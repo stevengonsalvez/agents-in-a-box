@@ -4,8 +4,8 @@
 //! sweepers (P1.4) and then polls [`ClaimTaskService`] for the oldest `queued`
 //! task bound to this daemon's runtime. Each claimed task walks the FSM —
 //! `dispatched -> running` ([`StartTaskService`]), provider exec
-//! ([`Runner::run_claude`]), then `running -> done` ([`CompleteTaskService`]) or
-//! `running -> failed` ([`FailTaskService`]) — inside its isolated
+//! ([`Runner::run_claude`]), then `running -> done` ([`CompleteTaskService`])
+//! or `running -> failed` ([`FailTaskService`]) — inside its isolated
 //! [`ExecEnv`](crate::execenv::ExecEnv).
 //!
 //! # Configuration
@@ -27,16 +27,17 @@
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
 //!
-//! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the daemon
-//! still sweeps) — a daemon with no runtime has nothing to claim.
+//! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the
+//! daemon still sweeps) — a daemon with no runtime has nothing to claim.
 
 // The provider runtime deadline is a "hours" quantity but `Duration::from_hours`
 // is unstable; a raw second count is the clearest stable spelling (and matches
 // the reference running-TTL value). Same rationale as `sweeper.rs`.
 #![allow(clippy::duration_suboptimal_units)]
 
+use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
@@ -48,6 +49,7 @@ use ainb_hangar_store::service::fail::FailTaskService;
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
+use tokio::task::JoinSet;
 
 use crate::events::EventSink;
 use crate::execenv::{prepare_env, write_context_prompt};
@@ -71,13 +73,14 @@ const TAIL_LINES: usize = 200;
 ///
 /// It names the hangar daemon as the owning orchestrator so the lifecycle hook
 /// (`ainb fleet atc hook`) resolves fleet membership and forwards the session's
-/// AskUserQuestion / lifecycle events into the attention pipeline — the fix for a
-/// daemon-spawned run showing "0 need you" while its picker is open (INV-3 / D11).
-/// A stable constant, not a per-task id: the spawner is the one daemon, and the
-/// attention ingest scopes hook rows host-wide regardless, so a finer key buys
-/// nothing. Completions the hook routes to `inbox/hangar-daemon.jsonl` are the
-/// daemon's own (the daemon detects completion via the run outcome, not the
-/// inbox); draining/sweeping that inbox is a follow-up, not part of visibility.
+/// AskUserQuestion / lifecycle events into the attention pipeline — the fix for
+/// a daemon-spawned run showing "0 need you" while its picker is open (INV-3 /
+/// D11). A stable constant, not a per-task id: the spawner is the one daemon,
+/// and the attention ingest scopes hook rows host-wide regardless, so a finer
+/// key buys nothing. Completions the hook routes to `inbox/hangar-daemon.jsonl`
+/// are the daemon's own (the daemon detects completion via the run outcome, not
+/// the inbox), so that inbox is pure exhaust — [`crate::inbox_sweep`] caps it
+/// on the sweeper tick (y0f) so it never grows without bound.
 const HANGAR_PARENT_SESSION: &str = "hangar-daemon";
 
 /// Resolved daemon configuration (identity + tunables).
@@ -92,9 +95,9 @@ pub struct DaemonConfig {
     /// Interval between claim polls.
     pub poll_interval: Duration,
     /// Hard wall-clock deadline for each provider run; the subprocess is killed
-    /// past it ([`FailureReason::Timeout`]). Defaults to the reference running TTL
-    /// (2.5h); overridable via `HANGAR_PROVIDER_MAX_RUNTIME_MS` so an e2e test can
-    /// drive the timeout-kill path within a bounded budget.
+    /// past it ([`FailureReason::Timeout`]). Defaults to the reference running
+    /// TTL (2.5h); overridable via `HANGAR_PROVIDER_MAX_RUNTIME_MS` so an
+    /// e2e test can drive the timeout-kill path within a bounded budget.
     pub provider_max_runtime: Duration,
     /// Sweeper thresholds + cadence.
     pub sweeper: SweeperConfig,
@@ -166,13 +169,74 @@ fn env_u64_opt(key: &str) -> Option<u64> {
     std::env::var(key).ok().and_then(|s| s.parse().ok())
 }
 
+/// Tracks the tmux session names of in-flight INTERACTIVE runs so daemon
+/// shutdown can reap them (a54).
+///
+/// An interactive run is a DETACHED tmux session ([`crate::interactive`]): it
+/// survives the daemon process exiting, and aborting the in-flight `wait`
+/// future (as the [`JoinSet`] does on shutdown) does NOT kill it — so a naive
+/// shutdown would orphan every live interactive pane. This shared set records
+/// each live session name from spawn until its `wait` returns; on `Ctrl-C` the
+/// loop drains it and kills each session by its EXACT name (never a wildcard),
+/// mirroring the reap the old single-inline path got "for free" by blocking
+/// shutdown until the run finished.
+///
+/// Cheap to clone (an `Arc`) so each spawned execution shares the one set. A
+/// poisoned lock is treated as empty rather than panicking a shutdown path.
+#[derive(Clone, Default)]
+pub(crate) struct InteractiveSessions {
+    inner: Arc<Mutex<HashSet<String>>>,
+}
+
+impl InteractiveSessions {
+    /// Record a now-live interactive session so shutdown can reap it.
+    fn register(&self, session_name: &str) {
+        if let Ok(mut set) = self.inner.lock() {
+            set.insert(session_name.to_string());
+        }
+    }
+
+    /// Drop a session that has already been reaped naturally (its `wait`
+    /// returned) so shutdown does not try to kill an already-gone session and
+    /// the set stays bounded.
+    fn unregister(&self, session_name: &str) {
+        if let Ok(mut set) = self.inner.lock() {
+            set.remove(session_name);
+        }
+    }
+
+    /// Take every still-live session name (clearing the set) for the shutdown
+    /// reap. A poisoned lock yields an empty vec — shutdown must never panic.
+    fn drain(&self) -> Vec<String> {
+        self.inner.lock().map_or_else(|_| Vec::new(), |mut set| set.drain().collect())
+    }
+}
+
+/// Kill every still-live interactive tmux session by its EXACT name so daemon
+/// shutdown never orphans a detached pane (a54). Best-effort and bounded: a
+/// session already gone is a harmless no-op.
+async fn reap_interactive_sessions(sessions: &InteractiveSessions) {
+    let names = sessions.drain();
+    if names.is_empty() {
+        return;
+    }
+    tracing::info!(
+        count = names.len(),
+        "reaping in-flight interactive sessions on shutdown"
+    );
+    for name in names {
+        crate::interactive::kill_session(&name).await;
+    }
+}
+
 /// Run the daemon's steady state: spawn sweepers, then poll-claim-execute until
 /// `Ctrl-C`.
 ///
-/// `stats` is the shared in-memory health collector (P8.5): each task's terminal
-/// outcome is recorded into its rolling throughput ring as the FSM finalises, so
-/// the `hangar/daemon_health` pane sees live per-second completed / failed
-/// counts. The collector is shared with the RPC server (which snapshots it).
+/// `stats` is the shared in-memory health collector (P8.5): each task's
+/// terminal outcome is recorded into its rolling throughput ring as the FSM
+/// finalises, so the `hangar/daemon_health` pane sees live per-second completed
+/// / failed counts. The collector is shared with the RPC server (which
+/// snapshots it).
 ///
 /// `events` is the daemon's event sink (e38.2): each FSM step the loop drives —
 /// `dispatched -> running` and the terminal finalize — publishes its typed
@@ -235,25 +299,76 @@ pub async fn run(
         // `DaemonConfig::from_env`).
         sandbox: cfg.sandbox,
     });
-    let clock = SystemClock;
+
+    // a54: claimed executions run on this JoinSet, NOT inline, so one long-lived
+    // run — most acutely an INTERACTIVE session a human is attached to — never
+    // wedges the claim loop. The loop keeps polling and claiming while runs are
+    // in flight. The per-agent `max_concurrent_tasks` cap needs no in-memory
+    // accounting: the claim SQL itself counts the agent's live
+    // `dispatched`+`running` rows (`ClaimTaskService`), and a claimed row is
+    // `dispatched` from the instant of claim through to its terminal finalize —
+    // so the DB's live in-flight count is the authoritative bound the next claim
+    // consults, and a spawned-but-not-yet-polled run is already accounted for.
+    let mut runs: JoinSet<()> = JoinSet::new();
+    // a54 shutdown reap: the set of live interactive tmux sessions, so `Ctrl-C`
+    // can kill each by exact name instead of orphaning a detached pane.
+    let interactive = InteractiveSessions::default();
 
     loop {
         tokio::select! {
             biased;
             _ = tokio::signal::ctrl_c() => {
                 tracing::info!("ainb-hangar-daemon shutting down");
+                // Reap every in-flight interactive tmux session by exact name so
+                // no detached pane orphans (aborting its `wait` future below does
+                // NOT kill a detached session).
+                reap_interactive_sessions(&interactive).await;
+                // Then abort + drain every in-flight run. Each headless provider
+                // was spawned with `kill_on_drop(true)`, so dropping its aborted
+                // future SIGKILLs the child instead of leaving it reparented to
+                // init, mutating the workspace unsupervised. `shutdown()` awaits
+                // each aborted task so the kills are delivered BEFORE we return —
+                // it does NOT wait for a provider to finish (abort cancels the
+                // wait), so shutdown stays prompt. The DB rows stay `running` and
+                // are requeued by the next boot's crash-recovery reclaim (and
+                // backstopped by the stale-running sweeper).
+                runs.shutdown().await;
                 return Ok(());
+            }
+            // Reap a finished run so the JoinSet never accumulates completed
+            // handles. Disabled while empty (`if !runs.is_empty()`) so the arm is
+            // inert on an idle daemon rather than resolving `None` in a hot spin.
+            Some(joined) = runs.join_next(), if !runs.is_empty() => {
+                if let Err(e) = joined {
+                    // A panic in one execution must never down the loop; log it
+                    // and keep claiming (a cancellation is a normal shutdown).
+                    if e.is_panic() {
+                        tracing::error!(error = %e, "task execution panicked");
+                    }
+                }
+                continue;
             }
             () = tokio::time::sleep(cfg.poll_interval) => {}
         }
 
-        match ClaimTaskService::claim_for_runtime(&pool, &runtime_id, &clock).await {
+        match ClaimTaskService::claim_for_runtime(&pool, &runtime_id, &SystemClock).await {
             Ok(Some(claimed)) => {
-                if let Err(e) =
-                    execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events).await
-                {
-                    tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
-                }
+                // Spawn the execution so the loop returns immediately to claiming
+                // the next task rather than blocking on this run's completion.
+                let pool = pool.clone();
+                let runner = runner.clone();
+                let stats = stats.clone();
+                let events = events.clone();
+                let interactive = interactive.clone();
+                runs.spawn(async move {
+                    let clock = SystemClock;
+                    if let Err(e) =
+                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive)
+                            .await
+                    {
+                        tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
+                    }
+                });
             }
             Ok(None) => {} // empty queue — poll again
             Err(e) => tracing::error!(error = %e, "claim query failed"),
@@ -283,6 +398,13 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
                 if let Err(e) = sweep_stale_running(&pool, &clock, &cfg).await {
                     tracing::error!(error = %e, kind = "running", "sweeper pass failed");
                 }
+                // y0f: cap the daemon's OWN parent inbox on the same tick. The
+                // hook routes every daemon-spawned run's completion there, but the
+                // daemon detects completion via the run outcome — so the file is
+                // pure exhaust that would grow forever. The cap is blocking file
+                // IO (an fs2 advisory lock + atomic rewrite), so it runs on the
+                // blocking pool; a fault is logged, never fatal.
+                cap_parent_inbox().await;
             }
         });
     }
@@ -302,24 +424,47 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
     });
 }
 
+/// Cap the daemon's own parent completion inbox to its most-recent-N records
+/// (y0f), on the blocking pool since it takes an `fs2` advisory lock + rewrites
+/// a file. Best-effort: a missing home / file is a no-op, an IO fault or a join
+/// error is logged and swallowed — inbox hygiene must never down a sweeper.
+async fn cap_parent_inbox() {
+    match tokio::task::spawn_blocking(|| {
+        crate::inbox_sweep::sweep_parent_inbox(crate::inbox_sweep::KEEP_LAST)
+    })
+    .await
+    {
+        Ok(Ok(report)) if report.evicted() > 0 => {
+            tracing::info!(
+                evicted = report.evicted(),
+                kept = report.kept,
+                "hangar-daemon inbox capped"
+            );
+        }
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(error = %e, "hangar-daemon inbox cap failed"),
+        Err(e) => tracing::warn!(error = %e, "hangar-daemon inbox cap task join failed"),
+    }
+}
+
 /// Spawn the periodic workspace-GC sweeper as a background task (e38.22).
 ///
 /// On every `interval` tick it walks the live workspace tree under `home`
 /// (`{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/`) via
 /// [`sweep_workspaces_gc`], reclaiming each orphaned per-task dir — no
 /// `.gc_meta.json` marker AND mtime older than the 72h grace relative to the
-/// injected clock's `now_ms()` — while leaving every live (marked) dir and every
-/// young orphan in place. This is the scheduled driver the bead is about: the
-/// orphan-scan code existed but nothing ticked it, so leaked dirs accumulated
-/// forever.
+/// injected clock's `now_ms()` — while leaving every live (marked) dir and
+/// every young orphan in place. This is the scheduled driver the bead is about:
+/// the orphan-scan code existed but nothing ticked it, so leaked dirs
+/// accumulated forever.
 ///
 /// The `clock` is injected so the 72h grace comparison is deterministic under
 /// test (production passes [`SystemClock`]). Each pass is independent and
-/// idempotent (a missing tree is a no-op, an already-removed dir is success), so
-/// a missed or overlapping tick is harmless. Returns the task's [`JoinHandle`]
-/// so a caller (the integration test, a future supervisor) can stop it; the
-/// production daemon drops it and relies on process exit to tear the task down,
-/// mirroring [`spawn_sweepers`].
+/// idempotent (a missing tree is a no-op, an already-removed dir is success),
+/// so a missed or overlapping tick is harmless. Returns the task's
+/// [`JoinHandle`] so a caller (the integration test, a future supervisor) can
+/// stop it; the production daemon drops it and relies on process exit to tear
+/// the task down, mirroring [`spawn_sweepers`].
 #[must_use]
 pub fn spawn_gc_sweeper(
     home: PathBuf,
@@ -348,8 +493,8 @@ pub fn spawn_gc_sweeper(
 /// Walk one claimed task through `dispatched -> running -> done|failed`.
 ///
 /// Re-reads the full row (for `workspace_id` / `issue_id`), resolves the
-/// workspace slug, prepares the isolated env, marks the task `running`, runs the
-/// provider, and finalises the row from the [`RunOutcome`].
+/// workspace slug, prepares the isolated env, marks the task `running`, runs
+/// the provider, and finalises the row from the [`RunOutcome`].
 ///
 /// # Errors
 ///
@@ -363,6 +508,7 @@ async fn execute_claimed(
     clock: &dyn HangarClock,
     stats: &HealthStats,
     events: &EventSink,
+    interactive: &InteractiveSessions,
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
@@ -438,10 +584,10 @@ async fn execute_claimed(
     // P5.3: apply the configurable env-allowlist policy here (the authoritative
     // pass), layering keychain-resident API keys on top via
     // `dispatch::build_task_env`. The policy is loaded from
-    // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent). The
-    // keychain key list is empty until P5.2 wires `host/secret_store_get` into
-    // dispatch; the seam is in place so adding keys is a one-line change. The
-    // runner re-applies its own deny-by-default 12-var filter as
+    // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent).
+    // The keychain key list is empty until P5.2 wires `host/secret_store_get`
+    // into dispatch; the seam is in place so adding keys is a one-line change.
+    // The runner re-applies its own deny-by-default 12-var filter as
     // defense-in-depth (a strict subset of this policy).
     let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let policy = load_env_policy();
@@ -509,7 +655,17 @@ async fn execute_claimed(
     // the agent's model/cli_args on the argv and its `agent_env` layered onto the
     // child env. Both spawn through the same OS sandbox (e38.23).
     let outcome = if task.mode == "interactive" {
-        run_interactive(pool, runner, &task, &ws_slug, &env, task_env, &dispatch).await?
+        run_interactive(
+            pool,
+            runner,
+            &task,
+            &ws_slug,
+            &env,
+            task_env,
+            &dispatch,
+            interactive,
+        )
+        .await?
     } else {
         match dispatch.backend {
             Backend::Claude => runner.run_claude(&env, task_env).await?,
@@ -539,22 +695,23 @@ async fn execute_claimed(
     Ok(())
 }
 
-/// Launch a task's provider inside a REAL, attachable tmux session and await its
-/// completion (ccc / D6 interactive mode).
+/// Launch a task's provider inside a REAL, attachable tmux session and await
+/// its completion (ccc / D6 interactive mode).
 ///
-/// Resolves the provider program + argv (the same the headless path would exec),
-/// composes the deny-by-default child env, spawns the session under
-/// `tmux_hangar-<task_id>`, and — crucially — records that exact session name on
-/// the task row BEFORE awaiting, so the attach-from-card affordance can surface a
-/// copyable `tmux attach -t <name>` while the agent is live. The returned
-/// [`RunOutcome`] is the same shape the headless runner returns, so the finalize
-/// seam ([`finalize_success`] / [`finalize_failure`]) is unchanged.
+/// Resolves the provider program + argv (the same the headless path would
+/// exec), composes the deny-by-default child env, spawns the session under
+/// `tmux_hangar-<task_id>`, and — crucially — records that exact session name
+/// on the task row BEFORE awaiting, so the attach-from-card affordance can
+/// surface a copyable `tmux attach -t <name>` while the agent is live. The
+/// returned [`RunOutcome`] is the same shape the headless runner returns, so
+/// the finalize seam ([`finalize_success`] / [`finalize_failure`]) is
+/// unchanged.
 ///
 /// # Errors
 ///
-/// Returns an error only on an unrecoverable IO fault spawning the session (a bad
-/// tmux invocation, an unwritable wrapper). A non-zero provider exit or a timeout
-/// is a normal FSM outcome carried in the [`RunOutcome`], not an error.
+/// Returns an error only on an unrecoverable IO fault spawning the session (a
+/// bad tmux invocation, an unwritable wrapper). A non-zero provider exit or a
+/// timeout is a normal FSM outcome carried in the [`RunOutcome`], not an error.
 async fn run_interactive(
     pool: &SqlitePool,
     runner: &Runner,
@@ -563,6 +720,7 @@ async fn run_interactive(
     env: &crate::execenv::ExecEnv,
     task_env: std::collections::HashMap<String, String>,
     dispatch: &ResolvedDispatch,
+    interactive: &InteractiveSessions,
 ) -> anyhow::Result<RunOutcome> {
     // ccc / D6: the interactive session is a REAL, attachable tmux terminal (YOLO)
     // — it is DELIBERATELY not wrapped in the headless OS FS sandbox (Seatbelt /
@@ -590,6 +748,15 @@ async fn run_interactive(
     )
     .await?;
 
+    // a54: register the now-live session for the shutdown reap IMMEDIATELY, before
+    // any `.await` — a detached tmux session survives the daemon exiting, and the
+    // JoinSet aborting this future does not kill it. Registering synchronously
+    // right after spawn (no await point in between) closes the spawn→register
+    // window: a Ctrl-C can only cancel this future at an await, so once we reach
+    // the first await below the session is already tracked and shutdown reaps it.
+    // Unregistered on every exit path (the abort branches below, and after `wait`).
+    interactive.register(&session_name);
+
     // Record the session name on the row NOW (the session is live) so the card's
     // `a` attach affordance can reach it before the run finishes. This handle IS
     // the interactive feature: a run whose name cannot be recorded is
@@ -602,12 +769,16 @@ async fn run_interactive(
         }
         Ok(false) => {
             tracing::warn!(task_id = %task.id, "interactive session name update matched no row; aborting");
+            // `abort` kills the session; unregister so shutdown does not re-reap a
+            // dead session and the tracking set stays bounded.
+            interactive.unregister(&session_name);
             return Ok(run
                 .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
                 .await);
         }
         Err(e) => {
             tracing::warn!(task_id = %task.id, error = %e, "interactive session name persist failed; aborting");
+            interactive.unregister(&session_name);
             return Ok(run
                 .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
                 .await);
@@ -631,7 +802,13 @@ async fn run_interactive(
         tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
     }
 
-    Ok(run.wait().await?)
+    // a54: the session was registered for the shutdown reap right after spawn
+    // (above). Unregister once `wait` returns — a naturally reaped session needs
+    // no shutdown kill, and the set stays bounded. `wait` errors only on an
+    // unexpected IO fault; unregister on that path too.
+    let outcome = run.wait().await;
+    interactive.unregister(&session_name);
+    Ok(outcome?)
 }
 
 /// Finalise a successful run: capture any `gh pr create` URL, complete the row,
@@ -694,8 +871,16 @@ async fn finalize_success(
     persist_usage(pool, task, usage.as_ref(), clock).await;
     // P10 / D19: append the durable run-history row (provider / session / outcome
     // / duration / token-cost) + emit the OTLP task->run span. Best-effort.
-    record_run_history(pool, task, provider, session_id.as_deref(), usage.as_ref(), "success", clock)
-        .await;
+    record_run_history(
+        pool,
+        task,
+        provider,
+        session_id.as_deref(),
+        usage.as_ref(),
+        "success",
+        clock,
+    )
+    .await;
     // P8.5: record the successful terminal outcome into the rolling throughput
     // ring so the daemon-health pane's sparkline sees it.
     stats.record_completed(clock.now_ms() / 1_000);
@@ -724,7 +909,8 @@ async fn finalize_success(
 
 /// Finalise a failed run: persist the session id (for a resume), fail the row,
 /// record the throughput tick, push the terminal event, post the durable
-/// "blocker" comment carrying the reason (e38.6), then evaluate the retry chain.
+/// "blocker" comment carrying the reason (e38.6), then evaluate the retry
+/// chain.
 ///
 /// Split out of [`execute_claimed`] alongside [`finalize_success`]; ordering
 /// (persist → fail → stats → event → comment → retry) is unchanged.
@@ -881,11 +1067,11 @@ fn emit_task_finished(
 /// the per-task env exists and before the provider spawns (P6.4).
 ///
 /// Resolves the provider from the task's agent → its runtime, then copies every
-/// attached skill bundle to disk via [`crate::materialise::materialise_for_agent`].
-/// Returns the `*_HOME` env var (name, path) the runner must forward so a
-/// home-style provider (claude/codex/cursor) discovers the skills under the task
-/// root, or `None` when there is no env pointer (no skills, or an in-workdir
-/// provider).
+/// attached skill bundle to disk via
+/// [`crate::materialise::materialise_for_agent`]. Returns the `*_HOME` env var
+/// (name, path) the runner must forward so a home-style provider
+/// (claude/codex/cursor) discovers the skills under the task root, or `None`
+/// when there is no env pointer (no skills, or an in-workdir provider).
 ///
 /// Best-effort: any resolution or IO fault is logged and swallowed (`None`) — a
 /// task must still dispatch even if its skills cannot be materialised.
@@ -934,15 +1120,15 @@ async fn materialise_skills(
 }
 
 /// Compile-on-dispatch (P5, D16): if a profile master matches this task's agent
-/// slug, materialise its resolved tool-native files into the task's execution env
-/// and return the `*_HOME` env pointer the runner forwards. `None` when the agent
-/// has no matching profile master on disk, the provider has no profile target, or
-/// any read/write faults.
+/// slug, materialise its resolved tool-native files into the task's execution
+/// env and return the `*_HOME` env pointer the runner forwards. `None` when the
+/// agent has no matching profile master on disk, the provider has no profile
+/// target, or any read/write faults.
 ///
-/// The profile slug is resolved as the agent's name (D16: the board-assignee slug
-/// *is* the profile slug; an agent named for its profile picks that master up).
-/// Best-effort by design — a missing / unparseable master, or a materialise
-/// fault, is logged and swallowed so a task always dispatches.
+/// The profile slug is resolved as the agent's name (D16: the board-assignee
+/// slug *is* the profile slug; an agent named for its profile picks that master
+/// up). Best-effort by design — a missing / unparseable master, or a
+/// materialise fault, is logged and swallowed so a task always dispatches.
 async fn materialise_agent_profile(
     pool: &SqlitePool,
     task: &Task,
@@ -1003,8 +1189,8 @@ struct ResolvedDispatch {
     backend: Backend,
     /// The `model` + `cli_args` the provider threads onto its argv.
     invocation: ProviderInvocation,
-    /// The agent's per-agent env (`agent_env`), layered onto the child env after
-    /// the deny-by-default ambient allowlist.
+    /// The agent's per-agent env (`agent_env`), layered onto the child env
+    /// after the deny-by-default ambient allowlist.
     agent_env: Vec<(String, String)>,
 }
 
@@ -1087,8 +1273,8 @@ async fn workspace_context_prompt(
     Ok(prompt)
 }
 
-/// Persist the provider `session_id` onto the task row (best-effort; only when a
-/// session was actually opened).
+/// Persist the provider `session_id` onto the task row (best-effort; only when
+/// a session was actually opened).
 async fn persist_session_id(
     pool: &SqlitePool,
     task_id: &str,
@@ -1104,10 +1290,11 @@ async fn persist_session_id(
     Ok(())
 }
 
-/// Read the task row's `started_at` (epoch ms) from the DB — the run-start stamp
-/// `StartTaskService::start` wrote, which the claim-time in-memory `Task` predates
-/// (P10 / D19). `None` when the row is missing or never started, or on a read
-/// fault (the run-history duration then degrades to 0 rather than erroring).
+/// Read the task row's `started_at` (epoch ms) from the DB — the run-start
+/// stamp `StartTaskService::start` wrote, which the claim-time in-memory `Task`
+/// predates (P10 / D19). `None` when the row is missing or never started, or on
+/// a read fault (the run-history duration then degrades to 0 rather than
+/// erroring).
 async fn read_started_at(pool: &SqlitePool, task_id: &str) -> Option<i64> {
     sqlx::query_scalar::<_, Option<i64>>("SELECT started_at FROM agent_task_queue WHERE id = ?")
         .bind(task_id)
@@ -1148,23 +1335,23 @@ async fn persist_usage(
     }
 }
 
-/// Append a durable `run_history` row for a finished run (P10 / D19) AND emit the
-/// OTLP `task.run` boundary span carrying the run's token / cost / duration
+/// Append a durable `run_history` row for a finished run (P10 / D19) AND emit
+/// the OTLP `task.run` boundary span carrying the run's token / cost / duration
 /// attributes.
 ///
 /// Called from both finalize paths (`outcome` = `success` | `failed`). Unlike
-/// [`persist_usage`] (a per-task upsert), this is APPEND-ONLY — a fresh `run_id`
-/// is minted per run, so a retried task appends a second history row rather than
-/// overwriting the first. `diff_add` / `diff_del` are 0 until the runner surfaces
-/// a diff stat.
+/// [`persist_usage`] (a per-task upsert), this is APPEND-ONLY — a fresh
+/// `run_id` is minted per run, so a retried task appends a second history row
+/// rather than overwriting the first. `diff_add` / `diff_del` are 0 until the
+/// runner surfaces a diff stat.
 ///
-/// The `task.run` span is always emitted as a `tracing` span (so it lands in the
-/// JSONL sink); under the `otlp` feature with a configured endpoint it is ALSO
-/// exported over OTLP (T5) — the span's `tokens_in` / `tokens_out` / `cost_usd` /
-/// `duration_ms` fields become OTLP span attributes. It is opened + immediately
-/// closed (entered then dropped) so the batch exporter flushes it. A history
-/// write fault is logged, never propagated — it must never down a finalize that
-/// has already committed the task's terminal state.
+/// The `task.run` span is always emitted as a `tracing` span (so it lands in
+/// the JSONL sink); under the `otlp` feature with a configured endpoint it is
+/// ALSO exported over OTLP (T5) — the span's `tokens_in` / `tokens_out` /
+/// `cost_usd` / `duration_ms` fields become OTLP span attributes. It is opened
+/// + immediately closed (entered then dropped) so the batch exporter flushes
+/// it. A history write fault is logged, never propagated — it must never down a
+/// finalize that has already committed the task's terminal state.
 async fn record_run_history(
     pool: &SqlitePool,
     task: &Task,
@@ -1176,8 +1363,9 @@ async fn record_run_history(
 ) {
     let run_id = SystemIdGen.new_ulid();
     let finished_at = clock.now_ms();
-    let (input_tokens, output_tokens, cost_usd) =
-        usage.map_or((0, 0, 0.0), |u| (u.input_tokens, u.output_tokens, u.cost_usd));
+    let (input_tokens, output_tokens, cost_usd) = usage.map_or((0, 0, 0.0), |u| {
+        (u.input_tokens, u.output_tokens, u.cost_usd)
+    });
     // The in-memory `task` was read at claim time (before `StartTaskService::start`
     // stamped `started_at`), so its `started_at` is stale `None`. Read the live
     // DB value so the run's duration is real; fall back to the (stale) struct
@@ -1227,11 +1415,12 @@ async fn record_run_history(
     }
 }
 
-/// Load the env-allowlist policy from `~/.agents-in-a-box/hangar/env.allow.toml`.
+/// Load the env-allowlist policy from
+/// `~/.agents-in-a-box/hangar/env.allow.toml`.
 ///
-/// Falls back to the operator-default policy (the 12 built-ins + hardcoded deny)
-/// if the path can't be resolved or the file is unreadable — a missing/corrupt
-/// config must never down a daemon dispatch.
+/// Falls back to the operator-default policy (the 12 built-ins + hardcoded
+/// deny) if the path can't be resolved or the file is unreadable — a
+/// missing/corrupt config must never down a daemon dispatch.
 fn load_env_policy() -> ainb_hangar_core::env_policy::EnvPolicy {
     crate::dispatch::default_allow_path()
         .and_then(|p| crate::dispatch::load_allow_at(&p))
@@ -1269,9 +1458,9 @@ fn hangar_home() -> PathBuf {
         )
 }
 
-/// Warn about `danger-full-access` on the first invocation of `provider` in this
-/// task's session (P5.6). Best-effort: a `state.toml` path-resolution or IO
-/// fault is logged and swallowed — a warning bookkeeping failure must never
+/// Warn about `danger-full-access` on the first invocation of `provider` in
+/// this task's session (P5.6). Best-effort: a `state.toml` path-resolution or
+/// IO fault is logged and swallowed — a warning bookkeeping failure must never
 /// block a dispatch. The session id is the task's resumed provider session when
 /// present, else the task id (a fresh run is a fresh warning surface).
 fn warn_danger_access(task: &Task, provider: &str) {
@@ -1280,5 +1469,63 @@ fn warn_danger_access(task: &Task, provider: &str) {
         .and_then(|p| crate::warnings::maybe_warn_provider(&p, provider, session));
     if let Err(e) = outcome {
         tracing::warn!(error = %e, "danger-access warning bookkeeping failed; proceeding");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The shutdown-reap tracker records a live interactive session and hands
+    /// it back exactly once on drain, so `Ctrl-C` kills every live session
+    /// — and only live ones — by exact name.
+    #[test]
+    fn interactive_sessions_registers_then_drains_once() {
+        let sessions = InteractiveSessions::default();
+        sessions.register("tmux_hangar-a");
+        sessions.register("tmux_hangar-b");
+
+        let mut drained = sessions.drain();
+        drained.sort();
+        assert_eq!(drained, vec!["tmux_hangar-a", "tmux_hangar-b"]);
+
+        // Drain is destructive: a second drain (a double shutdown signal) yields
+        // nothing, so no session is killed twice.
+        assert!(sessions.drain().is_empty());
+    }
+
+    /// A session whose run finished naturally is unregistered, so the shutdown
+    /// reap never tries to kill an already-gone session (and the set stays
+    /// bounded across a long-lived daemon).
+    #[test]
+    fn interactive_sessions_unregister_drops_a_finished_session() {
+        let sessions = InteractiveSessions::default();
+        sessions.register("tmux_hangar-live");
+        sessions.register("tmux_hangar-done");
+        sessions.unregister("tmux_hangar-done");
+
+        assert_eq!(sessions.drain(), vec!["tmux_hangar-live"]);
+    }
+
+    /// The tracker is cheap to clone (an `Arc`), and clones share ONE set — a
+    /// session registered through a spawned execution's clone is visible to the
+    /// run loop's clone for the shutdown reap.
+    #[test]
+    fn interactive_sessions_clone_shares_one_set() {
+        let a = InteractiveSessions::default();
+        let b = a.clone();
+        b.register("tmux_hangar-shared");
+        // The loop's handle (`a`) sees the session the execution's handle (`b`)
+        // registered.
+        assert_eq!(a.drain(), vec!["tmux_hangar-shared"]);
+        // And it is now gone from both views.
+        assert!(b.drain().is_empty());
+    }
+
+    /// An empty tracker drains to nothing — an idle daemon's shutdown reap is a
+    /// no-op (kills no sessions).
+    #[test]
+    fn interactive_sessions_empty_drains_to_nothing() {
+        assert!(InteractiveSessions::default().drain().is_empty());
     }
 }

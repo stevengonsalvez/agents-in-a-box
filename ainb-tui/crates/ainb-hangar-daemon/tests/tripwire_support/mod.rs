@@ -1,12 +1,14 @@
 //! Shared helpers for the P1.7 e2e tripwires.
 //!
-//! Lives under `tests/tripwire_support/mod.rs` (not `tests/tripwire_support.rs`)
-//! so Cargo treats it as a shared module rather than its own test binary. Each
-//! tripwire `mod tripwire_support;`s this in. Helpers cover: seeding the minimal
-//! world, writing a fake-`claude` script, an RAII tmux session that kills itself
-//! by exact name on drop, and a DB poll helper with a deadline.
+//! Lives under `tests/tripwire_support/mod.rs` (not
+//! `tests/tripwire_support.rs`) so Cargo treats it as a shared module rather
+//! than its own test binary. Each tripwire `mod tripwire_support;`s this in.
+//! Helpers cover: seeding the minimal world, writing a fake-`claude` script, an
+//! RAII tmux session that kills itself by exact name on drop, and a DB poll
+//! helper with a deadline.
 
-#![allow(dead_code)] // not every tripwire uses every helper
+#![allow(dead_code)]
+// not every tripwire uses every helper
 // Helper docs mention capitalised domain nouns (AskUserQuestion); backticking
 // each hurts readability. Mirrors `tripwire_p4_common.rs`.
 #![allow(clippy::doc_markdown)]
@@ -31,7 +33,8 @@ pub struct SeededIds {
     pub agent_id: String,
 }
 
-/// Seed the minimal workspace + user + runtime + agent graph a task FKs require.
+/// Seed the minimal workspace + user + runtime + agent graph a task FKs
+/// require.
 pub async fn seed_world(pool: &SqlitePool) -> SeededIds {
     let ids = SeededIds {
         workspace_id: "ws-trip".to_string(),
@@ -139,6 +142,36 @@ pub fn fake_codex_happy(dir: &Path, session_id: &str) -> PathBuf {
     write_executable(dir, "fake-codex.sh", &body)
 }
 
+/// Write a fake `claude` that BRANCHES on whether stdout is a TTY, so the SAME
+/// binary can back BOTH a headless and an interactive dispatch inside one
+/// daemon (the a54 concurrency tripwire):
+///
+///   * headless (stdout is a pipe — the captured runner path): emit the
+///     `system`
+///     + `result` JSONL the runner pins and exit 0 (a fast, clean completion).
+///   * interactive (stdout is a tmux pty): BLOCK until `$HOME/<sentinel>`
+///     appears (self-exits after ~60s so a wiring bug can never wedge the
+///     session), then exit 0.
+///
+/// `[ -t 1 ]` is the reliable discriminator: the headless runner pipes the
+/// provider's stdout, while the interactive tmux pane hands it a pty. Both
+/// paths resolve the same `HANGAR_CLAUDE_PATH`, so one binary serves both
+/// tasks.
+pub fn fake_claude_tty_branch(dir: &Path, session_id: &str, sentinel: &str) -> PathBuf {
+    let body = format!(
+        "#!/bin/sh\n\
+         if [ -t 1 ]; then\n\
+         \ti=0\n\
+         \twhile [ ! -f \"$HOME/{sentinel}\" ] && [ \"$i\" -lt 300 ]; do sleep 0.2; i=$((i+1)); done\n\
+         \texit 0\n\
+         fi\n\
+         echo '{{\"type\":\"system\",\"session_id\":\"{session_id}\"}}'\n\
+         echo '{{\"type\":\"result\",\"content\":\"ok\"}}'\n\
+         exit 0\n"
+    );
+    write_executable(dir, "fake-claude-tty-branch.sh", &body)
+}
+
 /// Write an executable `fake-claude.sh` that emits a `system` line carrying
 /// `session_id`, then a `result` line, then exits 0.
 pub fn fake_claude_happy(dir: &Path, session_id: &str) -> PathBuf {
@@ -225,16 +258,18 @@ pub fn fake_claude_runs_gh(dir: &Path, session_id: &str) -> PathBuf {
     write_executable(dir, "fake-claude.sh", &body)
 }
 
-/// The AskUserQuestion transcript line the hook-firing stubs point the attention
-/// ingest at — a single `tool_use` block, the strongest ASK classifier signal
-/// (mirrors the `attention_ingest` unit fixture). Written to `$HOME/ask.jsonl` by
-/// [`plant_ask_transcript`]; the stub passes that path as the hook's
-/// `transcript_path`, so the daemon's ingest classifies the raised event as ASK.
+/// The AskUserQuestion transcript line the hook-firing stubs point the
+/// attention ingest at — a single `tool_use` block, the strongest ASK
+/// classifier signal (mirrors the `attention_ingest` unit fixture). Written to
+/// `$HOME/ask.jsonl` by [`plant_ask_transcript`]; the stub passes that path as
+/// the hook's `transcript_path`, so the daemon's ingest classifies the raised
+/// event as ASK.
 const ASK_TRANSCRIPT_LINE: &str = r#"{"type":"assistant","message":{"content":[{"type":"tool_use","name":"AskUserQuestion","input":{"questions":[{"question":"Ship it?","options":[{"label":"yes"},{"label":"no"}]}]}}]},"timestamp":"2026-01-01T00:00:00Z"}"#;
 
-/// Plant the AskUserQuestion transcript at `<home>/ask.jsonl` — the exact path the
-/// hook-firing stubs reference as `"$HOME/ask.jsonl"` (the stub's `$HOME` is this
-/// isolated tempdir). The daemon's attention ingest reads it to classify the ASK.
+/// Plant the AskUserQuestion transcript at `<home>/ask.jsonl` — the exact path
+/// the hook-firing stubs reference as `"$HOME/ask.jsonl"` (the stub's `$HOME`
+/// is this isolated tempdir). The daemon's attention ingest reads it to
+/// classify the ASK.
 pub fn plant_ask_transcript(home: &Path) {
     std::fs::write(home.join("ask.jsonl"), format!("{ASK_TRANSCRIPT_LINE}\n"))
         .expect("plant ASK transcript");
@@ -242,9 +277,9 @@ pub fn plant_ask_transcript(home: &Path) {
 
 /// Locate the built `ainb` binary the hook-firing stubs shell out to for
 /// `ainb fleet atc hook`. `CARGO_BIN_EXE_ainb` is only defined for the `ainb`
-/// crate's own tests; from the daemon crate we walk up to `target/<profile>/ainb`.
-/// `None` when it can't be found (→ the tripwire SKIPs — the hook cannot be fired
-/// without it).
+/// crate's own tests; from the daemon crate we walk up to
+/// `target/<profile>/ainb`. `None` when it can't be found (→ the tripwire SKIPs
+/// — the hook cannot be fired without it).
 pub fn ainb_bin() -> Option<PathBuf> {
     if let Some(p) = option_env!("CARGO_BIN_EXE_ainb") {
         let path = PathBuf::from(p);
@@ -259,13 +294,14 @@ pub fn ainb_bin() -> Option<PathBuf> {
 }
 
 /// Write a fake-`claude` (HEADLESS) that fires the lifecycle hook the way
-/// `notify.sh` does before finishing: it pipes a `{"transcript_path": …}` payload
-/// into `ainb fleet atc hook --event Notification`, reading `AINB_PARENT_SESSION`
-/// from its INHERITED env so the hook's fleet-membership gate resolves (the fix
-/// under test). The hook then appends to `events.jsonl`, the daemon's attention
-/// ingest classifies it (ASK, via the planted transcript), and raises a row for
-/// `hook_session`. The stub also emits the `system` + `result` JSONL lines the
-/// headless runner pins, then exits 0. `ainb` is the absolute binary path.
+/// `notify.sh` does before finishing: it pipes a `{"transcript_path": …}`
+/// payload into `ainb fleet atc hook --event Notification`, reading
+/// `AINB_PARENT_SESSION` from its INHERITED env so the hook's fleet-membership
+/// gate resolves (the fix under test). The hook then appends to `events.jsonl`,
+/// the daemon's attention ingest classifies it (ASK, via the planted
+/// transcript), and raises a row for `hook_session`. The stub also emits the
+/// `system` + `result` JSONL lines the headless runner pins, then exits 0.
+/// `ainb` is the absolute binary path.
 pub fn fake_claude_fires_hook(dir: &Path, ainb: &Path, hook_session: &str) -> PathBuf {
     let body = format!(
         "#!/bin/sh\n\
@@ -298,9 +334,9 @@ pub fn fake_claude_interactive_fires_hook(dir: &Path, ainb: &Path, hook_session:
     write_executable(dir, "fake-claude-interactive-hook.sh", &body)
 }
 
-/// Poll the `attention` table until a row for `session_id` appears (returning its
-/// `kind`) or `budget` elapses (returning `None`). The daemon's ingest ticks every
-/// few seconds, so a bounded poll absorbs the append→ingest lag.
+/// Poll the `attention` table until a row for `session_id` appears (returning
+/// its `kind`) or `budget` elapses (returning `None`). The daemon's ingest
+/// ticks every few seconds, so a bounded poll absorbs the append→ingest lag.
 pub async fn wait_for_attention_kind(
     pool: &SqlitePool,
     session_id: &str,
@@ -325,9 +361,9 @@ pub async fn wait_for_attention_kind(
 }
 
 /// Read the raw `sessions.json` the daemon's session registry writes (and
-/// `ainb list` reads) under `<home>/.agents-in-a-box/sessions.json`. `None` when
-/// absent. The tripwire asserts a daemon-spawned interactive session is keyed
-/// here so `ainb list` / fleet discover can see it.
+/// `ainb list` reads) under `<home>/.agents-in-a-box/sessions.json`. `None`
+/// when absent. The tripwire asserts a daemon-spawned interactive session is
+/// keyed here so `ainb list` / fleet discover can see it.
 pub fn read_sessions_json(home: &Path) -> Option<serde_json::Value> {
     let path = home.join(".agents-in-a-box").join("sessions.json");
     let text = std::fs::read_to_string(path).ok()?;
@@ -434,16 +470,16 @@ impl Drop for DaemonSession {
 /// env), this pins `HOME` and REMOVES `AINB_HOME` / `AINB_HANGAR_HOME`, so
 /// `events.jsonl`, `sessions.json`, and `hangar.db` all resolve under
 /// `<home>/.agents-in-a-box` regardless of what the operator's shell has set —
-/// the isolation the ccc attention + registry tripwires require to avoid touching
-/// the real fleet home.
+/// the isolation the ccc attention + registry tripwires require to avoid
+/// touching the real fleet home.
 pub struct DaemonProcess {
     child: std::process::Child,
 }
 
 impl DaemonProcess {
     /// Spawn the daemon binary under `home` with `extra_env` layered on, stdio
-    /// nulled. `HOME` is pinned and the two home-override vars are removed so the
-    /// child cannot escape the isolated tree.
+    /// nulled. `HOME` is pinned and the two home-override vars are removed so
+    /// the child cannot escape the isolated tree.
     pub fn spawn(home: &Path, extra_env: &[(&str, &str)]) -> Self {
         let mut cmd = Command::new(daemon_bin());
         cmd.env("HOME", home)
@@ -458,6 +494,14 @@ impl DaemonProcess {
         let child = cmd.spawn().expect("spawn ainb-hangar-daemon");
         Self { child }
     }
+
+    /// This daemon child's PID — for sending it a graceful `SIGINT` in a
+    /// shutdown-reap test (so its `Ctrl-C` reap path runs, rather than the
+    /// `SIGKILL` that `Drop` uses).
+    #[must_use]
+    pub fn pid(&self) -> u32 {
+        self.child.id()
+    }
 }
 
 impl Drop for DaemonProcess {
@@ -468,7 +512,8 @@ impl Drop for DaemonProcess {
     }
 }
 
-/// Whether a tmux session with the EXACT name `name` is live (`tmux has-session`).
+/// Whether a tmux session with the EXACT name `name` is live (`tmux
+/// has-session`).
 #[must_use]
 pub fn tmux_session_live(name: &str) -> bool {
     Command::new("tmux")

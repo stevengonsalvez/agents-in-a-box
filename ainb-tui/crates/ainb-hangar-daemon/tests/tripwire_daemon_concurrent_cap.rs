@@ -18,19 +18,19 @@
 //!               no duplicate started_at-bearing run; 10 distinct terminal rows).
 //! ```
 //!
-//! ## Why a daemon FLEET, not one daemon
+//! ## Why a daemon FLEET, and why the cap still binds after a54
 //!
-//! The daemon's claim loop is fully serial: `execute_claimed(...).await` is
-//! inline in the loop body, and the runner awaits `child.wait()` inline. So a
-//! **single** daemon runs exactly ONE task at a time — it can never exceed any
-//! cap, and the cap is never exercised. The cap only becomes the binding
-//! constraint when MORE daemons than the cap contend for the same runtime's
-//! queue: five daemons against a cap of 3 means the per-agent
-//! `max_concurrent_tasks` guard (`claim.rs` `CLAIM_SQL`) is the only thing
-//! holding the in-flight count at 3. This is the daemon-level concurrency the
-//! store-layer `claim_task_integration.rs` `tokio::join!` test cannot reach: it
-//! proves the *atomic claim statement* is race-safe, but never spawns processes
-//! that drive the full claim→start→run→complete FSM concurrently against one db.
+//! Since a54 a SINGLE daemon runs claimed executions concurrently (spawned onto
+//! a `JoinSet`), so one daemon alone can already hold several of an agent's
+//! tasks in flight. A five-daemon fleet against a cap of 3 pushes that
+//! contention harder still, from multiple processes at once — the per-agent
+//! `max_concurrent_tasks` guard (`claim.rs` `CLAIM_SQL`, a correlated COUNT of
+//! the agent's live `dispatched`+`running` rows) is the ONLY thing holding the
+//! in-flight count at 3, whether the contenders are threads in one daemon or a
+//! fleet of five. This is the daemon-level concurrency the store-layer
+//! `claim_task_integration.rs` `tokio::join!` test cannot reach: it proves the
+//! *atomic claim statement* is race-safe, but never spawns processes that drive
+//! the full claim→start→run→complete FSM concurrently against one db.
 //!
 //! ## Why this is a distinct gap from the daemon-health tripwire
 //!
@@ -42,11 +42,11 @@
 //!
 //! Reuses `tripwire_support` (the P1.7 daemon-spawn helpers): `seed_world`,
 //! `daemon_bin`, the `DaemonSession` RAII tmux wrapper (exact-name kill only),
-//! and the wall-clock `now_ms`. The fleet + the live `running`-count sampler are
-//! the new bits here. SKIP-not-fail when tmux is missing; `--test-threads=1`
-//! (the runner enforces it) so the five daemon processes never race a sibling
-//! tripwire's tempdir. Each `DaemonSession` kills ONLY its own exact-named tmux
-//! session on drop — never `pkill`/`killall`/wildcard.
+//! and the wall-clock `now_ms`. The fleet + the live `running`-count sampler
+//! are the new bits here. SKIP-not-fail when tmux is missing;
+//! `--test-threads=1` (the runner enforces it) so the five daemon processes
+//! never race a sibling tripwire's tempdir. Each `DaemonSession` kills ONLY its
+//! own exact-named tmux session on drop — never `pkill`/`killall`/wildcard.
 
 #![allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 // `Duration::from_secs(N)` reads fine as a poll budget; `from_mins` is unstable.

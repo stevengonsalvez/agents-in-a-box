@@ -1,27 +1,27 @@
 //! Interactive-mode provider launch: a REAL, attachable tmux session per task
 //! (ccc / D6).
 //!
-//! A board card launched with `mode = interactive` (the D6 `Run ▾` menu) does NOT
-//! go through the headless [`Runner::run_claude`](crate::runner::Runner) pipe-and-
-//! capture path. Instead the daemon spawns the provider inside a detached tmux
-//! session — exactly the shape `ainb run` uses ([`ainb-core`'s `TmuxSession`],
-//! `tmux new-session -d -s <name> -c <workdir> …`) — so the agent is a live,
-//! attachable terminal that shows up in `tmux ls` like any other session. The
-//! session name is `tmux_hangar-<task_id>` (the task id is a ULID, so it is exact
-//! and collision-safe), recorded on the task row the moment the session is created
-//! ([`crate::run_loop`]) so the attach-from-card affordance can surface a copyable
-//! `tmux attach -t <name>` mid-run.
+//! A board card launched with `mode = interactive` (the D6 `Run ▾` menu) does
+//! NOT go through the headless [`Runner::run_claude`](crate::runner::Runner)
+//! pipe-and- capture path. Instead the daemon spawns the provider inside a
+//! detached tmux session — exactly the shape `ainb run` uses ([`ainb-core`'s
+//! `TmuxSession`], `tmux new-session -d -s <name> -c <workdir> …`) — so the
+//! agent is a live, attachable terminal that shows up in `tmux ls` like any
+//! other session. The session name is `tmux_hangar-<task_id>` (the task id is a
+//! ULID, so it is exact and collision-safe), recorded on the task row the
+//! moment the session is created ([`crate::run_loop`]) so the attach-from-card
+//! affordance can surface a copyable `tmux attach -t <name>` mid-run.
 //!
 //! # Completion detection
 //!
 //! The pane runs a generated wrapper that execs the provider under `env -i`
 //! (deny-by-default env, identical to the headless allowlist via
-//! [`crate::runner::compose_child_env`]) and writes the provider's exit code to a
-//! sibling file before the pane closes. [`TmuxRun::wait`] polls
+//! [`crate::runner::compose_child_env`]) and writes the provider's exit code to
+//! a sibling file before the pane closes. [`TmuxRun::wait`] polls
 //! [`tmux_session_exists`] until the session is reaped, then maps the recorded
 //! exit code onto the same [`RunOutcome`] the headless runner returns — so the
-//! daemon's finalize seam (`running -> done | failed`) is byte-identical for both
-//! modes. A blown deadline kills the session by its exact name and returns
+//! daemon's finalize seam (`running -> done | failed`) is byte-identical for
+//! both modes. A blown deadline kills the session by its exact name and returns
 //! [`FailureReason::Timeout`].
 //!
 //! [ainb-core's `TmuxSession`]: the host's `crates/ainb-core/src/tmux/session.rs`.
@@ -41,8 +41,8 @@ use crate::runner::{RunOutcome, RunnerResult};
 const SESSION_WIDTH: &str = "200";
 /// The tmux height the interactive session is created at (`-y`).
 const SESSION_HEIGHT: &str = "50";
-/// The file (under the task's `logs` dir) the wrapper writes the provider's exit
-/// code into, read back by [`TmuxRun::wait`] once the session is reaped.
+/// The file (under the task's `logs` dir) the wrapper writes the provider's
+/// exit code into, read back by [`TmuxRun::wait`] once the session is reaped.
 const EXIT_FILE: &str = "interactive.exit";
 /// The generated pane wrapper script (under the task's `logs` dir).
 const WRAPPER_FILE: &str = "interactive-run.sh";
@@ -54,13 +54,24 @@ const POLL_INTERVAL: Duration = Duration::from_millis(200);
 
 /// The exact, collision-safe tmux session name for a task's interactive run.
 ///
-/// `tmux_hangar-<task_id>`: the `tmux_` prefix matches the host's session-naming
-/// convention (so it is discoverable alongside `ainb run` sessions), and the task
-/// id is a ULID — globally unique and already tmux-safe (Crockford base32, no
-/// characters tmux would reject) — so the name never collides.
+/// `tmux_hangar-<task_id>`: the `tmux_` prefix matches the host's
+/// session-naming convention (so it is discoverable alongside `ainb run`
+/// sessions), and the task id is a ULID — globally unique and already tmux-safe
+/// (Crockford base32, no characters tmux would reject) — so the name never
+/// collides.
 #[must_use]
 pub fn session_name_for(task_id: &str) -> String {
     format!("tmux_hangar-{task_id}")
+}
+
+/// Kill a tmux session by its EXACT name (never a wildcard / kill-server).
+///
+/// The daemon's shutdown reap (a54, [`crate::run_loop`]) calls this for every
+/// in-flight interactive session so a detached pane never outlives the daemon.
+/// Best-effort: a session already gone yields a non-zero status that is ignored
+/// (killing an absent session is a harmless no-op).
+pub(crate) async fn kill_session(session_name: &str) {
+    let _ = Command::new("tmux").args(["kill-session", "-t", session_name]).status().await;
 }
 
 /// A spawned interactive tmux session awaiting completion.
@@ -71,8 +82,8 @@ pub struct TmuxRun {
 }
 
 /// Spawn `program` (with `argv`) inside a detached tmux session named
-/// `session_name`, running in `workdir` with the deny-by-default `child_env`, and
-/// return a [`TmuxRun`] to await its completion.
+/// `session_name`, running in `workdir` with the deny-by-default `child_env`,
+/// and return a [`TmuxRun`] to await its completion.
 ///
 /// The pane runs a generated wrapper (written under `logs`) that execs the
 /// provider under `env -i` and records its exit code, so completion is detected
@@ -155,9 +166,10 @@ impl TmuxRun {
     /// closed) or the deadline blows, then map the recorded exit code onto a
     /// [`RunOutcome`] — the same shape the headless runner returns.
     ///
-    /// On a blown deadline the session is killed by its exact name and the run is
-    /// [`FailureReason::Timeout`]. A session that vanished without a readable exit
-    /// code is treated as an agent error (terminal), never a silent success.
+    /// On a blown deadline the session is killed by its exact name and the run
+    /// is [`FailureReason::Timeout`]. A session that vanished without a
+    /// readable exit code is treated as an agent error (terminal), never a
+    /// silent success.
     ///
     /// # Errors
     ///
@@ -185,12 +197,14 @@ impl TmuxRun {
         }
     }
 
-    /// Kill the spawned session by exact name and return a failed [`RunOutcome`].
+    /// Kill the spawned session by exact name and return a failed
+    /// [`RunOutcome`].
     ///
-    /// Used by the daemon when it cannot record the session name on the task row:
-    /// an interactive run whose attach handle is unrecoverable is not worth
-    /// completing (the card could never surface an attach command for it), so the
-    /// session is torn down and the task fails with a retryable reason.
+    /// Used by the daemon when it cannot record the session name on the task
+    /// row: an interactive run whose attach handle is unrecoverable is not
+    /// worth completing (the card could never surface an attach command for
+    /// it), so the session is torn down and the task fails with a retryable
+    /// reason.
     pub async fn abort(&self, reason: FailureReason) -> RunOutcome {
         self.kill_and_confirm_reaped().await;
         RunOutcome::Failed {
@@ -226,8 +240,8 @@ impl TmuxRun {
     }
 
     /// Read the wrapper's recorded exit code and classify it, mirroring the
-    /// headless runner's outcome mapping (`0` → success, `75` → retryable runtime
-    /// offline, any other / missing → terminal agent error).
+    /// headless runner's outcome mapping (`0` → success, `75` → retryable
+    /// runtime offline, any other / missing → terminal agent error).
     fn outcome_from_exit_file(&self) -> RunOutcome {
         let code = std::fs::read_to_string(&self.exit_file)
             .ok()
@@ -262,10 +276,10 @@ impl TmuxRun {
     }
 }
 
-/// A [`RunnerResult`] for an interactive run: only the exit code is meaningful —
-/// there is no captured JSONL stream (the session is a live terminal), so the
-/// session id / usage / output tails are absent. The durable handle to the run is
-/// the tmux session name, recorded on the task row.
+/// A [`RunnerResult`] for an interactive run: only the exit code is meaningful
+/// — there is no captured JSONL stream (the session is a live terminal), so the
+/// session id / usage / output tails are absent. The durable handle to the run
+/// is the tmux session name, recorded on the task row.
 const fn interactive_result(exit_code: Option<i32>) -> RunnerResult {
     RunnerResult {
         exit_code,
@@ -276,9 +290,9 @@ const fn interactive_result(exit_code: Option<i32>) -> RunnerResult {
     }
 }
 
-/// Generate the pane wrapper: exec the provider under a deny-by-default `env -i`,
-/// then record its exit code so [`TmuxRun::wait`] can classify the run after the
-/// session is reaped.
+/// Generate the pane wrapper: exec the provider under a deny-by-default `env
+/// -i`, then record its exit code so [`TmuxRun::wait`] can classify the run
+/// after the session is reaped.
 ///
 /// Every interpolated value (env pairs, program, args, exit-file path) is
 /// POSIX-single-quoted, so a path or value containing spaces or shell
@@ -301,9 +315,7 @@ fn wrapper_script(
     // child_env (PATH included, so the provider still resolves). The exit code is
     // written AFTER the provider returns and BEFORE this wrapper exits, so it is
     // on disk before tmux reaps the session.
-    format!(
-        "#!/bin/sh\nenv -i {env_pairs} {program} {args}\nprintf '%s' \"$?\" > {exit_file}\n"
-    )
+    format!("#!/bin/sh\nenv -i {env_pairs} {program} {args}\nprintf '%s' \"$?\" > {exit_file}\n")
 }
 
 /// POSIX-single-quote `s`: wrap in single quotes, escaping any embedded single
@@ -312,8 +324,8 @@ fn sh_quote(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 
-/// Write `contents` to `path` as an OWNER-ONLY executable (`0o700`), created with
-/// those permissions from the outset.
+/// Write `contents` to `path` as an OWNER-ONLY executable (`0o700`), created
+/// with those permissions from the outset.
 ///
 /// The wrapper embeds the deny-by-default child env (which can carry a codex
 /// agent's `agent_env` and, via the dispatch seam, keychain-resident API keys),
@@ -336,8 +348,9 @@ fn write_owner_only_executable(path: &Path, contents: &str) -> std::io::Result<(
 mod tests {
     use super::*;
 
-    /// Build a [`TmuxRun`] whose exit file holds `code` (or no file when `None`),
-    /// under a fresh tempdir, so the outcome mapping can be exercised without tmux.
+    /// Build a [`TmuxRun`] whose exit file holds `code` (or no file when
+    /// `None`), under a fresh tempdir, so the outcome mapping can be
+    /// exercised without tmux.
     fn run_with_exit(dir: &Path, code: Option<&str>) -> TmuxRun {
         let exit_file = dir.join(EXIT_FILE);
         if let Some(c) = code {
@@ -369,7 +382,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
             run_with_exit(dir.path(), Some("75")).outcome_from_exit_file(),
-            RunOutcome::Failed { reason: FailureReason::RuntimeOffline, .. }
+            RunOutcome::Failed {
+                reason: FailureReason::RuntimeOffline,
+                ..
+            }
         ));
     }
 
@@ -378,7 +394,10 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         assert!(matches!(
             run_with_exit(dir.path(), Some("1")).outcome_from_exit_file(),
-            RunOutcome::Failed { reason: FailureReason::AgentError, .. }
+            RunOutcome::Failed {
+                reason: FailureReason::AgentError,
+                ..
+            }
         ));
     }
 
@@ -388,13 +407,17 @@ mod tests {
         let outcome = run_with_exit(dir.path(), None).outcome_from_exit_file();
         assert!(matches!(
             outcome,
-            RunOutcome::Failed { reason: FailureReason::AgentError, .. }
+            RunOutcome::Failed {
+                reason: FailureReason::AgentError,
+                ..
+            }
         ));
         assert_eq!(outcome.result().exit_code, None, "no code recovered");
     }
 
     /// A value carrying a single quote and spaces is passed through the wrapper
-    /// literally (POSIX single-quote escaping), never breaking out of the command.
+    /// literally (POSIX single-quote escaping), never breaking out of the
+    /// command.
     #[test]
     fn wrapper_single_quotes_env_and_args_safely() {
         let script = wrapper_script(
@@ -405,9 +428,15 @@ mod tests {
         );
         // The injection attempt is neutralised: the `'; rm -rf /` lands inside a
         // single-quoted token, never as a bare shell command.
-        assert!(script.contains(r"'K=v'\''; rm -rf /'"), "env value escaped: {script}");
+        assert!(
+            script.contains(r"'K=v'\''; rm -rf /'"),
+            "env value escaped: {script}"
+        );
         assert!(script.contains(r"'a b'\''c'"), "arg escaped: {script}");
-        assert!(script.contains("env -i "), "provider execs under env -i: {script}");
+        assert!(
+            script.contains("env -i "),
+            "provider execs under env -i: {script}"
+        );
         assert!(
             script.contains(r#"printf '%s' "$?" > '/tmp/x.exit'"#),
             "exit code is recorded after the provider returns: {script}"

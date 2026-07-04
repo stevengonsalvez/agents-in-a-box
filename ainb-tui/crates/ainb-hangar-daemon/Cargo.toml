@@ -93,6 +93,10 @@ serde_yaml = { workspace = true }
 # Home-directory resolution for the per-task env tree root (mirrors the store's
 # `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
 dirs = { workspace = true }
+# y0f: the advisory file lock (`FileExt::lock_exclusive`) the inbox cap takes on
+# `inbox/hangar-daemon.lock` — the SAME lock the hook's inbox writer holds — so a
+# periodic cap of the daemon's own exhaust inbox never races a concurrent commit.
+fs2 = { workspace = true }
 # Unix process-group signalling: the runner spawns the provider in its own
 # process group so a timeout can SIGKILL the whole tree (the provider plus any
 # `sh -c sleep …` grandchild), closing inherited pipes so the stdout reader
