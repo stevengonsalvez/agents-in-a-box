@@ -373,6 +373,8 @@ pub enum AppEvent {
     SkillManagerPreviewConfirm,          // Enter — import selection to chosen tools
     SkillManagerPreviewClose,            // Esc — discard, nothing persisted
     SkillManagerPreviewSource,           // p on a source row — reopen the picker for it
+    SkillManagerApplySourceFilterKey,    // f on a source row — filter the Units table to it
+    SkillManagerOpenUnitInEditor,        // o on a unit — open its deployed dir in $EDITOR
     SkillManagerSourceRemoveOpen,        // r on a source row — open the remove dialog
     SkillManagerSourceRemoveMove(isize), // move the remove-dialog cursor
     SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
@@ -1807,10 +1809,20 @@ impl EventHandler {
                 KeyCode::Down | KeyCode::Char('j') if sources_focused => {
                     Some(AppEvent::SkillManagerSourceSelectNext)
                 }
-                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
-                // `[p]` on a source row — reopen the import picker for it
-                // (preview its units, select, install more).
+                // `Enter` on a source row opens the installed-aware import
+                // picker (its skills, pre-checked if already installed) —
+                // the primary action. `[f]` keeps the older filter-to-source
+                // behaviour for when you just want to scope the Units table.
+                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
+                KeyCode::Char('f') if sources_focused => {
+                    Some(AppEvent::SkillManagerApplySourceFilterKey)
+                }
+                // `[p]` still opens the picker too (muscle-memory alias).
                 KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
+                // `[o]` on a unit — open its deployed skill dir in $EDITOR.
+                KeyCode::Char('o') if !sources_focused => {
+                    Some(AppEvent::SkillManagerOpenUnitInEditor)
+                }
                 // `[r]` on a source row — remove dialog (skills+source, or
                 // skills-only / keep source). Distinct from unit `[r]`.
                 KeyCode::Char('r') if sources_focused => {
@@ -5127,7 +5139,8 @@ impl EventHandler {
                     crate::components::skill_manager_screen::SelectionMove::Next,
                 );
             }
-            AppEvent::SkillManagerApplySourceFilter => {
+            AppEvent::SkillManagerApplySourceFilter
+            | AppEvent::SkillManagerApplySourceFilterKey => {
                 state.skill_manager_state.apply_selected_source_filter();
                 // Refresh the detail pane against the newly-selected unit.
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -5135,6 +5148,34 @@ impl EventHandler {
                     &mut state.skill_manager_state,
                     &ainb_home,
                 );
+            }
+            AppEvent::SkillManagerOpenUnitInEditor => {
+                // `[o]` — open the selected unit's deployed skill dir in the
+                // user's editor. Reuses the generic OpenInEditor async action
+                // (resolve_editor → $EDITOR fallback chain). Open the parent
+                // dir when the deployed path is a file (e.g. SKILL.md) so the
+                // whole skill folder lands in the editor.
+                let deployed = state
+                    .skill_manager_state
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.deployed.first().cloned());
+                match deployed {
+                    Some(path) => {
+                        let p = std::path::PathBuf::from(&path);
+                        let target = if p.is_file() {
+                            p.parent().map(|d| d.to_path_buf()).unwrap_or(p)
+                        } else {
+                            p
+                        };
+                        state.pending_async_action = Some(AsyncAction::OpenInEditor(target));
+                    }
+                    None => {
+                        state.add_warning_notification(
+                            "open: no deployed path for selected unit".to_string(),
+                        );
+                    }
+                }
             }
             AppEvent::SkillManagerClearSourceFilter => {
                 state.skill_manager_state.clear_source_filter();
