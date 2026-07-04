@@ -2804,6 +2804,10 @@ impl SessionFilter {
     }
 }
 
+/// Payload of the Configure remote-repo pre-flight: generation guard + the
+/// `ls-remote` branch listing (or the error string to show on the form).
+type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
+
 #[derive(Debug)]
 pub struct AppState {
     pub workspaces: Vec<Workspace>,
@@ -3080,6 +3084,14 @@ pub struct AppState {
     >,
     /// Current branch-refresh generation (bumped on every picker open).
     pub branch_refresh_seq: u64,
+
+    /// Background remote-repo pre-flight for the Configure screen (ls-remote
+    /// at open: does the repo exist, does it have branches). Applied by
+    /// `check_repo_check_complete` on the next tick; the `u64` is a
+    /// generation guard so a stale check can't stamp a newer Configure form.
+    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
+    /// Current repo-check generation (bumped on every Configure open).
+    pub repo_check_seq: u64,
 
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
@@ -3544,6 +3556,9 @@ impl Default for AppState {
             // Configure base-branch picker background refresh
             branch_refresh_receiver: None,
             branch_refresh_seq: 0,
+            // Configure remote-repo pre-flight (ls-remote at open)
+            repo_check_receiver: None,
+            repo_check_seq: 0,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -7675,7 +7690,92 @@ impl AppState {
             ns.step = NewSessionStep::Configure;
         }
         tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+
+        // Remote pre-flight: one background ls-remote validates the repo
+        // exists, is reachable, and has at least one branch — BEFORE Launch.
+        // Without it a typo'd repo dies after Launch with "Clone failed" and
+        // an empty repo dies even later at `prepare_remote_worktree` with a
+        // cryptic origin/HEAD error (Stevie 2026-07-04: mysocialmedia).
+        // `ConfigureState::from_pick_repo` already set `repo_check = Checking`
+        // for these sources; `check_repo_check_complete` applies the verdict.
+        if matches!(
+            source,
+            crate::git::repo_source::RepoSource::HttpsUrl(_)
+                | crate::git::repo_source::RepoSource::SshUrl(_)
+                | crate::git::repo_source::RepoSource::GithubShorthand { .. }
+        ) {
+            self.repo_check_seq += 1;
+            let seq = self.repo_check_seq;
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.repo_check_receiver = Some(rx);
+            tokio::spawn(async move {
+                let join = tokio::task::spawn_blocking(move || {
+                    crate::git::RemoteRepoManager::new()
+                        .map_err(|e| e.to_string())?
+                        .list_remote_branches(&source)
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+                let payload = match join {
+                    Ok(r) => r,
+                    Err(join_err) => Err(format!("repo check task panicked: {join_err}")),
+                };
+                let _ = tx.send((seq, payload));
+            });
+        }
         self.ui_needs_refresh = true;
+    }
+
+    /// Poll the background remote-repo pre-flight. Applies the verdict to the
+    /// Configure screen: `Failed` blocks Launch with an inline message; a
+    /// success also stamps the real default-branch name onto the Branch row
+    /// (was a hardcoded "main" placeholder — wrong for master-default repos)
+    /// and backfills the "⚠ exists" guard for not-yet-cached remotes.
+    /// Returns true when state changed this tick.
+    pub fn check_repo_check_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::RepoCheck;
+
+        let Some(ref mut receiver) = self.repo_check_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.repo_check_receiver = None;
+                return false;
+            }
+        };
+        self.repo_check_receiver = None;
+        if seq != self.repo_check_seq {
+            // A newer Configure form superseded this check.
+            return false;
+        }
+        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        else {
+            return false;
+        };
+
+        if let Ok(branches) = &result {
+            if let Some(default) = branches.iter().find(|b| b.is_default) {
+                // Only when the user hasn't already picked a base — a pick
+                // owns the Branch-row display.
+                if cfg.base_selection.is_none() {
+                    cfg.branch_source.clone_from(&default.name);
+                }
+            }
+            // Feed the base-off "⚠ exists" guard for not-yet-cached remotes
+            // (a cached remote was already seeded from its clone's refs —
+            // that list includes local heads, so don't clobber it).
+            if cfg.repo_branch_names.is_empty() {
+                cfg.repo_branch_names = branches.iter().map(|b| b.name.clone()).collect();
+            }
+        }
+        cfg.repo_check = RepoCheck::from_branches(result.map(|branches| branches.len()));
+        if let RepoCheck::Failed(msg) = &cfg.repo_check {
+            tracing::warn!(error = %msg, "configure repo pre-flight failed");
+        }
+        true
     }
 
     /// Pre-check GitHub authentication via `gh auth status`. Updates the
@@ -11275,6 +11375,10 @@ impl App {
         }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+        // Check for a completed remote-repo pre-flight (Configure screen)
+        if self.state.check_repo_check_complete() {
             self.state.ui_needs_refresh = true;
         }
 
