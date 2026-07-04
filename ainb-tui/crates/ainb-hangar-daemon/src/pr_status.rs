@@ -59,11 +59,29 @@ impl Default for GhPrStatusProvider {
     }
 }
 
+/// Env var overriding the `gh` binary the production provider invokes.
+///
+/// Unset → `gh` on `$PATH` (production). A test / e2e harness points it at a stub
+/// script that prints canned `gh pr view` JSON, so the whole PR-status path can be
+/// exercised end-to-end without touching real GitHub — mirroring
+/// `HANGAR_CLAUDE_PATH` / `HANGAR_CODEX_PATH` for the provider binaries.
+pub const GH_PATH_ENV: &str = "HANGAR_GH_PATH";
+
 impl GhPrStatusProvider {
     /// A provider that invokes the `gh` binary resolved on `$PATH`.
     #[must_use]
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// A provider honouring the [`GH_PATH_ENV`] override: the pinned stub `gh`
+    /// when the env var is set (tests / e2e), else `gh` on `$PATH` (production).
+    #[must_use]
+    pub fn from_env() -> Self {
+        std::env::var(GH_PATH_ENV)
+            .ok()
+            .filter(|s| !s.is_empty())
+            .map_or_else(Self::new, Self::with_bin)
     }
 
     /// A provider pinned to a specific `gh` binary path (used by tests that point

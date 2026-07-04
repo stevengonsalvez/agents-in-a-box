@@ -1054,8 +1054,13 @@ async fn handle_tasks_list(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
+    // tcp T2: the board card surfaces a PR'd card's CI + merge status. The fetch
+    // rides the same injectable seam the issue task-detail badge uses (a `gh`
+    // subprocess in production, a stub `gh` under `HANGAR_GH_PATH` in e2e), and
+    // only fires for the handful of cards that captured a PR.
+    let provider = crate::pr_status::GhPrStatusProvider::from_env();
     let tasks = match resolve(pool, req).await? {
-        Some(ws) => snapshots::tasks_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+        Some(ws) => snapshots::tasks_list(pool, &ws, &provider).await.map_err(|e| store_err(&e))?,
         None => Vec::new(),
     };
     to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
@@ -1137,7 +1142,7 @@ async fn handle_pr_status_refresh(
         parse_params(req, "{ workspace_id, issue_id }")?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
-    let provider = crate::pr_status::GhPrStatusProvider::new();
+    let provider = crate::pr_status::GhPrStatusProvider::from_env();
     let (status, transitioned) =
         snapshots::refresh_pr_status(pool, ws.as_str(), &params.issue_id, &provider)
             .await
@@ -3084,6 +3089,12 @@ mod tests {
         EventBroker::new().sink()
     }
 
+    /// A PR-status provider that never shells `gh` — the seam for `tasks_list`
+    /// snapshots in tests whose cards carry no PR (so it is never even called).
+    fn no_pr() -> crate::pr_status::FakePrStatusProvider {
+        crate::pr_status::FakePrStatusProvider::new(ainb_hangar_proto::pr_status::PrStatus::default())
+    }
+
     fn req(method: &str, params: serde_json::Value) -> RpcRequest {
         RpcRequest {
             jsonrpc: ainb_hangar_proto::jsonrpc_version(),
@@ -4050,6 +4061,70 @@ mod tests {
         assert_eq!(tasks[0]["agent_id"], "agent-1");
     }
 
+    /// tcp T2: a card surfaces the run's durable artifacts — the recorded
+    /// `branch`, the PR captured into its `result`, and the CI + merge status
+    /// fetched through the injectable provider (a fake here — never real `gh`).
+    #[tokio::test]
+    async fn tasks_list_surfaces_branch_pr_and_ci_status() {
+        use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        // Record a produced branch + a captured PR on the seeded task, exactly as a
+        // committed finalize (branch) + a `gh pr create` capture (result.pr_url) would.
+        sqlx::query("UPDATE agent_task_queue SET branch = ?, result = ? WHERE id = 'task-1'")
+            .bind("ainb/task-1")
+            .bind(r#"{"content":"","pr_url":"https://github.com/o/r/pull/9"}"#)
+            .execute(store.pool())
+            .await
+            .unwrap();
+        // A provider that answers a passing, mergeable, open PR — no `gh`, no net.
+        let provider = crate::pr_status::FakePrStatusProvider::new(PrStatus {
+            ci: CiRollup::Pass,
+            mergeable: Mergeable::Mergeable,
+            state: MergeState::Open,
+        });
+        let cards = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &provider)
+            .await
+            .unwrap();
+        let card = cards.iter().find(|c| c.id.as_str() == "task-1").unwrap();
+        assert_eq!(card.branch.as_deref(), Some("ainb/task-1"), "branch surfaced");
+        assert_eq!(
+            card.pr_url.as_deref(),
+            Some("https://github.com/o/r/pull/9"),
+            "captured PR url surfaced"
+        );
+        assert_eq!(
+            card.pr_status.map(|s| s.ci),
+            Some(CiRollup::Pass),
+            "the PR's CI rollup is fetched and surfaced on the card"
+        );
+        assert_eq!(card.pr_status.map(|s| s.mergeable), Some(Mergeable::Mergeable));
+    }
+
+    /// A card that captured no PR carries no `pr_url` and no `pr_status` — the
+    /// provider is never consulted (a failing fake would still yield `None`).
+    #[tokio::test]
+    async fn tasks_list_no_pr_card_has_no_status() {
+        use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        // A fake that would report Fail if ever consulted — it must NOT be, since
+        // the seeded task has no captured pr_url.
+        let provider = crate::pr_status::FakePrStatusProvider::new(PrStatus {
+            ci: CiRollup::Fail,
+            mergeable: Mergeable::Conflicting,
+            state: MergeState::Closed,
+        });
+        let cards = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &provider)
+            .await
+            .unwrap();
+        let card = cards.iter().find(|c| c.id.as_str() == "task-1").unwrap();
+        assert_eq!(card.pr_url, None, "no PR captured");
+        assert_eq!(card.pr_status, None, "no PR → no status fetched");
+    }
+
     /// A foreign workspace yields an empty task list (tenant isolation).
     #[tokio::test]
     async fn tasks_list_foreign_workspace_is_empty() {
@@ -4092,7 +4167,7 @@ mod tests {
         assert!(resp.error.is_none(), "{resp:?}");
 
         // The board snapshot now reports the task in `done`.
-        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID).await.unwrap();
+        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &no_pr()).await.unwrap();
         let moved = tasks.iter().find(|t| t.id.as_str() == "task-1").unwrap();
         assert_eq!(
             moved.status, "done",
@@ -4119,7 +4194,7 @@ mod tests {
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
         // The seeded task stays `running` (no cross-tenant move).
-        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID).await.unwrap();
+        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &no_pr()).await.unwrap();
         assert_eq!(tasks[0].status, "running");
     }
 

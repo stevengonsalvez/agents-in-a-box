@@ -34,6 +34,7 @@
 //! domain data (`project_ainb_plugin_owns_data_plane`).
 
 use ainb_hangar_proto::events::{HangarEvent, TaskCardRow};
+use ainb_hangar_proto::pr_status::{CiRollup, PrStatus};
 use ainb_plugin_sdk::WireBuffer;
 
 use crate::widgets::card_board::{self, BoardCard, PriorityChip};
@@ -120,6 +121,14 @@ pub struct CardSummary {
     pub status: String,
     /// Creation timestamp (epoch ms), kept for re-computing age on re-render.
     pub created_at: i64,
+    /// The worktree branch (`ainb/<slug>`) the run committed on (tcp T2), or
+    /// `None` when the run made no commits — the durable artifact surfaced on the
+    /// card once a run completes with commits.
+    pub branch: Option<String>,
+    /// The captured PR URL (P9.1), or `None` — drives the card's PR chip.
+    pub pr_url: Option<String>,
+    /// The PR's CI + merge status (tcp T2), or `None` when the card has no PR.
+    pub pr_status: Option<PrStatus>,
 }
 
 /// One board column: its status bucket, its cards, and its vertical scroll.
@@ -213,12 +222,7 @@ impl KanbanState {
                     .map(|c| BoardCard {
                         issue_id: c.task_id.clone(),
                         display_id: format!("#{}", c.short_id),
-                        title: format!(
-                            "{} · {} · {}",
-                            c.agent_id,
-                            age_label(c.created_at, now_ms),
-                            c.status
-                        ),
+                        title: card_title(c, now_ms),
                         priority: PriorityChip::from_priority(0),
                         assignee_initial: c.agent_id.chars().next(),
                     })
@@ -360,6 +364,27 @@ impl KanbanState {
     }
 }
 
+/// The card's title line: `<agent> · <age> · <status>`, then the run's durable
+/// artifacts when present (tcp T2) — the `ainb/<slug>` branch it committed on and
+/// a `PR <ci>` chip — so a finished run's branch + PR read on the tile itself.
+fn card_title(c: &CardSummary, now_ms: i64) -> String {
+    let mut title = format!(
+        "{} · {} · {}",
+        c.agent_id,
+        age_label(c.created_at, now_ms),
+        c.status
+    );
+    if let Some(branch) = c.branch.as_deref() {
+        title.push_str(" · ");
+        title.push_str(branch);
+    }
+    if let Some(chip) = card_pr_chip(c) {
+        title.push_str(" · ");
+        title.push_str(&chip);
+    }
+    title
+}
+
 /// Build the [`CardSummary`] list for one board column from the wire rows.
 fn cards_for(tasks: &[TaskCardRow], col: BoardColumn, now_ms: i64) -> Vec<CardSummary> {
     let _ = now_ms; // age is computed at render time so a re-render re-ages.
@@ -372,8 +397,26 @@ fn cards_for(tasks: &[TaskCardRow], col: BoardColumn, now_ms: i64) -> Vec<CardSu
             agent_id: t.agent_id.clone(),
             status: t.status.clone(),
             created_at: t.created_at,
+            branch: t.branch.clone(),
+            pr_url: t.pr_url.clone(),
+            pr_status: t.pr_status,
         })
         .collect()
+}
+
+/// The compact PR chip a card renders when it has a captured PR (tcp T2):
+/// `PR <ci>` using the same CI glyphs the task-detail badge does (`✓`/`✗`/`…`),
+/// so a passing / failing / pending / unknown rollup reads at a glance. `None`
+/// when the card has no PR.
+fn card_pr_chip(card: &CardSummary) -> Option<String> {
+    card.pr_url.as_ref()?;
+    let ci = match card.pr_status.map(|s| s.ci) {
+        Some(CiRollup::Pass) => "✓",
+        Some(CiRollup::Fail) => "✗",
+        // Pending / Unknown / no status yet all read as in-flight.
+        _ => "…",
+    };
+    Some(format!("PR {ci}"))
 }
 
 /// The short id rendered on a card: the last 6 chars of the id (char-safe), or
@@ -645,6 +688,9 @@ mod tests {
             status: status.into(),
             priority: 0,
             created_at: NOW - 300_000, // 5m
+            branch: None,
+            pr_url: None,
+            pr_status: None,
         }
     }
 
@@ -677,6 +723,54 @@ mod tests {
         // The running task buckets into the running column.
         assert_eq!(cols[1].cards.len(), 1);
         assert_eq!(cols[1].cards[0].issue_id, "01HANGARTASKRUNNING03");
+    }
+
+    /// tcp T2: a finished run's durable artifacts read on the card title — the
+    /// `ainb/<slug>` branch it committed on and a `PR <ci>` chip reflecting the
+    /// CI rollup. A card with no branch / no PR carries neither (no stray chips).
+    #[test]
+    fn card_title_surfaces_branch_and_pr_chip() {
+        use ainb_hangar_proto::pr_status::{MergeState, Mergeable};
+        let mut done = task("01HANGARTASKDONE0001", "done");
+        done.branch = Some("ainb/done0001".into());
+        done.pr_url = Some("https://github.com/o/r/pull/7".into());
+        done.pr_status = Some(PrStatus {
+            ci: CiRollup::Pass,
+            mergeable: Mergeable::Mergeable,
+            state: MergeState::Open,
+        });
+        // A plain card with no run artifacts (the negative control).
+        let plain = task("01HANGARTASKQUEUED01", "queued");
+
+        let state = KanbanState::from_tasks(&[done, plain], NOW);
+        let cols = state.board_columns(NOW);
+        // done → the Done column (index 2), queued → the Todo column (index 0).
+        let done_title = &cols[2].cards[0].title;
+        assert!(
+            done_title.contains("ainb/done0001"),
+            "the committed branch reads on the card: {done_title:?}"
+        );
+        assert!(
+            done_title.contains("PR ✓"),
+            "a passing PR shows a PR chip with the pass glyph: {done_title:?}"
+        );
+        let plain_title = &cols[0].cards[0].title;
+        assert!(
+            !plain_title.contains("ainb/") && !plain_title.contains("PR "),
+            "a card with no run artifacts carries no branch / PR chip: {plain_title:?}"
+        );
+    }
+
+    /// A captured PR whose CI has not resolved yet (or is unknown) renders the
+    /// in-flight `PR …` chip, never a false pass/fail.
+    #[test]
+    fn card_pr_chip_is_in_flight_when_ci_unresolved() {
+        let mut c = task("01HANGARTASKDONE0002", "done");
+        c.pr_url = Some("https://github.com/o/r/pull/8".into());
+        c.pr_status = None; // status not fetched yet
+        let state = KanbanState::from_tasks(&[c], NOW);
+        let title = &state.board_columns(NOW)[2].cards[0].title;
+        assert!(title.contains("PR …"), "unresolved CI is in-flight: {title:?}");
     }
 
     /// A wheel-scroll over a column nudges that column's scroll offset, saturating

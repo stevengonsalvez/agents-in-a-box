@@ -21,6 +21,9 @@ fn task(id: &str, status: &str) -> TaskCardRow {
         status: status.into(),
         priority: 0,
         created_at: NOW - 60_000,
+        branch: None,
+        pr_url: None,
+        pr_status: None,
     }
 }
 

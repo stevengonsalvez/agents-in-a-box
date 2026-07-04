@@ -1852,6 +1852,9 @@ mod tests {
                 status: "running".into(),
                 priority: 2,
                 created_at: 1_700_000_000_000,
+                branch: Some("ainb/task-1".into()),
+                pr_url: Some("https://github.com/o/r/pull/1".into()),
+                pr_status: Some(crate::pr_status::PrStatus::default()),
             }],
         };
         let s = serde_json::to_string(&list).unwrap();

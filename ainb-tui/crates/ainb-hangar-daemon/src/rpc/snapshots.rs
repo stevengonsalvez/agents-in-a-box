@@ -870,11 +870,20 @@ pub async fn autopilot_set_enabled(
 // ──────────────────────────────────────────────────────────────────────────
 
 /// Snapshot every task in `workspace`, mapped to wire [`TaskCardRow`]s for the
-/// Kanban board (`hangar/tasks_list`, P8.4).
+/// Kanban board (`hangar/tasks_list`, P8.4 + tcp T2).
 ///
 /// Carries every lifecycle status (terminal rows included) so the board can
 /// bucket the six statuses into its four columns; a foreign workspace yields an
 /// empty set.
+///
+/// tcp T2 surfacing: each card also carries the run's `branch` (the durable
+/// `ainb/<slug>` recorded at finalize when the run committed), the `pr_url`
+/// captured into the task's `result` (P9.1), and — ONLY for a card that has a
+/// `pr_url` — the PR's CI + merge status fetched through the injectable
+/// `provider` (the production `gh` subprocess, or a test fake / stub). Cards
+/// without a PR incur no `gh` call, so the fetch cost is bounded to the handful
+/// of PR'd cards on a board (this snapshot fires on subscribe / workspace-switch
+/// and on a run finishing, not per render frame).
 ///
 /// # Errors
 ///
@@ -882,6 +891,7 @@ pub async fn autopilot_set_enabled(
 pub async fn tasks_list(
     pool: &SqlitePool,
     workspace_id: &str,
+    provider: &dyn crate::pr_status::PrStatusProvider,
 ) -> Result<Vec<TaskCardRow>, sqlx::Error> {
     let tasks = TaskRepo::list_by_workspace(pool, workspace_id).await?;
     let mut out = Vec::with_capacity(tasks.len());
@@ -892,6 +902,12 @@ pub async fn tasks_list(
                 source: format!("malformed task id {:?}: {e}", t.id).into(),
             }
         })?;
+        let pr_url = task_pr_url(t.result.as_deref());
+        // Only a card that captured a PR pays for a status fetch.
+        let pr_status = match pr_url.as_deref() {
+            Some(url) => Some(provider.fetch(url).await),
+            None => None,
+        };
         out.push(TaskCardRow {
             id,
             workspace_id: t.workspace_id,
@@ -900,9 +916,27 @@ pub async fn tasks_list(
             status: t.status,
             priority: t.priority,
             created_at: t.created_at,
+            branch: t.branch,
+            pr_url,
+            pr_status,
         });
     }
     Ok(out)
+}
+
+/// Extract the captured `pr_url` from a task's stored `result` JSON blob (P9.1),
+/// or `None` when the run recorded no result or opened no PR.
+///
+/// Pure + total: a `None` result, unparseable JSON, or a `result` with no
+/// (non-empty) `pr_url` key all yield `None` — never a false or empty URL.
+fn task_pr_url(result_json: Option<&str>) -> Option<String> {
+    let raw = result_json?;
+    let value: serde_json::Value = serde_json::from_str(raw).ok()?;
+    value
+        .get("pr_url")
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
 }
 
 /// Cap on the inbox entries one `hangar/inbox_list` snapshot returns. The inbox

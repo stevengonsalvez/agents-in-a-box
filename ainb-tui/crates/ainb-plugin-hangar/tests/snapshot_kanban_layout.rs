@@ -27,6 +27,9 @@ fn task(id: &str, agent: &str, status: &str, created_at: i64) -> TaskCardRow {
         status: status.into(),
         priority: 0,
         created_at,
+        branch: None,
+        pr_url: None,
+        pr_status: None,
     }
 }
 

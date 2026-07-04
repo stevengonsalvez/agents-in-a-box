@@ -416,6 +416,24 @@ pub struct TaskCardRow {
     pub priority: i64,
     /// Creation (queued-at) timestamp (epoch milliseconds) — drives the card age.
     pub created_at: i64,
+    /// The worktree branch (`ainb/<slug>`) the run committed on (tcp T2), or
+    /// `None` when the run made no commits / was not a worktree run. Recorded at
+    /// finalize (store migration 0033); the durable artifact surviving teardown.
+    /// Omitted from the wire when absent (`skip_serializing_if`) so the shape only
+    /// grows for a run that produced a branch — a pre-T2 reader is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The PR URL captured from the run's `result.pr_url` (P9.1), or `None` when
+    /// the run opened no PR. Surfaces the same PR the backing issue shows, on the
+    /// card (tcp T2). Omitted from the wire when absent (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    /// The PR's CI + merge status (tcp T2), fetched daemon-side via the injectable
+    /// `gh` seam only for a card that HAS a `pr_url`; `None` otherwise. Carries the
+    /// same three axes the issue task-detail badge renders. Omitted from the wire
+    /// when absent (additive) so a pre-T2 reader never sees the new key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<crate::pr_status::PrStatus>,
 }
 
 /// A wire-side aggregated inbox row for the notification inbox
