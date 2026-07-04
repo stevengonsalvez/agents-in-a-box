@@ -471,17 +471,18 @@ pub fn prepare_pipeline_board_run_interactive() -> Pipeline {
 /// seed the board-run fixture + profile and spawn a CLAIM-ENABLED daemon whose
 /// `HANGAR_CLAUDE_PATH` is a fake agent with `fake_agent_body`.
 fn prepare_pipeline_board_run_with(fake_agent_body: &str) -> Pipeline {
-    prepare_pipeline_board_run_seeded(fake_agent_body, |_| {}, &[])
+    prepare_pipeline_board_run_seeded(fake_agent_body, |_| {}, |_| Vec::new())
 }
 
 /// [`prepare_pipeline_board_run_with`], plus a `pre_spawn(home)` hook run while no
-/// daemon is attached (to add repo/scan-cache fixture rows) and `extra_env`
-/// layered onto the daemon (e.g. `HANGAR_DAEMON_DISABLE_SANDBOX`). The F5 worktree
+/// daemon is attached (to add repo/scan-cache fixture rows) and an `extra_env`
+/// closure — computed against the isolated `$HOME` so it can point env vars at
+/// files it wrote there (e.g. a stub `gh` under `HANGAR_GH_PATH`). The F5 worktree
 /// tripwires use this to seed a real git repo + widen the daemon env.
 fn prepare_pipeline_board_run_seeded(
     fake_agent_body: &str,
     pre_spawn: impl FnOnce(&Path),
-    extra_env: &[(&str, &str)],
+    extra_env: impl FnOnce(&Path) -> Vec<(String, String)>,
 ) -> Pipeline {
     let home = tempfile::tempdir().expect("isolated HOME tempdir");
     let hangar_dir = home.path().join(".agents-in-a-box");
@@ -495,6 +496,7 @@ fn prepare_pipeline_board_run_seeded(
     pre_spawn(home.path());
 
     let fake_claude = write_executable(home.path(), "fake-claude.sh", fake_agent_body);
+    let extra_env = extra_env(home.path());
 
     let bin = daemon_bin().expect("gated by can_run_tripwire");
     let mut cmd = Command::new(bin);
@@ -508,7 +510,7 @@ fn prepare_pipeline_board_run_seeded(
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null());
-    for (k, v) in extra_env {
+    for (k, v) in &extra_env {
         cmd.env(k, v);
     }
     let daemon = cmd.spawn().expect("spawn ainb-hangar-daemon");
@@ -585,8 +587,72 @@ pub fn prepare_pipeline_worktree_run() -> Pipeline {
     prepare_pipeline_board_run_seeded(
         BLOCKING_FAKE_AGENT,
         |home| seed_scanned_repo(home, WORKTREE_REPO_NAME),
-        &[("HANGAR_DAEMON_DISABLE_SANDBOX", "1")],
+        |_| vec![disable_sandbox()],
     )
+}
+
+/// The canonical `gh pr create` PR URL the committing stub agent prints on its own
+/// stdout line, captured into the task's `result.pr_url` by the P9.1 scan (tcp T2).
+pub const WORKTREE_PR_URL: &str = "https://github.com/o/r/pull/42";
+
+/// A HEADLESS fake-claude that makes a REAL commit in its worktree cwd, then prints
+/// a canonical `gh pr create` PR URL line + a success result, and exits 0 (tcp T2).
+///
+/// The commit leaves the `ainb/<slug>` branch ahead of its base, so finalize
+/// records the branch on the task; the printed PR URL is captured into
+/// `result.pr_url`. Together they drive the card's branch + PR surfacing end to
+/// end. Runs with the sandbox DISABLED so `git commit` can write the shared repo's
+/// refs (the worktree's `.git` points into the origin repo, outside the sandbox's
+/// worktree write-root). The repo's `user.name`/`user.email` come from the seeded
+/// repo config (worktrees share it); set again defensively so the commit never
+/// fails on identity.
+const COMMITTING_FAKE_AGENT: &str = "#!/bin/sh\n\
+     git config user.email t@e.com 2>/dev/null\n\
+     git config user.name t 2>/dev/null\n\
+     printf 'agent work\\n' > agent_output.txt\n\
+     git add -A >/dev/null 2>&1\n\
+     git commit --quiet -m 'agent commit' >/dev/null 2>&1\n\
+     echo 'https://github.com/o/r/pull/42'\n\
+     echo '{\"type\":\"system\",\"session_id\":\"pr-sess\"}'\n\
+     echo '{\"type\":\"result\",\"content\":\"opened PR\"}'\n\
+     exit 0\n";
+
+/// Like [`prepare_pipeline_worktree_run`], but the fake agent COMMITS in its
+/// worktree + prints a PR URL, and the daemon's `gh` is a stub (via
+/// `HANGAR_GH_PATH`) that answers a passing, mergeable, open PR (tcp T2). Drives
+/// the card branch + PR + CI surfacing to a completed run — never touching real
+/// GitHub.
+pub fn prepare_pipeline_worktree_pr() -> Pipeline {
+    prepare_pipeline_board_run_seeded(
+        COMMITTING_FAKE_AGENT,
+        |home| seed_scanned_repo(home, WORKTREE_REPO_NAME),
+        |home| {
+            let gh = write_stub_gh(home);
+            vec![
+                disable_sandbox(),
+                ("HANGAR_GH_PATH".to_string(), gh.to_string_lossy().into_owned()),
+            ]
+        },
+    )
+}
+
+/// The `HANGAR_DAEMON_DISABLE_SANDBOX=1` env pair the worktree fixtures widen the
+/// daemon with (so a headless agent can read the release sentinel / write repo refs).
+fn disable_sandbox() -> (String, String) {
+    ("HANGAR_DAEMON_DISABLE_SANDBOX".to_string(), "1".to_string())
+}
+
+/// Write a stub `gh` under `$HOME` that answers `gh pr view … --json …` with a
+/// canned passing / mergeable / open PR, so the daemon's `GhPrStatusProvider`
+/// (pointed here via `HANGAR_GH_PATH`) resolves a real `PrStatus` WITHOUT touching
+/// GitHub. Returns the stub's path (→ the env var value). Any args are ignored.
+fn write_stub_gh(home: &Path) -> PathBuf {
+    let body = "#!/bin/sh\n\
+        cat <<'JSON'\n\
+        {\"mergeable\":\"MERGEABLE\",\"state\":\"OPEN\",\"statusCheckRollup\":\
+        [{\"__typename\":\"CheckRun\",\"conclusion\":\"SUCCESS\",\"status\":\"COMPLETED\",\"name\":\"Test\"}]}\n\
+        JSON\n";
+    write_executable(home, "stub-gh.sh", body)
 }
 
 /// Like [`prepare_pipeline_worktree_run`], but raises the fixture agent's
@@ -600,7 +666,7 @@ pub fn prepare_pipeline_worktree_concurrent() -> Pipeline {
             seed_scanned_repo(home, WORKTREE_REPO_NAME);
             raise_agent_cap(home, 2);
         },
-        &[("HANGAR_DAEMON_DISABLE_SANDBOX", "1")],
+        |_| vec![disable_sandbox()],
     )
 }
 
@@ -700,6 +766,32 @@ pub fn task_short_id_by_title(home: &Path, title: &str) -> Option<String> {
         .ok()
         .flatten();
         id.map(|id| task_short_id(&id).to_string())
+    })
+}
+
+/// Read the `branch` recorded on the latest task of the card with issue TITLE
+/// `title` (tcp T2) — the durable `ainb/<slug>` finalize stamps when the run left
+/// commits. `None` until the run finalises with commits (or if it made none).
+#[must_use]
+pub fn task_branch_by_title(home: &Path, title: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("branch-read runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let like = format!("%{title}%");
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT t.branch FROM agent_task_queue t JOIN issue i ON t.issue_id = i.id \
+             WHERE i.title LIKE ? ORDER BY t.created_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(&like)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten()
+        .flatten()
     })
 }
 
