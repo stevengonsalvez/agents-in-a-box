@@ -147,6 +147,42 @@ fn lock_store(dir: &Path) -> Result<std::fs::File> {
     Ok(f)
 }
 
+/// Acquire the exclusive advisory lock guarding `sessions.json` in `dir`,
+/// creating `dir` (and the lock file) if needed.
+///
+/// This is the SAME lock [`register_session_at`] takes internally, exposed so
+/// the other writer of `~/.agents-in-a-box/sessions.json` — `ainb-core`'s
+/// `SessionStore` load-mutate-save lifecycle sites — can serialise against the
+/// daemon's registrations and against each other. Hold the returned handle
+/// across the whole read → mutate → write window: the lock is released when the
+/// handle drops, so a concurrent writer cannot lost-update the file.
+///
+/// The returned `File` is the guard; it carries no other meaning (the lock file
+/// is never read or written, only `flock`ed). This is a blocking, cross-process
+/// advisory lock — it excludes other processes' `ainb run` / `ainb kill` /
+/// recovery mutations, not just threads.
+///
+/// # Errors
+///
+/// Returns an error if `dir` cannot be created or the lock cannot be acquired.
+pub fn lock_sessions_store_at(dir: &Path) -> Result<std::fs::File> {
+    std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
+    lock_store(dir)
+}
+
+/// [`lock_sessions_store_at`] against the default [`sessions_json_path`]
+/// directory (`$AINB_HOME`/`~/.agents-in-a-box`).
+///
+/// # Errors
+///
+/// Returns an error if the parent directory cannot be resolved/created or the
+/// lock cannot be acquired.
+pub fn lock_sessions_store() -> Result<std::fs::File> {
+    let path = sessions_json_path();
+    let dir = path.parent().context("sessions.json has no parent directory")?;
+    lock_sessions_store_at(dir)
+}
+
 /// Serialize `value` and write it to `path` atomically (tmp + rename), so a crash
 /// mid-write can never truncate the store and lose every tracked session — the
 /// same durability `SessionStore::save` guarantees.
@@ -220,5 +256,64 @@ mod tests {
         let store = read(&path);
         assert_eq!(store["sessions"].as_object().unwrap().len(), 1, "same key upserts");
         assert_eq!(store["sessions"]["tmux_hangar-x"]["workspace_name"], "wsB");
+    }
+
+    /// pu4: the advisory lock must serialise concurrent read-modify-write so
+    /// two writers racing on the same `sessions.json` never lose an update.
+    /// Each thread does a full load-merge-write of a DISTINCT key; without the
+    /// lock the classic interleaving (both read the same base, both write back
+    /// their own single entry) drops one. With the lock every write sees the
+    /// prior writer's entry, so all N survive. This is the exact primitive the
+    /// `ainb-core` `SessionStore::mutate` sites now hold across their RMW.
+    #[test]
+    fn concurrent_registrations_do_not_lose_updates() {
+        use std::sync::{Arc, Barrier};
+
+        let home = TempDir::new().unwrap();
+        let path = Arc::new(home.path().join("sessions.json"));
+
+        // Seed a pre-existing entry so we also prove foreign preservation under
+        // contention (it must survive every racing writer).
+        let seed = AinbSessionRecord::new("tmux_seed", PathBuf::from("/work/seed"), "seedws");
+        register_session_at(&path, &seed).unwrap();
+
+        const WRITERS: usize = 16;
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let path = Arc::clone(&path);
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    // Release all writers at once to maximise the RMW overlap.
+                    barrier.wait();
+                    let rec = AinbSessionRecord::new(
+                        format!("tmux_w{i}"),
+                        PathBuf::from(format!("/work/{i}")),
+                        format!("ws{i}"),
+                    );
+                    register_session_at(&path, &rec).unwrap();
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let store = read(&path);
+        let sessions = store["sessions"].as_object().unwrap();
+        // Seed + every one of the WRITERS entries present: no lost update.
+        assert_eq!(
+            sessions.len(),
+            WRITERS + 1,
+            "all concurrent writers plus the seed must survive"
+        );
+        assert_eq!(sessions["tmux_seed"]["workspace_name"], "seedws");
+        for i in 0..WRITERS {
+            assert_eq!(
+                sessions[&format!("tmux_w{i}")]["workspace_name"],
+                format!("ws{i}"),
+                "writer {i}'s entry was lost to a racing write"
+            );
+        }
     }
 }
