@@ -844,29 +844,41 @@ impl SessionRecoveryState {
             }
         }
 
-        // Try to find a transcript to resume from (only for Claude sessions)
-        let transcript_path = if agent_type == SessionAgentType::Claude {
-            Self::find_transcript_for_worktree(worktree)
-        } else {
-            None
-        };
+        // Orphan recovery is always a resume. Build the command via the shared
+        // launch/resume assembler so this screen stays in lock-step with the
+        // main resume path: Claude `--continue`, Codex `resume --last`, and the
+        // correct per-provider yolo flag (the old hardcoded strings used the
+        // wrong codex flag and the broken `claude --resume <path>`). The pane's
+        // cwd is the worktree (`tmux new-session -c <worktree>`), so the
+        // cwd-scoped resume resolves to this worktree's latest session.
+        // `has_history` gates Claude's `--continue` — no history → fresh launch,
+        // avoiding a dead pane.
+        let has_history = agent_type == SessionAgentType::Claude
+            && Self::find_transcript_for_worktree(worktree).is_some();
 
-        // Build agent command based on agent_type
         let agent_cmd = match agent_type {
-            SessionAgentType::Copilot => "github-copilot-cli".to_string(),
-            SessionAgentType::Codex => "codex --dangerously-skip-permissions".to_string(),
-            SessionAgentType::Gemini => "gemini".to_string(),
-            SessionAgentType::Shell => String::new(), // Just open a shell, no command
+            SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Kiro => {
+                String::new() // Just open a shell, no command
+            }
             _ => {
-                // Claude (default)
-                if let Some(transcript) = transcript_path {
-                    format!(
-                        "claude --dangerously-skip-permissions --resume \"{}\"",
-                        transcript
-                    )
-                } else {
-                    "claude --dangerously-skip-permissions".to_string()
-                }
+                use crate::config::CliProvider;
+                use crate::interactive::session_manager::InteractiveSessionManager;
+                let provider = match agent_type {
+                    SessionAgentType::Codex => CliProvider::Codex,
+                    SessionAgentType::Gemini => CliProvider::Gemini,
+                    SessionAgentType::Copilot => CliProvider::Copilot,
+                    _ => CliProvider::Claude,
+                };
+                InteractiveSessionManager::build_cli_cmd_parts(
+                    &provider,
+                    agent_type,
+                    true, // skip_permissions — recovery launches yolo, as before
+                    None, // claude_model
+                    None, // codex_model
+                    true, // resume_requested — orphan recovery is a resume
+                    has_history,
+                )
+                .join(" ")
             }
         };
 
@@ -1073,7 +1085,8 @@ impl SessionRecoveryState {
             return Err("Cannot resume: no transcript found".to_string());
         }
 
-        let transcript = session.transcript_path.as_ref().ok_or("No transcript path")?;
+        // Guard: `can_resume` already implies a transcript exists; double-check.
+        session.transcript_path.as_ref().ok_or("No transcript path")?;
 
         let new_session = format!(
             "{}-resumed-{}",
@@ -1094,10 +1107,11 @@ impl SessionRecoveryState {
             ));
         }
 
-        let claude_cmd = format!(
-            "claude --dangerously-skip-permissions --resume \"{}\"",
-            transcript
-        );
+        // `--continue` re-opens the most recent conversation in `directory`
+        // (the pane's cwd). The old `--resume "<transcript path>"` silently fell
+        // through to the claude picker — the current CLI `--resume` expects a
+        // session id, not a path. A transcript is known to exist (can_resume).
+        let claude_cmd = "claude --dangerously-skip-permissions --continue".to_string();
         let send_result = Command::new("tmux")
             .args(["send-keys", "-t", &new_session, &claude_cmd, "C-m"])
             .output()
