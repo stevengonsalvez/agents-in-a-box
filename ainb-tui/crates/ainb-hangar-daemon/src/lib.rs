@@ -247,6 +247,10 @@ pub mod warnings;
 pub mod webhook_ingress;
 /// Git-worktree integration for per-task working dirs (P1.6).
 pub mod worktree;
+/// Per-run working-dir provisioning from a card's `repo_ref` (spec F5): a
+/// volatile `ainb/<slug>` worktree for a real repo, an in-place git-inited
+/// scratch repo, or the fallback execenv workdir for a chat task.
+pub mod workdir_provision;
 
 /// Resolve the directory that holds `hangar.db`.
 ///
