@@ -3218,6 +3218,45 @@ impl Plugin for HangarPlugin {
             || self.list_context_menu.is_some()
     }
 
+    fn captures_text(&self) -> bool {
+        // 8hx: declare to the host when a focused surface is capturing free text
+        // (a title / filter / compose / API-key / search input) so it suppresses
+        // its own global single-character shortcuts (`H`/`?`/`W`) and forwards
+        // those keys into the input instead of eating them — e.g. a card titled
+        // `Help?` must type verbatim, not toggle the host help overlay.
+        //
+        // This MIRRORS the text-capture routing guards in `handle_key` 1:1:
+        // every surface there that routes keys straight to its reducer as typed
+        // content (bypassing the tab-switch / help / quit nav layer) reports
+        // here. Keep the two lists in sync — a new capture surface must be added
+        // to both, or the host will swallow keystrokes bound for it.
+        //
+        // The command palette (`Ctrl+P`) is a modal text filter layered over any
+        // screen, so it short-circuits before the per-screen match.
+        if self.screens.command_palette.is_some() {
+            return true;
+        }
+        let Some(app) = self.app.as_ref() else {
+            return false;
+        };
+        match &app.screen {
+            Screen::IssueList => self.screens.issue_list.is_capturing_text(),
+            Screen::TaskDetail(_) => self
+                .screens
+                .task_detail
+                .as_ref()
+                .is_some_and(|td| td.compose_buffer().is_some()),
+            Screen::Settings => {
+                self.screens.settings.as_ref().is_some_and(|s| s.key_entry_open())
+            }
+            Screen::Squads => self.screens.squads.is_creating(),
+            // Every open Boards overlay (create-title / profile-pick / column
+            // rename / `Run ▾`) consumes all keys as input, per its routing guard.
+            Screen::Boards => self.screens.boards.overlay().is_some(),
+            _ => false,
+        }
+    }
+
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
         // Drain any deferred Workspace-pane action here: `plugin/render` is
         // dispatched on a SPAWNED task (unlike the inline `handle_key`/
@@ -4478,6 +4517,7 @@ mod tests {
         use ainb_hangar_proto::snapshots::{
             BoardColumnWireRow, BoardWireRow, BoardsListResult,
         };
+        use crate::screen::boards::BoardsOverlay;
         let mut p = connected_plugin_with_issue();
 
         // Load a board with one column, then land on the Boards screen.
@@ -4501,6 +4541,13 @@ mod tests {
         app.screen = Screen::Boards;
         p.app = Some(app);
 
+        // 8hx: on the Boards screen with NO overlay open, the plugin is navigable
+        // — it does NOT declare text-capture, so the host keeps its globals.
+        assert!(
+            !p.captures_text(),
+            "Boards without an open overlay must not declare text-capture"
+        );
+
         // `c` opens the card-title input on the focused Todo column.
         p.on_key(&char_press('c'));
         assert!(
@@ -4513,6 +4560,14 @@ mod tests {
             p.screens.boards.overlay()
         );
 
+        // 8hx: the open card-title input IS a text-capture surface — the plugin
+        // must now report capture so the HOST suppresses its global `H`/`?`/`W`
+        // shortcuts and forwards those keys into this input instead.
+        assert!(
+            p.captures_text(),
+            "an open card-title overlay must declare text-capture (8hx)"
+        );
+
         // Typing the title's leading `C` must be captured, not switch to Control.
         p.on_key(&char_press('C'));
         assert!(
@@ -4520,13 +4575,24 @@ mod tests {
             "typing `C` into the title must NOT switch to the control center, got {:?}",
             p.app_state().screen
         );
+
+        // 8hx: the host-shortcut characters `H` and `?` — which the host would
+        // otherwise eat as the help toggle — must land in the title VERBATIM once
+        // the host forwards them (it does, because `captures_text()` is true).
+        p.on_key(&char_press('H'));
+        p.on_key(&char_press('?'));
         assert!(
             matches!(
                 p.screens.boards.overlay(),
-                Some(crate::screen::boards::BoardsOverlay::CardTitle { title, .. }) if title == "C"
+                Some(BoardsOverlay::CardTitle { title, .. }) if title == "CH?"
             ),
-            "`C` must land in the title buffer, got {:?}",
+            "`H`/`?` must be typed into the card title verbatim, got {:?}",
             p.screens.boards.overlay()
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Boards),
+            "typing `H`/`?` must not toggle help or leave the Boards screen, got {:?}",
+            p.app_state().screen
         );
     }
 
