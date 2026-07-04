@@ -554,9 +554,14 @@ async fn execute_claimed(
     // than dispatching a run into an unprovisioned dir. The injected `CLAUDE.md`
     // (above) + skills stay in the task tree, NOT the worktree, so teardown's
     // keep-if-dirty check sees only genuine agent work.
-    let repo_ref = read_repo_ref(pool, &task.id).await;
+    //
+    // tcp 19n: the repo is read straight off the claimed `Task` (which now carries
+    // `repo_ref` verbatim from the row) rather than a second `card_parity` query.
+    // The single source means a RuntimeOffline-retried child — whose INSERT copies
+    // `repo_ref` — provisions the SAME repo's worktree instead of the in-tree
+    // fallback a dropped `repo_ref` used to force.
     let run_wd = crate::workdir_provision::provision(
-        repo_ref.as_deref(),
+        task.repo_ref.as_deref(),
         crate::execenv::short_id(&task.id),
         &home,
         &env.workdir,
@@ -909,6 +914,10 @@ async fn finalize_success(
     // e38.35: record this run's token/cost usage now the task row is terminal
     // (best-effort; a run that reported no usage records nothing).
     persist_usage(pool, task, usage.as_ref(), clock).await;
+    // tcp T2: record the worktree branch if the run left commits — before the
+    // TaskFinished event below, so a board re-pulling `tasks_list` on that event
+    // already surfaces the branch. A no-commit / scratch / in-tree run is a no-op.
+    persist_run_branch(pool, &task.id, run_wd).await;
     // P10 / D19: append the durable run-history row (provider / session / outcome
     // / duration / token-cost) + emit the OTLP task->run span. Best-effort.
     record_run_history(
@@ -981,6 +990,9 @@ async fn finalize_failure(
     // e38.35: a failed/timed-out run can still report partial usage worth
     // accounting; record it now the row is terminal (best-effort).
     persist_usage(pool, task, result.usage.as_ref(), clock).await;
+    // tcp T2: a failed run that still committed leaves a durable branch — record
+    // it (before the TaskFinished event) so the card surfaces the partial work.
+    persist_run_branch(pool, &task.id, run_wd).await;
     // P10 / D19: a failed run still appends a run-history row (outcome=failed) +
     // emits the OTLP task->run span, so the timeline records the failure and its
     // partial token-cost. Best-effort.
@@ -1294,23 +1306,6 @@ async fn resolve_provider_and_workspace(
     Ok((runtime.provider, workspace))
 }
 
-/// Read a task's persisted `repo_ref` (spec F5), or `None`.
-///
-/// A card task carries `scratch` or an absolute repo path (rpc `card_run` sets
-/// it); a chat / autopilot task has none. A read fault is logged and treated as
-/// `None` (run in-tree) — a `repo_ref` lookup must never strand a claimed run.
-async fn read_repo_ref(pool: &SqlitePool, task_id: &str) -> Option<String> {
-    use ainb_hangar_store::repo::card_parity::CardParityRepo;
-    match CardParityRepo::get_task_repo_agent(pool, task_id).await {
-        Ok(Some((repo_ref, _agent))) => repo_ref,
-        Ok(None) => None,
-        Err(e) => {
-            tracing::warn!(error = %e, task_id = %task_id, "repo_ref read failed; running in-tree");
-            None
-        }
-    }
-}
-
 /// Build the provider [`RunLocation`](crate::runner::RunLocation) for a
 /// provisioned run workdir (F5).
 ///
@@ -1326,6 +1321,43 @@ fn run_location_for(run_wd: &crate::workdir_provision::RunWorkdir) -> crate::run
         }
         RunWorkdir::Fallback { path } => {
             crate::runner::RunLocation { cwd: path.clone(), extra_root: None }
+        }
+    }
+}
+
+/// Record the run's worktree branch on the task row when the run produced
+/// commits (tcp T2), so the board card + task detail surface it WITHOUT a git
+/// query at render time.
+///
+/// Only a [`RunWorkdir::Worktree`] whose `ainb/<slug>` branch is ahead of its
+/// base (the agent left commits) is recorded — that branch survives teardown
+/// (`git worktree remove` keeps it), so it is the durable artifact worth
+/// surfacing. A no-commit run, a scratch / in-tree run, or a git hiccup records
+/// nothing, so a NULL `branch` cleanly means "no commits, nothing to show".
+///
+/// Called BEFORE teardown (the branch/worktree still exist) and BEFORE the
+/// terminal `TaskFinished` event, so a subscribed board re-pulling `tasks_list`
+/// on that event already sees the recorded branch. Best-effort: a store or git
+/// fault is logged, never propagated onto a finalize that has already committed
+/// the task's terminal state.
+async fn persist_run_branch(
+    pool: &SqlitePool,
+    task_id: &str,
+    run_wd: &crate::workdir_provision::RunWorkdir,
+) {
+    let crate::workdir_provision::RunWorkdir::Worktree { branch, .. } = run_wd else {
+        return;
+    };
+    match crate::workdir_provision::commits_ahead(run_wd) {
+        Ok(0) => {}
+        Ok(n) => match TaskRepo::set_branch(pool, task_id, branch).await {
+            Ok(_) => {
+                tracing::info!(task_id = %task_id, branch = %branch, commits = n, "run branch recorded");
+            }
+            Err(e) => tracing::warn!(task_id = %task_id, error = %e, "branch record failed"),
+        },
+        Err(e) => {
+            tracing::warn!(task_id = %task_id, error = %e, "commits-ahead check failed; branch not recorded");
         }
     }
 }

@@ -194,6 +194,56 @@ pub fn teardown(wd: &RunWorkdir) -> io::Result<TeardownOutcome> {
     }
 }
 
+/// How many commits the run's worktree branch is ahead of its base — the "did
+/// this run produce a durable artifact?" signal the card's branch surfacing keys
+/// on (tcp T2).
+///
+/// For a [`RunWorkdir::Worktree`] this counts the commits on `ainb/<slug>` that
+/// its fork point (the merge-base with the origin repo's `HEAD`) does not carry,
+/// i.e. exactly the commits the agent made. Scratch + fallback runs never produce
+/// a surfaced branch and return `0`.
+///
+/// Uses the merge-base fork point (not a stored base SHA) so it is correct for
+/// both a fresh worktree and a resumed one, and unaffected by the origin `HEAD`
+/// advancing during the run. The branch ref lives in the shared repository, so
+/// this is queried against the ORIGIN repo and works whether or not the worktree
+/// checkout has already been torn down.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if the `git` invocations fail to spawn. A non-zero
+/// `git` exit (e.g. an unrelated history with no merge-base) degrades to `0` (no
+/// branch surfaced) rather than erroring, so a finalize is never blocked.
+pub fn commits_ahead(wd: &RunWorkdir) -> io::Result<u64> {
+    let RunWorkdir::Worktree { branch, repo, .. } = wd else {
+        return Ok(0);
+    };
+    let Some(base) = git_capture(repo, &["merge-base", "HEAD", branch])? else {
+        return Ok(0);
+    };
+    let base = base.trim();
+    if base.is_empty() {
+        return Ok(0);
+    }
+    let range = format!("{base}..{branch}");
+    let Some(count) = git_capture(repo, &["rev-list", "--count", &range])? else {
+        return Ok(0);
+    };
+    Ok(count.trim().parse::<u64>().unwrap_or(0))
+}
+
+/// Run a `git` subcommand in `cwd`, returning its trimmed stdout on success, or
+/// `None` on a non-zero exit (a tolerated "could not determine" outcome the
+/// caller degrades from). Errors only if the process fails to spawn.
+fn git_capture(cwd: &Path, args: &[&str]) -> io::Result<Option<String>> {
+    let out = Command::new("git").args(args).current_dir(cwd).output()?;
+    if out.status.success() {
+        Ok(Some(String::from_utf8_lossy(&out.stdout).into_owned()))
+    } else {
+        Ok(None)
+    }
+}
+
 /// Whether a worktree holds uncommitted changes (`git status --porcelain`
 /// non-empty). A git failure is treated as "dirty" (conservative — never delete
 /// a checkout we cannot prove is clean).
@@ -363,6 +413,36 @@ mod tests {
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::KeptDirty);
         assert!(wd.path().exists(), "a dirty worktree is kept, not deleted");
         assert!(wd.path().join("new.txt").exists(), "the uncommitted work survives");
+    }
+
+    /// A worktree run with NO commits reports 0 ahead; one that commits reports
+    /// the exact commit count — the tcp T2 signal the card's branch surfacing
+    /// keys on. Scratch + fallback always report 0 (never a surfaced branch).
+    #[test]
+    fn commits_ahead_counts_only_committed_work() {
+        let tmp = tempfile::tempdir().unwrap();
+        let repo = tmp.path().join("repo");
+        init_repo_with_commit(&repo);
+        let home = tmp.path().join("home");
+        let fallback = home.join("fallback");
+
+        // Fresh worktree, no agent commits yet → 0 ahead (nothing to surface).
+        let wd = provision(Some(repo.to_str().unwrap()), "ahead", &home, &fallback).unwrap();
+        assert_eq!(commits_ahead(&wd).unwrap(), 0, "a no-commit run is 0 ahead");
+
+        // The agent commits inside its worktree → the branch is ahead of its base.
+        run_git(wd.path(), &["config", "user.email", "a@b.com"]).unwrap();
+        run_git(wd.path(), &["config", "user.name", "a"]).unwrap();
+        std::fs::write(wd.path().join("work.txt"), "agent output").unwrap();
+        run_git(wd.path(), &["add", "."]).unwrap();
+        run_git(wd.path(), &["commit", "--quiet", "-m", "agent work"]).unwrap();
+        assert_eq!(commits_ahead(&wd).unwrap(), 1, "one agent commit is 1 ahead");
+
+        // Scratch + fallback never surface a branch.
+        let scratch = provision(Some("scratch"), "s", &home, &fallback).unwrap();
+        assert_eq!(commits_ahead(&scratch).unwrap(), 0);
+        let fb = provision(None, "c", &home, &fallback).unwrap();
+        assert_eq!(commits_ahead(&fb).unwrap(), 0);
     }
 
     /// No repo_ref → the fallback execenv workdir, no git, never torn down.
