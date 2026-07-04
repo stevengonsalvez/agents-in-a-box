@@ -32,13 +32,32 @@ pub fn cwd_to_project_slug(cwd: &str) -> String {
         .collect()
 }
 
+/// Canonicalize `cwd` so a symlinked working directory resolves to the SAME
+/// slug Claude derives from its real cwd. On macOS Claude runs under the
+/// resolved `/private/tmp/…` (or `/private/var/…`) path, so a caller that only
+/// knows the `/tmp/…` (or `/var/…`) symlink would otherwise slug to a DIFFERENT
+/// project dir and never find the transcript. `std::fs::canonicalize` resolves
+/// the symlinks; when the path does not exist (a synthetic/test cwd) or cannot
+/// be canonicalized we fall back to the literal input, so a non-existent cwd
+/// keeps its verbatim slug.
+#[must_use]
+pub fn canonical_cwd(cwd: &str) -> String {
+    std::fs::canonicalize(cwd)
+        .ok()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_else(|| cwd.to_string())
+}
+
 /// Locate the most recently modified `.jsonl` file under
 /// `~/.claude/projects/<cwd-slug>/`. Returns `None` if no transcripts exist.
+///
+/// The cwd is canonicalized first ([`canonical_cwd`]) so a `/tmp`-rooted
+/// workdir matches Claude's `/private/tmp`-rooted transcript dir on macOS.
 pub fn latest_transcript_for_cwd(cwd: &str) -> Option<PathBuf> {
     let mut home = dirs::home_dir()?;
     home.push(".claude");
     home.push("projects");
-    home.push(cwd_to_project_slug(cwd));
+    home.push(cwd_to_project_slug(&canonical_cwd(cwd)));
 
     let entries = std::fs::read_dir(&home).ok()?;
     let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
@@ -685,5 +704,38 @@ mod tests {
         let hit = last_api_error_from_jsonl(&path, 40, 0);
         let _ = std::fs::remove_file(&path);
         assert!(hit.is_none());
+    }
+
+    // --- cwd canonicalization (/tmp vs /private/tmp transcript matching) --
+
+    #[test]
+    fn canonical_cwd_resolves_symlinks_to_the_same_slug() {
+        // A symlinked cwd must canonicalize to its real dir so it slugs
+        // identically — the macOS /tmp vs /private/tmp mismatch that broke
+        // transcript matching.
+        let tmp = tempfile::tempdir().unwrap();
+        let real = tmp.path().join("real-workdir");
+        std::fs::create_dir(&real).unwrap();
+        let link = tmp.path().join("link-workdir");
+        std::os::unix::fs::symlink(&real, &link).unwrap();
+
+        let via_link = canonical_cwd(link.to_str().unwrap());
+        let via_real = canonical_cwd(real.to_str().unwrap());
+        assert_eq!(via_link, via_real, "a symlinked cwd canonicalizes to its real dir");
+        assert_eq!(
+            cwd_to_project_slug(&via_link),
+            cwd_to_project_slug(&via_real),
+            "canonicalized symlink + real dir yield the same project slug"
+        );
+    }
+
+    #[test]
+    fn canonical_cwd_falls_back_for_nonexistent_path() {
+        let missing = "/no/such/dir/ainb-canon-xyz-12345";
+        assert_eq!(
+            canonical_cwd(missing),
+            missing,
+            "a non-existent cwd keeps its literal path (graceful fallback)"
+        );
     }
 }
