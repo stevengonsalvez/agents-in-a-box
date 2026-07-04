@@ -66,6 +66,20 @@ const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
 const TAIL_LINES: usize = 200;
 
+/// The parent-session identity the daemon stamps onto every task it spawns
+/// (ccc / D11), via `AINB_PARENT_SESSION` in the provider's child env.
+///
+/// It names the hangar daemon as the owning orchestrator so the lifecycle hook
+/// (`ainb fleet atc hook`) resolves fleet membership and forwards the session's
+/// AskUserQuestion / lifecycle events into the attention pipeline — the fix for a
+/// daemon-spawned run showing "0 need you" while its picker is open (INV-3 / D11).
+/// A stable constant, not a per-task id: the spawner is the one daemon, and the
+/// attention ingest scopes hook rows host-wide regardless, so a finer key buys
+/// nothing. Completions the hook routes to `inbox/hangar-daemon.jsonl` are the
+/// daemon's own (the daemon detects completion via the run outcome, not the
+/// inbox); draining/sweeping that inbox is a follow-up, not part of visibility.
+const HANGAR_PARENT_SESSION: &str = "hangar-daemon";
+
 /// Resolved daemon configuration (identity + tunables).
 #[derive(Debug, Clone)]
 pub struct DaemonConfig {
@@ -434,6 +448,23 @@ async fn execute_claimed(
     let keychain_keys: Vec<(String, String)> = Vec::new();
     let mut task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
 
+    // ccc / D11: mark this daemon-spawned session as a legitimate fleet member by
+    // stamping AINB_PARENT_SESSION into the provider's child env. The lifecycle
+    // hook gates its `events.jsonl` append on fleet membership (resolvable parent
+    // | non-empty inbox | ATC cwd); a card run has none, so its AskUserQuestion
+    // never reached the attention pipeline (the control centre showed "0 need you"
+    // with the picker open — INV-3 / D11). Naming the hangar daemon as the parent
+    // resolves membership for BOTH provider paths at once: the headless
+    // (`run_claude` / `run_codex_with_env`) and interactive (`run_interactive`)
+    // spawns each compose their child env from `task_env`, and the runner
+    // allowlists this key so it survives the deny-by-default filter. It is set
+    // AFTER `build_task_env` so the daemon's own value always wins over any
+    // ambient one.
+    task_env.insert(
+        ainb_fleet_core::session_registry::PARENT_ENV.to_string(),
+        HANGAR_PARENT_SESSION.to_string(),
+    );
+
     // P6.4: materialise the agent's attached skills into the provider's layout
     // before spawning. Home-style providers (claude/codex/cursor) land their
     // skills under the *task root* (sibling of `workdir`, so the git worktree
@@ -478,7 +509,7 @@ async fn execute_claimed(
     // the agent's model/cli_args on the argv and its `agent_env` layered onto the
     // child env. Both spawn through the same OS sandbox (e38.23).
     let outcome = if task.mode == "interactive" {
-        run_interactive(pool, runner, &task, &env, task_env, &dispatch).await?
+        run_interactive(pool, runner, &task, &ws_slug, &env, task_env, &dispatch).await?
     } else {
         match dispatch.backend {
             Backend::Claude => runner.run_claude(&env, task_env).await?,
@@ -528,6 +559,7 @@ async fn run_interactive(
     pool: &SqlitePool,
     runner: &Runner,
     task: &Task,
+    ws_slug: &str,
     env: &crate::execenv::ExecEnv,
     task_env: std::collections::HashMap<String, String>,
     dispatch: &ResolvedDispatch,
@@ -580,6 +612,23 @@ async fn run_interactive(
                 .abort(ainb_hangar_store::service::fail::FailureReason::RuntimeOffline)
                 .await);
         }
+    }
+
+    // ccc / D11: register the live tmux session in ainb's session registry
+    // (`sessions.json`) so `ainb list` — and thus fleet discover / auto-standup /
+    // `atc broadcast` — can SEE and TARGET it. Only the interactive mode registers:
+    // it is a real, attachable tmux session; the headless path is a captured
+    // subprocess with no tmux target, so its fleet visibility is the attention
+    // pipeline (mechanism a) alone. Best-effort: the session is already live and
+    // recorded on the row, so a registry write fault is logged and ignored rather
+    // than failing the run (the external-dep / degrade rule).
+    let record = ainb_fleet_core::session_registry::AinbSessionRecord::new(
+        session_name.clone(),
+        env.workdir.clone(),
+        ws_slug.to_string(),
+    );
+    if let Err(e) = ainb_fleet_core::session_registry::register_session(&record) {
+        tracing::warn!(task_id = %task.id, error = %e, "session registry write failed");
     }
 
     Ok(run.wait().await?)

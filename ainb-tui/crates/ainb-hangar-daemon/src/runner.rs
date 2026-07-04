@@ -70,6 +70,12 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
+    // ccc / D11: the parent-session linkage the daemon stamps onto every task it
+    // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
+    // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
+    // deny-by-default filter, or the lifecycle hook's fleet-membership gate never
+    // resolves and the run's AskUserQuestion never reaches the attention pipeline.
+    ainb_fleet_core::session_registry::PARENT_ENV,
 ];
 
 /// The POSIX `sysexits.h` `EX_TEMPFAIL` (75): "temporary failure, indicating
@@ -671,7 +677,18 @@ where
     let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
     let mut child_env: Vec<(String, String)> =
         source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
-    child_env.extend(extra_env);
+    // ccc / D11: the daemon's AINB_PARENT_SESSION stamp (an allowlisted
+    // `source_env` value) is AUTHORITATIVE fleet-membership config. A per-agent
+    // `agent_env` is layered on top and wins over ambient values by name — so
+    // WITHOUT this filter an agent config carrying AINB_PARENT_SESSION (or a blank
+    // one) would shadow the daemon's stamp, dropping the hook's membership
+    // resolution or misrouting the session's Stop completion. Only the daemon sets
+    // this key, so drop any the agent env carries before layering.
+    child_env.extend(
+        extra_env
+            .into_iter()
+            .filter(|(k, _)| k.as_str() != ainb_fleet_core::session_registry::PARENT_ENV),
+    );
     child_env
 }
 
@@ -773,4 +790,57 @@ fn kill_group(pgid: Option<i32>) {
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGKILL,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn compose_child_env_filters_source_to_the_allowlist() {
+        // A non-allowlisted ambient var (a leaked secret) is dropped; HOME survives.
+        let child = compose_child_env(
+            vec![pair("HOME", "/h"), pair("SECRET_KEY", "leak")],
+            std::iter::empty(),
+        );
+        assert!(child.contains(&pair("HOME", "/h")));
+        assert!(child.iter().all(|(k, _)| k != "SECRET_KEY"), "secret filtered");
+    }
+
+    #[test]
+    fn compose_child_env_layers_agent_env_over_ambient() {
+        // A per-agent value overrides an allowlisted ambient one of the same name.
+        let child = compose_child_env(vec![pair("LANG", "C")], vec![pair("LANG", "en_US.UTF-8")]);
+        // The daemon spawn passes the composed Vec to `Command::envs` / `env -i`,
+        // both last-wins — so the agent value is the effective one.
+        assert_eq!(child.last(), Some(&pair("LANG", "en_US.UTF-8")));
+    }
+
+    #[test]
+    fn compose_child_env_agent_env_cannot_shadow_the_daemon_parent_stamp() {
+        // ccc / D11 regression guard: the daemon stamps AINB_PARENT_SESSION into the
+        // allowlisted source env; a per-agent `agent_env` carrying its OWN value must
+        // NOT override it (that would drop the hook's fleet-membership resolution).
+        let child = compose_child_env(
+            vec![pair(
+                ainb_fleet_core::session_registry::PARENT_ENV,
+                "hangar-daemon",
+            )],
+            vec![pair(ainb_fleet_core::session_registry::PARENT_ENV, "agent-hijack")],
+        );
+        let parent: Vec<&String> = child
+            .iter()
+            .filter(|(k, _)| k == ainb_fleet_core::session_registry::PARENT_ENV)
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            parent,
+            vec!["hangar-daemon"],
+            "the daemon parent stamp must be the ONLY AINB_PARENT_SESSION in the child env"
+        );
+    }
 }
