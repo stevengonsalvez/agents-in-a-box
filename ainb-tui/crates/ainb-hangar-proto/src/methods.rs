@@ -602,6 +602,19 @@ pub const HANGAR_BOARD_CARD_CREATE: &str = "hangar/board_card_create";
 /// Mutating + workspace-scoped.
 pub const HANGAR_BOARD_CARD_RUN: &str = "hangar/board_card_run";
 
+/// `hangar/repo_list` — the card-create `@` autocomplete repo roster (spec F3).
+///
+/// Params: `{}` (host-scoped — the roster is the host's favorites + scan cache,
+/// not workspace-partitioned). Result: [`crate::snapshots::RepoListResult`] —
+/// favorites first (★, most-recent-first via `stats.last_used`), then the
+/// scanned repos in cache order, deduped. The daemon reads New Session's
+/// `favorites.yaml` + `cache/repositories.json` AS-IS via the fleet-core roster
+/// reader (it NEVER triggers a scan — a card-create must not block on a cold
+/// filesystem walk). Fuzzy filtering on the `@`-query happens plugin-side; the
+/// plugin also prepends the `📁 scratch` first entry (F2), which is not a roster
+/// row. A read: a cold / first-run install yields an empty roster, never an error.
+pub const HANGAR_REPO_LIST: &str = "hangar/repo_list";
+
 /// `hangar/run_history` — snapshot the workspace's per-run observability timeline
 /// (P10 / D19).
 ///
@@ -802,6 +815,9 @@ pub const ALL_METHODS: &[&str] = &[
     // profiles).
     HANGAR_BOARD_CARD_CREATE,
     HANGAR_BOARD_CARD_RUN,
+    // Card-create repo roster (spec F3) is APPENDED at the catalogue tail — the
+    // wire catalogue is append-only.
+    HANGAR_REPO_LIST,
 ];
 
 #[cfg(test)]
@@ -982,6 +998,7 @@ mod tests {
             PROFILE_UPSERT,
             HANGAR_BOARD_CARD_CREATE,
             HANGAR_BOARD_CARD_RUN,
+            HANGAR_REPO_LIST,
         ];
         for m in declared {
             assert!(

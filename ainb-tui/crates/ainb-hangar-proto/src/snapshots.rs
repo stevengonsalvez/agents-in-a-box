@@ -1474,6 +1474,18 @@ pub struct BoardCardCreateParams {
     /// `None` to leave the issue unassigned.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee_profile: Option<String>,
+    /// The card's repo (spec F2/F3): an absolute checkout path, or the literal
+    /// `scratch`. APPEND-ONLY: omitted by a pre-parity caller (`None`), leaving
+    /// the card without a repo. The daemon persists it on the issue so a run /
+    /// rerun provisions the right worktree.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// The card's chosen provider agent (spec F1/F4): `claude` / `codex` /
+    /// `copilot`. APPEND-ONLY: omitted (`None`) leaves the run to resolve the
+    /// agent via the F4 cascade. An unrecognised token is ignored (cascade
+    /// decides), never a hard reject — the wire stays forward-compatible.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6, D16): launch a
@@ -1490,6 +1502,16 @@ pub struct BoardCardRunParams {
     /// through the one provider-runner path today; the value is carried for the D6
     /// launch surface and echoed in the result.
     pub mode: String,
+    /// A run-time REPO override (spec F5): an absolute path or `scratch`.
+    /// APPEND-ONLY: omitted (`None`) uses the card's persisted `repo_ref`. Lets a
+    /// run pin a repo the card was created without (Repo REQUIRED at run).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// A run-time AGENT override (spec F4): `claude` / `codex` / `copilot`.
+    /// APPEND-ONLY: omitted (`None`) uses the card's persisted agent, else the F4
+    /// cascade. An unrecognised token is ignored (cascade decides).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6): the enqueued
@@ -1504,6 +1526,35 @@ pub struct BoardCardRunResult {
     pub runtime_id: String,
     /// The echoed launch mode (`headless` / `interactive`).
     pub mode: String,
+}
+
+/// One pickable repository in the card-create `@` roster
+/// ([`crate::methods::HANGAR_REPO_LIST`], spec F3).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RepoWireRow {
+    /// The display name: a favorite's alias, or a scanned repo's name.
+    pub name: String,
+    /// The local checkout path, when known (scanned repos always carry one; a
+    /// favorite migrated to a remote indicator carries `None`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
+    /// The remote indicator (`owner/repo` shorthand or a URL) for a favorite, or
+    /// `None` for a scan-only entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote: Option<String>,
+    /// Whether this is a ★ favorite (pinned first, ahead of scanned repos).
+    pub is_favorite: bool,
+    /// Recency (epoch ms) from a favorite's `stats.last_used`, when present.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_used_ms: Option<i64>,
+}
+
+/// Result of [`crate::methods::HANGAR_REPO_LIST`] (spec F3): the card-create repo
+/// roster, favorites-first + scanned-second, ready for plugin-side fuzzy filter.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct RepoListResult {
+    /// The roster rows in pick order (★ favorites by recency, then scanned).
+    pub repos: Vec<RepoWireRow>,
 }
 
 #[cfg(test)]
@@ -2195,5 +2246,71 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cleared.fsm_state.as_deref(), Some(""), "empty = clear");
+    }
+
+    /// The F3 repo roster result round-trips, omitting the absent optionals.
+    #[test]
+    fn repo_list_result_roundtrips() {
+        let result = RepoListResult {
+            repos: vec![
+                RepoWireRow {
+                    name: "claude-code".into(),
+                    path: None,
+                    remote: Some("anthropics/claude-code".into()),
+                    is_favorite: true,
+                    last_used_ms: Some(1_700_000_000_000),
+                },
+                RepoWireRow {
+                    name: "beta".into(),
+                    path: Some("/repos/beta".into()),
+                    remote: None,
+                    is_favorite: false,
+                    last_used_ms: None,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(serde_json::from_str::<RepoListResult>(&s).unwrap(), result);
+        // A scan-only row drops path-less/remote-less optionals.
+        assert!(!s.contains("\"remote\":null"));
+        assert!(!s.contains("\"last_used_ms\":null"));
+    }
+
+    /// APPEND-ONLY: a pre-parity card-create frame (no repo_ref / agent) still
+    /// decodes, defaulting the new fields to None; a parity frame carries them.
+    #[test]
+    fn board_card_create_params_are_append_only() {
+        let legacy: BoardCardCreateParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","title":"Fix it"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.repo_ref, None);
+        assert_eq!(legacy.agent, None);
+
+        let parity: BoardCardCreateParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","title":"Fix it","repo_ref":"scratch","agent":"codex"}"#,
+        )
+        .unwrap();
+        assert_eq!(parity.repo_ref.as_deref(), Some("scratch"));
+        assert_eq!(parity.agent.as_deref(), Some("codex"));
+    }
+
+    /// APPEND-ONLY: a pre-parity card-run frame still decodes; a run override
+    /// carries repo_ref + agent.
+    #[test]
+    fn board_card_run_params_are_append_only() {
+        let legacy: BoardCardRunParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","issue_id":"i1","mode":"headless"}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.repo_ref, None);
+        assert_eq!(legacy.agent, None);
+
+        let over: BoardCardRunParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","issue_id":"i1","mode":"interactive","repo_ref":"/repos/app","agent":"claude"}"#,
+        )
+        .unwrap();
+        assert_eq!(over.repo_ref.as_deref(), Some("/repos/app"));
+        assert_eq!(over.agent.as_deref(), Some("claude"));
     }
 }
