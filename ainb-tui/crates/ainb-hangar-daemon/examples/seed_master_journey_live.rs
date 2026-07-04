@@ -60,6 +60,7 @@ fn main() {
 
     std::fs::create_dir_all(&hangar_home).expect("create AINB_HANGAR_HOME");
     seed_profile_master(&hangar_home);
+    seed_attention_cursor_at_eof(&hangar_home);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -126,6 +127,26 @@ fn wait_for(timeout: Duration, mut cond: impl FnMut() -> bool) {
     while !cond() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Pre-seed the attention-ingest byte cursor at the CURRENT end of the real
+/// `~/.agents-in-a-box/events.jsonl` (this harness deliberately does not
+/// override `$HOME`, so that file is the REAL, shared, host-wide hook log —
+/// every other project's managed session on this box appends to it too).
+/// Without this, a fresh fixture's cursor starts at byte 0 and the daemon's
+/// very first ingest tick would classify the ENTIRE pre-existing backlog
+/// (potentially hundreds of lines from unrelated, real, possibly sensitive
+/// sessions) into this recording's attention board. Seeding the cursor at
+/// EOF means only lines appended AFTER this harness starts — i.e. from the
+/// journey's own seeded session(s) — are ever ingested.
+fn seed_attention_cursor_at_eof(hangar_home: &Path) {
+    let Some(home) = dirs::home_dir() else { return };
+    let events_jsonl = home.join(".agents-in-a-box").join("events.jsonl");
+    let len = std::fs::metadata(&events_jsonl).map(|m| m.len()).unwrap_or(0);
+    let cursor_dir = hangar_home.join("hangar");
+    std::fs::create_dir_all(&cursor_dir).expect("create hangar dir for cursor");
+    std::fs::write(cursor_dir.join("attention_ingest.offset"), len.to_string())
+        .expect("seed attention_ingest cursor at events.jsonl EOF");
 }
 
 /// Write the CH2+ profile master: slug `journey-runner`. No `model:` tier
