@@ -194,6 +194,29 @@ path: it dispatches no `claude`, but exercises the daemon's real C1 resolve + re
 delivery into a real (plain-shell) session. When running the live-provider suite locally,
 disclose per report which legs ran REAL vs seeded-fixture.
 
+## Journey catalogue
+
+Every recorded GIF under `docs/hangar/assets/` / `docs/hangar/assets/journeys/`, in
+recording order, with one line on what it proves. `CH*` are the master converged-journey
+chapters (frame-truth or fixed-and-reshot); `control-center`/`boards`/`squads` are the P2/
+P4/P7 per-surface recordings; `S1`/`S3` are the two side journeys that close out the
+catalogue.
+
+| GIF | What it proves |
+|-----|-----------------|
+| `assets/control-center-journey.gif` | Control-center (C): a 3-option ASK shuffles to the top of the attention board, option ② answered over the real attention RPC, board flips to `0 need you`. |
+| `assets/boards-journey.gif` | Boards (B): a user-defined 5-column board's card runs to done and auto-moves into the done-mapped Done column through the real render path. |
+| `assets/squads-journey.gif` | Squads (S): open the live team, fan the current issue across the squad (`x`) — leader briefed, one task per non-human member enqueued. |
+| `journeys/ch0-ch1-profile-boards.gif` | CH0 Profiles (`P`, tier toggle) + CH1 Boards live card-create (`c` → title → assignee picker → commit); frame-truth also caught the card's assignee-initial glyph bug. |
+| `journeys/ch2-live-attach.gif` | CH2: a real interactive `claude` session renders its own live `AskUserQuestion` picker, gets answered (staging), replies `GOT_IT` — the card's attach affordance against a genuinely running agent. |
+| `journeys/ch3-attention-fixed.gif` | CH3 (fixed): the `AINB_PARENT_SESSION` fix landing — a live picker on a hangar board-card run now reaches the control-center board (`4 sessions · 4 need you`, ①②③ options on the top card), closing the frame-truth defect the CH3 repro chapter first caught. |
+| `journeys/ch4-atc-human-relay.gif` | CH4: a real ATC session relays a human decision into a live `AskUserQuestion` picker with zero direct tmux access by the operator (`ainb fleet atc heartbeat`). |
+| `journeys/ch5-atc-autonomous.gif` | CH5: ATC acts on its own ASK playbook from a heartbeat carrying no human text — an "obvious, safe default" answered autonomously. |
+| `journeys/ch6-idle-standup.gif` | CH6 (fixed): auto-standup fires only for a session genuinely idle-at-prompt past the stagnant threshold, never for one mid a real Bash call, and the roster proves both. |
+| `journeys/ch7-card-done-usage.gif` | CH7: the CH2 session completes (answers, replies `DONE`, exits) — the daemon reaps the real session, the card auto-moves to Done (green), and the run lands in Usage history alongside the earlier interrupted attempt. |
+| `journeys/s1-web-answer.gif` | **S1 — web answer (this update).** The CC18 web ASK-answer fixture, re-run VISIBLY: headed chromium renders the seeded 3-option ASK, clicking ② flips/removes the card from the open-needs panel (`NEED ATTENTION 2 → 1`), the pick lands in the real target tmux pane, and the store row reads `answered\|web\|2`. |
+| `journeys/s3-autopilot-firenow.gif` | **S3 — autopilot fire-now (this update).** The Autopilots manager (`4`) shows a seeded cron autopilot (`last never`); pressing `r` fires it through the real claim→dispatch→finalize path, the row flips to `last completed` within ~1s, and the completed run lands in the Usage screen's recent-runs list. |
+
 ## Reporting
 
 - Emit the three tables above: F01–F44 + R01–R08 (Phase B/C), the C-leg table (Phase D),
