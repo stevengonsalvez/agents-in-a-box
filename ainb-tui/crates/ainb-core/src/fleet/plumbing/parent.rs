@@ -25,7 +25,12 @@ use super::atomic::write_atomic_json;
 use super::paths;
 
 /// Environment variable carrying the parent session id into a spawned child.
-pub const PARENT_ENV: &str = "AINB_PARENT_SESSION";
+///
+/// Re-exported from `ainb-fleet-core` (the shared lower layer) so there is ONE
+/// definition of the wire constant: the hangar daemon — which cannot depend on
+/// `ainb-core` — stamps the same var onto the sessions it spawns, and the hook
+/// below reads it. Every existing `plumbing::PARENT_ENV` reference is unchanged.
+pub use ainb_fleet_core::session_registry::PARENT_ENV;
 
 /// Path to the durable child→parent map under the default home.
 pub fn map_path() -> Result<PathBuf> {
