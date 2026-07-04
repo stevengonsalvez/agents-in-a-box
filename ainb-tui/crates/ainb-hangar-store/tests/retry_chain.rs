@@ -192,6 +192,78 @@ async fn failure_reason_runtime_offline_spawns_child_row() {
 }
 
 #[tokio::test]
+async fn child_inherits_repo_ref_and_agent_kind_but_not_branch() {
+    // tcp 19n: a RuntimeOffline-retried card must re-provision the SAME repo's
+    // worktree under the SAME provider. The child INSERT therefore copies the
+    // parent's `repo_ref` + `agent_kind` verbatim — without this the child fell
+    // back to `repo_ref = NULL` (in-tree dir) and `agent_kind = 'claude'` (column
+    // default), so an infra-retry silently ran outside its worktree / wrong
+    // provider. The per-run `branch` is NOT copied: a fresh child mints a fresh
+    // worktree and records its own branch at finalize.
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t-repo",
+        None,
+        None,
+        1,
+        3,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    // Stamp the card's repo + resolved provider + a produced branch on the parent,
+    // exactly as the card-run dispatch + a committed finalize would have.
+    sqlx::query(
+        "UPDATE agent_task_queue SET repo_ref = ?, agent_kind = ?, branch = ? WHERE id = ?",
+    )
+    .bind("/repos/app")
+    .bind("codex")
+    .bind("ainb/t-repo")
+    .bind(&parent_seed.id)
+    .execute(store.pool())
+    .await
+    .expect("stamp repo/agent/branch on parent");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id)
+        .await
+        .unwrap()
+        .expect("parent re-reads");
+    assert_eq!(parent.repo_ref.as_deref(), Some("/repos/app"));
+    assert_eq!(parent.agent_kind, "codex");
+    assert_eq!(parent.branch.as_deref(), Some("ainb/t-repo"));
+
+    let clock = FixedClock(NOW_MS);
+    let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-repo", &clock)
+        .await
+        .expect("retry ok");
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-repo".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "child-repo")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    // The retry re-runs in the SAME repo under the SAME provider.
+    assert_eq!(
+        child.repo_ref.as_deref(),
+        Some("/repos/app"),
+        "child inherits the parent's repo_ref (re-provisions the same worktree)"
+    );
+    assert_eq!(
+        child.agent_kind, "codex",
+        "child inherits the parent's resolved provider, not the claude column default"
+    );
+    // The branch is per-run: the fresh attempt has produced nothing yet.
+    assert_eq!(
+        child.branch, None,
+        "the child starts with no branch (a fresh worktree records its own)"
+    );
+}
+
+#[tokio::test]
 async fn child_inherits_parent_priority() {
     // A retried urgent task must stay urgent: the child row inherits the
     // parent's `priority` (0..3 = P3..P0, higher = more urgent) so it keeps

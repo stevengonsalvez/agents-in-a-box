@@ -6,8 +6,9 @@
 //! attempts remaining spawns a fresh `queued` child row whose `parent_task_id`
 //! chains back to the failed task and whose `attempt` is `parent.attempt + 1`.
 //! Everything else (workspace / runtime / agent / issue / work_dir / priority /
-//! max_attempts) is inherited verbatim; all per-run timestamps and outputs
-//! reset.
+//! max_attempts / **repo_ref / agent_kind**) is inherited verbatim so the retry
+//! re-provisions the SAME repo's worktree under the SAME provider (tcp 19n); all
+//! per-run timestamps, outputs, and the recorded `branch` reset.
 //!
 //! # Retry/resume taxonomy (reference migration 055 + `GetLastTaskSession`)
 //!
@@ -108,18 +109,25 @@ pub enum RetryDecision {
 /// `session_id` is bound explicitly per the retry/resume taxonomy: the parent's
 /// session for a [`RetryDisposition::ResumeRetry`] (so the child *resumes* the
 /// conversation), or `NULL` for a [`RetryDisposition::FreshRetry`] (so a *new*
-/// session begins instead of resuming a poisoned conversation). The remaining
+/// session begins instead of resuming a poisoned conversation).
+///
+/// `repo_ref` and `agent_kind` are copied from the parent (tcp 19n): without
+/// them a RuntimeOffline-retried card lost its repo (`repo_ref` fell to NULL)
+/// and its provider (`agent_kind` reset to the `claude` column default), so the
+/// re-dispatched attempt ran in the in-tree fallback dir under the wrong
+/// provider instead of re-provisioning the SAME repo's worktree. The remaining
 /// per-run columns (`result`, `failure_reason`, `started_at`, `finished_at`,
-/// `dispatched_at`) reset by being omitted (NULL); `priority` is inherited from
-/// the parent so a retried urgent task stays urgent in the claim ordering.
+/// `dispatched_at`, `branch`) reset by being omitted (NULL) — `branch` is per-run
+/// (a fresh child mints a fresh worktree and records its own); `priority` is
+/// inherited so a retried urgent task stays urgent in the claim ordering.
 /// Binds, in order: `id`, `workspace_id`, `runtime_id`, `agent_id`, `issue_id`,
 /// `work_dir`, `priority`, `attempt`, `max_attempts`, `parent_task_id`,
-/// `session_id`, `created_at`.
+/// `session_id`, `repo_ref`, `agent_kind`, `created_at`.
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
  (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
-  attempt, max_attempts, parent_task_id, session_id, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?)";
+  attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, created_at) \
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -189,6 +197,8 @@ impl RetryService {
             .bind(failed_task.max_attempts)
             .bind(&failed_task.id)
             .bind(child_session_id)
+            .bind(&failed_task.repo_ref)
+            .bind(&failed_task.agent_kind)
             .bind(clock.now_ms())
             .execute(pool)
             .await?;

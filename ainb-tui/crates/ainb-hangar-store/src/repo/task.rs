@@ -118,6 +118,23 @@ pub struct Task {
     /// an interactive task not yet dispatched. This is the durable handle the
     /// attach-from-card affordance surfaces (`tmux attach -t <session_name>`).
     pub session_name: Option<String>,
+    /// The run's repo (migration 0032): an absolute checkout path, or the literal
+    /// `scratch`; `None` for a chat / autopilot task with no repo (the pre-F5
+    /// in-tree fallback). Read back onto the struct (tcp 19n) so the dispatch path
+    /// provisions the worktree from the claimed [`Task`] rather than re-querying,
+    /// and an infra-retried child inherits it (the retry INSERT copies it) instead
+    /// of falling back to the in-tree dir.
+    pub repo_ref: Option<String>,
+    /// The resolved provider the run dispatches through (`claude` / `codex` /
+    /// `copilot`; migration 0032, `NOT NULL DEFAULT 'claude'`). Carried on the
+    /// struct (tcp 19n) so a retry child copies it verbatim rather than silently
+    /// resetting to the `claude` column default.
+    pub agent_kind: String,
+    /// The worktree branch (`ainb/<slug>`) this run produced commits on, recorded
+    /// at finalize ONLY when the run left commits ahead of its base (tcp T2). The
+    /// durable artifact that survives worktree teardown (`git worktree remove`
+    /// keeps the branch); `None` when the run made no commits (nothing to surface).
+    pub branch: Option<String>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
@@ -195,6 +212,26 @@ impl TaskRepo {
     ) -> Result<bool, sqlx::Error> {
         let res = sqlx::query("UPDATE agent_task_queue SET session_name = ? WHERE id = ?")
             .bind(session_name)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Record the worktree `branch` (`ainb/<slug>`) a run produced commits on
+    /// (tcp T2), written at finalize only when the run left commits ahead of its
+    /// base. Returns `true` iff exactly one row was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_branch(
+        pool: &SqlitePool,
+        id: &str,
+        branch: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent_task_queue SET branch = ? WHERE id = ?")
+            .bind(branch)
             .bind(id)
             .execute(pool)
             .await?;
@@ -328,7 +365,7 @@ impl TaskRepo {
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
      priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
-     mode, session_name";
+     mode, session_name, repo_ref, agent_kind, branch";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -354,5 +391,8 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         autopilot_run_id: row.try_get("autopilot_run_id")?,
         mode: row.try_get("mode")?,
         session_name: row.try_get("session_name")?,
+        repo_ref: row.try_get("repo_ref")?,
+        agent_kind: row.try_get("agent_kind")?,
+        branch: row.try_get("branch")?,
     })
 }

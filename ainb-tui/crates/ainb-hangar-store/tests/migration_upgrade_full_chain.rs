@@ -375,6 +375,16 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "0032 issue.agent_kind defaults NULL"
     );
 
+    // 0033 (tcp T2): the run's produced worktree branch defaults NULL on a
+    // pre-existing task row (recorded only at finalize when the run committed).
+    let task_branch: Option<String> =
+        sqlx::query_scalar("SELECT branch FROM agent_task_queue WHERE id = ?")
+            .bind("task-1")
+            .fetch_one(pool)
+            .await
+            .expect("task 0033 branch column");
+    assert_eq!(task_branch, None, "0033 task.branch defaults NULL");
+
     // 0032 workspace.default_agent defaults NULL on prior rows.
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>("SELECT default_agent FROM workspace WHERE id = ?")
@@ -524,7 +534,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 32, "head is migration 0032");
+    assert_eq!(head_version, 33, "head is migration 0033");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
