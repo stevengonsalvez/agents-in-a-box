@@ -365,7 +365,15 @@ pub fn remove_source_units(
             yes: true,
             dry_run: false,
         };
-        let _ = crate::skill::dispatch(home, crate::SkillCommand::Remove(args), out);
+        if let Err(e) = crate::skill::dispatch(home, crate::SkillCommand::Remove(args), out) {
+            // A "not in the lockfile" bail is expected for discovered units —
+            // stay quiet. Surface any OTHER failure (e.g. a real file teardown
+            // error) so a lingering deployment isn't hidden behind "removed".
+            let msg = e.to_string();
+            if !msg.contains("not in the lockfile") {
+                writeln!(out, "# {uri}: {msg}")?;
+            }
+        }
     }
 
     // Authoritatively drop every one of this source's units from the
