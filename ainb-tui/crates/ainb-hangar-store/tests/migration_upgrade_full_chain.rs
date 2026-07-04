@@ -340,6 +340,52 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "0031 task.session_name defaults NULL"
     );
 
+    // 0032 (task-create parity, F1-F5): the card's repo + resolved agent on the
+    // task; repo_ref NULL, agent_kind defaults to 'claude' on pre-existing rows.
+    let task_parity = sqlx::query("SELECT repo_ref, agent_kind FROM agent_task_queue WHERE id = ?")
+        .bind("task-1")
+        .fetch_one(pool)
+        .await
+        .expect("task 0032 columns");
+    assert_eq!(
+        task_parity.get::<Option<String>, _>("repo_ref"),
+        None,
+        "0032 task.repo_ref defaults NULL"
+    );
+    assert_eq!(
+        task_parity.get::<String, _>("agent_kind"),
+        "claude",
+        "0032 task.agent_kind defaults to claude"
+    );
+
+    // 0032 issue.repo_ref / issue.agent_kind both default NULL on prior rows.
+    let issue_parity = sqlx::query("SELECT repo_ref, agent_kind FROM issue WHERE id = ?")
+        .bind("issue-1")
+        .fetch_one(pool)
+        .await
+        .expect("issue 0032 columns");
+    assert_eq!(
+        issue_parity.get::<Option<String>, _>("repo_ref"),
+        None,
+        "0032 issue.repo_ref defaults NULL"
+    );
+    assert_eq!(
+        issue_parity.get::<Option<String>, _>("agent_kind"),
+        None,
+        "0032 issue.agent_kind defaults NULL"
+    );
+
+    // 0032 workspace.default_agent defaults NULL on prior rows.
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT default_agent FROM workspace WHERE id = ?")
+            .bind("ws-1")
+            .fetch_one(pool)
+            .await
+            .expect("workspace 0032 default_agent"),
+        None,
+        "0032 workspace.default_agent defaults NULL"
+    );
+
     let issue_row = sqlx::query("SELECT priority, due_date, labels FROM issue WHERE id = ?")
         .bind("issue-1")
         .fetch_one(pool)
@@ -478,7 +524,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 31, "head is migration 0031");
+    assert_eq!(head_version, 32, "head is migration 0032");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
