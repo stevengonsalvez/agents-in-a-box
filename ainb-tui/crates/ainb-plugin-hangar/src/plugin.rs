@@ -1497,6 +1497,12 @@ impl HangarPlugin {
                     "column_id": column_id,
                     "title": title,
                     "assignee_profile": assignee_profile,
+                    // F2: a card always carries a repo. Until the overlay grows the
+                    // full `@` repo picker + agent chips, default to the always-
+                    // offered first-class `scratch` repo so a created card is
+                    // launchable (the run refuses a repo-less card) and never
+                    // silently random. The agent is left to the F4 cascade.
+                    "repo_ref": "scratch",
                 }),
             ),
             BoardsAction::ColumnRename {
