@@ -248,10 +248,7 @@ impl AttentionRepo {
     ///
     /// Returns a [`sqlx::Error`] if the query fails or a stored `kind` token is
     /// malformed.
-    pub async fn get(
-        pool: &SqlitePool,
-        id: &str,
-    ) -> Result<Option<AttentionRow>, sqlx::Error> {
+    pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<AttentionRow>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
                     created_at, answered_by, answer, answered_at, raise_transcript \
@@ -336,6 +333,35 @@ impl AttentionRepo {
         .execute(pool)
         .await?;
         Ok(res.rows_affected())
+    }
+
+    /// The ids of every still-`open` `ask_user_question` row a session raised,
+    /// oldest first.
+    ///
+    /// The ingest's stale-ASK reconcile uses this to find the rows to close when a
+    /// later hook shows the session is no longer asking — the question was answered
+    /// / timed out / interrupted IN the live session, which never routes through
+    /// the hangar answer router, so no [`AttentionRepo::mark_answered_if_open`]
+    /// ever fired for it. Each returned id is then flipped through that same
+    /// first-answer-wins path, so the reconcile can never clobber a concurrent
+    /// human answer racing on the row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn open_ask_ids_for_session(
+        pool: &SqlitePool,
+        session_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id FROM attention \
+             WHERE session_id = ? AND kind = 'ask_user_question' AND state = 'open' \
+             ORDER BY created_at ASC, id ASC",
+        )
+        .bind(session_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(|r| r.try_get("id")).collect()
     }
 }
 
@@ -437,7 +463,10 @@ mod tests {
             AttentionRepo::mark_answered_if_open(store.pool(), "a1", "web", "option 3", 6000)
                 .await
                 .unwrap();
-        assert_eq!(second, 0, "a second answer flips nothing (first-answer-wins)");
+        assert_eq!(
+            second, 0,
+            "a second answer flips nothing (first-answer-wins)"
+        );
 
         // The answered row leaves the open list and keeps the FIRST answer.
         assert!(
@@ -486,7 +515,10 @@ mod tests {
             1
         );
         let row = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
-        assert_eq!(row.state, "open", "a failed delivery leaves the row answerable");
+        assert_eq!(
+            row.state, "open",
+            "a failed delivery leaves the row answerable"
+        );
         assert!(row.answered_by.is_none());
         assert!(row.answer.is_none());
         assert!(row.answered_at.is_none());
@@ -526,7 +558,10 @@ mod tests {
 
         // None → only the no-workspace (host) row.
         let host = AttentionRepo::list_open(store.pool(), None).await.unwrap();
-        assert_eq!(host.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(), ["h1"]);
+        assert_eq!(
+            host.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
+            ["h1"]
+        );
         assert!(host[0].workspace_id.is_none());
     }
 
@@ -596,7 +631,9 @@ mod tests {
         );
 
         // A row inserted without a transcript reads back NULL.
-        AttentionRepo::insert(store.pool(), &ask("t2", "sess", None, 2000)).await.unwrap();
+        AttentionRepo::insert(store.pool(), &ask("t2", "sess", None, 2000))
+            .await
+            .unwrap();
         let none = AttentionRepo::get(store.pool(), "t2").await.unwrap().unwrap();
         assert!(none.raise_transcript.is_none());
     }
