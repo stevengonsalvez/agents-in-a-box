@@ -570,6 +570,9 @@ pub enum AppEvent {
     /// Enter on the Branch row's Source segment → seed the base-branch
     /// popup from cached refs + kick the background fetch refresh.
     ConfigureOpenBranchPicker,
+    /// `[i]` on an empty-remote verdict → commit a README to the clone
+    /// cache and push it, unblocking Launch.
+    ConfigureInitRemoteRepo,
 }
 
 /// Translate a `RepoSource` variant into the `(SourceType, source_string)`
@@ -2164,6 +2167,7 @@ impl EventHandler {
                 ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
                 ConfigureOutcome::OpenPresetManager => Some(AppEvent::ConfigureOpenPresetManager),
                 ConfigureOutcome::OpenBranchPicker => Some(AppEvent::ConfigureOpenBranchPicker),
+                ConfigureOutcome::InitializeRemote => Some(AppEvent::ConfigureInitRemoteRepo),
             };
         }
 
@@ -3418,6 +3422,11 @@ impl EventHandler {
                 // Git stays in the app layer — components/ never touch git2
                 // (finding #9).
                 state.open_branch_picker();
+            }
+            AppEvent::ConfigureInitRemoteRepo => {
+                // README + initial commit + push, off-thread. The component
+                // already shows the Initializing spinner.
+                state.initialize_remote_repo();
             }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);

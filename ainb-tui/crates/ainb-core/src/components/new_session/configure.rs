@@ -97,8 +97,15 @@ pub enum RepoCheck {
     Checking,
     /// Remote exists and has at least one branch.
     Ok,
-    /// Remote is unreachable, missing, or has zero branches. Blocks Launch;
-    /// the message renders on the form.
+    /// Remote exists but has zero branches (fresh GitHub repo, no initial
+    /// commit). Blocks Launch, but offers `[i]` to initialize in place —
+    /// README + initial commit + push — so the user never has to leave ainb
+    /// (Stevie 2026-07-04: full-IDE-in-terminal experience).
+    EmptyRemote,
+    /// `[i]` accepted — README/commit/push in flight. Blocks Launch.
+    Initializing,
+    /// Remote is unreachable or missing. Blocks Launch; the message renders
+    /// on the form.
     Failed(String),
 }
 
@@ -108,9 +115,7 @@ impl RepoCheck {
     #[must_use]
     pub fn from_branches(result: Result<usize, String>) -> Self {
         match result {
-            Ok(0) => Self::Failed(
-                "repository is empty (no branches) — push an initial commit first".to_string(),
-            ),
+            Ok(0) => Self::EmptyRemote,
             Ok(_) => Self::Ok,
             Err(msg) => Self::Failed(msg),
         }
@@ -119,7 +124,10 @@ impl RepoCheck {
     /// True when Launch must be refused (check failed or still in flight).
     #[must_use]
     pub const fn blocks_launch(&self) -> bool {
-        matches!(self, Self::Checking | Self::Failed(_))
+        matches!(
+            self,
+            Self::Checking | Self::EmptyRemote | Self::Initializing | Self::Failed(_)
+        )
     }
 }
 
@@ -693,6 +701,10 @@ pub enum ConfigureOutcome {
     /// branches (git stays out of components/ — finding #9), seed
     /// `branch_picker`, and kick the background refresh.
     OpenBranchPicker,
+    /// `[i]` on an `EmptyRemote` verdict — the app layer must commit a README
+    /// to the clone cache and push it, then flip `repo_check` to Ok (git
+    /// stays out of components/).
+    InitializeRemote,
 }
 
 /// Launch payload built by the Configure component and threaded all the way
@@ -1234,6 +1246,28 @@ fn render_repo_check(f: &mut Frame, check: &RepoCheck, area: Rect) {
     let lines = match check {
         RepoCheck::Checking => vec![Line::from(Span::styled(
             "  \u{23f3} validating remote repository\u{2026}",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        ))],
+        RepoCheck::EmptyRemote => vec![
+            Line::from(Span::styled(
+                "  \u{2716} repository is empty (no branches)",
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled("  press ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("i", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " to initialize it \u{2014} ainb commits a README and pushes it for you",
+                    Style::default().fg(SELECTION_GREEN),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "  or Esc to pick another repository",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )),
+        ],
+        RepoCheck::Initializing => vec![Line::from(Span::styled(
+            "  \u{23f3} initializing repository \u{2014} committing README, pushing\u{2026}",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         ))],
         RepoCheck::Failed(msg) => vec![
@@ -2047,8 +2081,16 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if state.focused_row == ConfigureRow::Prompt {
                 state.prompt.insert_char(c);
+                return ConfigureOutcome::Stay;
             }
-            // No bare-char shortcuts elsewhere — Tab + arrows is the entire
+            // `[i]` initializes an empty remote (README + commit + push) so
+            // the user never leaves ainb. Only offered while the pre-flight
+            // verdict is EmptyRemote; the Prompt row keeps plain chars.
+            if matches!(c, 'i' | 'I') && state.repo_check == RepoCheck::EmptyRemote {
+                state.repo_check = RepoCheck::Initializing;
+                return ConfigureOutcome::InitializeRemote;
+            }
+            // No other bare-char shortcuts — Tab + arrows is the entire
             // navigation surface for non-Prompt rows.
             ConfigureOutcome::Stay
         }
@@ -2535,11 +2577,9 @@ mod tests {
 
     #[test]
     fn repo_check_from_branches_folds_verdicts() {
-        // Zero branches = empty repo → explicit, actionable failure.
-        assert!(matches!(
-            RepoCheck::from_branches(Ok(0)),
-            RepoCheck::Failed(msg) if msg.contains("empty")
-        ));
+        // Zero branches = empty repo → the actionable EmptyRemote verdict
+        // (offers `[i]` to initialize in place).
+        assert_eq!(RepoCheck::from_branches(Ok(0)), RepoCheck::EmptyRemote);
         assert_eq!(RepoCheck::from_branches(Ok(3)), RepoCheck::Ok);
         // ls-remote error (not found / auth / network) carries through verbatim.
         assert!(matches!(
@@ -2551,16 +2591,44 @@ mod tests {
     #[test]
     fn launch_blocked_while_repo_check_pending_or_failed() {
         let mut s = mk_state();
-        s.repo_check = RepoCheck::Checking;
-        assert!(matches!(launch_outcome(&mut s), ConfigureOutcome::Stay));
-        s.repo_check = RepoCheck::Failed("Repository not found".into());
-        assert!(matches!(launch_outcome(&mut s), ConfigureOutcome::Stay));
+        for blocked in [
+            RepoCheck::Checking,
+            RepoCheck::EmptyRemote,
+            RepoCheck::Initializing,
+            RepoCheck::Failed("Repository not found".into()),
+        ] {
+            s.repo_check = blocked;
+            assert!(matches!(launch_outcome(&mut s), ConfigureOutcome::Stay));
+        }
         // Verdict lands → same keypress launches.
         s.repo_check = RepoCheck::Ok;
         assert!(matches!(
             launch_outcome(&mut s),
             ConfigureOutcome::Launch(_)
         ));
+    }
+
+    #[test]
+    fn i_key_initializes_empty_remote_only() {
+        let key = KeyEvent::from(KeyCode::Char('i'));
+        // EmptyRemote → [i] fires the init and shows the spinner.
+        let mut s = mk_state();
+        s.repo_check = RepoCheck::EmptyRemote;
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::InitializeRemote);
+        assert_eq!(s.repo_check, RepoCheck::Initializing);
+        // Second press while initializing: no double-fire.
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::Stay);
+        // Healthy repo: 'i' is inert.
+        let mut s = mk_state();
+        s.repo_check = RepoCheck::Ok;
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::Stay);
+        // Prompt row keeps plain chars even on an EmptyRemote verdict.
+        let mut s = mk_state();
+        s.repo_check = RepoCheck::EmptyRemote;
+        s.focused_row = ConfigureRow::Prompt;
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::Stay);
+        assert_eq!(s.repo_check, RepoCheck::EmptyRemote);
+        assert_eq!(s.prompt.to_non_empty_string().as_deref(), Some("i"));
     }
 
     #[test]

@@ -3093,6 +3093,13 @@ pub struct AppState {
     /// Current repo-check generation (bumped on every Configure open).
     pub repo_check_seq: u64,
 
+    /// Background empty-remote initialization (`[i]` on Configure: README +
+    /// initial commit + push). `Ok(branch)` carries the branch the commit
+    /// landed on. Applied by `check_repo_init_complete` on the next tick.
+    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
+    /// Current repo-init generation.
+    pub repo_init_seq: u64,
+
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
 
@@ -3559,6 +3566,9 @@ impl Default for AppState {
             // Configure remote-repo pre-flight (ls-remote at open)
             repo_check_receiver: None,
             repo_check_seq: 0,
+            // Configure empty-remote initialization ([i] → README + push)
+            repo_init_receiver: None,
+            repo_init_seq: 0,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -7781,6 +7791,98 @@ impl AppState {
         true
     }
 
+    /// `[i]` on an `EmptyRemote` verdict: initialize the empty remote in
+    /// place — clone (an empty clone succeeds), commit a README, push — so
+    /// the user never has to leave ainb to make a fresh repo launchable.
+    /// The component already flipped `repo_check` to `Initializing`; the
+    /// verdict lands via `check_repo_init_complete`.
+    pub fn initialize_remote_repo(&mut self) {
+        let Some(source) = self
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.configure_state.as_ref())
+            .map(|cfg| cfg.repo_source.clone())
+        else {
+            return;
+        };
+        self.repo_init_seq += 1;
+        let seq = self.repo_init_seq;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.repo_init_receiver = Some(rx);
+        tokio::spawn(async move {
+            let join = tokio::task::spawn_blocking(move || {
+                let manager = crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
+                let parsed = source.parse_components().map_err(|e| e.to_string())?;
+                manager.initialize_empty_remote(&source, &parsed).map_err(|e| e.to_string())
+            })
+            .await;
+            let payload = match join {
+                Ok(r) => r,
+                Err(join_err) => Err(format!("repo init task panicked: {join_err}")),
+            };
+            let _ = tx.send((seq, payload));
+        });
+    }
+
+    /// Poll the background empty-remote initialization. Success flips the
+    /// Configure verdict to Ok, stamps the pushed branch onto the Branch row,
+    /// and toasts; failure returns to `EmptyRemote` (so `[i]` can retry) with
+    /// the exact git error in a toast. Returns true when state changed.
+    pub fn check_repo_init_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::RepoCheck;
+
+        let Some(ref mut receiver) = self.repo_init_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.repo_init_receiver = None;
+                return false;
+            }
+        };
+        self.repo_init_receiver = None;
+        if seq != self.repo_init_seq {
+            return false;
+        }
+        let mut toast: Option<Result<String, String>> = None;
+        if let Some(cfg) =
+            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        {
+            match result {
+                Ok(branch) => {
+                    if cfg.base_selection.is_none() {
+                        cfg.branch_source.clone_from(&branch);
+                    }
+                    if cfg.repo_branch_names.is_empty() {
+                        cfg.repo_branch_names = vec![branch.clone()];
+                    }
+                    cfg.repo_check = RepoCheck::Ok;
+                    toast = Some(Ok(branch));
+                }
+                Err(msg) => {
+                    // Back to the actionable verdict — `[i]` retries.
+                    cfg.repo_check = RepoCheck::EmptyRemote;
+                    toast = Some(Err(msg));
+                }
+            }
+        }
+        match toast {
+            Some(Ok(branch)) => {
+                self.add_info_notification(format!(
+                    "Initialized repository — pushed README to origin/{branch}"
+                ));
+            }
+            Some(Err(msg)) => {
+                tracing::error!(error = %msg, "empty-remote initialization failed");
+                self.add_error_notification(format!("Could not initialize repository: {msg}"));
+            }
+            None => {}
+        }
+        true
+    }
+
     /// Pre-check GitHub authentication via `gh auth status`. Updates the
     /// `git_auth_status` field on PickRepoState. If authenticated and a
     /// `pending_clone_source` is waiting, automatically advances to Configure.
@@ -11382,6 +11484,10 @@ impl App {
         }
         // Check for a completed remote-repo pre-flight (Configure screen)
         if self.state.check_repo_check_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+        // Check for a completed empty-remote initialization ([i] on Configure)
+        if self.state.check_repo_init_complete() {
             self.state.ui_needs_refresh = true;
         }
 
