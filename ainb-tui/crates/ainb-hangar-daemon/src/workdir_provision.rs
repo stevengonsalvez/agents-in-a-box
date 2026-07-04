@@ -194,38 +194,33 @@ pub fn teardown(wd: &RunWorkdir) -> io::Result<TeardownOutcome> {
     }
 }
 
-/// How many commits the run's worktree branch is ahead of its base — the "did
-/// this run produce a durable artifact?" signal the card's branch surfacing keys
-/// on (tcp T2).
+/// Whether the run's worktree branch carries commits its base does not — the
+/// "did this run produce a durable artifact?" signal the card's branch surfacing
+/// keys on (tcp T2). Returns the count (used only as `> 0`).
 ///
-/// For a [`RunWorkdir::Worktree`] this counts the commits on `ainb/<slug>` that
-/// its fork point (the merge-base with the origin repo's `HEAD`) does not carry,
-/// i.e. exactly the commits the agent made. Scratch + fallback runs never produce
-/// a surfaced branch and return `0`.
-///
-/// Uses the merge-base fork point (not a stored base SHA) so it is correct for
-/// both a fresh worktree and a resumed one, and unaffected by the origin `HEAD`
-/// advancing during the run. The branch ref lives in the shared repository, so
-/// this is queried against the ORIGIN repo and works whether or not the worktree
-/// checkout has already been torn down.
+/// For a [`RunWorkdir::Worktree`] this is `git rev-list --count HEAD..ainb/<slug>`
+/// against the ORIGIN repo: the commits reachable from the branch but NOT from the
+/// origin's `HEAD` — exactly the agent's private commits. This is correct for a
+/// fresh worktree (HEAD is the fork point), a resumed one, and an origin whose
+/// HEAD advanced during the run (the agent's commits are never on HEAD, so they
+/// are never miscounted to zero); an unrelated-history origin merely OVER-counts,
+/// which is harmless for the `> 0` decision. It needs no stored base SHA — so it
+/// works for a recovered task with no provisioning state — and no `merge-base`
+/// (so there is no "no common ancestor" failure path that could drop a real
+/// branch). The branch ref lives in the shared repository, so the query works
+/// whether or not the worktree checkout has been torn down. Scratch + fallback
+/// runs never produce a surfaced branch and return `0`.
 ///
 /// # Errors
 ///
-/// Returns an [`io::Error`] if the `git` invocations fail to spawn. A non-zero
-/// `git` exit (e.g. an unrelated history with no merge-base) degrades to `0` (no
-/// branch surfaced) rather than erroring, so a finalize is never blocked.
+/// Returns an [`io::Error`] if the `git` invocation fails to spawn. A non-zero
+/// `git` exit degrades to `0` (no branch surfaced) rather than erroring, so a
+/// finalize is never blocked.
 pub fn commits_ahead(wd: &RunWorkdir) -> io::Result<u64> {
     let RunWorkdir::Worktree { branch, repo, .. } = wd else {
         return Ok(0);
     };
-    let Some(base) = git_capture(repo, &["merge-base", "HEAD", branch])? else {
-        return Ok(0);
-    };
-    let base = base.trim();
-    if base.is_empty() {
-        return Ok(0);
-    }
-    let range = format!("{base}..{branch}");
+    let range = format!("HEAD..{branch}");
     let Some(count) = git_capture(repo, &["rev-list", "--count", &range])? else {
         return Ok(0);
     };
@@ -437,6 +432,17 @@ mod tests {
         run_git(wd.path(), &["add", "."]).unwrap();
         run_git(wd.path(), &["commit", "--quiet", "-m", "agent work"]).unwrap();
         assert_eq!(commits_ahead(&wd).unwrap(), 1, "one agent commit is 1 ahead");
+
+        // The origin's HEAD advancing during the run must NOT mask the agent's
+        // commit (the count is HEAD..branch, and the agent's commit is never on
+        // HEAD): the branch is still surfaced.
+        std::fs::write(repo.join("origin.txt"), "origin moved").unwrap();
+        run_git(&repo, &["add", "."]).unwrap();
+        run_git(&repo, &["commit", "--quiet", "-m", "origin advances"]).unwrap();
+        assert!(
+            commits_ahead(&wd).unwrap() >= 1,
+            "an origin HEAD that moved forward must not drop the run's branch"
+        );
 
         // Scratch + fallback never surface a branch.
         let scratch = provision(Some("scratch"), "s", &home, &fallback).unwrap();

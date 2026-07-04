@@ -260,12 +260,6 @@ pub struct HangarPlugin {
     /// socket send can't run inline in the `apply_nav` key path). `None` when no
     /// refresh is armed; consumed (taken) once fired.
     pending_pr_status_refresh: Option<String>,
-    /// Armed when a `TaskFinished` event lands (tcp T2), so `render` re-pulls
-    /// `hangar/tasks_list`: the terminal event's reducer moves the card's column,
-    /// but the run's freshly-recorded `branch` + captured `pr_url` / PR status live
-    /// only in the snapshot — a targeted re-pull surfaces them live on the card.
-    /// `false` when none is armed; consumed (taken) once fired.
-    tasks_refresh_pending: bool,
     /// The card-board mouse drag FSM (63l.2). `handle_mouse` folds each forwarded
     /// pointer event against the [`hit_map`](Self::hit_map) into this, producing a
     /// [`MouseIntent`](crate::mouse::MouseIntent).
@@ -365,7 +359,6 @@ impl Default for HangarPlugin {
             start_daemon_pending: false,
             daemon_start_error: None,
             pending_pr_status_refresh: None,
-            tasks_refresh_pending: false,
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
             pending_mouse_intents: Vec::new(),
@@ -639,12 +632,6 @@ impl HangarPlugin {
     fn apply_hangar_event(&mut self, event: HangarEvent) {
         use crate::screen::issue_list::{IssueListEvent, reduce_issue_list};
         use crate::screen::kanban::{KanbanEvent, reduce_kanban};
-        // tcp T2: a terminal run just recorded its branch + captured its PR — the
-        // reducer moves the card's column, but those artifacts live in the
-        // snapshot, so arm a targeted `tasks_list` re-pull to surface them live.
-        if matches!(event, HangarEvent::TaskFinished { .. }) {
-            self.tasks_refresh_pending = true;
-        }
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
@@ -1919,27 +1906,6 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: pr status refresh send failed: {e}")).await;
-        }
-    }
-
-    /// Re-pull `hangar/tasks_list` for the active workspace (tcp T2), framed over
-    /// the socket cap. Fired when a `TaskFinished` event lands so the board card
-    /// picks up the run's freshly-recorded `branch` + captured PR + CI status
-    /// (which live in the snapshot, not the terminal event). The reply folds
-    /// through the usual [`Self::apply_tasks`] path. A send failure is logged but
-    /// non-fatal — the next re-subscribe reconciles.
-    async fn fire_tasks_list(&mut self, host: &HostClient) {
-        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
-            return;
-        };
-        let ws = self.app_state().ws_id.as_str().to_string();
-        let params = serde_json::json!({ "workspace_id": ws });
-        let Ok(body) = encode_request(TASKS_REQ_ID, daemon_methods::HANGAR_TASKS_LIST, params)
-        else {
-            return;
-        };
-        if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host.log_info(format!("hangar: tasks_list re-pull send failed: {e}")).await;
         }
     }
 
@@ -3408,12 +3374,6 @@ impl Plugin for HangarPlugin {
         // auto-moved to Done daemon-side (announced via `IssueUpdated`).
         if let Some(issue_id) = self.pending_pr_status_refresh.take() {
             self.fire_pr_status_refresh(host, issue_id).await;
-        }
-        // tcp T2: drain a deferred board re-pull armed by a `TaskFinished` event so
-        // the just-recorded branch + captured PR (which live in the snapshot, not
-        // the event) surface on the card live, without waiting for a re-subscribe.
-        if std::mem::take(&mut self.tasks_refresh_pending) {
-            self.fire_tasks_list(host).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active

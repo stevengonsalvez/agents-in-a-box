@@ -1057,8 +1057,12 @@ async fn handle_tasks_list(
     // tcp T2: the board card surfaces a PR'd card's CI + merge status. The fetch
     // rides the same injectable seam the issue task-detail badge uses (a `gh`
     // subprocess in production, a stub `gh` under `HANGAR_GH_PATH` in e2e), and
-    // only fires for the handful of cards that captured a PR.
-    let provider = crate::pr_status::GhPrStatusProvider::from_env();
+    // only fires for the handful of cards that captured a PR. It is wrapped in the
+    // shared TTL cache so the board's per-event `tasks_list` re-pull coalesces to
+    // ~one `gh` spawn per PR URL per window rather than one per card per event.
+    let provider = crate::pr_status::CachingPrStatusProvider::new(
+        crate::pr_status::GhPrStatusProvider::from_env(),
+    );
     let tasks = match resolve(pool, req).await? {
         Some(ws) => snapshots::tasks_list(pool, &ws, &provider).await.map_err(|e| store_err(&e))?,
         None => Vec::new(),

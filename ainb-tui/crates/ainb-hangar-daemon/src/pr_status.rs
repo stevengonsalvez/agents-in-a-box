@@ -21,9 +21,12 @@
 //! or panics, so the badge renders a muted placeholder rather than a false state
 //! and the auto-Done transition simply does not fire.
 
+use std::collections::HashMap;
 use std::future::Future;
 use std::pin::Pin;
 use std::process::Stdio;
+use std::sync::{LazyLock, Mutex};
+use std::time::{Duration, Instant};
 
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 
@@ -238,6 +241,69 @@ fn check_outcome(entry: &serde_json::Value) -> CheckOutcome {
     }
 }
 
+/// How long a fetched [`PrStatus`] is served from the board cache before a
+/// refetch (tcp T2). The plugin re-pulls `hangar/tasks_list` on EVERY pushed
+/// event, so without a cache each PR'd card would spawn `gh` once per event — a
+/// rate-limit / latency hazard on a busy workspace. A short TTL bounds it to ~one
+/// `gh` per PR URL per window while keeping a card badge fresh enough.
+const PR_STATUS_CACHE_TTL: Duration = Duration::from_secs(20);
+
+/// Process-global PR-status cache keyed by PR URL → `(status, fetched_at)`.
+///
+/// Bounded by the number of distinct PR URLs a daemon ever surfaces (small); a
+/// poisoned lock degrades to a miss (a refetch), never a panic. Only the
+/// production [`CachingPrStatusProvider`] touches it — test fakes bypass it, so
+/// unit tests never share cache state.
+static PR_STATUS_CACHE: LazyLock<Mutex<HashMap<String, (PrStatus, Instant)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// A [`PrStatusProvider`] that serves a recently-fetched status from the shared
+/// TTL cache ([`PR_STATUS_CACHE`]) before delegating to `inner` (tcp T2).
+///
+/// This is the production wrapper the board `tasks_list` handler puts around the
+/// real [`GhPrStatusProvider`], so the per-event board re-pull coalesces to at
+/// most one `gh` spawn per PR URL per [`PR_STATUS_CACHE_TTL`] window regardless of
+/// how many events (or PR'd cards) fire in between.
+#[derive(Debug, Clone)]
+pub struct CachingPrStatusProvider<P> {
+    inner: P,
+}
+
+impl<P: PrStatusProvider> CachingPrStatusProvider<P> {
+    /// Wrap `inner` with the shared TTL cache.
+    pub const fn new(inner: P) -> Self {
+        Self { inner }
+    }
+}
+
+impl<P: PrStatusProvider> PrStatusProvider for CachingPrStatusProvider<P> {
+    fn fetch<'a>(&'a self, pr_url: &'a str) -> Pin<Box<dyn Future<Output = PrStatus> + Send + 'a>> {
+        Box::pin(async move {
+            if let Some(status) = cache_lookup(pr_url) {
+                return status;
+            }
+            let status = self.inner.fetch(pr_url).await;
+            cache_store(pr_url, status);
+            status
+        })
+    }
+}
+
+/// Return a cached [`PrStatus`] for `url` when it is younger than the TTL, else
+/// `None` (a poisoned lock is treated as a miss).
+fn cache_lookup(url: &str) -> Option<PrStatus> {
+    let cache = PR_STATUS_CACHE.lock().ok()?;
+    let (status, fetched_at) = cache.get(url)?;
+    (fetched_at.elapsed() < PR_STATUS_CACHE_TTL).then_some(*status)
+}
+
+/// Record a freshly fetched `status` for `url` (a poisoned lock is a no-op).
+fn cache_store(url: &str, status: PrStatus) {
+    if let Ok(mut cache) = PR_STATUS_CACHE.lock() {
+        cache.insert(url.to_string(), (status, Instant::now()));
+    }
+}
+
 /// A test double returning a canned [`PrStatus`] for any URL — the seam that lets
 /// the auto-Done refresh path be driven without spawning `gh`.
 #[cfg(any(test, feature = "test-support"))]
@@ -376,5 +442,44 @@ mod tests {
     async fn real_provider_degrades_on_blank_url() {
         let provider = GhPrStatusProvider::new();
         assert_eq!(provider.fetch("   ").await, PrStatus::default());
+    }
+
+    /// The caching wrapper coalesces repeated fetches of the SAME url within the
+    /// TTL to a single inner fetch — so the board's per-event `tasks_list` re-pull
+    /// does not spawn `gh` once per PR'd card per event (tcp T2 rate-limit guard).
+    #[tokio::test]
+    async fn caching_provider_coalesces_fetches_within_ttl() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        struct Counting(Arc<AtomicUsize>);
+        impl PrStatusProvider for Counting {
+            fn fetch<'a>(
+                &'a self,
+                _pr_url: &'a str,
+            ) -> Pin<Box<dyn Future<Output = PrStatus> + Send + 'a>> {
+                self.0.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async {
+                    PrStatus {
+                        ci: CiRollup::Pass,
+                        ..Default::default()
+                    }
+                })
+            }
+        }
+
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = CachingPrStatusProvider::new(Counting(Arc::clone(&calls)));
+        // A url unique to this test so the process-global cache never collides.
+        let url = "https://github.com/cache/coalesce/pull/1";
+        let first = provider.fetch(url).await;
+        let second = provider.fetch(url).await;
+        assert_eq!(first, second);
+        assert_eq!(first.ci, CiRollup::Pass);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "the second fetch within the TTL is served from the cache, not the inner provider"
+        );
     }
 }
