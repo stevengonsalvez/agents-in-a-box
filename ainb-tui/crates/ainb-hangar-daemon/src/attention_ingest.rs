@@ -394,6 +394,45 @@ mod tests {
         TranscriptFixture { cwd, dir }
     }
 
+    /// Plant a transcript where an AskUserQuestion was RAISED then ANSWERED (a
+    /// paired `tool_result`), followed by a finished `end_turn` assistant turn
+    /// at `ts_ms`. After the sticky-ASK fix this classifies IDLE (not ASK), so a
+    /// `Stop` hook over it raises a Waiting row — never a stale AskUserQuestion.
+    fn plant_answered_ask_then_idle_transcript(tag: &str, ts_ms: i64) -> TranscriptFixture {
+        let cwd = format!(
+            "/ainb-test-att-ingest/{tag}/{}/{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let mut dir = dirs::home_dir().expect("home dir");
+        dir.push(".claude");
+        dir.push("projects");
+        let slug = ainb_fleet_core::read::jsonl_tail::cwd_to_project_slug(&cwd);
+        dir.push(&slug);
+        std::fs::create_dir_all(&dir).expect("create project dir");
+        let iso = chrono::DateTime::from_timestamp_millis(ts_ms).unwrap().to_rfc3339();
+        let mut f = std::fs::File::create(dir.join("session.jsonl")).expect("create transcript");
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"stop_reason":"tool_use","content":[{{"type":"tool_use","id":"toolu_ans","name":"AskUserQuestion","input":{{"questions":[{{"question":"Scope?","options":[{{"label":"a"}}]}}]}}}}]}},"timestamp":"2026-01-01T00:00:00Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"user","message":{{"content":[{{"type":"tool_result","tool_use_id":"toolu_ans","content":"Your questions have been answered."}}]}},"timestamp":"2026-01-01T00:00:01Z"}}"#
+        )
+        .unwrap();
+        writeln!(
+            f,
+            r#"{{"type":"assistant","message":{{"stop_reason":"end_turn","content":[{{"type":"text","text":"All done."}}]}},"timestamp":"{iso}"}}"#
+        )
+        .unwrap();
+        TranscriptFixture { cwd, dir }
+    }
+
     fn hook_line(session: &str, cwd: &str, event_type: &str) -> String {
         format!(
             r#"{{"ts":1700000000000,"session_id":"{session}","cwd":"{cwd}","transcript_path":"","agent":"claude","event_type":"{event_type}"}}"#
@@ -519,5 +558,37 @@ mod tests {
         assert_eq!(ingest.ingest_once(5000).await, 1, "only the complete line ingests");
         // The cursor stopped at the newline; it did not consume the partial tail.
         assert_eq!(read_cursor(&cursor), (complete.len() + 1) as u64);
+    }
+
+    #[tokio::test]
+    async fn answered_ask_then_stop_raises_waiting_not_sticky_ask() {
+        // Regression for the sticky-ASK-forever bug at the daemon-ingest seam: a
+        // session that ANSWERED its interview and then finished a turn must NOT be
+        // re-raised as an AskUserQuestion. classify() now sees the paired
+        // tool_result → falls through to IDLE → the ingest raises a Waiting row.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let base_ms = 1_700_000_000_000_i64;
+        let fx = plant_answered_ask_then_idle_transcript("answered", base_ms);
+
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!("{}\n", hook_line("sid-answered", &fx.cwd, "Stop")),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        // 10 min after the finished turn → IDLE (> the 5-min default threshold).
+        let raised = ingest.ingest_once(base_ms + 10 * 60_000).await;
+        assert_eq!(raised, 1, "the Stop line classifies to one IDLE→Waiting row");
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open.len(), 1);
+        assert_eq!(
+            open[0].kind,
+            AttentionKind::Waiting,
+            "an answered ask must not re-raise as AskUserQuestion (sticky-ASK fix)"
+        );
     }
 }
