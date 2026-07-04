@@ -17,6 +17,10 @@ use anyhow::{Context, Result, anyhow, bail};
 use ainb_adapters_tool::read_root_for;
 use ainb_skill_core::UnitKind;
 use ainb_skill_core::library::{Library, OwnedUnit, library_path_in};
+use ainb_skill_core::lockfile::Lockfile;
+use ainb_skill_core::manifest::{Manifest, SourceEntry};
+use ainb_skill_core::paths::{lockfile_path_in, manifest_path_in};
+use ainb_skill_core::uri::Uri;
 
 use crate::LibraryCmd;
 
@@ -28,6 +32,11 @@ pub fn dispatch(home: &Path, cmd: LibraryCmd, out: &mut dyn io::Write) -> Result
         LibraryCmd::List { json } => list(home, json, out),
         LibraryCmd::Add { path, tool } => add(home, &path, tool.as_deref(), out),
         LibraryCmd::New { name, tool } => new(home, &name, tool.as_deref(), out),
+        LibraryCmd::Copy { uri, tool } => copy(home, &uri, tool.as_deref(), out),
+        LibraryCmd::MarkSource { name } => mark_source(home, &name, out),
+        LibraryCmd::UnmarkSource { name } => unmark_source(home, &name, out),
+        LibraryCmd::Push { source } => push(home, &source, out),
+        LibraryCmd::Pull { source } => pull(home, &source, out),
     }
 }
 
@@ -146,6 +155,219 @@ fn new(home: &Path, name: &str, tool: Option<&str>, out: &mut dyn io::Write) -> 
 
     let rel = tool_home_relative_path(tool, "skills", name);
     register_owned(home, name, UnitKind::Skill, &rel, out)
+}
+
+/// `ainb skill library copy <uri> [--tool t]` — copy a unit from ANY
+/// configured source into the user's library. Resolves the source unit
+/// dir the same way `install` does, deploys it under the tool's skills
+/// dir (idempotent — skipped when already deployed there), then
+/// registers it as an owned unit.
+fn copy(home: &Path, uri_str: &str, tool: Option<&str>, out: &mut dyn io::Write) -> Result<()> {
+    let tool = tool.unwrap_or(DEFAULT_TOOL);
+    let uri = Uri::parse(uri_str).with_context(|| format!("parsing `{uri_str}`"))?;
+
+    let resolution = crate::skill::resolve_unit_dir(home, &uri)?;
+    let src_dir = resolution.unit_dir();
+    let name = src_dir
+        .file_name()
+        .and_then(|n| n.to_str())
+        .ok_or_else(|| anyhow!("cannot derive a unit name from `{}`", src_dir.display()))?
+        .to_string();
+
+    let dest = read_root_for(tool).join("skills").join(&name);
+    if dest.exists() {
+        writeln!(
+            out,
+            "# `{name}` already deployed at `{}` — skipping copy, registering only",
+            dest.display()
+        )?;
+    } else {
+        crate::promote::copy_dir_recursive(&src_dir, &dest)
+            .with_context(|| format!("copying `{}` -> `{}`", src_dir.display(), dest.display()))?;
+    }
+
+    let rel = tool_home_relative_path(tool, "skills", &name);
+    register_owned(home, &name, resolution.kind, &rel, out)
+}
+
+/// `ainb skill library mark-source <name>` — opt a manifest source into
+/// git-native two-way library sync (`push`/`pull`).
+fn mark_source(home: &Path, name: &str, out: &mut dyn io::Write) -> Result<()> {
+    require_manifest_source(home, name)?;
+    let lib_path = library_path_in(home);
+    let mut lib = Library::load_from(&lib_path)?;
+    let inserted = lib.mark_source(name);
+    lib.save_to(&lib_path)?;
+    if inserted {
+        writeln!(out, "marked `{name}` as a library source")?;
+    } else {
+        writeln!(out, "`{name}` is already a library source")?;
+    }
+    Ok(())
+}
+
+/// `ainb skill library unmark-source <name>` — the inverse of `mark-source`.
+fn unmark_source(home: &Path, name: &str, out: &mut dyn io::Write) -> Result<()> {
+    require_manifest_source(home, name)?;
+    let lib_path = library_path_in(home);
+    let mut lib = Library::load_from(&lib_path)?;
+    let removed = lib.unmark_source(name);
+    lib.save_to(&lib_path)?;
+    if removed {
+        writeln!(out, "unmarked `{name}` as a library source")?;
+    } else {
+        writeln!(out, "`{name}` was not a library source")?;
+    }
+    Ok(())
+}
+
+/// Bail unless `name` is a source declared in the manifest — guards
+/// `mark-source`/`unmark-source` against typos.
+fn require_manifest_source(home: &Path, name: &str) -> Result<()> {
+    let manifest = Manifest::load_from(&manifest_path_in(home))?;
+    if !manifest.sources.iter().any(|s| s.name == name) {
+        bail!("no source named `{name}` in the manifest — run `ainb source add` first");
+    }
+    Ok(())
+}
+
+/// `ainb skill library push <source>` — publish local library edits to
+/// a library source's git remote. Runs the same bidirectional content
+/// sync `ainb skill sync` uses (scoped to this source, to-repo only),
+/// then commits + pushes anything that sync's per-file lockfile-driven
+/// diffing didn't already cover (e.g. a `library copy`/`new` skill that
+/// was never `install`ed through the lockfile).
+fn push(home: &Path, source_name: &str, out: &mut dyn io::Write) -> Result<()> {
+    let source = require_library_source(home, source_name)?;
+
+    let manifest = Manifest::load_from(&manifest_path_in(home))?;
+    let lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
+    let sync_args = crate::SyncArgs {
+        source_or_unit: Some(source_name.to_string()),
+        yes: true,
+        dry_run: false,
+        to_home: false,
+        to_repo: true,
+    };
+    crate::skill::bidirectional_content_sync(home, &manifest, &lockfile, &sync_args, out)?;
+
+    let checkout = crate::skill::ensure_repo_clone(home, &source)?;
+    git_add_commit_push(&checkout, "ainb: sync library edits", out)
+}
+
+/// `ainb skill library pull <source>` — rebase-pull a library source's
+/// git remote, then sync its (possibly updated) content back down into
+/// the tool home.
+fn pull(home: &Path, source_name: &str, out: &mut dyn io::Write) -> Result<()> {
+    let source = require_library_source(home, source_name)?;
+    let checkout = crate::skill::ensure_repo_clone(home, &source)?;
+    git_pull_rebase(&checkout)?;
+
+    let manifest = Manifest::load_from(&manifest_path_in(home))?;
+    let lockfile = Lockfile::load_from(&lockfile_path_in(home))?;
+    let sync_args = crate::SyncArgs {
+        source_or_unit: Some(source_name.to_string()),
+        yes: true,
+        dry_run: false,
+        to_home: true,
+        to_repo: false,
+    };
+    crate::skill::bidirectional_content_sync(home, &manifest, &lockfile, &sync_args, out)?;
+    writeln!(out, "pulled `{source_name}` and synced to home")?;
+    Ok(())
+}
+
+/// Bail unless `name` is both declared in the manifest AND marked as a
+/// library source; on success returns the owned `SourceEntry` (cloned
+/// out of the manifest borrow) so the caller can resolve its checkout.
+fn require_library_source(home: &Path, name: &str) -> Result<SourceEntry> {
+    let lib = Library::load_from(&library_path_in(home))?;
+    if !lib.is_library_source(name) {
+        bail!(
+            "`{name}` is not a library source — run \
+             `ainb skill library mark-source {name}` first"
+        );
+    }
+    let manifest = Manifest::load_from(&manifest_path_in(home))?;
+    manifest
+        .sources
+        .iter()
+        .find(|s| s.name == name)
+        .cloned()
+        .ok_or_else(|| anyhow!("no source named `{name}` in the manifest"))
+}
+
+/// `git -C <checkout> pull --rebase`. Surfaces stderr verbatim on
+/// failure (conflicts left as standard git conflict markers — no
+/// custom merge UI).
+fn git_pull_rebase(checkout: &Path) -> Result<()> {
+    let out = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["pull", "--rebase"])
+        .output()
+        .context("running `git pull --rebase`")?;
+    if !out.status.success() {
+        bail!(
+            "git pull --rebase failed: {}",
+            String::from_utf8_lossy(&out.stderr).trim()
+        );
+    }
+    Ok(())
+}
+
+/// `git add -A && git commit -m <message> && git push` in `checkout`.
+/// A "nothing to commit" commit outcome is treated as success (no-op —
+/// the content sync pass already published everything). Reuses
+/// `promote`'s committer-identity fallback so a hermetic CI run with no
+/// global git identity still produces a clean commit.
+fn git_add_commit_push(checkout: &Path, message: &str, out: &mut dyn io::Write) -> Result<()> {
+    let add = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["add", "-A"])
+        .output()
+        .context("running `git add -A`")?;
+    if !add.status.success() {
+        bail!(
+            "git add -A failed: {}",
+            String::from_utf8_lossy(&add.stderr).trim()
+        );
+    }
+
+    crate::promote::ensure_committer_identity(checkout)?;
+
+    let commit = std::process::Command::new("git")
+        .env("LC_ALL", "C")
+        .arg("-C")
+        .arg(checkout)
+        .args(["-c", "commit.gpgsign=false", "commit", "-m", message])
+        .output()
+        .context("running `git commit`")?;
+    if !commit.status.success() {
+        let stderr = String::from_utf8_lossy(&commit.stderr);
+        let stdout = String::from_utf8_lossy(&commit.stdout);
+        if stdout.contains("nothing to commit") || stderr.contains("nothing to commit") {
+            writeln!(out, "# nothing to commit — library edits already in sync")?;
+            return Ok(());
+        }
+        bail!("git commit failed: {} {}", stdout.trim(), stderr.trim());
+    }
+
+    let push = std::process::Command::new("git")
+        .arg("-C")
+        .arg(checkout)
+        .args(["push"])
+        .output()
+        .context("running `git push`")?;
+    if !push.status.success() {
+        bail!(
+            "git push failed: {}",
+            String::from_utf8_lossy(&push.stderr).trim()
+        );
+    }
+    writeln!(out, "pushed library edits for `{}`", checkout.display())?;
+    Ok(())
 }
 
 /// Shared registration tail: load `library.yaml`, register (dedup by
