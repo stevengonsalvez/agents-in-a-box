@@ -581,3 +581,224 @@ fn push_publishes_deployed_edit_to_checkout_and_commits() {
         "expected a sync commit in the checkout log: {log_text}"
     );
 }
+
+/// Finding 1 regression: a `library new` skill is registered in
+/// `library.yaml` and deployed under the tool home, but is NEVER
+/// installed through the lockfile — `bidirectional_content_sync` only
+/// walks `lockfile.units`, so before the fix `push` reported success
+/// while publishing nothing for it. Assert it actually lands in the
+/// checkout, gets committed, and reaches the bare remote.
+#[test]
+fn push_stages_owned_library_units_never_installed_through_lockfile() {
+    let sb = Sandbox::new();
+    let bare_repo = tempfile::tempdir().unwrap();
+    let working = tempfile::tempdir().unwrap();
+
+    init_bare_repo(bare_repo.path());
+    let bare_url = format!("file://{}", bare_repo.path().display());
+    init_working_clone(&bare_url, working.path());
+    seed_skill_and_push(working.path(), b"---\nname: commit\n---\ninitial body\n");
+
+    let source_uri = format!("git:{bare_url}");
+    add_source(
+        &sb,
+        SourceCommand::Add(AddArgs {
+            uri: source_uri.clone(),
+            name: Some("upstream".into()),
+            kind: None,
+        }),
+    )
+    .expect("add git source");
+
+    let mut manifest = Manifest::load_from(&manifest_path_in(&sb.home)).unwrap();
+    manifest
+        .sources
+        .iter_mut()
+        .find(|s| s.name == "upstream")
+        .unwrap()
+        .target_layout = vec![TargetMapping {
+        glob: "skills/*/SKILL.md".into(),
+        home: PathBuf::from("skills"),
+        repo: PathBuf::from("skills"),
+    }];
+    manifest.save_to(&manifest_path_in(&sb.home)).unwrap();
+
+    // `library new` — owned unit, no lockfile entry at all.
+    let (res, _out) = run_library(
+        &sb,
+        LibraryCmd::New {
+            name: "home-grown".into(),
+            tool: None,
+        },
+    );
+    res.expect("library new ok");
+    let owned_content = "---\nname: home-grown\nkind: skill\n---\nauthored locally.\n";
+    fs::write(
+        sb.claude_home.join("skills/home-grown/SKILL.md"),
+        owned_content,
+    )
+    .unwrap();
+
+    run_library(
+        &sb,
+        LibraryCmd::MarkSource {
+            name: "upstream".into(),
+        },
+    )
+    .0
+    .expect("mark-source ok");
+
+    let (res, out) = run_library(
+        &sb,
+        LibraryCmd::Push {
+            source: "upstream".into(),
+        },
+    );
+    res.expect("push ok");
+    assert!(
+        out.contains("staged 1 owned-library unit"),
+        "push reports the staged unit: {out}"
+    );
+
+    let cache_root = sb.home.join("promote-cache");
+    let clones: Vec<_> = fs::read_dir(&cache_root)
+        .unwrap()
+        .filter_map(|e| e.ok())
+        .filter(|e| e.path().is_dir())
+        .collect();
+    assert_eq!(clones.len(), 1, "expected one cache clone, got: {clones:?}");
+    let clone_dir = clones[0].path();
+    let cache_file = clone_dir.join("skills/home-grown/SKILL.md");
+    assert!(
+        cache_file.is_file(),
+        "owned unit staged into checkout at {cache_file:?}"
+    );
+    assert_eq!(
+        fs::read_to_string(&cache_file).unwrap(),
+        owned_content,
+        "staged bytes match the owned unit's on-disk content"
+    );
+
+    let log = git(&["log", "--oneline"], &clone_dir);
+    let log_text = String::from_utf8_lossy(&log.stdout);
+    assert!(
+        log_text.contains("ainb: sync library edits"),
+        "expected push's catch-all commit in the checkout log: {log_text}"
+    );
+
+    // Reached the bare remote, not just the local cache checkout.
+    let verify = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new("git")
+        .args(["clone", &bare_url])
+        .arg(verify.path())
+        .output()
+        .expect("git clone verify");
+    assert!(out.status.success(), "clone verify: {out:?}");
+    assert!(
+        verify.path().join("skills/home-grown/SKILL.md").is_file(),
+        "owned unit pushed all the way to the bare remote"
+    );
+}
+
+/// Finding 3 regression: `ensure_repo_clone` never checks out
+/// `source.ref` (it clones the remote's default branch), and a bare
+/// `git push` would push whatever branch happens to be checked out —
+/// silently landing on the wrong remote branch for a source whose ref
+/// isn't the default. Set up a source pinned to a non-default branch
+/// and assert the push lands there, not on the bare repo's `main`.
+#[test]
+fn push_targets_the_sources_configured_ref_not_the_default_branch() {
+    let sb = Sandbox::new();
+    let bare_repo = tempfile::tempdir().unwrap();
+    let working = tempfile::tempdir().unwrap();
+
+    init_bare_repo(bare_repo.path());
+    let bare_url = format!("file://{}", bare_repo.path().display());
+    init_working_clone(&bare_url, working.path());
+    seed_skill_and_push(working.path(), b"---\nname: commit\n---\ninitial body\n");
+
+    // A second branch, diverging from `main` at the same commit — the
+    // source will be pinned to this one instead of the bare repo's
+    // default (which `ensure_repo_clone`'s plain `git clone` checks out).
+    assert!(git(&["checkout", "-b", "release"], working.path()).status.success());
+    assert!(git(&["push", "origin", "release"], working.path()).status.success());
+
+    let source_uri = format!("git:{bare_url}");
+    add_source(
+        &sb,
+        SourceCommand::Add(AddArgs {
+            uri: source_uri.clone(),
+            name: Some("upstream".into()),
+            kind: None,
+        }),
+    )
+    .expect("add git source");
+
+    let mut manifest = Manifest::load_from(&manifest_path_in(&sb.home)).unwrap();
+    {
+        let entry = manifest.sources.iter_mut().find(|s| s.name == "upstream").unwrap();
+        entry.r#ref = "release".to_string();
+        entry.target_layout = vec![TargetMapping {
+            glob: "skills/*/SKILL.md".into(),
+            home: PathBuf::from("skills"),
+            repo: PathBuf::from("skills"),
+        }];
+    }
+    manifest.save_to(&manifest_path_in(&sb.home)).unwrap();
+
+    let (res, _out) = run_library(
+        &sb,
+        LibraryCmd::New {
+            name: "release-only".into(),
+            tool: None,
+        },
+    );
+    res.expect("library new ok");
+    fs::write(
+        sb.claude_home.join("skills/release-only/SKILL.md"),
+        "---\nname: release-only\nkind: skill\n---\nrelease-branch content.\n",
+    )
+    .unwrap();
+
+    run_library(
+        &sb,
+        LibraryCmd::MarkSource {
+            name: "upstream".into(),
+        },
+    )
+    .0
+    .expect("mark-source ok");
+    run_library(
+        &sb,
+        LibraryCmd::Push {
+            source: "upstream".into(),
+        },
+    )
+    .0
+    .expect("push ok");
+
+    // Fresh clones verify the *remote* branch tips, not the local cache.
+    let verify_main = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new("git")
+        .args(["clone", "--branch", "main", &bare_url])
+        .arg(verify_main.path())
+        .output()
+        .expect("clone main");
+    assert!(out.status.success(), "clone main: {out:?}");
+    assert!(
+        !verify_main.path().join("skills/release-only/SKILL.md").exists(),
+        "push must not touch `main` when the source ref is `release`"
+    );
+
+    let verify_release = tempfile::tempdir().unwrap();
+    let out = std::process::Command::new("git")
+        .args(["clone", "--branch", "release", &bare_url])
+        .arg(verify_release.path())
+        .output()
+        .expect("clone release");
+    assert!(out.status.success(), "clone release: {out:?}");
+    assert!(
+        verify_release.path().join("skills/release-only/SKILL.md").is_file(),
+        "push must land on the source's configured ref (`release`)"
+    );
+}
