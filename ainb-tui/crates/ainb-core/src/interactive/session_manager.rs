@@ -1697,6 +1697,43 @@ mod tests {
         }
     }
 
+    /// ccc / D11 schema-compat guard: a session the hangar daemon registers
+    /// through the `ainb-fleet-core` seam must round-trip back through THIS
+    /// crate's `SessionStore` — the same `sessions.json` file, the same schema —
+    /// so `ainb list` (and thus fleet discover / standup / broadcast) sees a
+    /// daemon-spawned interactive session. The daemon writes only the REQUIRED
+    /// fields; the `#[serde(default)]` fields (`agent_type` / `headroom_enabled` /
+    /// `rtk_enabled`) it omits must default cleanly on read. If a future field
+    /// becomes non-default, this test fails — the drift alarm.
+    #[test]
+    fn daemon_registered_session_round_trips_through_session_store() {
+        use ainb_fleet_core::session_registry::{AinbSessionRecord, register_session_at};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let rec = AinbSessionRecord::new(
+            "tmux_hangar-01HZ",
+            PathBuf::from("/work/ws/01HZ/workdir"),
+            "myproj",
+        );
+        register_session_at(&path, &rec).unwrap();
+
+        // Read the file back through the CLI's store type — the exact `ainb list` path.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let store: SessionStore = serde_json::from_str(&content).unwrap();
+        let meta = store
+            .find_by_tmux_name("tmux_hangar-01HZ")
+            .expect("daemon-registered session must be readable by SessionStore");
+
+        assert_eq!(meta.session_id, rec.session_id);
+        assert_eq!(meta.tmux_session_name, "tmux_hangar-01HZ");
+        assert_eq!(meta.worktree_path, PathBuf::from("/work/ws/01HZ/workdir"));
+        assert_eq!(meta.workspace_name, "myproj");
+        // The omitted optionals default cleanly (no drift).
+        assert!(!meta.headroom_enabled);
+        assert!(!meta.rtk_enabled);
+    }
+
     #[test]
     fn test_derive_workspace_name() {
         // Legacy worktree layout: <repo>--<hash>--<session-id>
