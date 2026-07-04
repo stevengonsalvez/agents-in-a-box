@@ -7602,7 +7602,10 @@ impl AppState {
             Ok(Ok(paths)) => Ok(paths),
             Ok(Err(msg)) => {
                 tracing::error!(error = %msg, "prepare_remote_worktree failed");
-                self.add_error_notification(format!("Could not prepare worktree off main: {msg}"));
+                // Don't hardcode a base name in the message — the base is the
+                // remote's default (main/master/develop) or a picked branch;
+                // "off main" misled the empty-repo diagnosis (Stevie 2026-07-04).
+                self.add_error_notification(format!("Could not prepare worktree: {msg}"));
                 self.cancel_new_session();
                 Err(())
             }
