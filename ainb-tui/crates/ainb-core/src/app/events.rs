@@ -4930,11 +4930,26 @@ impl EventHandler {
             AppEvent::SkillManagerRemove => {
                 // `[r]` — uninstall the selected unit from its tools.
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                let uri = state
-                    .skill_manager_state
-                    .units
-                    .get(state.skill_manager_state.selected)
-                    .map(|u| u.declared_uri.clone());
+                // The cursor (`selected`) must land on a row that's actually
+                // VISIBLE under the current filter — otherwise `[r]` would act
+                // on an off-screen unit (e.g. filtering to a 0-unit source left
+                // `selected` on an unrelated row, so `[r]` removed *that*).
+                let visible = state.skill_manager_state.visible_indices();
+                let selected = state.skill_manager_state.selected;
+                if !visible.contains(&selected) {
+                    // Nothing removable in view. If the empty view is a source
+                    // filter, the obvious intent is "remove this source" — route
+                    // there (the user filtered to the source they want gone).
+                    if state.skill_manager_state.source_filter.is_some() {
+                        Self::process_event(AppEvent::SkillManagerSourceRemoveOpen, state);
+                    } else {
+                        state.skill_manager_state.pending_remove_confirm = None;
+                        state.add_warning_notification("remove: no unit selected".to_string());
+                    }
+                    return;
+                }
+                let uri =
+                    state.skill_manager_state.units.get(selected).map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
                         state.skill_manager_state.pending_remove_confirm = None;
@@ -7866,6 +7881,50 @@ mod panel_back_tests {
         assert_eq!(
             state.skill_manager_state.selected, 2,
             "cursor must reset onto the visible unit, not stay at hidden index 0"
+        );
+    }
+
+    /// `[r]` while filtered to a source with NO visible units must NOT
+    /// remove an off-filter unit (the "removed the wrong skill" bug). With
+    /// a source filter active it routes to source-remove instead.
+    #[test]
+    fn skill_manager_remove_on_empty_filtered_source_opens_source_remove() {
+        use crate::components::skill_manager_screen::{SourceRow, UnitRow};
+        let mut state = AppState::default();
+        state.current_screen = ids::SKILL_MANAGER.to_string();
+        // One source with zero units of its own, plus an unrelated unit
+        // that `selected` happens to point at.
+        state.skill_manager_state.sources = vec![SourceRow {
+            name: "toolkit".to_string(),
+            uri: "gh:o/toolkit".to_string(),
+            r#ref: "main".to_string(),
+            enabled: true,
+        }];
+        state.skill_manager_state.units = vec![UnitRow {
+            idx: 0,
+            name: "other".to_string(),
+            kind: "skill".to_string(),
+            source: "local:x".to_string(),
+            git_ref: "head".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: "local:x@head/other".to_string(),
+        }];
+        state.skill_manager_state.source_selected = 0;
+        state.skill_manager_state.source_filter = Some("gh:o/toolkit".to_string());
+        state.skill_manager_state.selected = 0; // the off-filter unit
+
+        assert!(state.skill_manager_state.visible_indices().is_empty());
+        EventHandler::process_event(AppEvent::SkillManagerRemove, &mut state);
+
+        // The unrelated unit is untouched; the source-remove dialog opened.
+        assert_eq!(
+            state.skill_manager_state.units.len(),
+            1,
+            "off-filter unit not removed"
+        );
+        assert!(
+            state.skill_manager_state.source_remove_confirm.is_some(),
+            "[r] on an empty filtered source must open source-remove"
         );
     }
 
