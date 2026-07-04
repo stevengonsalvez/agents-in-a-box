@@ -4935,11 +4935,11 @@ impl EventHandler {
                 // on an off-screen unit (e.g. filtering to a 0-unit source left
                 // `selected` on an unrelated row, so `[r]` removed *that*).
                 let visible = state.skill_manager_state.visible_indices();
-                let selected = state.skill_manager_state.selected;
-                if !visible.contains(&selected) {
-                    // Nothing removable in view. If the empty view is a source
-                    // filter, the obvious intent is "remove this source" — route
-                    // there (the user filtered to the source they want gone).
+                if visible.is_empty() {
+                    // Nothing removable in view. If it's empty because of a
+                    // source filter, the obvious intent is "remove this source"
+                    // (the user filtered to the repo they want gone) — route
+                    // there rather than touching a hidden unit.
                     if state.skill_manager_state.source_filter.is_some() {
                         Self::process_event(AppEvent::SkillManagerSourceRemoveOpen, state);
                     } else {
@@ -4948,8 +4948,19 @@ impl EventHandler {
                     }
                     return;
                 }
+                // Act on the unit the user actually SEES highlighted. The
+                // render highlights `visible[position(selected) | 0]`, so map
+                // through the same logic — never a stale absolute `selected`
+                // that drifted out of the filtered set (that removed the wrong
+                // unit). Sync `selected` so the arm/confirm keys agree.
+                let pos = visible
+                    .iter()
+                    .position(|&i| i == state.skill_manager_state.selected)
+                    .unwrap_or(0);
+                let target = visible[pos];
+                state.skill_manager_state.selected = target;
                 let uri =
-                    state.skill_manager_state.units.get(selected).map(|u| u.declared_uri.clone());
+                    state.skill_manager_state.units.get(target).map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
                         state.skill_manager_state.pending_remove_confirm = None;
