@@ -82,6 +82,11 @@ pub struct BoardCard {
     pub column_id: Option<String>,
     /// When the card was added (epoch ms).
     pub added_at: i64,
+    /// The card's position WITHIN its column (migration 0034, F6). Compared only
+    /// against sibling cards in the same column — the repo appends a new/moved card
+    /// at the column's `MAX(ord) + 1` and [`BoardRepo::card_reorder`] rewrites one
+    /// column to a contiguous `0..n`.
+    pub ord: i64,
 }
 
 /// One card the auto-move hook actually moved: which board, which issue, and the
@@ -463,15 +468,21 @@ impl BoardRepo {
         if let Some(col) = column_id {
             Self::ensure_column_of_board(&mut tx, board_id, col).await?;
         }
+        // Append the card at the end of its target column (migration 0034): a fresh
+        // placement — and a re-add that re-targets the card's column — lands after
+        // the column's existing cards rather than jumping to an arbitrary slot.
+        let ord = Self::next_card_ord(&mut tx, board_id, column_id).await?;
         sqlx::query(
-            "INSERT INTO board_card (board_id, issue_id, column_id, added_at) \
-             VALUES (?, ?, ?, ?) \
-             ON CONFLICT (board_id, issue_id) DO UPDATE SET column_id = excluded.column_id",
+            "INSERT INTO board_card (board_id, issue_id, column_id, added_at, ord) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (board_id, issue_id) \
+             DO UPDATE SET column_id = excluded.column_id, ord = excluded.ord",
         )
         .bind(board_id)
         .bind(issue_id)
         .bind(column_id)
         .bind(added_at)
+        .bind(ord)
         .execute(&mut *tx)
         .await?;
         tx.commit().await?;
@@ -499,10 +510,14 @@ impl BoardRepo {
         if let Some(col) = column_id {
             Self::ensure_column_of_board(&mut tx, board_id, col).await?;
         }
+        // A moved card appends at the end of its destination column (migration
+        // 0034) so a cross-column move never collides with the target's ordering.
+        let ord = Self::next_card_ord(&mut tx, board_id, column_id).await?;
         let affected = sqlx::query(
-            "UPDATE board_card SET column_id = ? WHERE board_id = ? AND issue_id = ?",
+            "UPDATE board_card SET column_id = ?, ord = ? WHERE board_id = ? AND issue_id = ?",
         )
         .bind(column_id)
+        .bind(ord)
         .bind(board_id)
         .bind(issue_id)
         .execute(&mut *tx)
@@ -510,6 +525,61 @@ impl BoardRepo {
         .rows_affected();
         if affected == 0 {
             return Err(BoardRepoError::NotFound);
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Reorder the cards WITHIN one column of a board to match `ordered_issue_ids`
+    /// (index becomes `ord`). `column_id` is the column being reordered, or `None`
+    /// for the unmapped pool.
+    ///
+    /// `ordered_issue_ids` must be exactly the cards currently in that column (a
+    /// permutation of them); any other set — a missing card, an extra card, or a
+    /// card that sits in a different column — is rejected with
+    /// [`BoardRepoError::BadReorder`] and nothing is written. Mirrors
+    /// [`BoardRepo::column_reorder`]: a pure `ord` rewrite over a single-writer
+    /// table, so no `UNIQUE(ord)` two-phase swap is needed.
+    ///
+    /// # Errors
+    ///
+    /// [`BoardRepoError::NotFound`] (board / column not in the workspace) /
+    /// [`BoardRepoError::BadReorder`] / [`BoardRepoError::Db`].
+    pub async fn card_reorder(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        board_id: &str,
+        column_id: Option<&str>,
+        ordered_issue_ids: &[String],
+    ) -> Result<(), BoardRepoError> {
+        let mut tx = pool.begin().await?;
+        Self::ensure_board_in_ws(&mut tx, workspace, board_id).await?;
+        if let Some(col) = column_id {
+            Self::ensure_column_of_board(&mut tx, board_id, col).await?;
+        }
+        // The reorder set must be exactly the cards currently in this column.
+        let current: Vec<String> = sqlx::query_scalar(
+            "SELECT issue_id FROM board_card WHERE board_id = ? AND column_id IS ?",
+        )
+        .bind(board_id)
+        .bind(column_id)
+        .fetch_all(&mut *tx)
+        .await?;
+        use std::collections::HashSet;
+        let current_set: HashSet<&str> = current.iter().map(String::as_str).collect();
+        let given_set: HashSet<&str> = ordered_issue_ids.iter().map(String::as_str).collect();
+        if current.len() != ordered_issue_ids.len() || current_set != given_set {
+            return Err(BoardRepoError::BadReorder);
+        }
+        for (i, issue_id) in ordered_issue_ids.iter().enumerate() {
+            sqlx::query(
+                "UPDATE board_card SET ord = ? WHERE board_id = ? AND issue_id = ?",
+            )
+            .bind(i64::try_from(i).unwrap_or(i64::MAX))
+            .bind(board_id)
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
         }
         tx.commit().await?;
         Ok(())
@@ -559,12 +629,20 @@ impl BoardRepo {
         for r in &rows {
             let board_id: String = r.try_get("board_id")?;
             let column_id: String = r.try_get("column_id")?;
-            sqlx::query("UPDATE board_card SET column_id = ? WHERE board_id = ? AND issue_id = ?")
-                .bind(&column_id)
-                .bind(&board_id)
-                .bind(issue_id)
-                .execute(pool)
-                .await?;
+            // Append the auto-moved card at the end of its target column (migration
+            // 0034), consistent with a manual card_move.
+            let mut tx = pool.begin().await?;
+            let ord = Self::next_card_ord(&mut tx, &board_id, Some(&column_id)).await?;
+            sqlx::query(
+                "UPDATE board_card SET column_id = ?, ord = ? WHERE board_id = ? AND issue_id = ?",
+            )
+            .bind(&column_id)
+            .bind(ord)
+            .bind(&board_id)
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+            tx.commit().await?;
             moved.push(AutoMoved {
                 board_id,
                 issue_id: issue_id.to_string(),
@@ -599,11 +677,15 @@ impl BoardRepo {
             .collect()
     }
 
-    /// Read a board's card placements, ordered by `added_at` then `issue_id`.
+    /// Read a board's card placements, ordered by `ord` then `added_at` then
+    /// `issue_id`. `ord` is the within-column position (migration 0034); the
+    /// `added_at` / `issue_id` tiebreak keeps cards that share an `ord` (the
+    /// pre-0034 default of `0`, or two columns' independent `ord = 0` cards)
+    /// deterministically ordered.
     async fn cards_of(pool: &SqlitePool, board_id: &str) -> Result<Vec<BoardCard>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT issue_id, column_id, added_at FROM board_card \
-             WHERE board_id = ? ORDER BY added_at, issue_id",
+            "SELECT issue_id, column_id, added_at, ord FROM board_card \
+             WHERE board_id = ? ORDER BY ord, added_at, issue_id",
         )
         .bind(board_id)
         .fetch_all(pool)
@@ -614,9 +696,30 @@ impl BoardRepo {
                     issue_id: r.try_get("issue_id")?,
                     column_id: r.try_get("column_id")?,
                     added_at: r.try_get("added_at")?,
+                    ord: r.try_get("ord")?,
                 })
             })
             .collect()
+    }
+
+    /// The next `ord` a card appended to `(board_id, column_id)` takes: the column's
+    /// current `MAX(ord) + 1`, or `0` when the column is empty. `column_id` binds
+    /// `NULL` for the unmapped pool (`column_id IS ?` matches `IS NULL`). Runs
+    /// inside the caller's transaction so the append is race-free against a
+    /// concurrent add/move into the same column.
+    async fn next_card_ord(
+        tx: &mut sqlx::SqliteConnection,
+        board_id: &str,
+        column_id: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ord) + 1, 0) FROM board_card \
+             WHERE board_id = ? AND column_id IS ?",
+        )
+        .bind(board_id)
+        .bind(column_id)
+        .fetch_one(&mut *tx)
+        .await
     }
 
     /// Renumber a board's columns to a contiguous `0..n` by their current order.
@@ -1031,5 +1134,100 @@ mod tests {
         BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c1", None, Some(Some("done")), Some(true))
             .await
             .unwrap();
+    }
+
+    /// Cards append in insertion order within a column (`ord` 0,1,2…), a reorder
+    /// rewrites just that column to a contiguous 0..n, and a bad set is rejected —
+    /// mirroring `column_reorder` but keyed off the card's `issue_id` (F6).
+    #[tokio::test]
+    async fn card_reorder_rewrites_within_column_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Doing", None, false).await.unwrap();
+        for i in 1..=3 {
+            seed_issue(pool, "ws-a", &format!("issue-{i}")).await;
+            BoardRepo::card_add(pool, &ws("ws-a"), "b1", &format!("issue-{i}"), Some("c1"), 10 + i)
+                .await
+                .unwrap();
+        }
+        // A card in the OTHER column, so a c1 reorder must not touch it.
+        seed_issue(pool, "ws-a", "other").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "other", Some("c2"), 20).await.unwrap();
+
+        // Cards append in insertion order: issue-1, issue-2, issue-3 (ord 0,1,2).
+        let cards = |b: &Board| -> Vec<(String, Option<String>, i64)> {
+            b.cards.iter().map(|c| (c.issue_id.clone(), c.column_id.clone(), c.ord)).collect()
+        };
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        let c1: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c1")).map(|c| c.issue_id.as_str()).collect();
+        assert_eq!(c1, ["issue-1", "issue-2", "issue-3"], "cards append in order: {:?}", cards(b));
+
+        // Reverse c1's cards. Only c1 is rewritten; `other` in c2 is untouched.
+        BoardRepo::card_reorder(
+            pool,
+            &ws("ws-a"),
+            "b1",
+            Some("c1"),
+            &["issue-3".into(), "issue-2".into(), "issue-1".into()],
+        )
+        .await
+        .unwrap();
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        let c1: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c1")).map(|c| c.issue_id.as_str()).collect();
+        assert_eq!(c1, ["issue-3", "issue-2", "issue-1"], "reorder rewrote c1");
+        let c2: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c2")).map(|c| c.issue_id.as_str()).collect();
+        assert_eq!(c2, ["other"], "the other column is untouched by a c1 reorder");
+
+        // A set that is not exactly c1's cards is rejected, nothing written.
+        let bad = BoardRepo::card_reorder(
+            pool,
+            &ws("ws-a"),
+            "b1",
+            Some("c1"),
+            &["issue-1".into(), "issue-2".into()],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(bad, BoardRepoError::BadReorder), "got {bad:?}");
+        // Including a card from another column is also rejected (wrong bucket).
+        let cross = BoardRepo::card_reorder(
+            pool,
+            &ws("ws-a"),
+            "b1",
+            Some("c1"),
+            &["issue-3".into(), "issue-2".into(), "other".into()],
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(cross, BoardRepoError::BadReorder), "got {cross:?}");
+    }
+
+    /// A card moved to another column appends at that column's end (`ord` = max+1),
+    /// so a reordered destination never has the moved card jump into the middle.
+    #[tokio::test]
+    async fn card_move_appends_at_destination_end() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Doing", None, false).await.unwrap();
+        for i in 1..=2 {
+            seed_issue(pool, "ws-a", &format!("dst-{i}")).await;
+            BoardRepo::card_add(pool, &ws("ws-a"), "b1", &format!("dst-{i}"), Some("c2"), 10 + i).await.unwrap();
+        }
+        seed_issue(pool, "ws-a", "mover").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "mover", Some("c1"), 5).await.unwrap();
+
+        // Move `mover` into c2: it lands AFTER dst-1, dst-2 (append, not front).
+        BoardRepo::card_move(pool, &ws("ws-a"), "b1", "mover", Some("c2")).await.unwrap();
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        let c2: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c2")).map(|c| c.issue_id.as_str()).collect();
+        assert_eq!(c2, ["dst-1", "dst-2", "mover"], "moved card appends at the end");
     }
 }

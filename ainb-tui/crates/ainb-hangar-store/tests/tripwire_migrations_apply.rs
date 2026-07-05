@@ -1125,3 +1125,28 @@ async fn migration_0028_creates_atc_standup_and_daemon_config_tables() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn migration_0034_adds_board_card_ord_defaulting_zero() {
+    // tcp T3 / F6: cards reorder WITHIN a column, which needs a mutable per-card
+    // position. Migration 0034 adds `board_card.ord` (NOT NULL DEFAULT 0), so an
+    // upgrading board keeps the pre-0034 `(added_at, issue_id)` order until the
+    // user reorders. ALTER TABLE ADD COLUMN rewrites the catalog SQL, so the new
+    // column shows up in `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let bc = table_sql(&pool, "board_card").await;
+    assert!(
+        bc.contains("ord INTEGER NOT NULL DEFAULT 0"),
+        "board_card.ord NOT NULL default 0: {bc}"
+    );
+    // The stable card identity a reorder keys off is still the (board_id, issue_id)
+    // composite PK — no surrogate id was added.
+    assert!(
+        bc.contains("PRIMARY KEY (board_id, issue_id)"),
+        "board_card keeps its (board_id, issue_id) PK: {bc}"
+    );
+
+    pool.close().await;
+}
