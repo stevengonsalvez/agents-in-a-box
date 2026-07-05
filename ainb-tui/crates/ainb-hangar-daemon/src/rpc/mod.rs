@@ -5481,8 +5481,8 @@ mod tests {
         }
 
         // The seeded global grid: escalation is loud, ask is phone+web+os (0038
-        // restored phone), waiting is board-only, and nothing is marked overridden
-        // at global scope.
+        // restored phone) + atc (0040 folded in the ATC feed), waiting is
+        // board-only, and nothing is marked overridden at global scope.
         let resp = dispatch(
             pool,
             &req(methods::HANGAR_NOTIFY_RULES_LIST, serde_json::json!({})),
@@ -5493,7 +5493,7 @@ mod tests {
         assert!(resp.error.is_none(), "{resp:?}");
         let rules = resp.result.unwrap()["rules"].clone();
         assert_eq!(row_for(&rules, "escalation")["channels"], serde_json::json!(["phone", "web", "os"]));
-        assert_eq!(row_for(&rules, "ask_user_question")["channels"], serde_json::json!(["phone", "web", "os"]));
+        assert_eq!(row_for(&rules, "ask_user_question")["channels"], serde_json::json!(["phone", "web", "os", "atc"]));
         assert_eq!(row_for(&rules, "waiting")["channels"], serde_json::json!([]));
         assert_eq!(row_for(&rules, "error")["overridden"], serde_json::json!(false));
 
@@ -5541,7 +5541,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             row_for(&global["rules"], "ask_user_question")["channels"],
-            serde_json::json!(["phone", "web", "os"]),
+            serde_json::json!(["phone", "web", "os", "atc"]),
             "global untouched"
         );
     }
