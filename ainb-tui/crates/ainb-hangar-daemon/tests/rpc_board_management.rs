@@ -982,3 +982,123 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
 
     std::env::remove_var("AINB_HANGAR_HOME");
 }
+
+/// tcp T3 / F6 race guard: a card whose run is RUNNING refuses a second run — the
+/// active-task guard closes the shadow-task hole the pending-only unique index
+/// misses. Deterministic: the guard is a DB-conditional check, so a `running`
+/// task is enough to prove the rejection without real concurrency.
+#[tokio::test]
+async fn rerun_while_running_is_rejected() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(methods::HANGAR_BOARD_CREATE, serde_json::json!({ "workspace_id": WS_SLUG, "name": "Race" }))
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(methods::HANGAR_BOARD_COLUMN_ADD, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }))
+        .await;
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let with_card = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "title": "Run once", "assignee_profile": "claude-agent", "repo_ref": "scratch" }),
+        )
+        .await;
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap()[0]["issue_id"].as_str().unwrap().to_string();
+
+    // First run enqueues a task; drive it to `running` so the guard covers the
+    // running (not merely pending) case.
+    let first = c
+        .call(methods::HANGAR_BOARD_CARD_RUN, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }))
+        .await;
+    let task_id = first["result"]["task_id"].as_str().unwrap().to_string();
+    sqlx::query("UPDATE agent_task_queue SET status = 'running' WHERE id = ?")
+        .bind(&task_id)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    // A second run while the first is RUNNING is refused (no shadow task).
+    let second = c
+        .call(methods::HANGAR_BOARD_CARD_RUN, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }))
+        .await;
+    assert!(!second["error"].is_null(), "a rerun while running must be rejected: {second}");
+    assert!(
+        second["error"]["message"].as_str().unwrap_or_default().contains("already active"),
+        "the rejection names the active run: {second}"
+    );
+
+    // Exactly ONE task exists for the card — no shadow row was enqueued.
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = ?")
+        .bind(&issue_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(n, 1, "the rejected rerun enqueued no shadow task");
+}
+
+/// tcp T3 / F6: a card cancelled BEFORE its run is ever claimed flips the queued
+/// task straight to `cancelled` (the DB flip alone cancels a run that never
+/// started — the run loop's kill signal simply finds no live process). Cancelling
+/// again is an idempotent success, never a double-event.
+#[tokio::test]
+async fn cancel_before_start_cancels_a_queued_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(methods::HANGAR_BOARD_CREATE, serde_json::json!({ "workspace_id": WS_SLUG, "name": "Preempt" }))
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(methods::HANGAR_BOARD_COLUMN_ADD, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }))
+        .await;
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let with_card = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "title": "Never starts", "assignee_profile": "claude-agent", "repo_ref": "scratch" }),
+        )
+        .await;
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap()[0]["issue_id"].as_str().unwrap().to_string();
+
+    // Enqueue a run — no claim loop is running here, so the task stays `queued`.
+    let run = c
+        .call(methods::HANGAR_BOARD_CARD_RUN, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }))
+        .await;
+    let task_id = run["result"]["task_id"].as_str().unwrap().to_string();
+    let status: String = sqlx::query_scalar("SELECT status FROM agent_task_queue WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(status, "queued", "the run is queued-but-unclaimed");
+
+    // Cancel before it ever starts → the DB flip cancels it.
+    let cancelled = c
+        .call(methods::HANGAR_BOARD_CARD_CANCEL, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
+        .await;
+    assert!(cancelled["error"].is_null(), "cancel must ack: {cancelled}");
+    assert_eq!(cancelled["result"]["cancelled"], true, "a queued run cancels: {cancelled}");
+    let status: String = sqlx::query_scalar("SELECT status FROM agent_task_queue WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(status, "cancelled", "the queued task flipped straight to cancelled");
+
+    // A second cancel is an idempotent no-op success (the card has no active task).
+    let again = c
+        .call(methods::HANGAR_BOARD_CARD_CANCEL, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
+        .await;
+    assert!(again["error"].is_null(), "a repeat cancel is not an error: {again}");
+    assert_eq!(again["result"]["cancelled"], false, "nothing left to cancel: {again}");
+}
