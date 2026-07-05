@@ -3680,7 +3680,14 @@ async fn handle_notify_rules_list(
             overridden: r.overridden,
         })
         .collect();
-    to_value(&ainb_hangar_proto::snapshots::NotifyRulesListResult { rules })
+    // Echo the scope this reply answers (agents-in-a-box-cqh) — the REQUESTED
+    // `workspace_id`, so a settings grid that flipped its edit scope while this
+    // list was in flight can drop a reply for the scope it just left rather than
+    // briefly repopulating with the wrong scope's rows.
+    to_value(&ainb_hangar_proto::snapshots::NotifyRulesListResult {
+        rules,
+        workspace_id: params.workspace_id,
+    })
 }
 
 /// Dispatch `hangar/notify_rule_set` (tcp T5): upsert one routing rule.

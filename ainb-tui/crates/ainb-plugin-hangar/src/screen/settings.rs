@@ -171,6 +171,32 @@ impl NotifyScope {
             Self::Workspace => "workspace",
         }
     }
+
+    /// The `workspace_id` a `notify_rules_list` for this scope carries: `None` for
+    /// GLOBAL (the host-wide default), `Some(ws_id)` for WORKSPACE.
+    #[must_use]
+    pub fn scoped_workspace_id<'a>(self, ws_id: &'a str) -> Option<&'a str> {
+        match self {
+            Self::Global => None,
+            Self::Workspace => Some(ws_id),
+        }
+    }
+}
+
+/// Whether a `hangar/notify_rules_list` reply that answered `reply_workspace_id`
+/// (the scope it echoes) should be applied to a grid whose CURRENT scope is
+/// `scope` over workspace `ws_id` (agents-in-a-box-cqh).
+///
+/// A reply for the scope the grid already LEFT (the human flipped `g` while the
+/// list was in flight) is DROPPED so it can't briefly repopulate the grid with the
+/// wrong scope's rows before the in-scope reply lands.
+#[must_use]
+pub fn notify_reply_matches_scope(
+    scope: NotifyScope,
+    ws_id: &str,
+    reply_workspace_id: Option<&str>,
+) -> bool {
+    reply_workspace_id == scope.scoped_workspace_id(ws_id)
 }
 
 /// The render-state cache for the settings screen.
