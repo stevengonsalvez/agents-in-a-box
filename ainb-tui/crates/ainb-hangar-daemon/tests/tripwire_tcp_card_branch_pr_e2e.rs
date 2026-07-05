@@ -148,9 +148,19 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
     // a PR chip carrying the stub gh's passing CI. The TaskFinished re-pull already
     // folded branch + PR + status onto the card cache, so switching to the board
     // (`K`) renders them on the finished task's tile in the `done` column.
+    //
+    // The run branch is `ainb/<task-id>` keyed on the FULL task ULID (tcp vpm made
+    // it collision-safe), which is wider than the compact Kanban tile — so the card
+    // SOFT-WRAPS the branch mid-string and the full value is never contiguous in the
+    // tmux capture (the adjacent column also interleaves the wrapped halves). The
+    // EXACT branch is already pinned above (recorded on the task row + present in
+    // git), so the tile check proves the card SURFACES the run's artifacts: the
+    // `PR ✓` chip plus the branch's leading `ainb/<ulid-head>`, a deterministic
+    // prefix guaranteed to fit the first tile line before the wrap.
+    let branch_head = &branch[..branch.len().min(15)];
     let surface_deadline = Instant::now() + Duration::from_secs(30 * scale);
     let surfaced = sess.switch_tab_until("K", surface_deadline, |c| {
-        c.contains("done (") && c.contains(&branch) && c.contains("PR ✓")
+        c.contains("done (") && c.contains(branch_head) && c.contains("PR ✓")
     });
 
     // Kill the TUI tmux session by exact name before the final assertions.
@@ -159,7 +169,8 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
 
     assert!(
         surfaced.is_some(),
-        "the Kanban task card must surface its branch `{branch}` AND a passing `PR ✓` chip\npane:\n{pane}"
+        "the Kanban task card must surface its branch `{branch}` (matched on the \
+         pre-wrap head `{branch_head}`) AND a passing `PR ✓` chip\npane:\n{pane}"
     );
     // NEGATIVE cross-check: the card is in Done (the run finished), so the branch +
     // PR read on a finished card, not a phantom render.
