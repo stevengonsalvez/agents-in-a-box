@@ -124,6 +124,58 @@ async fn issues_list_takes_the_latest_finished_task_pr_url() {
 }
 
 #[tokio::test]
+async fn issues_list_scopes_pr_url_and_branch_to_the_latest_generation() {
+    // Regression guard (migration 0039 x the branch/pr surface): a rerun mints a
+    // fresh run generation. When the LATEST generation opened no PR and committed
+    // no branch, the issue row must surface None — never the superseded prior
+    // generation's stale PR/branch, which recency-ordering alone would leak
+    // because the newer, value-less row is skipped by the `IS NOT NULL` filter.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+
+    // Generation 0 (a prior run) produced a PR AND a branch on issue-1.
+    let g0 = serde_json::json!({ "content": "done", "exit_code": 0, "pr_url": "https://example.com/pr/OLD" });
+    sqlx::query(
+        "UPDATE agent_task_queue \
+         SET status = 'done', result = ?, branch = 'ainb/old', finished_at = ?, generation = 0 \
+         WHERE id = 'task-1'",
+    )
+    .bind(g0.to_string())
+    .bind(1_700_000_100_000i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // Generation 1 (the rerun, the LATEST) finished later but opened no PR and
+    // committed no branch — the current run produced neither.
+    let g1 = serde_json::json!({ "content": "done", "exit_code": 0 });
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, result, created_at, finished_at, generation) \
+         VALUES ('task-1-g1', ?, 'runtime-1', 'agent-1', 'issue-1', 'done', ?, ?, ?, 1)",
+    )
+    .bind(WS_ID)
+    .bind(g1.to_string())
+    .bind(1_700_000_200_000i64)
+    .bind(1_700_000_300_000i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let issues = issues_list(store.pool(), WS_ID).await.unwrap();
+    let issue_1 = issues.iter().find(|i| i.id.as_str() == "issue-1").expect("issue-1 present");
+    assert_eq!(
+        issue_1.pr_url, None,
+        "the superseded generation-0 PR must not leak onto the latest run"
+    );
+    assert_eq!(
+        issue_1.branch, None,
+        "the superseded generation-0 branch must not leak onto the latest run"
+    );
+}
+
+#[tokio::test]
 async fn issues_list_surfaces_issue_priority_due_date_and_labels() {
     // e38.9 guard: the snapshot mapper must thread the issue's priority,
     // due_date, and labels onto the wire IssueRow. A regression that emitted the

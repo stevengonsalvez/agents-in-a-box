@@ -247,6 +247,11 @@ pub async fn search(
 /// rows whose `result` JSON has the key, so a task with no PR (the byte-identical
 /// pre-P9 `result` shape) is skipped, never surfaced as an empty string.
 ///
+/// Scoped to the issue's LATEST run generation (migration 0039): a rerun mints a
+/// fresh generation, so a superseded run's PR never leaks onto the current view.
+/// A latest-generation run that has not yet opened a PR reads back `None` rather
+/// than an older generation's stale URL — consistent with the card-state folds.
+///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] on a store fault.
@@ -260,6 +265,8 @@ async fn latest_pr_url_for_issue(
          FROM agent_task_queue \
          WHERE workspace_id = ?1 AND issue_id = ?2 \
            AND result ->> 'pr_url' IS NOT NULL \
+           AND generation = (SELECT MAX(generation) FROM agent_task_queue \
+                             WHERE issue_id = ?2) \
          ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
          LIMIT 1",
     )
@@ -282,6 +289,11 @@ async fn latest_pr_url_for_issue(
 /// empty string. Surfaces the branch on the task-detail view opened from the
 /// ISSUE LIST — a synthetic task that carries no single per-run branch of its own.
 ///
+/// Scoped to the issue's LATEST run generation (migration 0039), exactly like
+/// [`latest_pr_url_for_issue`]: a rerun mints a fresh generation, so a superseded
+/// run's branch never leaks onto the current view, and a latest-generation run
+/// that has committed nothing yet reads back `None`.
+///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] on a store fault.
@@ -295,6 +307,8 @@ async fn latest_branch_for_issue(
          FROM agent_task_queue \
          WHERE workspace_id = ?1 AND issue_id = ?2 \
            AND branch IS NOT NULL AND branch <> '' \
+           AND generation = (SELECT MAX(generation) FROM agent_task_queue \
+                             WHERE issue_id = ?2) \
          ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
          LIMIT 1",
     )
@@ -1060,22 +1074,43 @@ pub async fn tasks_list(
     Ok(out)
 }
 
+/// Cap on the number of PR-status fetches in flight at once. Each fetch is a `gh`
+/// subprocess hitting the GitHub API, so an unbounded fan-out over a large board
+/// would fork-storm the host and trip GitHub's secondary rate limit. A workspace
+/// with hundreds of PR'd cards therefore drains through this many-at-a-time
+/// window rather than all-at-once; the wall-clock cost stays ~`ceil(N / cap)`
+/// fetch timeouts, still far cheaper than N serial fetches.
+const PR_FETCH_CONCURRENCY: usize = 8;
+
 /// Fetch the [`PrStatus`](ainb_hangar_proto::pr_status::PrStatus) of every url in
-/// `urls` CONCURRENTLY, returning a `url → status` map (tcp le3).
+/// `urls` concurrently but BOUNDED to [`PR_FETCH_CONCURRENCY`] in-flight fetches,
+/// returning a `url → status` map (tcp le3).
 ///
 /// Each url is fetched on its own [`tokio::task::JoinSet`] task holding an
-/// `Arc`-clone of the shared `provider`, so N urls cost ~one fetch timeout rather
-/// than N serial ones. A task that panics (a JoinError) is dropped from the map —
-/// that url's card then renders no PR badge — never a propagated panic. An empty
-/// `urls` spawns nothing and returns an empty map.
+/// `Arc`-clone of the shared `provider`; a shared [`Semaphore`] caps how many run
+/// at once, so a board with N uncached PR'd cards costs ~`ceil(N / cap)` fetch
+/// timeouts rather than either N serial ones or an N-wide `gh` fork storm.
+/// A task that panics (a JoinError) is dropped from the map — that url's card then
+/// renders no PR badge — never a propagated panic. An empty `urls` spawns nothing
+/// and returns an empty map.
+///
+/// [`Semaphore`]: tokio::sync::Semaphore
 async fn fetch_pr_statuses(
     provider: Arc<dyn crate::pr_status::PrStatusProvider>,
     urls: HashSet<String>,
 ) -> HashMap<String, ainb_hangar_proto::pr_status::PrStatus> {
+    let limiter = Arc::new(tokio::sync::Semaphore::new(PR_FETCH_CONCURRENCY));
     let mut set = tokio::task::JoinSet::new();
     for url in urls {
         let provider = Arc::clone(&provider);
+        let limiter = Arc::clone(&limiter);
         set.spawn(async move {
+            // Hold a permit for the fetch's duration, capping in-flight `gh`
+            // subprocesses. The semaphore is never closed, so acquire cannot fail.
+            let _permit = limiter
+                .acquire_owned()
+                .await
+                .expect("pr-fetch semaphore is never closed");
             let status = provider.fetch(&url).await;
             (url, status)
         });
@@ -2041,7 +2076,7 @@ mod pr_fetch_bound_tests {
 
     use ainb_hangar_proto::pr_status::{CiRollup, PrStatus};
 
-    use super::fetch_pr_statuses;
+    use super::{PR_FETCH_CONCURRENCY, fetch_pr_statuses};
     use crate::pr_status::PrStatusProvider;
 
     /// A provider whose every fetch sleeps `delay` — the stand-in for a slow (or
@@ -2061,6 +2096,34 @@ mod pr_fetch_bound_tests {
             let delay = self.delay;
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
+                PrStatus { ci: CiRollup::Pass, ..Default::default() }
+            })
+        }
+    }
+
+    /// A provider that tracks the PEAK number of fetches in flight at once. Each
+    /// fetch bumps a live counter (recording a new max), sleeps, then releases it,
+    /// so the test can read exactly how wide the fan-out got.
+    struct PeakConcurrencyProvider {
+        delay: Duration,
+        in_flight: Arc<AtomicUsize>,
+        peak: Arc<AtomicUsize>,
+    }
+
+    impl PrStatusProvider for PeakConcurrencyProvider {
+        fn fetch<'a>(
+            &'a self,
+            _pr_url: &'a str,
+        ) -> Pin<Box<dyn std::future::Future<Output = PrStatus> + Send + 'a>> {
+            // The increment runs when `fetch` is invoked — which the fan-out only
+            // does AFTER acquiring a permit — so the live count tracks permits held.
+            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            self.peak.fetch_max(now, Ordering::SeqCst);
+            let delay = self.delay;
+            let in_flight = Arc::clone(&self.in_flight);
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                in_flight.fetch_sub(1, Ordering::SeqCst);
                 PrStatus { ci: CiRollup::Pass, ..Default::default() }
             })
         }
@@ -2092,6 +2155,36 @@ mod pr_fetch_bound_tests {
             elapsed < Duration::from_millis(1500),
             "N slow fetches ran concurrently (bounded to ~one delay), took {elapsed:?}"
         );
+    }
+
+    /// A board with far MORE distinct PR'd cards than the concurrency cap never
+    /// runs more than [`PR_FETCH_CONCURRENCY`] fetches at once — the guard against
+    /// a `gh` fork storm / GitHub secondary-rate-limit trip on a large workspace.
+    /// The peak must also exceed 1, proving the fetches still overlap (not a
+    /// serial regression). Every distinct url is still fetched exactly once.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn fan_out_is_bounded_to_the_concurrency_cap() {
+        const N: usize = PR_FETCH_CONCURRENCY * 3;
+        let in_flight = Arc::new(AtomicUsize::new(0));
+        let peak = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(PeakConcurrencyProvider {
+            delay: Duration::from_millis(80),
+            in_flight,
+            peak: Arc::clone(&peak),
+        });
+
+        let urls: std::collections::HashSet<String> =
+            (0..N).map(|i| format!("https://github.com/o/r/pull/{i}")).collect();
+
+        let statuses = fetch_pr_statuses(provider, urls).await;
+
+        assert_eq!(statuses.len(), N, "every distinct url yields a status");
+        let peak = peak.load(Ordering::SeqCst);
+        assert!(
+            peak <= PR_FETCH_CONCURRENCY,
+            "in-flight fetches never exceed the cap ({peak} > {PR_FETCH_CONCURRENCY})"
+        );
+        assert!(peak > 1, "fetches still overlap (peak {peak} proves it is not serial)");
     }
 
     /// The same url appearing on many cards collapses to ONE fetch (the caller
