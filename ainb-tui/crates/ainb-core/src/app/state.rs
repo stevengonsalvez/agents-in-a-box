@@ -9438,9 +9438,20 @@ impl AppState {
                         Ok(Ok(preview)) => {
                             info!(uri = %uri, units = preview.units.len(),
                                   "SkillManager: source preview open");
+                            // Pre-check + badge units already installed: the
+                            // manifest-declared URIs of the units we already
+                            // track. `declared_uri` is the same
+                            // `<source>@<ref>/<path>` shape the picker rebuilds.
+                            let installed_uris: std::collections::HashSet<String> = self
+                                .skill_manager_state
+                                .units
+                                .iter()
+                                .map(|u| u.declared_uri.clone())
+                                .collect();
                             self.skill_manager_state.preview = Some(
                                 crate::components::skill_manager_screen::SourcePreviewViewState::new(
                                     preview,
+                                    &installed_uris,
                                 ),
                             );
                         }

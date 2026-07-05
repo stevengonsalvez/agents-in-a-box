@@ -590,7 +590,7 @@ fn git_add_and_commit(cache: &Path, unit_name: &str, message: &str) -> Result<()
 /// so the caller learns about read-only repos / permission errors
 /// instead of seeing them silently become "Author identity unknown"
 /// later in `git commit`.
-fn ensure_committer_identity(cache: &Path) -> Result<()> {
+pub(crate) fn ensure_committer_identity(cache: &Path) -> Result<()> {
     fn has_global(key: &str) -> bool {
         ProcCommand::new("git")
             .args(["config", "--get", key])
@@ -697,7 +697,7 @@ fn require_success(out: &Output, what: &str) -> Result<()> {
 /// as their target. This is deliberate: a symlink redirect would be
 /// a surprising escape from the nominal source root, and skill dirs
 /// are expected to be regular file trees only.
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
+pub(crate) fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<()> {
     let meta = fs::symlink_metadata(src)
         .with_context(|| format!("reading metadata for `{}`", src.display()))?;
     if !meta.is_dir() {

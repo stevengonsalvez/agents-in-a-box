@@ -51,6 +51,10 @@ pub struct SourceRow {
     /// must fetch this ref, not default to `main`.
     pub r#ref: String,
     pub enabled: bool,
+    /// True when this source is marked as (one of) the user's own
+    /// libraries in `library.yaml` — drives the `★lib` badge and lets
+    /// `[L]` toggle + `[s]` two-way-sync it back to its remote.
+    pub is_library: bool,
 }
 
 /// One unit row in the right table.
@@ -187,6 +191,10 @@ pub struct SkillsScreenData {
     /// Offers "remove skills + source", "remove skills, keep source", and
     /// cancel — nothing is removed until a choice is confirmed.
     pub source_remove_confirm: Option<SourceRemoveConfirm>,
+    /// Sync assess-then-apply dialog: `Some` after `[s]` computes a
+    /// dry-run plan. Renders the planned mutations as a git-style diff;
+    /// `Enter` applies, `Esc` cancels. Nothing is written until applied.
+    pub sync_confirm: Option<SyncConfirmState>,
     /// Width (terminal columns) of the left Sources panel. Resizable by
     /// dragging the Sources/Units divider or via `[`/`]`. Persisted to
     /// `ui_preferences.skill_manager_sources_width` on resize-finish and
@@ -236,6 +244,7 @@ impl Default for SkillsScreenData {
             preview: None,
             preview_loading: None,
             source_remove_confirm: None,
+            sync_confirm: None,
             sources_width: DEFAULT_SOURCES_WIDTH,
             focused_pane: FocusedSkillPane::default(),
             source_selected: 0,
@@ -405,8 +414,14 @@ pub const PREVIEW_TOOLS: [&str; 3] = ["claude", "codex", "copilot"];
 #[derive(Debug, Clone)]
 pub struct SourcePreviewViewState {
     pub preview: ainb_cli::source::SourcePreview,
-    /// One checkbox per `preview.units` entry. Opt-in: all false on open.
+    /// One checkbox per `preview.units` entry. Pre-checked for units
+    /// already installed (see [`installed`]) so the picker opens showing
+    /// current state; the user toggles the rest to install more.
     pub checked: Vec<bool>,
+    /// One flag per `preview.units` entry: is this unit already installed
+    /// (its full URI is declared in the manifest)? Drives the "installed"
+    /// badge and the pre-check above.
+    pub installed: Vec<bool>,
     pub cursor: usize,
     /// claude / codex / copilot (see [`PREVIEW_TOOLS`]). Claude on by
     /// default — the primary tool this manager fronts.
@@ -414,13 +429,27 @@ pub struct SourcePreviewViewState {
 }
 
 impl SourcePreviewViewState {
-    pub fn new(preview: ainb_cli::source::SourcePreview) -> Self {
-        let n = preview.units.len();
+    /// Build the picker. `installed_uris` is the set of full unit URIs
+    /// (`<source>@<ref>/<path>`) already declared in the manifest, used
+    /// to pre-check + badge units the user already has.
+    pub fn new(
+        preview: ainb_cli::source::SourcePreview,
+        installed_uris: &std::collections::HashSet<String>,
+    ) -> Self {
+        let installed: Vec<bool> = preview
+            .units
+            .iter()
+            .map(|u| {
+                let full = format!("{}@{}/{}", preview.stored_uri, preview.r#ref, u.path);
+                installed_uris.contains(&full)
+            })
+            .collect();
         Self {
-            preview,
-            checked: vec![false; n],
+            checked: installed.clone(),
+            installed,
             cursor: 0,
             tools: [true, false, false],
+            preview,
         }
     }
 
@@ -531,6 +560,29 @@ impl SourceRemoveConfirm {
     /// The currently-highlighted choice.
     pub fn choice(&self) -> SourceRemoveChoice {
         SourceRemoveChoice::ALL[self.cursor.min(SourceRemoveChoice::ALL.len() - 1)]
+    }
+}
+
+/// Assess-then-apply dialog for `[s]` sync. Holds the dry-run plan text
+/// (rendered as a git-style diff) and the scope that produced it so the
+/// apply step re-runs the identical scope with `--yes`.
+#[derive(Debug, Clone, Default)]
+pub struct SyncConfirmState {
+    /// What the sync is scoped to — a source name or a unit URI. Passed
+    /// back verbatim as `SyncArgs.source_or_unit` on apply.
+    pub target: String,
+    /// Human label for the dialog title (e.g. `unit foo` / `source bar`).
+    pub label: String,
+    /// The dry-run plan, one line per emitted output row.
+    pub plan: Vec<String>,
+    /// Vertical scroll offset into [`Self::plan`].
+    pub scroll: usize,
+}
+
+impl SyncConfirmState {
+    pub fn scroll_by(&mut self, delta: isize) {
+        let max = self.plan.len().saturating_sub(1) as isize;
+        self.scroll = (self.scroll as isize + delta).clamp(0, max.max(0)) as usize;
     }
 }
 
@@ -791,6 +843,11 @@ pub fn render(frame: &mut Frame, area: Rect, data: &SkillsScreenData) {
         render_source_remove_confirm(frame, area, confirm);
     }
 
+    // Sync assess-then-apply — the plan rendered as a git-style diff.
+    if let Some(sc) = &data.sync_confirm {
+        render_sync_confirm(frame, area, sc);
+    }
+
     // Background fetch in flight — small centered banner so the user
     // sees progress instead of a frozen screen.
     if let Some(uri) = &data.preview_loading {
@@ -950,6 +1007,7 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
             Constraint::Min(4),    // unit list | detail
             Constraint::Length(1), // tool checkboxes
             Constraint::Length(1), // key hints
+            Constraint::Length(1), // CLI-equivalent tip
         ])
         .split(inner);
 
@@ -974,7 +1032,7 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
         } else {
             Style::default().fg(MUTED_GRAY)
         };
-        list_lines.push(Line::from(vec![
+        let mut spans = vec![
             Span::styled(marker, Style::default().fg(SELECTION_GREEN)),
             Span::styled(
                 box_glyph,
@@ -985,7 +1043,14 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
                 Style::default().fg(CORNFLOWER_BLUE),
             ),
             Span::styled(unit.name.clone(), name_style),
-        ]));
+        ];
+        if view.installed.get(i).copied().unwrap_or(false) {
+            spans.push(Span::styled(
+                "  \u{2713} installed",
+                Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::DIM),
+            ));
+        }
+        list_lines.push(Line::from(spans));
     }
     frame.render_widget(Paragraph::new(list_lines), cols[0]);
 
@@ -1073,6 +1138,24 @@ fn render_source_preview(frame: &mut Frame, area: Rect, view: &SourcePreviewView
         Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
     ]);
     frame.render_widget(Paragraph::new(hints), rows[2]);
+
+    // ── CLI-equivalent tip: the same import as a shell command, so the
+    // TUI stays discoverable from (and teaches) the CLI surface.
+    let targets = view.targets_csv().unwrap_or_else(|| "claude".to_string());
+    let cli_tip = Line::from(vec![
+        Span::styled(
+            " CLI  ",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::DIM),
+        ),
+        Span::styled(
+            format!(
+                "ainb skill install {}@{}/<unit> --targets {targets}",
+                p.stored_uri, p.r#ref
+            ),
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::DIM),
+        ),
+    ]);
+    frame.render_widget(Paragraph::new(cli_tip), rows[3]);
 }
 
 /// Confirm dialog for `[r]` on a source: remove skills + source, remove
@@ -1140,6 +1223,68 @@ fn render_source_remove_confirm(frame: &mut Frame, area: Rect, c: &SourceRemoveC
         Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: true }),
         inner,
     );
+}
+
+/// Assess-then-apply sync popup. Renders the dry-run plan as a
+/// git-style coloured diff (`+` additions green, `-` removals red, `#`
+/// section headers gold), scrollable, with apply/cancel hints.
+fn render_sync_confirm(frame: &mut Frame, area: Rect, sc: &SyncConfirmState) {
+    let width = area.width.saturating_sub(6).clamp(60, 120);
+    let height = area.height.saturating_sub(4).clamp(12, 40);
+    let rect = centered_rect(area, width, height);
+    frame.render_widget(Clear, rect);
+
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_type(BorderType::Rounded)
+        .border_style(Style::default().fg(GOLD))
+        .title(Span::styled(
+            format!(" Sync {} — review plan ", sc.label),
+            Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(rect);
+    frame.render_widget(block, rect);
+
+    let rows = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([Constraint::Min(3), Constraint::Length(1)])
+        .split(inner);
+
+    // Colour each plan line like a unified diff.
+    let body_h = rows[0].height as usize;
+    let start = sc.scroll.min(sc.plan.len().saturating_sub(1));
+    let end = (start + body_h).min(sc.plan.len());
+    let lines: Vec<Line> = sc.plan[start..end]
+        .iter()
+        .map(|l| {
+            let t = l.trim_start();
+            let style = if t.starts_with('+') {
+                Style::default().fg(SELECTION_GREEN)
+            } else if t.starts_with('-') || t.starts_with('~') {
+                Style::default().fg(ERROR_RED)
+            } else if t.starts_with('#') {
+                Style::default().fg(GOLD).add_modifier(Modifier::BOLD)
+            } else {
+                Style::default().fg(SOFT_WHITE)
+            };
+            Line::from(Span::styled(l.clone(), style))
+        })
+        .collect();
+    frame.render_widget(Paragraph::new(lines), rows[0]);
+
+    let hints = Line::from(vec![
+        Span::styled(
+            format!(" [{}/{}] ", end, sc.plan.len().max(1)),
+            Style::default().fg(MUTED_GRAY),
+        ),
+        Span::styled("\u{2191}\u{2193}", Style::default().fg(GOLD)),
+        Span::styled(" scroll \u{b7} ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Enter", Style::default().fg(GOLD)),
+        Span::styled(" apply \u{b7} ", Style::default().fg(MUTED_GRAY)),
+        Span::styled("Esc", Style::default().fg(GOLD)),
+        Span::styled(" cancel", Style::default().fg(MUTED_GRAY)),
+    ]);
+    frame.render_widget(Paragraph::new(hints), rows[1]);
 }
 
 fn render_browse_view(frame: &mut Frame, area: Rect, browse: &BrowseViewState) {
@@ -1467,7 +1612,7 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
                 Style::default().fg(name_color).add_modifier(name_mods),
             );
             let uri = Span::styled(format!("({})", source.uri), Style::default().fg(MUTED_GRAY));
-            lines.push(Line::from(vec![
+            let mut spans = vec![
                 Span::styled(
                     marker,
                     Style::default().fg(SELECTION_GREEN).add_modifier(Modifier::BOLD),
@@ -1475,7 +1620,14 @@ fn render_sources_panel(frame: &mut Frame, area: Rect, data: &SkillsScreenData) 
                 Span::styled(glyph, glyph_style),
                 name,
                 uri,
-            ]));
+            ];
+            if source.is_library {
+                spans.push(Span::styled(
+                    "  ★lib",
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ));
+            }
+            lines.push(Line::from(spans));
         }
     }
     let para = Paragraph::new(lines).block(block);
@@ -1680,6 +1832,12 @@ fn render_help_bar(frame: &mut Frame, area: Rect) {
         Span::styled("emove  ", Style::default().fg(MUTED_GRAY)),
         key_span("s"),
         Span::styled("ync  ", Style::default().fg(MUTED_GRAY)),
+        key_span("o"),
+        Span::styled("pen  ", Style::default().fg(MUTED_GRAY)),
+        key_span("y"),
+        Span::styled(" copy→lib  ", Style::default().fg(MUTED_GRAY)),
+        key_span("L"),
+        Span::styled(" mark-lib  ", Style::default().fg(MUTED_GRAY)),
         key_span("b"),
         Span::styled("rowse  ", Style::default().fg(MUTED_GRAY)),
         key_span("l"),
@@ -2053,7 +2211,7 @@ pub fn apply_discovery_import(
         return Err(std::io::Error::other(format!("manifest save failed: {e}")));
     }
 
-    refresh_view_model_from_manifest(data, &manifest);
+    refresh_view_model_from_manifest(data, &manifest, ainb_home);
     data.banner = DiscoveryBannerState::Hidden;
     Ok(())
 }
@@ -2144,7 +2302,7 @@ pub fn apply_conflict_flip(data: &mut SkillsScreenData, ainb_home: &Path) -> std
         .save_to(&manifest_path)
         .map_err(|e| std::io::Error::other(format!("manifest save failed: {e}")))?;
 
-    refresh_view_model_from_manifest(data, &manifest);
+    refresh_view_model_from_manifest(data, &manifest, ainb_home);
     Ok(())
 }
 
@@ -2234,7 +2392,7 @@ impl SkillsScreenData {
         let manifest = Manifest::load_from(&manifest_path_in(home)).unwrap_or_default();
         let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
         let mut data = SkillsScreenData::default();
-        refresh_view_model_from_manifest(&mut data, &manifest);
+        refresh_view_model_from_manifest(&mut data, &manifest, home);
         data.detail = compute_detail_for_selected(&data, &lockfile);
         data
     }
@@ -2247,7 +2405,7 @@ impl SkillsScreenData {
     pub fn reload_from_disk(&mut self, home: &Path) {
         let manifest = Manifest::load_from(&manifest_path_in(home)).unwrap_or_default();
         let lockfile = Lockfile::load_from(&lockfile_path_in(home)).unwrap_or_default();
-        refresh_view_model_from_manifest(self, &manifest);
+        refresh_view_model_from_manifest(self, &manifest, home);
         self.detail = compute_detail_for_selected(self, &lockfile);
         // Any disk-changing action invalidates a pending remove confirm.
         self.pending_remove_confirm = None;
@@ -2287,6 +2445,23 @@ impl SkillsScreenData {
             })
             .map(|(i, _)| i)
             .collect()
+    }
+
+    /// The `units` index the user actually SEES highlighted under the
+    /// current filter. Render highlights `visible[position(selected) | 0]`,
+    /// so keystroke actions (`[s]` sync, `[y]` copy, `[o]` open) must map
+    /// `selected` through the same logic — a stale absolute `selected` that
+    /// drifted out of the filtered set would act on an off-screen unit
+    /// (the bug `[r]` remove already guards against). Returns `None` when
+    /// nothing is visible. Callers should also assign the result back to
+    /// `selected` so the detail pane + subsequent keys agree.
+    pub fn highlighted_unit_index(&self) -> Option<usize> {
+        let visible = self.visible_indices();
+        if visible.is_empty() {
+            return None;
+        }
+        let pos = visible.iter().position(|&i| i == self.selected).unwrap_or(0);
+        Some(visible[pos])
     }
 
     /// Toggle keyboard focus between the Sources and Units panels
@@ -2484,7 +2659,13 @@ fn manifest_uri_for_row(row: &UnitRow) -> String {
 /// after `[Enter]` so the user immediately sees imported entries
 /// without waiting for a separate refresh trigger. Best-effort;
 /// keeps existing `selected` / `detail` state unchanged.
-fn refresh_view_model_from_manifest(data: &mut SkillsScreenData, manifest: &Manifest) {
+fn refresh_view_model_from_manifest(data: &mut SkillsScreenData, manifest: &Manifest, home: &Path) {
+    // Which sources the user has marked as their own library
+    // (`library.yaml`). Missing / malformed file → nothing marked.
+    let lib = ainb_skill_core::library::Library::load_from(
+        &ainb_skill_core::library::library_path_in(home),
+    )
+    .unwrap_or_default();
     data.sources = manifest
         .sources
         .iter()
@@ -2493,6 +2674,7 @@ fn refresh_view_model_from_manifest(data: &mut SkillsScreenData, manifest: &Mani
             uri: s.uri.clone(),
             r#ref: s.r#ref.clone(),
             enabled: s.enabled,
+            is_library: lib.is_library_source(&s.name),
         })
         .collect();
     data.units = manifest
@@ -2573,17 +2755,20 @@ mod tests {
     };
 
     fn mk_preview(unit_names: &[&str]) -> SourcePreviewViewState {
-        SourcePreviewViewState::new(ainb_cli::source::SourcePreview {
-            name: "test-src".to_string(),
-            stored_uri: "gh:o/r".to_string(),
-            r#ref: "main".to_string(),
-            kind: "raw".to_string(),
-            fetched_path: PathBuf::from("/tmp/x"),
-            resolved_sha: "abc".to_string(),
-            fetched_at: "now".to_string(),
-            units: unit_names.iter().map(|n| ainb_adapters_source_unit(n)).collect(),
-            already_added: false,
-        })
+        SourcePreviewViewState::new(
+            ainb_cli::source::SourcePreview {
+                name: "test-src".to_string(),
+                stored_uri: "gh:o/r".to_string(),
+                r#ref: "main".to_string(),
+                kind: "raw".to_string(),
+                fetched_path: PathBuf::from("/tmp/x"),
+                resolved_sha: "abc".to_string(),
+                fetched_at: "now".to_string(),
+                units: unit_names.iter().map(|n| ainb_adapters_source_unit(n)).collect(),
+                already_added: false,
+            },
+            &std::collections::HashSet::new(),
+        )
     }
 
     fn ainb_adapters_source_unit(name: &str) -> ainb_cli::source::UnitDescriptor {
@@ -3038,6 +3223,7 @@ mod tests {
             uri: uri.to_string(),
             r#ref: "main".to_string(),
             enabled: true,
+            is_library: false,
         }
     }
 
