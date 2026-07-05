@@ -557,6 +557,20 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     // coarse session state is now `current_state`-backed without any direct
     // SQLite access here — and the exactly-once inbox drain below is UNCHANGED.
     let rows = fetch_needs().await.unwrap_or_default();
+    // ATC channel gate (agents-in-a-box-cdd): drop needs rows the notify rules kept
+    // off the Atc channel, so a board-only `waiting` (or a kind routed away from
+    // ATC) stops nudging the ATC brain. Fail-open when the daemon inbox is
+    // unreachable — a transient socket fault must never silence ATC.
+    let rows = match fetch_fleet_attention().await {
+        Ok(attention) => filter_atc_channel(rows, &attention),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "atc heartbeat: attention inbox unavailable; nudging the full needs snapshot"
+            );
+            rows
+        }
+    };
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     // Load the heartbeat process's OWN bookkeeping file. This is a single-writer
@@ -752,6 +766,49 @@ async fn fetch_needs() -> Result<Vec<NeedsRow>> {
     let rows: Vec<NeedsRow> =
         serde_json::from_slice(&out.stdout).context("parsing `fleet needs` JSON")?;
     Ok(rows)
+}
+
+/// Snapshot the daemon's fleet-wide OPEN attention inbox, whose rows carry the
+/// resolved routing channels (tcp T5, agents-in-a-box-cdd). Best-effort: a daemon
+/// that is down / unreachable errors, and the caller then nudges the FULL needs
+/// snapshot (fail-open — the Atc gate must never silence ATC on a transient socket
+/// fault). The wire rows already carry channels resolved-at-read by the daemon
+/// (`attention_row_to_wire`), so a legacy pre-channel row resolves to its rule's
+/// set without any re-resolution at this seam.
+async fn fetch_fleet_attention() -> Result<Vec<ainb_hangar_proto::events::AttentionRow>> {
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()?;
+    Ok(client.attention_list_fleet().await?)
+}
+
+/// Drop the needs rows the notify rules kept OFF the ATC channel (agents-in-a-box-cdd).
+///
+/// A session the attention inbox KNOWS but whose resolved `ChannelSet` excludes
+/// [`Channel::Atc`] — a board-only `waiting`, or a kind the rules routed away from
+/// ATC — stops nudging the ATC brain. A session ABSENT from the inbox (a tmux-only
+/// / non-Claude row the daemon never raised an attention for) is KEPT: the Atc
+/// gate only applies to rows the daemon actually routed, so wiring the channel in
+/// never silently drops an un-routed session. A session with SEVERAL open rows
+/// nudges ATC when ANY of them is Atc-routed.
+fn filter_atc_channel(
+    rows: Vec<NeedsRow>,
+    attention: &[ainb_hangar_proto::events::AttentionRow],
+) -> Vec<NeedsRow> {
+    use ainb_hangar_proto::Channel;
+    use std::collections::HashSet;
+    let mut known: HashSet<&str> = HashSet::new();
+    let mut atc_on: HashSet<&str> = HashSet::new();
+    for a in attention {
+        known.insert(a.session_id.as_str());
+        if a.channels.contains(Channel::Atc) {
+            atc_on.insert(a.session_id.as_str());
+        }
+    }
+    rows.into_iter()
+        .filter(|r| {
+            let sid = r.session.id.as_str();
+            !known.contains(sid) || atc_on.contains(sid)
+        })
+        .collect()
 }
 
 // --- hook (internal, called by the installed hook script) -------------------
@@ -1304,6 +1361,95 @@ This is ATC's durable, human-readable memory. Append one dated line per action\n
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A minimal idle needs row for the given session id.
+    fn needs_row(session_id: &str) -> NeedsRow {
+        use crate::fleet::read::{IdleContext, NeedsContext, RouteHint};
+        use crate::fleet::types::{Session, SessionSource};
+        NeedsRow {
+            session: Session {
+                id: session_id.into(),
+                cwd: format!("/tmp/{session_id}"),
+                pid: None,
+                git_root: None,
+                tmux_session: None,
+                workspace_name: None,
+                worktree_path: None,
+                peer_id: None,
+                bg_job_id: None,
+                transcript_path: None,
+                sources: vec![SessionSource::Ainb],
+                summary: None,
+                last_seen_ms: None,
+            },
+            context: NeedsContext::Idle(IdleContext {
+                idle_minutes: 9,
+                last_assistant_text: None,
+            }),
+            route_hint: RouteHint::Tmux,
+            enrich_key: String::new(),
+            enriched: None,
+            need_enrich: false,
+            source: None,
+        }
+    }
+
+    /// A minimal open attention row for `session_id` routed to `channels`.
+    fn attention_row(
+        session_id: &str,
+        channels: ainb_hangar_proto::ChannelSet,
+    ) -> ainb_hangar_proto::events::AttentionRow {
+        ainb_hangar_proto::events::AttentionRow {
+            id: format!("att:{session_id}:0"),
+            session_id: session_id.into(),
+            cwd: format!("/tmp/{session_id}"),
+            workspace_id: None,
+            kind: "waiting".into(),
+            payload: "{}".into(),
+            degraded: false,
+            created_at: 0,
+            channels,
+        }
+    }
+
+    #[test]
+    fn atc_channel_gate_drops_atc_excluded_but_keeps_routed_and_unrouted() {
+        use ainb_hangar_proto::{Channel, ChannelSet};
+        let rows = vec![
+            needs_row("s-atc"),
+            needs_row("s-board"),
+            needs_row("s-unknown"),
+        ];
+        let attention = vec![
+            // Routed to ATC → keeps nudging.
+            attention_row("s-atc", ChannelSet::from_channels([Channel::Atc])),
+            // Board-only (waiting) → excludes Atc → stops nudging ATC.
+            attention_row("s-board", ChannelSet::NONE),
+            // s-unknown has NO attention row → kept (never silently dropped).
+        ];
+        let kept: Vec<String> = filter_atc_channel(rows, &attention)
+            .into_iter()
+            .map(|r| r.session.id)
+            .collect();
+        assert_eq!(
+            kept,
+            vec!["s-atc".to_string(), "s-unknown".to_string()],
+            "atc-excluded board-only row dropped; atc-routed + un-routed rows kept"
+        );
+    }
+
+    #[test]
+    fn atc_channel_gate_keeps_a_session_with_any_atc_routed_row() {
+        use ainb_hangar_proto::{Channel, ChannelSet};
+        // A session with one board-only row AND one Atc-routed row still nudges.
+        let rows = vec![needs_row("s-multi")];
+        let attention = vec![
+            attention_row("s-multi", ChannelSet::NONE),
+            attention_row("s-multi", ChannelSet::from_channels([Channel::Os, Channel::Atc])),
+        ];
+        let kept = filter_atc_channel(rows, &attention);
+        assert_eq!(kept.len(), 1, "any Atc-routed row keeps the session nudging");
+    }
 
     #[test]
     fn heartbeat_cron_maps_interval_to_a_valid_cron() {
