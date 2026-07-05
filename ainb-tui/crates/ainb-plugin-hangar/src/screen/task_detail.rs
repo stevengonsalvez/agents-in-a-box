@@ -116,6 +116,20 @@ pub struct TranscriptEntry {
 }
 
 impl TranscriptEntry {
+    /// Build a transcript line in `kind`'s lane with `body` text. `is_comment`
+    /// marks an interleaved human comment (the collapse grouping skips it). The
+    /// live task stream builds these internally; the JSONL timeline parser
+    /// ([`crate::widgets::jsonl_timeline`]) uses this to turn a disk transcript into
+    /// the same [`ViewEntry`]s the streamed transcript renders through.
+    #[must_use]
+    pub const fn new(kind: MessageKind, body: String, is_comment: bool) -> Self {
+        Self {
+            kind,
+            body,
+            is_comment,
+        }
+    }
+
     /// The taxonomy lane this entry renders in.
     #[must_use]
     pub const fn kind(&self) -> MessageKind {
@@ -152,6 +166,13 @@ pub enum ViewEntry {
 }
 
 impl ViewEntry {
+    /// A single rendered line in `kind`'s lane with `body` text — the shape the
+    /// JSONL timeline parser emits ([`crate::widgets::jsonl_timeline`]).
+    #[must_use]
+    pub fn line(kind: MessageKind, body: impl Into<String>) -> Self {
+        Self::Line(TranscriptEntry::new(kind, body.into(), false))
+    }
+
     /// `true` when this is a [`ViewEntry::CollapsedThinking`] fold marker.
     #[must_use]
     pub const fn is_collapsed_group(&self) -> bool {
