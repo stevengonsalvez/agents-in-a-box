@@ -22,10 +22,11 @@ use sqlx::{Row, SqlitePool};
 
 use super::attention::AttentionKind;
 
-/// The coded fallback used ONLY when a kind has neither a workspace override nor
-/// a global row (unreachable after migration 0037 seeds all six globals, but a
-/// defensive floor so a manually-truncated table or a kind the resolver has not
-/// seen still degrades to a sane, non-silent default rather than panicking).
+/// The coded fallback for a kind with neither a workspace override nor a global row.
+///
+/// Unreachable after migration 0037 seeds all six globals, but a defensive floor
+/// so a manually-truncated table (or a kind the resolver has not seen) still
+/// degrades to a sane, non-silent default rather than panicking.
 ///
 /// `escalation` is the loudest fallback (a human is being paged); every other
 /// kind falls back to the board only (empty set) — a missing rule must never
