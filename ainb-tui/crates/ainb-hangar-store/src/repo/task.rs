@@ -357,6 +357,16 @@ impl TaskRepo {
     /// unaffected: a fan-out's leader + members all share one generation, so the
     /// whole set is still folded together.
     ///
+    /// # Retry-superseded attempts are excluded (codex F1)
+    ///
+    /// An infra retry spawns a child row IN the same generation whose
+    /// `parent_task_id` chains to the failed attempt. The failed parent is a
+    /// SUPERSEDED attempt — the child carries the attempt's real outcome — so any
+    /// row another row names as its parent is excluded from the fold. Without this,
+    /// a retryable failure would poison the generation `failed` forever, even after
+    /// its retry child completed `done`. A capped chain's LAST failure has no child
+    /// and still counts.
+    ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the query fails.
@@ -365,10 +375,10 @@ impl TaskRepo {
         workspace_id: &str,
         issue_id: &str,
     ) -> Result<Option<String>, sqlx::Error> {
-        // One pass over the issue's LATEST-generation tasks: NULL while any is still
-        // active (the drain gate), else the highest-precedence terminal token
-        // present. `SUM(bool)` over zero rows is NULL, so a task-less issue (the MAX
-        // subquery is NULL, matching no row) also yields NULL.
+        // One pass over the issue's LATEST-generation, non-superseded tasks: NULL
+        // while any is still active (the drain gate), else the highest-precedence
+        // terminal token present. `SUM(bool)` over zero rows is NULL, so a task-less
+        // issue (the MAX subquery is NULL, matching no row) also yields NULL.
         sqlx::query_scalar::<_, Option<String>>(
             "SELECT CASE \
                WHEN SUM(status IN ('queued','dispatched','running')) > 0 THEN NULL \
@@ -379,7 +389,9 @@ impl TaskRepo {
              FROM agent_task_queue \
              WHERE workspace_id = ?1 AND issue_id = ?2 \
                AND generation = (SELECT MAX(generation) FROM agent_task_queue \
-                                 WHERE issue_id = ?2)",
+                                 WHERE issue_id = ?2) \
+               AND id NOT IN (SELECT parent_task_id FROM agent_task_queue \
+                              WHERE issue_id = ?2 AND parent_task_id IS NOT NULL)",
         )
         .bind(workspace_id)
         .bind(issue_id)
@@ -713,6 +725,50 @@ mod tests {
         assert_eq!(
             TaskRepo::issue_aggregate_terminal_state(pool, WS, "allcancel").await.unwrap().as_deref(),
             Some("cancelled")
+        );
+    }
+
+    /// A retryable failure's parent row is SUPERSEDED by its retry child (codex
+    /// F1): once the child completes `done`, the generation aggregates `done` —
+    /// the stale failed attempt does not poison the card. A CAPPED chain (last
+    /// failure has no child) still aggregates `failed`.
+    #[tokio::test]
+    async fn aggregate_ignores_retry_superseded_attempts() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_chain(pool, "retry").await;
+
+        // Parent failed, retry child (same generation, parent_task_id set) done.
+        seed_task_gen(pool, "retry", "parent", "failed", 1, 0).await;
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
+              generation, parent_task_id, attempt) \
+             VALUES ('child', ?, 'rt', 'ag', 'retry', 'done', 2, 0, 'parent', 2)",
+        )
+        .bind(WS)
+        .execute(pool).await.unwrap();
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "retry").await.unwrap().as_deref(),
+            Some("done"),
+            "the superseded failed attempt is excluded; the retry child's done wins"
+        );
+
+        // A capped chain: the child itself fails with no further child → failed.
+        seed_chain(pool, "capped").await;
+        seed_task_gen(pool, "capped", "cp-parent", "failed", 1, 0).await;
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
+              generation, parent_task_id, attempt) \
+             VALUES ('cp-child', ?, 'rt', 'ag', 'capped', 'failed', 2, 0, 'cp-parent', 2)",
+        )
+        .bind(WS)
+        .execute(pool).await.unwrap();
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "capped").await.unwrap().as_deref(),
+            Some("failed"),
+            "a capped chain's LAST failure has no child and still fails the card"
         );
     }
 
