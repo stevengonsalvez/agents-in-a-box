@@ -205,3 +205,70 @@ async fn transition_status_stamps_lifecycle_timestamps() {
     assert_eq!(task.finished_at, None, "re-queue clears finished_at");
     assert_eq!(task.dispatched_at, None, "re-queue clears dispatched_at");
 }
+
+/// `active_task_for_issue` (tcp T3 / F6) resolves the issue's NEWEST active
+/// (queued / dispatched / running) task, returns `None` once every task is
+/// terminal, and is workspace-scoped — a foreign workspace never resolves the
+/// card's task. Backs the card-cancel path, which carries only an issue id.
+#[tokio::test]
+async fn active_task_for_issue_resolves_the_live_task_scoped() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("store");
+    seed_two_workspaces(&store).await;
+    // The card's issue (agent_task_queue.issue_id references it).
+    sqlx::query(
+        "INSERT INTO issue (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('iss-1', 'ws-a', 'card', 'open', 'member', 'user-ws-a', 0)",
+    )
+    .execute(store.pool())
+    .await
+    .expect("issue");
+
+    // One active (queued) task on the issue.
+    let mut t1 = new_task("a-1", "ws-a", "rt-a", "agent-a", 100);
+    t1.issue_id = Some("iss-1".into());
+    TaskRepo::insert(store.pool(), &t1).await.expect("insert a-1");
+    assert_eq!(
+        TaskRepo::active_task_for_issue(store.pool(), "ws-a", "iss-1")
+            .await
+            .expect("query")
+            .map(|t| t.id),
+        Some("a-1".to_string()),
+        "the queued task is the issue's active task",
+    );
+
+    // Tenant guard: a foreign workspace never resolves ws-a's task.
+    assert!(
+        TaskRepo::active_task_for_issue(store.pool(), "ws-b", "iss-1")
+            .await
+            .expect("query")
+            .is_none(),
+        "ws-b must not see ws-a's active task",
+    );
+
+    // Once cancelled (terminal), the issue has no active task.
+    TaskRepo::transition_status(store.pool(), "ws-a", "a-1", TaskStatus::Cancelled, 200)
+        .await
+        .expect("cancel");
+    assert!(
+        TaskRepo::active_task_for_issue(store.pool(), "ws-a", "iss-1")
+            .await
+            .expect("query")
+            .is_none(),
+        "a cancelled task is not active",
+    );
+
+    // A fresh task on the same issue (allowed now the prior is terminal) is the
+    // newest active one — the card's rerun resolves to it, not the dead a-1.
+    let mut t2 = new_task("a-2", "ws-a", "rt-a", "agent-a", 300);
+    t2.issue_id = Some("iss-1".into());
+    TaskRepo::insert(store.pool(), &t2).await.expect("insert a-2");
+    assert_eq!(
+        TaskRepo::active_task_for_issue(store.pool(), "ws-a", "iss-1")
+            .await
+            .expect("query")
+            .map(|t| t.id),
+        Some("a-2".to_string()),
+        "the fresh task is the newest active task",
+    );
+}
