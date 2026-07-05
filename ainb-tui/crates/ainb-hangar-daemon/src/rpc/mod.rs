@@ -2467,6 +2467,45 @@ fn card_run_err(e: CardRunError) -> RpcError {
     }
 }
 
+/// The card launches currently in flight, keyed by issue id (tcp T4 hardening).
+///
+/// [`run_card`]'s blocked/active checks and its enqueue are separate statements,
+/// so two CONCURRENT launches of one card — a manual Run racing the finalize
+/// auto-run — could both pass the checks before either inserts. The migration-0012
+/// unique index only backstops `queued`/`dispatched` rows: once the first task is
+/// claimed to `running`, the second insert would slip through and the card runs
+/// twice. Every launch path lives in this one daemon process (the daemon owns the
+/// socket, the claim loop, AND the store — architecture invariant #1), so an
+/// in-process per-issue slot held across the whole check+enqueue serializes them:
+/// the loser refuses exactly like a run that lost to an already-active task.
+static CARD_LAUNCHES_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
+    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+
+/// RAII slot in [`CARD_LAUNCHES_IN_FLIGHT`]: acquired at [`run_card`] entry,
+/// released on drop (any exit path). The mutex is only held inside
+/// acquire/release — never across an await — so it cannot block the runtime.
+struct CardLaunchSlot(String);
+
+impl CardLaunchSlot {
+    /// Claim the launch slot for `issue_id`, or `None` when another launch of the
+    /// same card is already in flight.
+    fn acquire(issue_id: &str) -> Option<Self> {
+        let mut set = CARD_LAUNCHES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        set.insert(issue_id.to_string()).then(|| Self(issue_id.to_string()))
+    }
+}
+
+impl Drop for CardLaunchSlot {
+    fn drop(&mut self) {
+        CARD_LAUNCHES_IN_FLIGHT
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .remove(&self.0);
+    }
+}
+
 /// Launch a card's issue NOW — the shared core behind the `board_card_run` RPC and
 /// the F7 auto-run seam (tcp T4).
 ///
@@ -2502,6 +2541,13 @@ pub(crate) async fn run_card(
     use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
 
     let issue_id = issue.id.as_str();
+
+    // 0. One launch of a card at a time (in-process slot, held to the end of this
+    //    function): a manual Run racing the finalize auto-run serializes here, so
+    //    the checks below can never both pass for one card. The loser reports the
+    //    same "already active" refusal a lost re-run gets.
+    let _launch_slot = CardLaunchSlot::acquire(issue_id)
+        .ok_or_else(|| CardRunError::ActiveRun("launching".to_string()))?;
 
     // 1. F7 refuse-run: a card with any UNFINISHED blocker is not dispatched.
     let blockers = CardDependencyRepo::unfinished_blockers_of(pool, issue_id)
