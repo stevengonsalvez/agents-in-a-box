@@ -32,6 +32,7 @@ pub mod osnotify;
 pub mod paths;
 pub mod pid;
 pub mod procs;
+pub mod resolver;
 pub mod store;
 pub mod transition;
 

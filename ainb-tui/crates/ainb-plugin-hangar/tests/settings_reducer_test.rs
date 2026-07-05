@@ -356,6 +356,34 @@ fn notify_grid_g_toggles_scope_and_requests_refresh() {
     assert_eq!(back.intent, Some(SettingsIntent::RefreshNotifyRules));
 }
 
+/// Scope-echo drop (agents-in-a-box-cqh): a `notify_rules_list` reply is applied
+/// only when the scope it echoes still matches the grid's CURRENT edit scope. A
+/// reply for the scope the grid already left (an in-flight old-scope reply landing
+/// after a `g` toggle) is DROPPED, so it can't briefly repopulate the wrong rows.
+#[test]
+fn stale_scope_notify_reply_is_dropped() {
+    use ainb_plugin_hangar::screen::settings::notify_reply_matches_scope;
+    let ws = "ws-1";
+
+    // Global scope answers the global (workspace_id=None) reply, drops a workspace one.
+    assert!(notify_reply_matches_scope(NotifyScope::Global, ws, None));
+    assert!(
+        !notify_reply_matches_scope(NotifyScope::Global, ws, Some(ws)),
+        "a workspace-scoped reply is stale once the grid is back on global"
+    );
+
+    // Workspace scope answers its own workspace reply, drops the global one.
+    assert!(notify_reply_matches_scope(NotifyScope::Workspace, ws, Some(ws)));
+    assert!(
+        !notify_reply_matches_scope(NotifyScope::Workspace, ws, None),
+        "a global reply is stale once the grid flipped to workspace"
+    );
+    assert!(
+        !notify_reply_matches_scope(NotifyScope::Workspace, ws, Some("other-ws")),
+        "a different workspace's reply is stale"
+    );
+}
+
 /// Esc aborts the key-entry modal without emitting an intent.
 #[test]
 fn esc_aborts_key_entry_modal() {

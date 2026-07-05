@@ -1778,6 +1778,15 @@ pub struct NotifyRulesListParams {
 pub struct NotifyRulesListResult {
     /// The routing rules, one per kind.
     pub rules: Vec<NotifyRuleWireRow>,
+    /// The scope this reply answers — echoes the request's `workspace_id`
+    /// (`None` = the global rows, `Some(ws)` = that workspace's effective rows).
+    /// A settings grid that flips its edit scope (`g`, agents-in-a-box-cqh) while
+    /// a list request is in flight uses this echo to DROP a reply for the scope it
+    /// just left, so a stale reply can't briefly repopulate the grid with the
+    /// wrong scope's rows. Append-only + `default` so an older daemon that omits
+    /// it round-trips as `None` (the global scope, the pre-echo behaviour).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_NOTIFY_RULE_SET`] (tcp T5): set one rule.

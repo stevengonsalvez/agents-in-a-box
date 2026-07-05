@@ -806,7 +806,20 @@ impl HangarPlugin {
                 ainb_hangar_proto::snapshots::NotifyRulesListResult,
             >(result.clone())
             {
-                self.screens.set_notify_rules(r.rules);
+                // Drop a STALE-SCOPE reply (agents-in-a-box-cqh): if `g` flipped the
+                // grid's edit scope while this list was in flight, the reply answers
+                // the scope we just LEFT — applying it would briefly repopulate the
+                // grid with the wrong scope's rows before the in-scope reply lands.
+                // The result echoes the scope it answered; keep it only when that
+                // matches the grid's CURRENT scope.
+                let ws_id = self.app_state().ws_id.as_str().to_string();
+                if crate::screen::settings::notify_reply_matches_scope(
+                    self.screens.notify_scope(),
+                    &ws_id,
+                    r.workspace_id.as_deref(),
+                ) {
+                    self.screens.set_notify_rules(r.rules);
+                }
             }
         }
         self.conn.on_event();
