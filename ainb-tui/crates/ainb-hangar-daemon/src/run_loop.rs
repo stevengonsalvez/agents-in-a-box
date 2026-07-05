@@ -264,6 +264,7 @@ pub async fn run(
     // handle is dropped (process exit tears the task down, mirroring
     // `spawn_sweepers`); a future supervisor can keep it to cancel cleanly.
     let _gc = spawn_gc_sweeper(
+        pool.clone(),
         hangar_home(),
         cfg.sweeper.gc_interval,
         Arc::new(SystemClock),
@@ -460,6 +461,14 @@ async fn cap_parent_inbox() {
 /// the orphan-scan code existed but nothing ticked it, so leaked dirs
 /// accumulated forever.
 ///
+/// On the same tick it also sweeps orphaned task WORKTREES under
+/// `{home}/.agents-in-a-box/worktrees/` (tcp yjj) via
+/// [`sweep_orphan_worktrees`](crate::workdir_provision::sweep_orphan_worktrees):
+/// a Ctrl-C mid-run or a crash between finalize and teardown leaves a terminal
+/// task's git worktree on disk, so this removes each whose task is terminal and
+/// whose tree is clean (keeping dirty ones), pruning the git registration. This
+/// pass needs the store to resolve each worktree's task status, hence the `pool`.
+///
 /// The `clock` is injected so the 72h grace comparison is deterministic under
 /// test (production passes [`SystemClock`]). Each pass is independent and
 /// idempotent (a missing tree is a no-op, an already-removed dir is success),
@@ -469,6 +478,7 @@ async fn cap_parent_inbox() {
 /// the task down, mirroring [`spawn_sweepers`].
 #[must_use]
 pub fn spawn_gc_sweeper(
+    pool: SqlitePool,
     home: PathBuf,
     interval: Duration,
     clock: Arc<dyn HangarClock>,
@@ -487,6 +497,18 @@ pub fn spawn_gc_sweeper(
                 }
                 Ok(_) => {}
                 Err(e) => tracing::error!(error = %e, kind = "workspace_gc", "gc pass failed"),
+            }
+            match crate::workdir_provision::sweep_orphan_worktrees(&pool, &home).await {
+                Ok(report) if report.removed > 0 || report.kept_dirty > 0 => {
+                    tracing::info!(
+                        removed = report.removed,
+                        kept_dirty = report.kept_dirty,
+                        kept_active = report.kept_active,
+                        "worktree_gc_swept"
+                    );
+                }
+                Ok(_) => {}
+                Err(e) => tracing::error!(error = %e, kind = "worktree_gc", "gc pass failed"),
             }
         }
     })
