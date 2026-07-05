@@ -720,3 +720,190 @@ async fn boards_are_workspace_scoped() {
         "a cross-tenant board must not be mutable: {cross}"
     );
 }
+
+/// tcp T3 / F6: `board_card_reorder` rewrites the order of ONE column's cards, and
+/// the new order survives a fresh `boards_list` (persisted to `board_card.ord`,
+/// not merely echoed). A reorder set that is not exactly the column's cards is
+/// rejected.
+#[tokio::test]
+async fn card_reorder_persists_within_column_and_rejects_bad_set() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Order" }),
+        )
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
+        .await;
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Place issue-1 then issue-2 → they APPEND in that order (ord 0, 1).
+    for issue in ["issue-1", "issue-2"] {
+        c.call(
+            methods::HANGAR_BOARD_CARD_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue, "column_id": todo_id }),
+        )
+        .await;
+    }
+    let order = |resp: &serde_json::Value| -> Vec<String> {
+        only_board(resp)["columns"].as_array().unwrap()[0]["cards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|c| c["issue_id"].as_str().unwrap().to_string())
+            .collect()
+    };
+    let list = c.call(methods::HANGAR_BOARDS_LIST, serde_json::json!({ "workspace_id": WS_SLUG })).await;
+    assert_eq!(order(&list), vec!["issue-1", "issue-2"], "cards append in insertion order");
+
+    // Reorder to [issue-2, issue-1]; the reply reflects it.
+    let reordered = c
+        .call(
+            methods::HANGAR_BOARD_CARD_REORDER,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "issue_ids": ["issue-2", "issue-1"] }),
+        )
+        .await;
+    assert!(reordered["error"].is_null(), "reorder must ack: {reordered}");
+    assert_eq!(order(&reordered), vec!["issue-2", "issue-1"], "reply reflects the new order");
+
+    // A fresh boards_list proves the order PERSISTED (ord written to disk), not
+    // just echoed by the mutation reply.
+    let refetched = c.call(methods::HANGAR_BOARDS_LIST, serde_json::json!({ "workspace_id": WS_SLUG })).await;
+    assert_eq!(order(&refetched), vec!["issue-2", "issue-1"], "the reorder persisted across a re-fetch");
+
+    // A set that is not exactly the column's cards is rejected, nothing written.
+    let bad = c
+        .call(
+            methods::HANGAR_BOARD_CARD_REORDER,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "issue_ids": ["issue-2"] }),
+        )
+        .await;
+    assert!(!bad["error"].is_null(), "an incomplete reorder set must be rejected: {bad}");
+    let after = c.call(methods::HANGAR_BOARDS_LIST, serde_json::json!({ "workspace_id": WS_SLUG })).await;
+    assert_eq!(order(&after), vec!["issue-2", "issue-1"], "a rejected reorder leaves the order intact");
+}
+
+/// tcp T3 / F6: `board_card_remove` takes a card OFF a board but keeps the
+/// underlying issue (re-addable), REFUSES a card with an active run
+/// (delete-while-running = cancel-first), and is an idempotent no-op for a
+/// non-card issue.
+#[tokio::test]
+async fn card_remove_keeps_issue_and_refuses_active_run() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Cleanup" }),
+        )
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
+        .await;
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // A card that will get a live run: assign the seeded agent + a repo so a
+    // headless run enqueues.
+    let with_card = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "board_id": board_id,
+                "column_id": todo_id,
+                "title": "Throwaway",
+                "assignee_profile": "claude-agent",
+                "repo_ref": "scratch",
+            }),
+        )
+        .await;
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap()[0]["issue_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+
+    // Enqueue a run → the card now has an ACTIVE task.
+    let run = c
+        .call(
+            methods::HANGAR_BOARD_CARD_RUN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }),
+        )
+        .await;
+    assert!(run["error"].is_null(), "run must ack: {run}");
+
+    // A remove while the run is active is REFUSED (cancel-first).
+    let refused = c
+        .call(
+            methods::HANGAR_BOARD_CARD_REMOVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }),
+        )
+        .await;
+    assert!(!refused["error"].is_null(), "removing a card with an active run must be refused: {refused}");
+    assert!(
+        refused["error"]["message"].as_str().unwrap_or_default().contains("active run"),
+        "the refusal names the active run: {refused}"
+    );
+
+    // Cancel the run, then the remove is allowed.
+    let cancelled = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CANCEL,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }),
+        )
+        .await;
+    assert!(cancelled["error"].is_null(), "cancel must ack: {cancelled}");
+    let removed = c
+        .call(
+            methods::HANGAR_BOARD_CARD_REMOVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }),
+        )
+        .await;
+    assert!(removed["error"].is_null(), "remove after cancel must ack: {removed}");
+    let cards = only_board(&removed)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap();
+    assert!(cards.is_empty(), "the card is off the board: {removed}");
+
+    // The underlying issue SURVIVES the card removal (removing a card is not
+    // deleting the issue).
+    let issue_alive: Option<i64> = sqlx::query_scalar("SELECT 1 FROM issue WHERE id = ?")
+        .bind(&issue_id)
+        .fetch_optional(store.pool())
+        .await
+        .expect("issue query");
+    assert_eq!(issue_alive, Some(1), "the issue is kept after the card is removed");
+
+    // Removing a NON-card issue (issue-1 was never added) is an idempotent no-op.
+    let noop = c
+        .call(
+            methods::HANGAR_BOARD_CARD_REMOVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": "issue-1" }),
+        )
+        .await;
+    assert!(noop["error"].is_null(), "removing a non-card is a clean no-op: {noop}");
+}
