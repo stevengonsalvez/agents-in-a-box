@@ -10,7 +10,7 @@
 //! without overflowing the area.
 
 use ainb_hangar_proto::snapshots::{
-    BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult,
+    BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult, CardMemberChip,
 };
 use ainb_plugin_hangar::{
     reduce_boards, render_boards, BoardsEvent, BoardsKey, BoardsState, BoardsStatus, RepoOption,
@@ -26,6 +26,10 @@ fn card(issue: &str, title: &str, state: Option<&str>) -> BoardCardWireRow {
         session_name: None,
         repo_ref: None,
         agent: None,
+        squad_id: None,
+        member_states: Vec::new(),
+        blocked_by: Vec::new(),
+        auto_run: false,
     }
 }
 
@@ -175,6 +179,82 @@ fn render_narrow_board_snapshot() {
     }
     let map = glyph_map(&buf, W);
     assert!(map.contains("Board: Delivery"), "title at narrow width:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+// ---------------------------------------------------------------------------
+// tcp T4 / F7 — squad-from-card + card dependencies render.
+// ---------------------------------------------------------------------------
+
+/// A one-column board whose card is BLOCKED by an unfinished blocker card (tcp T4
+/// / F7): the card renders the 🔒 marker + the blocker ref in its title badge.
+fn blocked_card_board() -> BoardsListResult {
+    let blocked = BoardCardWireRow {
+        blocked_by: vec!["ock-1".into()],
+        ..card("dep01", "Ship the migration", None)
+    };
+    BoardsListResult {
+        boards: vec![BoardWireRow {
+            id: "b1".into(),
+            name: "Delivery".into(),
+            auto_move: true,
+            columns: vec![col("c1", "Todo", None, false, vec![blocked])],
+            unmapped: Vec::new(),
+        }],
+    }
+}
+
+/// A one-column board whose card is assigned a SQUAD and has run (tcp T4 / F7):
+/// the card renders one member chip per fanned-out member task + the auto-run
+/// marker.
+fn squad_card_board() -> BoardsListResult {
+    let squad = BoardCardWireRow {
+        squad_id: Some("sq-1".into()),
+        auto_run: true,
+        member_states: vec![
+            CardMemberChip { agent_id: "a-lead".into(), agent_name: "lead".into(), state: Some("running".into()) },
+            CardMemberChip { agent_id: "a-m1".into(), agent_name: "m1".into(), state: Some("queued".into()) },
+        ],
+        ..card("sqd01", "Fan this out", Some("running"))
+    };
+    BoardsListResult {
+        boards: vec![BoardWireRow {
+            id: "b1".into(),
+            name: "Delivery".into(),
+            auto_move: true,
+            columns: vec![col("c1", "Running", Some("running"), true, vec![squad])],
+            unmapped: Vec::new(),
+        }],
+    }
+}
+
+/// A BLOCKED card renders 🔒 (the blocked marker) + the blocker ref in its badge —
+/// the F7 blocked-state on the board.
+#[test]
+fn render_blocked_card_snapshot() {
+    let state = BoardsState::from_snapshot(&blocked_card_board());
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains('🔒'), "blocked card shows the lock marker:\n{map}");
+    assert!(map.contains("ock-1"), "the blocker ref renders:\n{map}");
+    insta::assert_snapshot!(map);
+}
+
+/// A SQUAD card renders one member chip per fanned-out member (name:state) + the
+/// auto-run marker — the F7 squad-from-card state on the board.
+#[test]
+fn render_squad_card_snapshot() {
+    let state = BoardsState::from_snapshot(&squad_card_board());
+    let mut buf = WireBuffer::new(120, 20);
+    render_boards(&mut buf, 120, 0, 20, &state);
+    let map = glyph_map(&buf, 120);
+    assert!(map.contains('👥'), "squad card shows the members marker:\n{map}");
+    assert!(
+        map.contains("lead:running") && map.contains("m1:queued"),
+        "per-member chips render:\n{map}"
+    );
+    assert!(map.contains('⏵'), "auto-run marker renders:\n{map}");
     insta::assert_snapshot!(map);
 }
 

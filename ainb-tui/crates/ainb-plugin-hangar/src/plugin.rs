@@ -1704,6 +1704,37 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_BOARD_CARD_TIMELINE,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
             ),
+            // T4 / F7: assign-squad, add-dependency, and set-auto-run all answer with
+            // the refreshed BoardsListResult under BOARDS_REQ_ID, so the board
+            // re-renders (member chips / 🔒 blocked-state / auto-run marker) from the
+            // reply without a second round-trip (mirrors CardRemove).
+            BoardsAction::CardAssignSquad {
+                board_id,
+                issue_id,
+                squad_id,
+            } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id, "squad_id": squad_id }),
+            ),
+            BoardsAction::CardDepAdd {
+                board_id,
+                dependent_issue_id,
+                blocker_issue_id,
+            } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_DEP_ADD,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id }),
+            ),
+            BoardsAction::CardSetAutoRun {
+                board_id,
+                issue_id,
+                auto_run,
+            } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_SET_AUTO_RUN,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id, "auto_run": auto_run }),
+            ),
             // A local-overlay repaint round-trip: re-fetch the board list; the
             // reply re-renders with the open overlay preserved.
             BoardsAction::Refresh => (

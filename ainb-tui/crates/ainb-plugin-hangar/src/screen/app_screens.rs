@@ -253,6 +253,36 @@ pub enum BoardsAction {
         /// The new column name.
         name: String,
     },
+    /// Assign (or clear) a squad as a card's assignee (`q`) —
+    /// `hangar/board_card_assign_squad` (tcp T4 / F7).
+    CardAssignSquad {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue to (re)assign.
+        issue_id: String,
+        /// The squad to assign, or `None` to clear.
+        squad_id: Option<String>,
+    },
+    /// Add a depends-on blocker to a card (`D`) — `hangar/board_card_dep_add`
+    /// (tcp T4 / F7).
+    CardDepAdd {
+        /// The board both cards sit on.
+        board_id: String,
+        /// The DEPENDENT card's issue.
+        dependent_issue_id: String,
+        /// The BLOCKER card's issue.
+        blocker_issue_id: String,
+    },
+    /// Flip a card's auto-run flag (`R`) — `hangar/board_card_set_auto_run`
+    /// (tcp T4 / F7).
+    CardSetAutoRun {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue.
+        issue_id: String,
+        /// The new auto-run value.
+        auto_run: bool,
+    },
     /// Re-fetch `hangar/boards_list` to force a repaint after a purely-local
     /// overlay change (open / typed keystroke). A local key change arms no daemon
     /// reply of its own, so without this round-trip the overlay never renders
@@ -652,6 +682,18 @@ impl ScreenStates {
         next.set_create_buffer(creating);
         next.set_note(note);
         self.squads = next;
+        // tcp T4 / F7: the Boards assign-squad picker draws from the same roster, so
+        // feed it the (id, name) options from the fresh snapshot.
+        self.boards.set_squads(
+            snapshot
+                .squads
+                .iter()
+                .map(|s| super::boards::SquadOption {
+                    id: s.id.clone(),
+                    name: s.name.clone(),
+                })
+                .collect(),
+        );
     }
 
     /// Take the pending squad mutation RPC raised by the Squads screen, if any
@@ -1383,6 +1425,12 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'x' => Some(BoardsEvent::DeleteColumn),
             'c' => Some(BoardsEvent::AddCard),
             'm' => Some(BoardsEvent::ToggleAutoMove),
+            // `q` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a picker.
+            'q' => Some(BoardsEvent::AssignSquad),
+            // `D` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
+            'D' => Some(BoardsEvent::AddDependency),
+            // `R` (uppercase, distinct from `r` = rename) toggles the auto-run flag.
+            'R' => Some(BoardsEvent::ToggleAutoRun),
             _ => None,
         },
         _ => None,
@@ -1421,6 +1469,33 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
         } => Some(BoardsAction::BoardUpdate {
             board_id,
             auto_move,
+        }),
+        BoardsIntent::AssignSquad {
+            board_id,
+            issue_id,
+            squad_id,
+        } => Some(BoardsAction::CardAssignSquad {
+            board_id,
+            issue_id,
+            squad_id,
+        }),
+        BoardsIntent::AddDependency {
+            board_id,
+            dependent_issue_id,
+            blocker_issue_id,
+        } => Some(BoardsAction::CardDepAdd {
+            board_id,
+            dependent_issue_id,
+            blocker_issue_id,
+        }),
+        BoardsIntent::ToggleAutoRun {
+            board_id,
+            issue_id,
+            auto_run,
+        } => Some(BoardsAction::CardSetAutoRun {
+            board_id,
+            issue_id,
+            auto_run,
         }),
         BoardsIntent::CreateCard {
             board_id,

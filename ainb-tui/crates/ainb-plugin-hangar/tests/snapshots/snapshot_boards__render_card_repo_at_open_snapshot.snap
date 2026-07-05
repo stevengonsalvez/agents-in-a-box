@@ -3,7 +3,7 @@ source: crates/ainb-plugin-hangar/tests/snapshot_boards.rs
 expression: map
 ---
 Board: Delivery   [1/1]   auto-move ON
-↵:run/rerun  a:attach  X:cancel  t:timeline  e:edit  d:remove  ⇧↑↓:move card  n:add col  r:rename  x:del col  c:add card
+↵:run/rerun  a:attach  X:cancel  t:timeline  e:edit  d:remove  q:squad  D:depends-on  R:auto-run  ⇧↑↓:move card  n:add c
 Repo for "Refactor" (@ to search, Enter pick — REQUIRED): ↦running (⋯ + ◈ Failed ↦failed (1)⋯ + ◈ Done ↦done (1)    ⋯ +
 @ [scratch]  ★ainb   widget
 ┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮

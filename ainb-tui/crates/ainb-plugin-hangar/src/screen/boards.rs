@@ -29,7 +29,7 @@
 //! auto-move, create/delete a board). Pure: no IO, no input mutation.
 
 use ainb_hangar_proto::events::MessageKind;
-use ainb_hangar_proto::snapshots::{BoardCardWireRow, BoardsListResult};
+use ainb_hangar_proto::snapshots::{BoardCardWireRow, BoardsListResult, CardMemberChip};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use crate::screen::task_detail::ViewEntry;
@@ -163,6 +163,16 @@ pub enum BoardsStatus {
     Error(String),
 }
 
+/// One pickable squad in the assign-squad roster (tcp T4 / F7): its id (the wire
+/// key the `board_card_assign_squad` RPC carries) + its display name.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SquadOption {
+    /// The squad's id (`squad.id`).
+    pub id: String,
+    /// The squad's display name.
+    pub name: String,
+}
+
 /// A card flattened for the Boards render (derived from a [`BoardCardWireRow`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CardView {
@@ -184,6 +194,17 @@ pub struct CardView {
     /// The card's persisted provider-agent token (`claude`/`codex`/`copilot`), or
     /// `None` when unset. The F6 edit overlay prefills its agent chip from this.
     pub agent: Option<String>,
+    /// The card's assigned SQUAD (`squad.id`), or `None` for a single-agent card
+    /// (tcp T4 / F7). A set squad makes a run fan out; the card renders member chips.
+    pub squad_id: Option<String>,
+    /// One chip per squad member's task on this card (agent name + state), tcp T4 /
+    /// F7. Empty for a single-agent card or a squad card that has not run yet.
+    pub member_states: Vec<CardMemberChip>,
+    /// The DISPLAY IDS of this card's UNFINISHED blocker cards (tcp T4 / F7).
+    /// Non-empty ⇒ the card is BLOCKED (renders 🔒 + these refs) and refuses to run.
+    pub blocked_by: Vec<String>,
+    /// Whether this card auto-launches when its last blocker completes (tcp T4 / F7).
+    pub auto_run: bool,
 }
 
 impl CardView {
@@ -196,7 +217,18 @@ impl CardView {
             session_name: w.session_name.clone(),
             repo_ref: w.repo_ref.clone(),
             agent: w.agent.clone(),
+            squad_id: w.squad_id.clone(),
+            member_states: w.member_states.clone(),
+            blocked_by: w.blocked_by.clone(),
+            auto_run: w.auto_run,
         }
+    }
+
+    /// Whether the card is BLOCKED by at least one unfinished blocker card (tcp T4 /
+    /// F7) — it renders 🔒 and refuses to run until its blockers finish.
+    #[must_use]
+    pub fn is_blocked(&self) -> bool {
+        !self.blocked_by.is_empty()
     }
 
     /// Whether the card's work has succeeded (its latest task is `done`).
@@ -498,6 +530,25 @@ pub enum BoardsOverlay {
         /// The card's issue to take off the board.
         issue_id: String,
     },
+    /// Picking a SQUAD to assign to the focused card (`q`, tcp T4 / F7). ↑↓ move over
+    /// the injected squad roster with a leading "✗ clear" row (index 0); Enter
+    /// commits (index 0 clears, else assigns). A no-op roster shows just the clear
+    /// row. Rides the text-capture signal like [`Self::RunMode`].
+    SquadPick {
+        /// The card's issue to (re)assign.
+        issue_id: String,
+        /// The highlighted row (0 = clear, `n+1` = the roster's squad `n`).
+        cursor: usize,
+    },
+    /// Picking a BLOCKER card for the focused (dependent) card (`D`, tcp T4 / F7).
+    /// ↑↓ move over the board's OTHER cards; Enter commits the depends-on edge. The
+    /// daemon rejects a self / cyclic / cross-board edge with a note.
+    DepPick {
+        /// The DEPENDENT card's issue (the one that gets blocked).
+        dependent_issue_id: String,
+        /// The highlighted candidate blocker (index into the other-cards list).
+        cursor: usize,
+    },
 }
 
 /// A raw key folded into an open [`BoardsOverlay`]. The reducer interprets each
@@ -543,6 +594,10 @@ pub struct BoardsState {
     /// The agent chip the card-create picker pre-selects (spec F4 cascade),
     /// injected by the glue (defaults to [`AgentChip::Claude`]).
     default_agent: AgentChip,
+    /// The squad roster the assign-squad picker offers (tcp T4 / F7), injected by
+    /// the glue from `hangar/squads_list` and preserved across a `boards_list`
+    /// refresh (like [`Self::profiles`]).
+    squads: Vec<SquadOption>,
     /// The open interactive overlay (card create / column rename / run mode), or
     /// `None`. Preserved across a `boards_list` refresh so a background refresh
     /// while typing never drops the input.
@@ -598,6 +653,7 @@ impl BoardsState {
             profiles: Vec::new(),
             repos: Vec::new(),
             default_agent: AgentChip::default(),
+            squads: Vec::new(),
             overlay: None,
             note: None,
             timeline: None,
@@ -694,6 +750,19 @@ impl BoardsState {
     #[must_use]
     pub fn profiles(&self) -> &[String] {
         &self.profiles
+    }
+
+    /// Inject the squad roster the assign-squad picker offers (tcp T4 / F7). Called
+    /// by the glue whenever `hangar/squads_list` refreshes; kept out of the wire
+    /// snapshot so the pure reducer never depends on IO.
+    pub fn set_squads(&mut self, squads: Vec<SquadOption>) {
+        self.squads = squads;
+    }
+
+    /// The injected squad roster.
+    #[must_use]
+    pub fn squads(&self) -> &[SquadOption] {
+        &self.squads
     }
 
     /// Inject the `@`-autocomplete repo roster (spec F3), favorites-first order
@@ -873,6 +942,15 @@ pub enum BoardsEvent {
     ReorderColumnRight,
     /// Toggle the focused board's auto-move master toggle (`m`).
     ToggleAutoMove,
+    /// Assign a SQUAD to the focused card (`q`, tcp T4 / F7) — opens a picker over
+    /// the injected squad roster (plus a "clear" row). A no-op with no card focused.
+    AssignSquad,
+    /// Add a `depends-on` blocker to the focused card (`D`, tcp T4 / F7) — opens a
+    /// picker over the board's OTHER cards. A no-op with no card focused.
+    AddDependency,
+    /// Toggle the focused card's auto-run flag (`R`, tcp T4 / F7) — the card
+    /// auto-launches when its last blocker completes. A no-op with no card focused.
+    ToggleAutoRun,
     /// A key folded into the open interactive overlay (card create / column
     /// rename / run mode). A no-op when no overlay is open.
     Key(BoardsKey),
@@ -1008,6 +1086,35 @@ pub enum BoardsIntent {
         /// The new toggle value.
         auto_move: bool,
     },
+    /// Assign (or clear) a squad as the card's assignee
+    /// (`hangar/board_card_assign_squad`, tcp T4 / F7). `squad_id = None` clears.
+    AssignSquad {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue to (re)assign.
+        issue_id: String,
+        /// The squad to assign, or `None` to clear (revert to a single-agent run).
+        squad_id: Option<String>,
+    },
+    /// Add a `depends-on` blocker edge to the focused (dependent) card
+    /// (`hangar/board_card_dep_add`, tcp T4 / F7).
+    AddDependency {
+        /// The board both cards sit on.
+        board_id: String,
+        /// The DEPENDENT card's issue (the one that gets blocked).
+        dependent_issue_id: String,
+        /// The BLOCKER card's issue (must finish first).
+        blocker_issue_id: String,
+    },
+    /// Flip the card's auto-run flag (`hangar/board_card_set_auto_run`, tcp T4 / F7).
+    ToggleAutoRun {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue.
+        issue_id: String,
+        /// The new auto-run value.
+        auto_run: bool,
+    },
 }
 
 /// The result of folding one [`BoardsEvent`] into a [`BoardsState`].
@@ -1087,6 +1194,25 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             board_id: b.id.clone(),
             auto_move: !b.auto_move,
         }),
+        // Assign-squad opens the squad picker over the focused card (Enter there
+        // commits an AssignSquad intent). A no-op with no card focused.
+        BoardsEvent::AssignSquad => open_overlay(state, |_, c| BoardsOverlay::SquadPick {
+            issue_id: c.issue_id.clone(),
+            cursor: 0,
+        }),
+        // Add-dependency opens the blocker picker over the board's OTHER cards
+        // (Enter there commits an AddDependency intent). A no-op with no card focused.
+        BoardsEvent::AddDependency => open_overlay(state, |_, c| BoardsOverlay::DepPick {
+            dependent_issue_id: c.issue_id.clone(),
+            cursor: 0,
+        }),
+        // Toggle-auto-run flips the focused card's flag directly (no overlay — a
+        // single boolean the daemon persists).
+        BoardsEvent::ToggleAutoRun => card_intent(state, |b, c| BoardsIntent::ToggleAutoRun {
+            board_id: b.id.clone(),
+            issue_id: c.issue_id.clone(),
+            auto_run: !c.auto_run,
+        }),
         BoardsEvent::Key(k) => reduce_overlay_key(state, k),
     }
 }
@@ -1128,6 +1254,148 @@ fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
         }
         BoardsOverlay::CancelConfirm { issue_id } => cancel_confirm_key(state, &issue_id, key),
         BoardsOverlay::RemoveConfirm { issue_id } => remove_confirm_key(state, &issue_id, key),
+        BoardsOverlay::SquadPick { issue_id, cursor } => {
+            squad_pick_key(state, &issue_id, cursor, key)
+        }
+        BoardsOverlay::DepPick {
+            dependent_issue_id,
+            cursor,
+        } => dep_pick_key(state, &dependent_issue_id, cursor, key),
+    }
+}
+
+/// The squad picker's rows: a leading "clear" row (index 0) then the injected
+/// squad roster. Enter on row 0 clears the card's squad; on `n+1` assigns squad
+/// `n`. Kept in sync with [`squad_pick_key`]'s indexing + the render.
+fn squad_pick_rows(state: &BoardsState) -> usize {
+    state.squads.len() + 1
+}
+
+/// Pick / clear a squad for the card (tcp T4 / F7): ↑↓ move over the "clear" row +
+/// the roster; Enter commits an [`BoardsIntent::AssignSquad`] (index 0 = clear);
+/// Esc closes; a `Char` is ignored (a picker, not an input).
+fn squad_pick_key(
+    state: &BoardsState,
+    issue_id: &str,
+    cursor: usize,
+    key: BoardsKey,
+) -> BoardsReduction {
+    let rows = squad_pick_rows(state);
+    match key {
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Up => set_overlay(
+            state,
+            BoardsOverlay::SquadPick {
+                issue_id: issue_id.to_string(),
+                cursor: cursor.saturating_sub(1),
+            },
+        ),
+        BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::SquadPick {
+                issue_id: issue_id.to_string(),
+                cursor: (cursor + 1).min(rows.saturating_sub(1)),
+            },
+        ),
+        BoardsKey::Enter => {
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            // Row 0 clears; row n+1 picks the roster's squad n.
+            let squad_id = cursor
+                .checked_sub(1)
+                .and_then(|i| state.squads.get(i))
+                .map(|s| s.id.clone());
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::AssignSquad {
+                    board_id: board.id.clone(),
+                    issue_id: issue_id.to_string(),
+                    squad_id,
+                }),
+            }
+        }
+        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
+            state,
+            BoardsOverlay::SquadPick {
+                issue_id: issue_id.to_string(),
+                cursor,
+            },
+        ),
+    }
+}
+
+/// The issue ids of the board's cards OTHER than `dependent` — the candidate
+/// blockers the dep picker offers (a card cannot depend on itself). Board order
+/// across every column + the unmapped pool.
+fn dep_candidate_ids(state: &BoardsState, dependent: &str) -> Vec<String> {
+    let Some(board) = state.focused_board() else {
+        return Vec::new();
+    };
+    board
+        .columns
+        .iter()
+        .flat_map(|col| col.cards.iter())
+        .chain(board.unmapped.iter())
+        .map(|c| c.issue_id.clone())
+        .filter(|id| id != dependent)
+        .collect()
+}
+
+/// Pick a BLOCKER card for the dependent card (tcp T4 / F7): ↑↓ move over the
+/// board's other cards; Enter commits an [`BoardsIntent::AddDependency`]; Esc
+/// closes. An empty candidate list (a lone card) Enter closes with no intent.
+fn dep_pick_key(
+    state: &BoardsState,
+    dependent_issue_id: &str,
+    cursor: usize,
+    key: BoardsKey,
+) -> BoardsReduction {
+    let candidates = dep_candidate_ids(state, dependent_issue_id);
+    match key {
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Up => set_overlay(
+            state,
+            BoardsOverlay::DepPick {
+                dependent_issue_id: dependent_issue_id.to_string(),
+                cursor: cursor.saturating_sub(1),
+            },
+        ),
+        BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::DepPick {
+                dependent_issue_id: dependent_issue_id.to_string(),
+                cursor: (cursor + 1).min(candidates.len().saturating_sub(1)),
+            },
+        ),
+        BoardsKey::Enter => {
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            let Some(blocker) = candidates.get(cursor) else {
+                // No candidate (a lone card) — close without an edge.
+                return close_overlay(state);
+            };
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::AddDependency {
+                    board_id: board.id.clone(),
+                    dependent_issue_id: dependent_issue_id.to_string(),
+                    blocker_issue_id: blocker.clone(),
+                }),
+            }
+        }
+        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
+            state,
+            BoardsOverlay::DepPick {
+                dependent_issue_id: dependent_issue_id.to_string(),
+                cursor,
+            },
+        ),
     }
 }
 
@@ -1883,6 +2151,7 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
             state.profiles(),
             state.repos(),
             state.editing().is_some(),
+            state,
         );
     }
 }
@@ -1926,6 +2195,7 @@ fn render_overlay(
     profiles: &[String],
     repos: &[RepoOption],
     editing: bool,
+    state: &BoardsState,
 ) {
     let value_row = row.saturating_add(1);
     match overlay {
@@ -2017,6 +2287,50 @@ fn render_overlay(
             let shown = format!("take #{issue_id} off the board (the issue is kept)");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
+        BoardsOverlay::SquadPick { cursor, .. } => {
+            put_str(buf, 0, row, "Assign squad (↑↓ pick, Enter commit, Esc cancel):", GOLD, area_w);
+            // Row 0 is the "clear" option; rows 1.. are the injected squad roster.
+            let mut x = 0u16;
+            let clear_sel = *cursor == 0;
+            let clear_colour = if clear_sel { GREEN } else { MUTED };
+            let clear_marker = if clear_sel { "▶ " } else { "  " };
+            x = put_str(buf, x, value_row, clear_marker, clear_colour, area_w);
+            x = put_str(buf, x, value_row, "✗ clear", clear_colour, area_w);
+            x = put_str(buf, x, value_row, "   ", MUTED, area_w);
+            for (i, squad) in state.squads().iter().enumerate() {
+                let sel = *cursor == i + 1;
+                let colour = if sel { GREEN } else { MUTED };
+                let marker = if sel { "▶ " } else { "  " };
+                x = put_str(buf, x, value_row, marker, colour, area_w);
+                x = put_str(buf, x, value_row, &squad.name, colour, area_w);
+                x = put_str(buf, x, value_row, "   ", MUTED, area_w);
+                if x >= area_w {
+                    break;
+                }
+            }
+        }
+        BoardsOverlay::DepPick { dependent_issue_id, cursor } => {
+            put_str(buf, 0, row, "Depends on (↑↓ pick a blocker card, Enter commit, Esc cancel):", GOLD, area_w);
+            let candidates = dep_candidate_ids(state, dependent_issue_id);
+            if candidates.is_empty() {
+                put_str(buf, 0, value_row, "> (no other cards on this board to depend on)", MUTED, area_w);
+            } else {
+                let mut x = 0u16;
+                for (i, issue_id) in candidates.iter().enumerate() {
+                    let sel = i == *cursor;
+                    let colour = if sel { GREEN } else { MUTED };
+                    let open = if sel { "[" } else { " " };
+                    let close = if sel { "]" } else { " " };
+                    x = put_str(buf, x, value_row, open, colour, area_w);
+                    x = put_str(buf, x, value_row, &format!("#{issue_id}"), colour, area_w);
+                    x = put_str(buf, x, value_row, close, colour, area_w);
+                    x = put_str(buf, x, value_row, " ", MUTED, area_w);
+                    if x >= area_w {
+                        break;
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -2100,13 +2414,16 @@ fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
     // Card-lifecycle verbs (F6) lead so they render even when a narrow pane clips
     // the trailing column verbs. `⇧↑↓` reorders a card within its column, `d`
     // removes it. `feedback_keybinding_hints_near_control`.
-    let hints: [(&str, &str); 13] = [
+    let hints: [(&str, &str); 16] = [
         ("↵", "run/rerun"),
         ("a", "attach"),
         ("X", "cancel"),
         ("t", "timeline"),
         ("e", "edit"),
         ("d", "remove"),
+        ("q", "squad"),
+        ("D", "depends-on"),
+        ("R", "auto-run"),
         ("⇧↑↓", "move card"),
         ("n", "add col"),
         ("r", "rename"),
@@ -2164,14 +2481,46 @@ fn column_header(c: &ColumnView) -> String {
 /// Map a [`CardView`] onto a card-board card. A succeeded card gets a leading
 /// `✓` marker on its id line (the card-green-on-success signal in text form).
 fn card_view_to_board_card(c: &CardView) -> BoardCard {
-    let marker = if c.is_succeeded() { "✓ #" } else { "#" };
+    // 🔒 (blocked) takes precedence over ✓ (succeeded) — a blocked card can't run,
+    // so its blocked-state is the headline signal (tcp T4 / F7).
+    let marker = if c.is_blocked() {
+        "🔒 #"
+    } else if c.is_succeeded() {
+        "✓ #"
+    } else {
+        "#"
+    };
     BoardCard {
         issue_id: c.issue_id.clone(),
         display_id: format!("{marker}{}", c.display_id),
-        title: c.title.clone(),
+        title: card_title_with_t4_badges(c),
         priority: PriorityChip::from_priority(0),
         assignee_initial: c.title.chars().next(),
     }
+}
+
+/// The card title with compact tcp T4 badges appended (the shared card widget is
+/// untouched, so the T4 state rides the title string): `🔒[<blocker refs>]` when
+/// blocked, `👥[<member:state …>]` for a squad card's per-member chips, and `⏵` when
+/// auto-run is on. A plain single-agent, unblocked card renders its title verbatim.
+fn card_title_with_t4_badges(c: &CardView) -> String {
+    let mut title = c.title.clone();
+    if !c.blocked_by.is_empty() {
+        title.push_str(&format!(" 🔒[{}]", c.blocked_by.join(",")));
+    }
+    if !c.member_states.is_empty() {
+        let chips = c
+            .member_states
+            .iter()
+            .map(|m| format!("{}:{}", m.agent_name, m.state.as_deref().unwrap_or("—")))
+            .collect::<Vec<_>>()
+            .join(" ");
+        title.push_str(&format!(" 👥[{chips}]"));
+    }
+    if c.auto_run {
+        title.push_str(" ⏵");
+    }
+    title
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at `area_w`. Returns the next
@@ -2204,6 +2553,10 @@ mod tests {
             session_name: None,
             repo_ref: None,
             agent: None,
+            squad_id: None,
+            member_states: Vec::new(),
+            blocked_by: Vec::new(),
+            auto_run: false,
         }
     }
 
@@ -3018,5 +3371,112 @@ mod tests {
         assert!(out.state.overlay().is_none());
         assert_eq!(out.state.editing(), None);
         assert_eq!(out.intent, None);
+    }
+
+    // -- tcp T4 / F7: squad-from-card + card dependencies ---------------------
+
+    /// `from_wire` copies the T4 fields, and `is_blocked` reflects a non-empty
+    /// blocker list; `card_view_to_board_card` renders the 🔒 marker + the badges.
+    #[test]
+    fn card_view_maps_t4_fields_and_renders_markers() {
+        let wire = BoardCardWireRow {
+            squad_id: Some("sq-1".into()),
+            member_states: vec![CardMemberChip {
+                agent_id: "a-lead".into(),
+                agent_name: "lead".into(),
+                state: Some("running".into()),
+            }],
+            blocked_by: vec!["ock-9".into()],
+            auto_run: true,
+            ..card("issue-1", "Ship it", None)
+        };
+        let cv = CardView::from_wire(&wire);
+        assert_eq!(cv.squad_id.as_deref(), Some("sq-1"));
+        assert_eq!(cv.member_states.len(), 1);
+        assert!(cv.is_blocked(), "a non-empty blocker list is blocked");
+        assert!(cv.auto_run);
+
+        let bc = card_view_to_board_card(&cv);
+        assert!(bc.display_id.starts_with("🔒 #"), "blocked marker: {}", bc.display_id);
+        assert!(bc.title.contains("🔒[ock-9]"), "blocker badge: {}", bc.title);
+        assert!(bc.title.contains("👥[lead:running]"), "member chip badge: {}", bc.title);
+        assert!(bc.title.contains('⏵'), "auto-run marker: {}", bc.title);
+    }
+
+    /// `q` opens the squad picker; Enter on the "clear" row (cursor 0) emits an
+    /// AssignSquad with `squad_id: None`, Enter on a roster row assigns that squad.
+    #[test]
+    fn assign_squad_picker_commits_clear_and_pick() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_squads(vec![
+            SquadOption { id: "sq-1".into(), name: "alpha".into() },
+            SquadOption { id: "sq-2".into(), name: "beta".into() },
+        ]);
+        // `q` opens the picker over the focused card (issue-1), cursor at 0 (clear).
+        let opened = reduce_boards(&state, BoardsEvent::AssignSquad);
+        assert!(matches!(opened.state.overlay(), Some(BoardsOverlay::SquadPick { .. })));
+        assert_eq!(opened.intent, None, "opening the picker raises no intent yet");
+
+        // Enter on the clear row → AssignSquad { squad_id: None }.
+        let cleared = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            cleared.intent,
+            Some(BoardsIntent::AssignSquad {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+                squad_id: None,
+            })
+        );
+
+        // Down twice (clamped) then Enter picks the SECOND roster squad (sq-2).
+        let d1 = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Down));
+        let d2 = reduce_boards(&d1.state, BoardsEvent::Key(BoardsKey::Down));
+        let picked = reduce_boards(&d2.state, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            picked.intent,
+            Some(BoardsIntent::AssignSquad {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+                squad_id: Some("sq-2".into()),
+            })
+        );
+    }
+
+    /// `D` opens the dependency picker over the board's OTHER cards; Enter commits
+    /// an AddDependency edge to the highlighted blocker (never the card itself).
+    #[test]
+    fn dependency_picker_commits_a_blocker_edge() {
+        let state = BoardsState::from_snapshot(&one_board());
+        // Focused card is issue-1; the only other card is issue-2 (in Done).
+        let opened = reduce_boards(&state, BoardsEvent::AddDependency);
+        assert!(matches!(opened.state.overlay(), Some(BoardsOverlay::DepPick { .. })));
+        let picked = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            picked.intent,
+            Some(BoardsIntent::AddDependency {
+                board_id: "b1".into(),
+                dependent_issue_id: "issue-1".into(),
+                blocker_issue_id: "issue-2".into(),
+            }),
+            "the dependent is the focused card; the blocker is the other card"
+        );
+    }
+
+    /// `R` toggles the focused card's auto-run flag directly (no overlay), emitting
+    /// an intent carrying the flipped value.
+    #[test]
+    fn toggle_auto_run_flips_the_flag() {
+        let state = BoardsState::from_snapshot(&one_board());
+        // issue-1 starts with auto_run = false → the toggle asks for true.
+        let out = reduce_boards(&state, BoardsEvent::ToggleAutoRun);
+        assert_eq!(
+            out.intent,
+            Some(BoardsIntent::ToggleAutoRun {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+                auto_run: true,
+            })
+        );
+        assert!(out.state.overlay().is_none(), "no overlay — a direct toggle");
     }
 }
