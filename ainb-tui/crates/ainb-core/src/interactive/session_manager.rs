@@ -2089,6 +2089,9 @@ mod tests {
             agent_type: SessionAgentType::Claude,
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         const WRITERS: usize = 12;
