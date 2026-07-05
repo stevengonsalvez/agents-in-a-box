@@ -90,6 +90,9 @@ fn tui_renders_members_with_roles() {
     ▶ Members
         amy@x.io · owner
         bob@x.io · admin
+      Notifications
+                      phone   web     os      atc
+        J/K kind · h/l channel · space toggle
     "###);
 
     // NON-VACUOUS COLOUR CHECK: the owner row's glyphs paint in `SELECTION_GREEN`.

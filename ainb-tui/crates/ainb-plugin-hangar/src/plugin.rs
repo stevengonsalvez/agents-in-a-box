@@ -201,6 +201,13 @@ const BOARD_CARD_CANCEL_REQ_ID: i64 = 45;
 /// carries a card's newest run transcript (raw stream-json); the plugin parses it
 /// into the prettied timeline overlay.
 const BOARD_CARD_TIMELINE_REQ_ID: i64 = 46;
+/// JSON-RPC id for the `hangar/notify_rules_list` fetch feeding the Settings
+/// Notifications routing grid (tcp T5). Workspace-scoped; fetched on first entry
+/// to the section.
+const NOTIFY_RULES_REQ_ID: i64 = 47;
+/// JSON-RPC id for a `hangar/notify_rule_set` upsert raised by a toggled routing
+/// cell (tcp T5). Its reply re-fetches the grid so the pane reflects the write.
+const NOTIFY_RULE_SET_REQ_ID: i64 = 48;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -707,6 +714,14 @@ impl HangarPlugin {
             RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
+            // tcp T5: the notification routing grid snapshot.
+            RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
+            // A rule set reply re-fetches the grid so the pane reflects the write.
+            RpcId::Number(NOTIFY_RULE_SET_REQ_ID) => {
+                self.screens.pending_notify_action =
+                    Some(crate::screen::app_screens::NotifyAction::Refresh);
+                self.conn.on_event();
+            }
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             // The attention/subscribe ack carries the open-attention snapshot that
             // seeds the control-center board.
@@ -777,6 +792,55 @@ impl HangarPlugin {
             ) {
                 self.screens.set_members(r.members);
             }
+        }
+    }
+
+    /// Populate the Settings Notifications grid from a `hangar/notify_rules_list`
+    /// result (tcp T5): one routing row per attention kind for the active
+    /// workspace (override where set, global otherwise).
+    fn apply_notify_rules(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::NotifyRulesListResult,
+            >(result.clone())
+            {
+                self.screens.set_notify_rules(r.rules);
+            }
+        }
+        self.conn.on_event();
+    }
+
+    /// Fire a deferred notify-rule RPC (tcp T5) over the daemon socket, scoped to
+    /// the active workspace: a `Refresh` fetches the grid, a `Set` upserts one
+    /// rule (whose reply re-fetches the grid). Best-effort — a send failure is
+    /// logged, never fatal (the grid simply keeps its prior rows).
+    async fn apply_notify_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::app_screens::NotifyAction,
+    ) {
+        use crate::screen::app_screens::NotifyAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let (id, method, params) = match action {
+            NotifyAction::Refresh => (
+                NOTIFY_RULES_REQ_ID,
+                daemon_methods::HANGAR_NOTIFY_RULES_LIST,
+                serde_json::json!({ "workspace_id": ws }),
+            ),
+            NotifyAction::Set { kind, channels } => (
+                NOTIFY_RULE_SET_REQ_ID,
+                daemon_methods::HANGAR_NOTIFY_RULE_SET,
+                serde_json::json!({ "workspace_id": ws, "kind": kind, "channels": channels }),
+            ),
+        };
+        let Ok(body) = encode_request(id, method, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: notify rpc send failed: {e}")).await;
         }
     }
 
@@ -3482,6 +3546,11 @@ impl Plugin for HangarPlugin {
         // host-cap response — awaiting a host request here can't deadlock.
         if let Some(action) = self.screens.take_pending_ws_action() {
             self.apply_workspace_action(host, action).await;
+        }
+        // tcp T5: drain any deferred notify-rule RPC (grid fetch on section entry
+        // or a rule set from a toggled cell) and fire it over the daemon socket.
+        if let Some(action) = self.screens.take_pending_notify_action() {
+            self.apply_notify_action(host, action).await;
         }
         // P6.5: drain any deferred skill RPC (sync / detail / attach / detach)
         // raised by the skill-manager screen and fire it over the daemon socket.

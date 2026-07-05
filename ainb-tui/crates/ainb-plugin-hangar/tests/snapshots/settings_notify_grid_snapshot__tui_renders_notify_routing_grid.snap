@@ -1,0 +1,16 @@
+---
+source: crates/ainb-plugin-hangar/tests/settings_notify_grid_snapshot.rs
+expression: map
+---
+  Daemon
+    /tmp/hangar.sock · ● connected
+  Providers
+  LLM Keys
+  Workspaces
+  Members
+▶ Notifications
+                  phone   web     os      atc
+    ›ask          [○]      ●       ●       ○
+     error         ○       ○       ●       ○
+     waiting       ○       ○       ○       ○
+    J/K kind · h/l channel · space toggle

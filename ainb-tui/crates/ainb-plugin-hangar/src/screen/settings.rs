@@ -25,7 +25,8 @@
 //! performs the actual keychain write.
 
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
-use ainb_hangar_proto::snapshots::MemberWireRow;
+use ainb_hangar_proto::snapshots::{MemberWireRow, NotifyRuleWireRow};
+use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_sdk::WireBuffer;
 
 use crate::widgets::key_entry::render_key_entry_modal;
@@ -76,17 +77,23 @@ pub enum SettingsSection {
     /// CLI-first (`ainb hangar member set-role|remove`) — the pane lists each
     /// member with their role so the operator can see who can do what.
     Members,
+    /// Per-attention-kind notification routing rules (tcp T5): a workspace-scoped
+    /// grid of kind × channel toggles. `J`/`K` move the kind row, `h`/`l` move the
+    /// channel column, `space` toggles the selected cell (emitting a
+    /// `SetNotifyRule` intent → `hangar/notify_rule_set`).
+    Notifications,
 }
 
 impl SettingsSection {
-    /// The next section down (j), clamped at [`Self::Members`].
+    /// The next section down (j), clamped at [`Self::Notifications`].
     #[must_use]
     const fn next(self) -> Self {
         match self {
             Self::Daemon => Self::Providers,
             Self::Providers => Self::Keys,
             Self::Keys => Self::Workspaces,
-            Self::Workspaces | Self::Members => Self::Members,
+            Self::Workspaces => Self::Members,
+            Self::Members | Self::Notifications => Self::Notifications,
         }
     }
 
@@ -98,6 +105,7 @@ impl SettingsSection {
             Self::Keys => Self::Providers,
             Self::Workspaces => Self::Keys,
             Self::Members => Self::Workspaces,
+            Self::Notifications => Self::Members,
         }
     }
 
@@ -110,6 +118,7 @@ impl SettingsSection {
             Self::Keys => "LLM Keys",
             Self::Workspaces => "Workspaces",
             Self::Members => "Members",
+            Self::Notifications => "Notifications",
         }
     }
 }
@@ -137,6 +146,12 @@ pub struct SettingsState {
     workspaces: Vec<WorkspaceRow>,
     /// The current workspace's members (render-only; e38.11).
     members: Vec<MemberWireRow>,
+    /// The notification routing grid rows, one per attention kind (tcp T5).
+    notify_rules: Vec<NotifyRuleWireRow>,
+    /// The selected kind row in the Notifications grid.
+    notify_kind_sel: usize,
+    /// The selected channel column (0..[`Channel::all`]) in the Notifications grid.
+    notify_channel_sel: usize,
     section: SettingsSection,
     /// Selection within the active section's list (workspaces / keys).
     list_selected: usize,
@@ -166,6 +181,9 @@ impl SettingsState {
             keys,
             workspaces,
             members: Vec::new(),
+            notify_rules: Vec::new(),
+            notify_kind_sel: 0,
+            notify_channel_sel: 0,
             section: SettingsSection::Daemon,
             list_selected: 0,
             connection,
@@ -206,6 +224,28 @@ impl SettingsState {
     #[must_use]
     pub fn members(&self) -> &[MemberWireRow] {
         &self.members
+    }
+
+    /// Replace the notification routing grid (after a `hangar/notify_rules_list`
+    /// fetch), clamping the kind cursor to the new row count (tcp T5).
+    pub fn set_notify_rules(&mut self, rules: Vec<NotifyRuleWireRow>) {
+        let max = rules.len().saturating_sub(1);
+        if self.notify_kind_sel > max {
+            self.notify_kind_sel = max;
+        }
+        self.notify_rules = rules;
+    }
+
+    /// The notification routing rows currently rendered (for the glue / tests).
+    #[must_use]
+    pub fn notify_rules(&self) -> &[NotifyRuleWireRow] {
+        &self.notify_rules
+    }
+
+    /// The Notifications grid cursor as `(kind_row, channel_col)` (for tests).
+    #[must_use]
+    pub const fn notify_cursor(&self) -> (usize, usize) {
+        (self.notify_kind_sel, self.notify_channel_sel)
     }
 
     /// The daemon-connection status.
@@ -256,6 +296,15 @@ pub enum SettingsIntent {
     NewWorkspace,
     /// Rename the selected workspace (`r`). Carries the workspace id.
     RenameWorkspace(String),
+    /// Toggle one notification routing cell (`space` on the Notifications grid,
+    /// tcp T5). Carries the attention kind wire token and the FULL new channel set
+    /// for that kind; the glue maps it to `hangar/notify_rule_set`.
+    SetNotifyRule {
+        /// The attention kind wire token the rule governs.
+        kind: String,
+        /// The new push-channel set after the toggle.
+        channels: ChannelSet,
+    },
 }
 
 /// The result of folding one [`SettingsEvent`] into a [`SettingsState`].
@@ -281,6 +330,11 @@ pub fn reduce_settings(state: &SettingsState, ev: SettingsEvent) -> SettingsRedu
 fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
     if state.key_entry.is_some() {
         return reduce_key_entry_key(state, c);
+    }
+    // The Notifications grid owns a 2D cursor (kind × channel) + a toggle, so it
+    // handles its own keys; `j`/`k` still move between sections.
+    if state.section == SettingsSection::Notifications {
+        return reduce_notify_key(state, c);
     }
     match c {
         'j' => move_section(state, SettingsSection::next),
@@ -322,6 +376,71 @@ fn workspace_intent(
             intent: Some(make(w.id.clone())),
         },
     )
+}
+
+/// Handle a key on the Notifications grid (tcp T5): `j`/`k` leave to the adjacent
+/// section, `J`/`K` move the kind row, `h`/`l` move the channel column, and
+/// `space`/`t` toggle the selected cell (emitting a `SetNotifyRule` intent).
+fn reduce_notify_key(state: &SettingsState, c: char) -> SettingsReduction {
+    match c {
+        'j' => move_section(state, SettingsSection::next),
+        'k' => move_section(state, SettingsSection::prev),
+        'J' => move_notify_kind(state, 1),
+        'K' => move_notify_kind(state, -1),
+        'h' => move_notify_channel(state, -1),
+        'l' => move_notify_channel(state, 1),
+        ' ' | 't' => toggle_notify_cell(state),
+        _ => unchanged(state),
+    }
+}
+
+/// Move the Notifications kind-row cursor by `delta`, clamped to the grid.
+fn move_notify_kind(state: &SettingsState, delta: i32) -> SettingsReduction {
+    let mut next = state.clone();
+    let max = next.notify_rules.len().saturating_sub(1);
+    if delta < 0 {
+        next.notify_kind_sel = next.notify_kind_sel.saturating_sub(1);
+    } else if !next.notify_rules.is_empty() {
+        next.notify_kind_sel = (next.notify_kind_sel + 1).min(max);
+    }
+    no_intent(next)
+}
+
+/// Move the Notifications channel-column cursor by `delta`, clamped to the four
+/// channels.
+fn move_notify_channel(state: &SettingsState, delta: i32) -> SettingsReduction {
+    let mut next = state.clone();
+    let max = Channel::all().len() - 1;
+    if delta < 0 {
+        next.notify_channel_sel = next.notify_channel_sel.saturating_sub(1);
+    } else {
+        next.notify_channel_sel = (next.notify_channel_sel + 1).min(max);
+    }
+    no_intent(next)
+}
+
+/// Toggle the selected `(kind, channel)` cell: flip the channel in the kind's
+/// set, update the grid optimistically, and emit a [`SettingsIntent::SetNotifyRule`]
+/// carrying the FULL new set (the RPC is an upsert of the whole set). A no-op when
+/// the grid is empty (not yet fetched) so a stray toggle can't emit a bogus rule.
+fn toggle_notify_cell(state: &SettingsState) -> SettingsReduction {
+    let channel = Channel::all()[state.notify_channel_sel];
+    let Some(rule) = state.notify_rules.get(state.notify_kind_sel) else {
+        return unchanged(state);
+    };
+    let kind = rule.kind.clone();
+    let new_channels = rule.channels.toggled(channel);
+    let mut next = state.clone();
+    // Optimistic local update so the cell flips immediately; the glue's
+    // re-fetch after the RPC reconciles authoritatively.
+    next.notify_rules[next.notify_kind_sel].channels = new_channels;
+    SettingsReduction {
+        state: next,
+        intent: Some(SettingsIntent::SetNotifyRule {
+            kind,
+            channels: new_channels,
+        }),
+    }
 }
 
 /// Handle a key while the key-entry modal is open: Enter writes, Backspace
@@ -383,7 +502,9 @@ fn move_list(state: &SettingsState, delta: i32) -> SettingsReduction {
         SettingsSection::Keys => next.keys.len(),
         SettingsSection::Providers => next.providers.len(),
         SettingsSection::Members => next.members.len(),
-        SettingsSection::Daemon => 0,
+        // Notifications owns its own 2D cursor (see `reduce_notify_key`); the
+        // generic list mover is never reached for it.
+        SettingsSection::Daemon | SettingsSection::Notifications => 0,
     };
     if delta < 0 {
         next.list_selected = next.list_selected.saturating_sub(1);
@@ -475,6 +596,110 @@ fn render_member_rows(
     row
 }
 
+/// A compact display label for an attention-kind wire token (the grid's row
+/// header). An unknown token renders verbatim so a future kind is never blank.
+fn notify_kind_label(wire_kind: &str) -> &str {
+    match wire_kind {
+        "ask_user_question" => "ask",
+        "codex_request_user" => "codex-req",
+        other => other,
+    }
+}
+
+/// Render the Notifications routing grid (tcp T5): a header row of channel names,
+/// then one row per attention kind with a ●/○ cell per channel. The active
+/// cursor cell is bracketed + accented, and a hint line names the keys. Returns
+/// the next free row. Split out of [`render_settings`] to keep it within the line
+/// cap; the toggle mutation is the `space` key (see [`reduce_notify_key`]).
+fn render_notify_grid(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    mut row: u16,
+    bottom: u16,
+    state: &SettingsState,
+    section_active: bool,
+) -> u16 {
+    use ainb_plugin_sdk::{Cell, Color, Coord};
+    const TEXT: Color = Color::rgb(220, 220, 230);
+    const ON: Color = Color::rgb(100, 200, 100);
+    const DIM: Color = Color::rgb(120, 120, 130);
+    const CURSOR: Color = Color::rgb(255, 215, 0);
+
+    let put = |buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color| {
+        for (ch, cx) in s.chars().zip(x..area_w) {
+            let mut cell = Cell::new(ch.to_string());
+            cell.fg = Some(color);
+            buf.push(Coord::new(cx, row), cell);
+        }
+    };
+
+    // The four channel columns start after a fixed kind-label gutter; each cell is
+    // a fixed width so the header and every row align.
+    const KIND_COL: u16 = 4;
+    const CELL_W: u16 = 8;
+    let channels = Channel::all();
+
+    // Header: channel names above their columns.
+    if row < bottom {
+        for (i, ch) in channels.iter().enumerate() {
+            let cx = KIND_COL + 14 + (u16::try_from(i).unwrap_or(0)) * CELL_W;
+            put(buf, cx, row, ch.as_str(), DIM);
+        }
+        row += 1;
+    }
+
+    // One row per kind: label + a ●/○ cell per channel.
+    for (ki, rule) in state.notify_rules.iter().enumerate() {
+        if row >= bottom {
+            break;
+        }
+        let kind_selected = section_active && ki == state.notify_kind_sel;
+        let label = notify_kind_label(&rule.kind);
+        let cursor = if kind_selected { "›" } else { " " };
+        put(
+            buf,
+            KIND_COL,
+            row,
+            &format!("{cursor}{label}"),
+            if kind_selected { CURSOR } else { TEXT },
+        );
+        for (ci, ch) in channels.iter().enumerate() {
+            let on = rule.channels.contains(*ch);
+            let cell_selected = kind_selected && ci == state.notify_channel_sel;
+            // The cursor cell is bracketed so the 2D position reads without colour.
+            let glyph = match (cell_selected, on) {
+                (true, true) => "[●]",
+                (true, false) => "[○]",
+                (false, true) => " ● ",
+                (false, false) => " ○ ",
+            };
+            let color = if cell_selected {
+                CURSOR
+            } else if on {
+                ON
+            } else {
+                DIM
+            };
+            let cx = KIND_COL + 14 + (u16::try_from(ci).unwrap_or(0)) * CELL_W;
+            put(buf, cx, row, glyph, color);
+        }
+        row += 1;
+    }
+
+    // Keybinding hints, rendered right by the control (house rule).
+    if row < bottom {
+        put(
+            buf,
+            KIND_COL,
+            row,
+            "J/K kind · h/l channel · space toggle",
+            DIM,
+        );
+        row += 1;
+    }
+    row
+}
+
 /// Render the settings screen into `buf` between rows `top` and `bottom`.
 ///
 /// The five sections paint stacked top-down; the active one is accent-highlighted.
@@ -512,6 +737,7 @@ pub fn render_settings(
         SettingsSection::Keys,
         SettingsSection::Workspaces,
         SettingsSection::Members,
+        SettingsSection::Notifications,
     ] {
         if row >= bottom {
             break;
@@ -582,6 +808,10 @@ pub fn render_settings(
             }
             SettingsSection::Members => {
                 row = render_member_rows(buf, area_w, row, bottom, &state.members);
+            }
+            SettingsSection::Notifications => {
+                let selected = state.section == SettingsSection::Notifications;
+                row = render_notify_grid(buf, area_w, row, bottom, state, selected);
             }
         }
     }

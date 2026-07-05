@@ -8,10 +8,45 @@
 //! flip.
 
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
+use ainb_hangar_proto::snapshots::NotifyRuleWireRow;
+use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_hangar::screen::settings::{
     reduce_settings, ConnectionStatus, KeyMaterial, SettingsEvent, SettingsIntent, SettingsSection,
     SettingsState,
 };
+
+/// The seeded routing grid: ask → web+os, error → os, waiting → board-only.
+fn notify_rules() -> Vec<NotifyRuleWireRow> {
+    vec![
+        NotifyRuleWireRow {
+            kind: "ask_user_question".into(),
+            channels: ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            overridden: false,
+        },
+        NotifyRuleWireRow {
+            kind: "error".into(),
+            channels: ChannelSet::from_channels([Channel::Os]),
+            overridden: false,
+        },
+        NotifyRuleWireRow {
+            kind: "waiting".into(),
+            channels: ChannelSet::NONE,
+            overridden: false,
+        },
+    ]
+}
+
+/// A state parked on the Notifications section with the grid loaded.
+fn notify_state() -> SettingsState {
+    let mut s = state();
+    s.set_notify_rules(notify_rules());
+    // Navigate Daemon → … → Notifications (six `j`s reach + clamp at the bottom).
+    for _ in 0..6 {
+        s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    }
+    assert_eq!(s.section(), SettingsSection::Notifications);
+    s
+}
 
 fn health() -> HealthSnapshot {
     HealthSnapshot {
@@ -66,7 +101,7 @@ fn state() -> SettingsState {
     SettingsState::new(health(), providers(), keys(), workspaces())
 }
 
-/// j/k cycle through the five settings sections.
+/// j/k cycle through the six settings sections.
 #[test]
 fn j_k_navigates_settings_sections() {
     let s = state();
@@ -79,11 +114,13 @@ fn j_k_navigates_settings_sections() {
     assert_eq!(s.section(), SettingsSection::Workspaces);
     let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     assert_eq!(s.section(), SettingsSection::Members);
-    // Clamps at the bottom (Members, e38.11).
     let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
-    assert_eq!(s.section(), SettingsSection::Members);
+    assert_eq!(s.section(), SettingsSection::Notifications);
+    // Clamps at the bottom (Notifications, tcp T5).
+    let s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    assert_eq!(s.section(), SettingsSection::Notifications);
     let s = reduce_settings(&s, SettingsEvent::Key('k')).state;
-    assert_eq!(s.section(), SettingsSection::Workspaces);
+    assert_eq!(s.section(), SettingsSection::Members);
 }
 
 /// `n` on the keys section opens the key-entry modal.
@@ -214,6 +251,80 @@ fn event_daemon_disconnected_flips_connection_section_status_to_red() {
         out.state.connection_status(),
         ConnectionStatus::Disconnected
     );
+}
+
+/// tcp T5: `J`/`K` move the kind row and `h`/`l` move the channel column on the
+/// Notifications grid, both clamped to their bounds.
+#[test]
+fn notify_grid_cursor_navigates_kinds_and_channels() {
+    let s = notify_state();
+    assert_eq!(s.notify_cursor(), (0, 0));
+
+    // J moves down the kinds; K back up; clamps at the ends.
+    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    assert_eq!(s.notify_cursor(), (1, 0));
+    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    assert_eq!(s.notify_cursor(), (2, 0));
+    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    assert_eq!(s.notify_cursor(), (2, 0), "kind cursor clamps at the last row");
+
+    // l moves right across the four channels; h back; clamps at 0..3.
+    let s = reduce_settings(&s, SettingsEvent::Key('l')).state;
+    assert_eq!(s.notify_cursor(), (2, 1));
+    let s = reduce_settings(&s, SettingsEvent::Key('l')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('l')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('l')).state;
+    assert_eq!(s.notify_cursor(), (2, 3), "channel cursor clamps at atc");
+    let s = reduce_settings(&s, SettingsEvent::Key('h')).state;
+    assert_eq!(s.notify_cursor(), (2, 2));
+}
+
+/// tcp T5: `space` toggles the selected cell and emits a `SetNotifyRule` intent
+/// carrying the FULL new channel set for that kind; the local grid flips
+/// optimistically.
+#[test]
+fn notify_grid_space_toggles_cell_and_emits_set_intent() {
+    // On the ASK row (web+os), toggle the phone column (col 0) ON.
+    let s = notify_state();
+    let out = reduce_settings(&s, SettingsEvent::Key(' '));
+    match out.intent {
+        Some(SettingsIntent::SetNotifyRule { ref kind, channels }) => {
+            assert_eq!(kind, "ask_user_question");
+            assert!(channels.contains(Channel::Phone), "phone toggled on");
+            assert!(channels.contains(Channel::Web), "web preserved");
+            assert!(channels.contains(Channel::Os), "os preserved");
+        }
+        other => panic!("expected SetNotifyRule, got {other:?}"),
+    }
+    // The local grid reflects the toggle optimistically.
+    assert!(out.state.notify_rules()[0].channels.contains(Channel::Phone));
+
+    // Toggling the same cell again turns it back off (idempotent flip).
+    let out2 = reduce_settings(&out.state, SettingsEvent::Key(' '));
+    match out2.intent {
+        Some(SettingsIntent::SetNotifyRule { channels, .. }) => {
+            assert!(!channels.contains(Channel::Phone), "phone toggled back off");
+        }
+        other => panic!("expected SetNotifyRule, got {other:?}"),
+    }
+}
+
+/// tcp T5: the Notifications keys are section-scoped — a `space` on the Daemon
+/// section never emits a rule change, and `j`/`k` still leave the grid.
+#[test]
+fn notify_keys_are_section_scoped_and_j_k_still_navigate() {
+    // space on Daemon does nothing.
+    assert!(reduce_settings(&state(), SettingsEvent::Key(' ')).intent.is_none());
+    // j/k move between sections even from the grid.
+    let s = notify_state();
+    let up = reduce_settings(&s, SettingsEvent::Key('k')).state;
+    assert_eq!(up.section(), SettingsSection::Members);
+    // A toggle with no rules loaded (empty grid) is a no-op, never a bogus intent.
+    let mut empty = state();
+    for _ in 0..6 {
+        empty = reduce_settings(&empty, SettingsEvent::Key('j')).state;
+    }
+    assert!(reduce_settings(&empty, SettingsEvent::Key(' ')).intent.is_none());
 }
 
 /// Esc aborts the key-entry modal without emitting an intent.

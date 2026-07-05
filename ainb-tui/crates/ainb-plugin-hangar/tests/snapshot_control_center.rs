@@ -41,6 +41,7 @@ fn row(
         payload: payload.to_string(),
         degraded: false,
         created_at,
+        channels: ainb_hangar_proto::ChannelSet::NONE,
     }
 }
 

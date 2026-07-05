@@ -62,6 +62,26 @@ pub enum WorkspaceAction {
     SetDefault(String),
 }
 
+/// A deferred daemon RPC raised by the Settings Notifications grid (tcp T5).
+///
+/// Like [`WorkspaceAction`], the sync key router can't `await`; it stashes the
+/// action on [`ScreenStates::pending_notify_action`] and the plugin's `render`
+/// pass drains it and fires the matching `hangar/notify_*` RPC over the daemon
+/// socket, scoped to the active workspace.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum NotifyAction {
+    /// Fetch the routing grid — raised when the user navigates into the
+    /// Notifications section (`hangar/notify_rules_list`).
+    Refresh,
+    /// Upsert one rule (`space` toggled a cell) — `hangar/notify_rule_set`.
+    Set {
+        /// The attention kind wire token the rule governs.
+        kind: String,
+        /// The full new push-channel set for that kind.
+        channels: ainb_hangar_proto::ChannelSet,
+    },
+}
+
 /// A deferred daemon RPC raised by the skill-manager screen (P6.5).
 ///
 /// Like [`WorkspaceAction`], the sync key router can't `await`; it stashes the
@@ -498,6 +518,12 @@ pub struct ScreenStates {
     /// Cached member roster from `hangar/members_list` (e38.11). Seeds the
     /// Settings Members pane regardless of which snapshot arrives first.
     pub member_rows: Vec<MemberWireRow>,
+    /// Cached notification routing grid from `hangar/notify_rules_list` (tcp T5).
+    /// Seeds the Settings Notifications pane regardless of arrival order.
+    pub notify_rule_rows: Vec<ainb_hangar_proto::snapshots::NotifyRuleWireRow>,
+    /// A deferred notify-rule RPC raised by the Notifications grid (tcp T5),
+    /// drained by the `render` pass. `None` when idle.
+    pub pending_notify_action: Option<NotifyAction>,
     /// Set when the logs screen's level filter changed (P8.6), asking the glue
     /// to re-read the structured-log file under the new `--level` floor. Drained
     /// by the `render` pass. `false` when idle.
@@ -763,6 +789,8 @@ impl ScreenStates {
         // Carry any cached member roster into the rebuilt state so the Members
         // pane survives a `set_health` rebuild (mirrors workspace_rows).
         state.set_members(self.member_rows.clone());
+        // Carry any cached notification grid too (tcp T5), same rebuild survival.
+        state.set_notify_rules(self.notify_rule_rows.clone());
         self.settings = Some(state);
     }
 
@@ -786,9 +814,27 @@ impl ScreenStates {
         }
     }
 
+    /// Refresh the Settings Notifications grid from a `hangar/notify_rules_list`
+    /// result (tcp T5). Caches the rows so a later `set_health` rebuild keeps
+    /// them, and overlays the live settings state when it already exists.
+    pub fn set_notify_rules(
+        &mut self,
+        rules: Vec<ainb_hangar_proto::snapshots::NotifyRuleWireRow>,
+    ) {
+        self.notify_rule_rows.clone_from(&rules);
+        if let Some(s) = self.settings.as_mut() {
+            s.set_notify_rules(rules);
+        }
+    }
+
     /// Take the pending workspace action raised by the Settings pane, if any.
     pub const fn take_pending_ws_action(&mut self) -> Option<WorkspaceAction> {
         self.pending_ws_action.take()
+    }
+
+    /// Take the pending notify-rule RPC raised by the Notifications grid, if any.
+    pub const fn take_pending_notify_action(&mut self) -> Option<NotifyAction> {
+        self.pending_notify_action.take()
     }
 
     /// Take the pending skill RPC raised by the skill-manager screen, if any.
@@ -1131,8 +1177,11 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     return None;
                 };
                 let out = reduce_settings(&s, ev);
+                let section = out.state.section();
                 let now_on_workspaces =
-                    out.state.section() == super::settings::SettingsSection::Workspaces;
+                    section == super::settings::SettingsSection::Workspaces;
+                let now_on_notifications =
+                    section == super::settings::SettingsSection::Notifications;
                 states.settings = Some(out.state);
                 // Lift the workspace switch/default intents into a deferred host
                 // action; the async key handler drains it and calls the cap.
@@ -1143,12 +1192,22 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SettingsIntent::ToggleDefault(id)) => {
                         states.pending_ws_action = Some(WorkspaceAction::SetDefault(id));
                     }
+                    // A toggled routing cell fires a `hangar/notify_rule_set` for
+                    // the active workspace (tcp T5).
+                    Some(SettingsIntent::SetNotifyRule { kind, channels }) => {
+                        states.pending_notify_action = Some(NotifyAction::Set { kind, channels });
+                    }
                     // KeychainWrite / New / Rename land in their own beads.
                     _ => {
                         // Seed the pane from the live host workspace list the
                         // first time the user lands on the Workspace section.
                         if now_on_workspaces && states.workspace_rows.is_empty() {
                             states.pending_ws_action = Some(WorkspaceAction::Refresh);
+                        }
+                        // Likewise, fetch the routing grid on first entry to the
+                        // Notifications section (tcp T5).
+                        if now_on_notifications && states.notify_rule_rows.is_empty() {
+                            states.pending_notify_action = Some(NotifyAction::Refresh);
                         }
                     }
                 }
