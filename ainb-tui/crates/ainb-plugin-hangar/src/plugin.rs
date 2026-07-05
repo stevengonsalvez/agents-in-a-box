@@ -915,7 +915,12 @@ impl HangarPlugin {
             return;
         };
         let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
-        if entries.is_empty() {
+        // A card that NEVER ran (no task) with no transcript: a note, not an empty
+        // overlay. But a run that HAS started (task present) yet not emitted its
+        // first JSONL line still opens the overlay with zero entries, so the F6
+        // live-tail can begin appending as lines stream in — refusing here would
+        // strand a just-launched run's timeline permanently empty.
+        if entries.is_empty() && r.task_id.is_none() {
             self.screens.boards.set_note("no run transcript yet — launch this card first");
             return;
         }
