@@ -451,9 +451,14 @@ async fn enrich_board_card(
         Some((t, repo, agent)) => (Some(t), repo, agent),
         None => (None, None, None),
     };
-    // The issue's most recent task's status — the card's live state — plus the
-    // tmux session name an interactive run recorded on it (ccc / D6), so the
+    // The card's live state is the issue's AGGREGATE terminal outcome once its
+    // latest run has drained (migration 0039 / tcp 8ln, codex F3): a squad card whose
+    // leader FAILED but whose newest member finished `done` must render `failed`, not
+    // the newest single task's `done`. While the run is still active (aggregate is
+    // None) the card shows its newest task's status (running / queued); a never-run
+    // card shows None. The tmux `session_name` still comes off the newest task so the
     // attach-from-card affordance can surface `tmux attach -t <session_name>`.
+    let aggregate = TaskRepo::issue_aggregate_terminal_state(pool, workspace_id, issue_id).await?;
     let latest: Option<(String, Option<String>)> = sqlx::query_as(
         "SELECT status, session_name FROM agent_task_queue \
          WHERE issue_id = ? AND workspace_id = ? \
@@ -463,10 +468,13 @@ async fn enrich_board_card(
     .bind(workspace_id)
     .fetch_optional(pool)
     .await?;
-    let (state, session_name) = match latest {
+    let (latest_state, session_name) = match latest {
         Some((status, session)) => (Some(status), session),
         None => (None, None),
     };
+    // Drained → the aggregate token; still active / never-run → the newest task's raw
+    // status (or None). This is the F3 fix: the card no longer reads a lone sibling.
+    let state = aggregate.or(latest_state);
 
     // tcp T4 / F7: the card's squad assignment, its per-member task chips (only for
     // a squad card), its unfinished-blocker refs (the 🔒 blocked-state), and its
@@ -510,16 +518,21 @@ async fn squad_member_chips(
     workspace_id: &str,
     issue_id: &str,
 ) -> Result<Vec<ainb_hangar_proto::snapshots::CardMemberChip>, sqlx::Error> {
-    // The latest task per agent on this issue (the correlated subquery picks each
-    // agent's most recent task), joined to the agent name.
+    // The latest task per agent WITHIN the issue's latest run generation (migration
+    // 0039 / tcp 8ln): a rerun with fewer members must not keep showing a prior
+    // generation's member chip, and the correlated subquery picks each agent's most
+    // recent task in that generation, joined to the agent name.
     let rows: Vec<(String, String, String)> = sqlx::query_as(
         "SELECT t.agent_id, a.name, t.status \
          FROM agent_task_queue t \
          JOIN agent a ON a.id = t.agent_id \
          WHERE t.issue_id = ? AND t.workspace_id = ? \
+           AND t.generation = (SELECT MAX(g.generation) FROM agent_task_queue g \
+                               WHERE g.issue_id = t.issue_id) \
            AND t.id = ( \
              SELECT t2.id FROM agent_task_queue t2 \
              WHERE t2.issue_id = t.issue_id AND t2.agent_id = t.agent_id \
+               AND t2.generation = t.generation \
              ORDER BY t2.created_at DESC, t2.id DESC LIMIT 1 \
            ) \
          ORDER BY a.name, t.agent_id",
@@ -1667,6 +1680,11 @@ pub async fn spawn_mention_tasks(
     // mention-triggered here.
     let agents = AgentRepo::list_by_workspace(pool, workspace_id).await?;
     let now = clock.now_ms();
+    // One mention event is one run GENERATION (migration 0039, tcp 8ln): every agent
+    // fanned out from this comment shares it, and it scopes the card-state folds to
+    // this run so a prior run's terminal rows on the issue do not poison it. Minted
+    // once, before the fan-out loop, exactly like the squad fan-out.
+    let generation = TaskRepo::next_generation_for_issue(pool, issue_id).await?;
     let mut spawned = Vec::new();
     for handle in &handles {
         // Resolve by name; an unknown handle simply matches no agent (ignored).
@@ -1685,6 +1703,7 @@ pub async fn spawn_mention_tasks(
             priority: 0,
             created_at: now,
             autopilot_run_id: None,
+            generation,
         };
         match TaskRepo::insert(pool, &task).await {
             Ok(_) => spawned.push(agent.id.clone()),

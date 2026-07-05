@@ -97,6 +97,7 @@ async fn seed_task(
             priority: 0,
             created_at,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

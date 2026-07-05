@@ -146,6 +146,7 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             priority: 0,
             created_at: now,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await?;
