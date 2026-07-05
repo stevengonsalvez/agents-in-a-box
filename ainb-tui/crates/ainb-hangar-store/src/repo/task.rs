@@ -253,6 +253,39 @@ impl TaskRepo {
         row.map(|r| task_from_row(&r)).transpose()
     }
 
+    /// Fetch the issue's single ACTIVE (`queued` / `dispatched` / `running`)
+    /// task, **scoped to `workspace_id`**, newest first — or `None` when the
+    /// issue has no active task (its latest run is terminal, or it never ran).
+    ///
+    /// Backs the card-cancel path (tcp T3 / F6): a card carries only its issue
+    /// id, so the daemon resolves the one live task to cancel here. The
+    /// per-(issue, agent) pending-unique index (migration 0012) caps pending
+    /// tasks, but a card can carry a `running` task alongside a distinct agent's
+    /// pending one; `ORDER BY created_at DESC, id DESC LIMIT 1` picks the most
+    /// recent active task deterministically. The `WHERE ... workspace_id = ?`
+    /// clause is the tenant guard — a foreign issue id matches no row.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query or row decode fails.
+    pub async fn active_task_for_issue(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<Task>, sqlx::Error> {
+        let row = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM agent_task_queue \
+             WHERE workspace_id = ? AND issue_id = ? \
+               AND status IN ('queued','dispatched','running') \
+             ORDER BY created_at DESC, id DESC LIMIT 1"
+        ))
+        .bind(workspace_id)
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await?;
+        row.map(|r| task_from_row(&r)).transpose()
+    }
+
     /// List the *pending* (`queued` or `dispatched`) tasks for a runtime,
     /// oldest first. This is the queue the P1 FSM drains.
     ///
