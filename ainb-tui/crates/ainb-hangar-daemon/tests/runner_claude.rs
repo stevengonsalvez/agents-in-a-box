@@ -211,6 +211,7 @@ exit 1"#,
             assert_eq!(result.exit_code, Some(1));
         }
         RunOutcome::Success(_) => panic!("expected Failed(AgentError), got Success"),
+        RunOutcome::Cancelled(_) => panic!("expected Failed(AgentError), got Cancelled"),
     }
 }
 
@@ -244,6 +245,7 @@ exit 75"#,
             assert_eq!(result.exit_code, Some(75));
         }
         RunOutcome::Success(_) => panic!("expected Failed(RuntimeOffline), got Success"),
+        RunOutcome::Cancelled(_) => panic!("expected Failed(RuntimeOffline), got Cancelled"),
     }
 }
 
@@ -346,5 +348,6 @@ exit 0"#,
     match outcome {
         RunOutcome::Failed { reason, .. } => assert_eq!(reason, FailureReason::Timeout),
         RunOutcome::Success(_) => panic!("expected Failed(Timeout), got Success"),
+        RunOutcome::Cancelled(_) => panic!("expected Failed(Timeout), got Cancelled"),
     }
 }
