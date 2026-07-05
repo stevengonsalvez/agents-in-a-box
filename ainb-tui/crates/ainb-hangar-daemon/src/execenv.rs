@@ -12,9 +12,10 @@
 //! └── .gc_meta.json   # GC marker: who owns this dir + when it was seen
 //! ```
 //!
-//! `shortID` is the first 8 characters of the task ULID (the reference short-id form).
-//! Because the ULID is injected via [`crate`]'s id-generation seam in tests, the
-//! path is deterministic across runs.
+//! `shortID` is the task ULID's first 8 characters plus its last 6 (see
+//! [`short_id`] — the random tail keeps same-instant ids distinct). Because the
+//! ULID is injected via [`crate`]'s id-generation seam in tests, the path is
+//! deterministic across runs.
 //!
 //! # GC marker
 //!
