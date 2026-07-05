@@ -250,6 +250,7 @@ async fn update_fields_edits_state_assignee_priority_and_due_date() {
         &workspace_id,
         "issue-edit",
         &IssueFieldUpdate {
+            title: None,
             state: Some("in_progress".to_string()),
             assignee: Some(Some(
                 ActorRef::new(ActorKind::Agent, "agent-7").expect("actor"),
