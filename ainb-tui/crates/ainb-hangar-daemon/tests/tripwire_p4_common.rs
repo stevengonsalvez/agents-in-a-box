@@ -1129,17 +1129,15 @@ impl DaemonRpc {
     }
 }
 
-/// The daemon's short-id form of a task id (first 8 chars + last 6, collision-
-/// resistant for same-instant ULIDs) — the worktree / scratch dir name and the
-/// `ainb/<slug>` branch suffix. Mirrors `execenv::short_id` exactly; ids of 14
-/// chars or fewer (hand-minted test ids like `wt-a`) are returned whole.
+/// The daemon's per-run path slug for a task id — the worktree / task-tree dir name
+/// and the `ainb/<slug>` branch suffix. Now the FULL task id (tcp vpm): the write
+/// side keys the worktree / logs / output on the whole id so no truncated prefix can
+/// cross-wire two runs, so a test that derives a run's on-disk path must use the
+/// full id too. Kept as a helper (rather than inlining `task_id.to_string()`) so the
+/// path-slug contract lives in one place beside `execenv::task_root`.
 #[must_use]
 pub fn task_short_id(task_id: &str) -> String {
-    let tail_start = task_id.len().saturating_sub(6);
-    match (task_id.get(..8), task_id.get(tail_start..)) {
-        (Some(head), Some(tail)) if task_id.len() > 14 => format!("{head}{tail}"),
-        _ => task_id.to_string(),
-    }
+    task_id.to_string()
 }
 
 /// The slug a SCRATCH card's durable dir is keyed on: `<issue-short-id>-<agent-short-id>`,
@@ -1165,7 +1163,7 @@ pub fn scratch_slug_by_title(home: &Path, title: &str) -> Option<String> {
         .await
         .ok()
         .flatten();
-        row.map(|(issue, agent)| format!("{}-{}", task_short_id(&issue), task_short_id(&agent)))
+        row.map(|(issue, agent)| format!("{issue}-{agent}"))
     })
 }
 

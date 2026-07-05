@@ -6,8 +6,9 @@
 //! and truer to the reference's behaviour than a `git2` re-implementation, and the CI
 //! matrix + ainb-tui already require `git`).
 //!
-//! The branch is `hangar/task/{shortID}` so a human (or `git worktree list`) can
-//! map a checkout back to its task at a glance.
+//! The branch is `hangar/task/{task_id}` — keyed on the FULL task id (tcp vpm) so a
+//! human (or `git worktree list`) can map a checkout back to its task at a glance,
+//! with no truncated-slug collision risk.
 //!
 //! # Chat tasks
 //!
@@ -29,27 +30,28 @@ use std::process::Command;
 
 use ainb_hangar_store::repo::task::Task;
 
-use crate::execenv::{ExecEnv, short_id};
+use crate::execenv::ExecEnv;
 
 /// A registered git worktree for one task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
     /// The checkout directory (equals [`ExecEnv::workdir`]).
     pub workdir: PathBuf,
-    /// The branch checked out in the worktree (`hangar/task/{shortID}`).
+    /// The branch checked out in the worktree (`hangar/task/{task_id}`).
     pub branch: String,
 }
 
-/// The branch name a task's worktree checks out.
+/// The branch name a task's worktree checks out — `hangar/task/{task_id}`, keyed on
+/// the FULL task id (tcp vpm) so no truncated slug can hand two runs one branch.
 #[must_use]
 fn task_branch(task: &Task) -> String {
-    format!("hangar/task/{}", short_id(&task.id))
+    format!("hangar/task/{}", task.id)
 }
 
 /// Prepare the git worktree for a task, or `None` for chat tasks.
 ///
 /// For an issue-driven task this runs `git worktree add {workdir} -b
-/// hangar/task/{shortID}` against `repo_cache`, creating the per-task branch and
+/// hangar/task/{task_id}` against `repo_cache`, creating the per-task branch and
 /// registering the checkout. For a chat task (no `issue_id`) it performs no git
 /// invocation and returns [`None`], leaving `env.workdir` empty.
 ///

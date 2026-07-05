@@ -21,10 +21,11 @@
 //!
 //! # Two slugs: per-RUN worktree vs per-CARD scratch
 //!
-//! The `slug` is the caller's per-task key (the task short-id). Because it is
-//! unique per task, two cards launched on the SAME repo provision two DISTINCT
+//! The `slug` is the caller's per-task key (the FULL task id, tcp vpm). Because it
+//! is unique per task, two cards launched on the SAME repo provision two DISTINCT
 //! worktrees on two DISTINCT `ainb/<slug>` branches — they never collide (the F5
-//! "N tasks on one repo never collide" guarantee).
+//! "N tasks on one repo never collide" guarantee, now airtight: no truncated prefix
+//! can alias two ids).
 //!
 //! Scratch is different: it is the card's durable scratch space (F2 intent), so it
 //! is keyed on the caller's `scratch_slug` — a per-(card, agent) key, STABLE across

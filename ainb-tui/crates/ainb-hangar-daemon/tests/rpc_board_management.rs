@@ -949,8 +949,8 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
     assert_eq!(empty["result"]["jsonl"], "", "no run → empty transcript");
 
     // Enqueue a run, then seed a fixture transcript at that task's deterministic
-    // logs path (`workspaces/default/{short_id(task_id)}/logs/claude.jsonl` — the
-    // daemon's own slug derivation, so this test can never drift from it).
+    // logs path (`workspaces/default/{task_id}/logs/claude.jsonl` — the daemon keys
+    // the task tree on the FULL id (tcp vpm), so this test can never drift from it).
     let run = c
         .call(methods::HANGAR_BOARD_CARD_RUN, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }))
         .await;
@@ -958,7 +958,7 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
     let logs = dir
         .path()
         .join(".agents-in-a-box/hangar/workspaces/default")
-        .join(ainb_hangar_daemon::execenv::short_id(&task_id))
+        .join(&task_id)
         .join("logs");
     std::fs::create_dir_all(&logs).unwrap();
     let fixture = concat!(

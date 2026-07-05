@@ -563,24 +563,20 @@ async fn execute_claimed(
     // `repo_ref` — provisions the SAME repo's worktree instead of the in-tree
     // fallback a dropped `repo_ref` used to force.
     //
-    // Two slugs: the per-run task short-id keys the volatile worktree (unique per
-    // run — the F5 no-collision guarantee), while SCRATCH is keyed on the
-    // (issue, agent) pair. A rerun re-dispatches the card to the SAME agent, so
-    // (issue, agent) reuses the durable scratch dir across reruns (F2 intent);
-    // a SQUAD fan-out gives each member a DISTINCT agent on the one issue (the
-    // 0012 (issue, agent) pending-guard scope), so members that claim in parallel
-    // get DISTINCT scratch dirs and never race in one working tree. A task with no
-    // issue never resolves `scratch`, so its fallback to the run slug is inert.
-    let run_slug = crate::execenv::short_id(&task.id);
+    // Two slugs: the per-run FULL task id keys the volatile worktree (unique per
+    // run — the F5 no-collision guarantee, made airtight by the full id, tcp vpm),
+    // while SCRATCH is keyed on the (issue, agent) pair. A rerun re-dispatches the
+    // card to the SAME agent, so (issue, agent) reuses the durable scratch dir
+    // across reruns (F2 intent); a SQUAD fan-out gives each member a DISTINCT agent
+    // on the one issue (the 0012 (issue, agent) pending-guard scope), so members
+    // that claim in parallel get DISTINCT scratch dirs and never race in one working
+    // tree. Both slugs use FULL ids so no truncated prefix can cross-wire two runs.
+    // A task with no issue never resolves `scratch`, so its fallback to the run slug
+    // is inert.
+    let run_slug = task.id.clone();
     let scratch_slug = task.issue_id.as_deref().map_or_else(
         || run_slug.clone(),
-        |issue| {
-            format!(
-                "{}-{}",
-                crate::execenv::short_id(issue),
-                crate::execenv::short_id(&task.agent_id)
-            )
-        },
+        |issue| format!("{}-{}", issue, task.agent_id),
     );
     let run_wd = crate::workdir_provision::provision(
         task.repo_ref.as_deref(),

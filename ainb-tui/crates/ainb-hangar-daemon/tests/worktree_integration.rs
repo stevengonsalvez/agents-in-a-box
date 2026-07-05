@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::execenv::{prepare_env, short_id};
+use ainb_hangar_daemon::execenv::prepare_env;
 use ainb_hangar_daemon::worktree::{cleanup_worktree, prepare_worktree};
 use ainb_hangar_store::repo::task::Task;
 use tempfile::TempDir;
@@ -87,7 +87,7 @@ fn worktree_add_creates_branch_for_task() {
         .expect("prepare_worktree")
         .expect("worktree created for issue task");
 
-    let branch = format!("hangar/task/{}", short_id(&task.id));
+    let branch = format!("hangar/task/{}", &task.id);
     assert_eq!(wt.branch, branch);
     assert!(
         wt.workdir.join(".git").exists(),

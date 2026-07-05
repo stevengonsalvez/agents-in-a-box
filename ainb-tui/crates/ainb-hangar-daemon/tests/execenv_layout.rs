@@ -66,7 +66,7 @@ fn expected_root(home: &Path, slug: &str, task_id: &str) -> std::path::PathBuf {
         .join("hangar")
         .join("workspaces")
         .join(slug)
-        .join(short_id(task_id))
+        .join(task_id)
 }
 
 #[test]
