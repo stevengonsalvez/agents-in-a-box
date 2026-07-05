@@ -7711,12 +7711,10 @@ impl AppState {
         // cryptic origin/HEAD error (Stevie 2026-07-04: mysocialmedia).
         // `ConfigureState::from_pick_repo` already set `repo_check = Checking`
         // for these sources; `check_repo_check_complete` applies the verdict.
-        if matches!(
-            source,
-            crate::git::repo_source::RepoSource::HttpsUrl(_)
-                | crate::git::repo_source::RepoSource::SshUrl(_)
-                | crate::git::repo_source::RepoSource::GithubShorthand { .. }
-        ) {
+        // Same `is_remote()` predicate as `from_pick_repo`'s Checking
+        // decision — the two must agree or the form waits on a verdict that
+        // never comes.
+        if source.is_remote() {
             self.repo_check_seq += 1;
             let seq = self.repo_check_seq;
             let (tx, rx) = mpsc::unbounded_channel();
@@ -7768,6 +7766,15 @@ impl AppState {
         else {
             return false;
         };
+        // Apply-side state gate, on top of the seq guard: the verdict only
+        // lands on a form that is actually waiting for one. The seq guard
+        // alone has a hole — it's bumped only when a REMOTE Configure form
+        // opens, so a stale check could otherwise stamp a later local-path or
+        // restart form (repo_check = NotApplicable) whose open never bumped
+        // the seq.
+        if cfg.repo_check != RepoCheck::Checking {
+            return false;
+        }
 
         if let Ok(branches) = &result {
             if let Some(default) = branches.iter().find(|b| b.is_default) {
@@ -7784,9 +7791,30 @@ impl AppState {
                 cfg.repo_branch_names = branches.iter().map(|b| b.name.clone()).collect();
             }
         }
-        cfg.repo_check = RepoCheck::from_branches(result.map(|branches| branches.len()));
+        let mut offline_warn: Option<String> = None;
+        cfg.repo_check = match RepoCheck::from_branches(result.map(|branches| branches.len())) {
+            RepoCheck::Failed(msg)
+                if crate::git::RemoteRepoManager::new()
+                    .ok()
+                    .and_then(|m| m.cached_source_path(&cfg.repo_source))
+                    .is_some() =>
+            {
+                // Warm clone cache → the launch path works offline by design
+                // (its fetch failures are warn-only). A failed validation
+                // must not brick that flow; warn and let Launch proceed.
+                offline_warn = Some(msg);
+                RepoCheck::Ok
+            }
+            verdict => verdict,
+        };
         if let RepoCheck::Failed(msg) = &cfg.repo_check {
             tracing::warn!(error = %msg, "configure repo pre-flight failed");
+        }
+        if let Some(msg) = offline_warn {
+            tracing::warn!(error = %msg, "repo pre-flight failed but clone cache is warm — allowing launch");
+            self.add_warning_notification(format!(
+                "Could not validate remote — using cached clone ({msg})"
+            ));
         }
         true
     }
@@ -7850,6 +7878,14 @@ impl AppState {
         if let Some(cfg) =
             self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
         {
+            // Apply-side state gate (mirrors check_repo_check_complete): only
+            // a form that is actually Initializing takes the verdict. Without
+            // it, [i] on repo A → Esc → open repo B lets A's init result
+            // force B's verdict to Ok while B is still Checking — reopening
+            // the fail-after-Launch hole this feature closes.
+            if cfg.repo_check != RepoCheck::Initializing {
+                return false;
+            }
             match result {
                 Ok(branch) => {
                     if cfg.base_selection.is_none() {

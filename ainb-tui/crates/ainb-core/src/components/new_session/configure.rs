@@ -425,12 +425,14 @@ impl ConfigureState {
         let focused_row = ConfigureRow::Preset;
 
         // Clonable remotes start in `Checking`; the app layer kicks the
-        // background ls-remote and flips this to Ok / Failed.
-        let repo_check = match &repo_source {
-            RepoSource::HttpsUrl(_)
-            | RepoSource::SshUrl(_)
-            | RepoSource::GithubShorthand { .. } => RepoCheck::Checking,
-            _ => RepoCheck::NotApplicable,
+        // background ls-remote and flips this to Ok / Failed. Same
+        // `is_remote()` predicate as the kick site — if they disagreed, a
+        // form could open in Checking with no check ever spawned (Launch
+        // bricked behind a permanent spinner).
+        let repo_check = if repo_source.is_remote() {
+            RepoCheck::Checking
+        } else {
+            RepoCheck::NotApplicable
         };
 
         Self {
