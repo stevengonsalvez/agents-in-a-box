@@ -1601,6 +1601,22 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_BOARD_CARD_CANCEL,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
             ),
+            // Remove + reorder both answer with the refreshed BoardsListResult under
+            // BOARDS_REQ_ID (the board re-renders from the reply); no bespoke note.
+            BoardsAction::CardRemove { board_id, issue_id } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_REMOVE,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
+            ),
+            BoardsAction::CardReorder {
+                board_id,
+                column_id,
+                issue_ids,
+            } => (
+                BOARDS_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_REORDER,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_id": column_id, "issue_ids": issue_ids }),
+            ),
             // A local-overlay repaint round-trip: re-fetch the board list; the
             // reply re-renders with the open overlay preserved.
             BoardsAction::Refresh => (

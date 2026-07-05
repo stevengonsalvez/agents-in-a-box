@@ -355,6 +355,14 @@ pub enum BoardsOverlay {
         /// The card's issue whose active run to cancel.
         issue_id: String,
     },
+    /// Confirming the removal of a card from the board (`d`, tcp T3 / F6). Rides the
+    /// same text-capture signal as [`Self::CancelConfirm`]: Enter confirms (emits
+    /// [`BoardsIntent::RemoveCard`]), Esc aborts. Removing a card drops only the
+    /// placement — the issue survives — so it is reversible (re-add the card).
+    RemoveConfirm {
+        /// The card's issue to take off the board.
+        issue_id: String,
+    },
 }
 
 /// A raw key folded into an open [`BoardsOverlay`]. The reducer interprets each
@@ -617,6 +625,14 @@ pub enum BoardsEvent {
     /// no card focused; a card whose latest run is terminal is refused by the
     /// daemon (reported as a note).
     CancelFocusedCard,
+    /// Remove the focused card from the board (`d`, tcp T3 / F6) — opens a confirm
+    /// overlay. A no-op with no card focused; the daemon refuses a card with an
+    /// active run (cancel it first).
+    RemoveFocusedCard,
+    /// Move the focused card one slot up within its column (`⇧↑`, tcp T3 / F6).
+    ReorderCardUp,
+    /// Move the focused card one slot down within its column (`⇧↓`, tcp T3 / F6).
+    ReorderCardDown,
     /// Add a column to the focused board (`n`) — the glue prompts for the name.
     AddColumn,
     /// Rename the focused column (`r`).
@@ -667,6 +683,25 @@ pub enum BoardsIntent {
         board_id: String,
         /// The issue whose active run to cancel.
         issue_id: String,
+    },
+    /// Remove the card from the board (`hangar/board_card_remove`, tcp T3 / F6).
+    /// Drops only the placement; the issue survives. The daemon refuses a card with
+    /// an active run.
+    RemoveCard {
+        /// The board the card sits on.
+        board_id: String,
+        /// The issue whose placement to remove.
+        issue_id: String,
+    },
+    /// Reorder the focused card within its column (`hangar/board_card_reorder`,
+    /// tcp T3 / F6): the column's new full issue-id order.
+    ReorderCards {
+        /// The board the cards sit on.
+        board_id: String,
+        /// The column being reordered.
+        column_id: String,
+        /// The card issue ids in their new top-to-bottom order.
+        issue_ids: Vec<String>,
     },
     /// Prompt for a name and add a column (`hangar/board_column_add`).
     AddColumn {
@@ -764,6 +799,12 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
         BoardsEvent::CancelFocusedCard => open_overlay(state, |_, c| BoardsOverlay::CancelConfirm {
             issue_id: c.issue_id.clone(),
         }),
+        // Remove opens a confirm overlay too; Enter there emits the RemoveCard intent.
+        BoardsEvent::RemoveFocusedCard => open_overlay(state, |_, c| BoardsOverlay::RemoveConfirm {
+            issue_id: c.issue_id.clone(),
+        }),
+        BoardsEvent::ReorderCardUp => reorder_card(state, -1),
+        BoardsEvent::ReorderCardDown => reorder_card(state, 1),
         BoardsEvent::AddColumn => board_intent(state, |b| BoardsIntent::AddColumn {
             board_id: b.id.clone(),
         }),
@@ -828,6 +869,35 @@ fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
             run_mode_key(state, &issue_id, cursor, key)
         }
         BoardsOverlay::CancelConfirm { issue_id } => cancel_confirm_key(state, &issue_id, key),
+        BoardsOverlay::RemoveConfirm { issue_id } => remove_confirm_key(state, &issue_id, key),
+    }
+}
+
+/// Confirm/abort a card-remove (tcp T3 / F6): Enter emits the [`RemoveCard`] intent
+/// (resolving the board from the focus) and closes; Esc closes; any other key keeps
+/// the modal open so a stray keystroke never fires the remove.
+///
+/// [`RemoveCard`]: BoardsIntent::RemoveCard
+fn remove_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> BoardsReduction {
+    match key {
+        BoardsKey::Enter => {
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::RemoveCard {
+                    board_id: board.id.clone(),
+                    issue_id: issue_id.to_string(),
+                }),
+            }
+        }
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => {
+            set_overlay(state, BoardsOverlay::RemoveConfirm { issue_id: issue_id.to_string() })
+        }
     }
 }
 
@@ -1324,6 +1394,44 @@ fn reorder(state: &BoardsState, dir: i32) -> BoardsReduction {
     }
 }
 
+/// Reorder the focused card one slot in `dir` (`-1` up, `+1` down) within its
+/// column, emitting the column's new full issue-id order. A no-op at the column
+/// edge, with no focused card, or in a column with fewer than two cards. Follows
+/// the moved card with the focus so a repeated reorder keeps dragging it.
+fn reorder_card(state: &BoardsState, dir: i32) -> BoardsReduction {
+    let Some(board) = state.focused_board() else {
+        return unchanged(state);
+    };
+    let Some(col) = state.focused_column() else {
+        return unchanged(state);
+    };
+    let n = col.cards.len();
+    if n < 2 {
+        return unchanged(state);
+    }
+    let (_, _, from) = state.focus();
+    let to = i32::try_from(from).unwrap_or(0) + dir;
+    if !(0..i32::try_from(n).unwrap_or(0)).contains(&to) {
+        return unchanged(state);
+    }
+    let to = usize::try_from(to).unwrap_or(0);
+    let mut issue_ids: Vec<String> = col.cards.iter().map(|c| c.issue_id.clone()).collect();
+    issue_ids.swap(from, to);
+    let board_id = board.id.clone();
+    let column_id = col.id.clone();
+    let mut next = state.clone();
+    next.focused_card = to;
+    next.clamp();
+    BoardsReduction {
+        state: next,
+        intent: Some(BoardsIntent::ReorderCards {
+            board_id,
+            column_id,
+            issue_ids,
+        }),
+    }
+}
+
 /// Emit an intent derived from the focused board + focused card, if both exist.
 fn card_intent(
     state: &BoardsState,
@@ -1526,6 +1634,11 @@ fn render_overlay(
             let shown = format!("kill the in-flight run for #{issue_id}");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
+        BoardsOverlay::RemoveConfirm { issue_id } => {
+            put_str(buf, 0, row, "Remove this card from the board? (Enter confirm, Esc abort):", GOLD, area_w);
+            let shown = format!("take #{issue_id} off the board (the issue is kept)");
+            put_str(buf, 0, value_row, &shown, GREEN, area_w);
+        }
     }
 }
 
@@ -1606,15 +1719,20 @@ fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
     // Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a
     // runnable card AND reruns a finished/failed/cancelled one (same launch
     // path), `X` cancels a running one. `feedback_keybinding_hints_near_control`.
-    let hints: [(&str, &str); 9] = [
+    // Card-lifecycle verbs (F6) lead so they render even when a narrow pane clips
+    // the trailing column verbs. `⇧↑↓` reorders a card within its column, `d`
+    // removes it. `feedback_keybinding_hints_near_control`.
+    let hints: [(&str, &str); 11] = [
         ("↵", "run/rerun"),
         ("a", "attach"),
         ("X", "cancel"),
+        ("d", "remove"),
+        ("⇧↑↓", "move card"),
         ("n", "add col"),
         ("r", "rename"),
         ("x", "del col"),
         ("c", "add card"),
-        ("⇧←→", "reorder"),
+        ("⇧←→", "reorder col"),
         ("m", "auto-move"),
     ];
     let mut x = 0u16;
@@ -1821,6 +1939,109 @@ mod tests {
         let out = reduce_boards(&empty.state, BoardsEvent::CancelFocusedCard);
         assert_eq!(out.intent, None, "no card focused → no cancel intent");
         assert!(out.state.overlay().is_none(), "no card focused → no confirm");
+    }
+
+    /// A board whose first column holds two cards, so a within-column reorder has
+    /// something to move.
+    fn two_card_board() -> BoardsListResult {
+        BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Sprint".into(),
+                auto_move: true,
+                columns: vec![
+                    col(
+                        "c1",
+                        "Todo",
+                        None,
+                        false,
+                        vec![card("issue-1", "First", None), card("issue-2", "Second", None)],
+                    ),
+                    col("c2", "Done", Some("done"), true, vec![]),
+                ],
+                unmapped: Vec::new(),
+            }],
+        }
+    }
+
+    /// `⇧↓` on the top card emits the column's REVERSED id order and follows the
+    /// moved card with the focus (so a repeated move keeps dragging it).
+    #[test]
+    fn reorder_card_down_emits_new_order_and_follows_focus() {
+        let state = BoardsState::from_snapshot(&two_card_board());
+        assert_eq!(state.focused_card().unwrap().issue_id, "issue-1");
+        let r = reduce_boards(&state, BoardsEvent::ReorderCardDown);
+        assert_eq!(
+            r.intent,
+            Some(BoardsIntent::ReorderCards {
+                board_id: "b1".into(),
+                column_id: "c1".into(),
+                issue_ids: vec!["issue-2".into(), "issue-1".into()],
+            })
+        );
+        // Focus followed the card to slot 1.
+        assert_eq!(r.state.focus().2, 1, "focus follows the moved card");
+    }
+
+    /// `⇧↑` on the top card is a no-op at the column edge (no intent, no move).
+    #[test]
+    fn reorder_card_up_at_top_edge_is_noop() {
+        let state = BoardsState::from_snapshot(&two_card_board());
+        let r = reduce_boards(&state, BoardsEvent::ReorderCardUp);
+        assert_eq!(r.intent, None, "top card cannot move up");
+        assert_eq!(r.state.focus().2, 0);
+    }
+
+    /// A single-card column has nothing to reorder — `⇧↓` is a no-op.
+    #[test]
+    fn reorder_single_card_column_is_noop() {
+        let state = BoardsState::from_snapshot(&one_board());
+        assert_eq!(state.focused_card().unwrap().issue_id, "issue-1");
+        let r = reduce_boards(&state, BoardsEvent::ReorderCardDown);
+        assert_eq!(r.intent, None, "a lone card has no reorder");
+    }
+
+    /// `d` on a focused card opens a remove-confirm overlay (no intent yet, so a
+    /// mis-press never removes a card); Enter there emits the RemoveCard intent.
+    #[test]
+    fn remove_focused_card_confirms_then_raises_remove_intent() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let opened = reduce_boards(&state, BoardsEvent::RemoveFocusedCard);
+        assert_eq!(opened.intent, None, "opening the confirm fires nothing");
+        assert!(matches!(
+            opened.state.overlay(),
+            Some(BoardsOverlay::RemoveConfirm { issue_id }) if issue_id == "issue-1"
+        ));
+        let confirmed = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            confirmed.intent,
+            Some(BoardsIntent::RemoveCard {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+            })
+        );
+        assert!(confirmed.state.overlay().is_none(), "confirm closes on Enter");
+    }
+
+    /// Esc aborts the remove confirm — the card is left on the board.
+    #[test]
+    fn remove_confirm_esc_aborts() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let opened = reduce_boards(&state, BoardsEvent::RemoveFocusedCard);
+        let aborted = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Esc));
+        assert_eq!(aborted.intent, None, "Esc fires no remove");
+        assert!(aborted.state.overlay().is_none(), "Esc closes the confirm");
+    }
+
+    /// `d` with no card focused opens nothing — a stray remove never even prompts.
+    #[test]
+    fn remove_with_no_card_focused_is_a_noop() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let empty = reduce_boards(&state, BoardsEvent::FocusRight); // Doing (empty)
+        assert!(empty.state.focused_card().is_none());
+        let out = reduce_boards(&empty.state, BoardsEvent::RemoveFocusedCard);
+        assert_eq!(out.intent, None);
+        assert!(out.state.overlay().is_none());
     }
 
     /// Rerun (tcp T3 / F6) rides the existing run affordance: `Enter` on a

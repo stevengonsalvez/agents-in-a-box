@@ -197,13 +197,31 @@ pub enum BoardsAction {
         /// The card's issue whose run to attach to.
         issue_id: String,
     },
-    /// Cancel a card's in-flight run (`C`) — `hangar/board_card_cancel` (tcp T3 /
+    /// Cancel a card's in-flight run (`X`) — `hangar/board_card_cancel` (tcp T3 /
     /// F6).
     CardCancel {
         /// The board the card sits on.
         board_id: String,
         /// The card's issue whose active run to cancel.
         issue_id: String,
+    },
+    /// Remove a card from the board (`d`) — `hangar/board_card_remove` (tcp T3 /
+    /// F6). Drops the placement; the issue survives.
+    CardRemove {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue whose placement to remove.
+        issue_id: String,
+    },
+    /// Reorder a card within its column (`⇧↑/↓`) — `hangar/board_card_reorder`
+    /// (tcp T3 / F6).
+    CardReorder {
+        /// The board the cards sit on.
+        board_id: String,
+        /// The column being reordered.
+        column_id: String,
+        /// The cards in their new top-to-bottom order.
+        issue_ids: Vec<String>,
     },
     /// Rename a column to the typed name (`r`) — `hangar/board_column_update`.
     ColumnRename {
@@ -1285,8 +1303,16 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
         } else {
             BoardsEvent::FocusRight
         }),
-        KeyCode::Up => Some(BoardsEvent::FocusUp),
-        KeyCode::Down => Some(BoardsEvent::FocusDown),
+        KeyCode::Up => Some(if shift {
+            BoardsEvent::ReorderCardUp
+        } else {
+            BoardsEvent::FocusUp
+        }),
+        KeyCode::Down => Some(if shift {
+            BoardsEvent::ReorderCardDown
+        } else {
+            BoardsEvent::FocusDown
+        }),
         KeyCode::Enter => Some(BoardsEvent::RunFocusedCard),
         KeyCode::Char { ch } => match ch {
             'h' => Some(BoardsEvent::FocusLeft),
@@ -1303,6 +1329,9 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             // cancel (uppercase avoids the lowercase `x` = delete-column binding,
             // and unlike `C` it is not a global tab shortcut).
             'X' => Some(BoardsEvent::CancelFocusedCard),
+            // `d` removes the focused card from the board (uppercase-free, distinct
+            // from lowercase `x` = delete-column); it opens a confirm overlay.
+            'd' => Some(BoardsEvent::RemoveFocusedCard),
             'n' => Some(BoardsEvent::AddColumn),
             'r' => Some(BoardsEvent::RenameColumn),
             'x' => Some(BoardsEvent::DeleteColumn),
@@ -1378,6 +1407,19 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
         BoardsIntent::CancelCard { board_id, issue_id } => Some(BoardsAction::CardCancel {
             board_id,
             issue_id,
+        }),
+        BoardsIntent::RemoveCard { board_id, issue_id } => Some(BoardsAction::CardRemove {
+            board_id,
+            issue_id,
+        }),
+        BoardsIntent::ReorderCards {
+            board_id,
+            column_id,
+            issue_ids,
+        } => Some(BoardsAction::CardReorder {
+            board_id,
+            column_id,
+            issue_ids,
         }),
         BoardsIntent::RenameColumn {
             board_id,
