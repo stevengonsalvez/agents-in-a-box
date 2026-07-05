@@ -12,17 +12,25 @@
 //!                                          <home>/.agents-in-a-box/worktrees/<slug>
 //!                                          on branch  ainb/<slug>
 //!                                          torn down on completion, KEPT if dirty
-//!  repo_ref = Some("scratch")        ──▶  <home>/.agents-in-a-box/scratch/<slug>
+//!  repo_ref = Some("scratch")        ──▶  <home>/.agents-in-a-box/scratch/<scratch_slug>
 //!                                          `git init` (idempotent), run IN PLACE
 //!                                          (already isolated — never torn down)
 //!  repo_ref = None                   ──▶  the fallback execenv workdir (a chat /
 //!                                          autopilot task — the pre-F5 behaviour)
 //! ```
 //!
+//! # Two slugs: per-RUN worktree vs per-CARD scratch
+//!
 //! The `slug` is the caller's per-task key (the task short-id). Because it is
 //! unique per task, two cards launched on the SAME repo provision two DISTINCT
 //! worktrees on two DISTINCT `ainb/<slug>` branches — they never collide (the F5
 //! "N tasks on one repo never collide" guarantee).
+//!
+//! Scratch is different: it is the CARD's durable scratch space (F2 intent), so it
+//! is keyed on the caller's `scratch_slug` — a per-CARD key (the issue short-id),
+//! STABLE across reruns. A per-run slug would hand every rerun a fresh empty dir,
+//! silently losing the prior run's scratch work; the per-card slug reuses the same
+//! `scratch/<scratch_slug>` dir so a rerun continues where the last run left off.
 //!
 //! # Teardown (keep-if-dirty)
 //!
@@ -96,15 +104,17 @@ fn ainb_root(home: &Path) -> PathBuf {
 
 /// Provision the run's working directory for `repo_ref`.
 ///
-/// - `Some("scratch")` → `<home>/.agents-in-a-box/scratch/<slug>`, `git init`ed
-///   idempotently, run in place.
+/// - `Some("scratch")` → `<home>/.agents-in-a-box/scratch/<scratch_slug>`,
+///   `git init`ed idempotently, run in place. Keyed on the per-CARD `scratch_slug`
+///   (stable across reruns), NOT the per-run `slug`.
 /// - `Some(path)` naming a git repo → a fresh worktree under
 ///   `<home>/.agents-in-a-box/worktrees/<slug>` on branch `ainb/<slug>`.
 /// - `None` (or a blank ref) → the `fallback` execenv workdir, untouched.
 ///
 /// Idempotent on resume: a worktree whose path already exists (a recovered task)
 /// is reused rather than re-added; a scratch dir already `git init`ed is left as
-/// is.
+/// is — and a scratch RERUN reuses the same `scratch_slug` dir, so the card's
+/// durable scratch work carries across runs.
 ///
 /// # Errors
 ///
@@ -113,13 +123,14 @@ fn ainb_root(home: &Path) -> PathBuf {
 pub fn provision(
     repo_ref: Option<&str>,
     slug: &str,
+    scratch_slug: &str,
     home: &Path,
     fallback: &Path,
 ) -> io::Result<RunWorkdir> {
     let repo_ref = repo_ref.map(str::trim).filter(|s| !s.is_empty());
     match repo_ref {
         None => Ok(RunWorkdir::Fallback { path: fallback.to_path_buf() }),
-        Some("scratch") => provision_scratch(slug, home),
+        Some("scratch") => provision_scratch(scratch_slug, home),
         Some(path) => provision_worktree(Path::new(path), slug, home),
     }
 }
@@ -288,26 +299,49 @@ mod tests {
         run_git(dir, &["commit", "--quiet", "-m", "init"]).unwrap();
     }
 
-    /// A scratch ref git-inits an isolated repo under the home, idempotently.
+    /// A scratch ref git-inits an isolated repo under the home, idempotently. The
+    /// dir is keyed on the per-CARD `scratch_slug`, NOT the per-run slug.
     #[test]
     fn scratch_git_inits_idempotently() {
         let home = tempfile::tempdir().unwrap();
         let fallback = home.path().join("fallback");
-        let a = provision(Some("scratch"), "card-1", home.path(), &fallback).unwrap();
+        let a = provision(Some("scratch"), "run-1", "card-1", home.path(), &fallback).unwrap();
         let RunWorkdir::Scratch { path } = &a else {
             panic!("expected scratch, got {a:?}");
         };
         assert!(path.join(".git").exists(), "scratch repo is git-inited");
         assert!(
             path.ends_with(".agents-in-a-box/scratch/card-1"),
-            "scratch under ~/.agents-in-a-box/scratch/<slug>: {path:?}"
+            "scratch under ~/.agents-in-a-box/scratch/<scratch_slug>: {path:?}"
         );
         // A second provision is a no-op reuse (idempotent), not a re-init error.
-        let b = provision(Some("scratch"), "card-1", home.path(), &fallback).unwrap();
+        let b = provision(Some("scratch"), "run-1", "card-1", home.path(), &fallback).unwrap();
         assert_eq!(a, b);
         // Teardown never removes a scratch repo.
         assert_eq!(teardown(&a).unwrap(), TeardownOutcome::NoOp);
         assert!(path.exists(), "scratch survives teardown");
+    }
+
+    /// A scratch RERUN reuses the SAME dir across a fresh per-run slug, so the
+    /// card's durable scratch work is not lost (F2 intent). The prior run's file
+    /// survives into the next run's provisioned dir.
+    #[test]
+    fn scratch_reuses_the_card_dir_across_reruns() {
+        let home = tempfile::tempdir().unwrap();
+        let fallback = home.path().join("fallback");
+
+        // Run 1 of card-x provisions scratch and leaves a file behind.
+        let first = provision(Some("scratch"), "run-1", "card-x", home.path(), &fallback).unwrap();
+        std::fs::write(first.path().join("notes.txt"), "prior scratch work").unwrap();
+
+        // Run 2 of the SAME card (a DIFFERENT per-run slug) reuses the same dir.
+        let second = provision(Some("scratch"), "run-2", "card-x", home.path(), &fallback).unwrap();
+        assert_eq!(first.path(), second.path(), "a rerun reuses the card's scratch dir");
+        assert_eq!(
+            std::fs::read_to_string(second.path().join("notes.txt")).unwrap(),
+            "prior scratch work",
+            "the prior run's scratch work survives into the rerun"
+        );
     }
 
     /// A real repo provisions a worktree on branch `ainb/<slug>`.
@@ -321,6 +355,7 @@ mod tests {
 
         let wd = provision(
             Some(repo.to_str().unwrap()),
+            "slug-a",
             "slug-a",
             &home,
             &fallback,
@@ -355,8 +390,8 @@ mod tests {
         let fallback = home.join("fallback");
         let repo_ref = repo.to_str().unwrap();
 
-        let a = provision(Some(repo_ref), "slug-a", &home, &fallback).unwrap();
-        let b = provision(Some(repo_ref), "slug-b", &home, &fallback).unwrap();
+        let a = provision(Some(repo_ref), "slug-a", "slug-a", &home, &fallback).unwrap();
+        let b = provision(Some(repo_ref), "slug-b", "slug-b", &home, &fallback).unwrap();
         assert_ne!(a.path(), b.path(), "distinct worktree dirs");
         let (RunWorkdir::Worktree { branch: ba, .. }, RunWorkdir::Worktree { branch: bb, .. }) =
             (&a, &b)
@@ -377,7 +412,7 @@ mod tests {
         let home = tmp.path().join("home");
         let fallback = home.join("fallback");
 
-        let wd = provision(Some(repo.to_str().unwrap()), "clean", &home, &fallback).unwrap();
+        let wd = provision(Some(repo.to_str().unwrap()), "clean", "clean", &home, &fallback).unwrap();
         let path = wd.path().to_path_buf();
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::Removed);
         assert!(!path.exists(), "clean worktree removed");
@@ -402,7 +437,7 @@ mod tests {
         let home = tmp.path().join("home");
         let fallback = home.join("fallback");
 
-        let wd = provision(Some(repo.to_str().unwrap()), "dirty", &home, &fallback).unwrap();
+        let wd = provision(Some(repo.to_str().unwrap()), "dirty", "dirty", &home, &fallback).unwrap();
         // Leave an uncommitted change in the worktree.
         std::fs::write(wd.path().join("new.txt"), "work in progress").unwrap();
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::KeptDirty);
@@ -422,7 +457,7 @@ mod tests {
         let fallback = home.join("fallback");
 
         // Fresh worktree, no agent commits yet → 0 ahead (nothing to surface).
-        let wd = provision(Some(repo.to_str().unwrap()), "ahead", &home, &fallback).unwrap();
+        let wd = provision(Some(repo.to_str().unwrap()), "ahead", "ahead", &home, &fallback).unwrap();
         assert_eq!(commits_ahead(&wd).unwrap(), 0, "a no-commit run is 0 ahead");
 
         // The agent commits inside its worktree → the branch is ahead of its base.
@@ -445,9 +480,9 @@ mod tests {
         );
 
         // Scratch + fallback never surface a branch.
-        let scratch = provision(Some("scratch"), "s", &home, &fallback).unwrap();
+        let scratch = provision(Some("scratch"), "s", "s", &home, &fallback).unwrap();
         assert_eq!(commits_ahead(&scratch).unwrap(), 0);
-        let fb = provision(None, "c", &home, &fallback).unwrap();
+        let fb = provision(None, "c", "c", &home, &fallback).unwrap();
         assert_eq!(commits_ahead(&fb).unwrap(), 0);
     }
 
@@ -456,12 +491,12 @@ mod tests {
     fn no_repo_uses_fallback() {
         let home = tempfile::tempdir().unwrap();
         let fallback = home.path().join("execenv-workdir");
-        let wd = provision(None, "chat", home.path(), &fallback).unwrap();
+        let wd = provision(None, "chat", "chat", home.path(), &fallback).unwrap();
         assert_eq!(wd, RunWorkdir::Fallback { path: fallback.clone() });
         assert_eq!(wd.path(), fallback);
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::NoOp);
         // A blank ref is treated the same as None.
-        let blank = provision(Some("  "), "chat", home.path(), &fallback).unwrap();
+        let blank = provision(Some("  "), "chat", "chat", home.path(), &fallback).unwrap();
         assert_eq!(blank, RunWorkdir::Fallback { path: fallback });
     }
 }

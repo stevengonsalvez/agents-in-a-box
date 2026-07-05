@@ -562,9 +562,21 @@ async fn execute_claimed(
     // The single source means a RuntimeOffline-retried child — whose INSERT copies
     // `repo_ref` — provisions the SAME repo's worktree instead of the in-tree
     // fallback a dropped `repo_ref` used to force.
+    //
+    // Two slugs: the per-run task short-id keys the volatile worktree (unique per
+    // run — the F5 no-collision guarantee), while SCRATCH is keyed on the CARD's
+    // issue short-id, STABLE across reruns, so a rerun continues in the same
+    // durable scratch dir instead of a fresh empty one (F2 intent). A task with no
+    // issue never resolves `scratch`, so its fallback to the run slug is inert.
+    let run_slug = crate::execenv::short_id(&task.id);
+    let scratch_slug = task
+        .issue_id
+        .as_deref()
+        .map_or_else(|| run_slug.clone(), crate::execenv::short_id);
     let run_wd = crate::workdir_provision::provision(
         task.repo_ref.as_deref(),
-        &crate::execenv::short_id(&task.id),
+        &run_slug,
+        &scratch_slug,
         &home,
         &env.workdir,
     )?;
