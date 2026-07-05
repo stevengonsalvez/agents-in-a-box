@@ -42,10 +42,12 @@ use std::time::Duration;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_core::task::state::TaskState;
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::service::claim::{ClaimTaskService, ClaimedTask};
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
 use ainb_hangar_store::service::fail::FailTaskService;
+use ainb_hangar_store::service::finalize::FinalizeError;
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
@@ -683,27 +685,47 @@ async fn execute_claimed(
     // takes the allowlist-filtered env and no argv; `codex` runs `codex exec` with
     // the agent's model/cli_args on the argv and its `agent_env` layered onto the
     // child env. Both spawn through the same OS sandbox (e38.23).
-    let outcome = if task.mode == "interactive" {
-        run_interactive(
-            pool,
-            runner,
-            &task,
-            &ws_slug,
-            &env,
-            run_wd.path(),
-            task_env,
-            &dispatch,
-            interactive,
-        )
-        .await?
-    } else {
-        // F5: run in the provisioned worktree / scratch dir (`location.cwd`),
-        // widening the sandbox to it (`location.extra_root`) so the confined
-        // agent can write its own checkout.
-        match dispatch.backend {
-            Backend::Claude => runner.run_claude_in(&env, task_env, &location).await?,
-            Backend::Codex => {
-                runner
+    // tcp T3 / F6: register this run in the daemon's kill registry so the cancel
+    // RPC (which runs on the RPC server task, not this claim-loop task) can stop
+    // it, then RACE the provider against that cancel signal. When the signal
+    // fires, `provider_run` is DROPPED — for a headless run that SIGKILLs the
+    // provider's process group via the runner's `kill_on_drop(true)` — and, for
+    // interactive, the detached tmux session (which a dropped `wait` does NOT
+    // kill) is torn down by its exact name below. Both settle as
+    // `RunOutcome::Cancelled`, finalised through the dedicated cancelled seam
+    // (never the failure path, so a cancel neither auto-moves to `failed` nor
+    // spawns a retry child).
+    // P10 / D19: the provider that executed this run, recorded on the run-history
+    // row + the OTLP task->run span. Captured BEFORE `provider_run` moves
+    // `dispatch` (the async block takes `dispatch.agent_env` by value).
+    let provider = dispatch.backend.name();
+    let cancel_guard = crate::cancel::registry().register(&task.id);
+    let provider_run = async {
+        if task.mode == "interactive" {
+            run_interactive(
+                pool,
+                runner,
+                &task,
+                &ws_slug,
+                &env,
+                run_wd.path(),
+                task_env,
+                &dispatch,
+                interactive,
+            )
+            .await
+        } else {
+            // F5: run in the provisioned worktree / scratch dir (`location.cwd`),
+            // widening the sandbox to it (`location.extra_root`) so the confined
+            // agent can write its own checkout. The runner's `io::Result` is
+            // lifted to `anyhow` so both `provider_run` arms share one error type
+            // (the interactive path already returns `anyhow::Result`).
+            match dispatch.backend {
+                Backend::Claude => runner
+                    .run_claude_in(&env, task_env, &location)
+                    .await
+                    .map_err(anyhow::Error::from),
+                Backend::Codex => runner
                     .run_codex_in(
                         &env,
                         task_env,
@@ -711,14 +733,35 @@ async fn execute_claimed(
                         &dispatch.invocation,
                         &location,
                     )
-                    .await?
+                    .await
+                    .map_err(anyhow::Error::from),
             }
         }
     };
+    let outcome = tokio::select! {
+        // Bias the cancel arm: an already-signalled cancel wins deterministically
+        // over a provider future that became ready in the same poll.
+        biased;
+        () = cancel_guard.cancelled() => {
+            if task.mode == "interactive" {
+                // The detached session survives `run_interactive`'s dropped `wait`,
+                // so kill it by its EXACT name and clear the shutdown-reap entry the
+                // dropped future would otherwise leave registered (keeps the set
+                // bounded — the reap on shutdown would no-op it anyway).
+                let session = crate::interactive::session_name_for(&task.id);
+                crate::interactive::kill_session(&session).await;
+                interactive.unregister(&session);
+            }
+            // Headless: dropping `provider_run` here fires the runner's
+            // `kill_on_drop(true)`, SIGKILLing the provider's process group.
+            RunOutcome::Cancelled(crate::runner::RunnerResult::default())
+        }
+        res = provider_run => res?,
+    };
+    // The guard is dropped once the run is decided so the registry stays bounded
+    // to genuinely-live runs (its `Drop` deregisters this task).
+    drop(cancel_guard);
 
-    // P10 / D19: the provider that executed this run, recorded on the run-history
-    // row + the OTLP task->run span.
-    let provider = dispatch.backend.name();
     match outcome {
         RunOutcome::Success(result) => {
             // running -> done: type the terminal edge before the store finalize.
@@ -730,6 +773,14 @@ async fn execute_claimed(
             lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
             finalize_failure(pool, &task, &run_wd, reason, result, provider, clock, stats, events)
                 .await?;
+        }
+        RunOutcome::Cancelled(result) => {
+            // running -> cancelled (tcp T3 / F6): the cancel RPC is the
+            // authoritative owner of the terminal DB flip, the terminal event, and
+            // the card auto-move; this seam only reclaims the run's artifacts.
+            // Type the edge first so an out-of-order cancel is a typed error.
+            lifecycle.fire(crate::fsm::LifecycleEvent::Cancel)?;
+            finalize_cancelled(pool, &task, &run_wd, result, provider, clock).await?;
         }
     }
     Ok(())
@@ -898,7 +949,7 @@ async fn finalize_success(
         ainb_hangar_core::result::TaskResult::new(result.stdout_tail, result.exit_code, pr_url);
     let result_json =
         serde_json::to_value(&task_result).unwrap_or_else(|_| serde_json::json!({"content": ""}));
-    CompleteTaskService::complete(
+    match CompleteTaskService::complete(
         pool,
         &task.id,
         CompleteParams {
@@ -910,7 +961,25 @@ async fn finalize_success(
         },
         clock,
     )
-    .await?;
+    .await
+    {
+        Ok(_) => {}
+        // tcp T3 / F6: a human cancel (`running -> cancelled`) landed between the
+        // provider finishing and this finalize (the cancel RPC won the conditional
+        // finalize race). Cancelled wins — skip the success side-effects (the
+        // cancel RPC owns the terminal event + card auto-move), but STILL tear the
+        // worktree down so the race never leaks a checkout, then return Ok so the
+        // benign race is not logged as a task-execution error.
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "run completed but was cancelled first; honoring cancel");
+            teardown_workdir(run_wd, &task.id);
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    }
     // e38.35: record this run's token/cost usage now the task row is terminal
     // (best-effort; a run that reported no usage records nothing).
     persist_usage(pool, task, usage.as_ref(), clock).await;
@@ -986,7 +1055,23 @@ async fn finalize_failure(
     // Persist the session id (if any) before failing so a retry can resume the
     // provider conversation.
     persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
-    FailTaskService::fail(pool, &task.id, reason, clock).await?;
+    match FailTaskService::fail(pool, &task.id, reason, clock).await {
+        Ok(_) => {}
+        // tcp T3 / F6: a human cancel (`running -> cancelled`) beat this failure to
+        // the conditional finalize. Cancelled wins — skip the failure side-effects
+        // (event / auto-move / retry are the cancel RPC's / not wanted for a
+        // cancel), but STILL tear the worktree down so the race never leaks, then
+        // return Ok so the benign race is not logged as an execution error.
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "run failed but was cancelled first; honoring cancel");
+            teardown_workdir(run_wd, &task.id);
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    }
     // e38.35: a failed/timed-out run can still report partial usage worth
     // accounting; record it now the row is terminal (best-effort).
     persist_usage(pool, task, result.usage.as_ref(), clock).await;
@@ -1047,6 +1132,58 @@ async fn finalize_failure(
     Ok(())
 }
 
+/// Finalise a cancelled run (tcp T3 / F6): reclaim the run's artifacts after a
+/// human cancel signalled it mid-flight.
+///
+/// The cancel RPC ([`crate::rpc`]) is the authoritative owner of the terminal
+/// transition — it flips the row `running -> cancelled` via the store's
+/// `CancelTaskService`, emits the `TaskFinished(Cancelled)` event, and auto-moves
+/// the card BEFORE signalling this run to stop. So this seam does NOT re-write
+/// the DB, re-emit the event, or re-move the card; it only reclaims what this run
+/// future owns and the RPC cannot see: a durable branch a cancelled run may have
+/// committed, a run-history row recording the cancel, and the provisioned
+/// worktree (torn down keep-if-dirty).
+///
+/// Deliberately NO retry — a user cancel is terminal by intent
+/// (`UserCancel -> NoRetry`) — and NO throughput tick (a cancel is neither a
+/// success nor a failure the health sparkline should count).
+///
+/// # Errors
+///
+/// Never returns `Err`: every step (branch capture, run-history append, teardown)
+/// is best-effort and self-contained. The `Result` matches the sibling finalize
+/// seams so the `execute_claimed` match arm reads uniformly.
+async fn finalize_cancelled(
+    pool: &SqlitePool,
+    task: &Task,
+    run_wd: &crate::workdir_provision::RunWorkdir,
+    result: crate::runner::RunnerResult,
+    provider: &str,
+    clock: &dyn HangarClock,
+) -> anyhow::Result<()> {
+    // A cancelled run that still committed leaves a durable branch — record it so
+    // the card can surface the partial work (mirrors the failed path).
+    persist_run_branch(pool, &task.id, run_wd).await;
+    // P10 / D19: append a run-history row (outcome=cancelled) so the observability
+    // timeline records the cancel + any partial token-cost. Best-effort.
+    record_run_history(
+        pool,
+        task,
+        provider,
+        result.session_id.as_deref(),
+        result.usage.as_ref(),
+        "cancelled",
+        clock,
+    )
+    .await;
+    // F5: tear down the run's provisioned worktree (keep-if-dirty). A cancelled
+    // run that left a dirty checkout keeps it for inspection; a clean one is
+    // removed + deregistered.
+    teardown_workdir(run_wd, &task.id);
+    tracing::info!(task_id = %task.id, "task cancelled");
+    Ok(())
+}
+
 /// Evaluate the just-failed `task_id` for an automatic retry and, if eligible,
 /// spawn a `parent_task_id`-chained child row (F06).
 ///
@@ -1104,7 +1241,12 @@ fn emit_task_started(events: &EventSink, task: &Task, clock: &dyn HangarClock) {
 /// Publish a [`TaskFinished`](ainb_hangar_proto::events::HangarEvent::TaskFinished)
 /// with `result` for `task`, scoped to its owning workspace (e38.2).
 /// Best-effort, mirroring [`emit_task_started`].
-fn emit_task_finished(
+///
+/// `pub(crate)` so the cancel RPC (tcp T3 / F6) can push the same terminal event
+/// the FSM finalize seams do — it owns the `running -> cancelled` transition, so
+/// it emits `TaskFinished(Cancelled)` through this one helper rather than
+/// hand-rolling a divergent event.
+pub(crate) fn emit_task_finished(
     events: &EventSink,
     task: &Task,
     result: ainb_hangar_proto::events::TaskResult,

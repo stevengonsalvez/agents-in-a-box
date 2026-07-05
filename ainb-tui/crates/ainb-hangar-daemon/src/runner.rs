@@ -180,8 +180,10 @@ pub struct ProviderUsage {
 
 /// The captured result of one provider run.
 ///
-/// Holds an `f64` cost via [`ProviderUsage`], so it is `PartialEq` only.
-#[derive(Debug, Clone, PartialEq)]
+/// Holds an `f64` cost via [`ProviderUsage`], so it is `PartialEq` only. The
+/// `Default` (all fields empty / `None`) is the "no captured output" result a
+/// cancelled run carries — its provider was killed before any JSONL was read.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunnerResult {
     /// Process exit code, or `None` if the process was killed by signal/timeout.
     pub exit_code: Option<i32>,
@@ -211,14 +213,21 @@ pub enum RunOutcome {
         /// The captured result (exit code, session id, output tails).
         result: RunnerResult,
     },
+    /// The run was cancelled by a human mid-flight (tcp T3 / F6): the claim loop
+    /// caught its kill signal and stopped the provider (a headless process group
+    /// via `kill_on_drop`, or the interactive tmux session by exact name). The
+    /// daemon finalises through the dedicated cancelled seam (`running ->
+    /// cancelled`) — NOT the failure path, so a cancel never auto-moves the card
+    /// to a `failed` column nor spawns a retry child.
+    Cancelled(RunnerResult),
 }
 
 impl RunOutcome {
-    /// Borrow the captured [`RunnerResult`] regardless of success/failure.
+    /// Borrow the captured [`RunnerResult`] regardless of outcome.
     #[must_use]
     pub const fn result(&self) -> &RunnerResult {
         match self {
-            Self::Success(r) | Self::Failed { result: r, .. } => r,
+            Self::Success(r) | Self::Cancelled(r) | Self::Failed { result: r, .. } => r,
         }
     }
 }

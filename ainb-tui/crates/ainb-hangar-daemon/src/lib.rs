@@ -30,6 +30,10 @@ pub mod atc;
 /// claim loop moves the task's issue card to the `fsm_state`-matched auto-move
 /// column of every board carrying it (best-effort, never blocks the FSM).
 pub mod board;
+/// The in-flight run kill registry (tcp T3 / F6): the process-global seam a
+/// cancel RPC uses to signal the claim loop to stop a live run (headless process
+/// group / interactive tmux session). See [`cancel::registry`].
+pub mod cancel;
 /// The attention ingest producer (spec P2, D10): the daemon's own tail of the
 /// shared hook `events.jsonl` into the `attention` table — classifies every
 /// qualifying session event and raises an answerable row + an `AttentionRaised`
