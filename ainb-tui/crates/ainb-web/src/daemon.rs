@@ -283,6 +283,10 @@ pub fn attention_to_needs(rows: &[AttentionRow]) -> Value {
                 "degraded": row.degraded,
                 "createdAt": row.created_at,
                 "payload": payload,
+                // The push channels resolved at raise time (tcp T5). The web-push
+                // delivery loop filters on this: it buzzes a device only when the
+                // rules routed this attention to the `web` channel.
+                "channels": row.channels,
             })
         })
         .collect();
@@ -382,6 +386,7 @@ mod tests {
             payload: payload.to_string(),
             degraded: false,
             created_at: 1000,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
         }
     }
 
