@@ -28,6 +28,7 @@
 //! to it, add/rename/delete/reorder a column, add a card, toggle the board's
 //! auto-move, create/delete a board). Pure: no IO, no input mutation.
 
+use ainb_hangar_proto::events::MessageKind;
 use ainb_hangar_proto::snapshots::{BoardCardWireRow, BoardsListResult};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -47,6 +48,10 @@ use crate::widgets::transcript::render_transcript;
 pub struct TimelineView {
     /// The overlay title (`Timeline · #<issue> · <provider>`).
     title: String,
+    /// The task whose transcript this is (`None` when the card never ran). Live
+    /// `TaskMessage` events for THIS task append to the view while it runs; events
+    /// for any other task are ignored.
+    task_id: Option<String>,
     /// The parsed transcript entries, in stream order.
     entries: Vec<ViewEntry>,
     /// The first visible entry (vertical scroll).
@@ -54,11 +59,12 @@ pub struct TimelineView {
 }
 
 impl TimelineView {
-    /// A fresh timeline for `title` over `entries`, scrolled to the top.
+    /// A fresh timeline for `task_id`'s run over `entries`, scrolled to the top.
     #[must_use]
-    pub fn new(title: impl Into<String>, entries: Vec<ViewEntry>) -> Self {
+    pub fn new(title: impl Into<String>, task_id: Option<String>, entries: Vec<ViewEntry>) -> Self {
         Self {
             title: title.into(),
+            task_id,
             entries,
             scroll: 0,
         }
@@ -68,6 +74,12 @@ impl TimelineView {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The task whose run this timeline shows, if any.
+    #[must_use]
+    pub fn task_id(&self) -> Option<&str> {
+        self.task_id.as_deref()
     }
 
     /// The parsed transcript entries.
@@ -80,6 +92,33 @@ impl TimelineView {
     #[must_use]
     pub const fn scroll(&self) -> usize {
         self.scroll
+    }
+
+    /// Cap on the live-appended transcript entries: a long run streams without
+    /// bound, so the tail view keeps only the most recent lines (dropping the
+    /// oldest), matching the daemon's 512 KiB tail on the initial fetch.
+    const MAX_ENTRIES: usize = 5000;
+
+    /// Append one live transcript line (from a `TaskMessage` on this task's run),
+    /// following the tail: if the view was scrolled to the last entry it advances
+    /// to the new last, otherwise the scroll position is left where the reader put
+    /// it (so live appends never yank the viewport off what they are reading).
+    ///
+    /// Bounded like the initial fetch's 512 KiB tail: once the entry count exceeds
+    /// [`Self::MAX_ENTRIES`] the oldest entries are dropped (a tail view never grows
+    /// without limit), and the scroll offset shifts down with them so it keeps
+    /// pointing at the same line the reader was on.
+    pub fn append_line(&mut self, kind: MessageKind, body: impl Into<String>) {
+        let was_at_tail = self.scroll >= self.entries.len().saturating_sub(1);
+        self.entries.push(ViewEntry::line(kind, body));
+        if self.entries.len() > Self::MAX_ENTRIES {
+            let overflow = self.entries.len() - Self::MAX_ENTRIES;
+            self.entries.drain(..overflow);
+            self.scroll = self.scroll.saturating_sub(overflow);
+        }
+        if was_at_tail {
+            self.scroll = self.entries.len().saturating_sub(1);
+        }
     }
 
     /// Scroll by `delta` rows, saturating at the top and at the last entry (never
@@ -608,6 +647,27 @@ impl BoardsState {
     pub fn scroll_timeline(&mut self, delta: i32) {
         if let Some(tl) = self.timeline.as_mut() {
             tl.scroll_by(delta);
+        }
+    }
+
+    /// Fold a live `TaskMessage` into the open timeline: append the line only when
+    /// the overlay is open for THIS `task_id` (an event for another task, or with
+    /// no timeline open, is ignored). This is the F6 logs-tail live auto-append —
+    /// while the shown run is in flight, its streamed transcript lines land in the
+    /// overlay without a re-fetch. Returns `true` when a line was appended (the glue
+    /// marks the render dirty).
+    pub fn fold_timeline_message(
+        &mut self,
+        task_id: &str,
+        kind: MessageKind,
+        body: impl Into<String>,
+    ) -> bool {
+        match self.timeline.as_mut() {
+            Some(tl) if tl.task_id() == Some(task_id) => {
+                tl.append_line(kind, body);
+                true
+            }
+            _ => false,
         }
     }
 
@@ -2365,7 +2425,7 @@ mod tests {
         let entries = crate::widgets::jsonl_timeline::parse_timeline(jsonl);
         assert!(!entries.is_empty(), "fixture parses to entries");
         let mut state = BoardsState::from_snapshot(&one_board());
-        state.set_timeline(TimelineView::new("Timeline · claude", entries));
+        state.set_timeline(TimelineView::new("Timeline · claude", Some("task-1".into()), entries));
         assert!(state.timeline().is_some());
 
         let mut buf = WireBuffer::new(80, 12);
@@ -2384,6 +2444,30 @@ mod tests {
         // Closing drops the overlay.
         state.close_timeline();
         assert!(state.timeline().is_none());
+    }
+
+    /// F6 logs-tail: a live `TaskMessage` for the timeline's task appends to the
+    /// open overlay (following the tail); an event for a DIFFERENT task is ignored.
+    #[test]
+    fn timeline_live_appends_only_matching_task_messages() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_timeline(TimelineView::new("Timeline · claude", Some("task-1".into()), Vec::new()));
+
+        // A line for THIS task appends + follows the tail (scroll tracks the last
+        // entry since we were already at the tail).
+        let appended = state.fold_timeline_message("task-1", MessageKind::Agent, "hello from the run");
+        assert!(appended, "a matching TaskMessage appends");
+        assert_eq!(state.timeline().unwrap().entries().len(), 1, "one live line landed");
+        assert_eq!(state.timeline().unwrap().scroll(), 0, "the tail-follow keeps the last entry visible");
+
+        // A line for another task is ignored (never appended to this overlay).
+        let other = state.fold_timeline_message("task-99", MessageKind::Agent, "not mine");
+        assert!(!other, "a foreign-task TaskMessage is ignored");
+        assert_eq!(state.timeline().unwrap().entries().len(), 1, "no cross-task append");
+
+        // With no timeline open, folding is a no-op.
+        state.close_timeline();
+        assert!(!state.fold_timeline_message("task-1", MessageKind::Agent, "closed"));
     }
 
     /// `d` on a focused card opens a remove-confirm overlay (no intent yet, so a

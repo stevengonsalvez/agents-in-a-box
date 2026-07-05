@@ -640,6 +640,14 @@ impl HangarPlugin {
     fn apply_hangar_event(&mut self, event: HangarEvent) {
         use crate::screen::issue_list::{IssueListEvent, reduce_issue_list};
         use crate::screen::kanban::{KanbanEvent, reduce_kanban};
+        // F6 logs-tail: a live transcript line for the task whose timeline overlay
+        // is open auto-appends to it, so the shown run streams in place (no re-
+        // fetch). Events for any other task — or with no timeline open — are ignored.
+        if let HangarEvent::TaskMessage { task_id, kind, body } = &event {
+            self.screens
+                .boards
+                .fold_timeline_message(task_id.as_str(), *kind, body.clone());
+        }
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
             IssueListEvent::Event(event.clone()),
@@ -913,9 +921,11 @@ impl HangarPlugin {
         }
         let provider = r.provider.as_deref().unwrap_or("run");
         let title = format!("Timeline · {provider}");
+        // Carry the run's task id so live `TaskMessage` events for THIS task
+        // auto-append to the overlay while the run is in flight (F6 logs-tail).
         self.screens
             .boards
-            .set_timeline(crate::screen::boards::TimelineView::new(title, entries));
+            .set_timeline(crate::screen::boards::TimelineView::new(title, r.task_id, entries));
     }
 
     /// Fold a `profile/get` result into the selected profile's detail (P5): the
