@@ -705,6 +705,8 @@ async fn handle(
         methods::PROFILE_LIST => handle_profile_list(pool).await,
         methods::PROFILE_GET => handle_profile_get(pool, req).await,
         methods::PROFILE_UPSERT => handle_profile_upsert(pool, req).await,
+        methods::HANGAR_NOTIFY_RULES_LIST => handle_notify_rules_list(pool, req).await,
+        methods::HANGAR_NOTIFY_RULE_SET => handle_notify_rule_set(pool, req).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -3573,6 +3575,67 @@ async fn handle_atc_escalate(
     to_value(&ainb_hangar_proto::snapshots::AtcEscalateResult { attention_id })
 }
 
+/// Dispatch `hangar/notify_rules_list` (tcp T5): the per-attention-kind routing
+/// grid for a scope. `workspace_id = None` returns the global rows; a
+/// `Some(ws)` returns that workspace's EFFECTIVE rows (override where set, global
+/// otherwise). A read: an unknown workspace resolves to the globals rather than
+/// erroring, mirroring the other list snapshots. Split out of [`handle`] to keep
+/// that dispatcher within the line cap.
+async fn handle_notify_rules_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
+
+    let params: ainb_hangar_proto::snapshots::NotifyRulesListParams =
+        parse_params(req, "{ workspace_id? }")?;
+    let ws = match params.workspace_id.as_deref() {
+        Some(w) => resolve_wire(pool, w).await?,
+        None => None,
+    };
+    let rules = NotifyRuleRepo::list(pool, ws.as_ref().map(WorkspaceId::as_str))
+        .await
+        .map_err(|e| store_err(&e))?
+        .into_iter()
+        .map(|r| ainb_hangar_proto::snapshots::NotifyRuleWireRow {
+            kind: r.kind.as_str().to_string(),
+            channels: r.channels,
+            overridden: r.overridden,
+        })
+        .collect();
+    to_value(&ainb_hangar_proto::snapshots::NotifyRulesListResult { rules })
+}
+
+/// Dispatch `hangar/notify_rule_set` (tcp T5): upsert one routing rule.
+/// `workspace_id = None` writes the GLOBAL rule; `Some(ws)` writes a
+/// per-workspace override. An unknown `kind` is a client error; a `Some(ws)` that
+/// does not resolve is rejected (you cannot override a non-existent workspace).
+/// Mutating + idempotent. Split out of [`handle`] to keep that dispatcher within
+/// the line cap.
+async fn handle_notify_rule_set(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::attention::AttentionKind;
+    use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
+
+    let params: ainb_hangar_proto::snapshots::NotifyRuleSetParams =
+        parse_params(req, "{ workspace_id?, kind, channels }")?;
+    let kind = AttentionKind::parse(&params.kind)
+        .ok_or_else(|| invalid_params(&format!("unknown attention kind `{}`", params.kind)))?;
+    let ws = match params.workspace_id.as_deref() {
+        Some(w) => Some(resolve_wire_or_reject(pool, w).await?),
+        None => None,
+    };
+    NotifyRuleRepo::set(pool, ws.as_ref().map(WorkspaceId::as_str), kind, params.channels)
+        .await
+        .map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::NotifyRuleSetResult {
+        kind: kind.as_str().to_string(),
+        channels: params.channels,
+    })
+}
+
 /// Dispatch `atc/unregister` (spec P9, D12): disable a registered ATC instance's
 /// heartbeat cron. The daemon-native counterpart to `ainb fleet atc teardown`'s
 /// timer removal — flips `enabled = 0` and clears `next_tick_at` (via
@@ -5091,5 +5154,110 @@ mod tests {
             delivered += 1;
         }
         assert_eq!(delivered, total - 10);
+    }
+
+    /// The rule-list RPC returns the seeded global defaults, a set RPC overrides a
+    /// rule, and a per-workspace override supersedes the global for that workspace
+    /// only — the full T5 grid round-trip through the dispatcher.
+    #[tokio::test]
+    async fn notify_rules_list_and_set_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let pool = store.pool();
+
+        // Find one kind's row in a `rules` array, cloned.
+        fn row_for(rules: &serde_json::Value, kind: &str) -> serde_json::Value {
+            rules
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|r| r["kind"] == kind)
+                .cloned()
+                .unwrap_or_else(|| panic!("no rule row for {kind}"))
+        }
+
+        // The seeded global grid: escalation is loud, ask is web+os, waiting is
+        // board-only, and nothing is marked overridden at global scope.
+        let resp = dispatch(
+            pool,
+            &req(methods::HANGAR_NOTIFY_RULES_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let rules = resp.result.unwrap()["rules"].clone();
+        assert_eq!(row_for(&rules, "escalation")["channels"], serde_json::json!(["phone", "web", "os"]));
+        assert_eq!(row_for(&rules, "ask_user_question")["channels"], serde_json::json!(["web", "os"]));
+        assert_eq!(row_for(&rules, "waiting")["channels"], serde_json::json!([]));
+        assert_eq!(row_for(&rules, "error")["overridden"], serde_json::json!(false));
+
+        // Override ASK for the seeded `default` workspace → phone only.
+        let set = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_NOTIFY_RULE_SET,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "kind": "ask_user_question",
+                    "channels": ["phone"],
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(set.error.is_none(), "{set:?}");
+        assert_eq!(set.result.unwrap()["channels"], serde_json::json!(["phone"]));
+
+        // The workspace grid shows the override (marked)...
+        let ws_rules = dispatch(
+            pool,
+            &req(methods::HANGAR_NOTIFY_RULES_LIST, serde_json::json!({"workspace_id": "default"})),
+            &health(),
+            &sink(),
+        )
+        .await
+        .result
+        .unwrap();
+        let ws_ask = row_for(&ws_rules["rules"], "ask_user_question");
+        assert_eq!(ws_ask["channels"], serde_json::json!(["phone"]));
+        assert_eq!(ws_ask["overridden"], serde_json::json!(true));
+
+        // ...while the global grid is untouched.
+        let global = dispatch(
+            pool,
+            &req(methods::HANGAR_NOTIFY_RULES_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await
+        .result
+        .unwrap();
+        assert_eq!(
+            row_for(&global["rules"], "ask_user_question")["channels"],
+            serde_json::json!(["web", "os"]),
+            "global untouched"
+        );
+    }
+
+    /// A set RPC with an unknown attention kind is rejected as INVALID_PARAMS
+    /// rather than silently writing a rule the CHECK constraint would reject.
+    #[tokio::test]
+    async fn notify_rule_set_rejects_unknown_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_NOTIFY_RULE_SET,
+                serde_json::json!({"kind": "not_a_kind", "channels": ["web"]}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
     }
 }

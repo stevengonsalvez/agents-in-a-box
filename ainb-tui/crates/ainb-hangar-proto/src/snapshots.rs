@@ -12,6 +12,7 @@
 //! These are **pure wire types** — `serde` only, no host deps — matching the
 //! rest of `ainb-hangar-proto`.
 
+use ainb_hangar_core::channel::ChannelSet;
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
@@ -1741,6 +1742,68 @@ pub struct RepoWireRow {
 pub struct RepoListResult {
     /// The roster rows in pick order (★ favorites by recency, then scanned).
     pub repos: Vec<RepoWireRow>,
+}
+
+/// One routing-rule row in the [`crate::methods::HANGAR_NOTIFY_RULES_LIST`]
+/// result (tcp T5): an attention kind, its EFFECTIVE push-channel set for the
+/// scope, and whether that value is a per-workspace override (vs the inherited
+/// global default). The settings grid renders one of these per kind.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyRuleWireRow {
+    /// The attention kind wire token (`ask_user_question` / `approval` / … /
+    /// `escalation`) this rule governs.
+    pub kind: String,
+    /// The effective push channels for the scope (empty = board-only).
+    pub channels: ChannelSet,
+    /// `true` when a per-workspace override supplied `channels`; `false` when
+    /// inherited from the global default. Always `false` for the global scope.
+    #[serde(default)]
+    pub overridden: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_NOTIFY_RULES_LIST`] (tcp T5): the scope to
+/// read the routing grid for. `workspace_id = None` reads the GLOBAL rows; a
+/// `Some(ws)` reads that workspace's effective rows (override where set, global
+/// otherwise).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NotifyRulesListParams {
+    /// The workspace to scope to, or `None` for the global rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_NOTIFY_RULES_LIST`] (tcp T5): one row per
+/// attention kind, in declaration order (the settings-grid row order).
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct NotifyRulesListResult {
+    /// The routing rules, one per kind.
+    pub rules: Vec<NotifyRuleWireRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_NOTIFY_RULE_SET`] (tcp T5): set one rule.
+/// `workspace_id = None` writes the GLOBAL row; `Some(ws)` writes a per-workspace
+/// override. The `kind` is the wire token; `channels` is the new push-channel set
+/// (empty = board-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyRuleSetParams {
+    /// The workspace to scope to, or `None` for the global rule.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The attention kind wire token to set the rule for.
+    pub kind: String,
+    /// The new push-channel set (empty = board-only).
+    pub channels: ChannelSet,
+}
+
+/// Result of [`crate::methods::HANGAR_NOTIFY_RULE_SET`] (tcp T5): the scope + kind
+/// that was written and its stored channel set (echoed for the caller to fold
+/// back into its grid without a re-list).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct NotifyRuleSetResult {
+    /// The kind wire token that was written.
+    pub kind: String,
+    /// The stored channel set after the write.
+    pub channels: ChannelSet,
 }
 
 #[cfg(test)]

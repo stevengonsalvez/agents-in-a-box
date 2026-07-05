@@ -816,6 +816,29 @@ pub const PROFILE_GET: &str = "profile/get";
 /// so the RPC and the watch converge on the same index. Mutating.
 pub const PROFILE_UPSERT: &str = "profile/upsert";
 
+/// `hangar/notify_rules_list` — the per-attention-kind notification routing grid
+/// for a scope (tcp T5).
+///
+/// Params: [`crate::snapshots::NotifyRulesListParams`] (`{ workspace_id? }`).
+/// Result: [`crate::snapshots::NotifyRulesListResult`] — one
+/// [`crate::snapshots::NotifyRuleWireRow`] per attention kind (in declaration
+/// order), each carrying the EFFECTIVE channel set for the scope and whether it
+/// is a per-workspace override. `workspace_id = None` returns the global rows. A
+/// read (an unknown workspace still resolves the globals), so no
+/// `INVALID_PARAMS` — it mirrors the other list snapshots.
+pub const HANGAR_NOTIFY_RULES_LIST: &str = "hangar/notify_rules_list";
+
+/// `hangar/notify_rule_set` — set (or clear) one routing rule (tcp T5).
+///
+/// Params: [`crate::snapshots::NotifyRuleSetParams`]
+/// (`{ workspace_id?, kind, channels }`). Result:
+/// [`crate::snapshots::NotifyRuleSetResult`]. Upserts the rule for the scope +
+/// kind (global when `workspace_id` is absent, a per-workspace override
+/// otherwise); the settings grid maps a toggled cell to this call. Mutating +
+/// idempotent (re-setting the same channels is a no-op replace). An unknown
+/// `kind` is rejected with `INVALID_PARAMS`.
+pub const HANGAR_NOTIFY_RULE_SET: &str = "hangar/notify_rule_set";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -927,6 +950,10 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_BOARD_CARD_DEP_ADD,
     HANGAR_BOARD_CARD_DEP_REMOVE,
     HANGAR_BOARD_CARD_SET_AUTO_RUN,
+    // Notification routing rules (tcp T5) are APPENDED at the catalogue tail —
+    // the wire catalogue is append-only.
+    HANGAR_NOTIFY_RULES_LIST,
+    HANGAR_NOTIFY_RULE_SET,
 ];
 
 #[cfg(test)]
@@ -1116,6 +1143,8 @@ mod tests {
             HANGAR_BOARD_CARD_DEP_ADD,
             HANGAR_BOARD_CARD_DEP_REMOVE,
             HANGAR_BOARD_CARD_SET_AUTO_RUN,
+            HANGAR_NOTIFY_RULES_LIST,
+            HANGAR_NOTIFY_RULE_SET,
         ];
         for m in declared {
             assert!(
