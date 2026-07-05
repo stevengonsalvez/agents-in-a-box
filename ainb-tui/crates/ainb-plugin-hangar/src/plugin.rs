@@ -627,11 +627,21 @@ impl HangarPlugin {
         let Ok(event) = serde_json::from_value::<HangarEvent>(params.clone()) else {
             return;
         };
+        // A transcript line (`TaskMessage`) changes NO snapshot-derived state — the
+        // timeline overlay live-appends it locally (F6 logs-tail), so a full
+        // `fetch_snapshots` fanout would be pure waste: a chatty streaming run
+        // (many lines/sec) would hammer the daemon with a whole snapshot bundle per
+        // line. Every OTHER event may move a derived column (task status buckets,
+        // issue fields, …), so it still arms the reconciling re-pull.
+        let needs_refetch = !matches!(event, HangarEvent::TaskMessage { .. });
         self.apply_hangar_event(event);
-        // A pushed event is the steady state — keep the link Connected and ask
-        // for a re-pull so every screen's derived columns reconcile.
+        // A pushed event is the steady state — keep the link Connected. Non-
+        // transcript events also arm a re-pull so every screen's derived columns
+        // reconcile.
         self.conn.on_event();
-        self.fetch_pending = true;
+        if needs_refetch {
+            self.fetch_pending = true;
+        }
     }
 
     /// Fold a typed [`HangarEvent`] into the issue-list + Kanban caches so a
@@ -3791,6 +3801,35 @@ mod tests {
         };
         p.on_daemon_response(&resp);
         assert!(matches!(p.conn.state(), ConnState::Error(_)));
+    }
+
+    /// A `TaskMessage` (transcript line) must NOT arm a snapshot re-pull — the
+    /// timeline live-appends it locally (F6), so a fanout per streamed line would
+    /// hammer the daemon. Every OTHER event still arms the reconciling re-fetch.
+    #[test]
+    fn task_message_event_skips_the_snapshot_refetch() {
+        use ainb_hangar_core::ids::{IssueId, TaskId};
+        use ainb_hangar_proto::events::{EVENT_METHOD, MessageKind};
+
+        let frame = |ev: &HangarEvent| {
+            serde_json::json!({ "method": EVENT_METHOD, "params": serde_json::to_value(ev).unwrap() })
+        };
+
+        // A transcript line does not arm a re-fetch.
+        let mut p = HangarPlugin::new();
+        p.on_daemon_event(&frame(&HangarEvent::TaskMessage {
+            task_id: TaskId::from_str("t1").unwrap(),
+            kind: MessageKind::Agent,
+            body: "streaming line".into(),
+        }));
+        assert!(!p.fetch_pending, "a TaskMessage transcript line must not re-pull snapshots");
+
+        // A status-relevant event (issue deleted) DOES arm the reconciling re-fetch.
+        let mut p = HangarPlugin::new();
+        p.on_daemon_event(&frame(&HangarEvent::IssueDeleted {
+            issue_id: IssueId::from_str("i1").unwrap(),
+        }));
+        assert!(p.fetch_pending, "a non-transcript event must arm the reconciling re-fetch");
     }
 
     /// An EOF socket event drops a connected link back to Disconnected.
