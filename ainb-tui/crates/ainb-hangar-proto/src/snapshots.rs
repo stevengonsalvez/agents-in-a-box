@@ -1317,6 +1317,47 @@ pub struct BoardCardWireRow {
     /// field the F6 card-edit overlay prefills its agent chip from.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The card's assigned SQUAD (`squad.id`), or `None` for a single-agent card
+    /// (tcp T4 / F7). APPEND-ONLY: a set squad makes a run fan out across the whole
+    /// squad; the board renders one member chip per fanned-out task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad_id: Option<String>,
+    /// One chip per squad member's task on this card (tcp T4 / F7). Empty for a
+    /// single-agent card, or a squad card that has not run yet. APPEND-ONLY: lets
+    /// the board render N per-member states on one card.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_states: Vec<CardMemberChip>,
+    /// The DISPLAY IDS of this card's UNFINISHED blocker cards (tcp T4 / F7).
+    /// Non-empty ⇒ the card is BLOCKED (renders 🔒 + these refs) and refuses to
+    /// run; empty ⇒ runnable. APPEND-ONLY.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_by: Vec<String>,
+    /// Whether this card auto-launches when its last blocker completes (tcp T4 /
+    /// F7). APPEND-ONLY: default `false` (explicit run stays the default).
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub auto_run: bool,
+}
+
+/// One squad member's task chip on a fanned-out card (tcp T4 / F7): which agent
+/// and that member task's latest status. The board paints one per squad member so
+/// a squad card shows N states at once, not a single collapsed one.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CardMemberChip {
+    /// The member agent (`agent.id`) this chip's task routed to.
+    pub agent_id: String,
+    /// The member agent's display name (falls back to the id when unnamed).
+    pub agent_name: String,
+    /// The member task's latest status (`queued`/`running`/`done`/…), or `None`
+    /// when that member has no task yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// serde `skip_serializing_if` helper: omit a `false` bool so a pre-T4 card row is
+/// byte-identical on the wire (the field only appears when auto-run is on).
+#[allow(clippy::trivially_copy_pass_by_ref)]
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 /// One user-defined board column with the cards bucketed into it
@@ -1554,6 +1595,11 @@ pub struct BoardCardRunResult {
     pub runtime_id: String,
     /// The echoed launch mode (`headless` / `interactive`).
     pub mode: String,
+    /// For a SQUAD card (tcp T4 / F7): the fanned-out MEMBER task ids (`task_id`
+    /// above is the LEADER brief). Empty for a single-agent card. APPEND-ONLY, so a
+    /// pre-T4 single-agent run serializes byte-identically.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_task_ids: Vec<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_CANCEL`] (tcp T3 / F6): cancel
@@ -1619,6 +1665,53 @@ pub struct BoardCardTimelineResult {
     /// `codex.jsonl`). Empty when the card never ran or the log is gone — the
     /// plugin renders "no transcript yet", never an error.
     pub jsonl: String,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD`] (tcp T4 / F7):
+/// assign (or clear) a squad as a card's assignee. Omit / null `squad_id` to
+/// clear (revert the card to a single-agent run).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardAssignSquadParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the card sits on.
+    pub board_id: String,
+    /// The card's issue to assign the squad to.
+    pub issue_id: String,
+    /// The squad to assign (`squad.id`), or `None` to clear the assignment.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub squad_id: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_DEP_ADD`] and
+/// [`crate::methods::HANGAR_BOARD_CARD_DEP_REMOVE`] (tcp T4 / F7): a `depends-on`
+/// edge between two cards on the board. The DEPENDENT is blocked until the BLOCKER
+/// finishes.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardDepParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board both cards sit on.
+    pub board_id: String,
+    /// The DEPENDENT card's issue (the one that gets blocked).
+    pub dependent_issue_id: String,
+    /// The BLOCKER card's issue (must finish before the dependent runs).
+    pub blocker_issue_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_SET_AUTO_RUN`] (tcp T4 / F7):
+/// flip a card's auto-run flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardAutoRunParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the card sits on.
+    pub board_id: String,
+    /// The card's issue whose auto-run flag to flip.
+    pub issue_id: String,
+    /// The new auto-run state (`true` = auto-launch when the last blocker
+    /// completes; `false` = explicit run only, the default).
+    pub auto_run: bool,
 }
 
 /// One pickable repository in the card-create `@` roster
@@ -2333,6 +2426,10 @@ mod tests {
                         session_name: None,
                         repo_ref: Some("/repos/app".into()),
                         agent: Some("codex".into()),
+                        squad_id: None,
+                        member_states: Vec::new(),
+                        blocked_by: Vec::new(),
+                        auto_run: false,
                     }],
                 }],
                 unmapped: Vec::new(),
@@ -2353,6 +2450,64 @@ mod tests {
         )
         .unwrap();
         assert_eq!(cleared.fsm_state.as_deref(), Some(""), "empty = clear");
+    }
+
+    /// The T4 card-orchestration wire shapes round-trip: a squad card carries its
+    /// squad + member chips + blocked refs + auto-run, while a pre-T4 single-agent
+    /// card omits every new field (append-only, byte-identical to the old wire).
+    #[test]
+    fn t4_card_orchestration_fields_roundtrip_and_omit_when_default() {
+        // A squad card, blocked, auto-run on, with two member chips.
+        let squad_card = BoardCardWireRow {
+            issue_id: "issue-1".into(),
+            title: "Ship it".into(),
+            display_id: "sue-1".into(),
+            state: None,
+            session_name: None,
+            repo_ref: Some("scratch".into()),
+            agent: None,
+            squad_id: Some("sq-1".into()),
+            member_states: vec![
+                CardMemberChip { agent_id: "a-lead".into(), agent_name: "lead".into(), state: Some("running".into()) },
+                CardMemberChip { agent_id: "a-m1".into(), agent_name: "m1".into(), state: Some("queued".into()) },
+            ],
+            blocked_by: vec!["ock-2".into()],
+            auto_run: true,
+        };
+        let s = serde_json::to_string(&squad_card).unwrap();
+        assert_eq!(serde_json::from_str::<BoardCardWireRow>(&s).unwrap(), squad_card);
+        assert!(s.contains("squad_id") && s.contains("member_states") && s.contains("blocked_by") && s.contains("auto_run"));
+
+        // A single-agent card leaves every T4 field at its default → the wire omits
+        // them all (a pre-T4 reader sees the exact old shape).
+        let plain = BoardCardWireRow {
+            issue_id: "i".into(),
+            title: "t".into(),
+            display_id: "i".into(),
+            state: None,
+            session_name: None,
+            repo_ref: None,
+            agent: None,
+            squad_id: None,
+            member_states: Vec::new(),
+            blocked_by: Vec::new(),
+            auto_run: false,
+        };
+        let s = serde_json::to_string(&plain).unwrap();
+        for k in ["squad_id", "member_states", "blocked_by", "auto_run"] {
+            assert!(!s.contains(k), "default T4 field {k} must be omitted, got {s}");
+        }
+
+        // The run result carries the fanned-out member task ids for a squad card.
+        let run = BoardCardRunResult {
+            task_id: "t-lead".into(),
+            agent_id: "a-lead".into(),
+            runtime_id: "rt-lead".into(),
+            mode: "headless".into(),
+            member_task_ids: vec!["t-m1".into(), "t-m2".into()],
+        };
+        let s = serde_json::to_string(&run).unwrap();
+        assert_eq!(serde_json::from_str::<BoardCardRunResult>(&s).unwrap(), run);
     }
 
     /// The F3 repo roster result round-trips, omitting the absent optionals.

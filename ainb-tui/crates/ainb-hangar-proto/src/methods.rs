@@ -679,6 +679,52 @@ pub const HANGAR_REPO_LIST: &str = "hangar/repo_list";
 /// `INVALID_PARAMS` rejection — mirrors `usage_rollup`).
 pub const HANGAR_RUN_HISTORY: &str = "hangar/run_history";
 
+/// `hangar/board_card_assign_squad` — assign (or clear) a SQUAD as a card's
+/// assignee (tcp T4 / F7).
+///
+/// Params: [`crate::snapshots::BoardCardAssignSquadParams`]
+/// (`{ workspace_id, board_id, issue_id, squad_id? }`, omit / null `squad_id` to
+/// clear). Result: the refreshed [`crate::snapshots::BoardsListResult`]. Persists
+/// the squad onto the card's issue (`issue.squad_id`, migration 0035) so a later
+/// `board_card_run` fans the card out across the whole squad (leader brief + one
+/// task per distinct `agent` member, each in its own worktree) and the board
+/// renders one member chip per fanned-out task. A `squad_id` that names no squad
+/// in the workspace is rejected (`INVALID_PARAMS`); clearing reverts the card to a
+/// single-agent run. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_ASSIGN_SQUAD: &str = "hangar/board_card_assign_squad";
+
+/// `hangar/board_card_dep_add` — add a beads-style `depends-on` edge between two
+/// cards (tcp T4 / F7).
+///
+/// Params: [`crate::snapshots::BoardCardDepParams`] (`{ workspace_id, board_id,
+/// dependent_issue_id, blocker_issue_id }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. The DEPENDENT card is blocked until the
+/// BLOCKER card finishes: a blocked card refuses to `board_card_run` (a clear
+/// message) and is never auto-dispatched. A self-edge, an edge that would create a
+/// CYCLE (checked by a DFS over the existing edges before the write), or an
+/// endpoint not on this board is rejected (`INVALID_PARAMS`). Re-adding an existing
+/// edge is idempotent. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_DEP_ADD: &str = "hangar/board_card_dep_add";
+
+/// `hangar/board_card_dep_remove` — remove a `depends-on` edge between two cards
+/// (tcp T4 / F7).
+///
+/// Params: [`crate::snapshots::BoardCardDepParams`] (`{ workspace_id, board_id,
+/// dependent_issue_id, blocker_issue_id }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. Removing an absent edge is an idempotent
+/// no-op. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_DEP_REMOVE: &str = "hangar/board_card_dep_remove";
+
+/// `hangar/board_card_set_auto_run` — flip a card's auto-run flag (tcp T4 / F7).
+///
+/// Params: [`crate::snapshots::BoardCardAutoRunParams`] (`{ workspace_id, board_id,
+/// issue_id, auto_run }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. When `auto_run` is on, the card
+/// auto-launches the instant its LAST blocker completes (respecting the claim-loop
+/// concurrency caps); default OFF keeps EXPLICIT run the default. A card with no
+/// blockers ignores the flag. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_SET_AUTO_RUN: &str = "hangar/board_card_set_auto_run";
+
 /// `attention/list` — snapshot the OPEN control-plane inbox for a scope (spec P2).
 ///
 /// Params: [`crate::snapshots::AttentionListParams`]
@@ -875,6 +921,12 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_BOARD_CARD_REORDER,
     HANGAR_BOARD_CARD_REMOVE,
     HANGAR_BOARD_CARD_TIMELINE,
+    // Squad-from-card + card dependencies (tcp T4 / F7) are APPENDED at the
+    // catalogue tail — the wire catalogue is append-only.
+    HANGAR_BOARD_CARD_ASSIGN_SQUAD,
+    HANGAR_BOARD_CARD_DEP_ADD,
+    HANGAR_BOARD_CARD_DEP_REMOVE,
+    HANGAR_BOARD_CARD_SET_AUTO_RUN,
 ];
 
 #[cfg(test)]
@@ -1060,6 +1112,10 @@ mod tests {
             HANGAR_BOARD_CARD_REORDER,
             HANGAR_BOARD_CARD_REMOVE,
             HANGAR_BOARD_CARD_TIMELINE,
+            HANGAR_BOARD_CARD_ASSIGN_SQUAD,
+            HANGAR_BOARD_CARD_DEP_ADD,
+            HANGAR_BOARD_CARD_DEP_REMOVE,
+            HANGAR_BOARD_CARD_SET_AUTO_RUN,
         ];
         for m in declared {
             assert!(
