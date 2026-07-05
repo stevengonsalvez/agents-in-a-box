@@ -3395,23 +3395,36 @@ impl EventHandler {
                 if !repo_label.is_empty() {
                     let path = SessionDefaults::default_path();
                     let mut defaults = SessionDefaults::load_from(&path);
-                    let entry = defaults.per_repo.entry(repo_label.clone()).or_default();
-                    entry.last_prompt = if prompt_text.is_empty() {
-                        None
-                    } else {
-                        Some(prompt_text)
-                    };
-                    if let Err(err) = defaults.save_to(&path) {
-                        tracing::warn!(error = %err, "ConfigureBack: persist failed");
-                    }
-                    // Refresh PickRepo's in-memory snapshot so a later Enter
-                    // on PickRepo doesn't clobber the prompt we just wrote.
-                    // The picker carries its own `defaults` copy from open
-                    // time; mutations elsewhere are invisible to it.
-                    if let Some(pick) =
-                        state.new_session_state.as_mut().and_then(|ns| ns.pick_repo_state.as_mut())
-                    {
-                        pick.defaults = defaults;
+                    // Only touch per_repo when there is something to preserve:
+                    // a typed prompt, or an entry that already exists (whose
+                    // stale prompt may need clearing). Esc-ing straight out of
+                    // a never-launched repo must NOT fabricate a ⌚ recent —
+                    // that's how typo'd owner/repo entries ended up pinned to
+                    // the top of the picker (Stevie 2026-07-05: sdfads/ssdaf).
+                    let worth_persisting =
+                        !prompt_text.is_empty() || defaults.per_repo.contains_key(&repo_label);
+                    if worth_persisting {
+                        let entry = defaults.per_repo.entry(repo_label.clone()).or_default();
+                        entry.last_prompt = if prompt_text.is_empty() {
+                            None
+                        } else {
+                            Some(prompt_text)
+                        };
+                        if let Err(err) = defaults.save_to(&path) {
+                            tracing::warn!(error = %err, "ConfigureBack: persist failed");
+                        }
+                        // Refresh PickRepo's in-memory snapshot so a later
+                        // Enter on PickRepo doesn't clobber the prompt we just
+                        // wrote. The picker carries its own `defaults` copy
+                        // from open time; mutations elsewhere are invisible
+                        // to it.
+                        if let Some(pick) = state
+                            .new_session_state
+                            .as_mut()
+                            .and_then(|ns| ns.pick_repo_state.as_mut())
+                        {
+                            pick.defaults = defaults;
+                        }
                     }
                 }
                 if let Some(ns) = state.new_session_state.as_mut() {
