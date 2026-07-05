@@ -83,6 +83,54 @@ impl CustomOverrides {
     }
 }
 
+/// Result of the remote-repo pre-flight (`git ls-remote` at Configure open).
+///
+/// Catches "repo doesn't exist" and "repo is empty" HERE, on the form, instead
+/// of after Launch as a clone/worktree failure toast (Stevie 2026-07-04:
+/// empty mysocialmedia died at `prepare_remote_worktree` with a cryptic
+/// origin/HEAD error; a typo'd repo died with "Clone failed").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RepoCheck {
+    /// Local path / SSH session — nothing to validate.
+    NotApplicable,
+    /// ls-remote in flight. Launch is held until it lands (sub-second).
+    Checking,
+    /// Remote exists and has at least one branch.
+    Ok,
+    /// Remote exists but has zero branches (fresh GitHub repo, no initial
+    /// commit). Blocks Launch, but offers `[i]` to initialize in place —
+    /// README + initial commit + push — so the user never has to leave ainb
+    /// (Stevie 2026-07-04: full-IDE-in-terminal experience).
+    EmptyRemote,
+    /// `[i]` accepted — README/commit/push in flight. Blocks Launch.
+    Initializing,
+    /// Remote is unreachable or missing. Blocks Launch; the message renders
+    /// on the form.
+    Failed(String),
+}
+
+impl RepoCheck {
+    /// Fold a `list_remote_branches` result into a check verdict. Pure so the
+    /// empty-repo rule is unit-testable without a network.
+    #[must_use]
+    pub fn from_branches(result: Result<usize, String>) -> Self {
+        match result {
+            Ok(0) => Self::EmptyRemote,
+            Ok(_) => Self::Ok,
+            Err(msg) => Self::Failed(msg),
+        }
+    }
+
+    /// True when Launch must be refused (check failed or still in flight).
+    #[must_use]
+    pub const fn blocks_launch(&self) -> bool {
+        matches!(
+            self,
+            Self::Checking | Self::EmptyRemote | Self::Initializing | Self::Failed(_)
+        )
+    }
+}
+
 /// Which segment of the Branch row (`source → worktree`) is targeted when
 /// the row is focused. ←/→ toggles; Enter acts on the targeted segment —
 /// Source opens the base-branch picker popup, Worktree opens the inline
@@ -302,6 +350,10 @@ pub struct ConfigureState {
     pub rtk_enabled: bool,
     /// Whether the `rtk` binary was found on PATH when this screen opened.
     pub rtk_available: bool,
+    /// Remote-repo pre-flight verdict. `Checking` for clonable remotes until
+    /// the background ls-remote lands; `Failed` blocks Launch with an inline
+    /// message; `NotApplicable` for local paths / SSH sessions.
+    pub repo_check: RepoCheck,
 }
 
 impl ConfigureState {
@@ -372,6 +424,17 @@ impl ConfigureState {
         // Initial focus: the Preset row — matches a fresh-form expectation.
         let focused_row = ConfigureRow::Preset;
 
+        // Clonable remotes start in `Checking`; the app layer kicks the
+        // background ls-remote and flips this to Ok / Failed. Same
+        // `is_remote()` predicate as the kick site — if they disagreed, a
+        // form could open in Checking with no check ever spawned (Launch
+        // bricked behind a permanent spinner).
+        let repo_check = if repo_source.is_remote() {
+            RepoCheck::Checking
+        } else {
+            RepoCheck::NotApplicable
+        };
+
         Self {
             repo_source,
             repo_label,
@@ -397,6 +460,7 @@ impl ConfigureState {
             headroom_available: crate::headroom::is_installed(),
             rtk_enabled: false,
             rtk_available: crate::rtk::is_installed(),
+            repo_check,
         }
     }
 
@@ -639,6 +703,10 @@ pub enum ConfigureOutcome {
     /// branches (git stays out of components/ — finding #9), seed
     /// `branch_picker`, and kick the background refresh.
     OpenBranchPicker,
+    /// `[i]` on an `EmptyRemote` verdict — the app layer must commit a README
+    /// to the clone cache and push it, then flip `repo_check` to Ok (git
+    /// stays out of components/).
+    InitializeRemote,
 }
 
 /// Launch payload built by the Configure component and threaded all the way
@@ -766,7 +834,11 @@ pub fn render(f: &mut Frame, state: &ConfigureState, area: Rect) {
     // and the help bar), keyed to the focused row. Headroom card for now — the
     // pattern extends to other rows when they need it.
     let filler_chunk = chunks[rows.len()];
-    if state.focused_row == ConfigureRow::HeadroomProxy && state.headroom_available {
+    // The remote pre-flight verdict outranks the focus-contextual guides —
+    // a blocked Launch must always be explained on screen.
+    if state.repo_check.blocks_launch() {
+        render_repo_check(f, &state.repo_check, filler_chunk);
+    } else if state.focused_row == ConfigureRow::HeadroomProxy && state.headroom_available {
         render_headroom_guide(f, filler_chunk);
     } else if state.focused_row == ConfigureRow::Rtk && state.rtk_available {
         render_rtk_guide(f, filler_chunk);
@@ -1168,6 +1240,51 @@ fn render_rtk_row(f: &mut Frame, state: &ConfigureState, area: Rect, focused: bo
         Style::default().fg(MUTED_GRAY),
     ));
     f.render_widget(Paragraph::new(line), area);
+}
+
+/// Remote pre-flight status card, shown in the filler space while the check
+/// is in flight or has failed. A failure blocks Launch, so it must be loud.
+fn render_repo_check(f: &mut Frame, check: &RepoCheck, area: Rect) {
+    let lines = match check {
+        RepoCheck::Checking => vec![Line::from(Span::styled(
+            "  \u{23f3} validating remote repository\u{2026}",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        ))],
+        RepoCheck::EmptyRemote => vec![
+            Line::from(Span::styled(
+                "  \u{2716} repository is empty (no branches)",
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(vec![
+                Span::styled("  press ", Style::default().fg(MUTED_GRAY)),
+                Span::styled("i", Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+                Span::styled(
+                    " to initialize it \u{2014} ainb commits a README and pushes it for you",
+                    Style::default().fg(SELECTION_GREEN),
+                ),
+            ]),
+            Line::from(Span::styled(
+                "  or Esc to pick another repository",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )),
+        ],
+        RepoCheck::Initializing => vec![Line::from(Span::styled(
+            "  \u{23f3} initializing repository \u{2014} committing README, pushing\u{2026}",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        ))],
+        RepoCheck::Failed(msg) => vec![
+            Line::from(Span::styled(
+                format!("  \u{2716} {msg}"),
+                Style::default().fg(ALERT_RED).add_modifier(Modifier::BOLD),
+            )),
+            Line::from(Span::styled(
+                "  Launch is disabled \u{2014} Esc to pick another repository",
+                Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+            )),
+        ],
+        RepoCheck::NotApplicable | RepoCheck::Ok => return,
+    };
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }), area);
 }
 
 /// Contextual RTK guide card, shown while the RTK row is focused.
@@ -1966,8 +2083,16 @@ pub fn handle_key(state: &mut ConfigureState, key: KeyEvent) -> ConfigureOutcome
         KeyCode::Char(c) if !key.modifiers.contains(KeyModifiers::CONTROL) => {
             if state.focused_row == ConfigureRow::Prompt {
                 state.prompt.insert_char(c);
+                return ConfigureOutcome::Stay;
             }
-            // No bare-char shortcuts elsewhere — Tab + arrows is the entire
+            // `[i]` initializes an empty remote (README + commit + push) so
+            // the user never leaves ainb. Only offered while the pre-flight
+            // verdict is EmptyRemote; the Prompt row keeps plain chars.
+            if matches!(c, 'i' | 'I') && state.repo_check == RepoCheck::EmptyRemote {
+                state.repo_check = RepoCheck::Initializing;
+                return ConfigureOutcome::InitializeRemote;
+            }
+            // No other bare-char shortcuts — Tab + arrows is the entire
             // navigation surface for non-Prompt rows.
             ConfigureOutcome::Stay
         }
@@ -1984,6 +2109,14 @@ fn launch_outcome(state: &mut ConfigureState) -> ConfigureOutcome {
     // and the Ctrl+Enter quick-launch (Stevie 2026-05-27).
     if state.branch_collision() {
         state.focused_row = ConfigureRow::Branch;
+        return ConfigureOutcome::Stay;
+    }
+    // Remote pre-flight gate: a missing / empty / unreachable remote can never
+    // launch — the clone or worktree step is guaranteed to fail. Refuse here
+    // and let the inline message (rendered in the filler space) explain.
+    // `Checking` also blocks: ls-remote lands sub-second, and launching before
+    // the verdict would just re-open the old fail-after-Launch hole.
+    if state.repo_check.blocks_launch() {
         return ConfigureOutcome::Stay;
     }
     // Defense-in-depth: a greyed-out agent (e.g. Gemini) is never selectable in
@@ -2440,7 +2573,93 @@ mod tests {
             headroom_available: true,
             rtk_enabled: false,
             rtk_available: true,
+            repo_check: RepoCheck::NotApplicable,
         }
+    }
+
+    #[test]
+    fn repo_check_from_branches_folds_verdicts() {
+        // Zero branches = empty repo → the actionable EmptyRemote verdict
+        // (offers `[i]` to initialize in place).
+        assert_eq!(RepoCheck::from_branches(Ok(0)), RepoCheck::EmptyRemote);
+        assert_eq!(RepoCheck::from_branches(Ok(3)), RepoCheck::Ok);
+        // ls-remote error (not found / auth / network) carries through verbatim.
+        assert!(matches!(
+            RepoCheck::from_branches(Err("Repository not found: x".into())),
+            RepoCheck::Failed(msg) if msg == "Repository not found: x"
+        ));
+    }
+
+    #[test]
+    fn launch_blocked_while_repo_check_pending_or_failed() {
+        let mut s = mk_state();
+        for blocked in [
+            RepoCheck::Checking,
+            RepoCheck::EmptyRemote,
+            RepoCheck::Initializing,
+            RepoCheck::Failed("Repository not found".into()),
+        ] {
+            s.repo_check = blocked;
+            assert!(matches!(launch_outcome(&mut s), ConfigureOutcome::Stay));
+        }
+        // Verdict lands → same keypress launches.
+        s.repo_check = RepoCheck::Ok;
+        assert!(matches!(
+            launch_outcome(&mut s),
+            ConfigureOutcome::Launch(_)
+        ));
+    }
+
+    #[test]
+    fn i_key_initializes_empty_remote_only() {
+        let key = KeyEvent::from(KeyCode::Char('i'));
+        // EmptyRemote → [i] fires the init and shows the spinner.
+        let mut s = mk_state();
+        s.repo_check = RepoCheck::EmptyRemote;
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::InitializeRemote);
+        assert_eq!(s.repo_check, RepoCheck::Initializing);
+        // Second press while initializing: no double-fire.
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::Stay);
+        // Healthy repo: 'i' is inert.
+        let mut s = mk_state();
+        s.repo_check = RepoCheck::Ok;
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::Stay);
+        // Prompt row keeps plain chars even on an EmptyRemote verdict.
+        let mut s = mk_state();
+        s.repo_check = RepoCheck::EmptyRemote;
+        s.focused_row = ConfigureRow::Prompt;
+        assert_eq!(handle_key(&mut s, key), ConfigureOutcome::Stay);
+        assert_eq!(s.repo_check, RepoCheck::EmptyRemote);
+        assert_eq!(s.prompt.to_non_empty_string().as_deref(), Some("i"));
+    }
+
+    #[test]
+    fn remote_source_starts_in_checking_local_not_applicable() {
+        use crate::config::session_defaults::SessionDefaults;
+        let defaults = SessionDefaults::default();
+        let remote = ConfigureState::from_pick_repo(
+            RepoSource::GithubShorthand {
+                owner: "o".into(),
+                repo: "r".into(),
+            },
+            "r".into(),
+            &defaults,
+            None,
+            "agents/",
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(remote.repo_check, RepoCheck::Checking);
+        let local = ConfigureState::from_pick_repo(
+            RepoSource::LocalPath(PathBuf::from("/tmp/repo")),
+            "repo".into(),
+            &defaults,
+            None,
+            "agents/",
+            Vec::new(),
+            Vec::new(),
+        );
+        assert_eq!(local.repo_check, RepoCheck::NotApplicable);
     }
 
     #[test]

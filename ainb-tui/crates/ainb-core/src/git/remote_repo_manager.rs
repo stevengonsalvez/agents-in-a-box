@@ -1006,6 +1006,37 @@ impl RemoteRepoManager {
         Ok(repos)
     }
 
+    /// Initialize an EMPTY remote repository in place: clone it (an empty
+    /// clone succeeds), commit a README, and push. Returns the branch name
+    /// the initial commit landed on. Lets the Configure screen unblock a
+    /// fresh GitHub repo without the user ever leaving ainb.
+    pub fn initialize_empty_remote(
+        &self,
+        source: &RepoSource,
+        parsed: &ParsedRepo,
+    ) -> Result<String, RemoteRepoError> {
+        // Re-verify emptiness at action time — the EmptyRemote verdict that
+        // offered [i] may be stale (a collaborator pushed meanwhile). Pushing
+        // a README onto a repo that now has history is never what's wanted.
+        let branches = self.list_remote_branches(source)?;
+        if !branches.is_empty() {
+            return Err(RemoteRepoError::InvalidRepo(
+                "repository is no longer empty — press Esc and re-open it".to_string(),
+            ));
+        }
+
+        let mut cache_path = self.clone_repo(source, parsed)?;
+        // A warm cache can carry commits the remote no longer has (repo
+        // deleted and recreated empty under the same name). Pushing that
+        // would silently upload the dead repo's entire history — the remote
+        // is verifiably empty, so wipe and re-clone fresh instead.
+        if local_head_exists(&cache_path) {
+            std::fs::remove_dir_all(&cache_path)?;
+            cache_path = self.clone_repo(source, parsed)?;
+        }
+        push_initial_commit(&cache_path, &parsed.repo_name)
+    }
+
     /// Remove a cached repository
     pub fn remove_cached_repo(&self, parsed: &ParsedRepo) -> Result<(), RemoteRepoError> {
         let cache_path = self.get_cache_path(parsed);
@@ -1098,6 +1129,95 @@ fn delete_orphaned_branch(cache_path: &Path, branch_name: &str) -> Result<bool, 
         );
         Ok(false)
     }
+}
+
+/// Does the clone at `path` have any commit on HEAD?
+fn local_head_exists(path: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(path)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
+/// Create the initial commit (a README) in a clone of an EMPTY remote and
+/// push it to `origin`. Returns the branch name pushed (the clone's HEAD
+/// symref — git/GitHub advertise the default branch name even for empty
+/// repos, so this respects a `master`/custom default).
+///
+/// Split from `initialize_empty_remote` so it's testable against a local
+/// bare remote without network. Idempotent-ish: if the cache already holds
+/// a local commit (a previous init attempt that failed at push), it skips
+/// the README/commit step and just pushes.
+fn push_initial_commit(cache_path: &Path, repo_name: &str) -> Result<String, RemoteRepoError> {
+    let branch = {
+        let out = Command::new("git")
+            .args(["symbolic-ref", "--short", "HEAD"])
+            .current_dir(cache_path)
+            .output()?;
+        let name = String::from_utf8_lossy(&out.stdout).trim().to_string();
+        if out.status.success() && !name.is_empty() {
+            name
+        } else {
+            "main".to_string()
+        }
+    };
+
+    // A previous attempt may have committed but failed at push — don't stack
+    // a second README commit on top.
+    let has_commit = local_head_exists(cache_path);
+
+    if !has_commit {
+        let readme = cache_path.join("README.md");
+        if !readme.exists() {
+            std::fs::write(&readme, format!("# {repo_name}\n"))?;
+        }
+        let add = Command::new("git")
+            .args(["add", "README.md"])
+            .current_dir(cache_path)
+            .output()?;
+        if !add.status.success() {
+            return Err(RemoteRepoError::InvalidRepo(
+                String::from_utf8_lossy(&add.stderr).trim().to_string(),
+            ));
+        }
+        // Uses the user's own git identity — a missing identity surfaces
+        // git's exact "tell me who you are" error. Signing is forced off:
+        // a gpg pin-entry prompt would hang this non-interactive path.
+        let commit = Command::new("git")
+            .args([
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "-m",
+                "Initial commit",
+            ])
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .current_dir(cache_path)
+            .output()?;
+        if !commit.status.success() {
+            return Err(RemoteRepoError::InvalidRepo(
+                String::from_utf8_lossy(&commit.stderr).trim().to_string(),
+            ));
+        }
+        info!("Created initial README commit in {}", cache_path.display());
+    }
+
+    let push = Command::new("git")
+        .args(["push", "-u", "origin", &branch])
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("GIT_ASKPASS", "echo")
+        .current_dir(cache_path)
+        .output()?;
+    if !push.status.success() {
+        let stderr = String::from_utf8_lossy(&push.stderr);
+        // Second arg names the repository in NotFound messages — the branch
+        // here would render "Repository not found: main".
+        return Err(classify_git_error(&stderr, repo_name));
+    }
+
+    info!("Pushed initial commit to origin/{branch}");
+    Ok(branch)
 }
 
 /// Classify git errors into appropriate RemoteRepoError variants
@@ -1199,6 +1319,58 @@ mod tests {
 
         let repos = manager.list_cached_repos().unwrap();
         assert!(repos.is_empty());
+    }
+
+    fn run_git(args: &[&str], cwd: &Path) {
+        let out = Command::new("git").args(args).current_dir(cwd).output().unwrap();
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    #[test]
+    fn push_initial_commit_initializes_empty_remote_on_its_default_branch() {
+        let tmp = TempDir::new().unwrap();
+        let bare = tmp.path().join("bare.git");
+        // Non-"main" default proves the branch name comes from the remote's
+        // advertised HEAD, not a hardcoded fallback.
+        run_git(
+            &["init", "--bare", "-b", "trunk", bare.to_str().unwrap()],
+            tmp.path(),
+        );
+        let clone = tmp.path().join("clone");
+        run_git(
+            &["clone", bare.to_str().unwrap(), clone.to_str().unwrap()],
+            tmp.path(),
+        );
+        run_git(&["config", "user.name", "Test"], &clone);
+        run_git(&["config", "user.email", "test@example.com"], &clone);
+
+        let branch = push_initial_commit(&clone, "myrepo").unwrap();
+        assert_eq!(branch, "trunk");
+
+        // The bare remote now has the branch with the README commit.
+        let out = Command::new("git")
+            .args(["ls-remote", "--heads", bare.to_str().unwrap()])
+            .output()
+            .unwrap();
+        assert!(
+            String::from_utf8_lossy(&out.stdout).contains("refs/heads/trunk"),
+            "initial commit did not land on the bare remote"
+        );
+        assert!(clone.join("README.md").exists());
+
+        // Re-running (e.g. after a failed push retry) must not stack a second
+        // commit — just re-push.
+        assert_eq!(push_initial_commit(&clone, "myrepo").unwrap(), "trunk");
+        let count = Command::new("git")
+            .args(["rev-list", "--count", "HEAD"])
+            .current_dir(&clone)
+            .output()
+            .unwrap();
+        assert_eq!(String::from_utf8_lossy(&count.stdout).trim(), "1");
     }
 
     #[test]

@@ -2804,6 +2804,10 @@ impl SessionFilter {
     }
 }
 
+/// Payload of the Configure remote-repo pre-flight: generation guard + the
+/// `ls-remote` branch listing (or the error string to show on the form).
+type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
+
 #[derive(Debug)]
 pub struct AppState {
     pub workspaces: Vec<Workspace>,
@@ -3080,6 +3084,21 @@ pub struct AppState {
     >,
     /// Current branch-refresh generation (bumped on every picker open).
     pub branch_refresh_seq: u64,
+
+    /// Background remote-repo pre-flight for the Configure screen (ls-remote
+    /// at open: does the repo exist, does it have branches). Applied by
+    /// `check_repo_check_complete` on the next tick; the `u64` is a
+    /// generation guard so a stale check can't stamp a newer Configure form.
+    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
+    /// Current repo-check generation (bumped on every Configure open).
+    pub repo_check_seq: u64,
+
+    /// Background empty-remote initialization (`[i]` on Configure: README +
+    /// initial commit + push). `Ok(branch)` carries the branch the commit
+    /// landed on. Applied by `check_repo_init_complete` on the next tick.
+    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
+    /// Current repo-init generation.
+    pub repo_init_seq: u64,
 
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
@@ -3544,6 +3563,12 @@ impl Default for AppState {
             // Configure base-branch picker background refresh
             branch_refresh_receiver: None,
             branch_refresh_seq: 0,
+            // Configure remote-repo pre-flight (ls-remote at open)
+            repo_check_receiver: None,
+            repo_check_seq: 0,
+            // Configure empty-remote initialization ([i] → README + push)
+            repo_init_receiver: None,
+            repo_init_seq: 0,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -7587,7 +7612,10 @@ impl AppState {
             Ok(Ok(paths)) => Ok(paths),
             Ok(Err(msg)) => {
                 tracing::error!(error = %msg, "prepare_remote_worktree failed");
-                self.add_error_notification(format!("Could not prepare worktree off main: {msg}"));
+                // Don't hardcode a base name in the message — the base is the
+                // remote's default (main/master/develop) or a picked branch;
+                // "off main" misled the empty-repo diagnosis (Stevie 2026-07-04).
+                self.add_error_notification(format!("Could not prepare worktree: {msg}"));
                 self.cancel_new_session();
                 Err(())
             }
@@ -7675,7 +7703,220 @@ impl AppState {
             ns.step = NewSessionStep::Configure;
         }
         tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+
+        // Remote pre-flight: one background ls-remote validates the repo
+        // exists, is reachable, and has at least one branch — BEFORE Launch.
+        // Without it a typo'd repo dies after Launch with "Clone failed" and
+        // an empty repo dies even later at `prepare_remote_worktree` with a
+        // cryptic origin/HEAD error (Stevie 2026-07-04: mysocialmedia).
+        // `ConfigureState::from_pick_repo` already set `repo_check = Checking`
+        // for these sources; `check_repo_check_complete` applies the verdict.
+        // Same `is_remote()` predicate as `from_pick_repo`'s Checking
+        // decision — the two must agree or the form waits on a verdict that
+        // never comes.
+        if source.is_remote() {
+            self.repo_check_seq += 1;
+            let seq = self.repo_check_seq;
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.repo_check_receiver = Some(rx);
+            tokio::spawn(async move {
+                let join = tokio::task::spawn_blocking(move || {
+                    crate::git::RemoteRepoManager::new()
+                        .map_err(|e| e.to_string())?
+                        .list_remote_branches(&source)
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+                let payload = match join {
+                    Ok(r) => r,
+                    Err(join_err) => Err(format!("repo check task panicked: {join_err}")),
+                };
+                let _ = tx.send((seq, payload));
+            });
+        }
         self.ui_needs_refresh = true;
+    }
+
+    /// Poll the background remote-repo pre-flight. Applies the verdict to the
+    /// Configure screen: `Failed` blocks Launch with an inline message; a
+    /// success also stamps the real default-branch name onto the Branch row
+    /// (was a hardcoded "main" placeholder — wrong for master-default repos)
+    /// and backfills the "⚠ exists" guard for not-yet-cached remotes.
+    /// Returns true when state changed this tick.
+    pub fn check_repo_check_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::RepoCheck;
+
+        let Some(ref mut receiver) = self.repo_check_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.repo_check_receiver = None;
+                return false;
+            }
+        };
+        self.repo_check_receiver = None;
+        if seq != self.repo_check_seq {
+            // A newer Configure form superseded this check.
+            return false;
+        }
+        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        else {
+            return false;
+        };
+        // Apply-side state gate, on top of the seq guard: the verdict only
+        // lands on a form that is actually waiting for one. The seq guard
+        // alone has a hole — it's bumped only when a REMOTE Configure form
+        // opens, so a stale check could otherwise stamp a later local-path or
+        // restart form (repo_check = NotApplicable) whose open never bumped
+        // the seq.
+        if cfg.repo_check != RepoCheck::Checking {
+            return false;
+        }
+
+        if let Ok(branches) = &result {
+            if let Some(default) = branches.iter().find(|b| b.is_default) {
+                // Only when the user hasn't already picked a base — a pick
+                // owns the Branch-row display.
+                if cfg.base_selection.is_none() {
+                    cfg.branch_source.clone_from(&default.name);
+                }
+            }
+            // Feed the base-off "⚠ exists" guard for not-yet-cached remotes
+            // (a cached remote was already seeded from its clone's refs —
+            // that list includes local heads, so don't clobber it).
+            if cfg.repo_branch_names.is_empty() {
+                cfg.repo_branch_names = branches.iter().map(|b| b.name.clone()).collect();
+            }
+        }
+        let mut offline_warn: Option<String> = None;
+        cfg.repo_check = match RepoCheck::from_branches(result.map(|branches| branches.len())) {
+            RepoCheck::Failed(msg)
+                if crate::git::RemoteRepoManager::new()
+                    .ok()
+                    .and_then(|m| m.cached_source_path(&cfg.repo_source))
+                    .is_some() =>
+            {
+                // Warm clone cache → the launch path works offline by design
+                // (its fetch failures are warn-only). A failed validation
+                // must not brick that flow; warn and let Launch proceed.
+                offline_warn = Some(msg);
+                RepoCheck::Ok
+            }
+            verdict => verdict,
+        };
+        if let RepoCheck::Failed(msg) = &cfg.repo_check {
+            tracing::warn!(error = %msg, "configure repo pre-flight failed");
+        }
+        if let Some(msg) = offline_warn {
+            tracing::warn!(error = %msg, "repo pre-flight failed but clone cache is warm — allowing launch");
+            self.add_warning_notification(format!(
+                "Could not validate remote — using cached clone ({msg})"
+            ));
+        }
+        true
+    }
+
+    /// `[i]` on an `EmptyRemote` verdict: initialize the empty remote in
+    /// place — clone (an empty clone succeeds), commit a README, push — so
+    /// the user never has to leave ainb to make a fresh repo launchable.
+    /// The component already flipped `repo_check` to `Initializing`; the
+    /// verdict lands via `check_repo_init_complete`.
+    pub fn initialize_remote_repo(&mut self) {
+        let Some(source) = self
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.configure_state.as_ref())
+            .map(|cfg| cfg.repo_source.clone())
+        else {
+            return;
+        };
+        self.repo_init_seq += 1;
+        let seq = self.repo_init_seq;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.repo_init_receiver = Some(rx);
+        tokio::spawn(async move {
+            let join = tokio::task::spawn_blocking(move || {
+                let manager = crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
+                let parsed = source.parse_components().map_err(|e| e.to_string())?;
+                manager.initialize_empty_remote(&source, &parsed).map_err(|e| e.to_string())
+            })
+            .await;
+            let payload = match join {
+                Ok(r) => r,
+                Err(join_err) => Err(format!("repo init task panicked: {join_err}")),
+            };
+            let _ = tx.send((seq, payload));
+        });
+    }
+
+    /// Poll the background empty-remote initialization. Success flips the
+    /// Configure verdict to Ok, stamps the pushed branch onto the Branch row,
+    /// and toasts; failure returns to `EmptyRemote` (so `[i]` can retry) with
+    /// the exact git error in a toast. Returns true when state changed.
+    pub fn check_repo_init_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::RepoCheck;
+
+        let Some(ref mut receiver) = self.repo_init_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.repo_init_receiver = None;
+                return false;
+            }
+        };
+        self.repo_init_receiver = None;
+        if seq != self.repo_init_seq {
+            return false;
+        }
+        let mut toast: Option<Result<String, String>> = None;
+        if let Some(cfg) =
+            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        {
+            // Apply-side state gate (mirrors check_repo_check_complete): only
+            // a form that is actually Initializing takes the verdict. Without
+            // it, [i] on repo A → Esc → open repo B lets A's init result
+            // force B's verdict to Ok while B is still Checking — reopening
+            // the fail-after-Launch hole this feature closes.
+            if cfg.repo_check != RepoCheck::Initializing {
+                return false;
+            }
+            match result {
+                Ok(branch) => {
+                    if cfg.base_selection.is_none() {
+                        cfg.branch_source.clone_from(&branch);
+                    }
+                    if cfg.repo_branch_names.is_empty() {
+                        cfg.repo_branch_names = vec![branch.clone()];
+                    }
+                    cfg.repo_check = RepoCheck::Ok;
+                    toast = Some(Ok(branch));
+                }
+                Err(msg) => {
+                    // Back to the actionable verdict — `[i]` retries.
+                    cfg.repo_check = RepoCheck::EmptyRemote;
+                    toast = Some(Err(msg));
+                }
+            }
+        }
+        match toast {
+            Some(Ok(branch)) => {
+                self.add_info_notification(format!(
+                    "Initialized repository — pushed README to origin/{branch}"
+                ));
+            }
+            Some(Err(msg)) => {
+                tracing::error!(error = %msg, "empty-remote initialization failed");
+                self.add_error_notification(format!("Could not initialize repository: {msg}"));
+            }
+            None => {}
+        }
+        true
     }
 
     /// Pre-check GitHub authentication via `gh auth status`. Updates the
@@ -11286,6 +11527,14 @@ impl App {
         }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+        // Check for a completed remote-repo pre-flight (Configure screen)
+        if self.state.check_repo_check_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+        // Check for a completed empty-remote initialization ([i] on Configure)
+        if self.state.check_repo_init_complete() {
             self.state.ui_needs_refresh = true;
         }
 
