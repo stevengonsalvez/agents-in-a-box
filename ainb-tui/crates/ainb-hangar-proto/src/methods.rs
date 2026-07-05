@@ -872,6 +872,9 @@ pub const ALL_METHODS: &[&str] = &[
     // Card lifecycle (tcp T3 / F6) is APPENDED at the catalogue tail — the wire
     // catalogue is append-only.
     HANGAR_BOARD_CARD_CANCEL,
+    HANGAR_BOARD_CARD_REORDER,
+    HANGAR_BOARD_CARD_REMOVE,
+    HANGAR_BOARD_CARD_TIMELINE,
 ];
 
 #[cfg(test)]
@@ -1054,6 +1057,9 @@ mod tests {
             HANGAR_BOARD_CARD_RUN,
             HANGAR_REPO_LIST,
             HANGAR_BOARD_CARD_CANCEL,
+            HANGAR_BOARD_CARD_REORDER,
+            HANGAR_BOARD_CARD_REMOVE,
+            HANGAR_BOARD_CARD_TIMELINE,
         ];
         for m in declared {
             assert!(
