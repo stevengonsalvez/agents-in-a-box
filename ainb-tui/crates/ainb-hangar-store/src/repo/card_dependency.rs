@@ -30,15 +30,18 @@
 //! engine-enforced invariant; existence, scoping, and acyclicity are enforced
 //! here in application code (mirroring `BoardRepo`).
 //!
-//! # "Finished" = the whole active set drained, with a success
+//! # "Finished" = the latest generation's active set drained, with a success
 //!
-//! A blocker is FINISHED when EVERY task on its issue is terminal (its active set
-//! has drained) AND at least one of them reached `done`. A squad blocker fans out
-//! N tasks onto one issue, so keying on the whole set — not just the latest task —
-//! is what stops a dependent unblocking while the leader / other members still run
-//! (tcp T4 / FANOUT-SEMANTICS). A blocker with no task, with any still-active task,
-//! or whose tasks all ended `failed`/`cancelled` (no `done`) is UNFINISHED, so the
-//! dependent stays blocked. See [`CardDependencyRepo::unfinished_blockers_of`].
+//! A blocker is FINISHED when EVERY task in its LATEST run generation (migration
+//! 0039) is terminal (that run's active set has drained) AND at least one of them
+//! reached `done`. A squad blocker fans out N tasks onto one issue (all sharing one
+//! generation), so keying on the whole generation — not just the latest task — is
+//! what stops a dependent unblocking while the leader / other members still run
+//! (tcp T4 / FANOUT-SEMANTICS). Scoping to the LATEST generation is what re-blocks a
+//! blocker that succeeded once then was re-run and failed (tcp 8ln). A blocker with
+//! no task, with any still-active task in its latest generation, or whose latest
+//! generation ended `failed`/`cancelled` (no `done`) is UNFINISHED, so the dependent
+//! stays blocked. See [`CardDependencyRepo::unfinished_blockers_of`].
 
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::{Row, SqlitePool};
@@ -206,13 +209,18 @@ impl CardDependencyRepo {
     /// unblocks its dependents, and a blocker that is re-running (fresh active tasks)
     /// re-blocks them until it drains again.
     ///
-    /// # Single run generation (known limitation)
+    /// # Latest run generation only (migration 0039, tcp 8ln)
     ///
-    /// The "any `done`" test spans EVERY task the blocker has ever had, so it assumes
-    /// one run generation. A blocker that succeeded once, then was RE-RUN and failed,
-    /// keeps an old `done` row and so stays "finished" here. Scoping to the latest run
-    /// needs a run-generation marker (follow-up); the concurrent-fan-out contract is
-    /// unaffected.
+    /// The "all-terminal ∧ any-done" test is scoped to the blocker's LATEST
+    /// generation (each Run / rerun / fan-out mints a fresh one via
+    /// [`TaskRepo::next_generation_for_issue`]). A blocker that succeeded once, then
+    /// was RE-RUN and failed, has a NEWER (higher) generation whose set has no
+    /// `done` — so it is UNFINISHED again and re-blocks its dependent, instead of
+    /// riding the stale `done` row from the prior run. The concurrent-fan-out
+    /// contract is unaffected: a fan-out's leader + members share one generation, so
+    /// the whole active set is still evaluated together.
+    ///
+    /// [`TaskRepo::next_generation_for_issue`]: crate::repo::task::TaskRepo::next_generation_for_issue
     ///
     /// # Errors
     ///
@@ -221,9 +229,11 @@ impl CardDependencyRepo {
         pool: &SqlitePool,
         dependent_issue_id: &str,
     ) -> Result<Vec<String>, sqlx::Error> {
-        // Keep a blocker UNLESS its active set has drained (no active task left) AND
-        // it has at least one `done` task. The two EXISTS probes are indexed lookups
-        // on `issue_id`, cheap even with a full task history per blocker.
+        // Keep a blocker UNLESS its LATEST generation has drained (no active task
+        // left in it) AND that generation has at least one `done`. Each EXISTS probe
+        // is scoped to the blocker's MAX(generation) so a prior run's terminal rows
+        // neither satisfy nor block the dependency. The probes are indexed lookups on
+        // `(issue_id, generation)` (migration 0039).
         sqlx::query_scalar(
             "SELECT d.blocker_issue_id FROM card_dependency d \
              WHERE d.dependent_issue_id = ? \
@@ -231,11 +241,15 @@ impl CardDependencyRepo {
                      EXISTS ( \
                        SELECT 1 FROM agent_task_queue t \
                        WHERE t.issue_id = d.blocker_issue_id AND t.status = 'done' \
+                         AND t.generation = (SELECT MAX(g.generation) FROM agent_task_queue g \
+                                             WHERE g.issue_id = d.blocker_issue_id) \
                      ) \
                      AND NOT EXISTS ( \
                        SELECT 1 FROM agent_task_queue t \
                        WHERE t.issue_id = d.blocker_issue_id \
                          AND t.status IN ('queued','dispatched','running') \
+                         AND t.generation = (SELECT MAX(g.generation) FROM agent_task_queue g \
+                                             WHERE g.issue_id = d.blocker_issue_id) \
                      ) \
                    ) \
              ORDER BY d.created_at, d.blocker_issue_id",
@@ -624,6 +638,74 @@ mod tests {
         // A newer done task on the same blocker flips it finished (latest wins).
         seed_task_on_issue(pool, "ws-a", "a", "t2", "done").await;
         assert!(CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty());
+    }
+
+    /// Seed a task on `issue_id` at an explicit `generation` (migration 0039), so a
+    /// test can build a rerun history where a later generation re-blocks a dependent.
+    async fn seed_task_gen(
+        pool: &SqlitePool,
+        ws: &str,
+        issue_id: &str,
+        task_id: &str,
+        status: &str,
+        generation: i64,
+    ) {
+        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt', ?, 'd','claude','local','online')")
+            .bind(ws).execute(pool).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag', ?, 'A','rt','x','workspace','u')")
+            .bind(ws).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+             VALUES (?, ?, 'rt', 'ag', ?, ?, 0, ?)",
+        )
+        .bind(task_id).bind(ws).bind(issue_id).bind(status).bind(generation)
+        .execute(pool).await.unwrap();
+    }
+
+    /// The 8ln bug: a blocker that SUCCEEDED (gen 0, done) then was RE-RUN and FAILED
+    /// (gen 1) must re-block its dependent — the stale gen-0 `done` no longer
+    /// satisfies the dependency once a newer generation exists without a `done`.
+    #[tokio::test]
+    async fn a_rerun_failing_blocker_reblocks_its_dependent() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "blk").await;
+        seed_issue(pool, "ws-a", "dep").await;
+        CardDependencyRepo::add_edge(pool, &ws("ws-a"), "dep", "blk", 1).await.unwrap();
+
+        // Generation 0: the blocker succeeded → the dependent is runnable.
+        seed_task_gen(pool, "ws-a", "blk", "g0", "done", 0).await;
+        assert!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            "a done blocker satisfies the dependency"
+        );
+
+        // Generation 1: the blocker is RE-RUN and is still running → re-blocked
+        // (the latest generation has an active task, no done).
+        seed_task_gen(pool, "ws-a", "blk", "g1", "running", 1).await;
+        assert_eq!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap(),
+            vec!["blk"],
+            "a re-running blocker re-blocks — the stale gen-0 done does not satisfy it"
+        );
+
+        // The rerun FAILS (gen 1 drained, no done) → still blocked.
+        set_task_status(pool, "g1", "failed").await;
+        assert_eq!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap(),
+            vec!["blk"],
+            "the latest generation failed with no done — the dependent stays blocked"
+        );
+
+        // A gen-2 rerun finally succeeds → runnable again.
+        seed_task_gen(pool, "ws-a", "blk", "g2", "done", 2).await;
+        assert!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            "the latest generation succeeded — the dependent is runnable again"
+        );
     }
 
     /// remove_edge is idempotent and unblocks the dependent.

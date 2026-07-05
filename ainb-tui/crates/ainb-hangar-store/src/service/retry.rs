@@ -120,14 +120,18 @@ pub enum RetryDecision {
 /// `dispatched_at`, `branch`) reset by being omitted (NULL) — `branch` is per-run
 /// (a fresh child mints a fresh worktree and records its own); `priority` is
 /// inherited so a retried urgent task stays urgent in the claim ordering.
+/// `generation` is copied from the parent (migration 0039, tcp 8ln): an infra
+/// retry is a NEW ATTEMPT of the SAME logical run, so it belongs to the parent's
+/// run generation — the card-state folds must fold the retry child together with
+/// its parent's siblings, not treat it as a fresh generation.
 /// Binds, in order: `id`, `workspace_id`, `runtime_id`, `agent_id`, `issue_id`,
 /// `work_dir`, `priority`, `attempt`, `max_attempts`, `parent_task_id`,
-/// `session_id`, `repo_ref`, `agent_kind`, `created_at`.
+/// `session_id`, `repo_ref`, `agent_kind`, `generation`, `created_at`.
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
  (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
-  attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, generation, created_at) \
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -199,6 +203,7 @@ impl RetryService {
             .bind(child_session_id)
             .bind(&failed_task.repo_ref)
             .bind(&failed_task.agent_kind)
+            .bind(failed_task.generation)
             .bind(clock.now_ms())
             .execute(pool)
             .await?;

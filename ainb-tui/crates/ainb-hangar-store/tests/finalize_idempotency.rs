@@ -90,6 +90,7 @@ async fn seed_task_in_state(store: &Store, id: &str, status: &str) {
             priority: 0,
             created_at: 1,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

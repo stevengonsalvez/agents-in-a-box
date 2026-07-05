@@ -92,6 +92,7 @@ async fn seed_failed_task_with_session(store: &Store, id: &str, reason: FailureR
             priority: 0,
             created_at: 1,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

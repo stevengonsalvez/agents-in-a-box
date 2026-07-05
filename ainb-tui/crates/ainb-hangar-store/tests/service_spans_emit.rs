@@ -219,6 +219,7 @@ async fn enqueue_task(store: &Store, id: &str, created_at: i64) -> String {
             priority: 0,
             created_at,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

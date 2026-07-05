@@ -375,6 +375,7 @@ async fn task_kind_is_autopilot() {
             priority: 0,
             created_at: T0,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

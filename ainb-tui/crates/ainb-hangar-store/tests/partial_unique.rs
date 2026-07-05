@@ -99,6 +99,7 @@ fn new_task(id: &str, issue_id: Option<&str>) -> NewTask {
         priority: 0,
         created_at: 1_700_000_000_000,
         autopilot_run_id: None,
+        generation: 0,
     }
 }
 

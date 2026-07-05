@@ -174,6 +174,7 @@ pub async fn fire_autopilot_tick(
             priority: 0,
             created_at: now,
             autopilot_run_id: Some(run_id.clone()),
+            generation: 0,
         },
     )
     .await?;
