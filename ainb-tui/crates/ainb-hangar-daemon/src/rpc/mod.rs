@@ -2554,8 +2554,7 @@ async fn handle_board_card_remove(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_store::repo::board::BoardRepo;
-    use ainb_hangar_store::repo::task::TaskRepo;
+    use ainb_hangar_store::repo::board::{BoardRepo, CardRemoveOutcome};
 
     let params: ainb_hangar_proto::snapshots::BoardCardParams =
         parse_params(req, "{ workspace_id, board_id, issue_id }")?;
@@ -2563,29 +2562,22 @@ async fn handle_board_card_remove(
     if params.issue_id.trim().is_empty() {
         return Err(invalid_params("issue_id must not be empty"));
     }
-    // Validate the board (a remove is a card affordance on a real board).
-    let board = board_in_ws(pool, &ws, &params.board_id).await?;
-    let is_card = board.cards.iter().any(|c| c.issue_id == params.issue_id);
 
-    // Refuse to remove a card whose run is still live — cancel it first, so a
-    // remove never orphans an in-flight task. Only a real card can have a run.
-    if is_card {
-        if let Some(active) =
-            TaskRepo::active_task_for_issue(pool, ws.as_str(), &params.issue_id)
-                .await
-                .map_err(|e| store_err(&e))?
-        {
-            return Err(invalid_params(&format!(
-                "this card has an active run ({}); cancel it before removing the card",
-                active.status
-            )));
+    // The active-run guard + the delete are ONE atomic statement in the repo (no
+    // TOCTOU window a concurrent `board_card_run` could slip through). A card with
+    // a live run is refused (cancel-first); a card that is not on the board is an
+    // idempotent no-op.
+    match BoardRepo::card_remove(pool, &ws, &params.board_id, &params.issue_id)
+        .await
+        .map_err(|e| board_repo_err(&e))?
+    {
+        CardRemoveOutcome::BlockedByActiveRun => Err(invalid_params(
+            "this card has an active run; cancel it before removing the card",
+        )),
+        CardRemoveOutcome::Removed | CardRemoveOutcome::NotOnBoard => {
+            boards_list_value(pool, &ws).await
         }
     }
-
-    BoardRepo::card_remove(pool, &ws, &params.board_id, &params.issue_id)
-        .await
-        .map_err(|e| board_repo_err(&e))?;
-    boards_list_value(pool, &ws).await
 }
 
 /// `hangar/board_card_timeline` (tcp T3 / F6, P10 §4.9): the raw stream-json

@@ -101,6 +101,18 @@ pub struct AutoMoved {
     pub column_id: String,
 }
 
+/// The outcome of a [`BoardRepo::card_remove`] (tcp T3 / F6): the three cases the
+/// caller reports distinctly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CardRemoveOutcome {
+    /// The placement was removed (the issue is kept).
+    Removed,
+    /// The card's issue has an ACTIVE run — the remove was refused (cancel first).
+    BlockedByActiveRun,
+    /// The card was not on the board — an idempotent no-op (already removed).
+    NotOnBoard,
+}
+
 /// Stateless typed wrapper over the `board` + `board_column` + `board_card` tables.
 pub struct BoardRepo;
 
@@ -572,12 +584,18 @@ impl BoardRepo {
             return Err(BoardRepoError::BadReorder);
         }
         for (i, issue_id) in ordered_issue_ids.iter().enumerate() {
+            // Scope each ord write to the target column: if a concurrent move
+            // relocated a card out of this column between the membership check
+            // above and this write, the `column_id IS ?` guard leaves it untouched
+            // rather than rewriting its ord in a column it no longer sits in.
             sqlx::query(
-                "UPDATE board_card SET ord = ? WHERE board_id = ? AND issue_id = ?",
+                "UPDATE board_card SET ord = ? \
+                 WHERE board_id = ? AND issue_id = ? AND column_id IS ?",
             )
             .bind(i64::try_from(i).unwrap_or(i64::MAX))
             .bind(board_id)
             .bind(issue_id)
+            .bind(column_id)
             .execute(&mut *tx)
             .await?;
         }
@@ -588,10 +606,15 @@ impl BoardRepo {
     /// Remove a card (an issue placement) from a board (tcp T3 / F6).
     ///
     /// Deletes ONLY the `board_card` row — the underlying `issue` is left intact, so
-    /// a removed card can be re-added and still shows in the issue list. Idempotent:
-    /// removing a card that is not on the board affects no row and is a clean
-    /// success (the end state — "not on the board" — already holds). Workspace-scoped
-    /// via the board (a foreign board is [`BoardRepoError::NotFound`]).
+    /// a removed card can be re-added and still shows in the issue list.
+    ///
+    /// The active-run guard and the delete are ONE atomic statement (the `DELETE …
+    /// AND NOT EXISTS (active task)` conditional), so a `board_card_run` that
+    /// enqueues concurrently can never slip between a separate check and the delete
+    /// and strand a live task off the board (the TOCTOU the two-step check+delete
+    /// would leave). The outcome distinguishes the three cases the caller reports:
+    /// removed, blocked by an active run (cancel it first), or already-not-on-board
+    /// (an idempotent no-op). Workspace-scoped via the board.
     ///
     /// # Errors
     ///
@@ -602,16 +625,44 @@ impl BoardRepo {
         workspace: &WorkspaceId,
         board_id: &str,
         issue_id: &str,
-    ) -> Result<(), BoardRepoError> {
+    ) -> Result<CardRemoveOutcome, BoardRepoError> {
         let mut tx = pool.begin().await?;
         Self::ensure_board_in_ws(&mut tx, workspace, board_id).await?;
-        sqlx::query("DELETE FROM board_card WHERE board_id = ? AND issue_id = ?")
-            .bind(board_id)
-            .bind(issue_id)
-            .execute(&mut *tx)
-            .await?;
+        let on_board: Option<i64> =
+            sqlx::query_scalar("SELECT 1 FROM board_card WHERE board_id = ? AND issue_id = ?")
+                .bind(board_id)
+                .bind(issue_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if on_board.is_none() {
+            tx.commit().await?;
+            return Ok(CardRemoveOutcome::NotOnBoard);
+        }
+        // Guarded delete: only when the card's issue has NO active (queued /
+        // dispatched / running) task. `NOT EXISTS` + the DELETE are evaluated as one
+        // statement, so a concurrent run's enqueue either lands before (→ 0 rows,
+        // blocked) or after (→ the card is already gone) — never orphaned.
+        let affected = sqlx::query(
+            "DELETE FROM board_card WHERE board_id = ? AND issue_id = ? \
+             AND NOT EXISTS ( \
+               SELECT 1 FROM agent_task_queue \
+               WHERE issue_id = ? AND workspace_id = ? \
+                 AND status IN ('queued', 'dispatched', 'running') \
+             )",
+        )
+        .bind(board_id)
+        .bind(issue_id)
+        .bind(issue_id)
+        .bind(workspace.as_str())
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
         tx.commit().await?;
-        Ok(())
+        Ok(if affected == 1 {
+            CardRemoveOutcome::Removed
+        } else {
+            CardRemoveOutcome::BlockedByActiveRun
+        })
     }
 
     /// THE AUTO-MOVE HOOK. For every board in `workspace` that carries `issue_id`
@@ -1248,7 +1299,8 @@ mod tests {
         seed_issue(pool, "ws-a", "issue-1").await;
         BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
 
-        BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
+        let out = BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
+        assert_eq!(out, CardRemoveOutcome::Removed);
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
         assert!(b.cards.is_empty(), "the placement is gone");
         // The issue itself survives (re-addable).
@@ -1259,13 +1311,59 @@ mod tests {
         assert_eq!(issue, Some(1), "the underlying issue is untouched");
         // Re-add works, and a second remove of the same card is a clean no-op.
         BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 11).await.unwrap();
-        BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
-        BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
+        assert_eq!(
+            BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap(),
+            CardRemoveOutcome::Removed
+        );
+        assert_eq!(
+            BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap(),
+            CardRemoveOutcome::NotOnBoard,
+            "a second remove is an idempotent no-op"
+        );
         // A remove scoped to a foreign workspace is rejected (never a cross-tenant
         // delete).
         seed_ws(pool, "ws-b").await;
         let err = BoardRepo::card_remove(pool, &ws("ws-b"), "b1", "issue-1").await.unwrap_err();
         assert!(matches!(err, BoardRepoError::NotFound), "got {err:?}");
+    }
+
+    /// The active-run guard is atomic with the delete: a card whose issue has an
+    /// active (queued/dispatched/running) task is NOT removed — it reports
+    /// BlockedByActiveRun and the placement survives (delete-while-running =
+    /// cancel-first, race-free).
+    #[tokio::test]
+    async fn card_remove_is_blocked_by_an_active_run() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+        // Minimal FK chain for an active task on the card's issue.
+        sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u','u@e.com',0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt','ws-a','d','claude','local','online')").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag','ws-a','A','rt','x','workspace','u')").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) VALUES ('t1','ws-a','rt','ag','issue-1','running',0)").execute(pool).await.unwrap();
+
+        // A running task blocks the remove — the card survives.
+        assert_eq!(
+            BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap(),
+            CardRemoveOutcome::BlockedByActiveRun
+        );
+        assert_eq!(
+            BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0].cards.len(),
+            1,
+            "the card is still on the board while its run is active"
+        );
+
+        // Once the task is terminal, the remove proceeds.
+        sqlx::query("UPDATE agent_task_queue SET status = 'cancelled' WHERE id = 't1'").execute(pool).await.unwrap();
+        assert_eq!(
+            BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap(),
+            CardRemoveOutcome::Removed
+        );
     }
 
     /// A card moved to another column appends at that column's end (`ord` = max+1),
