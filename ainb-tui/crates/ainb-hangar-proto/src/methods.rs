@@ -602,6 +602,21 @@ pub const HANGAR_BOARD_CARD_CREATE: &str = "hangar/board_card_create";
 /// Mutating + workspace-scoped.
 pub const HANGAR_BOARD_CARD_RUN: &str = "hangar/board_card_run";
 
+/// `hangar/board_card_cancel` — cancel a card's in-flight run (tcp T3 / F6).
+///
+/// Params: [`crate::snapshots::BoardCardCancelParams`]
+/// (`{ workspace_id, board_id, issue_id }`). Result:
+/// [`crate::snapshots::BoardCardCancelResult`] — the cancelled task id, or
+/// `cancelled = false` when the card has no active (queued / dispatched /
+/// running) task. Resolves the card's issue to its single active task, flips it
+/// to `cancelled` (the idempotent `CancelTaskService` FSM edge), then signals
+/// the daemon's run loop to KILL the in-flight run — the headless provider's
+/// process group or the interactive tmux session by its exact name. The run's
+/// provisioned worktree is torn down (keep-if-dirty) on the finalize seam. A
+/// finished / failed / already-cancelled card cannot be retroactively cancelled
+/// (`cancelled = false`). Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_CANCEL: &str = "hangar/board_card_cancel";
+
 /// `hangar/repo_list` — the card-create `@` autocomplete repo roster (spec F3).
 ///
 /// Params: `{}` (host-scoped — the roster is the host's favorites + scan cache,
@@ -818,6 +833,9 @@ pub const ALL_METHODS: &[&str] = &[
     // Card-create repo roster (spec F3) is APPENDED at the catalogue tail — the
     // wire catalogue is append-only.
     HANGAR_REPO_LIST,
+    // Card lifecycle (tcp T3 / F6) is APPENDED at the catalogue tail — the wire
+    // catalogue is append-only.
+    HANGAR_BOARD_CARD_CANCEL,
 ];
 
 #[cfg(test)]
@@ -999,6 +1017,7 @@ mod tests {
             HANGAR_BOARD_CARD_CREATE,
             HANGAR_BOARD_CARD_RUN,
             HANGAR_REPO_LIST,
+            HANGAR_BOARD_CARD_CANCEL,
         ];
         for m in declared {
             assert!(

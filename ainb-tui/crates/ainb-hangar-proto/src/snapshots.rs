@@ -1528,6 +1528,34 @@ pub struct BoardCardRunResult {
     pub mode: String,
 }
 
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_CANCEL`] (tcp T3 / F6): cancel
+/// a card's in-flight run.
+///
+/// Card = issue: the daemon resolves the issue's single active (queued /
+/// dispatched / running) task and cancels it, so the caller only carries the
+/// card's coordinates — never a task id it does not hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardCancelParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the card sits on.
+    pub board_id: String,
+    /// The card's issue whose active run to cancel.
+    pub issue_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_BOARD_CARD_CANCEL`] (tcp T3 / F6).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardCancelResult {
+    /// The task that was cancelled, or `None` when the card had no active task.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Whether an active task was found and cancelled. `false` for a card whose
+    /// latest task is already terminal (`done` / `failed` / `cancelled`) or that
+    /// never ran — the cancel is a no-op the caller surfaces as a note.
+    pub cancelled: bool,
+}
+
 /// One pickable repository in the card-create `@` roster
 /// ([`crate::methods::HANGAR_REPO_LIST`], spec F3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
