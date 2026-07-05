@@ -801,6 +801,13 @@ impl BoardsState {
     pub fn adopt_context(&mut self, prev: &Self) {
         self.profiles.clone_from(&prev.profiles);
         self.repos.clone_from(&prev.repos);
+        // Carry the squad roster too (tcp T4 / F7). A fresh `from_snapshot` starts
+        // it empty, so omitting this wiped the roster on every board-mutation
+        // refresh — and an OPEN SquadPick overlay whose cursor sat on a squad row
+        // would then commit `squad_id = None` on Enter, silently CLEARING the
+        // card's squad (agents-in-a-box holistic tcp review). `squad_pick_key`
+        // guards the residual race; carrying the roster removes the cause.
+        self.squads.clone_from(&prev.squads);
         self.default_agent = prev.default_agent;
         self.overlay.clone_from(&prev.overlay);
         self.note.clone_from(&prev.note);
@@ -1332,11 +1339,22 @@ fn squad_pick_key(
             let Some(board) = state.focused_board() else {
                 return close_overlay(state);
             };
-            // Row 0 clears; row n+1 picks the roster's squad n.
-            let squad_id = cursor
-                .checked_sub(1)
-                .and_then(|i| state.squads.get(i))
-                .map(|s| s.id.clone());
+            // Row 0 is the explicit "clear" row; rows n+1 pick the roster's squad n.
+            // A cursor pointing at a MISSING roster row — e.g. the roster emptied
+            // under an open overlay — must NOT fall through to a silent clear (that
+            // would wipe the card's squad). No-op with a note, leaving the overlay
+            // open to retry.
+            let squad_id = match cursor.checked_sub(1) {
+                None => None, // row 0: the deliberate clear
+                Some(i) => match state.squads.get(i) {
+                    Some(squad) => Some(squad.id.clone()),
+                    None => {
+                        let mut next = state.clone();
+                        next.set_note("Squad roster unavailable — reopen to assign");
+                        return BoardsReduction { state: next, intent: None };
+                    }
+                },
+            };
             let mut next = state.clone();
             next.overlay = None;
             BoardsReduction {
@@ -3495,6 +3513,51 @@ mod tests {
                 squad_id: Some("sq-2".into()),
             })
         );
+    }
+
+    /// A board-mutation refresh carries the injected squad roster across
+    /// `adopt_context` (tcp T4 / F7). A fresh `from_snapshot` starts it empty, so
+    /// without the carry every refresh wiped the roster the open SquadPick reads.
+    #[test]
+    fn refresh_preserves_squad_roster() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_squads(vec![
+            SquadOption { id: "sq-1".into(), name: "alpha".into() },
+            SquadOption { id: "sq-2".into(), name: "beta".into() },
+        ]);
+        let opened = reduce_boards(&state, BoardsEvent::AssignSquad).state;
+        assert!(matches!(opened.overlay(), Some(BoardsOverlay::SquadPick { .. })));
+
+        let mut refreshed = BoardsState::from_snapshot(&one_board());
+        refreshed.adopt_context(&opened);
+        assert_eq!(refreshed.squads().len(), 2, "the squad roster survives a refresh");
+        assert!(refreshed.overlay().is_some(), "the open SquadPick survives too");
+    }
+
+    /// The SquadPick commit guard (holistic tcp review): if the roster is emptied
+    /// under an OPEN overlay whose cursor sits on a now-missing squad row, Enter
+    /// must NOT fall through to a silent clear — it no-ops with a note and keeps
+    /// the overlay open, so a background wipe can never blank a card's squad.
+    #[test]
+    fn squad_pick_over_missing_row_is_a_noop_not_a_silent_clear() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_squads(vec![
+            SquadOption { id: "sq-1".into(), name: "alpha".into() },
+            SquadOption { id: "sq-2".into(), name: "beta".into() },
+        ]);
+        let opened = reduce_boards(&state, BoardsEvent::AssignSquad).state;
+        // Move the cursor onto a real squad row (cursor 1 = roster squad 0)...
+        let mut on_squad = reduce_boards(&opened, BoardsEvent::Key(BoardsKey::Down)).state;
+        // ...then wipe the roster under the open overlay (the pre-fix refresh bug).
+        on_squad.set_squads(vec![]);
+
+        let out = reduce_boards(&on_squad, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(out.intent, None, "a cursor over a missing row commits NO AssignSquad");
+        assert!(
+            matches!(out.state.overlay(), Some(BoardsOverlay::SquadPick { .. })),
+            "the overlay stays open to retry"
+        );
+        assert!(out.state.note().is_some(), "a note explains why nothing was assigned");
     }
 
     /// `D` opens the dependency picker over the board's OTHER cards; Enter commits

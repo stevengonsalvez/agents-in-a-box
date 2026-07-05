@@ -33,6 +33,7 @@ use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
+use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
 use ainb_hangar_store::repo::run_history::RunHistoryRepo;
@@ -1073,12 +1074,35 @@ pub async fn attention_list(
     } else {
         AttentionRepo::list_open(pool, workspace_id).await?
     };
-    Ok(rows.into_iter().map(attention_row_to_wire).collect())
+    let mut out = Vec::with_capacity(rows.len());
+    for row in rows {
+        out.push(attention_row_to_wire(pool, row).await?);
+    }
+    Ok(out)
 }
 
-/// Flatten one store `attention` row into its wire render shape.
-fn attention_row_to_wire(row: ainb_hangar_store::repo::attention::AttentionRow) -> AttentionRow {
-    AttentionRow {
+/// Flatten one store `attention` row into its wire render shape, RESOLVING the
+/// routing channels now for a row that carries no stamped set.
+///
+/// A row raised at or after migration 0037 stamps its resolved channels once at
+/// emit time (compute-once-at-emit), and that stamp is used verbatim. But a
+/// LEGACY row raised BEFORE 0037 persists the empty default (`''`); treating that
+/// as "no channels" would silently drop an in-flight ASK from before the upgrade
+/// off EVERY push channel. So an empty stamp is treated as "unstamped → resolve
+/// the rules now" via [`NotifyRuleRepo::resolve`]: a genuinely board-only kind
+/// (`waiting`, or a board-only override) resolves back to the empty set
+/// (unchanged), while a legacy ASK / approval / escalation resolves to its real
+/// push channels and pages exactly as it did before T5.
+async fn attention_row_to_wire(
+    pool: &SqlitePool,
+    row: ainb_hangar_store::repo::attention::AttentionRow,
+) -> Result<AttentionRow, sqlx::Error> {
+    let channels = if row.channels.is_empty() {
+        NotifyRuleRepo::resolve(pool, row.kind, row.workspace_id.as_deref()).await?
+    } else {
+        row.channels
+    };
+    Ok(AttentionRow {
         id: row.id,
         session_id: row.session_id,
         cwd: row.cwd,
@@ -1087,10 +1111,8 @@ fn attention_row_to_wire(row: ainb_hangar_store::repo::attention::AttentionRow) 
         payload: row.payload,
         degraded: row.degraded,
         created_at: row.created_at,
-        // The resolved routing channels stamped at raise time (tcp T5) — the
-        // bridge/web/atc consumers reading this feed filter on them.
-        channels: row.channels,
-    }
+        channels,
+    })
 }
 
 /// Snapshot a workspace's token/cost usage rollup (`hangar/usage_rollup`,

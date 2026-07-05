@@ -34,7 +34,7 @@ mod common;
 use common::{
     BOARD_RUN_DONE_COL, BOARD_RUN_PROFILE, BOARD_RUN_TODO_COL, TuiSession, board_card_by_title,
     budget_scale, can_run_tripwire, drive_card_create_to_profile, prepare_pipeline_board_run,
-    scratch_dir, skip, task_short_id_by_title,
+    scratch_dir, scratch_slug_by_title, skip,
 };
 
 /// The distinctive card title the tripwire types — greppable on the pane and in
@@ -122,9 +122,10 @@ fn creating_a_card_and_running_it_auto_moves_and_greens() {
     }
 
     // F5 POSITIVE (filesystem truth): the scratch-repo run provisioned a REAL git
-    // repo under `~/.agents-in-a-box/scratch/<slug>` (slug = the task short-id).
+    // repo under `~/.agents-in-a-box/scratch/<slug>` (slug = <issue>-<agent>, so a
+    // rerun reuses the durable dir while concurrent squad members stay isolated).
     // Scratch is durable (never torn down), so it is still on disk here.
-    let slug = task_short_id_by_title(pipe.home(), CARD_TITLE)
+    let slug = scratch_slug_by_title(pipe.home(), CARD_TITLE)
         .unwrap_or_else(|| panic!("no task dispatched for the card `{CARD_TITLE}`"));
     let scratch = scratch_dir(pipe.home(), &slug);
 

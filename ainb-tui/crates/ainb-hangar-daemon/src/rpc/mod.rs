@@ -3115,15 +3115,23 @@ async fn handle_board_card_timeline(
     let ws_slug = crate::run_loop::workspace_slug(pool, ws.as_str())
         .await
         .map_err(|e| internal(&format!("resolve workspace slug: {e}")))?;
-    let logs = crate::execenv::logs_dir(&crate::run_loop::hangar_home(), &ws_slug, &task_id);
+    // Candidate `logs/` dirs, newest slug scheme first then the pre-T4 legacy
+    // slug, so a run written under EITHER scheme resolves — a pre-upgrade task's
+    // transcript is never stranded by the T4 collision-resistant slug change.
+    let log_dirs =
+        crate::execenv::logs_dir_candidates(&crate::run_loop::hangar_home(), &ws_slug, &task_id);
 
     // The run tees exactly one provider log; read whichever exists (a bounded
-    // tail). from_utf8_lossy + the parser's leading-partial-line skip make a
-    // mid-char seek boundary harmless.
-    let (provider, jsonl) = [("claude", "claude.jsonl"), ("codex", "codex.jsonl")]
-        .into_iter()
-        .find_map(|(provider, file)| {
-            read_tail(&logs.join(file), TAIL_CAP).map(|text| (provider.to_string(), text))
+    // tail) across the candidate dirs, newest scheme first. from_utf8_lossy + the
+    // parser's leading-partial-line skip make a mid-char seek boundary harmless.
+    let (provider, jsonl) = log_dirs
+        .iter()
+        .flat_map(|logs| {
+            [("claude", "claude.jsonl"), ("codex", "codex.jsonl")]
+                .map(move |(provider, file)| (provider, logs.join(file)))
+        })
+        .find_map(|(provider, path)| {
+            read_tail(&path, TAIL_CAP).map(|text| (provider.to_string(), text))
         })
         .map_or((None, String::new()), |(p, t)| (Some(p), t));
 
@@ -5246,8 +5254,9 @@ mod tests {
                 .unwrap_or_else(|| panic!("no rule row for {kind}"))
         }
 
-        // The seeded global grid: escalation is loud, ask is web+os, waiting is
-        // board-only, and nothing is marked overridden at global scope.
+        // The seeded global grid: escalation is loud, ask is phone+web+os (0038
+        // restored phone), waiting is board-only, and nothing is marked overridden
+        // at global scope.
         let resp = dispatch(
             pool,
             &req(methods::HANGAR_NOTIFY_RULES_LIST, serde_json::json!({})),
@@ -5258,7 +5267,7 @@ mod tests {
         assert!(resp.error.is_none(), "{resp:?}");
         let rules = resp.result.unwrap()["rules"].clone();
         assert_eq!(row_for(&rules, "escalation")["channels"], serde_json::json!(["phone", "web", "os"]));
-        assert_eq!(row_for(&rules, "ask_user_question")["channels"], serde_json::json!(["web", "os"]));
+        assert_eq!(row_for(&rules, "ask_user_question")["channels"], serde_json::json!(["phone", "web", "os"]));
         assert_eq!(row_for(&rules, "waiting")["channels"], serde_json::json!([]));
         assert_eq!(row_for(&rules, "error")["overridden"], serde_json::json!(false));
 
@@ -5306,7 +5315,7 @@ mod tests {
         .unwrap();
         assert_eq!(
             row_for(&global["rules"], "ask_user_question")["channels"],
-            serde_json::json!(["web", "os"]),
+            serde_json::json!(["phone", "web", "os"]),
             "global untouched"
         );
     }

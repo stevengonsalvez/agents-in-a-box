@@ -17,12 +17,13 @@
 //!         phone consumer delivers ✓   os consumer suppressed ✗ (flip dropped os)
 //! ```
 //!
-//! This is a genuine regression guard: BEFORE the emit-time resolution the row
-//! would carry the SEEDED default (web+os), so the phone assertion (allowed) and
-//! the os assertion (suppressed) would both fail. Nothing is seeded for the
-//! interaction path — the rule flip and the raise both run live. No tmux, no real
-//! Telegram/web-push: the "consumers" are pure `ChannelSet::contains` filters (the
-//! exact gate the bridge + web push run), recording deliveries into a Vec.
+//! This is a genuine regression guard: the flip to `phone,web` DROPS os from the
+//! seeded default (`phone,web,os`), so BEFORE the emit-time resolution the row
+//! would carry the default and the os assertion (suppressed) would fail. Nothing
+//! is seeded for the interaction path — the rule flip and the raise both run live.
+//! No tmux, no real Telegram/web-push: the "consumers" are pure
+//! `ChannelSet::contains` filters (the exact gate the bridge + web push run),
+//! recording deliveries into a Vec.
 
 use std::io::Write;
 use std::path::PathBuf;
@@ -122,7 +123,7 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
     let sink = broker.sink();
     let health = health();
 
-    // Baseline: the SEEDED default routes ASK to web+os (never phone).
+    // Baseline: the SEEDED default routes ASK to phone+web+os (0038 restored phone).
     use ainb_hangar_store::repo::attention::AttentionKind;
     use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
     let default = NotifyRuleRepo::resolve(store.pool(), AttentionKind::AskUserQuestion, None)
@@ -130,12 +131,12 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
         .unwrap();
     assert_eq!(
         default,
-        ChannelSet::from_channels([Channel::Web, Channel::Os]),
-        "precondition: the seeded ASK default is web+os"
+        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+        "precondition: the seeded ASK default is phone+web+os"
     );
 
     // FLIP the global ASK rule to phone+web through the settings-grid RPC. This
-    // ENABLES phone and DROPS os for ASK.
+    // DROPS os for ASK (and keeps phone+web).
     let flip = RpcRequest {
         jsonrpc: ainb_hangar_proto::jsonrpc_version(),
         id: RpcId::Number(2),

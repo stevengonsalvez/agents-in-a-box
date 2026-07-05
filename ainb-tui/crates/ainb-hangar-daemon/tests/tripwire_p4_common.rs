@@ -1142,9 +1142,37 @@ pub fn task_short_id(task_id: &str) -> String {
     }
 }
 
+/// The slug a SCRATCH card's durable dir is keyed on: `<issue-short-id>-<agent-short-id>`,
+/// read off the latest task of the card with TITLE `title`. Stable across reruns
+/// (same card + agent) and distinct per concurrent squad member (distinct agents on
+/// one issue). `None` until a task has been dispatched.
+#[must_use]
+pub fn scratch_slug_by_title(home: &Path, title: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("scratch-slug runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let like = format!("%{title}%");
+        let row: Option<(String, String)> = sqlx::query_as(
+            "SELECT t.issue_id, t.agent_id FROM agent_task_queue t JOIN issue i ON t.issue_id = i.id \
+             WHERE i.title LIKE ? ORDER BY t.created_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(&like)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten();
+        row.map(|(issue, agent)| format!("{}-{}", task_short_id(&issue), task_short_id(&agent)))
+    })
+}
+
 /// Read the short-id of the latest task on the card with issue TITLE `title`, the
-/// slug the worktree/scratch dir + `ainb/<slug>` branch are keyed on. `None` until
-/// a task has been dispatched for that card.
+/// slug the worktree dir + `ainb/<slug>` branch are keyed on (per-run; scratch is
+/// keyed on (issue, agent) instead — see [`scratch_slug_by_title`]). `None` until a
+/// task has been dispatched for that card.
 #[must_use]
 pub fn task_short_id_by_title(home: &Path, title: &str) -> Option<String> {
     let hangar_dir = home.join(".agents-in-a-box");

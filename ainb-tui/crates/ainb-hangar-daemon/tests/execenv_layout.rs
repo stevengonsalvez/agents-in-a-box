@@ -109,8 +109,9 @@ fn gc_meta_json_contents() {
 
 #[test]
 fn short_id_is_ulid_short_form() {
-    // First 8 chars, deterministic (the reference short-id form).
-    assert_eq!(short_id("01HZX0000000000000000ABCDE"), "01HZX000");
+    // First 8 chars PLUS the last 6 (the T4 collision-resistant slug form), so
+    // same-instant ULIDs stay distinct. Deterministic.
+    assert_eq!(short_id("01HZX0000000000000000ABCDE"), "01HZX0000ABCDE");
     assert_eq!(
         short_id("01HZX0000000000000000ABCDE"),
         short_id("01HZX0000000000000000ABCDE")

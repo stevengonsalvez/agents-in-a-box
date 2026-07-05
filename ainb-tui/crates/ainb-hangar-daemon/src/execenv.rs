@@ -151,6 +151,20 @@ pub fn short_id(id: &str) -> String {
     }
 }
 
+/// The PRE-T4 short-id scheme: a task id's first 8 characters (or the whole id
+/// when 8 or fewer).
+///
+/// Superseded by [`short_id`] (which appends the random tail for
+/// collision-resistance), but retained for READERS: a task dispatched before the
+/// T4 slug change wrote its `logs/` + task tree under THIS slug, so a timeline
+/// read must be able to fall back to it. Without the fallback every pre-upgrade
+/// run's transcript would be stranded — the new slug names a dir that never
+/// existed for it.
+#[must_use]
+pub fn legacy_short_id(id: &str) -> &str {
+    id.get(..8).unwrap_or(id)
+}
+
 /// The per-task `{shortID}` root directory —
 /// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{short_id(task_id)}/` —
 /// the single source of truth for the layout [`prepare_env`] provisions. Pure
@@ -159,11 +173,17 @@ pub fn short_id(id: &str) -> String {
 /// without re-deriving — and can never drift from it.
 #[must_use]
 pub fn task_root(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
+    task_root_for_slug(home, ws_slug, &short_id(task_id))
+}
+
+/// The per-workspace task root for an already-computed `slug` (the shared shape
+/// behind both the current [`task_root`] and the legacy-slug read fallback).
+fn task_root_for_slug(home: &Path, ws_slug: &str, slug: &str) -> PathBuf {
     home.join(".agents-in-a-box")
         .join("hangar")
         .join("workspaces")
         .join(ws_slug)
-        .join(short_id(task_id))
+        .join(slug)
 }
 
 /// The per-task `logs/` directory (`{task_root}/logs/`), where a run tees its
@@ -171,6 +191,26 @@ pub fn task_root(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
 #[must_use]
 pub fn logs_dir(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
     task_root(home, ws_slug, task_id).join("logs")
+}
+
+/// The candidate `logs/` directories for a task, newest-scheme first: the current
+/// [`short_id`] path, then — when the pre-T4 [`legacy_short_id`] slug DIFFERS — the
+/// legacy path.
+///
+/// A reader tries these in order so a run written under EITHER slug scheme
+/// resolves: a fresh run only ever matches the first, while a pre-upgrade run
+/// whose tree was written under the old first-8-chars slug is still found instead
+/// of being stranded. Pure path derivation (touches no disk); the caller probes
+/// each for the file it wants.
+#[must_use]
+pub fn logs_dir_candidates(home: &Path, ws_slug: &str, task_id: &str) -> Vec<PathBuf> {
+    let new = short_id(task_id);
+    let legacy = legacy_short_id(task_id);
+    let mut dirs = vec![task_root_for_slug(home, ws_slug, &new).join("logs")];
+    if legacy != new {
+        dirs.push(task_root_for_slug(home, ws_slug, legacy).join("logs"));
+    }
+    dirs
 }
 
 /// Create (or reuse) the per-task directory layout under `home`, writing the
@@ -425,7 +465,8 @@ fn system_time_to_ms(t: SystemTime) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::short_id;
+    use super::{legacy_short_id, logs_dir_candidates, short_id};
+    use std::path::Path;
 
     /// Two ULIDs minted in the same instant share their (coarse-timestamp) first
     /// 8 chars but differ in the random tail — the slug must keep them DISTINCT,
@@ -448,5 +489,39 @@ mod tests {
         assert_eq!(short_id("wt-a"), "wt-a");
         assert_eq!(short_id("task-lead"), "task-lead");
         assert_eq!(short_id("exactly14chars"), "exactly14chars");
+    }
+
+    /// The legacy slug is the pre-T4 first-8-chars scheme (the whole id when
+    /// shorter) — the path a pre-upgrade run's tree was written under.
+    #[test]
+    fn legacy_short_id_is_the_pre_t4_first_eight() {
+        assert_eq!(legacy_short_id("01JB2K3W4APQRSTUVWXYZ23456"), "01JB2K3W");
+        assert_eq!(legacy_short_id("wt-a"), "wt-a");
+    }
+
+    /// A reader probes the NEW slug dir first, then falls back to the legacy dir
+    /// when the two schemes differ — a real ULID yields both candidates, so a
+    /// pre-upgrade transcript under the old slug is never stranded. A short id
+    /// (whole under both schemes) yields a single candidate, no duplicate.
+    #[test]
+    fn logs_dir_candidates_prefers_new_then_legacy() {
+        let home = Path::new("/home");
+        let ulid = "01JB2K3W4APQRSTUVWXYZ23456";
+        let cands = logs_dir_candidates(home, "ws", ulid);
+        assert_eq!(cands.len(), 2, "a ULID yields new + legacy candidates");
+        assert!(
+            cands[0].ends_with("workspaces/ws/01JB2K3WZ23456/logs"),
+            "the new slug dir is tried first: {:?}",
+            cands[0]
+        );
+        assert!(
+            cands[1].ends_with("workspaces/ws/01JB2K3W/logs"),
+            "the legacy first-8 slug dir is the fallback: {:?}",
+            cands[1]
+        );
+
+        // A short id is identical under both schemes → one candidate only.
+        let short = logs_dir_candidates(home, "ws", "wt-a");
+        assert_eq!(short.len(), 1, "no duplicate candidate when the schemes agree");
     }
 }
