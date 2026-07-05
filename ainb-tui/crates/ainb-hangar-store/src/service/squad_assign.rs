@@ -47,6 +47,15 @@ pub struct SquadAssignRequest<'a> {
     pub work_dir: Option<&'a str>,
     /// Claim urgency (0..3, higher = more urgent); `0` is the routine default.
     pub priority: i64,
+    /// The card's REPO (an absolute checkout path or `scratch`), stamped onto every
+    /// fanned-out task so each provisions its OWN volatile worktree (tcp T4 / F7).
+    /// `None` (the default) leaves the tasks with a NULL `repo_ref` — the pre-T4
+    /// squads-screen fan-out, which runs in-tree.
+    pub repo_ref: Option<&'a str>,
+    /// The resolved provider agent-kind stamped onto every fanned-out task, so each
+    /// member run routes through the right provider (tcp T4 / F7). `None` leaves the
+    /// column default (`claude`). Only consulted when `repo_ref` is set.
+    pub agent_kind: Option<ainb_hangar_core::agent_kind::AgentKind>,
 }
 
 /// The outcome of a successful squad assignment: the enqueued task plus the
@@ -291,6 +300,7 @@ impl SquadAssignService {
             },
         )
         .await?;
+        Self::stamp_dispatch_fields(&mut tx, &leader_task_id, request).await?;
         for (agent_id, runtime_id) in member_targets {
             let task_id = idgen.new_ulid();
             TaskRepo::insert_in_tx(
@@ -308,6 +318,7 @@ impl SquadAssignService {
                 },
             )
             .await?;
+            Self::stamp_dispatch_fields(&mut tx, &task_id, request).await?;
             members.push(SquadMemberDispatch {
                 task_id,
                 agent_id,
@@ -324,6 +335,31 @@ impl SquadAssignService {
             },
             members,
         })
+    }
+
+    /// Stamp the card's `repo_ref` + resolved `agent_kind` onto a fanned-out task
+    /// WITHIN the fan-out transaction (tcp T4 / F7), so each member run provisions
+    /// its own worktree from the card's repo and routes through the right provider.
+    /// A no-repo request (the pre-T4 squads-screen fan-out) is a no-op — the task
+    /// keeps its NULL `repo_ref` and runs in-tree.
+    async fn stamp_dispatch_fields(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task_id: &str,
+        request: &SquadAssignRequest<'_>,
+    ) -> Result<(), sqlx::Error> {
+        let Some(repo_ref) = request.repo_ref else {
+            return Ok(());
+        };
+        let agent_kind = request
+            .agent_kind
+            .unwrap_or(ainb_hangar_core::agent_kind::AgentKind::DEFAULT);
+        crate::repo::card_parity::CardParityRepo::set_task_repo_agent_in_tx(
+            tx,
+            task_id,
+            Some(repo_ref),
+            agent_kind,
+        )
+        .await
     }
 
     /// Resolve `agent_id` to its runtime **within `workspace`**, returning `None`
@@ -588,6 +624,57 @@ mod tests {
         assert_eq!(lead.issue_id.as_deref(), Some("issue-1"));
         assert_eq!(m1.issue_id.as_deref(), Some("issue-1"));
         assert_eq!(m2.issue_id.as_deref(), Some("issue-1"));
+    }
+
+    /// FAN-OUT stamps the card's repo + agent-kind onto EVERY fanned task (leader
+    /// + members), so each provisions its OWN worktree from the card's repo (tcp
+    /// T4 / F7). The pre-T4 no-repo fan-out leaves them NULL (runs in-tree).
+    #[tokio::test]
+    async fn assign_fanout_stamps_the_card_repo_on_every_task() {
+        use crate::repo::card_parity::CardParityRepo;
+        use ainb_hangar_core::agent_kind::AgentKind;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_agent(pool, "ws-a", "a-lead", "rt-lead").await;
+        seed_agent(pool, "ws-a", "a-m1", "rt-m1").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "shippers", &agent_ref("a-lead"), 1)
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1"))
+            .await
+            .unwrap();
+
+        let request = SquadAssignRequest {
+            issue_id: Some("issue-1"),
+            repo_ref: Some("/repos/app"),
+            agent_kind: Some(AgentKind::Codex),
+            ..SquadAssignRequest::default()
+        };
+        let fanout = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &FixedIdGen::new(vec!["task-lead".into(), "task-m1".into()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap();
+
+        // Both the leader brief and the member task carry the card's repo + kind,
+        // so each provisions its own worktree from `/repos/app`.
+        for id in [&fanout.leader.task_id, &fanout.members[0].task_id] {
+            assert_eq!(
+                CardParityRepo::get_task_repo_agent(pool, id).await.unwrap(),
+                Some((Some("/repos/app".to_string()), AgentKind::Codex)),
+                "fanned task {id} must carry the card repo + agent-kind"
+            );
+        }
     }
 
     /// FAN-OUT dedupe: a squad whose LEADER is also listed as a member does not
