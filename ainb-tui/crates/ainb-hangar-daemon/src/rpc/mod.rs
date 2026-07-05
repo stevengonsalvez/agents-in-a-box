@@ -1278,7 +1278,7 @@ async fn handle_issue_update(
     // task captured its repo + agent at ENQUEUE (`set_task_repo_agent_in_tx`), so an
     // edit only steers the NEXT run — never mutates a task already dispatched.
     if edits_card {
-        CardParityRepo::set_issue_repo_agent(pool, &params.issue_id, repo_ref, agent)
+        CardParityRepo::set_issue_repo_agent(pool, ws.as_str(), &params.issue_id, repo_ref, agent)
             .await
             .map_err(|e| store_err(&e))?;
     }
@@ -2301,7 +2301,7 @@ async fn handle_board_card_create(
     let agent = params.agent.as_deref().and_then(ainb_hangar_core::agent_kind::AgentKind::parse);
     if repo_ref.is_some() || agent.is_some() {
         ainb_hangar_store::repo::card_parity::CardParityRepo::set_issue_repo_agent(
-            pool, &issue_id, repo_ref, agent,
+            pool, ws.as_str(), &issue_id, repo_ref, agent,
         )
         .await
         .map_err(|e| store_err(&e))?;

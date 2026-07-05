@@ -35,26 +35,53 @@ pub const AGENT_LAST_USED_KEY: &str = "card_agent.last_used";
 pub struct CardParityRepo;
 
 impl CardParityRepo {
-    /// Persist a card's repo + agent onto its issue row (the durable card state).
-    /// `repo_ref` is an absolute path or the literal `scratch`; `agent_kind` is
-    /// the picked provider, or `None` to leave the run to resolve via the cascade.
+    /// Persist a card's repo and/or agent onto its issue row (the durable card
+    /// state), scoped to `workspace_id` so the write is self-guarded at the SQL
+    /// boundary (a foreign-tenant issue id matches no row — never a cross-tenant
+    /// write).
+    ///
+    /// This is a PARTIAL update: only the columns whose `Option` is `Some` are
+    /// written; a `None` field is LEFT UNCHANGED (not cleared to NULL). So an
+    /// agent-only edit never drops the card's repo, and a repo-only edit never
+    /// drops its chosen provider — the two are independently editable. Passing both
+    /// `None` is a no-op (`Ok(false)`).
     ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] on a store fault. Returns `Ok(false)` when no
-    /// issue with that id exists (matched no row).
+    /// `(issue_id, workspace_id)` row matched (an unknown / foreign issue), or when
+    /// both fields are `None` (nothing to write).
     pub async fn set_issue_repo_agent(
         pool: &SqlitePool,
+        workspace_id: &str,
         issue_id: &str,
         repo_ref: Option<&str>,
         agent_kind: Option<AgentKind>,
     ) -> Result<bool, sqlx::Error> {
-        let res = sqlx::query("UPDATE issue SET repo_ref = ?, agent_kind = ? WHERE id = ?")
-            .bind(repo_ref)
-            .bind(agent_kind.map(|a| a.as_str()))
-            .bind(issue_id)
-            .execute(pool)
-            .await?;
+        // Build the SET clause from only the provided columns (mirrors
+        // `IssueRepo::update_fields`): a `None` column is left untouched.
+        let mut sets: Vec<&str> = Vec::new();
+        if repo_ref.is_some() {
+            sets.push("repo_ref = ?");
+        }
+        if agent_kind.is_some() {
+            sets.push("agent_kind = ?");
+        }
+        if sets.is_empty() {
+            return Ok(false);
+        }
+        let sql = format!(
+            "UPDATE issue SET {} WHERE id = ? AND workspace_id = ?",
+            sets.join(", ")
+        );
+        let mut query = sqlx::query(&sql);
+        if let Some(repo) = repo_ref {
+            query = query.bind(repo);
+        }
+        if let Some(agent) = agent_kind {
+            query = query.bind(agent.as_str());
+        }
+        let res = query.bind(issue_id).bind(workspace_id).execute(pool).await?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -329,6 +356,7 @@ mod tests {
 
         let ok = CardParityRepo::set_issue_repo_agent(
             pool,
+            "ws-a",
             "issue-1",
             Some("/repos/app"),
             Some(AgentKind::Codex),
@@ -349,6 +377,57 @@ mod tests {
         assert_eq!(
             CardParityRepo::get_issue_repo_agent(pool, "issue-1").await.unwrap(),
             Some((Some("/repos/app".to_string()), None))
+        );
+    }
+
+    /// `set_issue_repo_agent` is a PARTIAL, workspace-scoped write: an agent-only
+    /// edit never drops the repo, a repo-only edit never drops the agent, and a
+    /// foreign-workspace write matches no row.
+    #[tokio::test]
+    async fn set_issue_repo_agent_is_partial_and_workspace_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        // Seed both fields.
+        CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", Some("/repos/app"), Some(AgentKind::Codex))
+            .await
+            .unwrap();
+
+        // Agent-only edit leaves the repo untouched.
+        let ok = CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", None, Some(AgentKind::Claude))
+            .await
+            .unwrap();
+        assert!(ok);
+        assert_eq!(
+            CardParityRepo::get_issue_repo_agent(pool, "issue-1").await.unwrap(),
+            Some((Some("/repos/app".to_string()), Some(AgentKind::Claude))),
+            "an agent-only edit must not drop the repo"
+        );
+
+        // Repo-only edit leaves the agent untouched.
+        let ok = CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", Some("scratch"), None)
+            .await
+            .unwrap();
+        assert!(ok);
+        assert_eq!(
+            CardParityRepo::get_issue_repo_agent(pool, "issue-1").await.unwrap(),
+            Some((Some("scratch".to_string()), Some(AgentKind::Claude))),
+            "a repo-only edit must not drop the agent"
+        );
+
+        // Both-None is a no-op; a foreign-workspace write matches no row.
+        assert!(!CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", None, None).await.unwrap());
+        assert!(
+            !CardParityRepo::set_issue_repo_agent(pool, "ws-b", "issue-1", Some("/x"), None).await.unwrap(),
+            "a cross-tenant repo/agent write must miss"
+        );
+        assert_eq!(
+            CardParityRepo::get_issue_repo_agent(pool, "issue-1").await.unwrap(),
+            Some((Some("scratch".to_string()), Some(AgentKind::Claude))),
+            "the no-op + cross-tenant writes left the row unchanged"
         );
     }
 
