@@ -907,3 +907,78 @@ async fn card_remove_keeps_issue_and_refuses_active_run() {
         .await;
     assert!(noop["error"].is_null(), "removing a non-card is a clean no-op: {noop}");
 }
+
+/// tcp T3 / F6 (P10 §4.9): `board_card_timeline` returns the RAW provider
+/// stream-json a card's newest run teed to disk, read from the deterministic
+/// per-task logs dir. The plugin parses this text into the prettied timeline; the
+/// e2e proves the daemon serves the right file (the parser's rendering is
+/// unit-tested in the plugin crate).
+#[tokio::test]
+async fn card_timeline_serves_the_run_transcript_jsonl() {
+    let dir = tempfile::tempdir().unwrap();
+    // The timeline RPC derives the per-task logs dir under $AINB_HANGAR_HOME; point
+    // it at this test's tempdir so the seeded transcript resolves. Only this test
+    // in the binary reads hangar_home, so the process-env set does not race.
+    std::env::set_var("AINB_HANGAR_HOME", dir.path());
+
+    let (socket_path, _store) = start_server(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(methods::HANGAR_BOARD_CREATE, serde_json::json!({ "workspace_id": WS_SLUG, "name": "Obs" }))
+        .await;
+    let board_id = only_board_id(&created);
+    let with_col = c
+        .call(methods::HANGAR_BOARD_COLUMN_ADD, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }))
+        .await;
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let with_card = c
+        .call(
+            methods::HANGAR_BOARD_CARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "title": "Watch me", "assignee_profile": "claude-agent", "repo_ref": "scratch" }),
+        )
+        .await;
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap()[0]["issue_id"].as_str().unwrap().to_string();
+
+    // A card with NO run yet → an empty transcript (a read, never an error).
+    let empty = c
+        .call(methods::HANGAR_BOARD_CARD_TIMELINE, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
+        .await;
+    assert!(empty["error"].is_null(), "timeline of an unrun card is not an error: {empty}");
+    assert_eq!(empty["result"]["jsonl"], "", "no run → empty transcript");
+
+    // Enqueue a run, then seed a fixture transcript at that task's deterministic
+    // logs path (`workspaces/default/{task_id[..8]}/logs/claude.jsonl`).
+    let run = c
+        .call(methods::HANGAR_BOARD_CARD_RUN, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }))
+        .await;
+    let task_id = run["result"]["task_id"].as_str().unwrap().to_string();
+    let logs = dir
+        .path()
+        .join(".agents-in-a-box/hangar/workspaces/default")
+        .join(&task_id[..8])
+        .join("logs");
+    std::fs::create_dir_all(&logs).unwrap();
+    let fixture = concat!(
+        "{\"type\":\"assistant\",\"timestamp\":1000,\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test --workspace\"}}]}}\n",
+        "{\"type\":\"user\",\"timestamp\":1800,\"message\":{\"content\":[{\"type\":\"tool_result\",\"tool_use_id\":\"t1\",\"content\":\"ok\"}]}}\n",
+        "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"done\"}\n",
+    );
+    std::fs::write(logs.join("claude.jsonl"), fixture).unwrap();
+
+    // The timeline RPC serves the transcript for the card's newest task.
+    let tl = c
+        .call(methods::HANGAR_BOARD_CARD_TIMELINE, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
+        .await;
+    assert!(tl["error"].is_null(), "timeline must ack: {tl}");
+    assert_eq!(tl["result"]["task_id"], task_id, "the newest task's transcript");
+    assert_eq!(tl["result"]["provider"], "claude", "read the claude log");
+    let jsonl = tl["result"]["jsonl"].as_str().unwrap();
+    assert!(
+        jsonl.contains("cargo test --workspace") && jsonl.contains("tool_use"),
+        "the run's tool call is in the served transcript: {jsonl}"
+    );
+
+    std::env::remove_var("AINB_HANGAR_HOME");
+}

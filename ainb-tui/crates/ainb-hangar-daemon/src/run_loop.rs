@@ -1566,7 +1566,7 @@ fn teardown_workdir(run_wd: &crate::workdir_provision::RunWorkdir, task_id: &str
 }
 
 /// Look up a workspace's slug by id.
-async fn workspace_slug(pool: &SqlitePool, workspace_id: &str) -> anyhow::Result<String> {
+pub(crate) async fn workspace_slug(pool: &SqlitePool, workspace_id: &str) -> anyhow::Result<String> {
     let row = sqlx::query("SELECT slug FROM workspace WHERE id = ?")
         .bind(workspace_id)
         .fetch_optional(pool)
@@ -1771,7 +1771,7 @@ fn load_env_policy() -> ainb_hangar_core::env_policy::EnvPolicy {
 /// Falls back to the current directory only when the home itself cannot be
 /// resolved, preserving the daemon's prior infallible contract here (the env
 /// tree is best-effort; a missing home must not abort the loop).
-fn hangar_home() -> PathBuf {
+pub(crate) fn hangar_home() -> PathBuf {
     std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV)
         .filter(|p| !p.is_empty())
         .map_or_else(

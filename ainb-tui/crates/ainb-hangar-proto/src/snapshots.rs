@@ -1576,6 +1576,23 @@ pub struct BoardCardReorderParams {
     pub issue_ids: Vec<String>,
 }
 
+/// Result of [`crate::methods::HANGAR_BOARD_CARD_TIMELINE`] (tcp T3 / F6): the
+/// card's latest run transcript, raw, for the plugin to parse + render.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardTimelineResult {
+    /// The task whose transcript this is, or `None` when the card never ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The provider whose log was read (`claude` / `codex`), or `None` when no log
+    /// exists yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// The RAW provider stream-json (a bounded tail of `claude.jsonl` /
+    /// `codex.jsonl`). Empty when the card never ran or the log is gone — the
+    /// plugin renders "no transcript yet", never an error.
+    pub jsonl: String,
+}
+
 /// One pickable repository in the card-create `@` roster
 /// ([`crate::methods::HANGAR_REPO_LIST`], spec F3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -135,6 +135,28 @@ pub fn short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
+/// The per-task `{shortID}` root directory —
+/// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{short_id(task_id)}/` —
+/// the single source of truth for the layout [`prepare_env`] provisions. Pure
+/// path derivation (creates nothing), so a read path (e.g. the board-card timeline
+/// RPC locating a run's `logs/*.jsonl`) can address the exact tree a run wrote
+/// without re-deriving — and can never drift from it.
+#[must_use]
+pub fn task_root(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
+    home.join(".agents-in-a-box")
+        .join("hangar")
+        .join("workspaces")
+        .join(ws_slug)
+        .join(short_id(task_id))
+}
+
+/// The per-task `logs/` directory (`{task_root}/logs/`), where a run tees its
+/// provider stream-json (`claude.jsonl` / `codex.jsonl`). Pure path derivation.
+#[must_use]
+pub fn logs_dir(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
+    task_root(home, ws_slug, task_id).join("logs")
+}
+
 /// Create (or reuse) the per-task directory layout under `home`, writing the
 /// `.gc_meta.json` marker.
 ///
@@ -154,12 +176,7 @@ pub fn prepare_env(
     home: &Path,
     clock: &dyn HangarClock,
 ) -> io::Result<ExecEnv> {
-    let root = home
-        .join(".agents-in-a-box")
-        .join("hangar")
-        .join("workspaces")
-        .join(ws_slug)
-        .join(short_id(&task.id));
+    let root = task_root(home, ws_slug, &task.id);
 
     let env = ExecEnv {
         workdir: root.join("workdir"),

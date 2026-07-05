@@ -687,6 +687,7 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
         methods::HANGAR_BOARD_CARD_REORDER => handle_board_card_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_REMOVE => handle_board_card_remove(pool, req).await,
+        methods::HANGAR_BOARD_CARD_TIMELINE => handle_board_card_timeline(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
@@ -2585,6 +2586,89 @@ async fn handle_board_card_remove(
         .await
         .map_err(|e| board_repo_err(&e))?;
     boards_list_value(pool, &ws).await
+}
+
+/// `hangar/board_card_timeline` (tcp T3 / F6, P10 §4.9): the raw stream-json
+/// transcript of a card's newest run, for the prettied timeline overlay.
+///
+/// Resolves the card's most recent task, derives the deterministic per-task logs
+/// dir ([`crate::execenv::logs_dir`] — the exact tree the run wrote), and reads a
+/// bounded TAIL of whichever provider log exists (`claude.jsonl` / `codex.jsonl`).
+/// The plugin parses the returned text into the transcript taxonomy. A card that
+/// never ran, or whose log is absent/unreadable, yields an empty transcript (a
+/// read: never an `INVALID_PARAMS` on a missing log).
+async fn handle_board_card_timeline(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    /// Cap the returned transcript at 512 KiB so a long run never floods the
+    /// socket; the plugin's timeline is a tail view, and the parser skips the
+    /// leading partial line a mid-file seek leaves.
+    const TAIL_CAP: u64 = 512 * 1024;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    // The issue must be a real card on this board (a timeline is a card affordance).
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+        return Err(invalid_params("that issue is not a card on this board"));
+    }
+
+    // The card's newest task (any status) — its run is the one to show.
+    let task_id: Option<String> = sqlx::query_scalar(
+        "SELECT id FROM agent_task_queue WHERE issue_id = ? AND workspace_id = ? \
+         ORDER BY created_at DESC, id DESC LIMIT 1",
+    )
+    .bind(&params.issue_id)
+    .bind(ws.as_str())
+    .fetch_optional(pool)
+    .await
+    .map_err(|e| store_err(&e))?;
+
+    let Some(task_id) = task_id else {
+        // No run yet — an empty transcript, not an error.
+        return to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult::default());
+    };
+
+    let ws_slug = crate::run_loop::workspace_slug(pool, ws.as_str())
+        .await
+        .map_err(|e| internal(&format!("resolve workspace slug: {e}")))?;
+    let logs = crate::execenv::logs_dir(&crate::run_loop::hangar_home(), &ws_slug, &task_id);
+
+    // The run tees exactly one provider log; read whichever exists (a bounded
+    // tail). from_utf8_lossy + the parser's leading-partial-line skip make a
+    // mid-char seek boundary harmless.
+    let (provider, jsonl) = [("claude", "claude.jsonl"), ("codex", "codex.jsonl")]
+        .into_iter()
+        .find_map(|(provider, file)| {
+            read_tail(&logs.join(file), TAIL_CAP).map(|text| (provider.to_string(), text))
+        })
+        .map_or((None, String::new()), |(p, t)| (Some(p), t));
+
+    to_value(&ainb_hangar_proto::snapshots::BoardCardTimelineResult {
+        task_id: Some(task_id),
+        provider,
+        jsonl,
+    })
+}
+
+/// Read the last `cap` bytes of `path` as a lossy string, or `None` when the file
+/// does not exist / cannot be read (a missing run log is not an error). Seeking to
+/// the tail keeps a huge run log off the heap; a mid-char boundary at the seek
+/// point decodes losslessly and the transcript parser skips the leading partial
+/// line.
+fn read_tail(path: &std::path::Path, cap: u64) -> Option<String> {
+    use std::io::{Read, Seek, SeekFrom};
+    let mut f = std::fs::File::open(path).ok()?;
+    let len = f.metadata().ok()?.len();
+    if len > cap {
+        f.seek(SeekFrom::Start(len - cap)).ok()?;
+    }
+    let mut buf = Vec::new();
+    f.take(cap).read_to_end(&mut buf).ok()?;
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 /// `hangar/repo_list` (spec F3): the card-create `@` autocomplete roster.
