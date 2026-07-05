@@ -3046,15 +3046,23 @@ async fn handle_board_card_timeline(
     let ws_slug = crate::run_loop::workspace_slug(pool, ws.as_str())
         .await
         .map_err(|e| internal(&format!("resolve workspace slug: {e}")))?;
-    let logs = crate::execenv::logs_dir(&crate::run_loop::hangar_home(), &ws_slug, &task_id);
+    // Candidate `logs/` dirs, newest slug scheme first then the pre-T4 legacy
+    // slug, so a run written under EITHER scheme resolves — a pre-upgrade task's
+    // transcript is never stranded by the T4 collision-resistant slug change.
+    let log_dirs =
+        crate::execenv::logs_dir_candidates(&crate::run_loop::hangar_home(), &ws_slug, &task_id);
 
     // The run tees exactly one provider log; read whichever exists (a bounded
-    // tail). from_utf8_lossy + the parser's leading-partial-line skip make a
-    // mid-char seek boundary harmless.
-    let (provider, jsonl) = [("claude", "claude.jsonl"), ("codex", "codex.jsonl")]
-        .into_iter()
-        .find_map(|(provider, file)| {
-            read_tail(&logs.join(file), TAIL_CAP).map(|text| (provider.to_string(), text))
+    // tail) across the candidate dirs, newest scheme first. from_utf8_lossy + the
+    // parser's leading-partial-line skip make a mid-char seek boundary harmless.
+    let (provider, jsonl) = log_dirs
+        .iter()
+        .flat_map(|logs| {
+            [("claude", "claude.jsonl"), ("codex", "codex.jsonl")]
+                .map(move |(provider, file)| (provider, logs.join(file)))
+        })
+        .find_map(|(provider, path)| {
+            read_tail(&path, TAIL_CAP).map(|text| (provider.to_string(), text))
         })
         .map_or((None, String::new()), |(p, t)| (Some(p), t));
 
