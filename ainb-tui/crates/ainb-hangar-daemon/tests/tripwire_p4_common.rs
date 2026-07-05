@@ -936,6 +936,109 @@ pub fn latest_task_status_for_issue(home: &Path, issue_id: &str) -> Option<Strin
     })
 }
 
+/// The id of the issue's NEWEST active (`queued`/`dispatched`/`running`) task, or
+/// `None` when the set has drained — the exact task the OLD latest-wins logic keyed
+/// on. The whole-squad-blocker proof transitions this newest sibling to `done` while
+/// an OLDER one still runs: latest-wins would unblock the dependent there, the
+/// whole-set contract must not.
+#[must_use]
+pub fn newest_active_task_for_issue(home: &Path, issue_id: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("newest-active runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agent_task_queue \
+             WHERE issue_id = ? AND status IN ('queued','dispatched','running') \
+             ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(issue_id)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten()
+    })
+}
+
+/// Read one task row's status by its exact `task_id` in the fixture store, or `None`
+/// when the id is absent. Backs the squad-cancel proof (every member id must reach
+/// `cancelled`) and the whole-squad-blocker proof (per-member state).
+#[must_use]
+pub fn task_status_by_id(home: &Path, task_id: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("task-status runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        sqlx::query_scalar::<_, String>("SELECT status FROM agent_task_queue WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(store.pool())
+            .await
+            .ok()
+            .flatten()
+    })
+}
+
+/// Spawn a CLAIM-ENABLED daemon over a fixture where the dependency BLOCKER is a
+/// SQUAD card (tcp T4 / FANOUT-SEMANTICS): the squad (`shippers`, leader `agent-1`
+/// + two members) is assigned to blocker card A, and dependent card B depends-on A
+/// with auto-run on. Proves B stays blocked until A's WHOLE fan-out set drains —
+/// not merely until the latest member finishes. The blocking fake-claude holds
+/// every fanned run; the sandbox is disabled so each agent can read the sentinel.
+pub fn prepare_pipeline_squad_dep_chain() -> Pipeline {
+    prepare_pipeline_board_run_seeded(
+        BLOCKING_FAKE_AGENT,
+        |home| {
+            seed_scanned_repo(home, WORKTREE_REPO_NAME);
+            let hangar_dir = home.join(".agents-in-a-box");
+            let repo_path = home.join(WORKTREE_REPO_NAME).to_string_lossy().into_owned();
+            let now = 1_700_000_100_000_i64;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("squad-dep-seed runtime");
+            rt.block_on(async {
+                use ainb_hangar_core::ids::WorkspaceId;
+                use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+                use ainb_hangar_store::repo::card_parity::CardParityRepo;
+                use ainb_hangar_store::repo::squad::SquadRepo;
+
+                let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open squad-dep store");
+                let pool = store.pool();
+                let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
+
+                seed_extra_agent_on_runtime_1(pool, "agent-m1", "member-one").await;
+                seed_extra_agent_on_runtime_1(pool, "agent-m2", "member-two").await;
+                SquadRepo::create(pool, &ws, T4_SQUAD_ID, "shippers", &t4_agent_ref("agent-1"), now)
+                    .await
+                    .expect("create squad");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1")).await.expect("add m1");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2")).await.expect("add m2");
+
+                // Blocker A is the squad card; dependent B depends-on A, auto-run on.
+                seed_card_issue(pool, T4_DEP_BLOCKER_ISSUE, "SquadBlockerA", &repo_path, now).await;
+                seed_card_issue(pool, T4_DEP_DEPENDENT_ISSUE, "DepDependentB", &repo_path, now + 1).await;
+                CardParityRepo::set_issue_squad(pool, &ws, T4_DEP_BLOCKER_ISSUE, Some(T4_SQUAD_ID))
+                    .await
+                    .expect("assign squad to blocker A");
+                CardDependencyRepo::add_edge(pool, &ws, T4_DEP_DEPENDENT_ISSUE, T4_DEP_BLOCKER_ISSUE, now)
+                    .await
+                    .expect("B depends-on A");
+                CardDependencyRepo::set_auto_run(pool, &ws, T4_DEP_DEPENDENT_ISSUE, true)
+                    .await
+                    .expect("B auto-run on");
+                free_fixture_running_task(pool).await;
+            });
+        },
+        |_| vec![disable_sandbox()],
+    )
+}
+
 /// A framed JSON-RPC client over the SPAWNED daemon's `hangar.sock` — a synchronous
 /// wrapper (its own current-thread tokio runtime) so a non-async tripwire can drive
 /// `board_card_run` etc. Models the framed `Client` in `rpc_board_management.rs`,
