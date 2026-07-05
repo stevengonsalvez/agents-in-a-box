@@ -123,7 +123,8 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
     let sink = broker.sink();
     let health = health();
 
-    // Baseline: the SEEDED default routes ASK to phone+web+os (0038 restored phone).
+    // Baseline: the SEEDED default routes ASK to phone+web+os (0038 restored
+    // phone) + atc (0040 folded the ATC feed into the actionable defaults).
     use ainb_hangar_store::repo::attention::AttentionKind;
     use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
     let default = NotifyRuleRepo::resolve(store.pool(), AttentionKind::AskUserQuestion, None)
@@ -131,8 +132,8 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
         .unwrap();
     assert_eq!(
         default,
-        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
-        "precondition: the seeded ASK default is phone+web+os"
+        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
+        "precondition: the seeded ASK default is phone+web+os+atc"
     );
 
     // FLIP the global ASK rule to phone+web through the settings-grid RPC. This

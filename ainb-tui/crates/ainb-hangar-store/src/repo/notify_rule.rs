@@ -278,22 +278,24 @@ mod tests {
             ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
         // ask / approval / codex_request_user carry phone (0038 restored the
-        // pre-T5 bridge behaviour after 0037 dropped it).
+        // pre-T5 bridge behaviour after 0037 dropped it) AND atc (0040 folds the
+        // ATC feed into the actionable defaults so the heartbeat nudges resume).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::Approval, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::CodexRequestUser, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
+        // error stays a local heads-up (os) plus atc (0040).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::Error, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Os]),
+            ChannelSet::from_channels([Channel::Os, Channel::Atc]),
         );
         // waiting is board-only (empty set), NOT a missing rule.
         assert_eq!(
@@ -310,12 +312,12 @@ mod tests {
         seed_workspace(pool, "ws-a").await;
 
         // No override yet → the workspace resolves the global default (phone+web+os
-        // after 0038).
+        // after 0038, +atc after 0040).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, Some("ws-a"))
                 .await
                 .unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
 
         // Set a workspace override: ASK → phone only.
@@ -336,17 +338,17 @@ mod tests {
             ChannelSet::from_channels([Channel::Phone]),
         );
         // ...but the global row is untouched (a no-workspace session, and a
-        // DIFFERENT workspace, both still see the phone+web+os default).
+        // DIFFERENT workspace, both still see the phone+web+os+atc default).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         seed_workspace(pool, "ws-b").await;
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, Some("ws-b"))
                 .await
                 .unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
 
         // Clearing the override reverts ws-a to the global default.
@@ -360,7 +362,7 @@ mod tests {
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, Some("ws-a"))
                 .await
                 .unwrap(),
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
     }
 
@@ -435,7 +437,7 @@ mod tests {
         assert!(!ask.overridden, "ask inherits the global default");
         assert_eq!(
             ask.channels,
-            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os])
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc])
         );
 
         // The global grid marks nothing overridden.

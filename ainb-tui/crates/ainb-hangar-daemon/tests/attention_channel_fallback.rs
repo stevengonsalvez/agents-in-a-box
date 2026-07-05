@@ -67,8 +67,8 @@ async fn legacy_unstamped_rows_resolve_channels_at_read() {
     let ask = rows.iter().find(|r| r.id == "ask").expect("legacy ask present");
     assert_eq!(
         ask.channels,
-        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
-        "a legacy ASK resolves its real push channels at read (regains phone)"
+        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
+        "a legacy ASK resolves its real push channels at read (regains phone, gains atc per 0040)"
     );
 
     let wait = rows.iter().find(|r| r.id == "wait").expect("legacy waiting present");

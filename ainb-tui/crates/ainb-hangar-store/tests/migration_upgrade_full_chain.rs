@@ -522,6 +522,44 @@ async fn assert_legacy_issue_state_remapped_forward(pool: &SqlitePool) {
     );
 }
 
+/// 0040 folds the `atc` channel into the GLOBAL notify defaults for the four
+/// actionable kinds (ask / approval / codex-request / error), appended in
+/// canonical `phone,web,os,atc` order. `escalation` and `waiting` are untouched.
+/// Asserted on the migration-seeded rows the full chain carries to head.
+async fn assert_notify_atc_defaults_folded(pool: &SqlitePool) {
+    let channels_of = |kind: &'static str| async move {
+        sqlx::query_scalar::<_, String>(
+            "SELECT channels FROM notify_rule WHERE workspace_id IS NULL AND kind = ?",
+        )
+        .bind(kind)
+        .fetch_one(pool)
+        .await
+        .unwrap_or_else(|e| panic!("read notify_rule for {kind}: {e}"))
+    };
+    for kind in ["ask_user_question", "approval", "codex_request_user"] {
+        assert_eq!(
+            channels_of(kind).await,
+            "phone,web,os,atc",
+            "0040 folds atc into the {kind} default (canonical order)"
+        );
+    }
+    assert_eq!(
+        channels_of("error").await,
+        "os,atc",
+        "0040 folds atc into the error default (os,atc)"
+    );
+    assert_eq!(
+        channels_of("escalation").await,
+        "phone,web,os",
+        "0040 leaves escalation untouched (already pages a human)"
+    );
+    assert_eq!(
+        channels_of("waiting").await,
+        "",
+        "0040 leaves waiting board-only"
+    );
+}
+
 #[tokio::test]
 async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -544,7 +582,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 39, "head is migration 0039");
+    assert_eq!(head_version, 40, "head is migration 0040");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
@@ -556,6 +594,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
     assert_seeded_identity_survives(&pool).await;
     assert_added_columns_read_defaults(&pool).await;
     assert_legacy_issue_state_remapped_forward(&pool).await;
+    assert_notify_atc_defaults_folded(&pool).await;
 
     // (c) Idempotency: a SECOND apply re-runs nothing and changes no row.
     let recorded_before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM _sqlx_migrations")
