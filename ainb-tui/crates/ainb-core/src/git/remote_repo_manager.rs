@@ -1015,7 +1015,25 @@ impl RemoteRepoManager {
         source: &RepoSource,
         parsed: &ParsedRepo,
     ) -> Result<String, RemoteRepoError> {
-        let cache_path = self.clone_repo(source, parsed)?;
+        // Re-verify emptiness at action time — the EmptyRemote verdict that
+        // offered [i] may be stale (a collaborator pushed meanwhile). Pushing
+        // a README onto a repo that now has history is never what's wanted.
+        let branches = self.list_remote_branches(source)?;
+        if !branches.is_empty() {
+            return Err(RemoteRepoError::InvalidRepo(
+                "repository is no longer empty — press Esc and re-open it".to_string(),
+            ));
+        }
+
+        let mut cache_path = self.clone_repo(source, parsed)?;
+        // A warm cache can carry commits the remote no longer has (repo
+        // deleted and recreated empty under the same name). Pushing that
+        // would silently upload the dead repo's entire history — the remote
+        // is verifiably empty, so wipe and re-clone fresh instead.
+        if local_head_exists(&cache_path) {
+            std::fs::remove_dir_all(&cache_path)?;
+            cache_path = self.clone_repo(source, parsed)?;
+        }
         push_initial_commit(&cache_path, &parsed.repo_name)
     }
 
@@ -1113,6 +1131,15 @@ fn delete_orphaned_branch(cache_path: &Path, branch_name: &str) -> Result<bool, 
     }
 }
 
+/// Does the clone at `path` have any commit on HEAD?
+fn local_head_exists(path: &Path) -> bool {
+    Command::new("git")
+        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
+        .current_dir(path)
+        .output()
+        .is_ok_and(|o| o.status.success())
+}
+
 /// Create the initial commit (a README) in a clone of an EMPTY remote and
 /// push it to `origin`. Returns the branch name pushed (the clone's HEAD
 /// symref — git/GitHub advertise the default branch name even for empty
@@ -1138,11 +1165,7 @@ fn push_initial_commit(cache_path: &Path, repo_name: &str) -> Result<String, Rem
 
     // A previous attempt may have committed but failed at push — don't stack
     // a second README commit on top.
-    let has_commit = Command::new("git")
-        .args(["rev-parse", "--verify", "--quiet", "HEAD"])
-        .current_dir(cache_path)
-        .output()
-        .is_ok_and(|o| o.status.success());
+    let has_commit = local_head_exists(cache_path);
 
     if !has_commit {
         let readme = cache_path.join("README.md");
@@ -1188,7 +1211,9 @@ fn push_initial_commit(cache_path: &Path, repo_name: &str) -> Result<String, Rem
         .output()?;
     if !push.status.success() {
         let stderr = String::from_utf8_lossy(&push.stderr);
-        return Err(classify_git_error(&stderr, &branch));
+        // Second arg names the repository in NotFound messages — the branch
+        // here would render "Repository not found: main".
+        return Err(classify_git_error(&stderr, repo_name));
     }
 
     info!("Pushed initial commit to origin/{branch}");
