@@ -17,6 +17,9 @@ pub mod agent_kind;
 pub mod assignee_crosswalk;
 /// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
 pub mod autopilot;
+/// Notification channels + the per-kind channel SET a routed attention lands on
+/// (tcp T5 — notification routing rules).
+pub mod channel;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).
 pub mod clock;
 /// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded
