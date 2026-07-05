@@ -1044,14 +1044,18 @@ async fn finalize_success(
         ainb_hangar_proto::events::TaskResult::Success,
         clock,
     );
-    // P4 / D8: auto-move the task's issue card into any board's `done` auto-move
-    // column (the card-green-on-success move). Best-effort; never blocks.
-    crate::board::auto_move_after_transition(pool, task, "done").await;
-    // tcp T4 / F7: this card just finished, so re-evaluate every card that DEPENDS
-    // on it — a dependent whose last blocker is now done becomes runnable (the 🔒
+    // P4 / D8 + tcp T4 / FANOUT-SEMANTICS: auto-move the card by its issue's
+    // AGGREGATE outcome, but only once the whole active set has drained — so a squad
+    // card does not slide to `done` while its leader / other members still run.
+    // Best-effort; never blocks.
+    crate::board::auto_move_after_terminal(pool, task).await;
+    // tcp T4 / F7 + FANOUT-SEMANTICS: a task of this card just went terminal, so
+    // re-evaluate every card that DEPENDS on it — a dependent whose blockers are now
+    // all FINISHED (their active sets drained with a `done`) becomes runnable (the 🔒
     // clears on the next board pull) and, if it opted into auto-run, is launched.
+    // The finished decision is the store's, so this is safe on any terminal.
     // Best-effort; never blocks the claim loop.
-    crate::board::unblock_dependents_after_done(pool, task).await;
+    crate::board::unblock_dependents_after_terminal(pool, task).await;
     // e38.6: durable terminal comment on the issue thread (best-effort).
     progress_comment::emit_checkpoint(
         pool,
@@ -1154,9 +1158,18 @@ async fn finalize_failure(
         ainb_hangar_proto::events::TaskResult::Failure,
         clock,
     );
-    // P4 / D8: auto-move the task's issue card into any board's `failed`
-    // auto-move column. Best-effort; never blocks.
-    crate::board::auto_move_after_transition(pool, task, "failed").await;
+    // P4 / D8 + tcp T4 / FANOUT-SEMANTICS: auto-move the card by its issue's
+    // AGGREGATE outcome once the whole active set has drained. A single failed member
+    // does not move a still-running squad card; the LAST sibling to drain moves it,
+    // and one failed sibling lands the whole card in the `failed` column (aggregate
+    // precedence). Best-effort; never blocks.
+    crate::board::auto_move_after_terminal(pool, task).await;
+    // tcp T4 / F7 + FANOUT-SEMANTICS: this member going terminal may have drained a
+    // blocker whose set already held a `done` sibling — re-evaluate dependents so a
+    // squad blocker that finished on a mixed done/failed drain still unblocks. The
+    // store owns the finished decision, so a genuinely-unfinished blocker is a no-op.
+    // Best-effort; never blocks the claim loop.
+    crate::board::unblock_dependents_after_terminal(pool, task).await;
     // e38.6: durable blocker comment carrying the failure reason, so the issue
     // thread records WHY the run stopped (best-effort).
     progress_comment::emit_checkpoint(

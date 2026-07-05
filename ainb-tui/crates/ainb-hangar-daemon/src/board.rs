@@ -60,10 +60,58 @@ pub async fn auto_move_after_transition(pool: &SqlitePool, task: &Task, new_stat
     }
 }
 
-/// When a card's task reaches `done`, re-evaluate every card that DEPENDS on it
-/// (tcp T4 / F7): a dependent whose LAST blocker just completed becomes RUNNABLE,
-/// and — only if its `auto_run` flag is on and it has no active run — is
-/// auto-launched via the shared [`run_card`](crate::rpc::run_card) core.
+/// Auto-move the task's issue card by its issue's AGGREGATE terminal outcome — but
+/// ONLY once the issue's active set has DRAINED (tcp T4 / FANOUT-SEMANTICS).
+///
+/// A squad card fans out N tasks onto one issue, so keying the terminal auto-move on
+/// a single task's transition slid the card to `done`/`failed` while the leader +
+/// other members were still running. This gates on the whole set:
+/// [`TaskRepo::issue_aggregate_terminal_state`] returns `None` while ANY sibling is
+/// still active (so nothing moves), and otherwise the aggregate token
+/// (`failed` > `cancelled` > `done`) the card should land on. Only the LAST sibling
+/// to finish therefore moves the card, and it moves to the aggregate column.
+///
+/// Idempotent: [`BoardRepo::auto_move_on_state`] skips a card already in the target
+/// column, so two sibling finalizers that race to an empty active set compute the
+/// same aggregate and move to the same column at most once. Best-effort — every
+/// fault is logged and swallowed (the task's terminal state has already committed).
+pub async fn auto_move_after_terminal(pool: &SqlitePool, task: &Task) {
+    use ainb_hangar_store::repo::task::TaskRepo;
+
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    let Ok(ws) = WorkspaceId::from_str(task.workspace_id.clone()) else {
+        tracing::warn!(task_id = %task.id, "board terminal auto-move: empty workspace id; skipping");
+        return;
+    };
+    let state = match TaskRepo::issue_aggregate_terminal_state(pool, ws.as_str(), issue_id).await {
+        // The active set has not drained yet — a sibling still runs, so the card
+        // must not terminal-move. A silent no-op.
+        Ok(None) => return,
+        Ok(Some(s)) => s,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "board terminal auto-move: aggregate read failed");
+            return;
+        }
+    };
+    auto_move_after_transition(pool, task, &state).await;
+}
+
+/// When ANY task of a card reaches a TERMINAL state, re-evaluate every card that
+/// DEPENDS on it (tcp T4 / F7 + FANOUT-SEMANTICS): a dependent whose blockers are now
+/// all finished becomes RUNNABLE, and — only if its `auto_run` flag is on and it has
+/// no active run — is auto-launched via the shared [`run_card`](crate::rpc::run_card)
+/// core.
+///
+/// This fires on ANY terminal transition (`done` / `failed` / `cancelled`), not just
+/// `done`, because a squad blocker only becomes FINISHED when its WHOLE active set
+/// drains — and the last sibling to drain it may be a `failed`/`cancelled` one even
+/// though an earlier sibling reached `done`. The decision is delegated to
+/// [`CardDependencyRepo::unfinished_blockers_of`], which encodes the finished
+/// contract (all-terminal ∧ any-done), so calling this on a non-`done` terminal is
+/// safe: a blocker that did not actually finish (no `done`, or still draining) leaves
+/// the dependent's blocker list non-empty and nothing unblocks.
 ///
 /// The RUNNABLE visual state needs no new event: the just-finished blocker already
 /// pushed a `TaskFinished` (the plugin re-pulls `boards_list` on it), and the fresh
@@ -75,10 +123,8 @@ pub async fn auto_move_after_transition(pool: &SqlitePool, task: &Task, new_stat
 /// Every fault is logged and swallowed — the blocker's terminal state has already
 /// committed, and a dependency-unblock failure must never down the claim loop. A
 /// dependent that is still blocked by another card, that has no `auto_run`, or that
-/// already has an active run is a silent no-op. Only a task that reached `done`
-/// should be passed here (a failed / cancelled blocker does not satisfy a
-/// dependency).
-pub async fn unblock_dependents_after_done(pool: &SqlitePool, task: &Task) {
+/// already has an active run is a silent no-op.
+pub async fn unblock_dependents_after_terminal(pool: &SqlitePool, task: &Task) {
     let Some(blocker_issue_id) = task.issue_id.as_deref() else {
         return;
     };
