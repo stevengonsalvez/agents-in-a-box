@@ -143,6 +143,7 @@ mod tests {
             payload: "{}".into(),
             degraded: false,
             created_at: 1,
+            channels: ainb_hangar_proto::ChannelSet::NONE,
         }
     }
 

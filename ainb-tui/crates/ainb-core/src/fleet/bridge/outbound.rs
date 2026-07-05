@@ -17,6 +17,7 @@ use std::future::Future;
 use std::pin::Pin;
 use std::time::Duration;
 
+use ainb_hangar_proto::Channel;
 use ainb_hangar_proto::events::AttentionRow;
 use serde_json::Value;
 
@@ -141,10 +142,17 @@ pub fn take_new_rows(seen: &mut HashSet<String>, rows: &[AttentionRow]) -> Vec<A
     fresh
 }
 
-/// Push a proactive message for each row via the `Notifier`. The channel-agnostic
+/// Push a proactive message for each row the notify rules routed to the PHONE
+/// channel (tcp T5). The routing decision was resolved once at raise time and
+/// stamped onto `row.channels`; the bridge is the phone consumer, so it delivers
+/// a row iff its set contains [`Channel::Phone`] and silently skips the rest
+/// (a `waiting` board-only row, or an `error` the rules kept off the phone). The
 /// dispatch the live worker calls once it has diffed out the fresh rows.
 pub async fn dispatch(rows: &[AttentionRow], notifier: &dyn Notifier) {
     for row in rows {
+        if !row.channels.contains(Channel::Phone) {
+            continue;
+        }
         notifier.notify(format_attention_notification(row)).await;
     }
 }
@@ -182,9 +190,22 @@ pub async fn run(client: DaemonClient, notifier: impl Notifier, interval: Durati
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ainb_hangar_proto::ChannelSet;
     use std::sync::Mutex;
 
+    /// A phone-routed row (the default for the bridge's tests — the phone is the
+    /// channel this consumer delivers). Use [`row_on`] for a specific channel set.
     fn row(id: &str, kind: &str, cwd: &str, payload: &str) -> AttentionRow {
+        row_on(id, kind, cwd, payload, ChannelSet::from_channels([Channel::Phone]))
+    }
+
+    fn row_on(
+        id: &str,
+        kind: &str,
+        cwd: &str,
+        payload: &str,
+        channels: ChannelSet,
+    ) -> AttentionRow {
         AttentionRow {
             id: id.into(),
             session_id: format!("sess-{id}"),
@@ -194,6 +215,7 @@ mod tests {
             payload: payload.into(),
             degraded: false,
             created_at: 1000,
+            channels,
         }
     }
 
@@ -289,5 +311,38 @@ mod tests {
         assert_eq!(sent.len(), 2);
         assert!(sent[0].contains("asks: go?"));
         assert!(sent[1].contains("hit an error: boom"));
+    }
+
+    /// The bridge is the PHONE consumer: it delivers a row iff the notify rules
+    /// routed it to the phone channel (tcp T5). A row whose resolved set omits
+    /// Phone (board-only, or routed only to web/os) is silently skipped, so the
+    /// suppressed channel never fires while the allowed one does.
+    #[tokio::test]
+    async fn dispatch_filters_to_phone_routed_rows() {
+        let notifier = RecordingNotifier(Mutex::new(Vec::new()));
+        let rows = [
+            // Phone-routed → delivered.
+            row_on(
+                "phone",
+                "escalation",
+                "/w/esc",
+                r#"{"question":"stuck"}"#,
+                ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            ),
+            // Web+os only (the ASK default) → suppressed on the phone.
+            row_on(
+                "webonly",
+                "ask_user_question",
+                "/w/ask",
+                r#"{"question":"go?"}"#,
+                ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ),
+            // Board-only (the waiting default) → suppressed on the phone.
+            row_on("board", "waiting", "/w/wait", "{}", ChannelSet::NONE),
+        ];
+        dispatch(&rows, &notifier).await;
+        let sent = notifier.0.lock().unwrap().clone();
+        assert_eq!(sent.len(), 1, "only the phone-routed row is pushed: {sent:?}");
+        assert!(sent[0].contains("escalated"), "the delivered row is the escalation: {sent:?}");
     }
 }
