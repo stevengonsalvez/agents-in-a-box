@@ -136,6 +136,26 @@ async fn sweep_removes_terminal_clean_keeps_dirty_and_active() {
     assert_eq!(report.kept_active, 2, "the active + unknown dirs are kept");
 }
 
+/// The liveness guard (codex F4): a task whose row is terminal (e.g. a manual
+/// board transition marked it done) but whose run is still REGISTERED live in this
+/// process keeps its worktree — the sweep never deletes a live run's cwd.
+#[tokio::test]
+async fn sweep_keeps_a_terminal_but_live_registered_run() {
+    let origin = seed_origin();
+    let home = TempDir::new().expect("home");
+    let live = "01JB2K3W4ALIVETERMEEEEEEEE";
+    let live_wt = add_worktree(origin.path(), home.path(), live);
+
+    let store = seed_store(home.path(), &[(live, "done")]).await;
+    // Simulate an in-flight run: registered in the process-global kill registry.
+    let _guard = ainb_hangar_daemon::cancel::registry().register(live);
+
+    let report = sweep_orphan_worktrees(store.pool(), home.path()).await.expect("sweep");
+    assert!(live_wt.is_dir(), "a live-registered run's worktree is never deleted");
+    assert_eq!(report.removed, 0);
+    assert_eq!(report.kept_active, 1, "counted as kept-active (live run)");
+}
+
 /// A home that never provisioned a worktree has no `worktrees/` dir — a clean
 /// no-op, not an error.
 #[tokio::test]

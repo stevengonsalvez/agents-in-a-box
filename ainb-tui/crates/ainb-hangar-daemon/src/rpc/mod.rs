@@ -1830,6 +1830,12 @@ async fn squads_list_value(
 /// issue's NEXT generation; an ad-hoc (issueless) assign carries `0`, since no card
 /// aggregate ever reads its rows. Bumping here keeps a repeated squad-screen assign
 /// on the same issue from folding a prior run's terminal rows into the current one.
+///
+/// Unlike [`run_card`] (which mints under the per-card launch slot + the
+/// one-active-run guard), this legacy path has no such guard: two assigns racing on
+/// one issue in the same instant could stamp the SAME generation and fold together
+/// as one run. Tolerated — the per-(issue, agent) pending-unique index caps
+/// duplicate dispatch, and the board Run path never routes through here.
 async fn squad_assign_generation(
     pool: &SqlitePool,
     issue_id: Option<&str>,

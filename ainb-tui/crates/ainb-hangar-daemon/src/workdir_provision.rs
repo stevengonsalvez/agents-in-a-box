@@ -282,10 +282,16 @@ pub struct WorktreeGcReport {
 ///     silently dropped — the same keep-if-dirty guarantee [`teardown`] gives);
 ///   - **keep** it when the task is still active, unknown (a legacy-slug or
 ///     hand-made dir), or its status could not be read — the sweep never deletes a
-///     worktree it cannot prove is a finished run's leak.
+///     worktree it cannot prove is a finished run's leak;
+///   - **keep** it when the task still has a LIVE registered run in this process
+///     ([`CancelRegistry::is_live`]) — a manual board transition can terminal-mark
+///     a task whose provider is still executing in the checkout, and deleting a
+///     live run's cwd would corrupt it (codex F4).
 ///
 /// Removal deregisters the worktree from its origin repo (`git worktree prune`
 /// against the resolved shared git dir) so no stale registration lingers.
+///
+/// [`CancelRegistry::is_live`]: crate::cancel::CancelRegistry::is_live
 ///
 /// # Errors
 ///
@@ -330,6 +336,12 @@ pub async fn sweep_orphan_worktrees(
             }
         };
         if !terminal {
+            report.kept_active += 1;
+            continue;
+        }
+        // Liveness guard (codex F4): a manually terminal-marked task can still have
+        // its provider running in this checkout; never delete a live run's cwd.
+        if crate::cancel::registry().is_live(slug) {
             report.kept_active += 1;
             continue;
         }
