@@ -1230,16 +1230,40 @@ async fn handle_issue_update(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_proto::events::HangarEvent;
 
+    use ainb_hangar_core::agent_kind::AgentKind;
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
     let params: ainb_hangar_proto::snapshots::IssueUpdateParams = parse_params(
         req,
-        "{ workspace_id, issue_id, state?, assignee?, priority?, due_date? }",
+        "{ workspace_id, issue_id, state?, assignee?, priority?, due_date?, title?, repo_ref?, agent? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let update = issue_field_update_from_params(&params)?;
-    let row = snapshots::issue_update(pool, ws.as_str(), &params.issue_id, &update)
-        .await
-        .map_err(|e| store_err(&e))?;
+
+    // F6 card edit: the card's repo + chosen agent are persisted on the durable
+    // card (the issue) exactly as `board_card_create` does — trim the repo, drop an
+    // unrecognised agent token (the F4 cascade decides), and only write when a
+    // repo/agent edit is actually requested.
+    let repo_ref = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent = params.agent.as_deref().and_then(AgentKind::parse);
+    let edits_card = repo_ref.is_some() || agent.is_some();
+
+    // Resolve (and, for the field edit, write) the refreshed row. A field edit runs
+    // the scoped UPDATE + re-read; a repo/agent-ONLY edit changes no field-UPDATE
+    // column, so read the row directly to resolve identity + answer with it.
+    let row = if !update.is_empty() {
+        snapshots::issue_update(pool, ws.as_str(), &params.issue_id, &update)
+            .await
+            .map_err(|e| store_err(&e))?
+    } else if edits_card {
+        snapshots::issue_row(pool, ws.as_str(), &params.issue_id)
+            .await
+            .map_err(|e| store_err(&e))?
+    } else {
+        // A truly-empty edit resolves no row (the existing no-op-rejects contract).
+        None
+    };
     // No row matched the (id, workspace) pair: an unknown id or a cross-tenant
     // issue. Reject rather than ack a write that never happened.
     let Some(row) = row else {
@@ -1248,6 +1272,17 @@ async fn handle_issue_update(
             params.issue_id
         )));
     };
+
+    // Persist the card's repo + agent AFTER the row resolved (so a foreign / unknown
+    // issue is rejected before any write). Safe while a run is in flight: the running
+    // task captured its repo + agent at ENQUEUE (`set_task_repo_agent_in_tx`), so an
+    // edit only steers the NEXT run — never mutates a task already dispatched.
+    if edits_card {
+        CardParityRepo::set_issue_repo_agent(pool, &params.issue_id, repo_ref, agent)
+            .await
+            .map_err(|e| store_err(&e))?;
+    }
+
     // A committed edit announces the refreshed row to subscribers.
     events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
     to_value(&row)
@@ -1288,7 +1323,17 @@ fn issue_field_update_from_params(
         FieldUpdate::Clear => Some(None),
         FieldUpdate::Set(ts) => Some(Some(ts)),
     };
+    // F6 card edit: a title is set only when present + non-blank (a blank title is
+    // a client error, mirroring `issue_create`, never a stored empty title).
+    let title = match &params.title {
+        None => None,
+        Some(t) if t.trim().is_empty() => {
+            return Err(invalid_params("title must not be blank"));
+        }
+        Some(t) => Some(t.trim().to_string()),
+    };
     Ok(ainb_hangar_store::repo::issue::IssueFieldUpdate {
+        title,
         state: params.state.clone(),
         assignee,
         priority: params.priority,

@@ -795,6 +795,55 @@ pub fn task_branch_by_title(home: &Path, title: &str) -> Option<String> {
     })
 }
 
+/// Read the `agent_kind` stamped on the latest task of the card with issue TITLE
+/// `title` — the durable proof a run routed to the agent the card was edited to
+/// (F6). `None` until a task has been enqueued for that card.
+#[must_use]
+pub fn task_agent_kind_by_title(home: &Path, title: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("task-agent runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let like = format!("%{title}%");
+        sqlx::query_scalar::<_, String>(
+            "SELECT t.agent_kind FROM agent_task_queue t JOIN issue i ON t.issue_id = i.id \
+             WHERE i.title LIKE ? ORDER BY t.created_at DESC, t.id DESC LIMIT 1",
+        )
+        .bind(&like)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten()
+    })
+}
+
+/// Read the `(title, agent_kind)` persisted on the ISSUE (the durable card) whose
+/// title matches `title` — the F6 edit-overlay proof the title rewrite + agent
+/// pick landed on the card itself (before any run). `None` when no such issue.
+#[must_use]
+pub fn card_title_agent_by_title(home: &Path, title: &str) -> Option<(String, Option<String>)> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("card-agent runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        let like = format!("%{title}%");
+        sqlx::query_as::<_, (String, Option<String>)>(
+            "SELECT title, agent_kind FROM issue WHERE title LIKE ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&like)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten()
+    })
+}
+
 /// The volatile-worktree checkout dir the daemon provisions for `slug`:
 /// `$HOME/.agents-in-a-box/worktrees/<slug>`.
 #[must_use]

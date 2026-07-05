@@ -2567,6 +2567,9 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         args.due.map(Some)
     };
     let update = IssueFieldUpdate {
+        // Title editing is a board card-edit affordance (F6, TUI); the CLI
+        // `issue update` keeps its existing state/assignee/priority/due surface.
+        title: None,
         state: args.state,
         assignee,
         priority: args.priority,

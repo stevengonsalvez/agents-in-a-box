@@ -139,6 +139,12 @@ pub struct CardView {
     /// latest task (`tmux_hangar-<task_id>`, ccc / D6), or `None` for a headless
     /// task / no run. The attach affordance surfaces it as `tmux attach -t <name>`.
     pub session_name: Option<String>,
+    /// The card's persisted repo (an absolute path or `scratch`), or `None` when
+    /// unset. The F6 edit overlay prefills its repo pick from this.
+    pub repo_ref: Option<String>,
+    /// The card's persisted provider-agent token (`claude`/`codex`/`copilot`), or
+    /// `None` when unset. The F6 edit overlay prefills its agent chip from this.
+    pub agent: Option<String>,
 }
 
 impl CardView {
@@ -149,6 +155,8 @@ impl CardView {
             display_id: w.display_id.clone(),
             state: w.state.clone(),
             session_name: w.session_name.clone(),
+            repo_ref: w.repo_ref.clone(),
+            agent: w.agent.clone(),
         }
     }
 
@@ -156,6 +164,21 @@ impl CardView {
     #[must_use]
     pub fn is_succeeded(&self) -> bool {
         self.state.as_deref() == Some("done")
+    }
+
+    /// The card's repo for the edit-overlay prefill: its persisted value, or
+    /// `scratch` when unset (the F2 guaranteed repo — a card always has one to run).
+    fn repo_or_scratch(&self) -> String {
+        self.repo_ref
+            .clone()
+            .filter(|r| !r.trim().is_empty())
+            .unwrap_or_else(|| RepoOption::scratch().repo_ref)
+    }
+
+    /// The card's provider agent as a chip for the edit-overlay prefill (defaults
+    /// to [`AgentChip::Claude`] when unset / unrecognised — the cascade fallback).
+    fn agent_chip(&self) -> AgentChip {
+        self.agent.as_deref().map_or(AgentChip::Claude, AgentChip::from_wire)
     }
 }
 
@@ -258,6 +281,18 @@ impl AgentChip {
             Self::Claude => "claude",
             Self::Codex => "codex",
             Self::Copilot => "copilot (dispatch gated — F8)",
+        }
+    }
+
+    /// The chip a persisted wire token maps to (the inverse of [`Self::wire`]); an
+    /// unrecognised token falls back to [`AgentChip::Claude`] so the edit overlay
+    /// always pre-selects a real chip.
+    #[must_use]
+    pub fn from_wire(token: &str) -> Self {
+        match token {
+            "codex" => Self::Codex,
+            "copilot" => Self::Copilot,
+            _ => Self::Claude,
         }
     }
 
@@ -480,6 +515,13 @@ pub struct BoardsState {
     /// glue populates from `hangar/board_card_timeline`; kept out of the pure
     /// reducer because its content is IO-derived.
     timeline: Option<TimelineView>,
+    /// The issue whose card the open create-overlay is EDITING (`e`, F6), or `None`
+    /// for a fresh create. A side-flag that reuses the whole title → repo → agent
+    /// overlay pipeline: it prefills each stage from the card and BRANCHES the
+    /// commit — an edit commits at the agent stage (title + repo + agent →
+    /// `hangar/issue_update`) instead of advancing to the create-only profile pick.
+    /// Cleared on commit / cancel; preserved across a `boards_list` refresh.
+    edit_issue_id: Option<String>,
 }
 
 impl BoardsState {
@@ -520,9 +562,30 @@ impl BoardsState {
             overlay: None,
             note: None,
             timeline: None,
+            edit_issue_id: None,
         };
         state.clamp();
         state
+    }
+
+    /// The issue whose card the open create-overlay is EDITING (`e`, F6), or `None`
+    /// for a fresh create — the flag the commit branches on.
+    #[must_use]
+    pub fn editing(&self) -> Option<&str> {
+        self.edit_issue_id.as_deref()
+    }
+
+    /// Find the card for `issue_id` across every board's columns + unmapped pool —
+    /// the edit overlay reads its prefill (repo + agent) from the card that is
+    /// still in the last snapshot.
+    fn card_by_issue(&self, issue_id: &str) -> Option<&CardView> {
+        self.boards.iter().find_map(|b| {
+            b.columns
+                .iter()
+                .flat_map(|c| &c.cards)
+                .chain(&b.unmapped)
+                .find(|c| c.issue_id == issue_id)
+        })
     }
 
     /// The open timeline overlay, if any (the render paints it over the board).
@@ -615,6 +678,9 @@ impl BoardsState {
         // Keep an open timeline overlay across a background refresh so a
         // boards_list reply while reading a transcript never yanks it closed.
         self.timeline.clone_from(&prev.timeline);
+        // Keep the edit side-flag paired with the overlay it belongs to, so a
+        // background refresh mid-edit never turns an edit commit into a create.
+        self.edit_issue_id.clone_from(&prev.edit_issue_id);
         self.clamp();
     }
 
@@ -737,6 +803,10 @@ pub enum BoardsEvent {
     DeleteColumn,
     /// Add a card to the focused column (`c`).
     AddCard,
+    /// Edit the focused card (`e`, F6) — reuses the create overlay (title → repo →
+    /// agent), prefilled from the card, and commits at the agent stage as an
+    /// `issue_update` rather than a create. A no-op with no card focused.
+    EditFocusedCard,
     /// Move the focused column one place left (`⇧←`).
     ReorderColumnLeft,
     /// Move the focused column one place right (`⇧→`).
@@ -848,6 +918,21 @@ pub enum BoardsIntent {
         /// The picked assignee profile slug, or `None` (unassigned).
         assignee_profile: Option<String>,
     },
+    /// Edit an existing card's title + repo + agent (`hangar/issue_update`, F6).
+    /// The card-edit overlay re-submits all three from its prefill; the daemon
+    /// rewrites the title and persists repo/agent on the issue so the NEXT run
+    /// routes to the chosen provider. Assignee/profile is untouched (edit is scoped
+    /// to the three fields the overlay carries).
+    EditCard {
+        /// The issue whose card to edit.
+        issue_id: String,
+        /// The new title (non-blank).
+        title: String,
+        /// The picked repo (an absolute checkout path or `scratch`).
+        repo_ref: String,
+        /// The picked provider agent (F1/F4).
+        agent: AgentChip,
+    },
     /// Reorder the focused column: the board's new full column-id order
     /// (`hangar/board_column_reorder`).
     ReorderColumns {
@@ -933,6 +1018,9 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             column_id: col.id.clone(),
             title: String::new(),
         }),
+        // Edit-card reuses the same overlay pipeline, prefilled from the focused
+        // card + tagged with the edit side-flag (the commit branches on it).
+        BoardsEvent::EditFocusedCard => edit_focused_card(state),
         BoardsEvent::ReorderColumnLeft => reorder(state, -1),
         BoardsEvent::ReorderColumnRight => reorder(state, 1),
         BoardsEvent::ToggleAutoMove => board_intent(state, |b| BoardsIntent::ToggleAutoMove {
@@ -1137,9 +1225,22 @@ fn card_repo_key(
             },
         ),
         (None, BoardsKey::Char('@')) => reopen(state, String::new(), Some(0)),
-        // Enter with no repo picked yet re-opens the dropdown (F2: repo REQUIRED,
-        // scratch always first) rather than advancing.
-        (None, BoardsKey::Enter) => reopen(state, String::new(), Some(0)),
+        // Enter with the field closed: in an EDIT, KEEP the card's current repo
+        // (prefill) and advance to the agent stage — the user changes the repo only
+        // by opening `@`. In a CREATE, repo is REQUIRED, so Enter re-opens the
+        // dropdown (scratch always first) rather than advancing repo-less.
+        (None, BoardsKey::Enter) => match state.editing().and_then(|id| state.card_by_issue(id)) {
+            Some(card) => set_overlay(
+                state,
+                BoardsOverlay::CardAgent {
+                    column_id: column_id.to_string(),
+                    title,
+                    repo_ref: card.repo_or_scratch(),
+                    cursor: card.agent_chip().index(),
+                },
+            ),
+            None => reopen(state, String::new(), Some(0)),
+        },
         (None, _) => reopen(state, query, None),
         // Dropdown open: Esc closes it back to the field.
         (Some(_), BoardsKey::Esc) => reopen(state, String::new(), None),
@@ -1172,10 +1273,40 @@ fn card_repo_key(
                     column_id: column_id.to_string(),
                     title,
                     repo_ref: picked.repo_ref.clone(),
-                    cursor: state.default_agent().index(),
+                    // Prefill the agent chip from the edited card (F6); a fresh
+                    // create pre-selects the F4 cascade default.
+                    cursor: edit_agent_cursor(state),
                 },
             )
         }
+    }
+}
+
+/// The agent-chip cursor the repo→agent transition pre-selects: the EDITED card's
+/// persisted agent (F6 prefill), or the F4 cascade default for a fresh create.
+fn edit_agent_cursor(state: &BoardsState) -> usize {
+    state
+        .editing()
+        .and_then(|id| state.card_by_issue(id))
+        .map_or_else(|| state.default_agent().index(), |c| c.agent_chip().index())
+}
+
+/// Open the create overlay in EDIT mode over the focused card (`e`, F6): prefill
+/// the title from the card and tag the edit side-flag, so the shared title → repo →
+/// agent pipeline runs prefilled and its agent-stage commit fires `EditCard`. A
+/// no-op with no card (or no column) focused.
+fn edit_focused_card(state: &BoardsState) -> BoardsReduction {
+    match (state.focused_column(), state.focused_card()) {
+        (Some(col), Some(card)) => {
+            let mut next = state.clone();
+            next.edit_issue_id = Some(card.issue_id.clone());
+            next.overlay = Some(BoardsOverlay::CardTitle {
+                column_id: col.id.clone(),
+                title: card.title.clone(),
+            });
+            no_intent(next)
+        }
+        _ => unchanged(state),
     }
 }
 
@@ -1214,16 +1345,36 @@ fn card_agent_key(
         ),
         BoardsKey::Up => reopen(state, cursor.saturating_sub(1)),
         BoardsKey::Down => reopen(state, (cursor + 1).min(AgentChip::ALL.len() - 1)),
-        BoardsKey::Enter => set_overlay(
-            state,
-            BoardsOverlay::CardProfile {
-                column_id: column_id.to_string(),
-                title,
-                repo_ref,
-                agent: AgentChip::at(cursor),
-                cursor: 0,
-            },
-        ),
+        // The BRANCHED commit point (F6): an EDIT commits here — the agent stage is
+        // the edit's last field (title + repo + agent), so Enter fires `EditCard`
+        // rather than advancing to the create-only profile pick.
+        BoardsKey::Enter => match state.editing() {
+            Some(issue_id) => {
+                let issue_id = issue_id.to_string();
+                let mut next = state.clone();
+                next.overlay = None;
+                next.edit_issue_id = None;
+                BoardsReduction {
+                    state: next,
+                    intent: Some(BoardsIntent::EditCard {
+                        issue_id,
+                        title,
+                        repo_ref,
+                        agent: AgentChip::at(cursor),
+                    }),
+                }
+            }
+            None => set_overlay(
+                state,
+                BoardsOverlay::CardProfile {
+                    column_id: column_id.to_string(),
+                    title,
+                    repo_ref,
+                    agent: AgentChip::at(cursor),
+                    cursor: 0,
+                },
+            ),
+        },
         BoardsKey::Char(_) | BoardsKey::Backspace => reopen(state, cursor),
     }
 }
@@ -1417,10 +1568,12 @@ fn set_overlay(state: &BoardsState, overlay: BoardsOverlay) -> BoardsReduction {
     no_intent(next)
 }
 
-/// Close any open overlay, emitting no intent.
+/// Close any open overlay, emitting no intent. Also drops the edit side-flag so a
+/// cancelled edit never leaks into the next create.
 fn close_overlay(state: &BoardsState) -> BoardsReduction {
     let mut next = state.clone();
     next.overlay = None;
+    next.edit_issue_id = None;
     no_intent(next)
 }
 
@@ -1662,7 +1815,15 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
     // typed title / picked profile / run mode is visible (and greppable by the
     // e2e tripwire) without a full modal layer.
     if let Some(overlay) = state.overlay() {
-        render_overlay(buf, area_w, body_top, overlay, state.profiles(), state.repos());
+        render_overlay(
+            buf,
+            area_w,
+            body_top,
+            overlay,
+            state.profiles(),
+            state.repos(),
+            state.editing().is_some(),
+        );
     }
 }
 
@@ -1704,19 +1865,32 @@ fn render_overlay(
     overlay: &BoardsOverlay,
     profiles: &[String],
     repos: &[RepoOption],
+    editing: bool,
 ) {
     let value_row = row.saturating_add(1);
     match overlay {
         BoardsOverlay::CardTitle { title, .. } => {
-            put_str(buf, 0, row, "New card title (Enter → repo, Esc cancel):", GOLD, area_w);
+            let prompt = if editing {
+                "Edit card title (Enter → repo, Esc cancel):"
+            } else {
+                "New card title (Enter → repo, Esc cancel):"
+            };
+            put_str(buf, 0, row, prompt, GOLD, area_w);
             let shown = format!("> {title}\u{2588}");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
         BoardsOverlay::CardRepo { title, query, dropdown, .. } => {
             render_card_repo(buf, area_w, row, value_row, title, query, *dropdown, repos);
         }
-        BoardsOverlay::CardAgent { title, cursor, .. } => {
-            let prompt = format!("Agent for \"{title}\" (↑↓ pick, Enter → profile):");
+        BoardsOverlay::CardAgent { title, repo_ref, cursor, .. } => {
+            // An edit commits at this stage (`Enter save`), so the prompt names the
+            // action + the prefilled repo the run will use; a create advances to
+            // the profile pick.
+            let prompt = if editing {
+                format!("Edit agent for \"{title}\" [repo: {repo_ref}] (↑↓ pick, Enter save):")
+            } else {
+                format!("Agent for \"{title}\" (↑↓ pick, Enter → profile):")
+            };
             put_str(buf, 0, row, &prompt, GOLD, area_w);
             let mut x = 0u16;
             for (i, chip) in AgentChip::ALL.iter().enumerate() {
@@ -1866,11 +2040,12 @@ fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
     // Card-lifecycle verbs (F6) lead so they render even when a narrow pane clips
     // the trailing column verbs. `⇧↑↓` reorders a card within its column, `d`
     // removes it. `feedback_keybinding_hints_near_control`.
-    let hints: [(&str, &str); 12] = [
+    let hints: [(&str, &str); 13] = [
         ("↵", "run/rerun"),
         ("a", "attach"),
         ("X", "cancel"),
         ("t", "timeline"),
+        ("e", "edit"),
         ("d", "remove"),
         ("⇧↑↓", "move card"),
         ("n", "add col"),
@@ -1967,6 +2142,23 @@ mod tests {
             display_id: issue.chars().rev().take(5).collect::<String>().chars().rev().collect(),
             state: state.map(str::to_string),
             session_name: None,
+            repo_ref: None,
+            agent: None,
+        }
+    }
+
+    /// A card carrying a persisted repo + agent — the F6 edit overlay prefills from
+    /// these two append-only fields.
+    fn card_with_repo_agent(
+        issue: &str,
+        title: &str,
+        repo_ref: &str,
+        agent: &str,
+    ) -> BoardCardWireRow {
+        BoardCardWireRow {
+            repo_ref: Some(repo_ref.into()),
+            agent: Some(agent.into()),
+            ..card(issue, title, None)
         }
     }
 
@@ -2647,5 +2839,100 @@ mod tests {
             Some(BoardsIntent::CreateBoard),
             "create-board fires even on an empty board list"
         );
+    }
+
+    /// A one-card board whose card carries a persisted repo + agent — the F6 edit
+    /// overlay prefills from these.
+    fn board_with_edit_card() -> BoardsListResult {
+        BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Sprint".into(),
+                auto_move: true,
+                columns: vec![col(
+                    "c1",
+                    "Todo",
+                    None,
+                    false,
+                    vec![card_with_repo_agent("issue-9", "Edit me", "/src/widget", "codex")],
+                )],
+                unmapped: Vec::new(),
+            }],
+        }
+    }
+
+    /// `e` opens the create overlay in EDIT mode prefilled from the focused card:
+    /// the title seeds the input, the repo/agent stages default to the card's
+    /// persisted values, and the agent-stage Enter commits `EditCard` (never
+    /// advancing to the create-only profile pick).
+    #[test]
+    fn edit_focused_card_prefills_and_commits_issue_update() {
+        let state = BoardsState::from_snapshot(&board_with_edit_card());
+
+        // `e` opens the title input prefilled + tags the edit side-flag.
+        let s = reduce_boards(&state, BoardsEvent::EditFocusedCard).state;
+        assert_eq!(s.editing(), Some("issue-9"), "the edit side-flag is set");
+        assert!(
+            matches!(s.overlay(), Some(BoardsOverlay::CardTitle { title, .. }) if title == "Edit me"),
+            "the title stage is prefilled with the card's title"
+        );
+
+        // Edit the title, advance to the repo stage.
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('!'))).state;
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(s.overlay(), Some(BoardsOverlay::CardRepo { .. })));
+
+        // Enter with the field closed KEEPS the card's current repo (prefill) and
+        // advances to the agent stage, whose cursor pre-selects the card's agent
+        // (codex = index 1), NOT the create default (claude).
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(
+            matches!(
+                s.overlay(),
+                Some(BoardsOverlay::CardAgent { repo_ref, cursor: 1, .. }) if repo_ref == "/src/widget"
+            ),
+            "the agent stage keeps the card repo + pre-selects its agent: {:?}",
+            s.overlay()
+        );
+
+        // Change the agent to claude (Up), then Enter COMMITS the edit (branches to
+        // EditCard rather than advancing to the profile pick).
+        let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Up)).state;
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            out.intent,
+            Some(BoardsIntent::EditCard {
+                issue_id: "issue-9".into(),
+                title: "Edit me!".into(),
+                repo_ref: "/src/widget".into(),
+                agent: AgentChip::Claude,
+            }),
+            "the agent-stage Enter commits the edit with the new title + agent"
+        );
+        assert!(out.state.overlay().is_none(), "the overlay closes on commit");
+        assert_eq!(out.state.editing(), None, "the edit side-flag clears on commit");
+    }
+
+    /// Cancelling an edit (Esc at the title stage) closes the overlay AND drops the
+    /// edit side-flag, so the next `c` create is never mistaken for an edit.
+    #[test]
+    fn edit_esc_clears_the_side_flag() {
+        let state = BoardsState::from_snapshot(&board_with_edit_card());
+        let s = reduce_boards(&state, BoardsEvent::EditFocusedCard).state;
+        assert_eq!(s.editing(), Some("issue-9"));
+        let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Esc));
+        assert!(out.state.overlay().is_none(), "Esc closes the overlay");
+        assert_eq!(out.state.editing(), None, "Esc clears the edit side-flag");
+        assert_eq!(out.intent, None);
+    }
+
+    /// Edit with no card focused is inert (no overlay, no side-flag).
+    #[test]
+    fn edit_with_no_card_focused_is_a_noop() {
+        let state = BoardsState::from_snapshot(&BoardsListResult { boards: Vec::new() });
+        let out = reduce_boards(&state, BoardsEvent::EditFocusedCard);
+        assert!(out.state.overlay().is_none());
+        assert_eq!(out.state.editing(), None);
+        assert_eq!(out.intent, None);
     }
 }

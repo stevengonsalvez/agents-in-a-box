@@ -24,6 +24,8 @@ fn card(issue: &str, title: &str, state: Option<&str>) -> BoardCardWireRow {
         display_id: issue.into(),
         state: state.map(str::to_string),
         session_name: None,
+        repo_ref: None,
+        agent: None,
     }
 }
 

@@ -437,12 +437,19 @@ async fn enrich_board_card(
     workspace_id: &str,
     issue_id: &str,
 ) -> Result<ainb_hangar_proto::snapshots::BoardCardWireRow, sqlx::Error> {
-    let title: Option<String> =
-        sqlx::query_scalar("SELECT title FROM issue WHERE id = ? AND workspace_id = ?")
-            .bind(issue_id)
-            .bind(workspace_id)
-            .fetch_optional(pool)
-            .await?;
+    // The issue title + its persisted card repo/agent (F2/F4) — the F6 card-edit
+    // overlay prefills its repo pick + agent chip from the latter two.
+    let issue_row: Option<(String, Option<String>, Option<String>)> = sqlx::query_as(
+        "SELECT title, repo_ref, agent_kind FROM issue WHERE id = ? AND workspace_id = ?",
+    )
+    .bind(issue_id)
+    .bind(workspace_id)
+    .fetch_optional(pool)
+    .await?;
+    let (title, repo_ref, agent) = match issue_row {
+        Some((t, repo, agent)) => (Some(t), repo, agent),
+        None => (None, None, None),
+    };
     // The issue's most recent task's status — the card's live state — plus the
     // tmux session name an interactive run recorded on it (ccc / D6), so the
     // attach-from-card affordance can surface `tmux attach -t <session_name>`.
@@ -465,6 +472,8 @@ async fn enrich_board_card(
         display_id: short_display_id(issue_id),
         state,
         session_name,
+        repo_ref,
+        agent,
     })
 }
 
@@ -1168,9 +1177,33 @@ pub async fn issue_update(
     }
     // Re-read the edited row and map it exactly as issues_list does, so the
     // response + event row match a list snapshot byte-for-byte.
+    issue_row(pool, workspace_id, issue_id).await
+}
+
+/// Read one issue as a wire [`IssueRow`], scoped to `workspace_id`, mapped exactly
+/// as `issues_list` maps it (so a response + pushed event row match a list
+/// snapshot byte-for-byte). Returns `None` when the `(id, workspace_id)` pair
+/// resolves to no issue (an unknown id or a foreign tenant).
+///
+/// Shared by [`issue_update`] (its post-write re-read) and the F6 card-edit
+/// handler's repo/agent-only path, which changes no `issue` column the field
+/// UPDATE covers yet still must resolve the row to answer + announce.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault or a malformed stored id.
+pub async fn issue_row(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Option<IssueRow>, sqlx::Error> {
     let Some(issue) = IssueRepo::get_by_id(pool, issue_id).await? else {
         return Ok(None);
     };
+    // Scope to the workspace so a foreign-tenant id never leaks a row.
+    if issue.workspace_id != workspace_id {
+        return Ok(None);
+    }
     let id = IssueId::from_str(&issue.id).map_err(|e| sqlx::Error::ColumnDecode {
         index: "id".to_string(),
         source: format!("malformed issue id {:?}: {e}", issue.id).into(),

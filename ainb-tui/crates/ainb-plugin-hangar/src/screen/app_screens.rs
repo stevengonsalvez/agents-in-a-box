@@ -231,6 +231,19 @@ pub enum BoardsAction {
         /// The card's issue whose run transcript to show.
         issue_id: String,
     },
+    /// Edit an existing card's title + repo + agent (`e`) — `hangar/issue_update`
+    /// (F6). Rewrites the title and persists repo/agent on the issue so the next
+    /// run routes to the chosen provider.
+    CardEdit {
+        /// The issue whose card to edit.
+        issue_id: String,
+        /// The new title (non-blank).
+        title: String,
+        /// The picked repo (an absolute checkout path or `scratch`).
+        repo_ref: String,
+        /// The picked provider-agent wire token (`claude`/`codex`/`copilot`).
+        agent: String,
+    },
     /// Rename a column to the typed name (`r`) — `hangar/board_column_update`.
     ColumnRename {
         /// The board the column belongs to.
@@ -1362,6 +1375,9 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'd' => Some(BoardsEvent::RemoveFocusedCard),
             // `t` opens the focused card's prettied JSONL run timeline.
             't' => Some(BoardsEvent::ShowTimeline),
+            // `e` edits the focused card (title + repo + agent) — reuses the
+            // create overlay, prefilled, committing as an `issue_update` (F6).
+            'e' => Some(BoardsEvent::EditFocusedCard),
             'n' => Some(BoardsEvent::AddColumn),
             'r' => Some(BoardsEvent::RenameColumn),
             'x' => Some(BoardsEvent::DeleteColumn),
@@ -1454,6 +1470,17 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
         BoardsIntent::ShowTimeline { board_id, issue_id } => Some(BoardsAction::CardTimeline {
             board_id,
             issue_id,
+        }),
+        BoardsIntent::EditCard {
+            issue_id,
+            title,
+            repo_ref,
+            agent,
+        } => Some(BoardsAction::CardEdit {
+            issue_id,
+            title,
+            repo_ref,
+            agent: agent.wire().to_string(),
         }),
         BoardsIntent::RenameColumn {
             board_id,

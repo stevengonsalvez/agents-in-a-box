@@ -1622,6 +1622,26 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_BOARD_COLUMN_UPDATE,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_id": column_id, "name": name }),
             ),
+            // F6 card edit: rewrite the issue title + persist repo/agent via
+            // `issue_update`. It answers with an IssueRow (not a BoardsListResult),
+            // so it rides ISSUE_UPDATE_REQ_ID — whose reply handler arms a snapshot
+            // re-pull, re-rendering the board with the new title.
+            BoardsAction::CardEdit {
+                issue_id,
+                title,
+                repo_ref,
+                agent,
+            } => (
+                ISSUE_UPDATE_REQ_ID,
+                daemon_methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "issue_id": issue_id,
+                    "title": title,
+                    "repo_ref": repo_ref,
+                    "agent": agent,
+                }),
+            ),
             BoardsAction::CardRun {
                 board_id,
                 issue_id,

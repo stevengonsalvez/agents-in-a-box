@@ -928,6 +928,24 @@ pub struct IssueUpdateParams {
     /// clears the deadline.
     #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
     pub due_date: FieldUpdate<i64>,
+    /// New issue title (F6 card edit); `None` leaves it unchanged. A blank/
+    /// whitespace title is rejected by the daemon, mirroring `issue_create`.
+    /// Append-only field: an old client omits it (title unchanged) and an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub title: Option<String>,
+    /// New card repo (F6 card edit): an absolute checkout path or the literal
+    /// `scratch`. `None` leaves it. Paired with [`Self::agent`] — the card-edit
+    /// overlay re-submits both from its prefill. Persisted on the issue via the
+    /// card-parity accessor (mirrors `board_card_create`), so a later run/rerun
+    /// provisions the right worktree. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// New card provider agent token (F6 card edit): `claude` / `codex` /
+    /// `copilot`. `None` leaves it; an unrecognised token is dropped (the F4
+    /// cascade then decides), never an error. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LABEL_ATTACH`] /
@@ -1289,6 +1307,16 @@ pub struct BoardCardWireRow {
     /// contract, since a plugin cannot drive a host terminal attach directly.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session_name: Option<String>,
+    /// The card's persisted repo (an absolute checkout path or `scratch`), or
+    /// `None` when never set (F2/F4). Append-only field the F6 card-edit overlay
+    /// prefills its repo pick from so an edit re-submits the current value.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// The card's persisted provider agent token (`claude` / `codex` / `copilot`),
+    /// or `None` when unset (the run resolves via the F4 cascade). Append-only
+    /// field the F6 card-edit overlay prefills its agent chip from.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
 }
 
 /// One user-defined board column with the cards bucketed into it
@@ -2030,7 +2058,8 @@ mod tests {
     /// distinct on the wire (e38.8).
     #[test]
     fn e38_issue_update_params_roundtrip_and_three_state() {
-        // A full edit: change state + reassign + bump priority + set a due date.
+        // A full edit: change state + reassign + bump priority + set a due date,
+        // plus the F6 card-edit fields (title + repo + agent).
         let full = IssueUpdateParams {
             workspace_id: "ws-1".into(),
             issue_id: "issue-1".into(),
@@ -2038,6 +2067,9 @@ mod tests {
             assignee: FieldUpdate::Set("agent:a1".into()),
             priority: Some(3),
             due_date: FieldUpdate::Set(1_700_000_000_000),
+            title: Some("Renamed card".into()),
+            repo_ref: Some("/repos/app".into()),
+            agent: Some("codex".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<IssueUpdateParams>(&s).unwrap(), full);
@@ -2050,6 +2082,11 @@ mod tests {
         assert_eq!(p.priority, None, "absent priority leaves it unchanged");
         assert!(p.assignee.is_keep(), "absent assignee leaves it unchanged");
         assert!(p.due_date.is_keep(), "absent due_date leaves it unchanged");
+        // The F6 card-edit fields are append-only: an old client that omits them
+        // leaves the title / repo / agent unchanged (all decode to `None`).
+        assert_eq!(p.title, None, "absent title leaves it unchanged");
+        assert_eq!(p.repo_ref, None, "absent repo leaves it unchanged");
+        assert_eq!(p.agent, None, "absent agent leaves it unchanged");
         // Keep-valued fields are omitted on re-serialize (byte-minimal request).
         assert_eq!(serde_json::to_string(&p).unwrap(), minimal);
 
@@ -2294,6 +2331,8 @@ mod tests {
                         display_id: "sue-1".into(),
                         state: Some("done".into()),
                         session_name: None,
+                        repo_ref: Some("/repos/app".into()),
+                        agent: Some("codex".into()),
                     }],
                 }],
                 unmapped: Vec::new(),

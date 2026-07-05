@@ -92,6 +92,10 @@ pub struct Issue {
 /// touch (`IssueFieldUpdate { priority: Some(2), ..Default::default() }`).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IssueFieldUpdate {
+    /// New issue title (F6 card edit), or `None` to leave it unchanged. The
+    /// caller validates non-blankness before building this (a blank title is a
+    /// client error, not a stored empty title).
+    pub title: Option<String>,
     /// New lifecycle state, or `None` to leave it unchanged.
     pub state: Option<String>,
     /// New assignee: `None` leaves it, `Some(None)` clears it (unassign),
@@ -109,7 +113,8 @@ impl IssueFieldUpdate {
     /// nothing — the handler uses this to skip a pointless UPDATE.
     #[must_use]
     pub const fn is_empty(&self) -> bool {
-        self.state.is_none()
+        self.title.is_none()
+            && self.state.is_none()
             && self.assignee.is_none()
             && self.priority.is_none()
             && self.due_date.is_none()
@@ -232,6 +237,9 @@ impl IssueRepo {
         // matches the placeholders. The nullable actor splits into its two
         // columns (`assignee_type`, `assignee_id`) when present.
         let mut sets: Vec<&str> = Vec::new();
+        if update.title.is_some() {
+            sets.push("title = ?");
+        }
         if update.state.is_some() {
             sets.push("state = ?");
         }
@@ -251,6 +259,9 @@ impl IssueRepo {
         );
 
         let mut query = sqlx::query(&sql);
+        if let Some(title) = &update.title {
+            query = query.bind(title);
+        }
         if let Some(state) = &update.state {
             query = query.bind(state);
         }
@@ -575,6 +586,35 @@ mod tests {
         .execute(pool)
         .await
         .unwrap();
+    }
+
+    /// `update_fields` writes a new title (F6 card edit) scoped to the workspace,
+    /// leaving the untouched columns alone; a title-only edit is not a no-op.
+    #[tokio::test]
+    async fn update_fields_edits_title_workspace_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        seed_issue(pool, "ws-a", "issue-1", "Old title", Some("body"), 1).await;
+
+        // A title-only edit is NOT empty (would previously short-circuit).
+        let update = IssueFieldUpdate { title: Some("New title".into()), ..Default::default() };
+        assert!(!update.is_empty(), "a title edit must write");
+        let touched = IssueRepo::update_fields(pool, "ws-a", "issue-1", &update).await.unwrap();
+        assert!(touched, "one row updated");
+
+        let issue = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
+        assert_eq!(issue.title, "New title", "title rewritten");
+        assert_eq!(issue.description.as_deref(), Some("body"), "other columns untouched");
+
+        // A cross-tenant edit (right id, wrong workspace) touches no row.
+        let cross =
+            IssueRepo::update_fields(pool, "ws-b", "issue-1", &update).await.unwrap();
+        assert!(!cross, "a foreign-workspace title edit must miss");
+        let unchanged = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
+        assert_eq!(unchanged.title, "New title", "foreign-tenant edit left the title");
     }
 
     /// A title hit outranks a description hit outranks a comment-only hit; a

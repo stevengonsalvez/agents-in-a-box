@@ -219,6 +219,82 @@ async fn issue_update_edits_persist_and_push_event() {
     );
 }
 
+/// F6 card edit: `issue_update` rewrites the title AND persists the card's repo +
+/// agent on the issue (mirroring `board_card_create`), so a later run/rerun routes
+/// to the NEW provider. The response carries the renamed row and the store shows
+/// the persisted `repo_ref` / `agent_kind`.
+#[tokio::test]
+async fn issue_update_edits_title_and_persists_card_repo_agent() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+    c.subscribe(WS_SLUG).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_ISSUE_UPDATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "issue_id": "issue-1",
+                "title": "Renamed by the edit overlay",
+                "repo_ref": "/repos/widget",
+                "agent": "codex",
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "edit must ack: {resp}");
+    assert_eq!(
+        resp["result"]["title"], "Renamed by the edit overlay",
+        "the response row carries the new title"
+    );
+
+    // The card's repo + agent are persisted on the durable card (the issue), so a
+    // subsequent `board_card_run` routes to codex on the picked repo.
+    let (repo_ref, agent_kind): (Option<String>, Option<String>) =
+        sqlx::query_as("SELECT repo_ref, agent_kind FROM issue WHERE id = 'issue-1'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(repo_ref.as_deref(), Some("/repos/widget"), "repo persisted on the card");
+    assert_eq!(agent_kind.as_deref(), Some("codex"), "the NEW agent persisted on the card");
+
+    // The title change is visible in a fresh snapshot.
+    let list = c
+        .call(
+            methods::HANGAR_ISSUES_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    let issues = list["result"]["issues"].as_array().unwrap();
+    let edited = issues.iter().find(|i| i["id"] == "issue-1").expect("issue-1 present");
+    assert_eq!(edited["title"], "Renamed by the edit overlay", "title persisted");
+}
+
+/// A blank title is a client error, never a stored empty title (mirrors
+/// `issue_create`'s non-blank guard).
+#[tokio::test]
+async fn issue_update_rejects_a_blank_title() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_ISSUE_UPDATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "issue_id": "issue-1",
+                "title": "   ",
+            }),
+        )
+        .await;
+    assert!(!resp["error"].is_null(), "a blank title must be rejected: {resp}");
+}
+
 /// A mistyped / foreign workspace is rejected with an error — never a silent
 /// no-op — and the issue is untouched (mirrors `handle_task_transition`).
 #[tokio::test]
