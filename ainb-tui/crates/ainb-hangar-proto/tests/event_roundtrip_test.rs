@@ -44,6 +44,7 @@ fn sample_issue() -> IssueRow {
         due_date: None,
         labels: Vec::new(),
         pr_url: Some("https://github.com/o/r/pull/42".to_string()),
+        branch: None,
     }
 }
 
@@ -193,6 +194,7 @@ fn presence_state_three_states_roundtrip() {
 fn issue_row_pr_url_is_additive() {
     let no_pr = IssueRow {
         pr_url: None,
+        branch: None,
         ..sample_issue()
     };
     let json = serde_json::to_string(&no_pr).expect("encode");

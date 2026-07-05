@@ -14,6 +14,9 @@
 //! picker; the real online/away signal for humans lands with presence tracking
 //! in a later phase).
 
+use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
+
 use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::IdGen;
@@ -94,6 +97,9 @@ pub async fn issues_list(
             // P9.2: surface the PR URL captured by P9.1 from this issue's latest
             // completed task's `result.pr_url`, or `None` when no task opened a PR.
             let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+            // ch3: the latest completed task's branch, so the task-detail opened
+            // from the issue list renders the run-branch line.
+            let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
             out.push(IssueRow {
                 id,
                 display_id,
@@ -108,6 +114,7 @@ pub async fn issues_list(
                 due_date: issue.due_date,
                 labels: issue.labels,
                 pr_url,
+                branch,
             });
         }
     }
@@ -164,6 +171,7 @@ pub async fn issues_search(
         let display_id =
             issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
         let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+        let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         out.push(IssueRow {
             id,
             display_id,
@@ -178,6 +186,7 @@ pub async fn issues_search(
             due_date: issue.due_date,
             labels: issue.labels,
             pr_url,
+            branch,
         });
     }
     Ok(out)
@@ -260,6 +269,41 @@ async fn latest_pr_url_for_issue(
     .await?
     .flatten();
     Ok(url)
+}
+
+/// The `ainb/<slug>` worktree branch of the latest completed task for `issue_id`
+/// in `workspace_id`, or `None` when no task on the issue committed a branch
+/// (tcp ch3).
+///
+/// Mirrors [`latest_pr_url_for_issue`]: reads the `branch` column of the
+/// `agent_task_queue` rows for the issue, taking the most recently finished task
+/// that carries a non-empty branch. The `WHERE` clause skips rows with no branch
+/// (a run that made no commits), so a branchless issue yields `None`, never an
+/// empty string. Surfaces the branch on the task-detail view opened from the
+/// ISSUE LIST — a synthetic task that carries no single per-run branch of its own.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+async fn latest_branch_for_issue(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let branch: Option<String> = sqlx::query_scalar(
+        "SELECT branch \
+         FROM agent_task_queue \
+         WHERE workspace_id = ?1 AND issue_id = ?2 \
+           AND branch IS NOT NULL AND branch <> '' \
+         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
+         LIMIT 1",
+    )
+    .bind(workspace_id)
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(branch)
 }
 
 /// Snapshot the assignable actors of `workspace_id` — human members and agents
@@ -964,9 +1008,13 @@ pub async fn autopilot_set_enabled(
 /// captured into the task's `result` (P9.1), and — ONLY for a card that has a
 /// `pr_url` — the PR's CI + merge status fetched through the injectable
 /// `provider` (the production `gh` subprocess, or a test fake / stub). Cards
-/// without a PR incur no `gh` call, so the fetch cost is bounded to the handful
-/// of PR'd cards on a board (this snapshot fires on subscribe / workspace-switch
-/// and on a run finishing, not per render frame).
+/// without a PR incur no `gh` call.
+///
+/// tcp le3 — bounded total fetch: the DISTINCT PR urls are fetched CONCURRENTLY
+/// (a [`tokio::task::JoinSet`], each fetch owning an `Arc`-clone of the provider),
+/// so a board with N uncached PR'd cards costs ~one fetch timeout in wall-clock,
+/// not N serial ones. Repeated urls collapse to a single fetch. The provider is
+/// shared by `Arc` because a spawned task must own `'static` state.
 ///
 /// # Errors
 ///
@@ -974,9 +1022,16 @@ pub async fn autopilot_set_enabled(
 pub async fn tasks_list(
     pool: &SqlitePool,
     workspace_id: &str,
-    provider: &dyn crate::pr_status::PrStatusProvider,
+    provider: Arc<dyn crate::pr_status::PrStatusProvider>,
 ) -> Result<Vec<TaskCardRow>, sqlx::Error> {
     let tasks = TaskRepo::list_by_workspace(pool, workspace_id).await?;
+
+    // Fetch every DISTINCT PR url once, concurrently — the le3 bound. A card
+    // without a PR contributes no url, so a PR-less board spawns nothing.
+    let distinct_urls: HashSet<String> =
+        tasks.iter().filter_map(|t| task_pr_url(t.result.as_deref())).collect();
+    let statuses = fetch_pr_statuses(provider, distinct_urls).await;
+
     let mut out = Vec::with_capacity(tasks.len());
     for t in tasks {
         let id = ainb_hangar_core::ids::TaskId::from_str(&t.id).map_err(|e| {
@@ -986,11 +1041,9 @@ pub async fn tasks_list(
             }
         })?;
         let pr_url = task_pr_url(t.result.as_deref());
-        // Only a card that captured a PR pays for a status fetch.
-        let pr_status = match pr_url.as_deref() {
-            Some(url) => Some(provider.fetch(url).await),
-            None => None,
-        };
+        // Every distinct url was fetched above, so a card WITH a PR always finds
+        // its status; a card without a PR carries none.
+        let pr_status = pr_url.as_deref().and_then(|url| statuses.get(url).copied());
         out.push(TaskCardRow {
             id,
             workspace_id: t.workspace_id,
@@ -1005,6 +1058,35 @@ pub async fn tasks_list(
         });
     }
     Ok(out)
+}
+
+/// Fetch the [`PrStatus`](ainb_hangar_proto::pr_status::PrStatus) of every url in
+/// `urls` CONCURRENTLY, returning a `url → status` map (tcp le3).
+///
+/// Each url is fetched on its own [`tokio::task::JoinSet`] task holding an
+/// `Arc`-clone of the shared `provider`, so N urls cost ~one fetch timeout rather
+/// than N serial ones. A task that panics (a JoinError) is dropped from the map —
+/// that url's card then renders no PR badge — never a propagated panic. An empty
+/// `urls` spawns nothing and returns an empty map.
+async fn fetch_pr_statuses(
+    provider: Arc<dyn crate::pr_status::PrStatusProvider>,
+    urls: HashSet<String>,
+) -> HashMap<String, ainb_hangar_proto::pr_status::PrStatus> {
+    let mut set = tokio::task::JoinSet::new();
+    for url in urls {
+        let provider = Arc::clone(&provider);
+        set.spawn(async move {
+            let status = provider.fetch(&url).await;
+            (url, status)
+        });
+    }
+    let mut out = HashMap::with_capacity(set.len());
+    while let Some(joined) = set.join_next().await {
+        if let Ok((url, status)) = joined {
+            out.insert(url, status);
+        }
+    }
+    out
 }
 
 /// Extract the captured `pr_url` from a task's stored `result` JSON blob (P9.1),
@@ -1309,6 +1391,7 @@ pub async fn issue_row(
     let prefix = workspace_issue_prefix(pool, workspace_id).await?;
     let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+    let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1323,6 +1406,7 @@ pub async fn issue_row(
         due_date: issue.due_date,
         labels: issue.labels,
         pr_url,
+        branch,
     }))
 }
 
@@ -1400,6 +1484,7 @@ async fn read_issue_row(
     let prefix = workspace_issue_prefix(pool, workspace_id).await?;
     let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+    let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1414,6 +1499,7 @@ async fn read_issue_row(
         due_date: issue.due_date,
         labels: issue.labels,
         pr_url,
+        branch,
     }))
 }
 
@@ -1549,6 +1635,8 @@ pub async fn issue_create(
         due_date: None,
         labels: Vec::new(),
         pr_url: None,
+        // A freshly-created issue has no tasks yet, so no committed branch.
+        branch: None,
     })
 }
 
@@ -1941,5 +2029,83 @@ mod mention_spawn_tests {
 
         assert!(spawned.is_empty());
         assert_eq!(count_for_issue3(&store).await, 0);
+    }
+}
+
+#[cfg(test)]
+mod pr_fetch_bound_tests {
+    use std::pin::Pin;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::{Duration, Instant};
+
+    use ainb_hangar_proto::pr_status::{CiRollup, PrStatus};
+
+    use super::fetch_pr_statuses;
+    use crate::pr_status::PrStatusProvider;
+
+    /// A provider whose every fetch sleeps `delay` — the stand-in for a slow (or
+    /// wedged, at the timeout) `gh` round-trip. Counts its calls so the test can
+    /// prove each DISTINCT url is fetched exactly once.
+    struct SlowProvider {
+        delay: Duration,
+        calls: Arc<AtomicUsize>,
+    }
+
+    impl PrStatusProvider for SlowProvider {
+        fn fetch<'a>(
+            &'a self,
+            _pr_url: &'a str,
+        ) -> Pin<Box<dyn std::future::Future<Output = PrStatus> + Send + 'a>> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            let delay = self.delay;
+            Box::pin(async move {
+                tokio::time::sleep(delay).await;
+                PrStatus { ci: CiRollup::Pass, ..Default::default() }
+            })
+        }
+    }
+
+    /// N distinct slow urls are fetched CONCURRENTLY: total wall-clock is ~one
+    /// `delay`, NOT N × delay (the le3 bound). A serial loop over the same urls
+    /// would take at least N × delay, so a comfortably-below-that ceiling can only
+    /// pass when the fetches overlap.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn distinct_urls_are_fetched_concurrently_not_serially() {
+        const N: usize = 12;
+        let delay = Duration::from_millis(300);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(SlowProvider { delay, calls: Arc::clone(&calls) });
+
+        let urls: std::collections::HashSet<String> =
+            (0..N).map(|i| format!("https://github.com/o/r/pull/{i}")).collect();
+
+        let started = Instant::now();
+        let statuses = fetch_pr_statuses(provider, urls).await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(statuses.len(), N, "every distinct url yields a status");
+        assert_eq!(calls.load(Ordering::SeqCst), N, "each distinct url fetched exactly once");
+        // Serial would be N * 300ms = 3.6s. Concurrent is ~300ms; a 1.5s ceiling
+        // absorbs scheduler jitter while still failing a serial regression.
+        assert!(
+            elapsed < Duration::from_millis(1500),
+            "N slow fetches ran concurrently (bounded to ~one delay), took {elapsed:?}"
+        );
+    }
+
+    /// The same url appearing on many cards collapses to ONE fetch (the caller
+    /// dedups to a `HashSet` before this runs), so a board full of one PR's cards
+    /// never fans out to many `gh` spawns.
+    #[tokio::test]
+    async fn empty_url_set_spawns_nothing() {
+        let calls = Arc::new(AtomicUsize::new(0));
+        let provider = Arc::new(SlowProvider {
+            delay: Duration::from_millis(10),
+            calls: Arc::clone(&calls),
+        });
+        let statuses = fetch_pr_statuses(provider, std::collections::HashSet::new()).await;
+        assert!(statuses.is_empty());
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "no urls → no fetches spawned");
     }
 }

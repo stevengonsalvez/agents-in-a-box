@@ -384,18 +384,25 @@ impl AgentChip {
 /// One pickable repo in the card-create `@` dropdown (spec F2/F3).
 ///
 /// Its display `label` and the `repo_ref` a pick persists — an absolute checkout
-/// path, or the literal `scratch`. The glue builds the roster from
-/// `hangar/repo_list` (favorites pinned first + recency, then scanned); the
-/// reducer prepends [`RepoOption::scratch`] so scratch is ALWAYS the first,
-/// guaranteed-launchable choice (F2).
+/// path, the literal `scratch`, or (for a remote-only favorite, bead pv8) the
+/// favorite's REMOTE indicator, which the daemon clones on card-create. The glue
+/// builds the roster from `hangar/repo_list` (favorites pinned first + recency,
+/// then scanned); the reducer prepends [`RepoOption::scratch`] so scratch is
+/// ALWAYS the first, guaranteed-launchable choice (F2).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepoOption {
     /// The display label (a favorite's alias / a scanned repo's name / `scratch`).
     pub label: String,
-    /// The value persisted on the card: an absolute checkout path, or `scratch`.
+    /// The value persisted on the card: an absolute checkout path, `scratch`, or a
+    /// remote indicator (`owner/repo` or a URL) for a remote-only favorite the
+    /// daemon clones on pick (bead pv8).
     pub repo_ref: String,
     /// Whether this is a ★ favorite (rendered with a star, pinned ahead of scans).
     pub is_favorite: bool,
+    /// A remote-only favorite carrying no local checkout — `repo_ref` is its
+    /// remote, rendered with a ☁ so the user knows the pick clones on card-create
+    /// (bead pv8). `false` for scanned repos, scratch, and path-backed favorites.
+    pub is_remote_only: bool,
 }
 
 impl RepoOption {
@@ -403,7 +410,12 @@ impl RepoOption {
     /// picker points a repo-less user at.
     #[must_use]
     pub fn scratch() -> Self {
-        Self { label: "scratch".to_string(), repo_ref: "scratch".to_string(), is_favorite: false }
+        Self {
+            label: "scratch".to_string(),
+            repo_ref: "scratch".to_string(),
+            is_favorite: false,
+            is_remote_only: false,
+        }
     }
 }
 
@@ -2419,7 +2431,14 @@ fn render_card_repo(
         let colour = if sel { GREEN } else { MUTED };
         let open = if sel { "[" } else { " " };
         let close = if sel { "]" } else { " " };
-        let star = if repo.is_favorite { "★" } else { "" };
+        // ★ for a favorite; ★☁ for a remote-only favorite the pick will clone.
+        let star = if repo.is_remote_only {
+            "★☁"
+        } else if repo.is_favorite {
+            "★"
+        } else {
+            ""
+        };
         x = put_str(buf, x, value_row, open, colour, area_w);
         x = put_str(buf, x, value_row, star, colour, area_w);
         x = put_str(buf, x, value_row, &repo.label, colour, area_w);
@@ -2975,8 +2994,8 @@ mod tests {
     /// as the daemon returns them).
     fn repo_roster() -> Vec<RepoOption> {
         vec![
-            RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true },
-            RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false },
+            RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true, is_remote_only: false },
+            RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false, is_remote_only: false },
         ]
     }
 
@@ -3286,6 +3305,34 @@ mod tests {
             .map(|r| r.into_iter().collect::<String>())
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    /// A remote-only favorite (bead pv8) renders with a ★☁ marker in the `@`
+    /// dropdown — signalling the pick will clone the remote on card-create — while
+    /// a path-backed favorite keeps a plain ★ and a scanned repo neither.
+    #[test]
+    fn remote_only_favorite_renders_cloud_marker() {
+        let repos = vec![
+            RepoOption {
+                label: "widget".into(),
+                repo_ref: "acme/widget".into(),
+                is_favorite: true,
+                is_remote_only: true,
+            },
+            RepoOption {
+                label: "local".into(),
+                repo_ref: "/src/local".into(),
+                is_favorite: true,
+                is_remote_only: false,
+            },
+        ];
+        let mut buf = WireBuffer::new(80, 4);
+        // Dropdown open at cursor 0 (scratch), empty query → all candidates shown.
+        render_card_repo(&mut buf, 80, 0, 1, "T", "", Some(0), &repos);
+        let map = painted(&buf);
+        assert!(map.contains("★☁widget"), "remote-only favorite shows ★☁:\n{map}");
+        assert!(map.contains("★local"), "path-backed favorite shows plain ★:\n{map}");
+        assert!(!map.contains("★☁local"), "a local favorite is not marked remote:\n{map}");
     }
 
     /// A LOADED but empty board list renders the create prompt (the genuine

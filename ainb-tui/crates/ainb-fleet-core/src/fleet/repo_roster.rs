@@ -47,6 +47,18 @@ pub struct RepoEntry {
     pub last_used_ms: Option<i64>,
 }
 
+impl RepoEntry {
+    /// A favorite carrying a remote indicator but NO local checkout path (bead
+    /// pv8): the migrate-to-remote favorites the picker used to drop. Picking one
+    /// must clone the remote (once) before a worktree can be provisioned, so the
+    /// roster marks it (`★☁`) and the pick routes through
+    /// [`repo_clone::ensure_clone`](crate::repo_clone::ensure_clone).
+    #[must_use]
+    pub fn is_remote_only(&self) -> bool {
+        self.path.is_none() && self.remote.is_some()
+    }
+}
+
 /// Read the card-create repo roster from `ainb_dir` (the `.agents-in-a-box`
 /// directory), favorites-first + scanned-second with recency applied.
 ///

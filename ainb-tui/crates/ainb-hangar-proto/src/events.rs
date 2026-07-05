@@ -291,6 +291,16 @@ pub struct IssueRow {
     /// produced a PR — a pre-P9.2 reader never sees a new `"pr_url": null` key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The `ainb/<slug>` worktree branch of this issue's latest completed task
+    /// (tcp ch3), mirroring [`Self::pr_url`]'s derivation, or `None` when no task
+    /// on the issue committed a branch. The task-detail view opened FROM THE ISSUE
+    /// LIST (a synthetic task with no single per-run branch) renders this branch
+    /// line, matching the Kanban path that seeds the branch from the task card.
+    /// Omitted from the JSON when `None` (`skip_serializing_if`) so the wire shape
+    /// only grows for a reader that supplies it — a pre-ch3 snapshot decodes to
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).

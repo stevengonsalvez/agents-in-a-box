@@ -942,10 +942,13 @@ impl HangarPlugin {
     /// `hangar/repo_list` result (spec F3).
     ///
     /// The daemon returns favorites-first + recency order already; the plugin
-    /// preserves it and keeps only rows with a resolvable local checkout path (a
-    /// worktree needs one — a remote-only favorite is not directly provisionable,
-    /// and `scratch` is prepended by the reducer regardless). Each row's `repo_ref`
-    /// is that path; a ★ favorite is flagged for the render.
+    /// preserves it and maps each row to a pickable [`RepoOption`]. A row with a
+    /// local checkout `path` persists that path as its `repo_ref`. A remote-only
+    /// favorite (bead pv8 — no local path but a `remote` indicator) is NO LONGER
+    /// dropped: it persists its `remote` as the `repo_ref` and is flagged
+    /// `is_remote_only`, so the picker renders ★☁ and the daemon clones it on
+    /// card-create. A row with neither a path nor a remote is unprovisionable and
+    /// skipped (`scratch` is prepended by the reducer regardless).
     fn apply_repos(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::RepoListResult>(
@@ -954,12 +957,21 @@ impl HangarPlugin {
                 let repos = r
                     .repos
                     .into_iter()
-                    .filter_map(|row| {
-                        row.path.map(|path| crate::screen::boards::RepoOption {
+                    .filter_map(|row| match (row.path, row.remote) {
+                        (Some(path), _) => Some(crate::screen::boards::RepoOption {
                             label: row.name,
                             repo_ref: path,
                             is_favorite: row.is_favorite,
-                        })
+                            is_remote_only: false,
+                        }),
+                        (None, Some(remote)) => Some(crate::screen::boards::RepoOption {
+                            label: row.name,
+                            repo_ref: remote,
+                            is_favorite: row.is_favorite,
+                            is_remote_only: true,
+                        }),
+                        // No path and no remote: nothing to provision from.
+                        (None, None) => None,
                     })
                     .collect();
                 self.screens.set_boards_repos(repos);
@@ -2985,6 +2997,9 @@ impl HangarPlugin {
             // badge the card does — the branch line then reads UNDER the badge
             // (agents-in-a-box-ch3), never a lone branch with a dropped PR.
             pr_url: card.pr_url.clone(),
+            // The card's run branch (ch3) — mirrored onto the row so the issue
+            // carries it too; the detail below is seeded from the same value.
+            branch: card.branch.clone(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -3326,11 +3341,13 @@ impl HangarPlugin {
                     if issue.pr_url.is_some() {
                         self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
                     }
-                    // The issue-list open carries no single per-run branch (an
-                    // issue can have many task runs); the branch is a per-run
-                    // artifact surfaced when opening a specific run from the board
-                    // (agents-in-a-box-ch3).
-                    self.screens.open_task_detail(task_id.clone(), issue, None);
+                    // ch3: the issue-list open is a synthetic task with no per-run
+                    // branch of its own, so seed the detail from the issue row's
+                    // `branch` — the daemon derives it from the issue's latest
+                    // completed task (mirroring `pr_url`), so the branch line reads
+                    // on the issue-list-opened detail exactly as on the Kanban path.
+                    let branch = issue.branch.clone();
+                    self.screens.open_task_detail(task_id.clone(), issue, branch);
                     let mut next = app.clone();
                     next.screen = Screen::TaskDetail(task_id.clone());
                     next.selected_task = Some(task_id);
@@ -4201,6 +4218,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }]);
         p
     }
@@ -4341,6 +4359,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -4356,6 +4375,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
         ]);
 
@@ -4499,6 +4519,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -4574,6 +4595,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -4641,6 +4663,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             })
             .collect();
         p.screens.set_issues(rows);
@@ -4712,6 +4735,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -4727,6 +4751,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -4993,6 +5018,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);

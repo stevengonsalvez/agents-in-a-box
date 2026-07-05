@@ -214,6 +214,7 @@ fn issue_event() -> HangarEvent {
         due_date: None,
         labels: Vec::new(),
         pr_url: None,
+        branch: None,
     })
 }
 

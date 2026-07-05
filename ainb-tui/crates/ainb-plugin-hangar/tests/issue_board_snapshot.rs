@@ -42,6 +42,7 @@ fn row(id: &str, display: &str, state: &str, priority: i64, assignee: Option<&st
         due_date: None,
         labels: Vec::new(),
         pr_url: None,
+        branch: None,
     }
 }
 

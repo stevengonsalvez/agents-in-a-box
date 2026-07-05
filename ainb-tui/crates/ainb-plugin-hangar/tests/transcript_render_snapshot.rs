@@ -32,6 +32,7 @@ fn issue_row() -> IssueRow {
         due_date: None,
         labels: Vec::new(),
         pr_url: None,
+        branch: None,
     }
 }
 

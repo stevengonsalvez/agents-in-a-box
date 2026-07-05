@@ -141,6 +141,7 @@ fn seeded_issues() -> serde_json::Value {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }],
     })
     .unwrap()

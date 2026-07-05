@@ -1877,6 +1877,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
