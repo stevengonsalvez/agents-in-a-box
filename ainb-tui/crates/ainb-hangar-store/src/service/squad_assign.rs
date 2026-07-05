@@ -56,6 +56,12 @@ pub struct SquadAssignRequest<'a> {
     /// member run routes through the right provider (tcp T4 / F7). `None` leaves the
     /// column default (`claude`). Only consulted when `repo_ref` is set.
     pub agent_kind: Option<ainb_hangar_core::agent_kind::AgentKind>,
+    /// The run generation stamped onto every task of this assignment (migration
+    /// 0039, tcp 8ln). The caller mints it ONCE per Run / rerun / fan-out
+    /// ([`TaskRepo::next_generation_for_issue`]) so the leader + all members SHARE
+    /// it — a fan-out is one run. `0` (the default) is the first run / the pre-8ln
+    /// squads-screen path.
+    pub generation: i64,
 }
 
 /// The outcome of a successful squad assignment: the enqueued task plus the
@@ -184,6 +190,7 @@ impl SquadAssignService {
                 priority: request.priority,
                 created_at: clock.now_ms(),
                 autopilot_run_id: None,
+                generation: request.generation,
             },
         )
         .await?;
@@ -297,6 +304,7 @@ impl SquadAssignService {
                 priority: request.priority,
                 created_at: clock.now_ms(),
                 autopilot_run_id: None,
+                generation: request.generation,
             },
         )
         .await?;
@@ -315,6 +323,7 @@ impl SquadAssignService {
                     priority: request.priority,
                     created_at: clock.now_ms(),
                     autopilot_run_id: None,
+                    generation: request.generation,
                 },
             )
             .await?;

@@ -1825,6 +1825,31 @@ async fn squads_list_value(
     to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
 }
 
+/// The run generation to stamp on a standalone squad assign / fan-out (migration
+/// 0039, tcp 8ln): a fresh assign onto an issue is a new run epoch, so mint the
+/// issue's NEXT generation; an ad-hoc (issueless) assign carries `0`, since no card
+/// aggregate ever reads its rows. Bumping here keeps a repeated squad-screen assign
+/// on the same issue from folding a prior run's terminal rows into the current one.
+///
+/// Unlike [`run_card`] (which mints under the per-card launch slot + the
+/// one-active-run guard), this legacy path has no such guard: two assigns racing on
+/// one issue in the same instant could stamp the SAME generation and fold together
+/// as one run. Tolerated — the per-(issue, agent) pending-unique index caps
+/// duplicate dispatch, and the board Run path never routes through here.
+async fn squad_assign_generation(
+    pool: &SqlitePool,
+    issue_id: Option<&str>,
+) -> Result<i64, RpcError> {
+    match issue_id {
+        Some(issue_id) => ainb_hangar_store::repo::task::TaskRepo::next_generation_for_issue(
+            pool, issue_id,
+        )
+        .await
+        .map_err(|e| store_err(&e)),
+        None => Ok(0),
+    }
+}
+
 /// Dispatch `hangar/squad_assign` (e38.17): route a task to the squad's LEADER,
 /// the product seam that makes leader routing TAKE EFFECT.
 ///
@@ -1851,10 +1876,12 @@ async fn handle_squad_assign(
         "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
     )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let generation = squad_assign_generation(pool, params.issue_id.as_deref()).await?;
     let request = SquadAssignRequest {
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
+        generation,
         ..SquadAssignRequest::default()
     };
     let SquadAssignment {
@@ -1905,10 +1932,12 @@ async fn handle_squad_fanout(
         "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
     )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let generation = squad_assign_generation(pool, params.issue_id.as_deref()).await?;
     let request = SquadAssignRequest {
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
+        generation,
         ..SquadAssignRequest::default()
     };
     let SquadFanout { leader, members } = SquadAssignService::assign_fanout(
@@ -2603,6 +2632,17 @@ pub(crate) async fn run_card(
         return Err(CardRunError::ActiveRun(active.status));
     }
 
+    // 2a. Mint this run's GENERATION (migration 0039, tcp 8ln): a fresh Run / rerun
+    //     of a card is a new run epoch, so stamp all of this run's tasks (the single
+    //     task, or the whole fan-out) with it. The card-state folds (aggregate /
+    //     blocker-finished / auto-move / chip) scope to an issue's LATEST generation,
+    //     so a prior run's terminal rows never poison this one. Minted here — under
+    //     the launch slot + the one-active-run guard above — so no two runs of one
+    //     card can share a generation.
+    let generation = TaskRepo::next_generation_for_issue(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?;
+
     // 3. F2 repo-required: run-time override, else the card's persisted repo.
     let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, issue_id)
         .await
@@ -2647,6 +2687,7 @@ pub(crate) async fn run_card(
             issue_id: Some(issue_id),
             repo_ref: Some(&repo_ref),
             agent_kind: Some(agent_kind),
+            generation,
             ..SquadAssignRequest::default()
         };
         let fanout = SquadAssignService::assign_fanout(
@@ -2687,6 +2728,7 @@ pub(crate) async fn run_card(
             priority: 0,
             created_at: SystemClock.now_ms(),
             autopilot_run_id: None,
+            generation,
         },
     )
     .await

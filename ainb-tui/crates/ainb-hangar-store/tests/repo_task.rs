@@ -64,6 +64,7 @@ fn new_task(id: &str, ws: &str, rt: &str, agent: &str, created_at: i64) -> NewTa
         priority: 0,
         created_at,
         autopilot_run_id: None,
+        generation: 0,
     }
 }
 

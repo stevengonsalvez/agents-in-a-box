@@ -118,8 +118,15 @@ async fn scheduled_gc_tick_reclaims_orphan() {
     let orphan = seed_task_dir(home.path(), "alpha", "0000orph", false);
     let live = seed_task_dir(home.path(), "alpha", "1111live", true);
 
+    // The sweeper also runs the worktree GC, which needs a store to resolve task
+    // status; this home has no `worktrees/` dir, so that pass is an inert no-op.
+    let store = ainb_hangar_store::Store::open_in(&home.path().join(".agents-in-a-box"))
+        .await
+        .expect("store");
+
     let clock = std::sync::Arc::new(FixedClock(now_past_grace()));
     let handle = spawn_gc_sweeper(
+        store.pool().clone(),
         home.path().to_path_buf(),
         std::time::Duration::from_millis(20),
         clock,

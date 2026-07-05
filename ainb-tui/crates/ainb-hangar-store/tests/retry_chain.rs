@@ -116,6 +116,7 @@ async fn seed_failed_task(
             priority: 0,
             created_at: 1,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await
@@ -374,6 +375,7 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
             priority: 0,
             created_at: 6,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await
@@ -574,6 +576,7 @@ async fn partial_unique_index_blocks_retry_when_existing_pending() {
             priority: 0,
             created_at: 5,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

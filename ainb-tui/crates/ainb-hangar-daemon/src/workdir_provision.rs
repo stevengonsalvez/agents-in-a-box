@@ -21,10 +21,11 @@
 //!
 //! # Two slugs: per-RUN worktree vs per-CARD scratch
 //!
-//! The `slug` is the caller's per-task key (the task short-id). Because it is
-//! unique per task, two cards launched on the SAME repo provision two DISTINCT
+//! The `slug` is the caller's per-task key (the FULL task id, tcp vpm). Because it
+//! is unique per task, two cards launched on the SAME repo provision two DISTINCT
 //! worktrees on two DISTINCT `ainb/<slug>` branches — they never collide (the F5
-//! "N tasks on one repo never collide" guarantee).
+//! "N tasks on one repo never collide" guarantee, now airtight: no truncated prefix
+//! can alias two ids).
 //!
 //! Scratch is different: it is the card's durable scratch space (F2 intent), so it
 //! is keyed on the caller's `scratch_slug` — a per-(card, agent) key, STABLE across
@@ -45,6 +46,9 @@
 use std::io;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+
+use ainb_hangar_store::repo::task::TaskRepo;
+use sqlx::SqlitePool;
 
 /// The provisioned working directory for a run, plus what teardown must do.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -251,6 +255,153 @@ fn git_capture(cwd: &Path, args: &[&str]) -> io::Result<Option<String>> {
     } else {
         Ok(None)
     }
+}
+
+/// The tally of one [`sweep_orphan_worktrees`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct WorktreeGcReport {
+    /// Worktrees removed + deregistered this pass (task terminal AND tree clean).
+    pub removed: u64,
+    /// Worktrees KEPT because their tree is dirty (uncommitted agent work preserved).
+    pub kept_dirty: u64,
+    /// Worktrees left alone because the task is still active, unknown, or its status
+    /// could not be read (never delete on uncertainty).
+    pub kept_active: u64,
+}
+
+/// Reclaim orphaned task worktrees under `<home>/.agents-in-a-box/worktrees/` (tcp
+/// yjj): a Ctrl-C mid-run or a crash between finalize and [`teardown`] leaves the
+/// run's git worktree on disk even though its task row is terminal. This is the
+/// scheduled backstop that sweeps them.
+///
+/// Each `worktrees/<slug>` dir is named after its run's FULL task id (tcp vpm), so
+/// the sweep resolves the task by that id and, per worktree:
+///   - **remove + deregister** it (mirroring [`teardown`]) when the task is TERMINAL
+///     (`done` / `failed` / `cancelled`) AND the checkout is CLEAN;
+///   - **keep** it when the checkout is DIRTY (uncommitted agent work is never
+///     silently dropped — the same keep-if-dirty guarantee [`teardown`] gives);
+///   - **keep** it when the task is still active, unknown (a legacy-slug or
+///     hand-made dir), or its status could not be read — the sweep never deletes a
+///     worktree it cannot prove is a finished run's leak;
+///   - **keep** it when the task still has a LIVE registered run in this process
+///     ([`CancelRegistry::is_live`]) — a manual board transition can terminal-mark
+///     a task whose provider is still executing in the checkout, and deleting a
+///     live run's cwd would corrupt it (codex F4).
+///
+/// Removal deregisters the worktree from its origin repo (`git worktree prune`
+/// against the resolved shared git dir) so no stale registration lingers.
+///
+/// [`CancelRegistry::is_live`]: crate::cancel::CancelRegistry::is_live
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] only if the `worktrees/` tree is present but unreadable,
+/// a dirtiness probe cannot spawn `git`, or a clean worktree's removal fails — the
+/// scheduler logs and swallows it (a GC pass must never down the daemon).
+pub async fn sweep_orphan_worktrees(
+    pool: &SqlitePool,
+    home: &Path,
+) -> io::Result<WorktreeGcReport> {
+    let root = ainb_root(home).join("worktrees");
+    let mut report = WorktreeGcReport::default();
+
+    // A daemon that never provisioned a worktree has no `worktrees/` dir — a no-op.
+    let entries = match std::fs::read_dir(&root) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(report),
+        Err(e) => return Err(e),
+    };
+    let mut worktrees: Vec<PathBuf> = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            worktrees.push(entry.path());
+        }
+    }
+    worktrees.sort();
+
+    for wt in worktrees {
+        let Some(slug) = wt.file_name().and_then(|s| s.to_str()) else {
+            report.kept_active += 1;
+            continue;
+        };
+        let terminal = match TaskRepo::get_by_id(pool, slug).await {
+            Ok(Some(task)) => is_terminal_status(&task.status),
+            // Unknown id (legacy-slug / hand-made dir) or a store fault → never
+            // delete on uncertainty; leave it for a human or the next pass.
+            Ok(None) => false,
+            Err(e) => {
+                tracing::warn!(error = %e, slug, "worktree gc: task lookup failed; keeping");
+                false
+            }
+        };
+        if !terminal {
+            report.kept_active += 1;
+            continue;
+        }
+        // Liveness guard (codex F4): a manually terminal-marked task can still have
+        // its provider running in this checkout; never delete a live run's cwd.
+        if crate::cancel::registry().is_live(slug) {
+            report.kept_active += 1;
+            continue;
+        }
+        if is_dirty(&wt)? {
+            report.kept_dirty += 1;
+            continue;
+        }
+        remove_and_deregister_worktree(&wt)?;
+        report.removed += 1;
+    }
+    Ok(report)
+}
+
+/// Whether a task status token is terminal (`done` / `failed` / `cancelled`), the
+/// set the DB `CHECK` constraint pairs with the active `queued`/`dispatched`/
+/// `running`. A terminal task's worktree is a teardown-eligible leak.
+fn is_terminal_status(status: &str) -> bool {
+    matches!(status, "done" | "failed" | "cancelled")
+}
+
+/// Remove a clean orphan worktree and prune its origin registration.
+///
+/// Resolves the origin's shared git dir BEFORE deleting the checkout (so the prune
+/// can still find it), removes the tree, then best-effort `git worktree prune`s the
+/// now-stale admin entry. A prune failure leaves only a harmless dangling
+/// registration, never an error.
+fn remove_and_deregister_worktree(worktree: &Path) -> io::Result<()> {
+    let common = worktree_common_git_dir(worktree);
+    match std::fs::remove_dir_all(worktree) {
+        Ok(()) => {}
+        Err(e) if e.kind() == io::ErrorKind::NotFound => {}
+        Err(e) => return Err(e),
+    }
+    if let Some(gitdir) = common.as_ref().and_then(|p| p.to_str()) {
+        let _ = Command::new("git")
+            .args(["--git-dir", gitdir, "worktree", "prune"])
+            .output()?;
+    }
+    Ok(())
+}
+
+/// Resolve the shared (origin) git dir of a linked worktree — `<origin>/.git` — so
+/// its registration can be pruned after the checkout is removed. `None` when the dir
+/// is not a git worktree or `git` cannot resolve it.
+fn worktree_common_git_dir(worktree: &Path) -> Option<PathBuf> {
+    let out = Command::new("git")
+        .args(["rev-parse", "--git-common-dir"])
+        .current_dir(worktree)
+        .output()
+        .ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let raw = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if raw.is_empty() {
+        return None;
+    }
+    let p = Path::new(&raw);
+    let abs = if p.is_absolute() { p.to_path_buf() } else { worktree.join(p) };
+    std::fs::canonicalize(&abs).ok().or(Some(abs))
 }
 
 /// Whether a worktree holds uncommitted changes (`git status --porcelain`

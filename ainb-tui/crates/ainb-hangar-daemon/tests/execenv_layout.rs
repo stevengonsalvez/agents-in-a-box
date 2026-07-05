@@ -51,6 +51,7 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         started_at: None,
         finished_at: None,
         autopilot_run_id: None,
+        generation: 0,
         mode: "headless".to_string(),
         session_name: None,
         repo_ref: None,
@@ -65,7 +66,7 @@ fn expected_root(home: &Path, slug: &str, task_id: &str) -> std::path::PathBuf {
         .join("hangar")
         .join("workspaces")
         .join(slug)
-        .join(short_id(task_id))
+        .join(task_id)
 }
 
 #[test]

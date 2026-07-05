@@ -91,6 +91,16 @@ impl CancelRegistry {
         }
     }
 
+    /// Whether `task_id` has a live registered run IN THIS PROCESS. The worktree
+    /// GC's liveness guard (tcp yjj): a manual board transition can terminal-mark a
+    /// task whose provider is still running, and the GC must not delete a live
+    /// run's checkout out from under it. A poisoned lock reports `true` — on
+    /// uncertainty, treat the run as live (never delete what might be running).
+    #[must_use]
+    pub fn is_live(&self, task_id: &str) -> bool {
+        self.inner.lock().map_or(true, |map| map.contains_key(task_id))
+    }
+
     /// Remove `task_id`'s entry (the guard's drop path). A poisoned lock leaves
     /// the entry — a bounded, ULID-keyed leak that never mis-signals a later run.
     fn unregister(&self, task_id: &str) {

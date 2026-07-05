@@ -102,6 +102,7 @@ async fn seed_task(pool: &SqlitePool, id: &str, issue_id: Option<&str>) -> Task 
             priority: 0,
             created_at: 0,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

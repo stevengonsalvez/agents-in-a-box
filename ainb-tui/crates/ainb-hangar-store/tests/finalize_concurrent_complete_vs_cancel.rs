@@ -77,6 +77,7 @@ async fn seed(store: &Store) {
             priority: 0,
             created_at: 1,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

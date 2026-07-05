@@ -60,6 +60,15 @@ pub struct NewTask {
     /// `issue_id`) is the discriminator that marks the row as an autopilot task;
     /// the finalize cascade follows it to stamp the run's `completed_at`.
     pub autopilot_run_id: Option<String>,
+    /// The run generation this task belongs to (migration 0039, tcp 8ln). Every
+    /// fresh Run / rerun / fan-out of an issue enqueues at the issue's NEXT
+    /// generation ([`TaskRepo::next_generation_for_issue`]); the leader + all
+    /// members of one fan-out SHARE one value (they are one run), and an infra
+    /// retry child copies its parent's. `0` for the first run and for issueless
+    /// chat / autopilot tasks. The card-state folds (aggregate / blocker-finished
+    /// / auto-move / chip) scope to an issue's LATEST generation, so prior-run
+    /// terminal rows never poison the current run.
+    pub generation: i64,
 }
 
 /// A fully-materialised `agent_task_queue` row read back from the database.
@@ -135,6 +144,10 @@ pub struct Task {
     /// durable artifact that survives worktree teardown (`git worktree remove`
     /// keeps the branch); `None` when the run made no commits (nothing to surface).
     pub branch: Option<String>,
+    /// The run generation this row belongs to (migration 0039, tcp 8ln). See
+    /// [`NewTask::generation`]. Carried on the struct so the infra-retry path
+    /// copies it verbatim (a retry is a new attempt of the SAME run generation).
+    pub generation: i64,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
@@ -180,8 +193,8 @@ impl TaskRepo {
         sqlx::query(
             "INSERT INTO agent_task_queue \
              (id, workspace_id, runtime_id, agent_id, issue_id, work_dir, priority, \
-              created_at, autopilot_run_id) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              created_at, autopilot_run_id, generation) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&task.id)
         .bind(&task.workspace_id)
@@ -192,6 +205,7 @@ impl TaskRepo {
         .bind(task.priority)
         .bind(task.created_at)
         .bind(&task.autopilot_run_id)
+        .bind(task.generation)
         .execute(&mut **tx)
         .await?;
         Ok(task.id.clone())
@@ -332,14 +346,26 @@ impl TaskRepo {
     ///   the card succeeded. Precedence is deliberate — a squad where one member
     ///   failed is a card-level failure even if the rest succeeded.
     ///
-    /// # Single run generation (known limitation)
+    /// # Latest run generation only (migration 0039, tcp 8ln)
     ///
-    /// The fold spans EVERY task the issue has ever had, so it assumes those tasks are
-    /// ONE run generation — true for a single fan-out. A card RE-RUN after a prior
-    /// `failed`/`cancelled` run leaves those older terminal rows in the table, and
-    /// precedence would then still report `failed`/`cancelled` even after a clean
-    /// rerun. Scoping to the latest run needs a run-generation marker (follow-up); the
-    /// concurrent-fan-out contract this backs is unaffected.
+    /// The fold is scoped to the issue's LATEST generation
+    /// ([`next_generation_for_issue`](Self::next_generation_for_issue) mints a fresh
+    /// one per Run / rerun / fan-out). A card RE-RUN after a prior
+    /// `failed`/`cancelled` run leaves those older terminal rows in the table at a
+    /// LOWER generation, so they are excluded here and a clean rerun reports `done`
+    /// (the old-terminal-rows-poison-rerun bug). The concurrent-fan-out contract is
+    /// unaffected: a fan-out's leader + members all share one generation, so the
+    /// whole set is still folded together.
+    ///
+    /// # Retry-superseded attempts are excluded (codex F1)
+    ///
+    /// An infra retry spawns a child row IN the same generation whose
+    /// `parent_task_id` chains to the failed attempt. The failed parent is a
+    /// SUPERSEDED attempt — the child carries the attempt's real outcome — so any
+    /// row another row names as its parent is excluded from the fold. Without this,
+    /// a retryable failure would poison the generation `failed` forever, even after
+    /// its retry child completed `done`. A capped chain's LAST failure has no child
+    /// and still counts.
     ///
     /// # Errors
     ///
@@ -349,9 +375,10 @@ impl TaskRepo {
         workspace_id: &str,
         issue_id: &str,
     ) -> Result<Option<String>, sqlx::Error> {
-        // One pass over the issue's tasks: NULL while any task is still active (the
-        // drain gate), else the highest-precedence terminal token present. `SUM(bool)`
-        // over zero rows is NULL, so a task-less issue also yields NULL.
+        // One pass over the issue's LATEST-generation, non-superseded tasks: NULL
+        // while any is still active (the drain gate), else the highest-precedence
+        // terminal token present. `SUM(bool)` over zero rows is NULL, so a task-less
+        // issue (the MAX subquery is NULL, matching no row) also yields NULL.
         sqlx::query_scalar::<_, Option<String>>(
             "SELECT CASE \
                WHEN SUM(status IN ('queued','dispatched','running')) > 0 THEN NULL \
@@ -359,12 +386,42 @@ impl TaskRepo {
                WHEN SUM(status = 'cancelled') > 0 THEN 'cancelled' \
                WHEN SUM(status = 'done') > 0 THEN 'done' \
                ELSE NULL END \
-             FROM agent_task_queue WHERE workspace_id = ? AND issue_id = ?",
+             FROM agent_task_queue \
+             WHERE workspace_id = ?1 AND issue_id = ?2 \
+               AND generation = (SELECT MAX(generation) FROM agent_task_queue \
+                                 WHERE issue_id = ?2) \
+               AND id NOT IN (SELECT parent_task_id FROM agent_task_queue \
+                              WHERE issue_id = ?2 AND parent_task_id IS NOT NULL)",
         )
         .bind(workspace_id)
         .bind(issue_id)
         .fetch_one(pool)
         .await
+    }
+
+    /// The NEXT run generation for `issue_id` (migration 0039, tcp 8ln): one past
+    /// the highest generation any task on the issue currently carries, or `0` when
+    /// the issue has never run. Called ONCE per Run / rerun / fan-out so every task
+    /// of that run shares the value — the fan-out leader + members are stamped with
+    /// it, and the card-state folds scope to it.
+    ///
+    /// The caller holds the per-card launch slot + the one-active-run guard
+    /// ([`run_card`](../../../ainb_hangar_daemon/rpc/fn.run_card.html)), so no two
+    /// runs of one card compute the same generation concurrently.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn next_generation_for_issue(
+        pool: &SqlitePool,
+        issue_id: &str,
+    ) -> Result<i64, sqlx::Error> {
+        let max: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(generation) FROM agent_task_queue WHERE issue_id = ?")
+                .bind(issue_id)
+                .fetch_one(pool)
+                .await?;
+        Ok(max.map_or(0, |m| m + 1))
     }
 
     /// List the *pending* (`queued` or `dispatched`) tasks for a runtime,
@@ -479,7 +536,7 @@ impl TaskRepo {
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
      priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
-     mode, session_name, repo_ref, agent_kind, branch";
+     mode, session_name, repo_ref, agent_kind, branch, generation";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -508,6 +565,7 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         repo_ref: row.try_get("repo_ref")?,
         agent_kind: row.try_get("agent_kind")?,
         branch: row.try_get("branch")?,
+        generation: row.try_get("generation")?,
     })
 }
 
@@ -551,6 +609,24 @@ mod tests {
              VALUES (?, ?, 'rt', 'ag', ?, ?, ?)",
         )
         .bind(id).bind(WS).bind(issue_id).bind(status).bind(created_at)
+        .execute(pool).await.unwrap();
+    }
+
+    /// Insert a task row at an explicit `generation` (migration 0039), so a test can
+    /// build a multi-generation (rerun / fan-out) history directly.
+    async fn seed_task_gen(
+        pool: &SqlitePool,
+        issue_id: &str,
+        id: &str,
+        status: &str,
+        created_at: i64,
+        generation: i64,
+    ) {
+        sqlx::query(
+            "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, generation) \
+             VALUES (?, ?, 'rt', 'ag', ?, ?, ?, ?)",
+        )
+        .bind(id).bind(WS).bind(issue_id).bind(status).bind(created_at).bind(generation)
         .execute(pool).await.unwrap();
     }
 
@@ -649,6 +725,100 @@ mod tests {
         assert_eq!(
             TaskRepo::issue_aggregate_terminal_state(pool, WS, "allcancel").await.unwrap().as_deref(),
             Some("cancelled")
+        );
+    }
+
+    /// A retryable failure's parent row is SUPERSEDED by its retry child (codex
+    /// F1): once the child completes `done`, the generation aggregates `done` —
+    /// the stale failed attempt does not poison the card. A CAPPED chain (last
+    /// failure has no child) still aggregates `failed`.
+    #[tokio::test]
+    async fn aggregate_ignores_retry_superseded_attempts() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_chain(pool, "retry").await;
+
+        // Parent failed, retry child (same generation, parent_task_id set) done.
+        seed_task_gen(pool, "retry", "parent", "failed", 1, 0).await;
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
+              generation, parent_task_id, attempt) \
+             VALUES ('child', ?, 'rt', 'ag', 'retry', 'done', 2, 0, 'parent', 2)",
+        )
+        .bind(WS)
+        .execute(pool).await.unwrap();
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "retry").await.unwrap().as_deref(),
+            Some("done"),
+            "the superseded failed attempt is excluded; the retry child's done wins"
+        );
+
+        // A capped chain: the child itself fails with no further child → failed.
+        seed_chain(pool, "capped").await;
+        seed_task_gen(pool, "capped", "cp-parent", "failed", 1, 0).await;
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
+              generation, parent_task_id, attempt) \
+             VALUES ('cp-child', ?, 'rt', 'ag', 'capped', 'failed', 2, 0, 'cp-parent', 2)",
+        )
+        .bind(WS)
+        .execute(pool).await.unwrap();
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "capped").await.unwrap().as_deref(),
+            Some("failed"),
+            "a capped chain's LAST failure has no child and still fails the card"
+        );
+    }
+
+    /// `next_generation_for_issue` is 0 for an unseen issue and one past the highest
+    /// generation present otherwise — the value a fresh Run / rerun stamps.
+    #[tokio::test]
+    async fn next_generation_bumps_past_the_highest() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_chain(pool, "iss").await;
+        assert_eq!(TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(), 0, "never-run → 0");
+        seed_task_gen(pool, "iss", "g0", "failed", 1, 0).await;
+        assert_eq!(TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(), 1, "one past gen 0");
+        seed_task_gen(pool, "iss", "g1", "done", 2, 1).await;
+        assert_eq!(TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(), 2, "one past gen 1");
+    }
+
+    /// The 8ln bug: a failed run (gen 0) then a clean rerun (gen 1, done) must
+    /// aggregate to `done` — the old gen-0 `failed` row no longer poisons the card,
+    /// so a failed-then-rerun-successful card auto-moves to the DONE column.
+    #[tokio::test]
+    async fn aggregate_scopes_to_latest_generation_after_a_rerun() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_chain(pool, "rerun").await;
+
+        // Generation 0: the card ran and FAILED.
+        seed_task_gen(pool, "rerun", "g0", "failed", 1, 0).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun").await.unwrap().as_deref(),
+            Some("failed"),
+            "the only generation is the failed one"
+        );
+
+        // Generation 1: the user reruns and it SUCCEEDS. The stale gen-0 failed row
+        // is excluded — the card is now `done`.
+        seed_task_gen(pool, "rerun", "g1", "done", 2, 1).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun").await.unwrap().as_deref(),
+            Some("done"),
+            "the latest generation succeeded — prior failure does not poison it"
+        );
+
+        // A gen-1 squad sibling still running re-gates the drain (aggregate None),
+        // proving the drain gate is also generation-scoped.
+        seed_task_gen(pool, "rerun", "g1-b", "running", 3, 1).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun").await.unwrap(),
+            None,
+            "a live sibling in the latest generation means the run has not drained"
         );
     }
 }

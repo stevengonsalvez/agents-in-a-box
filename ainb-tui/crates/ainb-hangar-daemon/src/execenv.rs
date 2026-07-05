@@ -12,10 +12,13 @@
 //! └── .gc_meta.json   # GC marker: who owns this dir + when it was seen
 //! ```
 //!
-//! `shortID` is the task ULID's first 8 characters plus its last 6 (see
-//! [`short_id`] — the random tail keeps same-instant ids distinct). Because the
-//! ULID is injected via [`crate`]'s id-generation seam in tests, the path is
-//! deterministic across runs.
+//! The `{shortID}` path segment is the task's FULL ULID (tcp vpm): keying the
+//! per-task tree on the whole id makes a path collision impossible, where any
+//! truncated slug (the pre-T4 first-8-chars, or the T4 first-8-plus-last-6) could
+//! in principle collide and cross-wire two runs' worktree / logs / output. Readers
+//! ([`logs_dir_candidates`]) still fall back through the two legacy slug schemes so
+//! a run written before this change resolves. Because the ULID is injected via
+//! [`crate`]'s id-generation seam in tests, the path is deterministic across runs.
 //!
 //! # GC marker
 //!
@@ -165,15 +168,17 @@ pub fn legacy_short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
 }
 
-/// The per-task `{shortID}` root directory —
-/// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{short_id(task_id)}/` —
-/// the single source of truth for the layout [`prepare_env`] provisions. Pure
-/// path derivation (creates nothing), so a read path (e.g. the board-card timeline
-/// RPC locating a run's `logs/*.jsonl`) can address the exact tree a run wrote
-/// without re-deriving — and can never drift from it.
+/// The per-task root directory —
+/// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{task_id}/` — keyed on the
+/// FULL task id (tcp vpm), the single source of truth for the layout
+/// [`prepare_env`] provisions. Pure path derivation (creates nothing), so a read
+/// path (e.g. the board-card timeline RPC locating a run's `logs/*.jsonl`) can
+/// address the exact tree a run wrote without re-deriving — and can never drift
+/// from it. A run written under a legacy truncated slug is reached by
+/// [`logs_dir_candidates`]'s fallbacks.
 #[must_use]
 pub fn task_root(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
-    task_root_for_slug(home, ws_slug, &short_id(task_id))
+    task_root_for_slug(home, ws_slug, task_id)
 }
 
 /// The per-workspace task root for an already-computed `slug` (the shared shape
@@ -194,23 +199,31 @@ pub fn logs_dir(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
 }
 
 /// The candidate `logs/` directories for a task, newest-scheme first: the current
-/// [`short_id`] path, then — when the pre-T4 [`legacy_short_id`] slug DIFFERS — the
-/// legacy path.
+/// FULL-id path ([`task_root`]), then the T4 [`short_id`] (first-8-plus-last-6)
+/// path, then the pre-T4 [`legacy_short_id`] (first-8) path — each included only
+/// when its slug DIFFERS from a scheme already listed.
 ///
-/// A reader tries these in order so a run written under EITHER slug scheme
-/// resolves: a fresh run only ever matches the first, while a pre-upgrade run
-/// whose tree was written under the old first-8-chars slug is still found instead
-/// of being stranded. Pure path derivation (touches no disk); the caller probes
-/// each for the file it wants.
+/// A reader tries these in order so a run written under ANY of the three slug
+/// schemes resolves: a fresh run (tcp vpm) matches the full-id path, while a run
+/// written under either older, truncated slug is still found instead of being
+/// stranded. Pure path derivation (touches no disk); the caller probes each for the
+/// file it wants.
 #[must_use]
 pub fn logs_dir_candidates(home: &Path, ws_slug: &str, task_id: &str) -> Vec<PathBuf> {
-    let new = short_id(task_id);
+    let short = short_id(task_id);
     let legacy = legacy_short_id(task_id);
-    let mut dirs = vec![task_root_for_slug(home, ws_slug, &new).join("logs")];
-    if legacy != new {
-        dirs.push(task_root_for_slug(home, ws_slug, legacy).join("logs"));
+    // Full id first (the current write scheme), then each legacy slug that differs.
+    let mut slugs: Vec<&str> = vec![task_id];
+    if short != task_id {
+        slugs.push(&short);
     }
-    dirs
+    if legacy != task_id && legacy != short {
+        slugs.push(legacy);
+    }
+    slugs
+        .into_iter()
+        .map(|slug| task_root_for_slug(home, ws_slug, slug).join("logs"))
+        .collect()
 }
 
 /// Create (or reuse) the per-task directory layout under `home`, writing the
@@ -465,7 +478,7 @@ fn system_time_to_ms(t: SystemTime) -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use super::{legacy_short_id, logs_dir_candidates, short_id};
+    use super::{legacy_short_id, logs_dir, logs_dir_candidates, short_id, task_root};
     use std::path::Path;
 
     /// Two ULIDs minted in the same instant share their (coarse-timestamp) first
@@ -499,29 +512,69 @@ mod tests {
         assert_eq!(legacy_short_id("wt-a"), "wt-a");
     }
 
-    /// A reader probes the NEW slug dir first, then falls back to the legacy dir
-    /// when the two schemes differ — a real ULID yields both candidates, so a
-    /// pre-upgrade transcript under the old slug is never stranded. A short id
-    /// (whole under both schemes) yields a single candidate, no duplicate.
+    /// A reader probes the FULL-id dir first (the current write scheme, tcp vpm),
+    /// then falls back through the T4 short_id slug and the pre-T4 legacy first-8
+    /// slug — a real ULID yields all three, so a run written under ANY scheme is
+    /// found. A short id (whole under every scheme) yields a single candidate.
     #[test]
-    fn logs_dir_candidates_prefers_new_then_legacy() {
+    fn logs_dir_candidates_prefers_full_then_short_then_legacy() {
         let home = Path::new("/home");
         let ulid = "01JB2K3W4APQRSTUVWXYZ23456";
         let cands = logs_dir_candidates(home, "ws", ulid);
-        assert_eq!(cands.len(), 2, "a ULID yields new + legacy candidates");
+        assert_eq!(cands.len(), 3, "a ULID yields full + short + legacy candidates");
         assert!(
-            cands[0].ends_with("workspaces/ws/01JB2K3WZ23456/logs"),
-            "the new slug dir is tried first: {:?}",
+            cands[0].ends_with("workspaces/ws/01JB2K3W4APQRSTUVWXYZ23456/logs"),
+            "the FULL-id dir is tried first: {:?}",
             cands[0]
         );
         assert!(
-            cands[1].ends_with("workspaces/ws/01JB2K3W/logs"),
-            "the legacy first-8 slug dir is the fallback: {:?}",
+            cands[1].ends_with("workspaces/ws/01JB2K3WZ23456/logs"),
+            "the T4 short_id slug is the second candidate: {:?}",
             cands[1]
         );
+        assert!(
+            cands[2].ends_with("workspaces/ws/01JB2K3W/logs"),
+            "the pre-T4 legacy first-8 slug is the last fallback: {:?}",
+            cands[2]
+        );
 
-        // A short id is identical under both schemes → one candidate only.
+        // A short id is identical under every scheme → one candidate only.
         let short = logs_dir_candidates(home, "ws", "wt-a");
         assert_eq!(short.len(), 1, "no duplicate candidate when the schemes agree");
+    }
+
+    /// Collision proof (tcp vpm): two distinct task ids that COLLIDE under BOTH
+    /// legacy slug schemes — identical first-8 (pre-T4) AND identical first-8+last-6
+    /// (T4) — still get DISTINCT `task_root` / `logs_dir` paths under the full-id
+    /// write scheme, so their worktree / logs / output never cross-wire.
+    #[test]
+    fn full_id_paths_do_not_collide_when_legacy_slugs_would() {
+        let home = Path::new("/home");
+        // Same first 8 AND same last 6 → identical `short_id` and `legacy_short_id`,
+        // differing only in the middle of the random part.
+        let a = "01JB2K3W4AAAAAAAAAAAAAABCDEF".to_string();
+        let b = "01JB2K3W4ABBBBBBBBBBBBBABCDEF".to_string();
+        assert_eq!(short_id(&a), short_id(&b), "the two ids alias under the T4 slug");
+        assert_eq!(
+            legacy_short_id(&a),
+            legacy_short_id(&b),
+            "and alias under the pre-T4 slug too"
+        );
+
+        // Yet the full-id write paths are distinct — no cross-wiring.
+        assert_ne!(
+            task_root(home, "ws", &a),
+            task_root(home, "ws", &b),
+            "full-id task roots must be distinct"
+        );
+        assert_ne!(
+            logs_dir(home, "ws", &a),
+            logs_dir(home, "ws", &b),
+            "full-id logs dirs must be distinct"
+        );
+        assert!(
+            task_root(home, "ws", &a).ends_with(&a),
+            "the task root is keyed on the whole id"
+        );
     }
 }
