@@ -2092,6 +2092,9 @@ async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
         issue_id: args.issue.as_deref(),
         work_dir: args.work_dir.as_deref(),
         priority: args.priority,
+        // The CLI assign carries no card repo/agent (tcp T4): the task runs in-tree,
+        // exactly the pre-T4 behaviour.
+        ..SquadAssignRequest::default()
     };
     let assignment = SquadAssignService::assign_to_leader(
         store.pool(),
