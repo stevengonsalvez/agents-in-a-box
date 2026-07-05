@@ -31,7 +31,68 @@
 use ainb_hangar_proto::snapshots::{BoardCardWireRow, BoardsListResult};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
+use crate::screen::task_detail::ViewEntry;
 use crate::widgets::card_board::{self, BoardCard, PriorityChip};
+use crate::widgets::transcript::render_transcript;
+
+/// The prettied JSONL timeline overlay opened over a card (`t`, tcp T3 / F6).
+///
+/// A read-only, scrollable view of a card's newest run transcript, parsed from the
+/// provider's on-disk stream-json ([`crate::widgets::jsonl_timeline`]) into the
+/// shared transcript taxonomy. Held as a side-cache on [`BoardsState`] (not the
+/// pure overlay enum) because its content is IO-derived: the glue fetches the
+/// transcript over `hangar/board_card_timeline`, parses it, and stashes the entries
+/// here for the render to paint. Scrolls with `j`/`k`, closes with `Esc`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimelineView {
+    /// The overlay title (`Timeline · #<issue> · <provider>`).
+    title: String,
+    /// The parsed transcript entries, in stream order.
+    entries: Vec<ViewEntry>,
+    /// The first visible entry (vertical scroll).
+    scroll: usize,
+}
+
+impl TimelineView {
+    /// A fresh timeline for `title` over `entries`, scrolled to the top.
+    #[must_use]
+    pub fn new(title: impl Into<String>, entries: Vec<ViewEntry>) -> Self {
+        Self {
+            title: title.into(),
+            entries,
+            scroll: 0,
+        }
+    }
+
+    /// The title bar text.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The parsed transcript entries.
+    #[must_use]
+    pub fn entries(&self) -> &[ViewEntry] {
+        &self.entries
+    }
+
+    /// The first-visible entry index (scroll offset).
+    #[must_use]
+    pub const fn scroll(&self) -> usize {
+        self.scroll
+    }
+
+    /// Scroll by `delta` rows, saturating at the top and at the last entry (never
+    /// scrolling into a blank past-the-end gap).
+    pub fn scroll_by(&mut self, delta: i32) {
+        let last = self.entries.len().saturating_sub(1);
+        self.scroll = if delta >= 0 {
+            self.scroll.saturating_add(delta.unsigned_abs() as usize).min(last)
+        } else {
+            self.scroll.saturating_sub(delta.unsigned_abs() as usize)
+        };
+    }
+}
 
 /// Gold accent for the board title + active auto-move toggle.
 const GOLD: Color = Color::rgb(255, 215, 0);
@@ -415,6 +476,10 @@ pub struct BoardsState {
     /// A transient status note (e.g. the attach feedback, or a run's routed
     /// agent), rendered in the title row and cleared by the next mutation.
     note: Option<String>,
+    /// The open prettied-JSONL timeline overlay (`t`), or `None`. A side-cache the
+    /// glue populates from `hangar/board_card_timeline`; kept out of the pure
+    /// reducer because its content is IO-derived.
+    timeline: Option<TimelineView>,
 }
 
 impl BoardsState {
@@ -454,9 +519,33 @@ impl BoardsState {
             default_agent: AgentChip::default(),
             overlay: None,
             note: None,
+            timeline: None,
         };
         state.clamp();
         state
+    }
+
+    /// The open timeline overlay, if any (the render paints it over the board).
+    #[must_use]
+    pub const fn timeline(&self) -> Option<&TimelineView> {
+        self.timeline.as_ref()
+    }
+
+    /// Open (replace) the timeline overlay with a fetched, parsed transcript.
+    pub fn set_timeline(&mut self, timeline: TimelineView) {
+        self.timeline = Some(timeline);
+    }
+
+    /// Close the timeline overlay (`Esc`).
+    pub fn close_timeline(&mut self) {
+        self.timeline = None;
+    }
+
+    /// Scroll the open timeline by `delta` rows (a no-op when none is open).
+    pub fn scroll_timeline(&mut self, delta: i32) {
+        if let Some(tl) = self.timeline.as_mut() {
+            tl.scroll_by(delta);
+        }
     }
 
     /// Set a transient status note (shown in the title row until the next refresh
@@ -523,6 +612,9 @@ impl BoardsState {
         self.default_agent = prev.default_agent;
         self.overlay.clone_from(&prev.overlay);
         self.note.clone_from(&prev.note);
+        // Keep an open timeline overlay across a background refresh so a
+        // boards_list reply while reading a transcript never yanks it closed.
+        self.timeline.clone_from(&prev.timeline);
         self.clamp();
     }
 
@@ -633,6 +725,10 @@ pub enum BoardsEvent {
     ReorderCardUp,
     /// Move the focused card one slot down within its column (`⇧↓`, tcp T3 / F6).
     ReorderCardDown,
+    /// Open the focused card's prettied JSONL timeline (`t`, tcp T3 / F6) — the
+    /// glue fetches + parses the run transcript and stashes it for the overlay. A
+    /// no-op with no card focused.
+    ShowTimeline,
     /// Add a column to the focused board (`n`) — the glue prompts for the name.
     AddColumn,
     /// Rename the focused column (`r`).
@@ -702,6 +798,15 @@ pub enum BoardsIntent {
         column_id: String,
         /// The card issue ids in their new top-to-bottom order.
         issue_ids: Vec<String>,
+    },
+    /// Fetch + open the card's prettied JSONL timeline
+    /// (`hangar/board_card_timeline`, tcp T3 / F6). The glue parses the returned
+    /// transcript and stashes it via [`BoardsState::set_timeline`].
+    ShowTimeline {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue whose run transcript to show.
+        issue_id: String,
     },
     /// Prompt for a name and add a column (`hangar/board_column_add`).
     AddColumn {
@@ -805,6 +910,11 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
         }),
         BoardsEvent::ReorderCardUp => reorder_card(state, -1),
         BoardsEvent::ReorderCardDown => reorder_card(state, 1),
+        // Timeline fetch: emit the intent (the glue does the IO + parse + stash).
+        BoardsEvent::ShowTimeline => card_intent(state, |b, c| BoardsIntent::ShowTimeline {
+            board_id: b.id.clone(),
+            issue_id: c.issue_id.clone(),
+        }),
         BoardsEvent::AddColumn => board_intent(state, |b| BoardsIntent::AddColumn {
             board_id: b.id.clone(),
         }),
@@ -1495,6 +1605,12 @@ fn unchanged(state: &BoardsState) -> BoardsReduction {
 /// near_control`); the card-board fills the rest. An empty state (no boards)
 /// paints a prompt to create one.
 pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, state: &BoardsState) {
+    // The timeline overlay, when open, takes the whole body (a read-only
+    // scrollable transcript over the board).
+    if let Some(tl) = state.timeline() {
+        render_timeline_overlay(buf, area_w, top, bottom, tl);
+        return;
+    }
     let Some(board) = state.focused_board() else {
         render_no_board(buf, area_w, top, state.status());
         return;
@@ -1548,6 +1664,34 @@ pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, s
     if let Some(overlay) = state.overlay() {
         render_overlay(buf, area_w, body_top, overlay, state.profiles(), state.repos());
     }
+}
+
+/// Paint the prettied JSONL timeline overlay over the whole body: a gold title
+/// row (`Timeline · … · j/k scroll · Esc close` — hint-near-control) and, below
+/// it, the parsed transcript painted THROUGH the shared
+/// [`render_transcript`](crate::widgets::transcript::render_transcript) from the
+/// scroll offset, so the card's history reads in the exact 5-colour taxonomy the
+/// live task-detail transcript uses.
+fn render_timeline_overlay(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    top: u16,
+    bottom: u16,
+    tl: &TimelineView,
+) {
+    let title = format!("{}   j/k scroll · Esc close", tl.title());
+    put_str(buf, 0, top, &title, GOLD, area_w);
+    let body_top = top.saturating_add(1);
+    if body_top > bottom {
+        return;
+    }
+    let entries = tl.entries();
+    if entries.is_empty() {
+        put_str(buf, 0, body_top, "no run transcript yet — launch this card first", MUTED, area_w);
+        return;
+    }
+    let from = tl.scroll().min(entries.len().saturating_sub(1));
+    render_transcript(buf, area_w, body_top, bottom, &entries[from..]);
 }
 
 /// Paint the open overlay as a two-row banner at `row`: a prompt line plus its
@@ -1722,10 +1866,11 @@ fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
     // Card-lifecycle verbs (F6) lead so they render even when a narrow pane clips
     // the trailing column verbs. `⇧↑↓` reorders a card within its column, `d`
     // removes it. `feedback_keybinding_hints_near_control`.
-    let hints: [(&str, &str); 11] = [
+    let hints: [(&str, &str); 12] = [
         ("↵", "run/rerun"),
         ("a", "attach"),
         ("X", "cancel"),
+        ("t", "timeline"),
         ("d", "remove"),
         ("⇧↑↓", "move card"),
         ("n", "add col"),
@@ -1999,6 +2144,54 @@ mod tests {
         assert_eq!(state.focused_card().unwrap().issue_id, "issue-1");
         let r = reduce_boards(&state, BoardsEvent::ReorderCardDown);
         assert_eq!(r.intent, None, "a lone card has no reorder");
+    }
+
+    /// `t` on a focused card emits a ShowTimeline fetch intent (the glue does the
+    /// IO + parse; no overlay opens until the reply lands).
+    #[test]
+    fn show_timeline_emits_fetch_intent() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let r = reduce_boards(&state, BoardsEvent::ShowTimeline);
+        assert_eq!(
+            r.intent,
+            Some(BoardsIntent::ShowTimeline {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+            })
+        );
+        assert!(r.state.timeline().is_none(), "the overlay opens on the reply, not now");
+    }
+
+    /// A populated timeline overlay renders its title + the parsed transcript
+    /// (tool calls read on the board), and scrolling clamps at both ends.
+    #[test]
+    fn timeline_overlay_renders_parsed_transcript_and_scrolls() {
+        let jsonl = concat!(
+            "{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"tool_use\",\"id\":\"t1\",\"name\":\"Bash\",\"input\":{\"command\":\"cargo test\"}}]}}\n",
+            "{\"type\":\"result\",\"subtype\":\"success\",\"result\":\"green\"}\n",
+        );
+        let entries = crate::widgets::jsonl_timeline::parse_timeline(jsonl);
+        assert!(!entries.is_empty(), "fixture parses to entries");
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_timeline(TimelineView::new("Timeline · claude", entries));
+        assert!(state.timeline().is_some());
+
+        let mut buf = WireBuffer::new(80, 12);
+        render_boards(&mut buf, 80, 0, 11, &state);
+        let map = painted(&buf);
+        assert!(map.contains("Timeline"), "the overlay title renders:\n{map}");
+        assert!(map.contains("Bash"), "the parsed tool call renders on the board:\n{map}");
+
+        // Scroll clamps: up past the top stays at 0, down past the end caps.
+        state.scroll_timeline(-5);
+        assert_eq!(state.timeline().unwrap().scroll(), 0, "clamped at the top");
+        state.scroll_timeline(100);
+        let last = state.timeline().unwrap().entries().len() - 1;
+        assert_eq!(state.timeline().unwrap().scroll(), last, "capped at the last entry");
+
+        // Closing drops the overlay.
+        state.close_timeline();
+        assert!(state.timeline().is_none());
     }
 
     /// `d` on a focused card opens a remove-confirm overlay (no intent yet, so a

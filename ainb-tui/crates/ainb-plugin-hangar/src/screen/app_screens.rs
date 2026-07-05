@@ -223,6 +223,14 @@ pub enum BoardsAction {
         /// The cards in their new top-to-bottom order.
         issue_ids: Vec<String>,
     },
+    /// Fetch + open a card's prettied JSONL timeline (`t`) —
+    /// `hangar/board_card_timeline` (tcp T3 / F6).
+    CardTimeline {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue whose run transcript to show.
+        issue_id: String,
+    },
     /// Rename a column to the typed name (`r`) — `hangar/board_column_update`.
     ColumnRename {
         /// The board the column belongs to.
@@ -1253,6 +1261,12 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
 /// toggles auto-move; `c` opens card-create; `r` opens column-rename; `Enter`
 /// opens the card's `Run ▾`; `a` attaches to the card's run.
 fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
+    // The timeline overlay (`t`) captures keys locally — a read-only scroll view
+    // that never routes to the reducer (its content is an IO-derived side-cache).
+    if states.boards.timeline().is_some() {
+        route_timeline_key(states, key);
+        return;
+    }
     let ev = if states.boards.overlay().is_some() {
         overlay_key_event(key)
     } else {
@@ -1271,6 +1285,20 @@ fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
         None if states.boards.overlay().is_some() => Some(BoardsAction::Refresh),
         None => None,
     };
+}
+
+/// Handle a key while the prettied-JSONL timeline overlay is open (tcp T3 / F6):
+/// `Esc` closes it, `j`/`↓` and `k`/`↑` scroll. A read-only local view mutation —
+/// no reducer, no RPC.
+fn route_timeline_key(states: &mut ScreenStates, key: &KeyEvent) {
+    match &key.code {
+        KeyCode::Esc => states.boards.close_timeline(),
+        KeyCode::Up => states.boards.scroll_timeline(-1),
+        KeyCode::Down => states.boards.scroll_timeline(1),
+        KeyCode::Char { ch: 'k' } => states.boards.scroll_timeline(-1),
+        KeyCode::Char { ch: 'j' } => states.boards.scroll_timeline(1),
+        _ => {}
+    }
 }
 
 /// Translate a raw key into an overlay [`BoardsEvent::Key`] while an overlay is
@@ -1332,6 +1360,8 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             // `d` removes the focused card from the board (uppercase-free, distinct
             // from lowercase `x` = delete-column); it opens a confirm overlay.
             'd' => Some(BoardsEvent::RemoveFocusedCard),
+            // `t` opens the focused card's prettied JSONL run timeline.
+            't' => Some(BoardsEvent::ShowTimeline),
             'n' => Some(BoardsEvent::AddColumn),
             'r' => Some(BoardsEvent::RenameColumn),
             'x' => Some(BoardsEvent::DeleteColumn),
@@ -1420,6 +1450,10 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             board_id,
             column_id,
             issue_ids,
+        }),
+        BoardsIntent::ShowTimeline { board_id, issue_id } => Some(BoardsAction::CardTimeline {
+            board_id,
+            issue_id,
         }),
         BoardsIntent::RenameColumn {
             board_id,

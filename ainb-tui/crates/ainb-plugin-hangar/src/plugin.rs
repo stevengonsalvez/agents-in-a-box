@@ -197,6 +197,10 @@ const REPO_LIST_REQ_ID: i64 = 44;
 /// is a `BoardCardCancelResult` surfaced as a transient board note; the card
 /// leaves the running state via the daemon's pushed `TaskFinished(Cancelled)`.
 const BOARD_CARD_CANCEL_REQ_ID: i64 = 45;
+/// JSON-RPC id for a `hangar/board_card_timeline` fetch (tcp T3 / F6). The reply
+/// carries a card's newest run transcript (raw stream-json); the plugin parses it
+/// into the prettied timeline overlay.
+const BOARD_CARD_TIMELINE_REQ_ID: i64 = 46;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -677,6 +681,7 @@ impl HangarPlugin {
             RpcId::Number(BOARDS_REQ_ID) => self.apply_boards(resp),
             RpcId::Number(BOARD_CARD_RUN_REQ_ID) => self.apply_board_card_run(resp),
             RpcId::Number(BOARD_CARD_CANCEL_REQ_ID) => self.apply_board_card_cancel(resp),
+            RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID) => self.apply_board_card_timeline(resp),
             RpcId::Number(SQUADS_LIST_REQ_ID) => self.apply_squads(resp),
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
@@ -881,6 +886,36 @@ impl HangarPlugin {
                 self.screens.boards.set_note(note);
             }
         }
+    }
+
+    /// Surface a `hangar/board_card_timeline` reply (tcp T3 / F6, P10 §4.9): parse
+    /// the returned raw stream-json into the prettied transcript taxonomy and open
+    /// the scrollable timeline overlay over the card. A daemon rejection, or a card
+    /// that never ran (empty transcript), surfaces a note instead of an overlay so
+    /// the key never dead-ends.
+    fn apply_board_card_timeline(&mut self, resp: &RpcResponse) {
+        if let Some(err) = &resp.error {
+            self.screens.boards.set_note(format!("timeline failed: {}", err.message));
+            return;
+        }
+        let Some(result) = &resp.result else {
+            return;
+        };
+        let Ok(r) = serde_json::from_value::<
+            ainb_hangar_proto::snapshots::BoardCardTimelineResult,
+        >(result.clone()) else {
+            return;
+        };
+        let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
+        if entries.is_empty() {
+            self.screens.boards.set_note("no run transcript yet — launch this card first");
+            return;
+        }
+        let provider = r.provider.as_deref().unwrap_or("run");
+        let title = format!("Timeline · {provider}");
+        self.screens
+            .boards
+            .set_timeline(crate::screen::boards::TimelineView::new(title, entries));
     }
 
     /// Fold a `profile/get` result into the selected profile's detail (P5): the
@@ -1616,6 +1651,13 @@ impl HangarPlugin {
                 BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_CARD_REORDER,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "column_id": column_id, "issue_ids": issue_ids }),
+            ),
+            // Timeline fetch answers under its own req id with the raw transcript;
+            // the reply handler parses it into the overlay.
+            BoardsAction::CardTimeline { board_id, issue_id } => (
+                BOARD_CARD_TIMELINE_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_TIMELINE,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
             ),
             // A local-overlay repaint round-trip: re-fetch the board list; the
             // reply re-renders with the open overlay preserved.
