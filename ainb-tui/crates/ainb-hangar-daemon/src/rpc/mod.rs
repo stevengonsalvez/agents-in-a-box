@@ -1095,11 +1095,14 @@ async fn handle_tasks_list(
     // only fires for the handful of cards that captured a PR. It is wrapped in the
     // shared TTL cache so the board's per-event `tasks_list` re-pull coalesces to
     // ~one `gh` spawn per PR URL per window rather than one per card per event.
-    let provider = crate::pr_status::CachingPrStatusProvider::new(
-        crate::pr_status::GhPrStatusProvider::from_env(),
-    );
+    // `Arc`-shared so the le3 concurrent fetch can hand each spawned task an owned
+    // (`'static`) clone; the TTL cache lives behind the single wrapped provider.
+    let provider: std::sync::Arc<dyn crate::pr_status::PrStatusProvider> =
+        std::sync::Arc::new(crate::pr_status::CachingPrStatusProvider::new(
+            crate::pr_status::GhPrStatusProvider::from_env(),
+        ));
     let tasks = match resolve(pool, req).await? {
-        Some(ws) => snapshots::tasks_list(pool, &ws, &provider).await.map_err(|e| store_err(&e))?,
+        Some(ws) => snapshots::tasks_list(pool, &ws, provider).await.map_err(|e| store_err(&e))?,
         None => Vec::new(),
     };
     to_value(&ainb_hangar_proto::snapshots::TasksListResult { tasks })
@@ -3883,8 +3886,11 @@ mod tests {
 
     /// A PR-status provider that never shells `gh` — the seam for `tasks_list`
     /// snapshots in tests whose cards carry no PR (so it is never even called).
-    fn no_pr() -> crate::pr_status::FakePrStatusProvider {
-        crate::pr_status::FakePrStatusProvider::new(ainb_hangar_proto::pr_status::PrStatus::default())
+    /// `Arc`-boxed to match `tasks_list`'s shared-provider signature (le3).
+    fn no_pr() -> std::sync::Arc<dyn crate::pr_status::PrStatusProvider> {
+        std::sync::Arc::new(crate::pr_status::FakePrStatusProvider::new(
+            ainb_hangar_proto::pr_status::PrStatus::default(),
+        ))
     }
 
     fn req(method: &str, params: serde_json::Value) -> RpcRequest {
@@ -4876,9 +4882,10 @@ mod tests {
             mergeable: Mergeable::Mergeable,
             state: MergeState::Open,
         });
-        let cards = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &provider)
-            .await
-            .unwrap();
+        let cards =
+            snapshots::tasks_list(store.pool(), crate::seed::WS_ID, std::sync::Arc::new(provider))
+                .await
+                .unwrap();
         let card = cards.iter().find(|c| c.id.as_str() == "task-1").unwrap();
         assert_eq!(card.branch.as_deref(), Some("ainb/task-1"), "branch surfaced");
         assert_eq!(
@@ -4909,9 +4916,10 @@ mod tests {
             mergeable: Mergeable::Conflicting,
             state: MergeState::Closed,
         });
-        let cards = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &provider)
-            .await
-            .unwrap();
+        let cards =
+            snapshots::tasks_list(store.pool(), crate::seed::WS_ID, std::sync::Arc::new(provider))
+                .await
+                .unwrap();
         let card = cards.iter().find(|c| c.id.as_str() == "task-1").unwrap();
         assert_eq!(card.pr_url, None, "no PR captured");
         assert_eq!(card.pr_status, None, "no PR → no status fetched");
@@ -4959,7 +4967,7 @@ mod tests {
         assert!(resp.error.is_none(), "{resp:?}");
 
         // The board snapshot now reports the task in `done`.
-        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &no_pr()).await.unwrap();
+        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, no_pr()).await.unwrap();
         let moved = tasks.iter().find(|t| t.id.as_str() == "task-1").unwrap();
         assert_eq!(
             moved.status, "done",
@@ -4986,7 +4994,7 @@ mod tests {
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
         // The seeded task stays `running` (no cross-tenant move).
-        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, &no_pr()).await.unwrap();
+        let tasks = snapshots::tasks_list(store.pool(), crate::seed::WS_ID, no_pr()).await.unwrap();
         assert_eq!(tasks[0].status, "running");
     }
 
