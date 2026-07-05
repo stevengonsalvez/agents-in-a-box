@@ -246,7 +246,7 @@ fn unknown_status_shows_muted_ci_and_no_mergeable() {
 fn applying_refresh_reply_updates_the_open_badge() {
     let task = TaskId::from_str("task-1").unwrap();
     let mut states = ScreenStates::default();
-    states.open_task_detail(task, issue_with_pr(Some("https://example.com/pr/1")));
+    states.open_task_detail(task, issue_with_pr(Some("https://example.com/pr/1")), None);
 
     // Before the reply: muted unknown CI, no mergeable token.
     let before = states.task_detail.as_ref().unwrap();
@@ -287,5 +287,63 @@ fn no_pr_url_renders_no_badge_row() {
     assert!(
         !map.contains("[o] open"),
         "no-PR task must not render the open hint: {map:?}"
+    );
+}
+
+/// The single glyph row `y` of the buffer, `trim_end`-ed (multi-byte safe).
+fn nth_row(buf: &WireBuffer, y: u16, cols: u16) -> String {
+    let mut row = vec![' '; cols as usize];
+    for (coord, cell) in &buf.cells {
+        if coord.y == y && coord.x < cols {
+            if let Some(ch) = cell.symbol.chars().next() {
+                row[coord.x as usize] = ch;
+            }
+        }
+    }
+    row.into_iter().collect::<String>().trim_end().to_string()
+}
+
+/// A task-detail state carrying the run's branch (agents-in-a-box-ch3).
+fn state_with_branch(pr_url: Option<&str>, branch: &str) -> TaskDetailState {
+    let mut s = TaskDetailState::new(TaskId::from_str("t1").unwrap(), issue_with_pr(pr_url));
+    s.set_branch(Some(branch.to_string()));
+    s
+}
+
+/// agents-in-a-box-ch3: a run with a committed branch surfaces it in the detail
+/// view on its OWN line right under the PR badge — `⎇ branch ainb/<slug>` — so the
+/// durable artifact reads in the detail exactly as it does on the Kanban card.
+#[test]
+fn branch_line_renders_under_the_pr_badge() {
+    let s = state_with_branch(Some("https://example.com/pr/1"), "ainb/refactor-api-a1b2c3");
+    let mut buf = WireBuffer::new(100, 8);
+    render_task_detail(&mut buf, 100, 0, 8, &s);
+
+    // Row 0 is the PR badge; row 1 is the branch line right beneath it.
+    insta::assert_snapshot!(nth_row(&buf, 0, 100), @"▶ PR https://example.com/pr/1 CI …  [o] open");
+    insta::assert_snapshot!(nth_row(&buf, 1, 100), @"⎇ branch ainb/refactor-api-a1b2c3");
+}
+
+/// With no PR badge, the branch line still surfaces — at the TOP row (the layout
+/// shifts up), so a run that opened no PR but committed a branch still shows it.
+#[test]
+fn branch_line_renders_at_top_when_no_pr_badge() {
+    let s = state_with_branch(None, "ainb/hotfix-9f9f9f");
+    let mut buf = WireBuffer::new(100, 8);
+    render_task_detail(&mut buf, 100, 0, 8, &s);
+    assert_eq!(nth_row(&buf, 0, 100), "⎇ branch ainb/hotfix-9f9f9f");
+}
+
+/// Progressive disclosure: a run with NO branch renders no branch line — never a
+/// `branch: none` placeholder (the transcript occupies the row instead).
+#[test]
+fn no_branch_renders_no_branch_line() {
+    let s = state(Some("https://example.com/pr/1"));
+    let mut buf = WireBuffer::new(100, 8);
+    render_task_detail(&mut buf, 100, 0, 8, &s);
+    let map = glyph_map(&buf, 100);
+    assert!(
+        !map.contains("⎇ branch"),
+        "a branchless run must not render a branch line: {map:?}"
     );
 }

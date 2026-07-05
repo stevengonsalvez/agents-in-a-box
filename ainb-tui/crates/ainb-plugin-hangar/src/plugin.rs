@@ -2968,9 +2968,19 @@ impl HangarPlugin {
             priority: 0,
             due_date: None,
             labels: Vec::new(),
-            pr_url: None,
+            // Carry the card's captured PR so the detail shows the SAME gold PR
+            // badge the card does — the branch line then reads UNDER the badge
+            // (agents-in-a-box-ch3), never a lone branch with a dropped PR.
+            pr_url: card.pr_url.clone(),
         };
-        self.screens.open_task_detail(tid.clone(), issue);
+        // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
+        // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
+        self.screens.open_task_detail(tid.clone(), issue, card.branch.clone());
+        // Seed the card's already-fetched PR CI/merge status so the badge renders
+        // the real state (not a muted unknown) with no extra round-trip.
+        if let Some(status) = card.pr_status {
+            self.screens.set_task_detail_pr_status(status);
+        }
         let mut next = self.app_state().clone();
         next.selected_task = Some(tid.clone());
         next.prior_screen = None;
@@ -3303,7 +3313,11 @@ impl HangarPlugin {
                     if issue.pr_url.is_some() {
                         self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
                     }
-                    self.screens.open_task_detail(task_id.clone(), issue);
+                    // The issue-list open carries no single per-run branch (an
+                    // issue can have many task runs); the branch is a per-run
+                    // artifact surfaced when opening a specific run from the board
+                    // (agents-in-a-box-ch3).
+                    self.screens.open_task_detail(task_id.clone(), issue, None);
                     let mut next = app.clone();
                     next.screen = Screen::TaskDetail(task_id.clone());
                     next.selected_task = Some(task_id);
@@ -4968,7 +4982,7 @@ mod tests {
             pr_url: None,
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
-        p.screens.open_task_detail(tid.clone(), issue);
+        p.screens.open_task_detail(tid.clone(), issue, None);
         let mut app = p.app_state().clone();
         app.screen = Screen::TaskDetail(tid);
         p.app = Some(app);

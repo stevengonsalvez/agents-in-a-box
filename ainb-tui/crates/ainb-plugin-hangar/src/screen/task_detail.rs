@@ -66,6 +66,11 @@ const STATUS_GREEN: Color = Color::rgb(120, 220, 120);
 const STATUS_RED: Color = Color::rgb(240, 100, 100);
 /// Amber for a pending (still-running) CI rollup (e38.34).
 const STATUS_AMBER: Color = Color::rgb(230, 190, 90);
+/// Cornflower-blue for the run's branch line (tcp T2, agents-in-a-box-ch3) —
+/// distinct from the gold PR badge so the two artifacts never read as one.
+const BRANCH_COLOR: Color = Color::rgb(100, 149, 237);
+/// The leading glyph + label painted before the branch name (`⎇ branch `).
+const BRANCH_PREFIX: &str = "⎇ branch ";
 /// Accent for the comment-compose input bar (a calm emerald, distinct from the
 /// gold PR badge so the two bars never read as the same control).
 const COMPOSE_ACCENT: Color = Color::rgb(120, 220, 160);
@@ -211,6 +216,12 @@ pub struct TaskDetailState {
     /// is `Some`. A merged status is reflected by the daemon's auto-Done move, so
     /// the plugin never transitions on its own.
     pr_status: PrStatus,
+    /// The run's worktree branch (`ainb/<slug>`) the task committed on (tcp T2,
+    /// agents-in-a-box-ch3), or `None` when the run made no commits / the detail
+    /// was opened without a per-run branch (e.g. from the issue list). Seeded from
+    /// the opening task card's [`TaskCardRow::branch`](ainb_hangar_proto::events::TaskCardRow);
+    /// rendered as a branch line under the PR badge (progressive disclosure).
+    branch: Option<String>,
 }
 
 /// The all-`Unknown` PR status, const-constructible so [`TaskDetailState::new`]
@@ -236,6 +247,7 @@ impl TaskDetailState {
             cancel_modal_open: false,
             compose: None,
             pr_status: UNKNOWN_PR_STATUS,
+            branch: None,
         }
     }
 
@@ -265,6 +277,20 @@ impl TaskDetailState {
     #[must_use]
     pub const fn pr_status(&self) -> PrStatus {
         self.pr_status
+    }
+
+    /// The run's `ainb/<slug>` worktree branch (tcp T2, agents-in-a-box-ch3), or
+    /// `None` when the run made no commits / the detail carries no per-run branch.
+    /// The detail view renders it as a branch line under the PR badge.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// Seed the run's branch when opening the detail from a task card carrying one
+    /// (agents-in-a-box-ch3). `None` clears it (a run with no committed branch).
+    pub fn set_branch(&mut self, branch: Option<String>) {
+        self.branch = branch;
     }
 
     /// Apply a freshly fetched PR status (e38.34) — the reducer calls this when a
@@ -642,10 +668,21 @@ pub fn render_task_detail(
     // The PR badge (P9.2) takes the first row of the whole area when present,
     // pushing the transcript + sidebar down one row. When absent there is NO
     // badge row at all (the layout shifts up) — never a `PR: none` placeholder.
-    let body_top = state.pr_url().map_or(top, |url| {
+    let mut body_top = state.pr_url().map_or(top, |url| {
         render_pr_badge(buf, area_w, top, url, state.pr_status());
         top.saturating_add(1)
     });
+
+    // The run's branch line (tcp T2, agents-in-a-box-ch3) sits right under the PR
+    // badge (or at the top when there is no PR). Progressive disclosure, exactly
+    // like the badge: a run with no committed branch renders NO row (the
+    // transcript shifts up), never a `branch: none` placeholder.
+    if let Some(branch) = state.branch() {
+        if body_top < bottom {
+            render_branch_row(buf, area_w, body_top, branch);
+            body_top = body_top.saturating_add(1);
+        }
+    }
 
     // The compose modal (e38.5), when open, takes the bottom row as an input bar,
     // shrinking the transcript region by one row so the two never overlap.
@@ -716,6 +753,18 @@ fn render_pr_badge(buf: &mut WireBuffer, area_w: u16, row: u16, url: &str, statu
         cx = put_clipped(buf, cx, row, label, color, area_w);
     }
     let _ = put_clipped(buf, cx, row, BADGE_HINT, HINT_MUTED, area_w);
+}
+
+/// Paint the single-row run-branch line at `(0, row)`: `⎇ branch <name>` in
+/// cornflower-blue (tcp T2, agents-in-a-box-ch3), so a finished run's durable
+/// `ainb/<slug>` branch reads in the detail view exactly as it does on the Kanban
+/// card. Clipped by **chars** at `area_w` (multi-byte safe —
+/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates without
+/// panicking on a multi-byte boundary.
+fn render_branch_row(buf: &mut WireBuffer, area_w: u16, row: u16, branch: &str) {
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, BRANCH_PREFIX, BRANCH_COLOR, area_w);
+    let _ = put_clipped(buf, cx, row, branch, BRANCH_COLOR, area_w);
 }
 
 /// The CI rollup badge segment: ` CI <glyph>` + its colour (e38.34).

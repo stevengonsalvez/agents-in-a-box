@@ -918,9 +918,19 @@ impl ScreenStates {
         }
     }
 
-    /// Open task detail for `issue`'s task, seeding from the issue's row.
-    pub fn open_task_detail(&mut self, task_id: ainb_hangar_core::ids::TaskId, issue: IssueRow) {
-        self.task_detail = Some(TaskDetailState::new(task_id, issue));
+    /// Open task detail for `issue`'s task, seeding from the issue's row and the
+    /// run's `branch` (tcp T2, agents-in-a-box-ch3) when the opening card carries
+    /// one — the detail view renders it as a branch line under the PR badge. Pass
+    /// `None` when there is no per-run branch (e.g. opened from the issue list).
+    pub fn open_task_detail(
+        &mut self,
+        task_id: ainb_hangar_core::ids::TaskId,
+        issue: IssueRow,
+        branch: Option<String>,
+    ) {
+        let mut td = TaskDetailState::new(task_id, issue);
+        td.set_branch(branch);
+        self.task_detail = Some(td);
     }
 
     /// Apply a freshly-fetched PR status to the open task-detail screen (e38.34)
