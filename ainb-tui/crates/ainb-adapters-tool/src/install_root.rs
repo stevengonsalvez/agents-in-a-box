@@ -7,38 +7,28 @@
 //!    `AINB_TOOL_HOME_CLAUDE_DESKTOP`). Tests set this to a per-test
 //!    tempdir; users can use it as a per-tool override.
 //!
-//! 2. `$AINB_USE_REAL_HOMES=1` → the tool's real config dir on disk,
-//!    e.g. `~/.claude`, `~/.codex`, `~/.aws/amazonq`,
-//!    `~/Library/Application Support/Claude` for claude-desktop on
-//!    macOS. This is the **production opt-in** the spec gates behind
-//!    a config flag; required after `toolkit/bootstrap.js` retired
-//!    in P9 — without it, ainb only writes to the managed sandbox.
+//! 2. The tool's real config dir on disk (default), e.g. `~/.claude`,
+//!    `~/.codex`, `~/.aws/amazonq`, `~/Library/Application
+//!    Support/Claude` for claude-desktop on macOS. Installs land here
+//!    so the deployed skill is actually visible to Claude/Codex — the
+//!    same root discovery reads from.
 //!
-//! 3. `$AINB_HOME/tools/<tool>` (default) — the managed sandbox.
-//!    Keeps state isolated under the ainb home so accidental
-//!    `ainb skill install` invocations don't trample the user's
-//!    actual tool dirs.
+//! 3. `$AINB_HOME/tools/<tool>` — the managed sandbox, used only when
+//!    `$HOME` is unresolvable or the tool has no known real dir.
 //!
 //! Pure function — never creates the directory.
 
 use std::path::PathBuf;
 
-/// Resolve the install root for `tool` using the precedence above.
+/// Resolve the install root for `tool`.
+///
+/// Delegates to [`read_root_for`] so writes land in the tool's real
+/// config dir by default — the same place discovery reads from. This
+/// is what makes an installed skill visible to Claude/Codex instead of
+/// stranded in the managed sandbox. Test fixtures still isolate via the
+/// `$AINB_TOOL_HOME_<TOOL>` override, which takes precedence.
 pub fn install_root_for(tool: &str) -> PathBuf {
-    let env_var = env_var_name(tool);
-    if let Ok(p) = std::env::var(&env_var) {
-        if !p.is_empty() {
-            return PathBuf::from(p);
-        }
-    }
-
-    if real_homes_enabled() {
-        if let Some(real) = real_home_for(tool) {
-            return real;
-        }
-    }
-
-    ainb_skill_core::default_ainb_home().join("tools").join(tool)
+    read_root_for(tool)
 }
 
 /// Translate a tool name into its env-var override (e.g.
@@ -52,32 +42,18 @@ pub fn env_var_name(tool: &str) -> String {
     )
 }
 
-fn real_homes_enabled() -> bool {
-    matches!(
-        std::env::var("AINB_USE_REAL_HOMES").as_deref(),
-        Ok("1") | Ok("true") | Ok("yes")
-    )
-}
-
-/// Resolve a per-tool path for **read-only** consumers such as the
-/// class-C discovery walker. Unlike [`install_root_for`] (used by
-/// write paths), this defaults to the real home — so the SkillManager
-/// discovery banner sees the user's actual `~/.claude/skills/...`
-/// without requiring `AINB_USE_REAL_HOMES=1`.
+/// Resolve a per-tool path defaulting to the tool's real config dir.
+/// Both the class-C discovery walker (read) and [`install_root_for`]
+/// (write) route through this so the SkillManager sees, and installs
+/// into, the user's actual `~/.claude/skills/...`.
 ///
 /// Precedence:
 ///
 /// 1. `$AINB_TOOL_HOME_<TOOL>` (preserved so test fixtures isolate
-///    the walker against tempdirs without env-var surgery).
+///    against tempdirs without env-var surgery).
 /// 2. The tool's real config dir (`~/.claude`, `~/.codex`, …).
-/// 3. `$AINB_HOME/tools/<tool>` only when `$HOME` is unresolvable —
-///    pure safety fallback, expected to be unreachable in practice.
-///
-/// Safety: walkers built on top of this function never write. They
-/// list directories and read frontmatter. If a future caller starts
-/// writing through a `read_root_for` path, that caller must be moved
-/// onto [`install_root_for`] so the `AINB_USE_REAL_HOMES` gate keeps
-/// protecting against accidental clobber.
+/// 3. `$AINB_HOME/tools/<tool>` only when `$HOME` is unresolvable or
+///    the tool has no known real dir — pure safety fallback.
 pub fn read_root_for(tool: &str) -> PathBuf {
     let env_var = env_var_name(tool);
     if let Ok(p) = std::env::var(&env_var) {
@@ -144,12 +120,26 @@ mod tests {
     }
 
     #[test]
-    fn default_resolves_under_ainb_home() {
+    fn unknown_tool_resolves_under_ainb_home() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::remove_var("AINB_TOOL_HOME_NOENVTOOL");
-        std::env::remove_var("AINB_USE_REAL_HOMES");
+        // Unknown tool has no real config dir → managed-sandbox fallback.
         let p = install_root_for("noenvtool");
         assert!(p.ends_with("tools/noenvtool"), "got: {p:?}");
+    }
+
+    #[test]
+    fn install_defaults_to_real_home_without_env_gate() {
+        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        std::env::set_var("HOME", "/tmp/fake-home-for-install");
+        std::env::remove_var("AINB_USE_REAL_HOMES");
+        std::env::remove_var("AINB_TOOL_HOME_CLAUDE");
+        let p = install_root_for("claude");
+        assert_eq!(
+            p,
+            PathBuf::from("/tmp/fake-home-for-install").join(".claude"),
+            "installs must default to real home so skills are visible to Claude"
+        );
     }
 
     #[test]
@@ -162,24 +152,11 @@ mod tests {
     }
 
     #[test]
-    fn real_homes_opt_in_routes_to_real_dir() {
+    fn install_amazonq_uses_aws_subdir() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         std::env::set_var("HOME", "/tmp/fake-home-for-test");
-        std::env::set_var("AINB_USE_REAL_HOMES", "1");
-        std::env::remove_var("AINB_TOOL_HOME_CLAUDE");
-        let p = install_root_for("claude");
-        std::env::remove_var("AINB_USE_REAL_HOMES");
-        assert_eq!(p, PathBuf::from("/tmp/fake-home-for-test").join(".claude"));
-    }
-
-    #[test]
-    fn real_homes_amazonq_uses_aws_subdir() {
-        let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("HOME", "/tmp/fake-home-for-test");
-        std::env::set_var("AINB_USE_REAL_HOMES", "1");
         std::env::remove_var("AINB_TOOL_HOME_AMAZONQ");
         let p = install_root_for("amazonq");
-        std::env::remove_var("AINB_USE_REAL_HOMES");
         assert_eq!(
             p,
             PathBuf::from("/tmp/fake-home-for-test").join(".aws").join("amazonq")
@@ -187,12 +164,10 @@ mod tests {
     }
 
     #[test]
-    fn real_homes_for_unknown_tool_falls_back_to_managed() {
+    fn install_unknown_tool_falls_back_to_managed() {
         let _g = ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
-        std::env::set_var("AINB_USE_REAL_HOMES", "1");
         std::env::remove_var("AINB_TOOL_HOME_UNKNOWN_TOOL_X");
         let p = install_root_for("unknown-tool-x");
-        std::env::remove_var("AINB_USE_REAL_HOMES");
         assert!(p.ends_with("tools/unknown-tool-x"), "got: {p:?}");
     }
 
