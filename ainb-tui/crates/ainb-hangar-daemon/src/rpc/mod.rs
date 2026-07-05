@@ -684,6 +684,7 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
         methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
+        methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
@@ -2397,6 +2398,83 @@ async fn handle_board_card_run(
         agent_id: agent.id,
         runtime_id: agent.runtime_id,
         mode: mode.to_string(),
+    })
+}
+
+/// `hangar/board_card_cancel` (tcp T3 / F6): cancel a card's in-flight run.
+///
+/// Resolves the card's single ACTIVE (`queued` / `dispatched` / `running`) task,
+/// flips it to `cancelled` (the idempotent `CancelTaskService` FSM edge, whose
+/// SQL conditional finalize arbitrates the cancel-vs-natural-finish race), then
+/// SIGNALS the daemon's run loop to KILL the in-flight run — a headless process
+/// group (via the runner's `kill_on_drop`) or the interactive tmux session by
+/// its exact name. The run's provisioned worktree is torn down (keep-if-dirty)
+/// on the finalize seam. A card whose latest run is already terminal cannot be
+/// retroactively cancelled (`cancelled = false`, never an error).
+async fn handle_board_card_cancel(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::task::TaskRepo;
+    use ainb_hangar_store::service::cancel::CancelTaskService;
+    use ainb_hangar_store::service::finalize::{FinalizeError, FinalizeOutcome};
+
+    let params: ainb_hangar_proto::snapshots::BoardCardCancelParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    // The issue must be a real CARD on this board — a cancel is a card affordance,
+    // so a non-card / foreign-board issue id is rejected, not silently acted on.
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+        return Err(invalid_params("that issue is not a card on this board"));
+    }
+
+    // Resolve the card's single ACTIVE task. `None` means the latest run is
+    // already terminal (or it never ran) — a clean no-op the caller surfaces as a
+    // note, never an error.
+    let Some(active) = TaskRepo::active_task_for_issue(pool, ws.as_str(), &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+    else {
+        return to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
+            task_id: None,
+            cancelled: false,
+        });
+    };
+
+    // Flip the row to `cancelled`. The conditional finalize is the arbiter: a row
+    // a natural finish beat us to is a `TerminalMismatch` we report as
+    // not-cancelled (the run genuinely finished), not an error.
+    let cancelled = match CancelTaskService::cancel(pool, &active.id, &SystemClock).await {
+        Ok(FinalizeOutcome::Transitioned | FinalizeOutcome::AlreadyTerminal) => true,
+        Err(FinalizeError::TerminalMismatch { .. }) => false,
+        Err(e) => return Err(internal(&format!("cancel: {e}"))),
+    };
+
+    if cancelled {
+        // Signal the run loop to KILL the in-flight run. `false` = no live run was
+        // registered (the task was queued-but-unclaimed, or is owned by another
+        // daemon) — the DB flip alone cancels it before it ever starts.
+        let signalled = crate::cancel::registry().signal(&active.id);
+        // Push the terminal transition + slide the card into any `cancelled`
+        // auto-move column so the board leaves the running state without a
+        // snapshot re-pull (mirrors the FSM finalize seam; both are idempotent
+        // with the run future's own artifact reclaim).
+        crate::run_loop::emit_task_finished(
+            events,
+            &active,
+            ainb_hangar_proto::events::TaskResult::Cancelled,
+            &SystemClock,
+        );
+        crate::board::auto_move_after_transition(pool, &active, "cancelled").await;
+        tracing::info!(task_id = %active.id, signalled, "board card cancelled");
+    }
+
+    to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
+        task_id: Some(active.id),
+        cancelled,
     })
 }
 
