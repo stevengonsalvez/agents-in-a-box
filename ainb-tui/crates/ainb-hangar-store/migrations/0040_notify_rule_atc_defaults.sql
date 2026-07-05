@@ -21,19 +21,31 @@
 -- byte-stable canonical string (`phone,web,os` -> `phone,web,os,atc`; `os` ->
 -- `os,atc`), matching what `ChannelSet::to_db` would emit.
 --
--- # Only untouched GLOBAL rows, idempotent
+-- # Only the untouched GLOBAL seed rows, idempotent (mirrors 0038)
 --
--- The `workspace_id IS NULL` predicate scopes this to the GLOBAL defaults, never
--- a per-workspace override an operator set. The `channels NOT LIKE '%atc%'` guard
--- makes the append idempotent (a row already carrying `atc` is skipped) and
--- preserves an operator's deliberate global edit that already added `atc`. This
--- is a data backfill (no schema change), a catalog-tiny UPDATE done as a
--- FOLLOW-UP migration (not a 0037/0038 edit) because the embedded
--- `sqlx::migrate!` checksums every applied migration — editing an earlier file in
--- place would break an already-upgraded install on the next boot.
+-- Like 0038, this updates ONLY rows STILL at their exact prior seed value, so an
+-- operator who deliberately re-set one of these GLOBAL rules through
+-- `notify_rule_set` keeps their edit verbatim (a value other than the seed no
+-- longer matches). The exact-value predicate also means a custom board-only
+-- (empty-string) global row is left untouched rather than corrupted into a
+-- leading-comma `,atc`. Post-0038 the seeded values are `phone,web,os` for
+-- ask / approval / codex_request_user and `os` for error; appending `,atc` keeps
+-- `ChannelSet` canonical order. The `workspace_id IS NULL` predicate scopes this
+-- to the GLOBAL defaults, never a per-workspace override.
+--
+-- Idempotent: after the first apply the seed-value predicate matches nothing (the
+-- rows now carry the trailing `,atc`), and the migrator ledger blocks a re-apply
+-- anyway. A data backfill (no schema change), done as a FOLLOW-UP migration (not
+-- a 0037/0038 edit) because the embedded `sqlx::migrate!` checksums every applied
+-- migration — editing an earlier file in place would break an already-upgraded
+-- install on the next boot.
 
 UPDATE notify_rule
    SET channels = channels || ',atc'
  WHERE workspace_id IS NULL
-   AND kind IN ('ask_user_question', 'approval', 'codex_request_user', 'error')
-   AND channels NOT LIKE '%atc%';
+   AND channels NOT LIKE '%atc%'
+   AND (
+        (kind IN ('ask_user_question', 'approval', 'codex_request_user')
+             AND channels = 'phone,web,os')
+     OR (kind = 'error' AND channels = 'os')
+       );
