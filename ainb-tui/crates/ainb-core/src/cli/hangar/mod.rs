@@ -2652,6 +2652,12 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     // + dispatches it (materialising the agent's skills first).
     if let Some(a) = assignment {
         let task_id = idgen.new_ulid();
+        // Scope the task to the issue's next run generation (migration 0039). A
+        // freshly created issue has no prior tasks, so this is 0; computing it
+        // keeps this path consistent with the daemon's assign seam.
+        let generation = TaskRepo::next_generation_for_issue(pool, &id)
+            .await
+            .context("compute run generation for assigned task")?;
         TaskRepo::insert(
             pool,
             &ainb_hangar_store::repo::task::NewTask {
@@ -2664,6 +2670,7 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
                 priority: args.priority,
                 created_at: now,
                 autopilot_run_id: None,
+                generation,
             },
         )
         .await
