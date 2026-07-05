@@ -580,12 +580,33 @@ async fn execute_claimed(
     // authoritative DB-level enforcers for atomicity and cross-daemon races.
     let mut lifecycle = crate::fsm::LifecycleGuard::claimed();
 
+    // tcp T3 / F6: register this run in the kill registry BEFORE the start
+    // transition, so a cancel arriving during setup (or racing the start) finds a
+    // live token to signal rather than missing it in the window between start and
+    // a later registration. The guard's `Drop` deregisters on every exit path.
+    let cancel_guard = crate::cancel::registry().register(&task.id);
+
     // dispatched -> running. A lost race (another worker started it) surfaces as
     // an FSM error; bail without running a duplicate provider. The typed guard
     // advances first: a `dispatched -> running` edge is legal, so this only fails
     // if the loop is driven out of order (a logic bug), never on a real run.
     lifecycle.fire(crate::fsm::LifecycleEvent::Start)?;
-    StartTaskService::start(pool, &task.id, clock).await?;
+    match StartTaskService::start(pool, &task.id, clock).await {
+        Ok(_) => {}
+        // tcp T3 / F6: a cancel landed BEFORE the run could start (the RPC flipped
+        // the row `{queued|dispatched} -> cancelled`, winning the finalize race).
+        // The provider never spawned, so reclaim the just-provisioned worktree and
+        // finish as cancelled without running anything — never leak the checkout.
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "cancelled before start; tearing down without running");
+            teardown_workdir(&run_wd, &task.id);
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    }
     // Surface the typed FSM position beside the DB transition so a lifecycle
     // race is greppable in the daemon log next to the store's `task.start` span.
     tracing::info!(task_id = %task.id, lifecycle = lifecycle.state().as_db_str(), "task running");
@@ -697,9 +718,9 @@ async fn execute_claimed(
     // spawns a retry child).
     // P10 / D19: the provider that executed this run, recorded on the run-history
     // row + the OTLP task->run span. Captured BEFORE `provider_run` moves
-    // `dispatch` (the async block takes `dispatch.agent_env` by value).
+    // `dispatch` (the async block takes `dispatch.agent_env` by value). The
+    // `cancel_guard` was registered up front (before the start transition).
     let provider = dispatch.backend.name();
-    let cancel_guard = crate::cancel::registry().register(&task.id);
     let provider_run = async {
         if task.mode == "interactive" {
             run_interactive(
@@ -975,6 +996,20 @@ async fn finalize_success(
             ..
         }) => {
             tracing::info!(task_id = %task.id, "run completed but was cancelled first; honoring cancel");
+            // Reclaim the run's artifacts as the cancelled seam would (branch +
+            // run-history + teardown), so a race-lost natural finish keeps the
+            // same observability a cleanly-cancelled run gets.
+            persist_run_branch(pool, &task.id, run_wd).await;
+            record_run_history(
+                pool,
+                task,
+                provider,
+                session_id.as_deref(),
+                usage.as_ref(),
+                "cancelled",
+                clock,
+            )
+            .await;
             teardown_workdir(run_wd, &task.id);
             return Ok(());
         }
@@ -1067,6 +1102,19 @@ async fn finalize_failure(
             ..
         }) => {
             tracing::info!(task_id = %task.id, "run failed but was cancelled first; honoring cancel");
+            // Reclaim artifacts as the cancelled seam does (branch + run-history +
+            // teardown) so a race-lost natural finish keeps the same observability.
+            persist_run_branch(pool, &task.id, run_wd).await;
+            record_run_history(
+                pool,
+                task,
+                provider,
+                result.session_id.as_deref(),
+                result.usage.as_ref(),
+                "cancelled",
+                clock,
+            )
+            .await;
             teardown_workdir(run_wd, &task.id);
             return Ok(());
         }
