@@ -277,17 +277,19 @@ mod tests {
             NotifyRuleRepo::resolve(pool, AttentionKind::Escalation, None).await.unwrap(),
             ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
+        // ask / approval / codex_request_user carry phone (0038 restored the
+        // pre-T5 bridge behaviour after 0037 dropped it).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::Approval, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::CodexRequestUser, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::Error, None).await.unwrap(),
@@ -307,12 +309,13 @@ mod tests {
         let pool = store.pool();
         seed_workspace(pool, "ws-a").await;
 
-        // No override yet → the workspace resolves the global default.
+        // No override yet → the workspace resolves the global default (phone+web+os
+        // after 0038).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, Some("ws-a"))
                 .await
                 .unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
 
         // Set a workspace override: ASK → phone only.
@@ -333,17 +336,17 @@ mod tests {
             ChannelSet::from_channels([Channel::Phone]),
         );
         // ...but the global row is untouched (a no-workspace session, and a
-        // DIFFERENT workspace, both still see web+os).
+        // DIFFERENT workspace, both still see the phone+web+os default).
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None).await.unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
         seed_workspace(pool, "ws-b").await;
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, Some("ws-b"))
                 .await
                 .unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
 
         // Clearing the override reverts ws-a to the global default.
@@ -357,7 +360,7 @@ mod tests {
             NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, Some("ws-a"))
                 .await
                 .unwrap(),
-            ChannelSet::from_channels([Channel::Web, Channel::Os]),
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
         );
     }
 
@@ -430,7 +433,10 @@ mod tests {
 
         let ask = grid.iter().find(|r| r.kind == AttentionKind::AskUserQuestion).unwrap();
         assert!(!ask.overridden, "ask inherits the global default");
-        assert_eq!(ask.channels, ChannelSet::from_channels([Channel::Web, Channel::Os]));
+        assert_eq!(
+            ask.channels,
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os])
+        );
 
         // The global grid marks nothing overridden.
         let global = NotifyRuleRepo::list(pool, None).await.unwrap();

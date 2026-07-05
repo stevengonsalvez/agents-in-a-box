@@ -329,7 +329,7 @@ mod tests {
                 r#"{"question":"stuck"}"#,
                 ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
             ),
-            // Web+os only (the ASK default) → suppressed on the phone.
+            // Web+os only (phone dropped, e.g. a workspace override) → suppressed.
             row_on(
                 "webonly",
                 "ask_user_question",
