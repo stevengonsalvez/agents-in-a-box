@@ -685,6 +685,8 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
+        methods::HANGAR_BOARD_CARD_REORDER => handle_board_card_reorder(pool, req).await,
+        methods::HANGAR_BOARD_CARD_REMOVE => handle_board_card_remove(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
@@ -2509,6 +2511,80 @@ async fn handle_board_card_cancel(
         }
         Err(e) => Err(internal(&format!("cancel: {e}"))),
     }
+}
+
+/// `hangar/board_card_reorder` (tcp T3 / F6): set the order of one column's cards.
+///
+/// A pure `board_card.ord` rewrite within the given column (`column_id = None` for
+/// the unmapped pool): `issue_ids` must be exactly that column's current cards (a
+/// permutation), else the repo rejects it and nothing is written. No card changes
+/// column. Answers with the refreshed `BoardsListResult`, like every `board_*`
+/// mutation.
+async fn handle_board_card_reorder(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardReorderParams =
+        parse_params(req, "{ workspace_id, board_id, column_id?, issue_ids }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    BoardRepo::card_reorder(
+        pool,
+        &ws,
+        &params.board_id,
+        params.column_id.as_deref(),
+        &params.issue_ids,
+    )
+    .await
+    .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
+}
+
+/// `hangar/board_card_remove` (tcp T3 / F6): take an issue card off a board.
+///
+/// Removes ONLY the board placement — the underlying issue is left intact (a card
+/// can be re-added, and it still shows in the issue list). A card with an ACTIVE
+/// (`queued` / `dispatched` / `running`) run is REFUSED: removing it would strand a
+/// live task, so the caller must cancel the run first (delete-while-running =
+/// cancel-first). Idempotent otherwise — removing a card not on the board is a
+/// clean no-op. Answers with the refreshed `BoardsListResult`.
+async fn handle_board_card_remove(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::board::BoardRepo;
+    use ainb_hangar_store::repo::task::TaskRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.issue_id.trim().is_empty() {
+        return Err(invalid_params("issue_id must not be empty"));
+    }
+    // Validate the board (a remove is a card affordance on a real board).
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    let is_card = board.cards.iter().any(|c| c.issue_id == params.issue_id);
+
+    // Refuse to remove a card whose run is still live — cancel it first, so a
+    // remove never orphans an in-flight task. Only a real card can have a run.
+    if is_card {
+        if let Some(active) =
+            TaskRepo::active_task_for_issue(pool, ws.as_str(), &params.issue_id)
+                .await
+                .map_err(|e| store_err(&e))?
+        {
+            return Err(invalid_params(&format!(
+                "this card has an active run ({}); cancel it before removing the card",
+                active.status
+            )));
+        }
+    }
+
+    BoardRepo::card_remove(pool, &ws, &params.board_id, &params.issue_id)
+        .await
+        .map_err(|e| board_repo_err(&e))?;
+    boards_list_value(pool, &ws).await
 }
 
 /// `hangar/repo_list` (spec F3): the card-create `@` autocomplete roster.

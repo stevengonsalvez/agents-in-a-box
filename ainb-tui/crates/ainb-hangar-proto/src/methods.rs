@@ -617,6 +617,29 @@ pub const HANGAR_BOARD_CARD_RUN: &str = "hangar/board_card_run";
 /// (`cancelled = false`). Mutating + workspace-scoped via the board.
 pub const HANGAR_BOARD_CARD_CANCEL: &str = "hangar/board_card_cancel";
 
+/// `hangar/board_card_reorder` — set the order of a column's cards (tcp T3 / F6).
+///
+/// Params: [`crate::snapshots::BoardCardReorderParams`]
+/// (`{ workspace_id, board_id, column_id?, issue_ids }`). Result: the refreshed
+/// [`crate::snapshots::BoardsListResult`]. `issue_ids` must be exactly the cards
+/// currently in `column_id` (omit `column_id` for the unmapped pool) — a
+/// permutation of them; any other set is rejected. A pure `ord` rewrite within the
+/// one column (a card's slot is `board_card.ord`, migration 0034), so no card ever
+/// changes column. Mutating + workspace-scoped via the board.
+pub const HANGAR_BOARD_CARD_REORDER: &str = "hangar/board_card_reorder";
+
+/// `hangar/board_card_remove` — take an issue card off a board (tcp T3 / F6).
+///
+/// Params: [`crate::snapshots::BoardCardParams`]
+/// (`{ workspace_id, board_id, issue_id }`, `column_id` ignored). Result: the
+/// refreshed [`crate::snapshots::BoardsListResult`]. Removes ONLY the board
+/// placement — the underlying issue is left intact (a card can be re-added). A
+/// card with an ACTIVE run is refused (`INVALID_PARAMS`): cancel the run first, so
+/// removing a card never orphans a live task. Idempotent otherwise: removing a
+/// card that is not on the board is a no-op. Mutating + workspace-scoped via the
+/// board.
+pub const HANGAR_BOARD_CARD_REMOVE: &str = "hangar/board_card_remove";
+
 /// `hangar/repo_list` — the card-create `@` autocomplete repo roster (spec F3).
 ///
 /// Params: `{}` (host-scoped — the roster is the host's favorites + scan cache,

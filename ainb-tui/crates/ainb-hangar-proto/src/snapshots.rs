@@ -1556,6 +1556,26 @@ pub struct BoardCardCancelResult {
     pub cancelled: bool,
 }
 
+/// Params for [`crate::methods::HANGAR_BOARD_CARD_REORDER`] (tcp T3 / F6): the new
+/// order of one column's cards.
+///
+/// `issue_ids` must be exactly the cards currently in `column_id` (a permutation);
+/// omit `column_id` to reorder the unmapped pool. A pure `board_card.ord` rewrite
+/// within the column — no card changes column.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BoardCardReorderParams {
+    /// The subscribed workspace the board belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The board the cards sit on.
+    pub board_id: String,
+    /// The column whose cards to reorder, or `None` for the unmapped pool.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub column_id: Option<String>,
+    /// The card issue ids in their new top-to-bottom order (a permutation of the
+    /// column's current cards).
+    pub issue_ids: Vec<String>,
+}
+
 /// One pickable repository in the card-create `@` roster
 /// ([`crate::methods::HANGAR_REPO_LIST`], spec F3).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

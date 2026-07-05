@@ -585,6 +585,35 @@ impl BoardRepo {
         Ok(())
     }
 
+    /// Remove a card (an issue placement) from a board (tcp T3 / F6).
+    ///
+    /// Deletes ONLY the `board_card` row — the underlying `issue` is left intact, so
+    /// a removed card can be re-added and still shows in the issue list. Idempotent:
+    /// removing a card that is not on the board affects no row and is a clean
+    /// success (the end state — "not on the board" — already holds). Workspace-scoped
+    /// via the board (a foreign board is [`BoardRepoError::NotFound`]).
+    ///
+    /// # Errors
+    ///
+    /// [`BoardRepoError::NotFound`] (board not in the workspace) /
+    /// [`BoardRepoError::Db`].
+    pub async fn card_remove(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        board_id: &str,
+        issue_id: &str,
+    ) -> Result<(), BoardRepoError> {
+        let mut tx = pool.begin().await?;
+        Self::ensure_board_in_ws(&mut tx, workspace, board_id).await?;
+        sqlx::query("DELETE FROM board_card WHERE board_id = ? AND issue_id = ?")
+            .bind(board_id)
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// THE AUTO-MOVE HOOK. For every board in `workspace` that carries `issue_id`
     /// as a card, move the card to the column whose `fsm_state == new_state` when
     /// the board's master `auto_move` AND the target column's `auto_move` are both
@@ -1204,6 +1233,39 @@ mod tests {
         .await
         .unwrap_err();
         assert!(matches!(cross, BoardRepoError::BadReorder), "got {cross:?}");
+    }
+
+    /// Removing a card deletes only the placement — the issue survives and the card
+    /// can be re-added — and a remove of a card not on the board is a clean no-op.
+    #[tokio::test]
+    async fn card_remove_deletes_placement_keeps_issue() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+
+        BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        assert!(b.cards.is_empty(), "the placement is gone");
+        // The issue itself survives (re-addable).
+        let issue: Option<i64> = sqlx::query_scalar("SELECT 1 FROM issue WHERE id = 'issue-1'")
+            .fetch_optional(pool)
+            .await
+            .unwrap();
+        assert_eq!(issue, Some(1), "the underlying issue is untouched");
+        // Re-add works, and a second remove of the same card is a clean no-op.
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 11).await.unwrap();
+        BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
+        BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
+        // A remove scoped to a foreign workspace is rejected (never a cross-tenant
+        // delete).
+        seed_ws(pool, "ws-b").await;
+        let err = BoardRepo::card_remove(pool, &ws("ws-b"), "b1", "issue-1").await.unwrap_err();
+        assert!(matches!(err, BoardRepoError::NotFound), "got {err:?}");
     }
 
     /// A card moved to another column appends at that column's end (`ord` = max+1),
