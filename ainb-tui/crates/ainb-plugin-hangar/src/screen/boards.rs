@@ -347,6 +347,14 @@ pub enum BoardsOverlay {
         /// The highlighted mode (index into [`RunMode::ALL`]).
         cursor: usize,
     },
+    /// Confirming the cancel of a card's in-flight run (`X`, tcp T3 / F6). A
+    /// destructive action, so it rides the text-capture signal like task-detail's
+    /// `X` cancel modal: Enter confirms (emits [`BoardsIntent::CancelCard`]), Esc
+    /// aborts.
+    CancelConfirm {
+        /// The card's issue whose active run to cancel.
+        issue_id: String,
+    },
 }
 
 /// A raw key folded into an open [`BoardsOverlay`]. The reducer interprets each
@@ -751,8 +759,9 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             board_id: b.id.clone(),
             issue_id: c.issue_id.clone(),
         }),
-        BoardsEvent::CancelFocusedCard => card_intent(state, |b, c| BoardsIntent::CancelCard {
-            board_id: b.id.clone(),
+        // Cancel opens a confirm overlay (a destructive action rides the
+        // text-capture signal); Enter there emits the CancelCard intent.
+        BoardsEvent::CancelFocusedCard => open_overlay(state, |_, c| BoardsOverlay::CancelConfirm {
             issue_id: c.issue_id.clone(),
         }),
         BoardsEvent::AddColumn => board_intent(state, |b| BoardsIntent::AddColumn {
@@ -817,6 +826,36 @@ fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
         }
         BoardsOverlay::RunMode { issue_id, cursor } => {
             run_mode_key(state, &issue_id, cursor, key)
+        }
+        BoardsOverlay::CancelConfirm { issue_id } => cancel_confirm_key(state, &issue_id, key),
+    }
+}
+
+/// Confirm/abort a card-cancel (tcp T3 / F6): Enter emits the [`CancelCard`]
+/// intent (resolving the board from the focus) and closes; Esc closes; any other
+/// key keeps the modal open so a stray keystroke never fires — or misses — the
+/// destructive cancel.
+///
+/// [`CancelCard`]: BoardsIntent::CancelCard
+fn cancel_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> BoardsReduction {
+    match key {
+        BoardsKey::Enter => {
+            let Some(board) = state.focused_board() else {
+                return close_overlay(state);
+            };
+            let mut next = state.clone();
+            next.overlay = None;
+            BoardsReduction {
+                state: next,
+                intent: Some(BoardsIntent::CancelCard {
+                    board_id: board.id.clone(),
+                    issue_id: issue_id.to_string(),
+                }),
+            }
+        }
+        BoardsKey::Esc => close_overlay(state),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => {
+            set_overlay(state, BoardsOverlay::CancelConfirm { issue_id: issue_id.to_string() })
         }
     }
 }
@@ -1482,6 +1521,11 @@ fn render_overlay(
                 }
             }
         }
+        BoardsOverlay::CancelConfirm { issue_id } => {
+            put_str(buf, 0, row, "Cancel this card's run? (Enter confirm, Esc abort):", GOLD, area_w);
+            let shown = format!("kill the in-flight run for #{issue_id}");
+            put_str(buf, 0, value_row, &shown, GREEN, area_w);
+        }
     }
 }
 
@@ -1561,11 +1605,11 @@ fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsS
 fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
     // Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a
     // runnable card AND reruns a finished/failed/cancelled one (same launch
-    // path), `C` cancels a running one. `feedback_keybinding_hints_near_control`.
+    // path), `X` cancels a running one. `feedback_keybinding_hints_near_control`.
     let hints: [(&str, &str); 9] = [
         ("↵", "run/rerun"),
         ("a", "attach"),
-        ("C", "cancel"),
+        ("X", "cancel"),
         ("n", "add col"),
         ("r", "rename"),
         ("x", "del col"),
@@ -1732,24 +1776,42 @@ mod tests {
         assert!(run.state.overlay().is_none(), "the picker closes on commit");
     }
 
-    /// `C` on a focused card raises a CancelCard intent carrying the board +
-    /// issue (tcp T3 / F6); it is an immediate action, not an overlay.
+    /// `X` on a focused card opens a cancel-confirm overlay (no intent yet, so a
+    /// mis-press never kills a run); Enter there emits the CancelCard intent
+    /// carrying the board + issue (tcp T3 / F6).
     #[test]
-    fn cancel_focused_card_raises_cancel_intent() {
+    fn cancel_focused_card_confirms_then_raises_cancel_intent() {
         let state = BoardsState::from_snapshot(&one_board());
-        let out = reduce_boards(&state, BoardsEvent::CancelFocusedCard);
+        let opened = reduce_boards(&state, BoardsEvent::CancelFocusedCard);
+        assert_eq!(opened.intent, None, "opening the confirm fires nothing");
+        assert!(matches!(
+            opened.state.overlay(),
+            Some(BoardsOverlay::CancelConfirm { issue_id }) if issue_id == "issue-1"
+        ));
+        // Enter confirms → the CancelCard intent, overlay closed.
+        let confirmed = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(
-            out.intent,
+            confirmed.intent,
             Some(BoardsIntent::CancelCard {
                 board_id: "b1".into(),
                 issue_id: "issue-1".into(),
             })
         );
-        assert!(out.state.overlay().is_none(), "cancel opens no overlay");
+        assert!(confirmed.state.overlay().is_none(), "confirm closes on Enter");
     }
 
-    /// `C` with no card focused (an empty column) raises nothing — a stray cancel
-    /// never fires a card-less RPC.
+    /// Esc aborts the cancel confirm — the run is left untouched.
+    #[test]
+    fn cancel_confirm_esc_aborts() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let opened = reduce_boards(&state, BoardsEvent::CancelFocusedCard);
+        let aborted = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Esc));
+        assert_eq!(aborted.intent, None, "Esc fires no cancel");
+        assert!(aborted.state.overlay().is_none(), "Esc closes the confirm");
+    }
+
+    /// `X` with no card focused (an empty column) opens nothing — a stray cancel
+    /// never even prompts.
     #[test]
     fn cancel_with_no_card_focused_is_a_noop() {
         let state = BoardsState::from_snapshot(&one_board());
@@ -1758,6 +1820,7 @@ mod tests {
         assert!(empty.state.focused_card().is_none());
         let out = reduce_boards(&empty.state, BoardsEvent::CancelFocusedCard);
         assert_eq!(out.intent, None, "no card focused → no cancel intent");
+        assert!(out.state.overlay().is_none(), "no card focused → no confirm");
     }
 
     /// Rerun (tcp T3 / F6) rides the existing run affordance: `Enter` on a

@@ -3,7 +3,7 @@ source: crates/ainb-plugin-hangar/tests/snapshot_boards.rs
 expression: map
 ---
 Board: Delivery   [1/1]   auto-move ON
-↵:run/rerun  a:attach  C:cancel  n:add col  r:rename  x:del col  c:add card  ⇧←→:reorder  m:auto-move
+↵:run/rerun  a:attach  X:cancel  n:add col  r:rename  x:del col  c:add card  ⇧←→:reorder  m:auto-move
 ○ Backlog (1)       ⋯ + ◈ Queued ↦queued (1)⋯ + ◈ Running ↦running (⋯ + ◈ Failed ↦failed (1)⋯ + ◈ Done ↦done (1)    ⋯ +
 
 ┏━━━━━━━━━━━━━━━━━━━━━━┓╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮╭──────────────────────╮

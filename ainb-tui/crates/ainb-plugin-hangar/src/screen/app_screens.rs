@@ -1299,7 +1299,10 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             ']' => Some(BoardsEvent::NextBoard),
             'b' => Some(BoardsEvent::CreateBoard),
             'a' => Some(BoardsEvent::AttachFocusedCard),
-            'C' => Some(BoardsEvent::CancelFocusedCard),
+            // `X` cancels a running card — case-paired with task-detail's `X`
+            // cancel (uppercase avoids the lowercase `x` = delete-column binding,
+            // and unlike `C` it is not a global tab shortcut).
+            'X' => Some(BoardsEvent::CancelFocusedCard),
             'n' => Some(BoardsEvent::AddColumn),
             'r' => Some(BoardsEvent::RenameColumn),
             'x' => Some(BoardsEvent::DeleteColumn),
