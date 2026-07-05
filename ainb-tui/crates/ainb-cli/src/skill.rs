@@ -23,7 +23,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result, anyhow, bail};
 
-use ainb_adapters_source::pick_adapter;
+use ainb_adapters_source::{ResolvedUnit, pick_adapter};
 use ainb_adapters_tool::{
     AcceptDecision, ToolAdapter, adapter_by_name, all_adapters, install_root_for,
     plan::{InstallPlan, PlanOp},
@@ -87,29 +87,60 @@ pub fn dispatch(home: &Path, action: SkillCommand, out: &mut dyn io::Write) -> R
     }
 }
 
-fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()> {
-    let uri = Uri::parse(&args.uri).with_context(|| format!("parsing `{}`", args.uri))?;
+/// Result of [`resolve_unit_dir`] — everything `install()` (and any other
+/// caller that needs a unit's on-disk location) derives from a unit URI:
+/// the fully resolved unit, its parsed kind, the source's current pinned
+/// SHA, and the lockfile — already updated + saved with a fresh fetch
+/// record when the source had none yet, so callers can keep mutating it
+/// (e.g. `install()` appends the `LockedUnit` and saves again).
+pub(crate) struct UnitDirResolution {
+    pub resolved: ResolvedUnit,
+    pub kind: UnitKind,
+    pub source: SourceEntry,
+    pub source_sha: Option<String>,
+    pub lockfile: Lockfile,
+}
+
+impl UnitDirResolution {
+    /// Absolute on-disk directory of the resolved unit (source root +
+    /// the descriptor's repo-relative path) — the directory `library
+    /// copy` and `install` both read files from.
+    pub fn unit_dir(&self) -> PathBuf {
+        self.resolved.source_root.join(&self.resolved.descriptor.path)
+    }
+}
+
+/// Resolve a unit URI down to its on-disk location: find the matching
+/// enabled source in the manifest, ensure it's fetched (fetching + a
+/// lockfile upsert on demand when it never was, or its cache dir is
+/// gone), then pick a source adapter and resolve the unit within the
+/// fetched checkout.
+///
+/// This is the shared front half of `install()` — factored out so other
+/// callers (e.g. `ainb skill library copy`) can resolve a unit's files
+/// without reimplementing the fetch/adapter dance.
+pub(crate) fn resolve_unit_dir(home: &Path, uri: &Uri) -> Result<UnitDirResolution> {
     if !uri.is_unit() {
         bail!(
             "`{}` is not a unit URI — expected `<source>@<ref>/<path>`",
-            args.uri
+            uri.display()
         );
     }
 
     // Look up the source matching this URI in the user manifest.
     let manifest = Manifest::load_from(&manifest_path_in(home))?;
     let source_uri = format!("{}:{}", uri.source_type, uri.locator);
-    let source =
-        manifest
-            .sources
-            .iter()
-            .find(|s| s.uri == source_uri && s.enabled)
-            .ok_or_else(|| {
-                anyhow!(
-                    "no enabled source matches `{source_uri}` — run \
+    let source = manifest
+        .sources
+        .iter()
+        .find(|s| s.uri == source_uri && s.enabled)
+        .ok_or_else(|| {
+            anyhow!(
+                "no enabled source matches `{source_uri}` — run \
                  `ainb source add {source_uri}` first"
-                )
-            })?;
+            )
+        })?
+        .clone();
 
     // Find the fetched checkout via lockfile. If the source has never been
     // fetched (or its cache dir is gone — e.g. the manifest was authored by
@@ -172,6 +203,32 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
         .parse()
         .with_context(|| format!("unit kind `{}`", resolved.descriptor.kind))?;
 
+    Ok(UnitDirResolution {
+        resolved,
+        kind,
+        source,
+        source_sha,
+        lockfile,
+    })
+}
+
+fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()> {
+    let uri = Uri::parse(&args.uri).with_context(|| format!("parsing `{}`", args.uri))?;
+    if !uri.is_unit() {
+        bail!(
+            "`{}` is not a unit URI — expected `<source>@<ref>/<path>`",
+            args.uri
+        );
+    }
+
+    let UnitDirResolution {
+        resolved,
+        kind,
+        source,
+        source_sha,
+        mut lockfile,
+    } = resolve_unit_dir(home, &uri)?;
+
     // Pick target tools.
     let targets = parse_targets(args.targets.as_deref())?;
 
@@ -191,7 +248,7 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
                 // paths; we rewrite them here using `resolve_pair`. See
                 // bead v12.C.4.
                 let plan = remap_plan_via_target_layout(
-                    source,
+                    &source,
                     tool.name(),
                     &install_root_for(tool.name()),
                     plan,
@@ -241,6 +298,24 @@ fn install(home: &Path, args: InstallArgs, out: &mut dyn io::Write) -> Result<()
                 reason: reason.clone(),
             },
         );
+    }
+
+    // Record the unit in the manifest too — the manifest is the
+    // declarative intent the Skill Manager's Units table renders;
+    // without this entry an installed unit was lockfile-only and
+    // invisible in the TUI ("imported but nothing shows"). Upsert, not
+    // insert-only: a reinstall with different --targets must refresh
+    // the declared targets or manifest and lockfile drift apart.
+    {
+        let manifest_path = manifest_path_in(home);
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        manifest.upsert_unit(
+            &args.uri,
+            args.targets
+                .as_deref()
+                .map(|s| s.split(',').map(|t| t.trim().to_string()).collect()),
+        );
+        manifest.save_to(&manifest_path)?;
     }
 
     // Replace or insert the LockedUnit.
@@ -329,6 +404,22 @@ fn remove(home: &Path, args: RemoveSkillArgs, out: &mut dyn io::Write) -> Result
             // Skipped / PendingUninstall — drop the entry, no fs op.
             removed_tools.push(tool_name);
         }
+    }
+
+    // Mirror the outcome into the manifest — install declares the unit
+    // there (that's what the Skill Manager renders), so remove must
+    // undeclare it or the next `sync` reinstalls what was just removed.
+    {
+        let manifest_path = manifest_path_in(home);
+        let mut manifest = Manifest::load_from(&manifest_path)?;
+        if retained.is_empty() {
+            manifest.units.retain(|u| u.uri != args.uri);
+        } else if let Some(entry) = manifest.units.iter_mut().find(|u| u.uri == args.uri) {
+            // Partial removal: keep the declaration, narrowed to the
+            // tools that still hold a deployment.
+            entry.targets = Some(retained.keys().cloned().collect());
+        }
+        manifest.save_to(&manifest_path)?;
     }
 
     if retained.is_empty() {
@@ -736,7 +827,7 @@ fn sync(home: &Path, args: SyncArgs, out: &mut dyn io::Write) -> Result<()> {
 /// On `--dry-run`, prints the plan and returns without executing.
 /// `args.source_or_unit`, when set, scopes the iteration to one
 /// source (by source name) or one unit (by lockfile `declared_uri`).
-fn bidirectional_content_sync(
+pub(crate) fn bidirectional_content_sync(
     home: &Path,
     manifest: &Manifest,
     lockfile: &Lockfile,
@@ -1041,7 +1132,7 @@ impl ContentFetcher for GitClonedFetcher {
 /// `<ainb-home>/promote-cache/<sanitised-remote>/` and return the
 /// checkout path. Sanitised remote key mirrors `promote.rs` so the
 /// two flows share the same cache directory.
-fn ensure_repo_clone(home: &Path, source: &SourceEntry) -> Result<PathBuf> {
+pub(crate) fn ensure_repo_clone(home: &Path, source: &SourceEntry) -> Result<PathBuf> {
     let remote = git_remote_url(source)?;
     let key = sanitise_cache_key(&remote);
     let cache = home.join("promote-cache").join(&key);

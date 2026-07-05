@@ -167,6 +167,53 @@ impl OnboardingStep {
         }
     }
 
+    /// A one-line "what this step actually does" hint, shown in the hint band
+    /// above every step's content.
+    pub fn hint(&self) -> &'static str {
+        match self {
+            Self::Welcome => {
+                "First-time setup — dependencies, project folders, agent auth, telemetry, \
+                 and editor. Change any of it later from the Setup menu."
+            }
+            Self::Source => {
+                "Optional: tell us how you found ainb. Picks one — used only to understand \
+                 where users come from. Nothing is sent until you finish."
+            }
+            Self::Role => {
+                "Optional: what best describes you. Helps us tune defaults and docs — \
+                 pick the closest match or skip ahead."
+            }
+            Self::UseCase => {
+                "Optional: what you mainly want ainb for. Shapes which features we surface \
+                 first — pick one or move on."
+            }
+            Self::DependencyCheck => {
+                "Checks the CLI tools ainb needs (claude, tmux, git, …). Press i to install a \
+                 missing one; required tools must pass before you can continue."
+            }
+            Self::GitDirectories => {
+                "Parent folders that hold your git repos. ainb scans these recursively — every \
+                 repo it finds becomes a session you can start. Comma-separate multiple."
+            }
+            Self::Authentication => {
+                "How each agent signs in: subscription/OAuth via its native login, or an API key \
+                 stored in your system keychain. Set per agent, changeable anytime."
+            }
+            Self::OtelSetup => {
+                "Optional: ship ainb usage metrics to your Grafana Cloud over OpenTelemetry. \
+                 Fill all three fields or skip — you can run `ainb otel setup` later."
+            }
+            Self::EditorSelection => {
+                "The editor ainb opens files and worktrees in. Detected from your PATH — pick \
+                 one, or skip to fall back to $EDITOR."
+            }
+            Self::Summary => {
+                "Review your choices and finish. Writes them to ~/.agents-in-a-box/config; \
+                 re-run this wizard anytime from the Setup menu."
+            }
+        }
+    }
+
     /// Can we go to the next step?
     pub fn can_advance(&self, state: &OnboardingState) -> bool {
         match self {
@@ -368,24 +415,167 @@ pub struct OnboardingState {
     pub dep_cursor: usize,
     /// Per-dep install state, keyed by dep id (idle deps absent).
     pub install_states: std::collections::HashMap<String, DepInstall>,
-    /// Authentication step: cursor over the selectable auth option rows.
-    pub auth_selected_index: usize,
-    /// Authentication step: `Some(buffer)` while typing a Claude API key
-    /// inline (the "Claude - API key" row was chosen); `None` in normal
-    /// list-navigation mode.
-    pub auth_api_key_input: Option<String>,
+    /// Authentication step: cursor over the agent rows in the `AgentList` pane.
+    pub auth_agent_cursor: usize,
+    /// Authentication step: active sub-view (agent list / method picker / key entry).
+    pub auth_pane: AuthPane,
+    /// Authentication step: detected current auth per agent, cached so render
+    /// never touches the keychain. Refreshed on entering the step and after any
+    /// change via `refresh_auth_statuses`.
+    pub auth_statuses: Vec<AgentAuthStatus>,
 }
 
-/// Selectable rows on the onboarding Authentication step. `(agent, method)`.
-/// Index order is load-bearing - the `OnboardingAuthSelect` handler matches on
-/// it. Real auth still happens in each tool (`/login`); only the API-key row
-/// persists anything (keychain + `claude_provider = ApiKey`).
-pub const AUTH_OPTIONS: [(&str, &str); 4] = [
-    ("Claude", "Login - subscription / OAuth"),
-    ("Claude", "API key - pay-per-use"),
-    ("Codex", "Login - OAuth"),
-    ("Skip", "Configure later"),
-];
+/// Harnesses whose auth is configurable on the onboarding Authentication step.
+/// Each runs in one of two modes: `Login` (native/system-wide sign-in, ainb
+/// injects nothing) or `ApiKey` (a key ainb stores in the keychain and injects
+/// as the harness's env var when a session starts).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthAgent {
+    Claude,
+    Codex,
+    Gemini,
+    Copilot,
+}
+
+impl AuthAgent {
+    /// The configurable harnesses, in row order.
+    pub fn all() -> &'static [AuthAgent] {
+        &[Self::Claude, Self::Codex, Self::Gemini, Self::Copilot]
+    }
+
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Claude => "Claude",
+            Self::Codex => "Codex",
+            Self::Gemini => "Gemini",
+            Self::Copilot => "Copilot",
+        }
+    }
+
+    /// Label for the non-key method in the picker. Claude's is "system-wide"
+    /// because you configure it entirely outside ainb; the others are a native
+    /// sign-in inside the tool.
+    pub fn login_label(&self) -> &'static str {
+        match self {
+            Self::Claude => "System-wide auth",
+            Self::Codex => "Sign in with ChatGPT",
+            Self::Gemini => "Sign in with Google",
+            Self::Copilot => "Sign in with GitHub",
+        }
+    }
+
+    /// One-line explanation of what the login/system-wide method actually does.
+    pub fn login_hint(&self) -> &'static str {
+        match self {
+            Self::Claude => {
+                "Use whatever you set up for Claude at the system level — `claude` /login, a \
+                 Pro/Max subscription, or a cloud provider. ainb injects no key."
+            }
+            Self::Codex => "Run `codex login` and sign in with your ChatGPT account (OAuth).",
+            Self::Gemini => {
+                "Run `gemini` and sign in with Google, or use application-default credentials."
+            }
+            Self::Copilot => {
+                "Run `copilot login` (GitHub device flow), or reuse your `gh` CLI login."
+            }
+        }
+    }
+
+    /// Official vendor auth-guide URL (terminals linkify plain URLs).
+    pub fn doc_url(&self) -> &'static str {
+        match self {
+            Self::Claude => crate::docs::AUTH_CLAUDE,
+            Self::Codex => crate::docs::AUTH_CODEX,
+            Self::Gemini => crate::docs::AUTH_GEMINI,
+            Self::Copilot => crate::docs::AUTH_COPILOT,
+        }
+    }
+
+    /// Keychain slot this harness's API key is stored under.
+    pub fn credential_key(&self) -> crate::credentials::CredentialKey {
+        use crate::credentials::CredentialKey;
+        match self {
+            Self::Claude => CredentialKey::AnthropicApiKey,
+            Self::Codex => CredentialKey::OpenAiApiKey,
+            Self::Gemini => CredentialKey::GeminiApiKey,
+            Self::Copilot => CredentialKey::GithubPat,
+        }
+    }
+
+    /// Env var the stored key is injected as when a session starts.
+    pub fn env_var(&self) -> &'static str {
+        match self {
+            Self::Claude => "ANTHROPIC_API_KEY",
+            Self::Codex => "OPENAI_API_KEY",
+            Self::Gemini => "GEMINI_API_KEY",
+            Self::Copilot => "GITHUB_TOKEN",
+        }
+    }
+
+    /// Prefix used to seed the inline API-key entry buffer (empty when the
+    /// harness's tokens have no single stable prefix, e.g. GitHub PATs).
+    pub fn key_seed(&self) -> &'static str {
+        match self {
+            Self::Claude => "sk-ant-",
+            Self::Codex => "sk-",
+            Self::Gemini => "AIza",
+            Self::Copilot => "",
+        }
+    }
+
+    pub fn key_label(&self) -> &'static str {
+        match self {
+            Self::Claude => "Anthropic API key",
+            Self::Codex => "OpenAI API key",
+            Self::Gemini => "Gemini API key",
+            Self::Copilot => "GitHub token (PAT)",
+        }
+    }
+}
+
+/// Auth method a harness is currently using (detected) or being switched to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AuthMethodKind {
+    /// Native / system-wide sign-in; ainb injects nothing.
+    Login,
+    /// API key stored in the system keychain, injected on session start.
+    ApiKey,
+}
+
+impl AuthMethodKind {
+    /// Generic label. The agent list uses this for the API-key row; the method
+    /// picker prefers `AuthAgent::login_label()` for the login row.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Login => "Sign-in / system-wide",
+            Self::ApiKey => "API key",
+        }
+    }
+}
+
+/// Detected current auth for a single agent. Cached in `OnboardingState` and
+/// refreshed on entering the step / after a change — never read from the
+/// keychain during render (which runs every frame).
+#[derive(Debug, Clone)]
+pub struct AgentAuthStatus {
+    pub agent: AuthAgent,
+    pub method: AuthMethodKind,
+    /// Masked key (e.g. "sk-ant-xxxx••••") when `method == ApiKey` and a key is
+    /// actually stored; `None` otherwise.
+    pub key_masked: Option<String>,
+}
+
+/// Which sub-view of the Authentication step is active. Drives both the render
+/// and the key dispatch so the flat option list becomes a per-agent drill-down.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AuthPane {
+    /// Browsing the per-agent list (default).
+    AgentList,
+    /// Choosing a method for `agent`. `cursor`: 0 = Login, 1 = API key, 2 = Back.
+    MethodPicker { agent: AuthAgent, cursor: usize },
+    /// Typing an API key for `agent` into `buf`.
+    KeyEntry { agent: AuthAgent, buf: String },
+}
 
 /// Background-install state for a single dependency on the deps screen.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -428,8 +618,9 @@ impl OnboardingState {
             otel_field: 0,
             dep_cursor: 0,
             install_states: std::collections::HashMap::new(),
-            auth_selected_index: 0,
-            auth_api_key_input: None,
+            auth_agent_cursor: 0,
+            auth_pane: AuthPane::AgentList,
+            auth_statuses: Vec::new(),
         }
     }
 
@@ -487,15 +678,82 @@ impl OnboardingState {
         self.questionnaire_answer(QuestionnaireKind::UseCase)
     }
 
-    /// Move the auth-option cursor by `delta`, clamped to `AUTH_OPTIONS`.
-    /// No-op while an API key is being typed.
-    pub fn move_auth_cursor(&mut self, delta: isize) {
-        if self.auth_api_key_input.is_some() {
+    /// Move the agent-list cursor by `delta`, clamped to `auth_statuses`.
+    pub fn move_auth_agent_cursor(&mut self, delta: isize) {
+        if self.auth_statuses.is_empty() {
+            self.auth_agent_cursor = 0;
             return;
         }
-        let max = (AUTH_OPTIONS.len() - 1) as isize;
-        self.auth_selected_index =
-            (self.auth_selected_index as isize + delta).clamp(0, max) as usize;
+        let max = (self.auth_statuses.len() - 1) as isize;
+        self.auth_agent_cursor = (self.auth_agent_cursor as isize + delta).clamp(0, max) as usize;
+    }
+
+    /// The agent under the list cursor, if any.
+    pub fn auth_agent_at_cursor(&self) -> Option<AuthAgent> {
+        self.auth_statuses.get(self.auth_agent_cursor).map(|s| s.agent)
+    }
+
+    /// Re-detect each agent's current auth from config + keychain and cache it.
+    /// Call on entering the Authentication step and after every change; never
+    /// from render. Also refreshes the summary string shown on the Summary step.
+    pub fn refresh_auth_statuses(&mut self) {
+        use crate::config::{AppConfig, ClaudeAuthProvider};
+        use crate::credentials;
+
+        // Claude's mode is gated by config: a stored Anthropic key with
+        // system-wide auth selected must NOT read as API-key mode (the key
+        // isn't injected in that case). Every other harness is "key present?".
+        let claude_api = matches!(
+            AppConfig::load().map(|c| c.authentication.claude_provider),
+            Ok(ClaudeAuthProvider::ApiKey)
+        );
+
+        self.auth_statuses = AuthAgent::all()
+            .iter()
+            .map(|&agent| {
+                let key = agent.credential_key();
+                let is_api = if agent == AuthAgent::Claude {
+                    claude_api
+                } else {
+                    credentials::has_credential(key)
+                };
+                let (method, key_masked) = if is_api {
+                    (
+                        AuthMethodKind::ApiKey,
+                        Some(credentials::get_credential_masked(key)),
+                    )
+                } else {
+                    (AuthMethodKind::Login, None)
+                };
+                AgentAuthStatus {
+                    agent,
+                    method,
+                    key_masked,
+                }
+            })
+            .collect();
+
+        // Auth is always in *some* state now — reflect that for the Summary step.
+        self.auth_completed = true;
+        self.auth_method = Some(self.auth_summary());
+    }
+
+    /// One-line summary of current per-agent auth for the Summary step.
+    pub fn auth_summary(&self) -> String {
+        if self.auth_statuses.is_empty() {
+            return "not configured".to_string();
+        }
+        self.auth_statuses
+            .iter()
+            .map(|s| {
+                let m = match s.method {
+                    AuthMethodKind::Login => "login",
+                    AuthMethodKind::ApiKey => "api key",
+                };
+                format!("{} {}", s.agent.label(), m)
+            })
+            .collect::<Vec<_>>()
+            .join(" • ")
     }
 
     /// Deps flattened in topic order — the cursor indexes into this. Empty until
@@ -646,6 +904,19 @@ impl OnboardingState {
         } else {
             existing.join(", ")
         }
+    }
+
+    /// Seed the git-directories input from previously-saved paths so re-opening
+    /// onboarding shows the user's last choice instead of a fresh default scan.
+    /// No-op on an empty list (keeps the default). Validates after seeding.
+    pub fn set_git_directories(&mut self, paths: &[PathBuf]) {
+        if paths.is_empty() {
+            return;
+        }
+        self.git_directories_input =
+            paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join(", ");
+        self.cursor_position = self.git_directories_input.len();
+        self.validate_git_directories();
     }
 
     /// Validate the current git directories input
@@ -816,20 +1087,70 @@ mod tests {
     }
 
     #[test]
-    fn auth_cursor_navigates_and_clamps() {
+    fn auth_agent_cursor_navigates_and_clamps() {
         let mut s = OnboardingState::new();
-        assert_eq!(s.auth_selected_index, 0);
-        s.move_auth_cursor(-1); // clamp at 0
-        assert_eq!(s.auth_selected_index, 0);
-        s.move_auth_cursor(1);
-        assert_eq!(s.auth_selected_index, 1);
-        s.move_auth_cursor(100); // clamp at the last option
-        assert_eq!(s.auth_selected_index, AUTH_OPTIONS.len() - 1);
-        // While typing an API key the cursor is frozen.
-        s.auth_api_key_input = Some("sk-ant-".to_string());
-        let before = s.auth_selected_index;
-        s.move_auth_cursor(-1);
-        assert_eq!(s.auth_selected_index, before);
+        // Seed two agents (avoids touching the real keychain in this unit test).
+        s.auth_statuses = vec![
+            AgentAuthStatus {
+                agent: AuthAgent::Claude,
+                method: AuthMethodKind::Login,
+                key_masked: None,
+            },
+            AgentAuthStatus {
+                agent: AuthAgent::Codex,
+                method: AuthMethodKind::Login,
+                key_masked: None,
+            },
+        ];
+        assert_eq!(s.auth_agent_cursor, 0);
+        s.move_auth_agent_cursor(-1); // clamp at 0
+        assert_eq!(s.auth_agent_cursor, 0);
+        assert_eq!(s.auth_agent_at_cursor(), Some(AuthAgent::Claude));
+        s.move_auth_agent_cursor(1);
+        assert_eq!(s.auth_agent_cursor, 1);
+        assert_eq!(s.auth_agent_at_cursor(), Some(AuthAgent::Codex));
+        s.move_auth_agent_cursor(100); // clamp at the last agent
+        assert_eq!(s.auth_agent_cursor, s.auth_statuses.len() - 1);
+    }
+
+    #[test]
+    fn auth_agents_cover_four_harnesses_with_correct_env_vars() {
+        // The env var each harness's stored key is injected as — must match what
+        // session_manager::build_env_setup_for_provider actually exports.
+        let expected = [
+            (AuthAgent::Claude, "ANTHROPIC_API_KEY"),
+            (AuthAgent::Codex, "OPENAI_API_KEY"),
+            (AuthAgent::Gemini, "GEMINI_API_KEY"),
+            (AuthAgent::Copilot, "GITHUB_TOKEN"),
+        ];
+        assert_eq!(AuthAgent::all().len(), 4);
+        for (agent, env) in expected {
+            assert_eq!(agent.env_var(), env, "{} env var drift", agent.label());
+            assert!(
+                agent.doc_url().starts_with("https://"),
+                "{} missing doc url",
+                agent.label()
+            );
+            assert!(!agent.login_label().is_empty());
+        }
+    }
+
+    #[test]
+    fn auth_summary_lists_each_agent() {
+        let mut s = OnboardingState::new();
+        s.auth_statuses = vec![
+            AgentAuthStatus {
+                agent: AuthAgent::Claude,
+                method: AuthMethodKind::ApiKey,
+                key_masked: Some("sk-ant-xxxx••••".to_string()),
+            },
+            AgentAuthStatus {
+                agent: AuthAgent::Codex,
+                method: AuthMethodKind::Login,
+                key_masked: None,
+            },
+        ];
+        assert_eq!(s.auth_summary(), "Claude api key • Codex login");
     }
 
     #[test]
@@ -858,6 +1179,21 @@ mod tests {
         state.otel_backspace();
         assert_eq!(state.otel_instance_id, "");
         assert!(!state.otel_creds_complete());
+    }
+
+    #[test]
+    fn set_git_directories_seeds_and_preserves_default_when_empty() {
+        let mut state = OnboardingState::new();
+        let default = state.git_directories_input.clone();
+
+        // Empty list is a no-op — keeps the default scan.
+        state.set_git_directories(&[]);
+        assert_eq!(state.git_directories_input, default);
+
+        // Saved paths replace the input, joined by ", ".
+        state.set_git_directories(&[PathBuf::from("/a/b"), PathBuf::from("/c/d")]);
+        assert_eq!(state.git_directories_input, "/a/b, /c/d");
+        assert_eq!(state.cursor_position, state.git_directories_input.len());
     }
 
     #[test]

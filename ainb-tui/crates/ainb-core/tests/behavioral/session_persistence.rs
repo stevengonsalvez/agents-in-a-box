@@ -23,6 +23,9 @@ fn create_session_metadata(
         agent_type: SessionAgentType::default(),
         headroom_enabled: false,
         rtk_enabled: false,
+        skip_permissions: None,
+        model: None,
+        codex_model: None,
     }
 }
 
@@ -42,6 +45,9 @@ fn create_session_metadata_with_id(
         agent_type: SessionAgentType::default(),
         headroom_enabled: false,
         rtk_enabled: false,
+        skip_permissions: None,
+        model: None,
+        codex_model: None,
     }
 }
 

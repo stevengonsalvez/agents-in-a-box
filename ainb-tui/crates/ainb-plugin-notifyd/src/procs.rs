@@ -284,6 +284,125 @@ pub fn reap() -> ReapReport {
     report
 }
 
+/// Outcome of a [`restart`] — the single resume/repair command for a dead
+/// or wedged approve socket. Serialisable so the CLI can render it as
+/// `--format json`.
+#[derive(Debug, Default, Clone, PartialEq, Eq, serde::Serialize)]
+pub struct RestartOutcome {
+    /// The prior owner pid that was signalled to stop, if one was live.
+    pub stopped: Option<u32>,
+    /// Wedged / orphan pids reaped before the fresh spawn.
+    pub reaped: Vec<u32>,
+    /// Pid of the freshly detach-spawned daemon.
+    pub spawned: Option<u32>,
+    /// Whether the approve socket came back up within the bind timeout.
+    /// `true` means still-blocked `client_await` waiters can re-dial and
+    /// resume; `false` means the caller should investigate (the waiters
+    /// keep re-dialling until their own deadline regardless).
+    pub socket_bound: bool,
+}
+
+/// argv for respawning *this* daemon binary. The shared `notifyd` CLI is
+/// reached two ways: the standalone `ainb-notifyd` binary (daemon verbs at
+/// the top level → `run`) and the host `ainb notifyd run` subcommand. Pick
+/// by the current exe's basename so a restart re-execs the right entrypoint
+/// regardless of which one called it.
+fn daemon_respawn_argv() -> (std::path::PathBuf, Vec<&'static str>) {
+    let exe = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ainb"));
+    let name = exe.file_name().and_then(|n| n.to_str()).unwrap_or("");
+    (exe.clone(), respawn_args_for(name))
+}
+
+/// Pure argv picker: the standalone `ainb-notifyd` binary exposes daemon
+/// verbs at the top level (`run`); the host `ainb` binary nests them under
+/// `notifyd`.
+fn respawn_args_for(exe_name: &str) -> Vec<&'static str> {
+    if exe_name.starts_with("ainb-notifyd") {
+        vec!["run"]
+    } else {
+        vec!["notifyd", "run"]
+    }
+}
+
+/// Detach-spawn a fresh daemon: null stdio + its own process group so a
+/// closing tmux pane or terminal SIGHUP can't take it down — the Rust
+/// equivalent of the hook script's `nohup ainb notifyd </dev/null
+/// >/dev/null 2>&1 &`. Returns the child pid.
+fn spawn_detached() -> anyhow::Result<u32> {
+    use anyhow::Context;
+    use std::os::unix::process::CommandExt;
+    use std::process::Stdio;
+
+    let (exe, args) = daemon_respawn_argv();
+    let child = Command::new(&exe)
+        .args(&args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .process_group(0)
+        .spawn()
+        .with_context(|| format!("spawning {} {}", exe.display(), args.join(" ")))?;
+    Ok(child.id())
+}
+
+/// Poll the approve socket until something is accepting on it, up to
+/// `timeout`. Returns whether it came up.
+fn wait_for_socket_bound(path: &std::path::Path, timeout: std::time::Duration) -> bool {
+    let started = std::time::Instant::now();
+    loop {
+        if socket_accepting(path) {
+            return true;
+        }
+        if started.elapsed() >= timeout {
+            return false;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+}
+
+/// The single resume/repair command (goal req: "one command to resume/repair;
+/// must not lose the waiting hook"). Stops any current owner, reaps wedged /
+/// orphan stragglers, then detach-spawns a fresh daemon and waits for the
+/// approve socket to bind. Because [`crate::broker::client_await`] re-dials
+/// on every `REDIAL_INTERVAL` until its own deadline, a still-blocked
+/// permission waiter re-registers itself the moment the socket is back — so
+/// restarting the daemon is all it takes to resume pending prompts, and no
+/// waiting hook is ever lost. `stop`-first (not just reap) because
+/// [`crate::run_daemon`] refuses to start while a live owner holds the pid.
+pub fn restart(bind_timeout: std::time::Duration) -> anyhow::Result<RestartOutcome> {
+    use nix::sys::signal::Signal;
+
+    let paths = Paths::from_home()?;
+    let mut outcome = RestartOutcome::default();
+
+    // 1. Stop the recorded owner and wait for it to actually exit — spawning
+    //    while it still holds the pid would make the new daemon bail.
+    if let Ok(Some(pid)) = crate::pid::read(&paths.pid) {
+        if crate::pid::is_running(pid) {
+            let _ = signal_pid(pid, Signal::SIGTERM);
+            outcome.stopped = Some(pid);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+            while crate::pid::is_running(pid) && std::time::Instant::now() < deadline {
+                std::thread::sleep(std::time::Duration::from_millis(50));
+            }
+            if crate::pid::is_running(pid) {
+                let _ = signal_pid(pid, Signal::SIGKILL);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+
+    // 2. Reap any wedged / orphan stragglers so the fresh daemon is the only
+    //    notifyd-family process left.
+    outcome.reaped = reap().killed;
+
+    // 3. Detach-spawn a fresh daemon and wait for the approve socket to bind.
+    outcome.spawned = Some(spawn_detached()?);
+    outcome.socket_bound = wait_for_socket_bound(&paths.approve_socket, bind_timeout);
+
+    Ok(outcome)
+}
+
 /// One-shot scan: enumerate notifyd processes and classify them against
 /// the on-disk owner pid, the live socket, and this process's own binary.
 /// Used by the TUI's Daemons overlay.
@@ -324,6 +443,41 @@ mod tests {
             class,
             binary_drift: false,
         }
+    }
+
+    #[test]
+    fn respawn_argv_standalone_uses_top_level_run() {
+        assert_eq!(respawn_args_for("ainb-notifyd"), vec!["run"]);
+        assert_eq!(respawn_args_for("ainb-notifyd-x86"), vec!["run"]);
+    }
+
+    #[test]
+    fn respawn_argv_host_binary_nests_under_notifyd() {
+        assert_eq!(respawn_args_for("ainb"), vec!["notifyd", "run"]);
+        assert_eq!(respawn_args_for(""), vec!["notifyd", "run"]);
+    }
+
+    #[test]
+    fn wait_for_socket_bound_true_when_listener_up() {
+        let dir = std::env::temp_dir().join(format!("ainb-sockbound-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sock = dir.join("live.sock");
+        let _listener = std::os::unix::net::UnixListener::bind(&sock).unwrap();
+        assert!(wait_for_socket_bound(
+            &sock,
+            std::time::Duration::from_millis(200)
+        ));
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn wait_for_socket_bound_false_when_absent() {
+        let sock = std::env::temp_dir().join(format!("ainb-nosock-{}.sock", std::process::id()));
+        std::fs::remove_file(&sock).ok();
+        assert!(!wait_for_socket_bound(
+            &sock,
+            std::time::Duration::from_millis(120)
+        ));
     }
 
     #[test]

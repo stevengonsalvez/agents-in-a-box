@@ -141,6 +141,9 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         agent_type,
         headroom_enabled: false,
         rtk_enabled: false,
+        skip_permissions: Some(args.dangerously_skip_permissions),
+        model: Some(model),
+        codex_model: None,
     };
 
     // Locked RMW (pu4): another `ainb run`/`kill` or a daemon register racing

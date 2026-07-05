@@ -394,6 +394,9 @@ fn execute_resume(session: &str) -> Result<()> {
         agent_type: SessionAgentType::default(),
         headroom_enabled: false,
         rtk_enabled: false,
+        skip_permissions: None,
+        model: None,
+        codex_model: None,
     };
 
     // Locked RMW (pu4): serialise recovery's re-register against live writers.
@@ -623,6 +626,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         }
     }
 

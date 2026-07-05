@@ -364,10 +364,40 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         }))
     };
 
+    use std::os::unix::fs::PermissionsExt;
+
+    // APPROVE BROKER (permission round-trip): the synchronous approve/deny
+    // socket. A waiting Claude `PermissionRequest` hook dials `approve.sock`
+    // and BLOCKS until a human decides from the fleet TUI/CLI (or the broker
+    // times out → deny). Pending approvals live only in the broker's memory —
+    // on disconnect the waiter re-dials and re-registers, so a single notifyd
+    // restart is the whole resume story. Bound + chmod like the main socket,
+    // and aborted on shutdown when the handle drops. The `BrokerState` handle
+    // is cloned into the connection handler so `List`/`Decide` from other
+    // callers reach the same pending map.
+    if config.paths.approve_socket.exists() {
+        std::fs::remove_file(&config.paths.approve_socket).ok();
+    }
+    let approve_listener = UnixListener::bind(&config.paths.approve_socket).with_context(|| {
+        format!(
+            "binding approve socket {}",
+            config.paths.approve_socket.display()
+        )
+    })?;
+    if let Ok(meta) = std::fs::metadata(&config.paths.approve_socket) {
+        let mut perms = meta.permissions();
+        perms.set_mode(0o600);
+        let _ = std::fs::set_permissions(&config.paths.approve_socket, perms);
+    }
+    let _approve_task = AbortOnDrop(tokio::spawn(crate::broker::serve(
+        approve_listener,
+        crate::broker::BrokerState::new(),
+    )));
+    info!(socket = %config.paths.approve_socket.display(), "approve broker listening");
+
     let listener = UnixListener::bind(&config.paths.socket)
         .with_context(|| format!("binding unix socket {}", config.paths.socket.display()))?;
     // chmod 0600 — only the owner can write.
-    use std::os::unix::fs::PermissionsExt;
     if let Ok(meta) = std::fs::metadata(&config.paths.socket) {
         let mut perms = meta.permissions();
         perms.set_mode(0o600);
@@ -418,9 +448,11 @@ pub async fn run_daemon(config: RunConfig) -> Result<()> {
         }
     }
 
-    // Cleanup before drop — remove the socket so future hook fires
-    // know the daemon is down.
+    // Cleanup before drop — remove the sockets so future hook fires
+    // know the daemon is down. The approve broker task is aborted when
+    // `_approve_task` drops; remove its socket too.
     let _ = std::fs::remove_file(&config.paths.socket);
+    let _ = std::fs::remove_file(&config.paths.approve_socket);
     Ok(())
 }
 

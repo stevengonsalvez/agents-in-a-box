@@ -43,8 +43,8 @@ The agents register the same intent, but not the same raw hook names. The mappin
 |------------|--------|-------|-------------|
 | `Notification` | `[?]` amber | awaiting input — asked a question, needs permission, or the prompt sat idle (~60s) | the agent resumes generating · you attach · a newer `Stop` supersedes it — **no TTL** |
 | `Stop` | `[✓]` green | turn finished — over to you | **5-minute TTL** · the agent resumes · you attach · a newer event |
-| *(none — Claude has no permission hook)* | `[!]` red | "blocked on approval" | **never shows today** — Claude folds permission into `Notification`, so a permission-block reads as `[?]` |
-| `SessionStart` · `UserPromptSubmit` · `PostToolUse` · `PreCompact` | *(none)* | telemetry — deliberately not hooked | — |
+| `PermissionRequest` | `[!]` red | blocked on tool approval | the agent resumes · attach. Fires only on sessions with the **fleet plumbing** hook set installed (fleet-managed sessions register `PermissionRequest` there); the plain notifyd install folds permission into `Notification`, which reads as `[?]`. On fleet sessions this hook also *blocks* for a live approve/deny — see [Permission approve/deny round-trip](#permission-approvedeny-round-trip) |
+| `SessionStart` · `UserPromptSubmit` · `PostToolUse` · `PreCompact` | *(none)* | telemetry — not hooked by the notifyd install (fleet plumbing registers `SessionStart`/`UserPromptSubmit` to drive the fleet panel's `STARTING`/`RUNNING` states) | — |
 
 ### Codex
 
@@ -68,6 +68,37 @@ While a session is **actively generating**, the marker is suppressed (the busy s
 
 Markers are matched to sessions by **working directory + agent**: each hook event carries the `cwd` it fired in, joined to the ainb session whose `workspace_path` matches (trailing-slash tolerant). Only events within a rolling **6-hour window** count — so opening ainb immediately surfaces sessions that were already waiting before you launched it (the `[✓]` TTL keeps long-finished turns from piling up, so only genuinely-pending `[?]` / `[!]` survive).
 
+## Permission approve/deny round-trip
+
+Fleet-managed Claude sessions get a **synchronous, first-class permission gate**: when Claude fires a `PermissionRequest` hook, the hook process *blocks* on notifyd's approve socket until a human approves or denies it — from the fleet panel, the CLI, or not at all (timeout ⇒ deny). The answer flows straight back to Claude as the hook's `hookSpecificOutput` permission decision, so approving in the TUI is exactly as authoritative as pressing `y` in the Claude session itself.
+
+```
+┌────────┐ PermissionRequest ┌───────────┐  AWAIT   ┌────────────────┐
+│ Claude │──────────────────▶│ hook proc │─────────▶│ approve.sock   │
+│ session│                   │ (blocks)  │          │ (notifyd)      │
+└────────┘                   └───────────┘          └────────────────┘
+     ▲                             │                        ▲
+     │  hookSpecificOutput         │ decision               │ DECIDE
+     │  allow / deny               ▼                        │
+     └─────────────────────────────┘             ┌──────────┴───────┐
+                                                 │ fleet panel y/n  │
+                                                 │ ainb fleet       │
+                                                 │   approve/deny   │
+                                                 └──────────────────┘
+```
+
+- **Fleet panel (TUI)** — press `f` on the home screen. A session blocked on approval shows the gold **`APRV`** badge (a freshly booting one shows blue **`STRT`**); select the row and press **`y`** to approve or **`n`** to deny.
+- **CLI** — `ainb fleet approve` with no argument lists the sessions currently waiting (with tool, context, and wait time; `--format json` for scripting). `ainb fleet approve <session-id>` / `ainb fleet deny <session-id> [--reason "…"]` delivers the decision; a no-waiter miss exits non-zero.
+
+### Fault tolerance — no hook is ever lost
+
+The waiting side is built to survive every failure mode without silently green-lighting a tool call:
+
+- **Timeout ladder** — the broker holds an AWAIT for up to 600 s; the waiting hook re-dials until 640 s; Claude's own hook timeout is registered at 660 s. Each layer answers before the one above kills it, and an unanswered wait falls back to **deny** — never auto-approve.
+- **Dead or restarted socket** — the blocked hook re-dials `approve.sock` every 500 ms until its deadline. If notifyd dies mid-wait, the prompt isn't lost: the moment a fresh daemon binds the socket, every still-waiting hook re-registers itself.
+- **Single resume/repair command** — `ainb notifyd restart` (CLI) or **`R`** in the [Daemons overlay](daemons.md) stops the owner, reaps strays, respawns, and waits for `approve.sock` to bind. Because of the re-dial loop, that one command repairs the socket *and* resumes every pending prompt.
+- **Observability** — the approve broker is a first-class row in `ainb fleet daemons`, with the live pending-waiter count in its health reason (`serving — 2 pending requests`), and notifyd's processes are listed in the `d` overlay.
+
 ## Host resources it touches
 
 Because this is host code, there is **no manifest and no capability declaration** — the capability gate that governs subprocess plugins does not apply. It reaches the filesystem, the socket, and the OS notifier directly. For reference, the host-side resources it touches are:
@@ -77,6 +108,7 @@ Because this is host code, there is **no manifest and no capability declaration*
 | `~/.agents-in-a-box/notifications.db` (SQLite, read+write) | Persist captured envelopes; back the Inbox list and the unread badge. |
 | `~/.agents-in-a-box/notify.sock` (Unix socket, `0600`) | Receive envelopes from the `ainb-hooks` script. |
 | `~/.agents-in-a-box/notify.pid`, `notify.fallback.jsonl` | Single-instance guard; recover events queued while the daemon was down. |
+| `~/.agents-in-a-box/approve.sock` (Unix socket, `0600`) | The **approve broker** — blocked `PermissionRequest` hooks park here awaiting a human approve/deny from the fleet panel or CLI. Rides notifyd's process; visible as its own row in `ainb fleet daemons`. |
 | `claude` CLI (subprocess), `~/.codex/hooks.json` (read+write), `~/.copilot/hooks/ainb.json`, `~/.agents-in-a-box/hooks/notify.sh` | The `install` / `uninstall` verbs wire the hook into the host agents — Claude via `claude plugin install/uninstall`, Codex via a managed `hooks.json` block, Copilot via a standalone drop-in. |
 | `osascript` / `notify-send` (subprocess) | Emit the native OS notification for user-facing events. |
 
@@ -92,13 +124,15 @@ Because this is host code, there is **no manifest and no capability declaration*
   - The Sessions screen renders a live **status marker** (`[!]` / `[?]` / `[✓]`) on the row of any session with a pending hook event, matched by `cwd` ↔ `workspace_path`. This is the primary surface — notifications are tied to the session that produced them, not a separate destination. See [Per-session status markers](#per-session-status-markers).
 - **Inbox screen** — press **`b`** from anywhere on the home screen, or `Enter` on the `📥 Inbox` sidebar tile. You get a two-pane list + detail view of captured events. Keys inside the Inbox: `↑`/`↓` (or `k`/`j`) move, `PageUp`/`PageDown` jump 10 rows, `Enter` open + mark read **and jump to the matching session's tmux pane** (via the cwd correlation below), `d` dismiss selected, `Shift+C` dismiss every visible row, `a` toggle archived (dismissed) rows, `p` cycle the agent filter (all → claude → codex → copilot), `r` force refresh, `q`/`Esc` back.
 - **cwd-based correlation (jump-to-tmux)** — every envelope carries the agent's `cwd` at hook-fire time, and every ainb `Session` carries a `workspace_path`. When the user presses `Enter` on an Inbox row, notifyd resolves the row's `cwd` to the first ainb workspace whose path matches (exact or `workspace_path/`-prefix to cover worktree subdirs), picks a session in that workspace, and queues an `AttachToOtherTmux` action with that session's `tmux_session_name`. There is no shared session-id namespace between the host agents' `session_id` strings and ainb's `Session.id` `Uuid`; the cwd is the bridge.
-- **Daemon + installer CLI** — the documented entrypoint is the standalone `ainb-notifyd` binary. The same verbs are also available as a **hidden `ainb notifyd …` subcommand** on the main `ainb` binary (it delegates to the identical `ainb_plugin_notifyd` functions). The hidden alias exists because `notify.sh`'s lazy-spawn invokes `ainb notifyd` — the host binary is the one guaranteed to be on `PATH` after a normal install. Verbs (both forms work):
+- **Daemon + installer CLI** — the verbs live both on the standalone `ainb-notifyd` binary and as the **`ainb notifyd …` subcommand** on the main `ainb` binary (both delegate to the identical `ainb_plugin_notifyd` functions, so they can never diverge). The alias exists because `notify.sh`'s lazy-spawn invokes `ainb notifyd` — the host binary is the one guaranteed to be on `PATH` after a normal install. Verbs (both forms work):
   - `ainb-notifyd run` (or `ainb notifyd run` / bare `ainb notifyd`) — run the daemon in the foreground. The hook script lazy-spawns `ainb notifyd` when the socket is missing; if `ainb` is on `PATH` the daemon auto-starts and the event is delivered live (no fallback file).
   - `ainb-notifyd install --claude --codex --copilot` (or `--all`) — install the `ainb-hooks` hook for the chosen agents.
   - `ainb-notifyd uninstall --claude --codex --copilot` (or `--all`) — reverse the install; preserves user-authored Codex hooks and other Copilot hook files.
-  - `ainb-notifyd status` — report per-agent install state, hook-script health, socket liveness, last event, and daemon PID liveness.
+  - `ainb-notifyd status` — report per-agent install state, hook-script health, socket liveness, last event, and daemon PID liveness. `--format json` emits `{agents, daemon: {pid, running}}` for scripting.
   - `ainb-notifyd stop` — send `SIGTERM` to a running daemon via its PID file.
-  - Every verb accepts `--format text|json|csv|markdown` (default `text`) for scripting — e.g. `ainb notifyd status --format json`.
+  - `ainb-notifyd restart` — stop the owner, reap strays, respawn, and wait for the approve socket to bind: the **single resume/repair command** for a dead or wedged approve socket (see the [round-trip section](#permission-approvedeny-round-trip) for why waiting prompts survive it).
+  - `ainb-notifyd reap` — kill orphaned/wedged notifyd strays, sparing the live owner.
+  - Every verb accepts `--format` (default `text`) for scripting — e.g. `ainb notifyd status --format json`. The host form takes `text|json|csv|markdown`; the standalone `ainb-notifyd` binary takes `text|json`.
 - **Snapshot topics** — none. `notifyd` does not publish or subscribe on the event bus; the Inbox reads SQLite directly. There is no slash command.
 
 ## Source

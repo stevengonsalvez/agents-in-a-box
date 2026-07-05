@@ -1,36 +1,62 @@
 ---
 title: "Daemons overlay"
-description: "Press d in the ainb TUI to open the read-only Daemons overlay — every ainb-managed background daemon in one place: the shared MCP pool, the Headroom compression proxy with its live saved-token count, and the in-loop watchdog watching it."
+description: "Press d in the ainb TUI to open the Daemons overlay — every ainb-managed background daemon and socket in one place: the shared MCP pool, the Headroom compression proxy, the notifyd notification daemon with its approve socket, plus the R restart lever that repairs a dead approve socket."
 ---
 
 import { Aside } from '@astrojs/starlight/components';
 
-ainb runs a few background daemons on your behalf — the shared MCP server pool and the Headroom compression proxy. Rather than make you hunt for them with `ps`, every ainb-managed daemon shows up in one place: press **`d`** from anywhere in the TUI to open the read-only **Daemons** overlay.
+ainb runs a few background daemons on your behalf — the shared MCP server pool, the Headroom compression proxy, and the `notifyd` notification daemon that also serves the permission approve socket. Rather than make you hunt for them with `ps`, every ainb-managed daemon and socket shows up in one place: press **`d`** from anywhere in the TUI to open the **Daemons** overlay.
 
 ![ainb TUI Daemons overlay showing the shared MCP pool row as down and the Headroom proxy on port 8787 as up with a saved-tokens count and a watched marker, plus the consuming-sessions line; r refreshes and esc closes](../assets/screenshots/daemons-overlay.gif)
 
-*The overlay lists each daemon with a live status dot, and for the Headroom proxy: its port (`:8787`), the tokens it has saved so far (the same figure as the [Savings tab](token-optimization.md) and `ainb usage savings`), and which sessions are routed through it. `r` refreshes; `Esc` closes.*
+*The overlay lists each daemon with a live status dot, and for the Headroom proxy: its port (`:8787`), the tokens it has saved so far (the same figure as the [Savings tab](token-optimization.md) and `ainb usage savings`), and which sessions are routed through it. `r` refreshes; `R` restarts notifyd; `Esc` closes.*
 
 ## What's on it
 
 - **MCP pool** — the shared `ainb mcp daemon` that spawns each MCP server once behind a unix socket. See [Shared MCP pool](mcp-pool.md).
 - **Headroom proxy** — the ainb-managed compression proxy. Its row carries the live saved-token count and a **`watched`** marker when the in-loop watchdog is keeping it alive for a routed session.
+- **notifyd processes** — every running `ainb-notifyd` process, one line each, with its pid and health class. Orphaned or wedged strays are counted with a `· N to clean up (run \`ainb notifyd reap\`)` hint. notifyd owns the [Inbox](inbox-notifications.md) socket **and** the **approve socket** (`~/.agents-in-a-box/approve.sock`) that the synchronous permission round-trip blocks on.
 
 <Aside type="note">
-The watchdog isn't a separate process — it's an in-loop tick (~10 s) that re-ensures the proxy if a routed session is live but the proxy has died. Because it belongs to the Headroom proxy, it's surfaced as the `watched` attribute on that row rather than as its own daemon. Every ainb-managed daemon lives on this screen.
+The Headroom watchdog isn't a separate process — it's an in-loop tick (~10 s) that re-ensures the proxy if a routed session is live but the proxy has died. Because it belongs to the Headroom proxy, it's surfaced as the `watched` attribute on that row rather than as its own daemon. Every ainb-managed daemon and socket lives on this screen — that's the invariant.
 </Aside>
 
-## Read-only by design
+## The restart lever (`R`)
 
-The overlay is for **observing**, not controlling — it never stops anything from under a running session. Stop a daemon deliberately from the CLI instead:
+The overlay is mostly for observing, but notifyd gets one deliberate control: **`R` restarts notifyd** — stop the owner, reap strays, respawn, and wait for the approve socket to bind. This is the **single resume/repair command** for a dead or wedged approve socket, and it is safe to run while permission prompts are mid-wait: a blocked `PermissionRequest` hook re-dials the socket every 500 ms until its deadline, so every still-waiting prompt re-registers itself the moment the fresh daemon binds. One restart repairs the socket *and* resumes the pending prompts — no hook is lost.
+
+The outcome (`stopped · reaped · spawned pid · socket bound`) is shown as a transient status line under the notifyd header, and the daemon list re-scans automatically so the new pid appears.
+
+The same command exists on the CLI:
+
+```bash
+ainb notifyd restart                  # stop + reap + respawn + wait for approve.sock
+ainb notifyd restart --format json    # machine-readable outcome
+```
+
+## The full health view
+
+The overlay is the quick glance; `ainb fleet daemons` is the full table — every daemon with state, pid, uptime, last activity, and a health reason. The **approve broker** appears as its own row there: it rides notifyd's process (no pid of its own), so its liveness is the socket accepting a connection, and its health reason carries the live pending-waiter count (`serving — 2 pending requests`) so you can see blocked hooks at a glance.
+
+```bash
+ainb fleet daemons                    # unified daemon health table
+ainb fleet daemons --format json      # typed rows for scripting
+```
+
+## Stopping things deliberately
+
+The overlay never stops anything from under a running session. Stop a daemon deliberately from the CLI instead:
 
 ```bash
 ainb mcp stop          # stop the shared MCP pool daemon
 ainb headroom stop     # stop the ainb-managed Headroom proxy
+ainb notifyd stop      # stop the notification daemon (SIGTERM via pid file)
+ainb notifyd reap      # kill orphan/wedged notifyd strays, sparing the live owner
 ```
 
 ## See also
 
+- [Inbox & notifications](inbox-notifications.md) — the daemon behind the notifyd rows, and the permission approve/deny round-trip.
 - [Token optimisation — Headroom & RTK](token-optimization.md) — the proxy this overlay watches.
 - [Shared MCP pool](mcp-pool.md) — the other daemon on this screen.
 - [Keyboard shortcuts](keyboard-shortcuts.md).

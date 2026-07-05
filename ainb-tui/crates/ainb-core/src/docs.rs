@@ -21,6 +21,17 @@ pub const REFLECT: &str = "https://stevengonsalvez.github.io/agents-in-a-box/kno
 /// ainb-toolkit (skills + agents).
 pub const TOOLKIT: &str = "https://stevengonsalvez.github.io/agents-in-a-box/toolkit/overview/";
 
+// Official vendor auth guides, surfaced on the onboarding Authentication step.
+/// Claude Code authentication guide.
+pub const AUTH_CLAUDE: &str = "https://code.claude.com/docs/en/authentication";
+/// OpenAI Codex CLI authentication guide.
+pub const AUTH_CODEX: &str = "https://developers.openai.com/codex/auth";
+/// Google Gemini CLI authentication guide.
+pub const AUTH_GEMINI: &str =
+    "https://google-gemini.github.io/gemini-cli/docs/get-started/authentication.html";
+/// GitHub Copilot CLI authentication guide.
+pub const AUTH_COPILOT: &str = "https://docs.github.com/en/copilot/how-tos/copilot-cli/set-up-copilot-cli/authenticate-copilot-cli";
+
 /// Docsite page for a setup-catalog dep id, if one exists. Used by the deps
 /// screen to show "what you get" on the focused row.
 pub fn docs_url_for(dep_id: &str) -> Option<&'static str> {

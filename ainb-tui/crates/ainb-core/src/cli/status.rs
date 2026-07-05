@@ -205,6 +205,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         }
     }
 

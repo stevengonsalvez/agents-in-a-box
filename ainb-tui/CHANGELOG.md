@@ -7,6 +7,83 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.12.0] - 2026-07-04
+### Added
+- Merge pull request #375 from stevengonsalvez/f/onboarding-auth-per-agent
+- Merge pull request #377 from stevengonsalvez/f/onboarding-step-hints
+- Merge pull request #380 from stevengonsalvez/f/agent-peek
+- Merge pull request #382 from stevengonsalvez/f/skillmgr-import-picker
+- **cli**: ainb fleet approve/deny by session
+- **cli**: surface ainb notifyd in --help
+- **daemons**: track approve.sock broker as a Daemons row
+- **fleet**: TUI approve/deny lever on APPROVE row
+- **fleet**: block PermissionRequest hook on approve broker round-trip
+- **fleet**: register PermissionRequest hook with a long timeout
+- **fleet**: render STARTING and APPROVE badges
+- **notifyd**: add --format text/json to status verb
+- **notifyd**: add STARTING and APPROVE fold states
+- **notifyd**: add approve.sock broker for synchronous permission round-trip
+- **notifyd**: add blocking clients for approve broker
+- **notifyd**: add restart as the single approve-socket resume/repair
+- **onboarding**: all four harnesses, system-wide auth, doc links, key injection
+- **onboarding**: per-agent auth screen with editable current values
+- **onboarding**: per-step hint band explaining what each step does
+- **otel**: inject the OTLP endpoint into spawned sessions
+- **sessions**: toggle to hide the bottom keymap legend (⇧M) (#381)
+- **skills**: remove a source with a confirm (skills+source, or keep source)
+- **skills-cli**: preview_source + import_selected
+- **tui**: add notifyd restart lever to Daemons overlay
+- **tui**: approve.sock row in the Daemons overlay
+- **tui**: source-preview import picker in the Skill Manager
+- idle-session restart continues the conversation
+- recover stopped sessions with original settings and resume latest
+- resume Copilot sessions via --continue
+
+### Fixed
+- Merge pull request #376 from stevengonsalvez/f/onboarding-remember-git-dirs
+- Merge pull request #383 from stevengonsalvez/f/paste-everywhere-and-otel-ux
+- Merge pull request #384 from stevengonsalvez/f/otel-persist-and-inject
+- Merge pull request #385 from stevengonsalvez/f/skillmgr-remove-discovered-units
+- **cli**: harden fleet approve/deny output
+- **fleet**: populate tool from PermissionRequest payload
+- **fleet**: report approve as matched, not delivered
+- **fleet**: tolerate input alias in permission context
+- **notifyd**: decide reports false when the waiter is gone
+- **notifyd**: honour AINB_HOME in Paths::from_home
+- **onboarding**: remember OTEL creds on re-open
+- **onboarding**: remember saved git directories on re-open
+- **onboarding**: save git directories on leaving the step, not only on finish
+- **onboarding**: visible field focus on OTEL form + explicit editor hints
+- **otel**: inject the full generic OTEL config, not just the endpoint
+- **setup**: auth menu item covers all four harnesses, not just Claude
+- **skills**: record installed units in the manifest
+- **skills**: remove() undeclares the unit from the manifest
+- **skills**: source-remove actually drops discovered units
+- **skills**: upsert the manifest unit entry, refreshing targets
+- **skills-cli**: key preview source identity on URI, not name slug
+- **skills-cli**: roll back the source when an import lands nothing
+- **tui**: [p] re-preview fetches the source at its declared ref
+- **tui**: accept paste in every focused text input
+- **tui**: suppress panel mouse hit-testing under the preview picker
+- recover-sessions screen resumes with the correct command
+- resume banner no longer claims Codex/Copilot lack --resume
+
+### Documentation
+- **cli**: regenerate CLI reference from the binary
+- **notifyd**: correct timeout-ladder comment + trust boundary
+- **tui**: daemons overlay — notifyd rows + R restart lever
+- **tui**: document fleet panel + daemons overlay keys
+- **tui**: permission approve/deny round-trip
+- feat(onboarding): all four harnesses, system-wide auth, doc links, key injection
+
+### Other
+- **notifyd**: clear clippy -D warnings debt
+- **tui**: fetch source previews off the event loop
+- **skills**: bind source-remove dialog options to a named enum
+- **skills**: surface genuine unit-teardown errors in source-remove
+- **skills-cli**: one preview/persist path for add and TUI import
+
+
 ## [1.11.1] - 2026-07-02
 ### Added
 - **fleet**: verify multi-line tmux sends actually submit

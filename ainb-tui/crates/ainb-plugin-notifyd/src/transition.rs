@@ -30,12 +30,15 @@
 //!
 //! | event_type · matcher                  | kind   | effect                                   |
 //! |---------------------------------------|--------|------------------------------------------|
+//! | `SessionStart`                        | `STARTING` | session booting, before the first user turn |
 //! | `PreToolUse` · `AskUserQuestion`      | `ASK`  | unanswered interview is the latest signal |
+//! | `PermissionRequest`                   | `APPROVE` | tool call awaiting the user's approval    |
 //! | `Notification` · `permission_prompt`  | `WAIT` | waiting on the user (permission)          |
 //! | `Notification` · `idle_prompt`        | `WAIT` | waiting on the user (idle input prompt)   |
 //! | `StopFailure`                         | `ERR`  | API error after retries exhausted         |
 //! | `Stop`                                | `IDLE` once `age >= idle_threshold`, else `RUNNING` (turn-ended-but-fresh) |
-//! | `UserPromptSubmit` / `SessionStart`   | `RUNNING` | a new user turn → clears ASK/WAIT/IDLE/ERR |
+//! | `UserPromptSubmit`                    | `RUNNING` | a new user turn → clears ASK/WAIT/IDLE/ERR/APPROVE |
+//! | `PostToolUse` / `SubagentStart`       | `RUNNING` | active work resumed → clears ASK/WAIT/APPROVE |
 //! | `SessionEnd`                          | `DONE` | terminal                                  |
 //!
 //! So the materialized kind is "the latest non-lifecycle signal (ASK/WAIT/ERR),
@@ -61,7 +64,7 @@
 //!
 //! Readers treat `RUNNING` (with or without a `stopped_ts` marker) as
 //! not-a-need, so the marker is invisible to the reader contract — the kind set
-//! stays exactly `ASK|ERR|WAIT|IDLE|RUNNING|DONE`. Once promoted to `IDLE` the
+//! stays exactly `ASK|ERR|WAIT|IDLE|RUNNING|DONE|STARTING|APPROVE`. Once promoted to `IDLE` the
 //! row's context is the classifier-shaped `{"idle_minutes": N}`; a later user
 //! turn clears it back to plain `RUNNING` (no marker) via the normal fold.
 
@@ -98,6 +101,8 @@ mod kind {
     pub const IDLE: &str = "IDLE";
     pub const RUNNING: &str = "RUNNING";
     pub const DONE: &str = "DONE";
+    pub const STARTING: &str = "STARTING";
+    pub const APPROVE: &str = "APPROVE";
 }
 
 /// The provenance stamped on every row this loop writes.
@@ -141,6 +146,14 @@ struct WaitContext {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 struct ErrContext {
     error_type: String,
+}
+
+/// APPROVE context — the tool + its input from a `PermissionRequest` payload,
+/// so a reader can show the user what they're being asked to approve.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+struct ApproveContext {
+    tool: String,
+    tool_input: Value,
 }
 
 /// Fold one pass of the event log into `current_state`.
@@ -281,14 +294,17 @@ struct Accum {
 /// The kind + its context decided by the latest meaningful event.
 #[derive(Debug, Clone)]
 enum Decision {
-    Ask(String),  // serialized AskUserQuestionData
-    Err(String),  // serialized ErrContext
-    Wait(String), // serialized WaitContext
+    Ask(String),     // serialized AskUserQuestionData
+    Err(String),     // serialized ErrContext
+    Wait(String),    // serialized WaitContext
+    Approve(String), // serialized ApproveContext (tool + tool_input)
     /// A `Stop` fired at this ts — resolved to IDLE-on-age or RUNNING when the
     /// row is built (age is recomputed against `now` at materialize time).
     Stopped(i64),
-    /// A new user turn (UserPromptSubmit / SessionStart) → RUNNING.
+    /// A new user turn (UserPromptSubmit) → RUNNING.
     Running,
+    /// SessionStart — session booting, distinct from an active user turn.
+    Starting,
     /// SessionEnd → terminal DONE.
     Done(Option<String>), // optional reason
 }
@@ -312,12 +328,16 @@ impl Accum {
                 ev.matcher.as_deref(),
                 &ev.payload,
             ))),
+            "PermissionRequest" => Some(Decision::Approve(approve_context(&ev.payload))),
             "StopFailure" => Some(Decision::Err(err_context(
                 ev.matcher.as_deref(),
                 &ev.payload,
             ))),
             "Stop" => Some(Decision::Stopped(ev.ts)),
-            "UserPromptSubmit" | "SessionStart" => Some(Decision::Running),
+            "UserPromptSubmit" => Some(Decision::Running),
+            "SessionStart" => Some(Decision::Starting),
+            // Active work resumed after an ASK/WAIT/APPROVE — clear back to RUNNING.
+            "PostToolUse" | "SubagentStart" => Some(Decision::Running),
             "SessionEnd" => Some(Decision::Done(reason_from_payload(&ev.payload))),
             // Unknown / telemetry event — does not change the decided kind.
             _ => None,
@@ -343,11 +363,13 @@ impl Accum {
             Decision::Ask(ctx) => (kind::ASK, Some(ctx)),
             Decision::Err(ctx) => (kind::ERR, Some(ctx)),
             Decision::Wait(ctx) => (kind::WAIT, Some(ctx)),
+            Decision::Approve(ctx) => (kind::APPROVE, Some(ctx)),
             Decision::Done(reason) => {
                 let ctx = reason.map(|r| serde_json::json!({ "reason": r }).to_string());
                 (kind::DONE, ctx)
             }
             Decision::Running => (kind::RUNNING, None),
+            Decision::Starting => (kind::STARTING, None),
             Decision::Stopped(stop_ts) => {
                 // Claude Code 2.1.19 `Stop` carries no stop_reason: the firing
                 // IS turn-end. A freshly-stopped session is RUNNING/quiet until
@@ -466,6 +488,24 @@ fn err_context(matcher: Option<&str>, payload: &str) -> String {
         })
         .unwrap_or_else(|| "unknown".to_string());
     serde_json::to_string(&ErrContext { error_type }).unwrap_or_default()
+}
+
+/// Build the APPROVE context (serialized `ApproveContext`) from a
+/// `PermissionRequest` payload. Claude's PermissionRequest stdin carries
+/// `tool_name` (string) + `tool_input` (object); tolerate `tool`/`input`
+/// aliases like `parse_ask` does. A best-effort placeholder is produced when
+/// the payload is malformed so APPROVE still surfaces rather than being
+/// dropped.
+fn approve_context(payload: &str) -> String {
+    let v: Value = serde_json::from_str(payload).unwrap_or(Value::Null);
+    let tool = v
+        .get("tool_name")
+        .or_else(|| v.get("tool"))
+        .and_then(Value::as_str)
+        .unwrap_or("(unknown)")
+        .to_string();
+    let tool_input = v.get("tool_input").or_else(|| v.get("input")).cloned().unwrap_or(Value::Null);
+    serde_json::to_string(&ApproveContext { tool, tool_input }).unwrap_or_default()
 }
 
 /// The session's `parent` — carried at the top level of the canonical event
@@ -620,6 +660,87 @@ mod tests {
         let ictx: WaitContext = serde_json::from_str(idle.context.as_deref().unwrap()).unwrap();
         assert_eq!(ictx.reason, "idle_prompt");
         assert_eq!(ictx.tool, None);
+    }
+
+    #[test]
+    fn approve_from_permissionrequest_carries_tool_and_input() {
+        let (_d, store) = store();
+        push(
+            &store,
+            NOW,
+            "s",
+            "/p",
+            "PermissionRequest",
+            None,
+            r#"{"tool_name":"Bash","tool_input":{"command":"rm -rf /tmp/x"}}"#,
+        );
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+
+        let row = state(&store, "s", "/p");
+        assert_eq!(row.kind, "APPROVE");
+        let ctx: ApproveContext = serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx.tool, "Bash");
+        assert_eq!(ctx.tool_input["command"], "rm -rf /tmp/x");
+    }
+
+    #[test]
+    fn approve_from_malformed_permissionrequest_still_surfaces() {
+        // Malformed payload — APPROVE still surfaces with placeholder context
+        // rather than being dropped (same defensive pattern as ask_context).
+        let (_d, store) = store();
+        push(
+            &store,
+            NOW,
+            "s",
+            "/p",
+            "PermissionRequest",
+            None,
+            "not json",
+        );
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+
+        let row = state(&store, "s", "/p");
+        assert_eq!(row.kind, "APPROVE");
+        let ctx: ApproveContext = serde_json::from_str(row.context.as_deref().unwrap()).unwrap();
+        assert_eq!(ctx.tool, "(unknown)");
+        assert_eq!(ctx.tool_input, Value::Null);
+    }
+
+    #[test]
+    fn starting_from_sessionstart() {
+        let (_d, store) = store();
+        push(&store, NOW, "s", "/p", "SessionStart", None, "{}");
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        assert_eq!(state(&store, "s", "/p").kind, "STARTING");
+    }
+
+    #[test]
+    fn running_after_user_prompt_then_posttooluse() {
+        let (_d, store) = store();
+        push(&store, NOW, "s", "/p", "UserPromptSubmit", None, "{}");
+        push(&store, NOW + 1000, "s", "/p", "PostToolUse", None, "{}");
+        materialize_at(&store, NOW + 1000, IDLE_MIN).unwrap();
+        assert_eq!(state(&store, "s", "/p").kind, "RUNNING");
+    }
+
+    #[test]
+    fn posttooluse_clears_established_approve_back_to_running() {
+        let (_d, store) = store();
+        push(
+            &store,
+            NOW,
+            "s",
+            "/p",
+            "PermissionRequest",
+            None,
+            r#"{"tool_name":"Bash","tool_input":{}}"#,
+        );
+        materialize_at(&store, NOW, IDLE_MIN).unwrap();
+        assert_eq!(state(&store, "s", "/p").kind, "APPROVE");
+
+        push(&store, NOW + 1000, "s", "/p", "PostToolUse", None, "{}");
+        materialize_at(&store, NOW + 1000, IDLE_MIN).unwrap();
+        assert_eq!(state(&store, "s", "/p").kind, "RUNNING");
     }
 
     #[test]

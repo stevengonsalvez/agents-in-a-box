@@ -756,29 +756,41 @@ impl SessionLifecycleManager {
             mode_str, request.session_id
         );
 
-        // Set ANTHROPIC_API_KEY if configured in the system keychain
-        // This allows pay-as-you-go API usage instead of Pro/Max subscription
-        match credentials::get_anthropic_api_key() {
-            Ok(Some(api_key)) => {
-                config.environment_vars.insert("ANTHROPIC_API_KEY".to_string(), api_key);
-                info!(
-                    "Set ANTHROPIC_API_KEY from keychain for session {}",
-                    request.session_id
-                );
+        // Set ANTHROPIC_API_KEY only when the user chose API-key auth. With
+        // system-wide auth, injecting a stored key would override the
+        // subscription/OAuth login (Claude prefers ANTHROPIC_API_KEY when set),
+        // which is exactly what "system-wide auth" is meant to avoid.
+        let claude_api_key_mode = matches!(
+            crate::config::AppConfig::load().map(|c| c.authentication.claude_provider),
+            Ok(crate::config::ClaudeAuthProvider::ApiKey)
+        );
+        if claude_api_key_mode {
+            match credentials::get_anthropic_api_key() {
+                Ok(Some(api_key)) => {
+                    config.environment_vars.insert("ANTHROPIC_API_KEY".to_string(), api_key);
+                    info!(
+                        "Set ANTHROPIC_API_KEY from keychain for session {}",
+                        request.session_id
+                    );
+                }
+                Ok(None) => {
+                    warn!(
+                        "API-key auth selected but no ANTHROPIC_API_KEY in keychain for session {}",
+                        request.session_id
+                    );
+                }
+                Err(e) => {
+                    warn!(
+                        "Failed to retrieve ANTHROPIC_API_KEY from keychain: {} - using claude auth for session {}",
+                        e, request.session_id
+                    );
+                }
             }
-            Ok(None) => {
-                // No API key configured - will use claude auth (Pro/Max plan)
-                info!(
-                    "No ANTHROPIC_API_KEY configured, using claude auth for session {}",
-                    request.session_id
-                );
-            }
-            Err(e) => {
-                warn!(
-                    "Failed to retrieve ANTHROPIC_API_KEY from keychain: {} - using claude auth for session {}",
-                    e, request.session_id
-                );
-            }
+        } else {
+            info!(
+                "System-wide Claude auth — not injecting ANTHROPIC_API_KEY for session {}",
+                request.session_id
+            );
         }
 
         // Set boss prompt if in boss mode

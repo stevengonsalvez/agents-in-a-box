@@ -170,12 +170,14 @@ fn sync_removes_orphan_lockfile_unit() {
         );
         res.expect("install");
 
-        // Manifest does NOT declare the unit → orphan.
-        let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
-        assert!(
-            manifest.units.is_empty(),
-            "manifest must not list units yet"
-        );
+        // Install now declares the unit in the manifest (so the TUI can
+        // render it). Manufacture the orphan the way it happens in the
+        // wild — the manifest entry removed by hand — then sync must
+        // clear the stale lockfile record + deployed files.
+        let mut manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        assert_eq!(manifest.units.len(), 1, "install declares the unit");
+        manifest.units.clear();
+        manifest.save_to(&manifest_path_in(home.path())).unwrap();
 
         let (out, res) = run(
             home.path(),
@@ -302,6 +304,67 @@ fn sync_skips_non_installable_local_orphan_units() {
         assert!(
             out.contains("skip (not an installable unit)"),
             "expected the local orphan to be skipped, got: {out}"
+        );
+    });
+}
+
+/// install → remove → sync must be a no-op: remove undeclares the unit
+/// from the manifest (not just the lockfile), so sync doesn't classify
+/// it as "declared but missing" and reinstall what was just removed.
+#[test]
+fn remove_undeclares_unit_so_sync_does_not_reinstall() {
+    let home = tmp_home();
+    let (_src, unit_uri) = seed_source(home.path(), "src-remove");
+    let base = tempfile::tempdir().unwrap();
+
+    with_all_tool_homes_under(base.path(), || {
+        let (_o, res) = run(
+            home.path(),
+            SkillCommand::Install(InstallArgs {
+                uri: unit_uri.clone(),
+                targets: Some("claude".into()),
+                dry_run: false,
+                yes: true,
+            }),
+        );
+        res.expect("install");
+
+        let (_o, res) = run(
+            home.path(),
+            SkillCommand::Remove(ainb_cli::RemoveSkillArgs {
+                uri: unit_uri.clone(),
+                targets: None,
+                dry_run: false,
+                yes: true,
+            }),
+        );
+        res.expect("remove");
+
+        // Manifest no longer declares the unit.
+        let manifest = Manifest::load_from(&manifest_path_in(home.path())).unwrap();
+        assert!(
+            manifest.units.is_empty(),
+            "remove must undeclare the unit: {:?}",
+            manifest.units
+        );
+
+        // Sync sees aligned state — nothing reinstalled.
+        let (out, res) = run(
+            home.path(),
+            SkillCommand::Sync(SyncArgs {
+                yes: true,
+                dry_run: false,
+                ..Default::default()
+            }),
+        );
+        res.expect("sync ok");
+        assert!(
+            out.contains("already in sync"),
+            "sync must not reinstall the removed unit, got: {out}"
+        );
+        assert!(
+            !base.path().join("claude/skills/commit/SKILL.md").exists(),
+            "removed files must stay removed after sync"
         );
     });
 }

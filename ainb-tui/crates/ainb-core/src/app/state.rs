@@ -999,6 +999,10 @@ pub struct DaemonsFetchResult {
     pub headroom_consumers: Vec<String>,
     /// Every running `notifyd` process, classified live / stale / orphan.
     pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    /// approve.sock liveness: serving? + the probe's health reason (carries the
+    /// pending-waiter count). Sockets are tracked here too, not just daemons.
+    pub approve_running: bool,
+    pub approve_reason: String,
 }
 
 /// Live, lazily-refreshed snapshot for the Daemons overlay. Present only while
@@ -1010,10 +1014,18 @@ pub struct DaemonsOverlayState {
     pub headroom_consumers: Vec<String>,
     /// Every running `notifyd` process, classified live / stale / orphan.
     pub notifyd: Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    /// approve.sock liveness + health reason (see [`DaemonsFetchResult`]).
+    pub approve_running: bool,
+    pub approve_reason: String,
     pub loading: bool,
     pub last_refreshed: Option<std::time::Instant>,
     /// Receiver for the in-flight fetch (None = no fetch pending).
     pub fetch_rx: Option<mpsc::UnboundedReceiver<DaemonsFetchResult>>,
+    /// Receiver for an in-flight `notifyd` restart (None = no restart pending).
+    /// Carries the one-line outcome to show under the notifyd section.
+    pub notifyd_restart_rx: Option<mpsc::UnboundedReceiver<String>>,
+    /// Last restart outcome line (transient, shown until the next refresh).
+    pub notifyd_restart_status: Option<String>,
 }
 
 /// Blocking portion of the daemons fetch: MCP alive probe + SessionStore read
@@ -1023,6 +1035,7 @@ pub(crate) fn daemons_sync_probe() -> (
     bool,
     Vec<String>,
     Vec<ainb_plugin_notifyd::ClassifiedDaemon>,
+    (bool, String),
 ) {
     let mcp_alive = crate::mcp_pool::client::daemon_alive();
     let headroom_consumers = crate::interactive::SessionStore::load()
@@ -1032,7 +1045,22 @@ pub(crate) fn daemons_sync_probe() -> (
         .map(|m| m.tmux_session_name.clone())
         .collect::<Vec<_>>();
     let notifyd = ainb_plugin_notifyd::scan_daemons();
-    (mcp_alive, headroom_consumers, notifyd)
+    // approve.sock — same probe the `ainb fleet daemons` health view uses, so
+    // the two surfaces can't drift. Reason carries the pending-waiter count.
+    let approve = match ainb_plugin_notifyd::Paths::from_home() {
+        Ok(paths) => {
+            let s = crate::fleet::daemons::probe::probe_approve_broker(
+                &paths.base,
+                crate::fleet::daemons::heartbeat::now_ms(),
+            );
+            (
+                s.state == crate::fleet::daemons::DaemonState::Running,
+                s.reason,
+            )
+        }
+        Err(e) => (false, format!("home unresolved: {e}")),
+    };
+    (mcp_alive, headroom_consumers, notifyd, approve)
 }
 
 // ============================================================================
@@ -2776,6 +2804,10 @@ impl SessionFilter {
     }
 }
 
+/// Payload of the Configure remote-repo pre-flight: generation guard + the
+/// `ls-remote` branch listing (or the error string to show on the form).
+type RepoCheckPayload = (u64, Result<Vec<crate::git::RemoteBranch>, String>);
+
 #[derive(Debug)]
 pub struct AppState {
     pub workspaces: Vec<Workspace>,
@@ -2829,6 +2861,9 @@ pub struct AppState {
     // mouse-coordinate translation into 1-based pane-local SGR sequences.
     // None whenever the embed is not rendering.
     pub embed_pane_area: Option<Rect>,
+    // Bottom keymap-legend rect (or its collapsed hint row), published each
+    // frame on the Sessions screen so a mouse click on it toggles visibility.
+    pub menu_bar_area: Option<Rect>,
     // Mouse/layout state for the Sessions split pane.
     pub sessions_pane_state: SessionsPaneState,
     // Track if current directory is a git repository
@@ -3062,6 +3097,21 @@ pub struct AppState {
     >,
     /// Current branch-refresh generation (bumped on every picker open).
     pub branch_refresh_seq: u64,
+
+    /// Background remote-repo pre-flight for the Configure screen (ls-remote
+    /// at open: does the repo exist, does it have branches). Applied by
+    /// `check_repo_check_complete` on the next tick; the `u64` is a
+    /// generation guard so a stale check can't stamp a newer Configure form.
+    pub repo_check_receiver: Option<mpsc::UnboundedReceiver<RepoCheckPayload>>,
+    /// Current repo-check generation (bumped on every Configure open).
+    pub repo_check_seq: u64,
+
+    /// Background empty-remote initialization (`[i]` on Configure: README +
+    /// initial commit + push). `Ok(branch)` carries the branch the commit
+    /// landed on. Applied by `check_repo_init_complete` on the next tick.
+    pub repo_init_receiver: Option<mpsc::UnboundedReceiver<(u64, Result<String, String>)>>,
+    /// Current repo-init generation.
+    pub repo_init_seq: u64,
 
     // Periodic session snapshot tracking
     pub last_snapshot_time: Option<Instant>,
@@ -3381,6 +3431,9 @@ pub enum AsyncAction {
     // Onboarding actions
     OnboardingCheckDeps,          // Run dependency check during onboarding
     OnboardingInstallDep(String), // Install one dep (by id) from the deps screen
+    /// Fetch + parse a skill source (git clone) off the event loop, then
+    /// open the Skill Manager's source-preview picker with the result.
+    SkillPreviewFetch(String),
 }
 
 impl Default for AppState {
@@ -3422,6 +3475,7 @@ impl Default for AppState {
             embed: None,
             embed_session: None,
             embed_pane_area: None,
+            menu_bar_area: None,
             sessions_pane_state,
             is_current_dir_git_repo: false,
             last_logs_session_id: None,
@@ -3523,6 +3577,12 @@ impl Default for AppState {
             // Configure base-branch picker background refresh
             branch_refresh_receiver: None,
             branch_refresh_seq: 0,
+            // Configure remote-repo pre-flight (ls-remote at open)
+            repo_check_receiver: None,
+            repo_check_seq: 0,
+            // Configure empty-remote initialization ([i] → README + push)
+            repo_init_receiver: None,
+            repo_init_seq: 0,
 
             // Periodic session snapshot tracking
             last_snapshot_time: None,
@@ -3952,6 +4012,29 @@ impl AppState {
             OnboardingState::new()
         };
 
+        // Seed git directories from the last saved paths so re-opening onboarding
+        // shows what the user set previously, not a fresh default scan. Prefer the
+        // onboarding record; fall back to the app-config scan paths.
+        let saved = crate::config::OnboardingConfig::load()
+            .map(|c| c.git_directories)
+            .unwrap_or_default();
+        let saved = if saved.is_empty() {
+            self.app_config.workspace_defaults.workspace_scan_paths.clone()
+        } else {
+            saved
+        };
+        state.set_git_directories(&saved);
+
+        // Re-populate the OTEL form from previously-saved Grafana creds so
+        // re-opening onboarding shows what was configured, not blank fields
+        // (same remember-on-reopen contract as git directories).
+        if let Some(creds) = crate::otel::read_grafana_creds() {
+            state.otel_otlp_endpoint = creds.otlp_endpoint;
+            state.otel_instance_id = creds.instance_id;
+            state.otel_api_token = creds.api_token;
+            state.otel_skip = false;
+        }
+
         // If a specific start step is provided, jump to it
         if let Some(step) = start_step {
             state.current_step = step;
@@ -3960,6 +4043,10 @@ impl AppState {
                 state.init_editors_if_needed();
             }
         }
+
+        // Detect current per-agent auth up front so the Authentication step
+        // always opens showing real current values (config + keychain).
+        state.refresh_auth_statuses();
 
         self.onboarding_state = Some(state);
         self.current_screen = screen_ids::ONBOARDING.to_string();
@@ -3986,6 +4073,37 @@ impl AppState {
         config.role = state.selected_role();
         config.use_case = state.selected_use_case();
         config
+    }
+
+    /// Persist the onboarding git directories immediately — called when leaving
+    /// the Git Directories step in any direction (Next / Back / to menu) so the
+    /// user's edit is saved without having to finish the whole wizard.
+    ///
+    /// Only writes when at least one path is VALID, so invalid/empty input never
+    /// clobbers previously-saved config.
+    pub fn persist_onboarding_git_dirs(&mut self) {
+        use crate::config::OnboardingConfig;
+
+        let Some(state) = self.onboarding_state.as_ref() else {
+            return;
+        };
+        let valid = state.get_valid_directories();
+        if valid.is_empty() {
+            return;
+        }
+
+        // Onboarding record — load first so we preserve completed/version/etc.
+        let mut cfg = OnboardingConfig::load().unwrap_or_default();
+        cfg.git_directories = valid.clone();
+        if let Err(e) = cfg.save() {
+            warn!("Failed to persist onboarding git directories: {}", e);
+        }
+
+        // App-config scan paths (what session creation actually reads).
+        self.app_config.workspace_defaults.workspace_scan_paths = valid;
+        if let Err(e) = self.app_config.save() {
+            warn!("Failed to persist workspace scan paths: {}", e);
+        }
     }
 
     /// Complete the onboarding process
@@ -4867,9 +4985,13 @@ impl AppState {
             },
             headroom_consumers: Vec::new(),
             notifyd: Vec::new(),
+            approve_running: false,
+            approve_reason: "probing…".to_string(),
             loading: true,
             last_refreshed: None,
             fetch_rx: None,
+            notifyd_restart_rx: None,
+            notifyd_restart_status: None,
         });
         self.spawn_daemons_fetch();
     }
@@ -4894,11 +5016,13 @@ impl AppState {
         tokio::spawn(async move {
             // Blocking I/O (control socket + file read + `ps` scan) on the
             // blocking pool.
-            let (mcp_alive, headroom_consumers, notifyd) = tokio::task::spawn_blocking(
-                daemons_sync_probe,
-            )
-            .await
-            .unwrap_or((false, Vec::new(), Vec::new()));
+            let (mcp_alive, headroom_consumers, notifyd, approve) =
+                tokio::task::spawn_blocking(daemons_sync_probe).await.unwrap_or((
+                    false,
+                    Vec::new(),
+                    Vec::new(),
+                    (false, "probe failed".to_string()),
+                ));
             // Async HTTP probe of the Headroom /health + /stats endpoints.
             let headroom = crate::headroom::status().await;
             let result = DaemonsFetchResult {
@@ -4906,8 +5030,50 @@ impl AppState {
                 headroom,
                 headroom_consumers,
                 notifyd,
+                approve_running: approve.0,
+                approve_reason: approve.1,
             };
             let _ = tx.send(result);
+        });
+    }
+
+    /// Restart the notifyd daemon from the Daemons overlay — the single
+    /// resume/repair lever. Runs [`ainb_plugin_notifyd::procs::restart`] off the
+    /// UI thread (it SIGTERMs the old owner, reaps stragglers, respawns, and
+    /// polls the approve socket, up to a few seconds). Once the socket rebinds,
+    /// every still-blocked permission waiter re-dials and resumes on its own —
+    /// so this one action both repairs a dead socket and resumes pending
+    /// prompts. One-outstanding guard mirrors the fetch path.
+    pub fn spawn_notifyd_restart(&mut self) {
+        let Some(o) = self.daemons_overlay.as_mut() else {
+            return;
+        };
+        if o.notifyd_restart_rx.is_some() {
+            return;
+        }
+        let (tx, rx) = mpsc::unbounded_channel();
+        o.notifyd_restart_rx = Some(rx);
+        o.notifyd_restart_status = Some("restarting notifyd…".to_string());
+        tokio::spawn(async move {
+            let line = tokio::task::spawn_blocking(|| {
+                match ainb_plugin_notifyd::procs::restart(std::time::Duration::from_secs(3)) {
+                    Ok(out) => {
+                        let spawned = out
+                            .spawned
+                            .map(|p| format!("pid {p}"))
+                            .unwrap_or_else(|| "spawn failed".to_string());
+                        if out.socket_bound {
+                            format!("restarted notifyd ({spawned}) — approve socket live, pending prompts resume")
+                        } else {
+                            format!("restarted notifyd ({spawned}) — socket not yet rebound; hooks keep re-dialling")
+                        }
+                    }
+                    Err(e) => format!("restart failed: {e:#}"),
+                }
+            })
+            .await
+            .unwrap_or_else(|e| format!("restart task panicked: {e}"));
+            let _ = tx.send(line);
         });
     }
 
@@ -4924,7 +5090,18 @@ impl AppState {
                 o.headroom = result.headroom;
                 o.headroom_consumers = result.headroom_consumers;
                 o.notifyd = result.notifyd;
+                o.approve_running = result.approve_running;
+                o.approve_reason = result.approve_reason;
                 o.last_refreshed = Some(std::time::Instant::now());
+            }
+        }
+        // A finished restart updates the status line and triggers a fresh scan
+        // so the new pid shows up in the notifyd section.
+        if let Some(rx) = o.notifyd_restart_rx.as_mut() {
+            if let Ok(line) = rx.try_recv() {
+                o.notifyd_restart_rx = None;
+                o.notifyd_restart_status = Some(line);
+                self.spawn_daemons_fetch();
             }
         }
     }
@@ -5301,12 +5478,14 @@ impl AppState {
         let mut session = Session::new_with_options(
             metadata.workspace_name.clone(),
             metadata.worktree_path.to_string_lossy().to_string(),
-            false, // skip_permissions — unknown when offline; safe default
+            // Recover the created-with yolo flag; None (legacy metadata) → yolo.
+            metadata.skip_permissions.unwrap_or(true),
             SessionMode::Interactive,
             None,
             metadata.agent_type,
-            None,
+            metadata.model,
         );
+        session.codex_model = metadata.codex_model;
         session.id = metadata.session_id;
         session.tmux_session_name = Some(metadata.tmux_session_name.clone());
         session.status = SessionStatus::Stopped;
@@ -6308,6 +6487,20 @@ impl AppState {
 
     pub fn toggle_expand_all_workspaces(&mut self) {
         self.expand_all_workspaces = !self.expand_all_workspaces;
+    }
+
+    /// Hide/show the Sessions bottom keymap legend (⇧M) and persist the choice.
+    pub fn toggle_session_menu_bar(&mut self) {
+        let show = !self.app_config.ui_preferences.show_session_menu_bar;
+        self.app_config.ui_preferences.show_session_menu_bar = show;
+        if let Err(e) = self.app_config.save() {
+            warn!("Failed to persist show_session_menu_bar: {}", e);
+        }
+        self.add_info_notification(if show {
+            "Keymap legend shown".to_string()
+        } else {
+            "Keymap legend hidden — ⇧M to show".to_string()
+        });
     }
 
     /// Cycle the session-status filter (Shift+F): All → ActiveOnly → StoppedOnly → All.
@@ -7451,7 +7644,10 @@ impl AppState {
             Ok(Ok(paths)) => Ok(paths),
             Ok(Err(msg)) => {
                 tracing::error!(error = %msg, "prepare_remote_worktree failed");
-                self.add_error_notification(format!("Could not prepare worktree off main: {msg}"));
+                // Don't hardcode a base name in the message — the base is the
+                // remote's default (main/master/develop) or a picked branch;
+                // "off main" misled the empty-repo diagnosis (Stevie 2026-07-04).
+                self.add_error_notification(format!("Could not prepare worktree: {msg}"));
                 self.cancel_new_session();
                 Err(())
             }
@@ -7539,7 +7735,220 @@ impl AppState {
             ns.step = NewSessionStep::Configure;
         }
         tracing::debug!(?source, "advance_pick_repo_to_configure → Configure");
+
+        // Remote pre-flight: one background ls-remote validates the repo
+        // exists, is reachable, and has at least one branch — BEFORE Launch.
+        // Without it a typo'd repo dies after Launch with "Clone failed" and
+        // an empty repo dies even later at `prepare_remote_worktree` with a
+        // cryptic origin/HEAD error (Stevie 2026-07-04: mysocialmedia).
+        // `ConfigureState::from_pick_repo` already set `repo_check = Checking`
+        // for these sources; `check_repo_check_complete` applies the verdict.
+        // Same `is_remote()` predicate as `from_pick_repo`'s Checking
+        // decision — the two must agree or the form waits on a verdict that
+        // never comes.
+        if source.is_remote() {
+            self.repo_check_seq += 1;
+            let seq = self.repo_check_seq;
+            let (tx, rx) = mpsc::unbounded_channel();
+            self.repo_check_receiver = Some(rx);
+            tokio::spawn(async move {
+                let join = tokio::task::spawn_blocking(move || {
+                    crate::git::RemoteRepoManager::new()
+                        .map_err(|e| e.to_string())?
+                        .list_remote_branches(&source)
+                        .map_err(|e| e.to_string())
+                })
+                .await;
+                let payload = match join {
+                    Ok(r) => r,
+                    Err(join_err) => Err(format!("repo check task panicked: {join_err}")),
+                };
+                let _ = tx.send((seq, payload));
+            });
+        }
         self.ui_needs_refresh = true;
+    }
+
+    /// Poll the background remote-repo pre-flight. Applies the verdict to the
+    /// Configure screen: `Failed` blocks Launch with an inline message; a
+    /// success also stamps the real default-branch name onto the Branch row
+    /// (was a hardcoded "main" placeholder — wrong for master-default repos)
+    /// and backfills the "⚠ exists" guard for not-yet-cached remotes.
+    /// Returns true when state changed this tick.
+    pub fn check_repo_check_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::RepoCheck;
+
+        let Some(ref mut receiver) = self.repo_check_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.repo_check_receiver = None;
+                return false;
+            }
+        };
+        self.repo_check_receiver = None;
+        if seq != self.repo_check_seq {
+            // A newer Configure form superseded this check.
+            return false;
+        }
+        let Some(cfg) = self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        else {
+            return false;
+        };
+        // Apply-side state gate, on top of the seq guard: the verdict only
+        // lands on a form that is actually waiting for one. The seq guard
+        // alone has a hole — it's bumped only when a REMOTE Configure form
+        // opens, so a stale check could otherwise stamp a later local-path or
+        // restart form (repo_check = NotApplicable) whose open never bumped
+        // the seq.
+        if cfg.repo_check != RepoCheck::Checking {
+            return false;
+        }
+
+        if let Ok(branches) = &result {
+            if let Some(default) = branches.iter().find(|b| b.is_default) {
+                // Only when the user hasn't already picked a base — a pick
+                // owns the Branch-row display.
+                if cfg.base_selection.is_none() {
+                    cfg.branch_source.clone_from(&default.name);
+                }
+            }
+            // Feed the base-off "⚠ exists" guard for not-yet-cached remotes
+            // (a cached remote was already seeded from its clone's refs —
+            // that list includes local heads, so don't clobber it).
+            if cfg.repo_branch_names.is_empty() {
+                cfg.repo_branch_names = branches.iter().map(|b| b.name.clone()).collect();
+            }
+        }
+        let mut offline_warn: Option<String> = None;
+        cfg.repo_check = match RepoCheck::from_branches(result.map(|branches| branches.len())) {
+            RepoCheck::Failed(msg)
+                if crate::git::RemoteRepoManager::new()
+                    .ok()
+                    .and_then(|m| m.cached_source_path(&cfg.repo_source))
+                    .is_some() =>
+            {
+                // Warm clone cache → the launch path works offline by design
+                // (its fetch failures are warn-only). A failed validation
+                // must not brick that flow; warn and let Launch proceed.
+                offline_warn = Some(msg);
+                RepoCheck::Ok
+            }
+            verdict => verdict,
+        };
+        if let RepoCheck::Failed(msg) = &cfg.repo_check {
+            tracing::warn!(error = %msg, "configure repo pre-flight failed");
+        }
+        if let Some(msg) = offline_warn {
+            tracing::warn!(error = %msg, "repo pre-flight failed but clone cache is warm — allowing launch");
+            self.add_warning_notification(format!(
+                "Could not validate remote — using cached clone ({msg})"
+            ));
+        }
+        true
+    }
+
+    /// `[i]` on an `EmptyRemote` verdict: initialize the empty remote in
+    /// place — clone (an empty clone succeeds), commit a README, push — so
+    /// the user never has to leave ainb to make a fresh repo launchable.
+    /// The component already flipped `repo_check` to `Initializing`; the
+    /// verdict lands via `check_repo_init_complete`.
+    pub fn initialize_remote_repo(&mut self) {
+        let Some(source) = self
+            .new_session_state
+            .as_ref()
+            .and_then(|ns| ns.configure_state.as_ref())
+            .map(|cfg| cfg.repo_source.clone())
+        else {
+            return;
+        };
+        self.repo_init_seq += 1;
+        let seq = self.repo_init_seq;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.repo_init_receiver = Some(rx);
+        tokio::spawn(async move {
+            let join = tokio::task::spawn_blocking(move || {
+                let manager = crate::git::RemoteRepoManager::new().map_err(|e| e.to_string())?;
+                let parsed = source.parse_components().map_err(|e| e.to_string())?;
+                manager.initialize_empty_remote(&source, &parsed).map_err(|e| e.to_string())
+            })
+            .await;
+            let payload = match join {
+                Ok(r) => r,
+                Err(join_err) => Err(format!("repo init task panicked: {join_err}")),
+            };
+            let _ = tx.send((seq, payload));
+        });
+    }
+
+    /// Poll the background empty-remote initialization. Success flips the
+    /// Configure verdict to Ok, stamps the pushed branch onto the Branch row,
+    /// and toasts; failure returns to `EmptyRemote` (so `[i]` can retry) with
+    /// the exact git error in a toast. Returns true when state changed.
+    pub fn check_repo_init_complete(&mut self) -> bool {
+        use crate::components::new_session::configure::RepoCheck;
+
+        let Some(ref mut receiver) = self.repo_init_receiver else {
+            return false;
+        };
+        let (seq, result) = match receiver.try_recv() {
+            Ok(payload) => payload,
+            Err(mpsc::error::TryRecvError::Empty) => return false,
+            Err(mpsc::error::TryRecvError::Disconnected) => {
+                self.repo_init_receiver = None;
+                return false;
+            }
+        };
+        self.repo_init_receiver = None;
+        if seq != self.repo_init_seq {
+            return false;
+        }
+        let mut toast: Option<Result<String, String>> = None;
+        if let Some(cfg) =
+            self.new_session_state.as_mut().and_then(|ns| ns.configure_state.as_mut())
+        {
+            // Apply-side state gate (mirrors check_repo_check_complete): only
+            // a form that is actually Initializing takes the verdict. Without
+            // it, [i] on repo A → Esc → open repo B lets A's init result
+            // force B's verdict to Ok while B is still Checking — reopening
+            // the fail-after-Launch hole this feature closes.
+            if cfg.repo_check != RepoCheck::Initializing {
+                return false;
+            }
+            match result {
+                Ok(branch) => {
+                    if cfg.base_selection.is_none() {
+                        cfg.branch_source.clone_from(&branch);
+                    }
+                    if cfg.repo_branch_names.is_empty() {
+                        cfg.repo_branch_names = vec![branch.clone()];
+                    }
+                    cfg.repo_check = RepoCheck::Ok;
+                    toast = Some(Ok(branch));
+                }
+                Err(msg) => {
+                    // Back to the actionable verdict — `[i]` retries.
+                    cfg.repo_check = RepoCheck::EmptyRemote;
+                    toast = Some(Err(msg));
+                }
+            }
+        }
+        match toast {
+            Some(Ok(branch)) => {
+                self.add_info_notification(format!(
+                    "Initialized repository — pushed README to origin/{branch}"
+                ));
+            }
+            Some(Err(msg)) => {
+                tracing::error!(error = %msg, "empty-remote initialization failed");
+                self.add_error_notification(format!("Could not initialize repository: {msg}"));
+            }
+            None => {}
+        }
+        true
     }
 
     /// Pre-check GitHub authentication via `gh auth status`. Updates the
@@ -8748,14 +9157,17 @@ impl AppState {
         let store = SessionStore::load();
         let metadata = store.sessions().values().find(|m| m.session_id == session_id).cloned();
 
-        // Pull skip_permissions, model, codex_model from the in-memory Session
-        // if available. Both per-agent model fields default to `None` (which
-        // is treated identically to `Some(SystemDefault)` at the CLI emission
-        // site — `--model` is omitted, CLI default applies).
-        let (skip_permissions, model, codex_model) = self
-            .find_session(session_id)
-            .map(|s| (s.skip_permissions, s.model, s.codex_model))
-            .unwrap_or((false, None, None));
+        // Recover the exact launch settings the session was CREATED with from
+        // persisted metadata (authoritative — survives stop + full TUI restart,
+        // unlike the in-memory Session which is rebuilt with defaults once a
+        // session goes Stopped). `skip_permissions` is `Option`: `None` (legacy
+        // metadata predating the field) → default to yolo
+        // (`--dangerously-skip-permissions`), per the "default dangerously-skip"
+        // requirement. `Some(v)` preserves the value the session was started with.
+        let (skip_permissions, model, codex_model) = metadata
+            .as_ref()
+            .map(|m| (m.skip_permissions.unwrap_or(true), m.model, m.codex_model))
+            .unwrap_or((true, None, None));
 
         // Capture audit context before any fallible step so we can record both
         // success and failure with the same fields.
@@ -8819,6 +9231,7 @@ impl AppState {
                     codex_model,
                     metadata.agent_type,
                     transcript.clone(),
+                    true, // resume_requested — Enter/r on a Stopped session
                     metadata.headroom_enabled,
                 )
                 .await?;
@@ -8846,10 +9259,14 @@ impl AppState {
                         encoded
                     )
                 }
-                (other, _) => format!(
-                    "Resumed (fresh session - {} doesn't support --resume)",
-                    other.name()
-                ),
+                // Codex resumes via `codex resume --last`, Copilot via `--continue` —
+                // both continue the most recent session in the worktree cwd.
+                (SessionAgentType::Codex, _) | (SessionAgentType::Copilot, _) => {
+                    "Resuming most recent session".to_string()
+                }
+                (other, _) => {
+                    format!("Started fresh ({} has no resume support)", other.name())
+                }
             };
             self.add_info_notification(banner);
 
@@ -9274,6 +9691,51 @@ impl AppState {
                             }
                         }
                     }
+                }
+                AsyncAction::SkillPreviewFetch(uri) => {
+                    info!(uri = %uri, "Fetching skill source for preview");
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    let fetch_uri = uri.clone();
+                    // Git clone + adapter scan — blocking I/O off the runtime.
+                    let result = tokio::task::spawn_blocking(move || {
+                        ainb_cli::source::preview_source(&ainb_home, &fetch_uri)
+                    })
+                    .await;
+                    self.skill_manager_state.preview_loading = None;
+                    match result {
+                        Ok(Ok(preview)) if preview.units.is_empty() => {
+                            self.add_warning_notification(format!(
+                                "{uri}: fetched OK but no skills/agents/commands found"
+                            ));
+                        }
+                        Ok(Ok(preview)) => {
+                            info!(uri = %uri, units = preview.units.len(),
+                                  "SkillManager: source preview open");
+                            // Pre-check + badge units already installed: the
+                            // manifest-declared URIs of the units we already
+                            // track. `declared_uri` is the same
+                            // `<source>@<ref>/<path>` shape the picker rebuilds.
+                            let installed_uris: std::collections::HashSet<String> = self
+                                .skill_manager_state
+                                .units
+                                .iter()
+                                .map(|u| u.declared_uri.clone())
+                                .collect();
+                            self.skill_manager_state.preview = Some(
+                                crate::components::skill_manager_screen::SourcePreviewViewState::new(
+                                    preview,
+                                    &installed_uris,
+                                ),
+                            );
+                        }
+                        Ok(Err(e)) => {
+                            self.add_error_notification(format!("preview failed: {e:#}"));
+                        }
+                        Err(e) => {
+                            self.add_error_notification(format!("preview task failed: {e}"));
+                        }
+                    }
+                    self.ui_needs_refresh = true;
                 }
             }
         }
@@ -10342,6 +10804,8 @@ impl AppState {
         let workspace_path = session.workspace_path.clone();
         let skip_permissions = session.skip_permissions;
         let agent_type = session.agent_type;
+        let model = session.model;
+        let codex_model = session.codex_model;
 
         let provider = match agent_type {
             SessionAgentType::Claude => CliProvider::Claude,
@@ -10353,10 +10817,31 @@ impl AppState {
             }
         };
 
-        let mut cmd_parts = vec![provider.command().to_string()];
-        if skip_permissions {
-            cmd_parts.push(provider.skip_permissions_flag().to_string());
-        }
+        // Load persisted metadata once — used for both the resume-history probe
+        // (Claude, keyed off the worktree cwd) and the Headroom routing flag.
+        let store = crate::interactive::SessionStore::load();
+        let metadata = store.sessions.get(&tmux_session_name);
+
+        // Restart continues the existing conversation, for parity with the
+        // Stopped-session resume path: Claude `--continue`, Codex `resume
+        // --last`, Copilot `--continue`. `has_history` gates Claude's
+        // `--continue` (no prior transcript → fresh, avoids a dead pane).
+        let has_history = agent_type == SessionAgentType::Claude
+            && metadata
+                .map(|m| Self::find_latest_transcript(&m.worktree_path).is_some())
+                .unwrap_or(false);
+
+        let cmd_parts =
+            crate::interactive::session_manager::InteractiveSessionManager::build_cli_cmd_parts(
+                &provider,
+                agent_type,
+                skip_permissions,
+                model,
+                codex_model,
+                true, // resume_requested — restart continues the conversation
+                has_history,
+            );
+
         // Preserve per-session Headroom routing across restart. `send-keys`
         // bypasses build_env_setup_for_provider, so re-derive the proxy export
         // from the persisted SessionMetadata (keyed by tmux name) and prepend
@@ -10368,11 +10853,7 @@ impl AppState {
         // healthy. Injecting a dead-port URL would brick the restarted CLI on
         // connection-refused. Ensure the proxy first; degrade to direct on
         // failure rather than pointing the session at a closed port.
-        let mut headroom_active = crate::interactive::SessionStore::load()
-            .sessions
-            .get(&tmux_session_name)
-            .map(|m| m.headroom_enabled)
-            .unwrap_or(false)
+        let mut headroom_active = metadata.map(|m| m.headroom_enabled).unwrap_or(false)
             && matches!(
                 agent_type,
                 SessionAgentType::Claude | SessionAgentType::Codex
@@ -11101,6 +11582,14 @@ impl App {
         }
         // Check for a completed base-branch refresh (Configure picker)
         if self.state.check_branch_refresh_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+        // Check for a completed remote-repo pre-flight (Configure screen)
+        if self.state.check_repo_check_complete() {
+            self.state.ui_needs_refresh = true;
+        }
+        // Check for a completed empty-remote initialization ([i] on Configure)
+        if self.state.check_repo_init_complete() {
             self.state.ui_needs_refresh = true;
         }
 

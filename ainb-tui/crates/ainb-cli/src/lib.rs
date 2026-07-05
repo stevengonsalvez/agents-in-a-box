@@ -138,6 +138,45 @@ pub enum LibraryCmd {
         #[arg(long)]
         tool: Option<String>,
     },
+    /// Copy a unit from any configured source into the user's library.
+    /// Resolves the unit like `install` does, deploys it under the
+    /// tool's skills dir (skipped if already deployed there), and
+    /// registers it as an owned unit — same as `add`/`new`.
+    Copy {
+        /// Full unit URI to copy in (e.g. `gh:org/repo@main/skills/foo`).
+        uri: String,
+
+        /// Tool whose home to deploy under. Defaults to `claude`.
+        #[arg(long)]
+        tool: Option<String>,
+    },
+    /// Mark a manifest source as a "library source", enabling
+    /// `push`/`pull` git-native two-way sync against it.
+    MarkSource {
+        /// Source name, as declared in the manifest.
+        name: String,
+    },
+    /// Unmark a source as a library source.
+    UnmarkSource {
+        /// Source name, as declared in the manifest.
+        name: String,
+    },
+    /// Publish local library edits to a library source's git remote:
+    /// sync tool-home content into the source's fetched checkout, then
+    /// commit + push. Only valid for a source already marked via
+    /// `mark-source`.
+    Push {
+        /// Library source name.
+        source: String,
+    },
+    /// Pull a library source's git remote into local library edits:
+    /// `git pull --rebase` the source's fetched checkout, then sync its
+    /// content back down into the tool home. Only valid for a source
+    /// already marked via `mark-source`.
+    Pull {
+        /// Library source name.
+        source: String,
+    },
 }
 
 #[derive(Args, Debug)]

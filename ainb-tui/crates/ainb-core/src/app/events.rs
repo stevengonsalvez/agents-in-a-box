@@ -52,6 +52,8 @@ pub enum AppEvent {
     DaemonsOverlayOpen,
     DaemonsOverlayClose,
     DaemonsOverlayRefresh,
+    /// Restart the notifyd daemon (single resume/repair) from the overlay.
+    DaemonsOverlayRestartNotifyd,
     RefreshWorkspaces,  // Manual refresh of workspace data
     CycleSessionFilter, // Cycle Interactive session filter (Shift+F): All → ActiveOnly → StoppedOnly
     ToggleClaudeChat,   // Toggle Claude chat visibility
@@ -193,6 +195,7 @@ pub enum AppEvent {
     ScrollPreviewUp,      // Scroll tmux preview up
     ScrollPreviewDown,    // Scroll tmux preview down
     ToggleExpandAll,      // Toggle expand/collapse all workspaces
+    ToggleSessionMenuBar, // Hide/show the Sessions bottom keymap legend (⇧M)
     // Other tmux rename events
     OtherTmuxStartRename, // Start rename mode for selected "Other tmux" session
     OtherTmuxRenameChar(char), // Character input for rename
@@ -252,6 +255,12 @@ pub enum AppEvent {
     /// conflict pair — otherwise [`Self::SkillManagerConflictFlip`]
     /// fires instead.
     SkillManagerSync,
+    /// Sync assess popup: apply the previewed plan (Enter).
+    SkillManagerSyncConfirm,
+    /// Sync assess popup: dismiss without applying (Esc).
+    SkillManagerSyncCancel,
+    /// Sync assess popup: scroll the plan/diff (isize rows).
+    SkillManagerSyncScroll(isize),
     /// Units panel: move selection up one row (k / Up arrow). Wraps
     /// to last row when at top. Recomputes detail pane on move.
     SkillManagerSelectPrev,
@@ -359,34 +368,55 @@ pub enum AppEvent {
     SkillManagerBrowseToggleCatalog,
     /// Esc — close the browse modal, discarding the ephemeral results.
     SkillManagerBrowseClose,
-    GoToRecovery,               // Navigate to session recovery view
-    GoToInbox,                  // Navigate to ainb-hooks notification inbox
-    GoToDaemons,                // Navigate to the daemon runtime-health view
-    GoToFleetPanel,             // Navigate to the fleet control panel (current_state)
-    FleetPanelMoveUp,           // Fleet panel: move row selection up
-    FleetPanelMoveDown,         // Fleet panel: move row selection down
-    FleetPanelOptionNext,       // Fleet panel: move ASK option cursor forward (Tab)
-    FleetPanelOptionPrev,       // Fleet panel: move ASK option cursor back (Shift+Tab)
-    FleetPanelAnswer,           // Fleet panel: answer selected ASK with the option (Enter/a)
-    FleetPanelBroadcast,        // Fleet panel: broadcast a ping to the selected session (B)
-    FleetPanelRefresh,          // Fleet panel: force-refresh from current_state (r)
-    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
+    // Source-preview picker (preview-first add flow): multi-select the
+    // units of a fetched source + target tools, then import.
+    SkillManagerPreviewUp,
+    SkillManagerPreviewDown,
+    SkillManagerPreviewToggle,           // Space — toggle the cursor unit
+    SkillManagerPreviewAll,              // a — select every unit
+    SkillManagerPreviewNone,             // n — clear the selection
+    SkillManagerPreviewTool(usize),      // 1/2/3 toggle claude/codex/copilot; 3=all-on (key 4)
+    SkillManagerPreviewConfirm,          // Enter — import selection to chosen tools
+    SkillManagerPreviewClose,            // Esc — discard, nothing persisted
+    SkillManagerPreviewSource,           // p on a source row — reopen the picker for it
+    SkillManagerApplySourceFilterKey,    // f on a source row — filter the Units table to it
+    SkillManagerOpenUnitInEditor,        // o on a unit — open its deployed dir in $EDITOR
+    SkillManagerToggleLibrarySource,     // L on a source row — mark/unmark it as my library
+    SkillManagerCopyToLibrary,           // y on a unit — copy it into my library
+    SkillManagerSourceRemoveOpen,        // r on a source row — open the remove dialog
+    SkillManagerSourceRemoveMove(isize), // move the remove-dialog cursor
+    SkillManagerSourceRemoveConfirm,     // Enter — execute the chosen removal
+    SkillManagerSourceRemoveCancel,      // Esc — dismiss, remove nothing
+    GoToRecovery,                        // Navigate to session recovery view
+    GoToInbox,                           // Navigate to ainb-hooks notification inbox
+    GoToDaemons,                         // Navigate to the daemon runtime-health view
+    GoToFleetPanel,                      // Navigate to the fleet control panel (current_state)
+    FleetPanelMoveUp,                    // Fleet panel: move row selection up
+    FleetPanelMoveDown,                  // Fleet panel: move row selection down
+    FleetPanelOptionNext,                // Fleet panel: move ASK option cursor forward (Tab)
+    FleetPanelOptionPrev,                // Fleet panel: move ASK option cursor back (Shift+Tab)
+    FleetPanelAnswer, // Fleet panel: answer selected ASK with the option (Enter/a)
+    FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
+    FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
+    FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
+    FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
+    FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
-    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
-    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
-    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
-    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,                // Inbox: move selection up one row
-    InboxMoveDown,              // Inbox: move selection down one row
-    InboxPageUp,                // Inbox: jump 10 rows up
-    InboxPageDown,              // Inbox: jump 10 rows down
-    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
-    InboxDismissSelected,       // Inbox: dismiss selected row (d)
-    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,            // Inbox: cycle agent filter (p)
-    InboxRefresh,               // Inbox: force-refresh from store (r)
+    FleetPanelNewAtcBackspace, // Fleet panel: delete last char of the name prompt
+    FleetPanelNewAtcCancel, // Fleet panel: cancel the name prompt (Esc)
+    FleetPanelNewAtcSubmit, // Fleet panel: create the ATC (Enter)
+    PanelBack,        // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,       // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,      // Inbox: move selection up one row
+    InboxMoveDown,    // Inbox: move selection down one row
+    InboxPageUp,      // Inbox: jump 10 rows up
+    InboxPageDown,    // Inbox: jump 10 rows down
+    InboxOpenSelected, // Inbox: mark selected row read (Enter)
+    InboxDismissSelected, // Inbox: dismiss selected row (d)
+    InboxDismissVisible, // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived, // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,  // Inbox: cycle agent filter (p)
+    InboxRefresh,     // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -462,12 +492,12 @@ pub enum AppEvent {
     OnboardingCursorEnd,          // Move cursor to end of input
     OnboardingCheckDeps,          // Run dependency check
     OnboardingSkipAuth,           // Skip authentication step
-    OnboardingAuthUp,             // Auth step: move option cursor up
-    OnboardingAuthDown,           // Auth step: move option cursor down
-    OnboardingAuthSelect,         // Auth step: choose focused option / save key
+    OnboardingAuthUp,             // Auth step: move cursor up (agent list / method picker)
+    OnboardingAuthDown,           // Auth step: move cursor down (agent list / method picker)
+    OnboardingAuthSelect,         // Auth step: drill in / choose method / save key
     OnboardingAuthKeyChar(char),  // Auth step: type into the API-key field
     OnboardingAuthKeyBackspace,   // Auth step: backspace the API-key field
-    OnboardingAuthKeyCancel,      // Auth step: leave API-key entry (Esc)
+    OnboardingAuthCancel,         // Auth step: leave a sub-pane (Esc) back one level
     OnboardingEditorUp,           // Move editor selection up
     OnboardingEditorDown,         // Move editor selection down
     OnboardingQuestionUp,         // Move questionnaire selection up (Source/Role/UseCase)
@@ -552,6 +582,9 @@ pub enum AppEvent {
     /// Enter on the Branch row's Source segment → seed the base-branch
     /// popup from cached refs + kick the background fetch refresh.
     ConfigureOpenBranchPicker,
+    /// `[i]` on an empty-remote verdict → commit a README to the clone
+    /// cache and push it, unblocking Launch.
+    ConfigureInitRemoteRepo,
 }
 
 /// Translate a `RepoSource` variant into the `(SourceType, source_string)`
@@ -719,10 +752,10 @@ impl EventHandler {
     }
 
     /// True when a SkillManager overlay (banner / input prompt / library
-    /// / browse modal) is open OR the help overlay is visible — i.e. the
-    /// underlying Sources/Units panels are NOT the active surface. Mouse
-    /// hit-testing on the panels is suppressed in that case so a click
-    /// meant for the modal doesn't leak through.
+    /// / browse / source-preview modal) is open OR the help overlay is
+    /// visible — i.e. the underlying Sources/Units panels are NOT the
+    /// active surface. Mouse hit-testing on the panels is suppressed in
+    /// that case so a click meant for the modal doesn't leak through.
     fn skill_manager_overlay_open(state: &AppState) -> bool {
         let s = &state.skill_manager_state;
         state.help_visible
@@ -730,6 +763,8 @@ impl EventHandler {
             || s.input.is_some()
             || s.library.is_some()
             || s.browse.is_some()
+            || s.preview.is_some()
+            || s.source_remove_confirm.is_some()
     }
 
     /// Recompute the SkillManager top-row rects (Sources panel + Units
@@ -775,6 +810,21 @@ impl EventHandler {
             && x < rect.x.saturating_add(rect.width)
             && y >= rect.y
             && y < rect.y.saturating_add(rect.height)
+    }
+
+    /// Queue a background fetch of `uri` (git clone off the event loop) that
+    /// opens the source-preview picker on completion. The loading banner
+    /// renders meanwhile; a second request while one is in flight is
+    /// ignored. Nothing is persisted until the picker's import confirms.
+    fn open_source_preview(state: &mut AppState, uri: &str) {
+        if state.skill_manager_state.preview_loading.is_some() {
+            state.add_warning_notification("a source fetch is already running".to_string());
+            return;
+        }
+        state.skill_manager_state.preview_loading = Some(uri.to_string());
+        state.pending_async_action = Some(crate::app::state::AsyncAction::SkillPreviewFetch(
+            uri.to_string(),
+        ));
     }
 
     /// Map a slash-command name (leading `/` already stripped by the
@@ -893,6 +943,14 @@ impl EventHandler {
 
                 // Check if we're in the main view (not in overlays)
                 if state.current_screen == screen_ids::SESSION_LIST && !state.help_visible {
+                    // Click on the bottom keymap legend (or its collapsed hint
+                    // row) toggles it — the mouse twin of ⇧M.
+                    if let Some(area) = state.menu_bar_area {
+                        if Self::point_in_rect(x, y, area) {
+                            return Some(AppEvent::ToggleSessionMenuBar);
+                        }
+                    }
+
                     if state.sessions_pane_state.is_on_toggle(x, y) {
                         state.sessions_pane_state.toggle_collapsed();
                         Self::persist_sessions_pane_preferences(state);
@@ -1076,6 +1134,29 @@ impl EventHandler {
         None
     }
 
+    /// Generic paste fallback: when any free-form text input has focus
+    /// (per `is_text_input_context`) and no dedicated paste route matched,
+    /// feed the pasted text through the normal key path one character at a
+    /// time. Every field's existing `Char` arm does the insertion, so all
+    /// current AND future text inputs accept paste without a per-field
+    /// route — the fix for "this form doesn't allow pasting".
+    ///
+    /// Control characters are skipped: a `\n` would submit the form and a
+    /// `\t` would jump fields mid-paste. Returns true when the paste was
+    /// consumed.
+    pub fn paste_into_text_input(text: &str, state: &mut AppState) -> bool {
+        if !Self::is_text_input_context(state) {
+            return false;
+        }
+        for c in text.chars().filter(|c| !c.is_control()) {
+            let key = KeyEvent::new(KeyCode::Char(c), KeyModifiers::NONE);
+            if let Some(ev) = Self::handle_key_event(key, state) {
+                Self::process_event(ev, state);
+            }
+        }
+        true
+    }
+
     /// True when the user is currently focused on any free-form text input.
     ///
     /// Single-character global shortcuts (`H`, `W`, future ones) must NOT
@@ -1174,8 +1255,25 @@ impl EventHandler {
                 || state.config_screen_state.api_key_input_mode
                 || state.config_popup_state.is_text_entry());
 
+        // Onboarding wizard text-entry steps: git-directories path input,
+        // the OTEL credential form, and the auth API-key entry pane. These
+        // must accept bracketed paste (endpoints/tokens/paths are exactly
+        // the values users paste).
+        let onboarding_text_active = state.current_screen == screen_ids::ONBOARDING
+            && state.onboarding_state.as_ref().is_some_and(|o| {
+                use crate::components::onboarding::{AuthPane, OnboardingStep};
+                match o.current_step {
+                    OnboardingStep::GitDirectories | OnboardingStep::OtelSetup => true,
+                    OnboardingStep::Authentication => {
+                        matches!(o.auth_pane, AuthPane::KeyEntry { .. })
+                    }
+                    _ => false,
+                }
+            });
+
         new_session_text_active
             || plugin_capturing_text
+            || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
                 screen_ids::SEARCH_WORKSPACE
@@ -1267,13 +1365,15 @@ impl EventHandler {
             };
         }
 
-        // Daemons overlay captures all keys while open (read-only: only r and esc/q).
+        // Daemons overlay captures all keys while open: r refresh, R restart
+        // notifyd (single resume/repair), esc/q/d close.
         if state.daemons_overlay.is_some() {
             return match key_event.code {
                 KeyCode::Esc | KeyCode::Char('q') | KeyCode::Char('d') => {
                     Some(AppEvent::DaemonsOverlayClose)
                 }
                 KeyCode::Char('r') => Some(AppEvent::DaemonsOverlayRefresh),
+                KeyCode::Char('R') => Some(AppEvent::DaemonsOverlayRestartNotifyd),
                 _ => None,
             };
         }
@@ -1581,6 +1681,57 @@ impl EventHandler {
                 };
             }
 
+            // Sync assess-then-apply dialog: shows the dry-run plan as a
+            // git-style diff. Enter applies, Esc cancels, arrows scroll.
+            // Intercepts before every other key while open.
+            if state.skill_manager_state.sync_confirm.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerSyncScroll(-1)),
+                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerSyncScroll(1)),
+                    KeyCode::Enter => Some(AppEvent::SkillManagerSyncConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerSyncCancel),
+                    _ => None,
+                };
+            }
+
+            // Source-removal confirm dialog: arrows pick an option, Enter
+            // confirms, Esc cancels. Intercepts before every other key.
+            if state.skill_manager_state.source_remove_confirm.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => {
+                        Some(AppEvent::SkillManagerSourceRemoveMove(-1))
+                    }
+                    KeyCode::Down | KeyCode::Char('j') => {
+                        Some(AppEvent::SkillManagerSourceRemoveMove(1))
+                    }
+                    KeyCode::Enter => Some(AppEvent::SkillManagerSourceRemoveConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => {
+                        Some(AppEvent::SkillManagerSourceRemoveCancel)
+                    }
+                    _ => None,
+                };
+            }
+
+            // Source-preview picker: multi-select units + target tools.
+            // Intercepts before browse/library/banner — it's the active
+            // modal whenever open.
+            if state.skill_manager_state.preview.is_some() {
+                return match key_event.code {
+                    KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::SkillManagerPreviewUp),
+                    KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::SkillManagerPreviewDown),
+                    KeyCode::Char(' ') => Some(AppEvent::SkillManagerPreviewToggle),
+                    KeyCode::Char('a') => Some(AppEvent::SkillManagerPreviewAll),
+                    KeyCode::Char('n') => Some(AppEvent::SkillManagerPreviewNone),
+                    KeyCode::Char('1') => Some(AppEvent::SkillManagerPreviewTool(0)),
+                    KeyCode::Char('2') => Some(AppEvent::SkillManagerPreviewTool(1)),
+                    KeyCode::Char('3') => Some(AppEvent::SkillManagerPreviewTool(2)),
+                    KeyCode::Char('4') => Some(AppEvent::SkillManagerPreviewTool(3)),
+                    KeyCode::Enter => Some(AppEvent::SkillManagerPreviewConfirm),
+                    KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::SkillManagerPreviewClose),
+                    _ => None,
+                };
+            }
+
             // Catalog browse overlay (`[b]`, bead ai-a20): two phases.
             //   * Query mode — every char goes into the query buffer
             //     (so `/`, `:`, spaces all reach it); Enter searches.
@@ -1689,7 +1840,35 @@ impl EventHandler {
                 KeyCode::Down | KeyCode::Char('j') if sources_focused => {
                     Some(AppEvent::SkillManagerSourceSelectNext)
                 }
-                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerApplySourceFilter),
+                // `Enter` on a source row opens the installed-aware import
+                // picker (its skills, pre-checked if already installed) —
+                // the primary action. `[f]` keeps the older filter-to-source
+                // behaviour for when you just want to scope the Units table.
+                KeyCode::Enter if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
+                KeyCode::Char('f') if sources_focused => {
+                    Some(AppEvent::SkillManagerApplySourceFilterKey)
+                }
+                // `[p]` still opens the picker too (muscle-memory alias).
+                KeyCode::Char('p') if sources_focused => Some(AppEvent::SkillManagerPreviewSource),
+                // `[o]` on a unit — open its deployed skill dir in $EDITOR.
+                KeyCode::Char('o') if !sources_focused => {
+                    Some(AppEvent::SkillManagerOpenUnitInEditor)
+                }
+                // `[r]` on a source row — remove dialog (skills+source, or
+                // skills-only / keep source). Distinct from unit `[r]`.
+                KeyCode::Char('r') if sources_focused => {
+                    Some(AppEvent::SkillManagerSourceRemoveOpen)
+                }
+                // `[s]` on a source row — sync the whole source (all its
+                // units, both directions). Same assess popup as unit sync.
+                KeyCode::Char('s') if sources_focused => Some(AppEvent::SkillManagerSync),
+                // `[L]` on a source row — toggle "my library" mark. Capital
+                // L so lowercase `l` stays the Library overlay.
+                KeyCode::Char('L') if sources_focused => {
+                    Some(AppEvent::SkillManagerToggleLibrarySource)
+                }
+                // `[y]` on a unit — copy it into my library (yank).
+                KeyCode::Char('y') if !sources_focused => Some(AppEvent::SkillManagerCopyToLibrary),
                 // Units panel `[s]` — dual-purpose:
                 //   * if the selected unit is part of a conflict pair,
                 //     flip the shadowed_by edge (legacy behaviour);
@@ -1921,6 +2100,8 @@ impl EventHandler {
             // Sidebar collapse/expand was mouse-only (the [-]/[+] glyph);
             // 'B' is its keyboard twin. Hinted next to the glyph itself.
             KeyCode::Char('B') => Some(AppEvent::ToggleSessionsSidebar),
+            // Hide/show the bottom keymap legend to reclaim vertical space.
+            KeyCode::Char('M') => Some(AppEvent::ToggleSessionMenuBar),
             // Panel screens mirror their home-menu letters here so every
             // panel opens from the session list too (i stats, w witr,
             // k skills, m memory, t abtop — same set
@@ -2036,6 +2217,7 @@ impl EventHandler {
                 ConfigureOutcome::Launch(spec) => Some(AppEvent::ConfigureLaunch(spec)),
                 ConfigureOutcome::OpenPresetManager => Some(AppEvent::ConfigureOpenPresetManager),
                 ConfigureOutcome::OpenBranchPicker => Some(AppEvent::ConfigureOpenBranchPicker),
+                ConfigureOutcome::InitializeRemote => Some(AppEvent::ConfigureInitRemoteRepo),
             };
         }
 
@@ -2345,31 +2527,40 @@ impl EventHandler {
                     }
                 }
                 OnboardingStep::Authentication => {
-                    let typing_key = state
-                        .onboarding_state
-                        .as_ref()
-                        .map(|o| o.auth_api_key_input.is_some())
-                        .unwrap_or(false);
-                    if typing_key {
-                        match key_event.code {
+                    use crate::components::onboarding::AuthPane;
+                    let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
+                    match pane {
+                        // Typing an API key.
+                        Some(AuthPane::KeyEntry { .. }) => match key_event.code {
                             KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
-                            KeyCode::Esc => Some(AppEvent::OnboardingAuthKeyCancel),
+                            KeyCode::Esc => Some(AppEvent::OnboardingAuthCancel),
                             KeyCode::Backspace => Some(AppEvent::OnboardingAuthKeyBackspace),
                             KeyCode::Char(c) => Some(AppEvent::OnboardingAuthKeyChar(c)),
                             _ => None,
-                        }
-                    } else {
-                        match key_event.code {
+                        },
+                        // Choosing a method for one agent.
+                        Some(AuthPane::MethodPicker { .. }) => match key_event.code {
                             KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
                             KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
                             KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Esc | KeyCode::Left => Some(AppEvent::OnboardingAuthCancel),
+                            _ => None,
+                        },
+                        // Per-agent list (default). Enter drills in; Right/n advance.
+                        _ => match key_event.code {
+                            KeyCode::Up => Some(AppEvent::OnboardingAuthUp),
+                            KeyCode::Down => Some(AppEvent::OnboardingAuthDown),
+                            KeyCode::Enter => Some(AppEvent::OnboardingAuthSelect),
+                            KeyCode::Right | KeyCode::Char('n') | KeyCode::Char('N') => {
+                                Some(AppEvent::OnboardingNext)
+                            }
                             KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
                             KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
                             KeyCode::Char('s') | KeyCode::Char('S') => {
                                 Some(AppEvent::OnboardingSkipAuth)
                             }
                             _ => None,
-                        }
+                        },
                     }
                 }
                 OnboardingStep::OtelSetup => match key_event.code {
@@ -2766,7 +2957,17 @@ impl EventHandler {
             KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
             KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
-            KeyCode::Char('n') => Some(AppEvent::FleetPanelNewAtcOpen),
+            KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
+            // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
+            // advertises) and new-ATC. Context decides: on an APPROVE row `n`
+            // denies; anywhere else it opens the new-ATC name prompt.
+            KeyCode::Char('n') => {
+                if state.fleet_panel_state.selected_kind() == Some("APPROVE") {
+                    Some(AppEvent::FleetPanelDeny)
+                } else {
+                    Some(AppEvent::FleetPanelNewAtcOpen)
+                }
+            }
             KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
             _ => None,
         }
@@ -3057,8 +3258,10 @@ impl EventHandler {
             AppEvent::DaemonsOverlayOpen => state.toggle_daemons_overlay(),
             AppEvent::DaemonsOverlayClose => state.close_daemons_overlay(),
             AppEvent::DaemonsOverlayRefresh => state.spawn_daemons_fetch(),
+            AppEvent::DaemonsOverlayRestartNotifyd => state.spawn_notifyd_restart(),
             AppEvent::ToggleClaudeChat => state.toggle_claude_chat(),
             AppEvent::ToggleExpandAll => state.toggle_expand_all_workspaces(),
+            AppEvent::ToggleSessionMenuBar => state.toggle_session_menu_bar(),
             AppEvent::ToggleSessionsSidebar => {
                 // Same path the [-]/[+] mouse glyph takes: flip + persist the
                 // preference so the choice survives restarts.
@@ -3281,6 +3484,11 @@ impl EventHandler {
                 // Git stays in the app layer — components/ never touch git2
                 // (finding #9).
                 state.open_branch_picker();
+            }
+            AppEvent::ConfigureInitRemoteRepo => {
+                // README + initial commit + push, off-thread. The component
+                // already shows the Initializing spinner.
+                state.initialize_remote_repo();
             }
             AppEvent::ShowNotification(message) => {
                 tracing::info!("Event: ShowNotification - {}", message);
@@ -4683,29 +4891,165 @@ impl EventHandler {
                 }
             }
             AppEvent::SkillManagerSync => {
-                // Phase D (v12.D.5): run `ainb skill sync` for the
-                // selected unit. The actual sync runs out-of-band via
-                // the CLI surface; here we only fire-and-forget the
-                // intent + reload the screen state so a successful
-                // sync surfaces fresh deployed paths / usage on next
-                // paint. Tests assert routing-only behaviour against
-                // the dispatch table; integration tests for the CLI
-                // path live in `ainb-cli/tests/skill_sync_*`.
-                //
-                // Surface a `sync: <unit>` info notification so the user
-                // sees that `[s]` routed to Sync (not ConflictFlip) and
-                // so the live tmux tripwire (v12.1.T3) can observe the
-                // routing decision in the captured pane.
-                tracing::info!("Units panel: sync selected unit");
-                let unit_name = state
-                    .skill_manager_state
-                    .units
-                    .get(state.skill_manager_state.selected)
-                    .map(|u| u.name.clone());
+                // `[s]` — assess-then-apply sync. Run a dry-run first to
+                // compute the plan (bidirectional content diff + manifest
+                // reconciliation), then show it as a git-style diff popup;
+                // the user applies with Enter (see SkillManagerSyncConfirm).
+                // Scope: the focused source (all its units) or the selected
+                // unit. `source_or_unit` accepts a source name OR a unit URI.
+                let sources_focused = state.skill_manager_state.focused_pane
+                    == crate::components::skill_manager_screen::FocusedSkillPane::Sources;
+                let (target, label) = if sources_focused {
+                    match state
+                        .skill_manager_state
+                        .sources
+                        .get(state.skill_manager_state.source_selected)
+                    {
+                        Some(s) => (s.name.clone(), format!("source {}", s.name)),
+                        None => {
+                            state.add_warning_notification("sync: no source selected".to_string());
+                            return;
+                        }
+                    }
+                } else {
+                    // Act on the unit the user SEES highlighted, not a stale
+                    // absolute `selected` that drifted out of the filter.
+                    let Some(idx) = state.skill_manager_state.highlighted_unit_index() else {
+                        state.add_warning_notification("sync: no unit selected".to_string());
+                        return;
+                    };
+                    state.skill_manager_state.selected = idx;
+                    match state.skill_manager_state.units.get(idx) {
+                        Some(u) => (u.declared_uri.clone(), format!("unit {}", u.name)),
+                        None => {
+                            state.add_warning_notification("sync: no unit selected".to_string());
+                            return;
+                        }
+                    }
+                };
+                tracing::info!(%target, "SkillManager: sync assess (dry-run)");
                 let ainb_home = ainb_skill_core::default_ainb_home();
+                let cmd = ainb_cli::SkillCommand::Sync(ainb_cli::SyncArgs {
+                    source_or_unit: Some(target.clone()),
+                    yes: false,
+                    dry_run: true,
+                    to_home: false,
+                    to_repo: false,
+                });
+                // Full output — the popup renders the WHOLE multi-line plan
+                // as a diff, and the "already in sync" marker is a `#` comment
+                // line that last_meaningful_line would strip.
+                let (ok, msg) = run_skill_cli_full(&ainb_home, cmd);
+                if !ok {
+                    state.add_error_notification(format!("sync assess failed: {msg}"));
+                    return;
+                }
+                if msg.contains("already in sync") {
+                    state.add_info_notification(format!("{label}: already in sync"));
+                    return;
+                }
+                let plan: Vec<String> = msg
+                    .lines()
+                    .map(|l| l.trim_end().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect();
+                state.skill_manager_state.sync_confirm =
+                    Some(crate::components::skill_manager_screen::SyncConfirmState {
+                        target,
+                        label,
+                        plan,
+                        scroll: 0,
+                    });
+            }
+            AppEvent::SkillManagerSyncScroll(delta) => {
+                if let Some(sc) = state.skill_manager_state.sync_confirm.as_mut() {
+                    sc.scroll_by(delta);
+                }
+            }
+            AppEvent::SkillManagerSyncCancel => {
+                state.skill_manager_state.sync_confirm = None;
+            }
+            AppEvent::SkillManagerSyncConfirm => {
+                // Apply the previewed plan: re-run the identical scope with
+                // `--yes`. Then reload so fresh deployed paths / usage paint.
+                let Some(sc) = state.skill_manager_state.sync_confirm.take() else {
+                    return;
+                };
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let cmd = ainb_cli::SkillCommand::Sync(ainb_cli::SyncArgs {
+                    source_or_unit: Some(sc.target.clone()),
+                    yes: true,
+                    dry_run: false,
+                    to_home: false,
+                    to_repo: false,
+                });
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
                 state.skill_manager_state.reload_from_disk(&ainb_home);
-                if let Some(name) = unit_name {
-                    state.add_info_notification(format!("sync: {name}"));
+                if ok {
+                    state.add_success_notification(format!("synced {}", sc.label));
+                } else {
+                    state.add_error_notification(format!("sync failed: {msg}"));
+                }
+            }
+            AppEvent::SkillManagerToggleLibrarySource => {
+                // `[L]` — mark/unmark the focused source as my library.
+                // Toggle by the row's current `is_library` flag.
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let src = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .map(|s| (s.name.clone(), s.is_library));
+                let Some((name, was_library)) = src else {
+                    state.add_warning_notification("library: no source selected".to_string());
+                    return;
+                };
+                let cmd = if was_library {
+                    ainb_cli::SkillCommand::Library {
+                        cmd: ainb_cli::LibraryCmd::UnmarkSource { name: name.clone() },
+                    }
+                } else {
+                    ainb_cli::SkillCommand::Library {
+                        cmd: ainb_cli::LibraryCmd::MarkSource { name: name.clone() },
+                    }
+                };
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                if ok {
+                    let verb = if was_library { "unmarked" } else { "marked" };
+                    state.add_success_notification(format!("{verb} library: {name}"));
+                } else {
+                    state.add_error_notification(format!("library toggle failed: {msg}"));
+                }
+            }
+            AppEvent::SkillManagerCopyToLibrary => {
+                // `[y]` — copy the selected unit into my library (deploy to
+                // the claude tool home + register in library.yaml).
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                // Copy the unit the user SEES highlighted, not a stale
+                // absolute `selected` that drifted out of the filter.
+                let Some(idx) = state.skill_manager_state.highlighted_unit_index() else {
+                    state.add_warning_notification("copy: no unit selected".to_string());
+                    return;
+                };
+                state.skill_manager_state.selected = idx;
+                let uri = state.skill_manager_state.units.get(idx).map(|u| u.declared_uri.clone());
+                let Some(uri) = uri else {
+                    state.add_warning_notification("copy: no unit selected".to_string());
+                    return;
+                };
+                let cmd = ainb_cli::SkillCommand::Library {
+                    cmd: ainb_cli::LibraryCmd::Copy {
+                        uri: uri.clone(),
+                        tool: None,
+                    },
+                };
+                let (ok, msg) = run_skill_cli(&ainb_home, cmd);
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                if ok {
+                    state.add_success_notification(format!("copied to library: {msg}"));
+                } else {
+                    state.add_error_notification(format!("copy failed: {msg}"));
                 }
             }
             AppEvent::SkillManagerConflictFlip => {
@@ -4801,11 +5145,37 @@ impl EventHandler {
             AppEvent::SkillManagerRemove => {
                 // `[r]` — uninstall the selected unit from its tools.
                 let ainb_home = ainb_skill_core::default_ainb_home();
-                let uri = state
-                    .skill_manager_state
-                    .units
-                    .get(state.skill_manager_state.selected)
-                    .map(|u| u.declared_uri.clone());
+                // The cursor (`selected`) must land on a row that's actually
+                // VISIBLE under the current filter — otherwise `[r]` would act
+                // on an off-screen unit (e.g. filtering to a 0-unit source left
+                // `selected` on an unrelated row, so `[r]` removed *that*).
+                let visible = state.skill_manager_state.visible_indices();
+                if visible.is_empty() {
+                    // Nothing removable in view. If it's empty because of a
+                    // source filter, the obvious intent is "remove this source"
+                    // (the user filtered to the repo they want gone) — route
+                    // there rather than touching a hidden unit.
+                    if state.skill_manager_state.source_filter.is_some() {
+                        Self::process_event(AppEvent::SkillManagerSourceRemoveOpen, state);
+                    } else {
+                        state.skill_manager_state.pending_remove_confirm = None;
+                        state.add_warning_notification("remove: no unit selected".to_string());
+                    }
+                    return;
+                }
+                // Act on the unit the user actually SEES highlighted. The
+                // render highlights `visible[position(selected) | 0]`, so map
+                // through the same logic — never a stale absolute `selected`
+                // that drifted out of the filtered set (that removed the wrong
+                // unit). Sync `selected` so the arm/confirm keys agree.
+                let pos = visible
+                    .iter()
+                    .position(|&i| i == state.skill_manager_state.selected)
+                    .unwrap_or(0);
+                let target = visible[pos];
+                state.skill_manager_state.selected = target;
+                let uri =
+                    state.skill_manager_state.units.get(target).map(|u| u.declared_uri.clone());
                 match uri {
                     None => {
                         state.skill_manager_state.pending_remove_confirm = None;
@@ -4916,24 +5286,14 @@ impl EventHandler {
                         let uri = crate::components::skill_manager_screen::normalize_source_input(
                             &input.buffer,
                         );
-                        tracing::info!(uri = %uri, "SkillManager: add-source submit");
+                        tracing::info!(uri = %uri, "SkillManager: add-source submit (preview-first)");
                         if uri.is_empty() {
                             return;
                         }
-                        let ainb_home = ainb_skill_core::default_ainb_home();
-                        let cmd = ainb_cli::SourceCommand::Add(ainb_cli::AddArgs {
-                            uri: uri.clone(),
-                            name: None,
-                            kind: None,
-                        });
-                        let (ok, msg) = run_source_cli(&ainb_home, cmd);
-                        tracing::info!(ok, msg = %msg, "SkillManager: add-source result");
-                        state.skill_manager_state.reload_from_disk(&ainb_home);
-                        if ok {
-                            state.add_success_notification(format!("source added: {msg}"));
-                        } else {
-                            state.add_error_notification(format!("add source failed: {msg}"));
-                        }
+                        // Preview-first: fetch + list units WITHOUT persisting;
+                        // the picker that opens decides what (if anything) is
+                        // imported. Cancelling leaves no manifest trace.
+                        Self::open_source_preview(state, &uri);
                     }
                 }
             }
@@ -4982,7 +5342,8 @@ impl EventHandler {
                     crate::components::skill_manager_screen::SelectionMove::Next,
                 );
             }
-            AppEvent::SkillManagerApplySourceFilter => {
+            AppEvent::SkillManagerApplySourceFilter
+            | AppEvent::SkillManagerApplySourceFilterKey => {
                 state.skill_manager_state.apply_selected_source_filter();
                 // Refresh the detail pane against the newly-selected unit.
                 let ainb_home = ainb_skill_core::default_ainb_home();
@@ -4990,6 +5351,46 @@ impl EventHandler {
                     &mut state.skill_manager_state,
                     &ainb_home,
                 );
+            }
+            AppEvent::SkillManagerOpenUnitInEditor => {
+                // `[o]` — open the selected unit's deployed skill dir in the
+                // user's editor. Reuses the generic OpenInEditor async action
+                // (resolve_editor → $EDITOR fallback chain). Open the parent
+                // dir when the deployed path is a file (e.g. SKILL.md) so the
+                // whole skill folder lands in the editor.
+                //
+                // Resolve the unit the user SEES highlighted and refresh the
+                // detail pane against it first — `detail` is keyed off
+                // `selected`, which can drift out of the active filter.
+                if let Some(idx) = state.skill_manager_state.highlighted_unit_index() {
+                    state.skill_manager_state.selected = idx;
+                    let ainb_home = ainb_skill_core::default_ainb_home();
+                    crate::components::skill_manager_screen::recompute_detail(
+                        &mut state.skill_manager_state,
+                        &ainb_home,
+                    );
+                }
+                let deployed = state
+                    .skill_manager_state
+                    .detail
+                    .as_ref()
+                    .and_then(|d| d.deployed.first().cloned());
+                match deployed {
+                    Some(path) => {
+                        let p = std::path::PathBuf::from(&path);
+                        let target = if p.is_file() {
+                            p.parent().map(|d| d.to_path_buf()).unwrap_or(p)
+                        } else {
+                            p
+                        };
+                        state.pending_async_action = Some(AsyncAction::OpenInEditor(target));
+                    }
+                    None => {
+                        state.add_warning_notification(
+                            "open: no deployed path for selected unit".to_string(),
+                        );
+                    }
+                }
             }
             AppEvent::SkillManagerClearSourceFilter => {
                 state.skill_manager_state.clear_source_filter();
@@ -5209,6 +5610,193 @@ impl EventHandler {
             AppEvent::SkillManagerBrowseClose => {
                 state.skill_manager_state.browse = None;
             }
+            AppEvent::SkillManagerPreviewUp => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.move_cursor(-1);
+                }
+            }
+            AppEvent::SkillManagerPreviewDown => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.move_cursor(1);
+                }
+            }
+            AppEvent::SkillManagerPreviewToggle => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.toggle_current();
+                }
+            }
+            AppEvent::SkillManagerPreviewAll => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.set_all(true);
+                }
+            }
+            AppEvent::SkillManagerPreviewNone => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.set_all(false);
+                }
+            }
+            AppEvent::SkillManagerPreviewTool(i) => {
+                if let Some(p) = state.skill_manager_state.preview.as_mut() {
+                    p.toggle_tool(i);
+                }
+            }
+            AppEvent::SkillManagerPreviewClose => {
+                // Discard — preview never persisted anything.
+                state.skill_manager_state.preview = None;
+            }
+            AppEvent::SkillManagerPreviewSource => {
+                // `[p]` on a source row — reopen the picker for that source,
+                // at its DECLARED ref (bare uri would default to `main`,
+                // silently swapping the name-keyed cache checkout).
+                let row = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .cloned();
+                if let Some(row) = row {
+                    if !row.enabled {
+                        // install() only matches enabled sources — a preview
+                        // would fetch fine and then fail every unit late.
+                        state.add_warning_notification(format!(
+                            "source `{}` is disabled — enable it before importing",
+                            row.name
+                        ));
+                        return;
+                    }
+                    Self::open_source_preview(state, &format!("{}@{}", row.uri, row.r#ref));
+                }
+            }
+            AppEvent::SkillManagerSourceRemoveOpen => {
+                use crate::components::skill_manager_screen::SourceRemoveConfirm;
+                let Some(row) = state
+                    .skill_manager_state
+                    .sources
+                    .get(state.skill_manager_state.source_selected)
+                    .cloned()
+                else {
+                    state.add_warning_notification("remove: no source selected".to_string());
+                    return;
+                };
+                let prefix = format!("{}@", row.uri);
+                let unit_count = state
+                    .skill_manager_state
+                    .units
+                    .iter()
+                    .filter(|u| u.declared_uri.starts_with(&prefix))
+                    .count();
+                state.skill_manager_state.source_remove_confirm = Some(SourceRemoveConfirm {
+                    source_name: row.name,
+                    source_uri: row.uri,
+                    unit_count,
+                    cursor: 0,
+                });
+            }
+            AppEvent::SkillManagerSourceRemoveMove(delta) => {
+                if let Some(c) = state.skill_manager_state.source_remove_confirm.as_mut() {
+                    c.move_cursor(delta);
+                }
+            }
+            AppEvent::SkillManagerSourceRemoveCancel => {
+                state.skill_manager_state.source_remove_confirm = None;
+            }
+            AppEvent::SkillManagerSourceRemoveConfirm => {
+                use crate::components::skill_manager_screen::SourceRemoveChoice;
+                let Some(confirm) = state.skill_manager_state.source_remove_confirm.clone() else {
+                    return;
+                };
+                let choice = confirm.choice();
+                if choice == SourceRemoveChoice::Cancel {
+                    state.skill_manager_state.source_remove_confirm = None;
+                    return;
+                }
+                let keep_source = choice.keeps_source();
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let mut buf: Vec<u8> = Vec::new();
+                let result = ainb_cli::source::remove_source_units(
+                    &ainb_home,
+                    &confirm.source_name,
+                    keep_source,
+                    &mut buf,
+                );
+                state.skill_manager_state.source_remove_confirm = None;
+                state.skill_manager_state.reload_from_disk(&ainb_home);
+                match result {
+                    Ok(removed) if keep_source => {
+                        state.add_success_notification(format!(
+                            "removed {removed} skill(s); kept {} (re-import with [p])",
+                            confirm.source_name
+                        ));
+                    }
+                    Ok(removed) => {
+                        state.add_success_notification(format!(
+                            "removed {} + {removed} skill(s)",
+                            confirm.source_name
+                        ));
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("remove failed: {e:#}"));
+                        tracing::warn!(output = %String::from_utf8_lossy(&buf),
+                            "SkillManager: source remove failed");
+                    }
+                }
+            }
+            AppEvent::SkillManagerPreviewConfirm => {
+                // Validate on a borrow (no deep clone of a potentially
+                // 95-unit view); only take() the state once we commit.
+                let (paths, targets) = {
+                    let Some(view) = state.skill_manager_state.preview.as_ref() else {
+                        return;
+                    };
+                    let paths = view.checked_paths();
+                    if paths.is_empty() {
+                        state.add_warning_notification(
+                            "Nothing selected — Space to pick, a for all".to_string(),
+                        );
+                        return;
+                    }
+                    let Some(targets) = view.targets_csv() else {
+                        state.add_warning_notification(
+                            "No target tool — 1/2/3 toggle claude/codex/copilot".to_string(),
+                        );
+                        return;
+                    };
+                    (paths, targets)
+                };
+                let Some(view) = state.skill_manager_state.preview.take() else {
+                    return;
+                };
+                let ainb_home = ainb_skill_core::default_ainb_home();
+                let mut buf: Vec<u8> = Vec::new();
+                match ainb_cli::source::import_selected(
+                    &ainb_home,
+                    &view.preview,
+                    &paths,
+                    &targets,
+                    &mut buf,
+                ) {
+                    Ok((installed, failed)) => {
+                        state.skill_manager_state.reload_from_disk(&ainb_home);
+                        if failed == 0 {
+                            state.add_success_notification(format!(
+                                "imported {installed} unit(s) → {targets}"
+                            ));
+                        } else {
+                            state.add_warning_notification(format!(
+                                "imported {installed}, {failed} failed → {targets} (see logs)"
+                            ));
+                            tracing::warn!(
+                                output = %String::from_utf8_lossy(&buf),
+                                "SkillManager: import finished with failures"
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        state.add_error_notification(format!("import failed: {e:#}"));
+                        // Reopen the picker with the user's selection intact.
+                        state.skill_manager_state.preview = Some(view);
+                    }
+                }
+            }
             AppEvent::GoToInbox => {
                 tracing::info!("Navigating to Inbox");
                 if state.current_screen != screen_ids::INBOX {
@@ -5297,6 +5885,23 @@ impl EventHandler {
                         .fleet_panel_state
                         .set_feedback("no session selected to broadcast to".to_string());
                 }
+            }
+            AppEvent::FleetPanelApprove => {
+                // Approve the selected APPROVE row: deliver a first-class
+                // permission decision to the notifyd approve broker, which
+                // unblocks the parked PermissionRequest hook (it flows back to
+                // Claude as `permissionDecision: allow`). NOT a tmux send.
+                state.fleet_panel_state.guarded_decide(
+                    ainb_plugin_notifyd::broker::DecisionKind::Approve,
+                    "approved",
+                );
+            }
+            AppEvent::FleetPanelDeny => {
+                // Deny the selected APPROVE row (broker relays `deny` back to the
+                // blocked hook). Same guard as approve/send.
+                state
+                    .fleet_panel_state
+                    .guarded_decide(ainb_plugin_notifyd::broker::DecisionKind::Deny, "denied");
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -6406,6 +7011,13 @@ impl EventHandler {
                     );
                     return;
                 }
+                // Save git directories as soon as the user leaves the step,
+                // not only on wizard finish.
+                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                    == Some(OnboardingStep::GitDirectories)
+                {
+                    state.persist_onboarding_git_dirs();
+                }
                 let mut trigger_dep_check = false;
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     if onboarding_state.is_final_step() {
@@ -6423,6 +7035,12 @@ impl EventHandler {
                         if onboarding_state.current_step == OnboardingStep::EditorSelection {
                             onboarding_state.init_editors_if_needed();
                         }
+                        // Detect current per-agent auth when entering the step.
+                        if onboarding_state.current_step == OnboardingStep::Authentication {
+                            onboarding_state.auth_pane =
+                                crate::components::onboarding::AuthPane::AgentList;
+                            onboarding_state.refresh_auth_statuses();
+                        }
                     }
                 }
                 // Auto-trigger dependency check if entering DependencyCheck step
@@ -6436,13 +7054,33 @@ impl EventHandler {
                 }
             }
             AppEvent::OnboardingBack => {
+                use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding back step");
+                // Persist git dirs when stepping back out of the step too.
+                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                    == Some(OnboardingStep::GitDirectories)
+                {
+                    state.persist_onboarding_git_dirs();
+                }
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
                     onboarding_state.go_back();
+                    // Refresh per-agent auth when stepping back into the step.
+                    if onboarding_state.current_step == OnboardingStep::Authentication {
+                        onboarding_state.auth_pane =
+                            crate::components::onboarding::AuthPane::AgentList;
+                        onboarding_state.refresh_auth_statuses();
+                    }
                 }
             }
             AppEvent::OnboardingToMenu => {
+                use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Leaving onboarding wizard for the Setup menu");
+                // Persist git dirs before dropping the wizard state.
+                if state.onboarding_state.as_ref().map(|o| o.current_step)
+                    == Some(OnboardingStep::GitDirectories)
+                {
+                    state.persist_onboarding_git_dirs();
+                }
                 state.onboarding_to_menu();
             }
             AppEvent::OnboardingInputChar(ch) => {
@@ -6488,61 +7126,78 @@ impl EventHandler {
                 state.pending_async_action = Some(AsyncAction::OnboardingCheckDeps);
             }
             AppEvent::OnboardingSkipAuth => {
-                tracing::debug!("Skipping authentication");
+                // "Configure later" — advance without changing anything. The
+                // per-agent statuses already reflect the real current auth.
+                tracing::debug!("Skipping authentication configuration");
                 if let Some(ref mut onboarding_state) = state.onboarding_state {
-                    onboarding_state.auth_completed = true;
-                    onboarding_state.auth_method = Some("skipped".to_string());
                     onboarding_state.advance();
                 }
             }
             AppEvent::OnboardingAuthUp => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    o.move_auth_cursor(-1);
+                    match &mut o.auth_pane {
+                        AuthPane::MethodPicker { cursor, .. } => {
+                            *cursor = cursor.saturating_sub(1);
+                        }
+                        AuthPane::AgentList => o.move_auth_agent_cursor(-1),
+                        AuthPane::KeyEntry { .. } => {}
+                    }
                 }
             }
             AppEvent::OnboardingAuthDown => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    o.move_auth_cursor(1);
+                    match &mut o.auth_pane {
+                        AuthPane::MethodPicker { cursor, .. } => {
+                            if *cursor < 2 {
+                                *cursor += 1;
+                            }
+                        }
+                        AuthPane::AgentList => o.move_auth_agent_cursor(1),
+                        AuthPane::KeyEntry { .. } => {}
+                    }
                 }
             }
             AppEvent::OnboardingAuthKeyChar(ch) => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                    if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.push(ch);
                     }
                 }
             }
             AppEvent::OnboardingAuthKeyBackspace => {
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    if let Some(buf) = o.auth_api_key_input.as_mut() {
+                    if let AuthPane::KeyEntry { buf, .. } = &mut o.auth_pane {
                         buf.pop();
                     }
                 }
             }
-            AppEvent::OnboardingAuthKeyCancel => {
+            AppEvent::OnboardingAuthCancel => {
+                // Esc backs out one level: key entry → its method picker,
+                // method picker → the agent list.
+                use crate::components::onboarding::AuthPane;
                 if let Some(o) = state.onboarding_state.as_mut() {
-                    o.auth_api_key_input = None;
+                    o.auth_pane = match &o.auth_pane {
+                        AuthPane::KeyEntry { agent, .. } => AuthPane::MethodPicker {
+                            agent: *agent,
+                            cursor: 1,
+                        },
+                        _ => AuthPane::AgentList,
+                    };
                 }
             }
             AppEvent::OnboardingAuthSelect => {
+                use crate::components::onboarding::{AuthAgent, AuthMethodKind, AuthPane};
                 use crate::config::{AppConfig, ClaudeAuthProvider};
-                // Decide from an immutable read, then mutate/notify without a
-                // held borrow. Rows: 0=Claude OAuth, 1=Claude API key,
-                // 2=Codex OAuth, 3=Skip. While typing a key, Enter = save.
-                let (typing_key, key_buf, idx) = state
-                    .onboarding_state
-                    .as_ref()
-                    .map(|o| {
-                        (
-                            o.auth_api_key_input.is_some(),
-                            o.auth_api_key_input.clone().unwrap_or_default(),
-                            o.auth_selected_index,
-                        )
-                    })
-                    .unwrap_or((false, String::new(), 0));
+
+                // Read the active pane, then mutate/notify without a held borrow.
+                let pane = state.onboarding_state.as_ref().map(|o| o.auth_pane.clone());
 
                 // Persist the Claude auth provider so build_env_setup() honours it.
-                let set_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
+                let set_claude_provider = |p: ClaudeAuthProvider| match AppConfig::load() {
                     Ok(mut c) => {
                         c.authentication.claude_provider = p;
                         if let Err(e) = c.save() {
@@ -6552,80 +7207,120 @@ impl EventHandler {
                     Err(e) => tracing::error!("Failed to load config for auth provider: {}", e),
                 };
 
-                if typing_key {
-                    // The API-key row pre-seeds the buffer with "sk-ant-" as a
-                    // hint. Users paste a FULL key (also starting "sk-ant-"),
-                    // producing "sk-ant-sk-ant-...". Collapse any repeated
-                    // leading prefix so storage is idempotent (N repeats -> 1).
-                    let mut key = key_buf.trim().to_string();
-                    while let Some(rest) = key.strip_prefix("sk-ant-sk-ant-") {
-                        key = format!("sk-ant-{rest}");
-                    }
-                    if key.is_empty() || key == "sk-ant-" {
-                        state.add_warning_notification(
-                            "Enter an API key first (or Esc to cancel)".to_string(),
-                        );
-                    } else {
-                        match credentials::store_anthropic_api_key(&key) {
-                            Ok(()) => {
-                                set_provider(ClaudeAuthProvider::ApiKey);
-                                if let Some(o) = state.onboarding_state.as_mut() {
-                                    o.auth_api_key_input = None;
-                                    o.auth_completed = true;
-                                    o.auth_method = Some("claude-api-key".to_string());
-                                    o.advance();
-                                }
-                                state.add_success_notification(
-                                    "API key saved to keychain; sessions will use ANTHROPIC_API_KEY"
-                                        .to_string(),
-                                );
-                            }
-                            Err(e) => {
-                                state.add_error_notification(format!(
-                                    "Failed to save API key: {}",
-                                    e
-                                ));
+                match pane {
+                    // Drill into the focused agent's method picker, defaulting the
+                    // cursor to that agent's current method.
+                    Some(AuthPane::AgentList) => {
+                        if let Some(o) = state.onboarding_state.as_mut() {
+                            if let Some(st) = o.auth_statuses.get(o.auth_agent_cursor) {
+                                let agent = st.agent;
+                                let cursor = match st.method {
+                                    AuthMethodKind::Login => 0,
+                                    AuthMethodKind::ApiKey => 1,
+                                };
+                                o.auth_pane = AuthPane::MethodPicker { agent, cursor };
                             }
                         }
                     }
-                } else {
-                    match idx {
+                    // Choose a method for the agent. Stays on the step (no advance).
+                    Some(AuthPane::MethodPicker { agent, cursor }) => match cursor {
+                        // Login / system-wide
                         0 => {
-                            set_provider(ClaudeAuthProvider::SystemAuth);
-                            if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_completed = true;
-                                o.auth_method = Some("claude-oauth".to_string());
-                                o.advance();
+                            match agent {
+                                AuthAgent::Claude => {
+                                    // System-wide: config gates injection, so the
+                                    // key (if any) simply stops being injected.
+                                    set_claude_provider(ClaudeAuthProvider::SystemAuth);
+                                }
+                                other => {
+                                    // No config flag for these — a stored key would
+                                    // force API-key mode, so drop it to honour the
+                                    // sign-in choice (else it'd still be injected).
+                                    let key = other.credential_key();
+                                    let had = credentials::has_credential(key);
+                                    let _ = credentials::delete_credential(key);
+                                    if had {
+                                        state.add_info_notification(format!(
+                                            "Removed stored {}; {} will use sign-in",
+                                            other.key_label(),
+                                            other.label()
+                                        ));
+                                    }
+                                }
                             }
-                            state.add_info_notification(
-                                "Claude: subscription/OAuth - run /login inside Claude on first launch"
-                                    .to_string(),
-                            );
+                            if let Some(o) = state.onboarding_state.as_mut() {
+                                o.auth_pane = AuthPane::AgentList;
+                                o.refresh_auth_statuses();
+                            }
+                            state.add_info_notification(format!(
+                                "{}: {}",
+                                agent.login_label(),
+                                agent.login_hint()
+                            ));
                         }
+                        // API key → inline entry seeded with the expected prefix.
                         1 => {
                             if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_api_key_input = Some("sk-ant-".to_string());
+                                o.auth_pane = AuthPane::KeyEntry {
+                                    agent,
+                                    buf: agent.key_seed().to_string(),
+                                };
                             }
                         }
-                        2 => {
-                            if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_completed = true;
-                                o.auth_method = Some("codex-oauth".to_string());
-                                o.advance();
-                            }
-                            state.add_info_notification(
-                                "Codex: run `codex login` (or /login in Codex) before first use"
-                                    .to_string(),
-                            );
-                        }
+                        // Back
                         _ => {
                             if let Some(o) = state.onboarding_state.as_mut() {
-                                o.auth_completed = true;
-                                o.auth_method = Some("skipped".to_string());
-                                o.advance();
+                                o.auth_pane = AuthPane::AgentList;
+                            }
+                        }
+                    },
+                    // Save the typed API key for the agent, then return to the list.
+                    Some(AuthPane::KeyEntry { agent, buf }) => {
+                        // The entry buffer is pre-seeded with the agent's key prefix as a
+                        // hint (e.g. "sk-ant-"). A pasted full key also starts with that
+                        // prefix, producing a doubled seed ("sk-ant-sk-ant-…"); collapse
+                        // any repeated leading seed so storage is idempotent.
+                        let mut key = buf.trim().to_string();
+                        let seed = agent.key_seed();
+                        if !seed.is_empty() {
+                            let doubled = format!("{seed}{seed}");
+                            while let Some(rest) = key.strip_prefix(&doubled) {
+                                key = format!("{seed}{rest}");
+                            }
+                        }
+                        if key.is_empty() || key == agent.key_seed() {
+                            state.add_warning_notification(
+                                "Enter an API key first (or Esc to cancel)".to_string(),
+                            );
+                        } else {
+                            let stored =
+                                credentials::store_credential(agent.credential_key(), &key);
+                            match stored {
+                                Ok(()) => {
+                                    if agent == AuthAgent::Claude {
+                                        set_claude_provider(ClaudeAuthProvider::ApiKey);
+                                    }
+                                    if let Some(o) = state.onboarding_state.as_mut() {
+                                        o.auth_pane = AuthPane::AgentList;
+                                        o.refresh_auth_statuses();
+                                    }
+                                    state.add_success_notification(format!(
+                                        "{} saved to keychain; injected as {}",
+                                        agent.key_label(),
+                                        agent.env_var()
+                                    ));
+                                }
+                                Err(e) => {
+                                    state.add_error_notification(format!(
+                                        "Failed to save {}: {}",
+                                        agent.key_label(),
+                                        e
+                                    ));
+                                }
                             }
                         }
                     }
+                    None => {}
                 }
             }
             AppEvent::OnboardingEditorUp => {
@@ -6939,6 +7634,20 @@ fn run_skill_cli(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (b
     let mut buf: Vec<u8> = Vec::new();
     match ainb_cli::skill::dispatch(ainb_home, cmd, &mut buf) {
         Ok(()) => (true, last_meaningful_line(&buf)),
+        Err(e) => (false, format!("{e}")),
+    }
+}
+
+/// Like [`run_skill_cli`] but returns the FULL captured output, not just
+/// the last non-comment line. The assess-sync popup needs the whole
+/// multi-line plan (`# sync plan`, `+ uri`, content-sync rows, …) to
+/// render it as a diff — `last_meaningful_line` would collapse it to one
+/// meaningless row (and strip the `# already in sync` marker the caller
+/// keys on).
+fn run_skill_cli_full(ainb_home: &std::path::Path, cmd: ainb_cli::SkillCommand) -> (bool, String) {
+    let mut buf: Vec<u8> = Vec::new();
+    match ainb_cli::skill::dispatch(ainb_home, cmd, &mut buf) {
+        Ok(()) => (true, String::from_utf8_lossy(&buf).into_owned()),
         Err(e) => (false, format!("{e}")),
     }
 }
@@ -7405,6 +8114,24 @@ mod panel_back_tests {
         assert_eq!(state.current_screen, ids::SESSION_LIST);
     }
 
+    /// A click anywhere on the published menu-bar rect toggles the legend
+    /// (the mouse twin of ⇧M); a click above it does not.
+    #[test]
+    fn click_on_menu_bar_toggles_the_legend() {
+        use ratatui::layout::Rect;
+        let mut state = AppState::default();
+        state.current_screen = ids::SESSION_LIST.to_string();
+        state.menu_bar_area = Some(Rect::new(0, 20, 100, 6));
+
+        let inside =
+            EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 10, y: 22 }, &mut state);
+        assert!(matches!(inside, Some(AppEvent::ToggleSessionMenuBar)));
+
+        let outside =
+            EventHandler::handle_mouse_event(AppEvent::MouseClick { x: 10, y: 5 }, &mut state);
+        assert!(!matches!(outside, Some(AppEvent::ToggleSessionMenuBar)));
+    }
+
     /// `[r]` in the Skill Manager must arm a confirm on the first press
     /// (so a single keystroke can't uninstall), and leaving the screen
     /// must cancel that arm. The actual removal (second press) is the
@@ -7480,6 +8207,51 @@ mod panel_back_tests {
         assert_eq!(
             state.skill_manager_state.selected, 2,
             "cursor must reset onto the visible unit, not stay at hidden index 0"
+        );
+    }
+
+    /// `[r]` while filtered to a source with NO visible units must NOT
+    /// remove an off-filter unit (the "removed the wrong skill" bug). With
+    /// a source filter active it routes to source-remove instead.
+    #[test]
+    fn skill_manager_remove_on_empty_filtered_source_opens_source_remove() {
+        use crate::components::skill_manager_screen::{SourceRow, UnitRow};
+        let mut state = AppState::default();
+        state.current_screen = ids::SKILL_MANAGER.to_string();
+        // One source with zero units of its own, plus an unrelated unit
+        // that `selected` happens to point at.
+        state.skill_manager_state.sources = vec![SourceRow {
+            name: "toolkit".to_string(),
+            uri: "gh:o/toolkit".to_string(),
+            r#ref: "main".to_string(),
+            enabled: true,
+            is_library: false,
+        }];
+        state.skill_manager_state.units = vec![UnitRow {
+            idx: 0,
+            name: "other".to_string(),
+            kind: "skill".to_string(),
+            source: "local:x".to_string(),
+            git_ref: "head".to_string(),
+            targets: vec!["claude".to_string()],
+            declared_uri: "local:x@head/other".to_string(),
+        }];
+        state.skill_manager_state.source_selected = 0;
+        state.skill_manager_state.source_filter = Some("gh:o/toolkit".to_string());
+        state.skill_manager_state.selected = 0; // the off-filter unit
+
+        assert!(state.skill_manager_state.visible_indices().is_empty());
+        EventHandler::process_event(AppEvent::SkillManagerRemove, &mut state);
+
+        // The unrelated unit is untouched; the source-remove dialog opened.
+        assert_eq!(
+            state.skill_manager_state.units.len(),
+            1,
+            "off-filter unit not removed"
+        );
+        assert!(
+            state.skill_manager_state.source_remove_confirm.is_some(),
+            "[r] on an empty filtered source must open source-remove"
         );
     }
 
@@ -7566,6 +8338,34 @@ mod panel_back_tests {
         assert!(matches!(event, Some(AppEvent::PanelBack)), "got {event:?}");
     }
 
+    /// While the Daemons `d` overlay is open, `R` maps to the notifyd restart
+    /// (single resume/repair) event, and `r` still maps to refresh — the two
+    /// case-paired verbs live on the same surface.
+    #[test]
+    fn daemons_overlay_restart_key_routing() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        // Opening the overlay fires the first lazy fetch (tokio::spawn), so the
+        // test needs a live reactor.
+        let rt = tokio::runtime::Runtime::new().unwrap();
+        let _guard = rt.enter();
+
+        let mut state = AppState::default();
+        state.toggle_daemons_overlay();
+        assert!(state.daemons_overlay.is_some(), "overlay must be open");
+
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('R')),
+            Some(AppEvent::DaemonsOverlayRestartNotifyd)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('r')),
+            Some(AppEvent::DaemonsOverlayRefresh)
+        ));
+    }
+
     #[test]
     fn panel_back_falls_back_to_home_when_no_origin() {
         let mut state = AppState::default();
@@ -7574,6 +8374,50 @@ mod panel_back_tests {
 
         EventHandler::process_event(AppEvent::PanelBack, &mut state);
         assert_eq!(state.current_screen, ids::HOME);
+    }
+
+    /// The overloaded `n` key resolves by selection context: deny on an
+    /// APPROVE row (pairing with the detail pane's y/n hint), the new-ATC
+    /// name prompt everywhere else. `y` approves only-and-always.
+    #[test]
+    fn fleet_panel_n_is_deny_on_approve_row_new_atc_elsewhere() {
+        use crossterm::event::{KeyCode, KeyEvent};
+        let mut state = AppState::default();
+        EventHandler::process_event(AppEvent::GoToFleetPanel, &mut state);
+        let row = |kind: &str| ainb_plugin_notifyd::StateRow {
+            session_id: "s-1".to_string(),
+            cwd: "/p".to_string(),
+            kind: kind.to_string(),
+            context: None,
+            parent: None,
+            last_event_ts: 1,
+            source: "hook".to_string(),
+        };
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+
+        state.fleet_panel_state.rows = vec![row("APPROVE")];
+        state.fleet_panel_state.selected = 0;
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelDeny)
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('y')),
+            Some(AppEvent::FleetPanelApprove)
+        ));
+
+        state.fleet_panel_state.rows = vec![row("ASK")];
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelNewAtcOpen)
+        ));
+        // Empty panel: nothing to deny → n still opens the prompt.
+        state.fleet_panel_state.rows.clear();
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('n')),
+            Some(AppEvent::FleetPanelNewAtcOpen)
+        ));
     }
 
     /// Fleet control panel: navigating in saves the origin, and Esc/q route
@@ -7950,6 +8794,44 @@ mod text_input_guard_tests {
         let evt = EventHandler::handle_paste_event("owner/repo".to_string(), &state)
             .expect("paste on PickRepo must dispatch a filter paste");
         assert!(matches!(evt, AppEvent::PickRepoPaste(ref t) if t == "owner/repo"));
+    }
+
+    /// A bracketed paste into the onboarding OTEL form must land in the
+    /// focused field via the generic fallback — the bug where the Grafana
+    /// endpoint/token fields silently dropped Cmd+V. Control characters
+    /// are stripped so a trailing newline can't submit the form.
+    #[test]
+    fn paste_lands_in_onboarding_otel_field() {
+        let mut state = AppState::default();
+        state.start_onboarding(false, None);
+        if let Some(o) = state.onboarding_state.as_mut() {
+            o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
+        }
+
+        let consumed = EventHandler::paste_into_text_input(
+            "https://otlp-gateway.grafana.net/otlp\n",
+            &mut state,
+        );
+        assert!(consumed, "OTEL form must be a paste-accepting context");
+        let o = state.onboarding_state.as_ref().unwrap();
+        assert_eq!(
+            o.otel_otlp_endpoint,
+            "https://otlp-gateway.grafana.net/otlp"
+        );
+        // Still on the OTEL step: the stripped \n must not advance.
+        assert_eq!(
+            o.current_step,
+            crate::components::onboarding::OnboardingStep::OtelSetup
+        );
+    }
+
+    /// Paste with no text input focused is refused (not typed into a
+    /// navigation screen as shortcut keystrokes).
+    #[test]
+    fn paste_outside_text_input_is_refused() {
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::SESSION_LIST.to_string();
+        assert!(!EventHandler::paste_into_text_input("abc", &mut state));
     }
 
     /// Esc inside a text input while help is visible must close help,

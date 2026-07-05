@@ -71,6 +71,13 @@ pub struct Library {
 
     #[serde(default)]
     pub owned: Vec<OwnedUnit>,
+
+    /// Manifest source names that have opted into git-native two-way
+    /// library sync (`ainb skill library push/pull`). A source must be
+    /// marked here before `push`/`pull` will touch it — see
+    /// [`Library::mark_source`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub library_sources: Vec<String>,
 }
 
 impl Default for Library {
@@ -78,6 +85,7 @@ impl Default for Library {
         Self {
             schema_version: LIBRARY_SCHEMA_VERSION,
             owned: Vec::new(),
+            library_sources: Vec::new(),
         }
     }
 }
@@ -139,6 +147,30 @@ impl Library {
     pub fn get(&self, name: &str) -> Option<&OwnedUnit> {
         self.owned.iter().find(|u| u.name == name)
     }
+
+    /// Mark `name` (a manifest source name) as a library source, enabling
+    /// `ainb skill library push/pull`. Dedup-ed by name. Returns `true`
+    /// when the name was newly added, `false` when it was already marked.
+    pub fn mark_source(&mut self, name: &str) -> bool {
+        if self.library_sources.iter().any(|s| s == name) {
+            return false;
+        }
+        self.library_sources.push(name.to_string());
+        true
+    }
+
+    /// Unmark `name` as a library source. Returns `true` when an entry
+    /// was actually removed, `false` when it was not marked.
+    pub fn unmark_source(&mut self, name: &str) -> bool {
+        let before = self.library_sources.len();
+        self.library_sources.retain(|s| s != name);
+        self.library_sources.len() != before
+    }
+
+    /// Whether `name` is currently marked as a library source.
+    pub fn is_library_source(&self, name: &str) -> bool {
+        self.library_sources.iter().any(|s| s == name)
+    }
 }
 
 /// `library.yaml` path for an explicit ainb home directory — sibling to
@@ -182,5 +214,43 @@ mod tests {
             promoted_uri: None,
         }));
         assert_eq!(lib.get("x").map(|u| u.name.as_str()), Some("x"));
+    }
+
+    #[test]
+    fn mark_source_dedups_and_reports_insert_vs_noop() {
+        let mut lib = Library::default();
+        assert!(!lib.is_library_source("my-source"));
+        assert!(lib.mark_source("my-source"), "first mark is a fresh insert");
+        assert!(lib.is_library_source("my-source"));
+        assert!(!lib.mark_source("my-source"), "repeat mark is a no-op");
+        assert_eq!(lib.library_sources, vec!["my-source".to_string()]);
+    }
+
+    #[test]
+    fn unmark_source_removes_and_reports() {
+        let mut lib = Library::default();
+        lib.mark_source("my-source");
+        assert!(lib.unmark_source("my-source"), "removes an existing mark");
+        assert!(!lib.is_library_source("my-source"));
+        assert!(
+            !lib.unmark_source("my-source"),
+            "unmarking again is a no-op"
+        );
+    }
+
+    #[test]
+    fn library_sources_round_trip_through_save_and_load() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = library_path_in(dir.path());
+
+        let mut lib = Library::default();
+        lib.mark_source("alpha");
+        lib.mark_source("beta");
+        lib.save_to(&path).expect("save");
+
+        let reloaded = Library::load_from(&path).expect("load");
+        assert!(reloaded.is_library_source("alpha"));
+        assert!(reloaded.is_library_source("beta"));
+        assert!(!reloaded.is_library_source("gamma"));
     }
 }

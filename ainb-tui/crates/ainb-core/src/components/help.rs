@@ -81,6 +81,7 @@ impl HelpComponent {
             row("Tab", "Switch focus (list <-> preview)"),
             row("Shift+E", "Expand / collapse all workspaces"),
             row("Shift+B", "Collapse / expand the sidebar"),
+            row("Shift+M", "Hide / show the bottom keymap legend"),
             ListItem::new(""),
             head("General:"),
             row("? / Shift+H", "Toggle this help"),

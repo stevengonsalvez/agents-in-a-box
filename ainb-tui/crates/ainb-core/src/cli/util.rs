@@ -141,6 +141,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let session2 = SessionMetadata {
@@ -152,6 +155,9 @@ mod tests {
             agent_type: SessionAgentType::default(),
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         store.sessions.insert(session1.tmux_session_name.clone(), session1);

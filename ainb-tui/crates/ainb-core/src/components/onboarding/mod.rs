@@ -6,5 +6,6 @@ pub mod state;
 
 pub use component::OnboardingComponent;
 pub use state::{
-    OnboardingFocus, OnboardingState, OnboardingStep, QuestionnaireKind, ValidatedPath,
+    AgentAuthStatus, AuthAgent, AuthMethodKind, AuthPane, OnboardingFocus, OnboardingState,
+    OnboardingStep, QuestionnaireKind, ValidatedPath,
 };

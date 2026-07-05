@@ -285,6 +285,9 @@ mod tests {
             agent_type: SessionAgentType::Claude,
             headroom_enabled: false,
             rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
         };
 
         let session = AppState::stopped_session_from_metadata(&metadata);
@@ -296,6 +299,41 @@ mod tests {
         );
         assert_eq!(session.workspace_path, "/tmp/work-stopped");
         assert_eq!(session.agent_type, SessionAgentType::Claude);
+        // Legacy metadata (skip_permissions == None) must default to yolo.
+        assert!(
+            session.skip_permissions,
+            "None skip_permissions must default to dangerously-skip-permissions"
+        );
+    }
+
+    /// `stopped_session_from_metadata` recovers the CREATED-with launch settings
+    /// (yolo off, model) rather than resetting them to defaults.
+    #[test]
+    fn test_stopped_session_from_metadata_preserves_launch_settings() {
+        use crate::interactive::SessionMetadata;
+        use crate::models::{ClaudeModel, SessionAgentType};
+        use std::path::PathBuf;
+
+        let metadata = SessionMetadata {
+            session_id: uuid::Uuid::new_v4(),
+            tmux_session_name: "tmux_b".to_string(),
+            worktree_path: PathBuf::from("/tmp/work2"),
+            workspace_name: "ws".to_string(),
+            created_at: chrono::Utc::now(),
+            agent_type: SessionAgentType::Claude,
+            headroom_enabled: false,
+            rtk_enabled: false,
+            skip_permissions: Some(false),
+            model: Some(ClaudeModel::Opus),
+            codex_model: None,
+        };
+
+        let session = AppState::stopped_session_from_metadata(&metadata);
+        assert!(
+            !session.skip_permissions,
+            "Some(false) must be preserved, not defaulted to yolo"
+        );
+        assert_eq!(session.model, Some(ClaudeModel::Opus));
     }
 
     // -- SessionFilter tests ------------------------------------------------

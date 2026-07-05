@@ -135,6 +135,79 @@ impl Drop for InFlightGuard {
     }
 }
 
+/// Dispatch an approve/deny decision for a waiting `PermissionRequest` hook,
+/// off the UI thread. Unlike [`dispatch_send`] (which routes text to a live
+/// agent via tmux/broker), this delivers a first-class permission decision to
+/// the notifyd approve broker: the blocked hook is parked on the approve
+/// socket in `client_await`, and `client_decide` hands it the human's answer,
+/// which flows back to Claude as its `hookSpecificOutput` permission decision.
+///
+/// Shares the same `in_flight` guard as sends so rapid key-repeat can't spawn
+/// unbounded workers or double-decide. The worker is a plain thread — the
+/// broker client is blocking `std::os::unix` I/O, no tokio runtime needed.
+///
+/// `kind_label` is the short verb for the feedback line ("approved" / "denied").
+/// The socket is resolved at dispatch time via [`Paths::from_home`], the same
+/// layout the daemon and hook use, so no home has to be threaded through the
+/// panel.
+pub fn dispatch_decide(
+    feedback: Arc<Mutex<ActionFeedback>>,
+    in_flight: Arc<AtomicBool>,
+    session_id: String,
+    kind: ainb_plugin_notifyd::broker::DecisionKind,
+    reason: String,
+    kind_label: &'static str,
+) {
+    // Atomically claim the single in-flight slot (shared with sends).
+    if in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        publish(
+            &feedback,
+            "action already in flight — wait for it to finish".to_string(),
+        );
+        return;
+    }
+
+    let spawn_err_feedback = Arc::clone(&feedback);
+    let spawn_err_flag = Arc::clone(&in_flight);
+    let target_label = session_id.clone();
+    let spawn_result =
+        std::thread::Builder::new().name("ainb-fleet-decide".into()).spawn(move || {
+            let _guard = InFlightGuard(in_flight);
+            let sock = match ainb_plugin_notifyd::paths::Paths::from_home() {
+                Ok(paths) => paths.approve_socket,
+                Err(e) => {
+                    publish(&feedback, format!("{kind_label} failed: {e}"));
+                    return;
+                }
+            };
+            // `matched` means a waiter WAS parked and the broker handed it the
+            // decision — the final write to the hook's socket is not itself
+            // acknowledged, so don't claim "delivered".
+            let outcome =
+                match ainb_plugin_notifyd::broker::client_decide(&sock, &session_id, kind, &reason)
+                {
+                    Ok(true) => "matched the waiting hook".to_string(),
+                    Ok(false) => "no waiter (already resolved or timed out)".to_string(),
+                    Err(e) => format!("broker unreachable: {e}"),
+                };
+            publish(
+                &feedback,
+                format!("{kind_label} → {target_label}: {outcome}"),
+            );
+        });
+    if let Err(e) = spawn_result {
+        tracing::warn!(error = %e, "fleet panel: decide worker thread spawn failed");
+        spawn_err_flag.store(false, Ordering::Release);
+        publish(
+            &spawn_err_feedback,
+            format!("{kind_label} failed: thread spawn error: {e}"),
+        );
+    }
+}
+
 /// Create a new ATC-managed session by shelling out to `ainb fleet atc setup
 /// <name>`, off the UI thread. This is the panel's "bootstrap a fleet member"
 /// action: an ordinary session is gated out of the event log (`is_fleet_member`
