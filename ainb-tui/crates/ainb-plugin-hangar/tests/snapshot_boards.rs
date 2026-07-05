@@ -267,8 +267,8 @@ fn render_squad_card_snapshot() {
 /// A repo roster (one ★ favorite + one scanned) for the card-create snapshots.
 fn repo_roster() -> Vec<RepoOption> {
     vec![
-        RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true },
-        RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false },
+        RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true, is_remote_only: false },
+        RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false, is_remote_only: false },
     ]
 }
 

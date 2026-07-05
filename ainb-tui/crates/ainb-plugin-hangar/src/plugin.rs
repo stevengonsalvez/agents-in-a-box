@@ -929,10 +929,13 @@ impl HangarPlugin {
     /// `hangar/repo_list` result (spec F3).
     ///
     /// The daemon returns favorites-first + recency order already; the plugin
-    /// preserves it and keeps only rows with a resolvable local checkout path (a
-    /// worktree needs one — a remote-only favorite is not directly provisionable,
-    /// and `scratch` is prepended by the reducer regardless). Each row's `repo_ref`
-    /// is that path; a ★ favorite is flagged for the render.
+    /// preserves it and maps each row to a pickable [`RepoOption`]. A row with a
+    /// local checkout `path` persists that path as its `repo_ref`. A remote-only
+    /// favorite (bead pv8 — no local path but a `remote` indicator) is NO LONGER
+    /// dropped: it persists its `remote` as the `repo_ref` and is flagged
+    /// `is_remote_only`, so the picker renders ★☁ and the daemon clones it on
+    /// card-create. A row with neither a path nor a remote is unprovisionable and
+    /// skipped (`scratch` is prepended by the reducer regardless).
     fn apply_repos(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::RepoListResult>(
@@ -941,12 +944,21 @@ impl HangarPlugin {
                 let repos = r
                     .repos
                     .into_iter()
-                    .filter_map(|row| {
-                        row.path.map(|path| crate::screen::boards::RepoOption {
+                    .filter_map(|row| match (row.path, row.remote) {
+                        (Some(path), _) => Some(crate::screen::boards::RepoOption {
                             label: row.name,
                             repo_ref: path,
                             is_favorite: row.is_favorite,
-                        })
+                            is_remote_only: false,
+                        }),
+                        (None, Some(remote)) => Some(crate::screen::boards::RepoOption {
+                            label: row.name,
+                            repo_ref: remote,
+                            is_favorite: row.is_favorite,
+                            is_remote_only: true,
+                        }),
+                        // No path and no remote: nothing to provision from.
+                        (None, None) => None,
                     })
                     .collect();
                 self.screens.set_boards_repos(repos);

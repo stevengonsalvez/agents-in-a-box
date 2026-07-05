@@ -2333,16 +2333,71 @@ async fn handle_board_card_create(
     // and provider. Both are optional at create — the run enforces "repo
     // required" (F2) and resolves the agent via the F4 cascade when unset. An
     // unrecognised agent token is dropped (cascade decides), never a reject.
-    let repo_ref = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let repo_ref_raw = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // bead pv8: a remote-only favorite pick arrives as its REMOTE indicator (not
+    // an absolute path, not `scratch`). Resolve it to a LOCAL clone path here so
+    // the run/provision path — which only understands a path or `scratch` — never
+    // sees a bare remote. A path / `scratch` passes through untouched.
+    let resolved_repo_ref = match repo_ref_raw {
+        Some(r) => {
+            let ainb_dir = ainb_hangar_core::hangar_home()
+                .ok_or_else(|| internal("cannot resolve hangar home to clone a remote favorite"))?;
+            Some(resolve_card_repo_ref(&ainb_dir, r).await?)
+        }
+        None => None,
+    };
     let agent = params.agent.as_deref().and_then(ainb_hangar_core::agent_kind::AgentKind::parse);
-    if repo_ref.is_some() || agent.is_some() {
+    if resolved_repo_ref.is_some() || agent.is_some() {
         ainb_hangar_store::repo::card_parity::CardParityRepo::set_issue_repo_agent(
-            pool, ws.as_str(), &issue_id, repo_ref, agent,
+            pool,
+            ws.as_str(),
+            &issue_id,
+            resolved_repo_ref.as_deref(),
+            agent,
         )
         .await
         .map_err(|e| store_err(&e))?;
     }
     boards_list_value(pool, &ws).await
+}
+
+/// Resolve a card's picked `repo_ref` to a value the run / provision path accepts
+/// — an absolute checkout path or `scratch` — cloning a remote-only favorite's
+/// REMOTE indicator into the managed clones dir along the way (bead pv8).
+///
+/// `scratch` and an absolute path (`/…`) pass through unchanged. Anything else is
+/// a remote indicator (`owner/repo`, an `https://` / `file://` URL): it is cloned
+/// ONCE — idempotently, reusing an existing clone — into
+/// `<hangar_home>/clones/<dir>` via [`ainb_fleet_core::repo_clone::ensure_clone`],
+/// and its local path is returned. The blocking `git clone` runs on a blocking
+/// thread so it never stalls the async runtime.
+///
+/// A clone failure is surfaced as an error (the card is NOT created; the user
+/// retries) rather than persisting an unprovisionable remote that the provision
+/// path would mistake for a path and loop on.
+///
+/// NOTE (interim): the clone is synchronous within card-create, so the FIRST
+/// card on a new remote blocks until the clone finishes (subsequent picks reuse
+/// instantly). The async-with-inbox-note refinement (card created immediately,
+/// clone in the background) is deferred — it needs a run-path guard for an
+/// unresolved remote, which a sibling owns.
+async fn resolve_card_repo_ref(ainb_dir: &Path, repo_ref: &str) -> Result<String, RpcError> {
+    // Already a value the provision path understands.
+    if repo_ref == "scratch" || repo_ref.starts_with('/') {
+        return Ok(repo_ref.to_string());
+    }
+    // A remote-only favorite: clone into the managed dir, persist the local path.
+    let ainb_dir = ainb_dir.to_path_buf();
+    let remote = repo_ref.to_string();
+    let path = tokio::task::spawn_blocking(move || {
+        ainb_fleet_core::repo_clone::ensure_clone(&ainb_dir, &remote)
+    })
+    .await
+    .map_err(|e| internal(&format!("clone task failed to join: {e}")))?
+    .map_err(|e| internal(&format!("clone of remote favorite {repo_ref:?} failed: {e}")))?;
+    path.into_os_string()
+        .into_string()
+        .map_err(|_| internal("cloned repo path is not valid UTF-8"))
 }
 
 /// `hangar/board_card_run` (ccc / D6, D16): launch a card's issue on its assignee
@@ -4977,6 +5032,86 @@ mod tests {
         .await;
         assert!(resp.error.is_none());
         assert_eq!(resp.result.unwrap()["tasks"].as_array().unwrap().len(), 0);
+    }
+
+    /// Build a local bare repo with one commit and return a `file://` URL to it —
+    /// a fake "remote" a remote-only favorite pick can be cloned from, without any
+    /// network (bead pv8).
+    fn make_file_remote(root: &std::path::Path) -> String {
+        use std::process::Command;
+        let work = root.join("src-work");
+        std::fs::create_dir_all(&work).unwrap();
+        let git = |args: &[&str]| {
+            assert!(
+                Command::new("git").args(args).current_dir(&work).output().unwrap().status.success(),
+                "git {args:?} failed"
+            );
+        };
+        git(&["init", "-q"]);
+        git(&["config", "user.email", "t@t.t"]);
+        git(&["config", "user.name", "t"]);
+        std::fs::write(work.join("README.md"), "hi").unwrap();
+        git(&["add", "."]);
+        git(&["commit", "-qm", "init"]);
+        let bare = root.join("remote.git");
+        assert!(
+            Command::new("git")
+                .args(["clone", "--bare", "-q"])
+                .arg(&work)
+                .arg(&bare)
+                .output()
+                .unwrap()
+                .status
+                .success(),
+            "bare clone failed"
+        );
+        format!("file://{}", bare.display())
+    }
+
+    /// `scratch` and an absolute path are already provision-ready and pass through
+    /// `resolve_card_repo_ref` untouched — no clone, no `git` spawn (bead pv8).
+    #[tokio::test]
+    async fn resolve_card_repo_ref_passes_through_path_and_scratch() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ainb = tmp.path().join(".agents-in-a-box");
+        assert_eq!(resolve_card_repo_ref(&ainb, "scratch").await.unwrap(), "scratch");
+        assert_eq!(resolve_card_repo_ref(&ainb, "/src/widget").await.unwrap(), "/src/widget");
+        // Neither pass-through touched the clones dir.
+        assert!(!ainb.join("clones").exists(), "no clone dir created for path/scratch");
+    }
+
+    /// A remote-only favorite pick (a `file://` remote here) is CLONED into the
+    /// managed clones dir and resolved to that LOCAL checkout path — so the
+    /// untouched provision path only ever sees a path, never a bare remote
+    /// (bead pv8 / Codex trap #1). Idempotent: a second resolve reuses the clone.
+    #[tokio::test]
+    async fn resolve_card_repo_ref_clones_remote_only_favorite() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ainb = tmp.path().join(".agents-in-a-box");
+        let remote = make_file_remote(tmp.path());
+
+        let resolved = resolve_card_repo_ref(&ainb, &remote).await.unwrap();
+        let path = std::path::Path::new(&resolved);
+        assert!(path.is_absolute(), "resolved to an absolute local path, not a remote");
+        assert!(path.starts_with(ainb.join("clones")), "clone lives under the managed dir");
+        assert!(path.join(".git").exists(), "a real checkout landed");
+        assert!(path.join("README.md").exists(), "the remote's content is present");
+
+        // A second pick of the same remote reuses the SAME clone (idempotent).
+        let again = resolve_card_repo_ref(&ainb, &remote).await.unwrap();
+        assert_eq!(again, resolved, "the clone is reused, not re-cloned to a new dir");
+    }
+
+    /// A remote that cannot be cloned surfaces an error (the card is not created;
+    /// the user retries) and leaves no partial checkout (bead pv8).
+    #[tokio::test]
+    async fn resolve_card_repo_ref_errors_on_unclonable_remote() {
+        let tmp = tempfile::tempdir().unwrap();
+        let ainb = tmp.path().join(".agents-in-a-box");
+        // A file:// URL to a path that is not a repo → clone fails.
+        let bad = format!("file://{}/nope.git", tmp.path().display());
+        let err = resolve_card_repo_ref(&ainb, &bad).await;
+        assert!(err.is_err(), "an unclonable remote is an error, not a bogus repo_ref");
     }
 
     /// `hangar/task_transition` drives the real store FSM: moving the seeded
