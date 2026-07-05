@@ -736,11 +736,17 @@ pub fn enqueue_task_with_repo(home: &Path, suffix: &str, repo_ref: &str) -> Stri
     id
 }
 
-/// The daemon's short-id form of a task id (first 8 chars) — the worktree /
-/// scratch dir name and the `ainb/<slug>` branch suffix (`execenv::short_id`).
+/// The daemon's short-id form of a task id (first 8 chars + last 6, collision-
+/// resistant for same-instant ULIDs) — the worktree / scratch dir name and the
+/// `ainb/<slug>` branch suffix. Mirrors `execenv::short_id` exactly; ids of 14
+/// chars or fewer (hand-minted test ids like `wt-a`) are returned whole.
 #[must_use]
-pub fn task_short_id(task_id: &str) -> &str {
-    task_id.get(..8).unwrap_or(task_id)
+pub fn task_short_id(task_id: &str) -> String {
+    let tail_start = task_id.len().saturating_sub(6);
+    match (task_id.get(..8), task_id.get(tail_start..)) {
+        (Some(head), Some(tail)) if task_id.len() > 14 => format!("{head}{tail}"),
+        _ => task_id.to_string(),
+    }
 }
 
 /// Read the short-id of the latest task on the card with issue TITLE `title`, the
@@ -765,7 +771,7 @@ pub fn task_short_id_by_title(home: &Path, title: &str) -> Option<String> {
         .await
         .ok()
         .flatten();
-        id.map(|id| task_short_id(&id).to_string())
+        id.map(|id| task_short_id(&id))
     })
 }
 

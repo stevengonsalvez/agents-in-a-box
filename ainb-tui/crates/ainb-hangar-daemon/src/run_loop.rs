@@ -564,7 +564,7 @@ async fn execute_claimed(
     // fallback a dropped `repo_ref` used to force.
     let run_wd = crate::workdir_provision::provision(
         task.repo_ref.as_deref(),
-        crate::execenv::short_id(&task.id),
+        &crate::execenv::short_id(&task.id),
         &home,
         &env.workdir,
     )?;

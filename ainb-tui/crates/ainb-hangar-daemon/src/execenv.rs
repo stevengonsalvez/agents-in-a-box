@@ -126,13 +126,28 @@ pub enum CleanupKind {
     },
 }
 
-/// The reference short-id form of a task id: its first 8 characters.
+/// The short-id form of a task id: its first 8 characters PLUS its last 6.
 ///
-/// Ids shorter than 8 chars are returned whole (defensive; real ULIDs are 26).
-/// ULIDs are ASCII (Crockford base32), so byte-slicing is safe here.
+/// A ULID's first 8 chars are pure (coarse, ~1s-granularity) timestamp — alone
+/// they COLLIDE for any two ids minted within the same second, and a squad
+/// fan-out (tcp T4) mints several in one millisecond. Since this slug names the
+/// per-task worktree dir AND its `ainb/<slug>` branch, a collision hands two
+/// concurrent runs the same checkout. Appending the last 6 chars (the tail of
+/// the ULID's 80-bit random part) keeps the slug sortable + human-scannable
+/// while making same-instant ids distinct (monotonic ULIDs differ in the tail;
+/// independent mints collide at ~2^-30 per pair).
+///
+/// Ids of 14 chars or fewer are returned whole (defensive; real ULIDs are 26 —
+/// this also keeps hand-minted test ids like `wt-a` byte-identical). ULIDs are
+/// ASCII (Crockford base32); the checked `get` slicing never panics on an
+/// unexpected multibyte id.
 #[must_use]
-pub fn short_id(id: &str) -> &str {
-    id.get(..8).unwrap_or(id)
+pub fn short_id(id: &str) -> String {
+    let tail_start = id.len().saturating_sub(6);
+    match (id.get(..8), id.get(tail_start..)) {
+        (Some(head), Some(tail)) if id.len() > 14 => format!("{head}{tail}"),
+        _ => id.to_string(),
+    }
 }
 
 /// The per-task `{shortID}` root directory —
@@ -405,4 +420,32 @@ fn is_older_than(dir: &Path, now_ms: i64, grace_ms: i64) -> io::Result<bool> {
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn system_time_to_ms(t: SystemTime) -> i64 {
     t.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::short_id;
+
+    /// Two ULIDs minted in the same instant share their (coarse-timestamp) first
+    /// 8 chars but differ in the random tail — the slug must keep them DISTINCT,
+    /// since it names the per-task worktree dir + `ainb/<slug>` branch (a squad
+    /// fan-out mints several ids per millisecond; tcp T4 regression).
+    #[test]
+    fn same_instant_ulids_get_distinct_slugs() {
+        // Same 10-char timestamp prefix, different random parts (real ULID shape).
+        let a = "01JB2K3W4APQRSTUVWXYZ23456";
+        let b = "01JB2K3W4APQRSTUVWXYZ23457";
+        assert_eq!(&a[..8], &b[..8], "the fixture ids share the coarse-ts prefix");
+        assert_ne!(short_id(a), short_id(b), "same-instant ids must map to distinct slugs");
+        assert_eq!(short_id(a), "01JB2K3WZ23456");
+    }
+
+    /// Short hand-minted ids (test fixtures like `wt-a`) pass through whole, so
+    /// pre-existing tripwires that hand-insert task rows keep their slugs.
+    #[test]
+    fn short_ids_pass_through_whole() {
+        assert_eq!(short_id("wt-a"), "wt-a");
+        assert_eq!(short_id("task-lead"), "task-lead");
+        assert_eq!(short_id("exactly14chars"), "exactly14chars");
+    }
 }
