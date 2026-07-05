@@ -1047,6 +1047,11 @@ async fn finalize_success(
     // P4 / D8: auto-move the task's issue card into any board's `done` auto-move
     // column (the card-green-on-success move). Best-effort; never blocks.
     crate::board::auto_move_after_transition(pool, task, "done").await;
+    // tcp T4 / F7: this card just finished, so re-evaluate every card that DEPENDS
+    // on it — a dependent whose last blocker is now done becomes runnable (the 🔒
+    // clears on the next board pull) and, if it opted into auto-run, is launched.
+    // Best-effort; never blocks the claim loop.
+    crate::board::unblock_dependents_after_done(pool, task).await;
     // e38.6: durable terminal comment on the issue thread (best-effort).
     progress_comment::emit_checkpoint(
         pool,

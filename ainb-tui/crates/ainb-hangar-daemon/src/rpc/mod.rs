@@ -688,6 +688,10 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_REORDER => handle_board_card_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_REMOVE => handle_board_card_remove(pool, req).await,
         methods::HANGAR_BOARD_CARD_TIMELINE => handle_board_card_timeline(pool, req).await,
+        methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD => handle_board_card_assign_squad(pool, req).await,
+        methods::HANGAR_BOARD_CARD_DEP_ADD => handle_board_card_dep(pool, req, true).await,
+        methods::HANGAR_BOARD_CARD_DEP_REMOVE => handle_board_card_dep(pool, req, false).await,
+        methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
@@ -1824,6 +1828,7 @@ async fn handle_squad_assign(
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
+        ..SquadAssignRequest::default()
     };
     let SquadAssignment {
         task_id,
@@ -1877,6 +1882,7 @@ async fn handle_squad_fanout(
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
+        ..SquadAssignRequest::default()
     };
     let SquadFanout { leader, members } = SquadAssignService::assign_fanout(
         pool,
@@ -2325,9 +2331,8 @@ async fn handle_board_card_run(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_core::agent_kind::AgentKind;
     use ainb_hangar_store::repo::issue::IssueRepo;
-    use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
 
     let params: ainb_hangar_proto::snapshots::BoardCardRunParams =
         parse_params(req, "{ workspace_id, board_id, issue_id, mode }")?;
@@ -2357,75 +2362,232 @@ async fn handle_board_card_run(
         .filter(|i| i.workspace_id == ws.as_str())
         .ok_or_else(|| invalid_params("no issue with that id in this workspace"))?;
 
-    // Claim guard (tcp T3 / F6): ONE active run per card. The
-    // `idx_one_pending_task_per_issue_agent` unique index only guards PENDING
-    // (queued/dispatched) rows, so a rerun launched while a prior task is still
-    // RUNNING would slip past it and enqueue a shadow task — leaving two active
-    // rows for one card, where a later cancel/board read resolves the newest
-    // (the shadow) and never touches the live run. Reject up front instead: a
-    // card with any active task cannot start another until it finishes or is
-    // cancelled. Card = issue, so the guard is issue-scoped.
-    if let Some(active) =
-        TaskRepo::active_task_for_issue(pool, ws.as_str(), &params.issue_id)
-            .await
-            .map_err(|e| store_err(&e))?
-    {
-        return Err(invalid_params(&format!(
-            "a run is already active for this card ({}); cancel it or wait for it to finish",
-            active.status
-        )));
+    // The shared launch core (refuse-run guard → squad fan-out vs single enqueue)
+    // runs the card; the finalize auto-run seam calls the SAME `run_card`. Thread
+    // the run-time repo/agent overrides (spec F4/F5) from the request.
+    let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
+    let outcome = run_card(
+        pool,
+        &ws,
+        Some(&params.board_id),
+        &issue,
+        mode,
+        run_override,
+        agent_override,
+    )
+    .await
+    .map_err(card_run_err)?;
+
+    let result = match outcome {
+        CardRunOutcome::Single { task_id, agent_id, runtime_id } => {
+            ainb_hangar_proto::snapshots::BoardCardRunResult {
+                task_id,
+                agent_id,
+                runtime_id,
+                mode: mode.to_string(),
+                member_task_ids: Vec::new(),
+            }
+        }
+        CardRunOutcome::Squad {
+            leader_task_id,
+            leader_agent_id,
+            leader_runtime_id,
+            member_task_ids,
+        } => ainb_hangar_proto::snapshots::BoardCardRunResult {
+            task_id: leader_task_id,
+            agent_id: leader_agent_id,
+            runtime_id: leader_runtime_id,
+            mode: mode.to_string(),
+            member_task_ids,
+        },
+    };
+    to_value(&result)
+}
+
+/// The outcome of launching a card: either a single-agent task or a squad fan-out
+/// (the leader brief + the member task ids). Shared by the `board_card_run` RPC
+/// handler and the finalize auto-run seam.
+pub(crate) enum CardRunOutcome {
+    Single {
+        task_id: String,
+        agent_id: String,
+        runtime_id: String,
+    },
+    Squad {
+        leader_task_id: String,
+        leader_agent_id: String,
+        leader_runtime_id: String,
+        member_task_ids: Vec<String>,
+    },
+}
+
+/// Why a card could not be launched. The RPC handler maps each to an
+/// `INVALID_PARAMS` (client-visible) or internal error; the auto-run seam treats
+/// `Blocked` / `ActiveRun` as benign no-ops (log-and-skip) since they mean the card
+/// is not launchable right now, not that anything is wrong.
+pub(crate) enum CardRunError {
+    /// The card has unfinished blockers (their display ids) — F7 refuse-run.
+    Blocked(Vec<String>),
+    /// The card already has an active run (its status).
+    ActiveRun(String),
+    /// The card has no repo to run in (F2).
+    NoRepo,
+    /// The resolved provider is not yet dispatchable (F8: copilot).
+    NotDispatchable(ainb_hangar_core::agent_kind::AgentKind),
+    /// A squad fan-out was rejected (unknown squad, dangling member, …).
+    Squad(ainb_hangar_store::service::squad_assign::SquadAssignError),
+    /// The workspace has no agent to run a single-agent card on.
+    NoAgent,
+    /// A store fault.
+    Db(sqlx::Error),
+}
+
+/// Map a [`CardRunError`] onto an RPC error for the `board_card_run` handler.
+fn card_run_err(e: CardRunError) -> RpcError {
+    match e {
+        CardRunError::Blocked(refs) => invalid_params(&format!(
+            "this card is blocked by unfinished cards ({}); finish them (or remove the dependency) first",
+            refs.join(", ")
+        )),
+        CardRunError::ActiveRun(status) => invalid_params(&format!(
+            "a run is already active for this card ({status}); cancel it or wait for it to finish"
+        )),
+        CardRunError::NoRepo => invalid_params(
+            "a repo is required to run this card — pick one, or use the scratch repo",
+        ),
+        CardRunError::NotDispatchable(kind) => invalid_params(&format!(
+            "the {kind} provider is not yet wired for dispatch (F8) — pick claude or codex",
+        )),
+        CardRunError::Squad(se) => squad_assign_err(&se),
+        CardRunError::NoAgent => {
+            invalid_params("this workspace has no agent to run the card on")
+        }
+        CardRunError::Db(db) => store_err(&db),
+    }
+}
+
+/// Launch a card's issue NOW — the shared core behind the `board_card_run` RPC and
+/// the F7 auto-run seam (tcp T4).
+///
+/// Order of guards (each a hard stop):
+///   1. F7 refuse-run — a card with any UNFINISHED blocker never dispatches (it is
+///      not launchable until its blockers finish);
+///   2. one-active-run guard — a card with an active (queued/dispatched/running)
+///      task cannot start another (card = issue), which also stops a squad card
+///      from being double-fanned;
+///   3. F2 repo-required — the run-time override, else the card's persisted repo,
+///      else a refusal (never a "random" run);
+///   4. F4 agent cascade + F8 dispatchable check.
+///
+/// Then it forks: a card with an assigned SQUAD (`issue.squad_id`, migration 0035)
+/// FANS OUT via [`SquadAssignService::assign_fanout`] — the leader brief plus one
+/// task per distinct `agent` member, each stamped with the card's repo so each
+/// provisions its OWN worktree; otherwise it enqueues ONE task on the card's
+/// assignee agent (the pre-T4 single-agent path). `board_id` scopes the F4 board
+/// tier (pass `None` from the auto-run seam, which is board-agnostic).
+pub(crate) async fn run_card(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    board_id: Option<&str>,
+    issue: &ainb_hangar_store::repo::issue::Issue,
+    mode: &str,
+    repo_override: Option<&str>,
+    agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
+) -> Result<CardRunOutcome, CardRunError> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+    use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
+
+    let issue_id = issue.id.as_str();
+
+    // 1. F7 refuse-run: a card with any UNFINISHED blocker is not dispatched.
+    let blockers = CardDependencyRepo::unfinished_blockers_of(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?;
+    if !blockers.is_empty() {
+        let refs = blockers.iter().map(|b| crate::rpc::snapshots::short_display_id(b)).collect();
+        return Err(CardRunError::Blocked(refs));
     }
 
-    use ainb_hangar_core::agent_kind::AgentKind;
-    use ainb_hangar_store::repo::card_parity::CardParityRepo;
-
-    // The card's persisted repo + agent (set at create, spec F2/F4).
-    let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, &params.issue_id)
+    // 2. One active run per card (card = issue). Blocks a re-run — and a second
+    //    squad fan-out — until the current run finishes or is cancelled.
+    if let Some(active) = TaskRepo::active_task_for_issue(pool, ws.as_str(), issue_id)
         .await
-        .map_err(|e| store_err(&e))?
-        .unwrap_or((None, None));
+        .map_err(CardRunError::Db)?
+    {
+        return Err(CardRunError::ActiveRun(active.status));
+    }
 
-    // F2 (repo REQUIRED): the run's repo is the run-time override, else the card's
-    // persisted repo. A card with NO repo cannot launch — refuse rather than
-    // silently running a "random" task, pointing the caller at the scratch repo.
-    let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let repo_ref = run_override
+    // 3. F2 repo-required: run-time override, else the card's persisted repo.
+    let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?
+        .unwrap_or((None, None));
+    let repo_ref = repo_override
         .map(str::to_string)
         .or(card_repo)
-        .ok_or_else(|| {
-            invalid_params(
-                "a repo is required to run this card — pick one, or use the scratch repo",
-            )
-        })?;
+        .ok_or(CardRunError::NoRepo)?;
 
-    // F4 (agent cascade): the run-time agent override, else the card's chosen
-    // agent, else the F4 cascade (last-used → board → workspace → global →
-    // claude). F8: copilot is picker-visible but its runner is not wired yet — a
-    // dispatch on it is refused with a clear error rather than stranding the task.
-    let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
+    // 4. F4 agent cascade + F8 dispatchable check.
     let agent_kind = match agent_override.or(card_agent) {
         Some(k) => k,
-        None => CardParityRepo::resolve_agent_cascade(pool, &ws, Some(&params.board_id))
+        None => CardParityRepo::resolve_agent_cascade(pool, ws, board_id)
             .await
-            .map_err(|e| store_err(&e))?,
+            .map_err(CardRunError::Db)?,
     };
     if !agent_kind.is_dispatchable() {
-        return Err(invalid_params(&format!(
-            "the {agent_kind} provider is not yet wired for dispatch (F8) — pick claude or codex",
-        )));
+        return Err(CardRunError::NotDispatchable(agent_kind));
     }
 
-    // Resolve the run's assignee agent (D16 profile axis, distinct from the
-    // provider-kind above): the issue's assignee agent when in-workspace, else the
-    // workspace's agent — so a card whose profile never resolved still runs.
-    let agent = resolve_run_agent(pool, &ws, issue.assignee.as_ref()).await?;
+    // F4: record the just-run agent as last-used (best-effort — never fail a run).
+    if let Err(e) = CardParityRepo::set_last_used_agent(pool, agent_kind).await {
+        tracing::warn!(error = %e, "card_run: last-used agent write failed");
+    }
 
-    // Enqueue the task and stamp its launch mode + the card's repo + resolved
-    // agent-kind in ONE transaction, so the claim loop can never claim it between
-    // the insert and the dispatch-field writes (the runner branches on `mode`,
-    // provisions the worktree from `repo_ref`, and routes on `agent_kind`).
+    // Fork: a squad card FANS OUT; a single-agent card enqueues one task.
+    let squad_id = CardParityRepo::get_issue_squad(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?;
+    if let Some(squad_id) = squad_id {
+        // Squad fan-out: leader brief + one task per member, each stamped with the
+        // card's repo (own worktree) + resolved provider. Headless batch (the
+        // leader coordinates); the requested `mode` is echoed by the caller.
+        let _ = mode;
+        let request = SquadAssignRequest {
+            issue_id: Some(issue_id),
+            repo_ref: Some(&repo_ref),
+            agent_kind: Some(agent_kind),
+            ..SquadAssignRequest::default()
+        };
+        let fanout = SquadAssignService::assign_fanout(
+            pool,
+            ws,
+            &squad_id,
+            &request,
+            &SystemIdGen,
+            &SystemClock,
+        )
+        .await
+        .map_err(CardRunError::Squad)?;
+        return Ok(CardRunOutcome::Squad {
+            leader_task_id: fanout.leader.task_id,
+            leader_agent_id: fanout.leader.leader_agent_id,
+            leader_runtime_id: fanout.leader.runtime_id,
+            member_task_ids: fanout.members.into_iter().map(|m| m.task_id).collect(),
+        });
+    }
+
+    // Single-agent: resolve the assignee agent (D16), then enqueue one task keyed
+    // to its `(agent_id, runtime_id)` + the resolved repo/agent-kind, in ONE tx.
+    let agent = resolve_run_agent_opt(pool, ws, issue.assignee.as_ref())
+        .await
+        .map_err(CardRunError::Db)?
+        .ok_or(CardRunError::NoAgent)?;
     let task_id = SystemIdGen.new_ulid();
-    let mut tx = pool.begin().await.map_err(|e| store_err(&e))?;
+    let mut tx = pool.begin().await.map_err(CardRunError::Db)?;
     TaskRepo::insert_in_tx(
         &mut tx,
         &NewTask {
@@ -2433,7 +2595,7 @@ async fn handle_board_card_run(
             workspace_id: ws.as_str().to_string(),
             runtime_id: agent.runtime_id.clone(),
             agent_id: agent.id.clone(),
-            issue_id: Some(params.issue_id.clone()),
+            issue_id: Some(issue_id.to_string()),
             work_dir: None,
             priority: 0,
             created_at: SystemClock.now_ms(),
@@ -2441,31 +2603,195 @@ async fn handle_board_card_run(
         },
     )
     .await
-    .map_err(|e| store_err(&e))?;
+    .map_err(CardRunError::Db)?;
     if mode == "interactive" {
         sqlx::query("UPDATE agent_task_queue SET mode = 'interactive' WHERE id = ?")
             .bind(&task_id)
             .execute(&mut *tx)
             .await
-            .map_err(|e| store_err(&e))?;
+            .map_err(CardRunError::Db)?;
     }
     CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
         .await
-        .map_err(|e| store_err(&e))?;
-    tx.commit().await.map_err(|e| store_err(&e))?;
+        .map_err(CardRunError::Db)?;
+    tx.commit().await.map_err(CardRunError::Db)?;
 
-    // F4: record the just-run agent as the last-used default so the next overlay
-    // pre-selects it (best-effort — never fail a launched run on a config write).
-    if let Err(e) = CardParityRepo::set_last_used_agent(pool, agent_kind).await {
-        tracing::warn!(error = %e, "card_run: last-used agent write failed");
-    }
-
-    to_value(&ainb_hangar_proto::snapshots::BoardCardRunResult {
+    Ok(CardRunOutcome::Single {
         task_id,
         agent_id: agent.id,
         runtime_id: agent.runtime_id,
-        mode: mode.to_string(),
     })
+}
+
+/// Resolve the agent a card run routes to (the issue's assignee agent when it names
+/// an in-workspace agent, else the workspace's first non-archived agent), returning
+/// `None` when the workspace has no agent at all. Used by [`run_card`], which maps
+/// `None` to `CardRunError::NoAgent`.
+async fn resolve_run_agent_opt(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    assignee: Option<&ainb_hangar_core::actor::ActorRef>,
+) -> Result<Option<ainb_hangar_store::repo::agent::Agent>, sqlx::Error> {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    if let Some(actor) = assignee {
+        if actor.kind() == ActorKind::Agent {
+            if let Some(agent) = AgentRepo::get(pool, actor.id())
+                .await?
+                .filter(|a| a.workspace_id == ws.as_str() && !a.archived)
+            {
+                return Ok(Some(agent));
+            }
+        }
+    }
+    Ok(AgentRepo::list_by_workspace(pool, ws.as_str())
+        .await?
+        .into_iter()
+        .next())
+}
+
+/// `hangar/board_card_assign_squad` (tcp T4 / F7): assign (or clear) a SQUAD as a
+/// card's assignee.
+///
+/// Persists `issue.squad_id` (migration 0035) so a later `board_card_run` fans the
+/// card out across the whole squad. A `Some(squad_id)` is validated to name a real
+/// squad in the workspace (`SquadRepo::get` — no cross-tenant / dangling ref); a
+/// `None` clears the assignment. The card must be on this board. Answers with the
+/// refreshed `BoardsListResult`, like every `board_*` mutation.
+async fn handle_board_card_assign_squad(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardAssignSquadParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id, squad_id? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    // The issue must be a real card on this board (a squad assignment is a card
+    // affordance) — reject a non-card / foreign-board issue id up front.
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+        return Err(invalid_params("that issue is not a card on this board"));
+    }
+
+    // A set squad must exist in this workspace (the column carries no FK, so this
+    // is the guard against a dangling / cross-tenant squad id).
+    if let Some(squad_id) = params.squad_id.as_deref() {
+        let known = SquadRepo::list(pool, &ws)
+            .await
+            .map_err(|e| store_err(&e))?
+            .iter()
+            .any(|s| s.id == squad_id);
+        if !known {
+            return Err(invalid_params("no squad with that id in this workspace"));
+        }
+    }
+
+    if !CardParityRepo::set_issue_squad(pool, &ws, &params.issue_id, params.squad_id.as_deref())
+        .await
+        .map_err(|e| store_err(&e))?
+    {
+        return Err(invalid_params("no issue with that id in this workspace"));
+    }
+    boards_list_value(pool, &ws).await
+}
+
+/// `hangar/board_card_dep_add` (`add = true`) / `hangar/board_card_dep_remove`
+/// (`add = false`) (tcp T4 / F7): add or remove a `depends-on` edge between two
+/// cards.
+///
+/// Both endpoints must be cards on this board. On add, a self-edge / cycle /
+/// unknown endpoint is rejected ([`card_dep_err`]); a re-add is idempotent. On
+/// remove, an absent edge is a no-op. Answers with the refreshed
+/// `BoardsListResult`.
+async fn handle_board_card_dep(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardDepParams =
+        parse_params(req, "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    // Both endpoints must be cards on this board — a dependency is a board
+    // affordance between two of its cards, not any two workspace issues.
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    let on_board = |id: &str| board.cards.iter().any(|c| c.issue_id == id);
+    if !on_board(&params.dependent_issue_id) || !on_board(&params.blocker_issue_id) {
+        return Err(invalid_params("both cards must be on this board"));
+    }
+
+    if add {
+        CardDependencyRepo::add_edge(
+            pool,
+            &ws,
+            &params.dependent_issue_id,
+            &params.blocker_issue_id,
+            SystemClock.now_ms(),
+        )
+        .await
+        .map_err(|e| card_dep_err(&e))?;
+    } else {
+        CardDependencyRepo::remove_edge(
+            pool,
+            &ws,
+            &params.dependent_issue_id,
+            &params.blocker_issue_id,
+        )
+        .await
+        .map_err(|e| store_err(&e))?;
+    }
+    boards_list_value(pool, &ws).await
+}
+
+/// `hangar/board_card_set_auto_run` (tcp T4 / F7): flip a card's auto-run flag.
+///
+/// Persists `issue.auto_run` (migration 0036) so the finalize seam auto-launches
+/// the card the instant its last blocker completes. The card must be on this board.
+/// Answers with the refreshed `BoardsListResult`.
+async fn handle_board_card_set_auto_run(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let params: ainb_hangar_proto::snapshots::BoardCardAutoRunParams =
+        parse_params(req, "{ workspace_id, board_id, issue_id, auto_run }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    let board = board_in_ws(pool, &ws, &params.board_id).await?;
+    if !board.cards.iter().any(|c| c.issue_id == params.issue_id) {
+        return Err(invalid_params("that issue is not a card on this board"));
+    }
+
+    if !CardDependencyRepo::set_auto_run(pool, &ws, &params.issue_id, params.auto_run)
+        .await
+        .map_err(|e| store_err(&e))?
+    {
+        return Err(invalid_params("no issue with that id in this workspace"));
+    }
+    boards_list_value(pool, &ws).await
+}
+
+/// Map a [`CardDependencyError`] onto an RPC error: a self-edge / cycle / not-found
+/// rejection is a client error (`INVALID_PARAMS`), a store fault an internal error.
+///
+/// [`CardDependencyError`]: ainb_hangar_store::repo::card_dependency::CardDependencyError
+fn card_dep_err(e: &ainb_hangar_store::repo::card_dependency::CardDependencyError) -> RpcError {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyError;
+    match e {
+        CardDependencyError::SelfDependency => invalid_params("a card cannot depend on itself"),
+        CardDependencyError::Cycle => invalid_params("that dependency would create a cycle"),
+        CardDependencyError::NotFound => {
+            invalid_params("both cards must be on this board")
+        }
+        CardDependencyError::Db(db) => store_err(db),
+    }
 }
 
 /// `hangar/board_card_cancel` (tcp T3 / F6): cancel a card's in-flight run.
@@ -2768,38 +3094,6 @@ async fn resolve_agent_by_name(
     Ok(agents.into_iter().find(|a| a.name == slug))
 }
 
-/// Resolve the agent a card run routes to: the issue's assignee agent (D16) when
-/// it names an in-workspace agent, else the workspace's first agent. Errors with
-/// `INVALID_PARAMS` when the workspace has no agent to run on.
-async fn resolve_run_agent(
-    pool: &SqlitePool,
-    ws: &WorkspaceId,
-    assignee: Option<&ainb_hangar_core::actor::ActorRef>,
-) -> Result<ainb_hangar_store::repo::agent::Agent, RpcError> {
-    use ainb_hangar_core::actor::ActorKind;
-    use ainb_hangar_store::repo::agent::AgentRepo;
-
-    // Prefer the issue's assignee agent when it resolves inside this workspace.
-    if let Some(actor) = assignee {
-        if actor.kind() == ActorKind::Agent {
-            if let Some(agent) = AgentRepo::get(pool, actor.id())
-                .await
-                .map_err(|e| store_err(&e))?
-                .filter(|a| a.workspace_id == ws.as_str() && !a.archived)
-            {
-                return Ok(agent);
-            }
-        }
-    }
-
-    // Fall back to the workspace's first non-archived agent so a card always runs.
-    AgentRepo::list_by_workspace(pool, ws.as_str())
-        .await
-        .map_err(|e| store_err(&e))?
-        .into_iter()
-        .next()
-        .ok_or_else(|| invalid_params("this workspace has no agent to run the card on"))
-}
 
 /// Re-read `ws`'s boards and serialize them as a
 /// [`BoardsListResult`](ainb_hangar_proto::snapshots::BoardsListResult) wire

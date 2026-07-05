@@ -466,6 +466,25 @@ async fn enrich_board_card(
         Some((status, session)) => (Some(status), session),
         None => (None, None),
     };
+
+    // tcp T4 / F7: the card's squad assignment, its per-member task chips (only for
+    // a squad card), its unfinished-blocker refs (the 🔒 blocked-state), and its
+    // auto-run flag. Each is a small, self-contained fold the board renders.
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
+    let squad_id = CardParityRepo::get_issue_squad(pool, issue_id).await?;
+    let member_states = match squad_id.as_deref() {
+        Some(_) => squad_member_chips(pool, workspace_id, issue_id).await?,
+        None => Vec::new(),
+    };
+    let blocked_by = CardDependencyRepo::unfinished_blockers_of(pool, issue_id)
+        .await?
+        .iter()
+        .map(|b| short_display_id(b))
+        .collect();
+    let auto_run = CardDependencyRepo::get_auto_run(pool, issue_id).await?;
+
     Ok(ainb_hangar_proto::snapshots::BoardCardWireRow {
         issue_id: issue_id.to_string(),
         title: title.unwrap_or_else(|| issue_id.to_string()),
@@ -474,12 +493,53 @@ async fn enrich_board_card(
         session_name,
         repo_ref,
         agent,
+        squad_id,
+        member_states,
+        blocked_by,
+        auto_run,
     })
+}
+
+/// The per-member task chips for a SQUAD card (tcp T4 / F7): the LATEST task per
+/// distinct agent on the card's issue, with the agent's display name + that task's
+/// status. A squad run fans out one task per member agent (all on the one issue),
+/// so this reads back one chip per member that has a task, ordered by agent name.
+async fn squad_member_chips(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::CardMemberChip>, sqlx::Error> {
+    // The latest task per agent on this issue (the correlated subquery picks each
+    // agent's most recent task), joined to the agent name.
+    let rows: Vec<(String, String, String)> = sqlx::query_as(
+        "SELECT t.agent_id, a.name, t.status \
+         FROM agent_task_queue t \
+         JOIN agent a ON a.id = t.agent_id \
+         WHERE t.issue_id = ? AND t.workspace_id = ? \
+           AND t.id = ( \
+             SELECT t2.id FROM agent_task_queue t2 \
+             WHERE t2.issue_id = t.issue_id AND t2.agent_id = t.agent_id \
+             ORDER BY t2.created_at DESC, t2.id DESC LIMIT 1 \
+           ) \
+         ORDER BY a.name, t.agent_id",
+    )
+    .bind(issue_id)
+    .bind(workspace_id)
+    .fetch_all(pool)
+    .await?;
+    Ok(rows
+        .into_iter()
+        .map(|(agent_id, agent_name, status)| ainb_hangar_proto::snapshots::CardMemberChip {
+            agent_id,
+            agent_name,
+            state: Some(status),
+        })
+        .collect())
 }
 
 /// A short, stable card display id: the last 6 chars of the issue id (char-safe),
 /// or the whole id when it is already short.
-fn short_display_id(id: &str) -> String {
+pub(crate) fn short_display_id(id: &str) -> String {
     let n = id.chars().count();
     if n <= 6 {
         return id.to_string();
