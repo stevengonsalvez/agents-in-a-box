@@ -197,6 +197,14 @@ pub enum BoardsAction {
         /// The card's issue whose run to attach to.
         issue_id: String,
     },
+    /// Cancel a card's in-flight run (`C`) — `hangar/board_card_cancel` (tcp T3 /
+    /// F6).
+    CardCancel {
+        /// The board the card sits on.
+        board_id: String,
+        /// The card's issue whose active run to cancel.
+        issue_id: String,
+    },
     /// Rename a column to the typed name (`r`) — `hangar/board_column_update`.
     ColumnRename {
         /// The board the column belongs to.
@@ -1291,6 +1299,7 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             ']' => Some(BoardsEvent::NextBoard),
             'b' => Some(BoardsEvent::CreateBoard),
             'a' => Some(BoardsEvent::AttachFocusedCard),
+            'C' => Some(BoardsEvent::CancelFocusedCard),
             'n' => Some(BoardsEvent::AddColumn),
             'r' => Some(BoardsEvent::RenameColumn),
             'x' => Some(BoardsEvent::DeleteColumn),
@@ -1360,6 +1369,10 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             mode: mode.wire().to_string(),
         }),
         BoardsIntent::AttachCard { board_id, issue_id } => Some(BoardsAction::CardAttach {
+            board_id,
+            issue_id,
+        }),
+        BoardsIntent::CancelCard { board_id, issue_id } => Some(BoardsAction::CardCancel {
             board_id,
             issue_id,
         }),

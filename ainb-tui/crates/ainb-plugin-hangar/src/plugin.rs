@@ -193,6 +193,10 @@ const BOARD_CARD_RUN_REQ_ID: i64 = 43;
 /// card-create `@` autocomplete roster (spec F3). Host-scoped (a repo picker is
 /// not workspace-partitioned), fetched once alongside the other snapshots.
 const REPO_LIST_REQ_ID: i64 = 44;
+/// JSON-RPC id for a `hangar/board_card_cancel` mutation (tcp T3 / F6). The reply
+/// is a `BoardCardCancelResult` surfaced as a transient board note; the card
+/// leaves the running state via the daemon's pushed `TaskFinished(Cancelled)`.
+const BOARD_CARD_CANCEL_REQ_ID: i64 = 45;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -672,6 +676,7 @@ impl HangarPlugin {
             RpcId::Number(TASKS_REQ_ID) => self.apply_tasks(resp),
             RpcId::Number(BOARDS_REQ_ID) => self.apply_boards(resp),
             RpcId::Number(BOARD_CARD_RUN_REQ_ID) => self.apply_board_card_run(resp),
+            RpcId::Number(BOARD_CARD_CANCEL_REQ_ID) => self.apply_board_card_cancel(resp),
             RpcId::Number(SQUADS_LIST_REQ_ID) => self.apply_squads(resp),
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
@@ -850,6 +855,30 @@ impl HangarPlugin {
                 self.screens
                     .boards
                     .set_note(format!("launched {} on {}", r.mode, r.agent_id));
+            }
+        }
+    }
+
+    /// Surface a `hangar/board_card_cancel` reply (tcp T3 / F6): a transient note
+    /// confirming the cancel, or reporting that the card had no active run to
+    /// cancel. The card leaves the running state via the daemon's pushed
+    /// `TaskFinished(Cancelled)` (no board refresh needed here).
+    fn apply_board_card_cancel(&mut self, resp: &RpcResponse) {
+        if let Some(err) = &resp.error {
+            self.screens.boards.set_note(format!("cancel failed: {}", err.message));
+            return;
+        }
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::BoardCardCancelResult,
+            >(result.clone())
+            {
+                let note = if r.cancelled {
+                    "cancelled the running task".to_string()
+                } else {
+                    "no active run to cancel (already finished?)".to_string()
+                };
+                self.screens.boards.set_note(note);
             }
         }
     }
@@ -1566,6 +1595,11 @@ impl HangarPlugin {
                 BOARD_CARD_RUN_REQ_ID,
                 daemon_methods::HANGAR_BOARD_CARD_RUN,
                 serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id, "mode": mode }),
+            ),
+            BoardsAction::CardCancel { board_id, issue_id } => (
+                BOARD_CARD_CANCEL_REQ_ID,
+                daemon_methods::HANGAR_BOARD_CARD_CANCEL,
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "issue_id": issue_id }),
             ),
             // A local-overlay repaint round-trip: re-fetch the board list; the
             // reply re-renders with the open overlay preserved.

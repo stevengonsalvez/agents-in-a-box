@@ -605,6 +605,10 @@ pub enum BoardsEvent {
     RunFocusedCard,
     /// Attach to the focused card's session (`a`).
     AttachFocusedCard,
+    /// Cancel the focused card's in-flight run (`C`, tcp T3 / F6). A no-op with
+    /// no card focused; a card whose latest run is terminal is refused by the
+    /// daemon (reported as a note).
+    CancelFocusedCard,
     /// Add a column to the focused board (`n`) — the glue prompts for the name.
     AddColumn,
     /// Rename the focused column (`r`).
@@ -646,6 +650,14 @@ pub enum BoardsIntent {
         /// The board the card sits on.
         board_id: String,
         /// The issue whose session to attach to.
+        issue_id: String,
+    },
+    /// Cancel the card's in-flight run (`hangar/board_card_cancel`, tcp T3 / F6).
+    /// Card = issue: the daemon resolves the issue's active task and kills it.
+    CancelCard {
+        /// The board the card sits on.
+        board_id: String,
+        /// The issue whose active run to cancel.
         issue_id: String,
     },
     /// Prompt for a name and add a column (`hangar/board_column_add`).
@@ -736,6 +748,10 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             cursor: 0,
         }),
         BoardsEvent::AttachFocusedCard => card_intent(state, |b, c| BoardsIntent::AttachCard {
+            board_id: b.id.clone(),
+            issue_id: c.issue_id.clone(),
+        }),
+        BoardsEvent::CancelFocusedCard => card_intent(state, |b, c| BoardsIntent::CancelCard {
             board_id: b.id.clone(),
             issue_id: c.issue_id.clone(),
         }),
@@ -1543,9 +1559,13 @@ fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsS
 /// The key-hint band rendered under the board title — the column/card bindings
 /// next to the widget they drive.
 fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
-    let hints: [(&str, &str); 8] = [
-        ("↵", "run"),
+    // Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a
+    // runnable card AND reruns a finished/failed/cancelled one (same launch
+    // path), `C` cancels a running one. `feedback_keybinding_hints_near_control`.
+    let hints: [(&str, &str); 9] = [
+        ("↵", "run/rerun"),
         ("a", "attach"),
+        ("C", "cancel"),
         ("n", "add col"),
         ("r", "rename"),
         ("x", "del col"),
@@ -1710,6 +1730,64 @@ mod tests {
             })
         );
         assert!(run.state.overlay().is_none(), "the picker closes on commit");
+    }
+
+    /// `C` on a focused card raises a CancelCard intent carrying the board +
+    /// issue (tcp T3 / F6); it is an immediate action, not an overlay.
+    #[test]
+    fn cancel_focused_card_raises_cancel_intent() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let out = reduce_boards(&state, BoardsEvent::CancelFocusedCard);
+        assert_eq!(
+            out.intent,
+            Some(BoardsIntent::CancelCard {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+            })
+        );
+        assert!(out.state.overlay().is_none(), "cancel opens no overlay");
+    }
+
+    /// `C` with no card focused (an empty column) raises nothing — a stray cancel
+    /// never fires a card-less RPC.
+    #[test]
+    fn cancel_with_no_card_focused_is_a_noop() {
+        let state = BoardsState::from_snapshot(&one_board());
+        // Move right to the empty `Doing` column.
+        let empty = reduce_boards(&state, BoardsEvent::FocusRight);
+        assert!(empty.state.focused_card().is_none());
+        let out = reduce_boards(&empty.state, BoardsEvent::CancelFocusedCard);
+        assert_eq!(out.intent, None, "no card focused → no cancel intent");
+    }
+
+    /// Rerun (tcp T3 / F6) rides the existing run affordance: `Enter` on a
+    /// FINISHED (`done`) card opens the same `Run ▾` picker and commits a fresh
+    /// RunCard — the daemon enqueues a new task (fresh worktree), so a finished
+    /// card is rerunnable with no distinct keybinding.
+    #[test]
+    fn enter_reruns_a_finished_card() {
+        let state = BoardsState::from_snapshot(&one_board());
+        // Focus the Done column's finished card (issue-2, state = done).
+        let state = reduce_boards(&state, BoardsEvent::FocusRight).state; // Doing (empty)
+        let state = reduce_boards(&state, BoardsEvent::FocusRight).state; // Done
+        assert_eq!(state.focused_card().unwrap().issue_id, "issue-2");
+        assert_eq!(state.focused_card().unwrap().state.as_deref(), Some("done"));
+        // Enter opens the run picker even though the card is terminal (rerun).
+        let opened = reduce_boards(&state, BoardsEvent::RunFocusedCard);
+        assert!(matches!(
+            opened.state.overlay(),
+            Some(BoardsOverlay::RunMode { issue_id, .. }) if issue_id == "issue-2"
+        ));
+        let rerun = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            rerun.intent,
+            Some(BoardsIntent::RunCard {
+                board_id: "b1".into(),
+                issue_id: "issue-2".into(),
+                mode: RunMode::Headless,
+            }),
+            "Enter on a done card reruns it via board_card_run"
+        );
     }
 
     /// Down in `Run ▾` selects Interactive, and Enter commits that mode.
