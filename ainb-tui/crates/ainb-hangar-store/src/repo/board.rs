@@ -711,23 +711,35 @@ impl BoardRepo {
             let column_id: String = r.try_get("column_id")?;
             // Append the auto-moved card at the end of its target column (migration
             // 0034), consistent with a manual card_move.
+            //
+            // The `column_id <> target` guard in the UPDATE makes the move ATOMIC:
+            // the SELECT above is a stale read, so two finalizers racing to auto-move
+            // one card (e.g. two squad siblings draining the active set at once) could
+            // both pass it. The guard means the loser's UPDATE matches 0 rows — so the
+            // card lands in the target exactly once and only the winner records a
+            // `moved` entry (no duplicate move event / ord churn).
             let mut tx = pool.begin().await?;
             let ord = Self::next_card_ord(&mut tx, &board_id, Some(&column_id)).await?;
-            sqlx::query(
-                "UPDATE board_card SET column_id = ?, ord = ? WHERE board_id = ? AND issue_id = ?",
+            let res = sqlx::query(
+                "UPDATE board_card SET column_id = ?, ord = ? \
+                 WHERE board_id = ? AND issue_id = ? \
+                   AND (column_id IS NULL OR column_id <> ?)",
             )
             .bind(&column_id)
             .bind(ord)
             .bind(&board_id)
             .bind(issue_id)
+            .bind(&column_id)
             .execute(&mut *tx)
             .await?;
             tx.commit().await?;
-            moved.push(AutoMoved {
-                board_id,
-                issue_id: issue_id.to_string(),
-                column_id,
-            });
+            if res.rows_affected() == 1 {
+                moved.push(AutoMoved {
+                    board_id,
+                    issue_id: issue_id.to_string(),
+                    column_id,
+                });
+            }
         }
         Ok(moved)
     }

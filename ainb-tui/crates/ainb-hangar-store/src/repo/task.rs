@@ -286,6 +286,87 @@ impl TaskRepo {
         row.map(|r| task_from_row(&r)).transpose()
     }
 
+    /// Fetch the issue's ENTIRE active set — every `queued` / `dispatched` /
+    /// `running` task on `issue_id`, **scoped to `workspace_id`**, newest first.
+    ///
+    /// A squad card fans out N tasks onto ONE issue (leader + one per member), so
+    /// an issue can carry several active tasks at once. This is the set the
+    /// card-cancel path (tcp T4 / FANOUT-SEMANTICS) must cancel WHOLESALE:
+    /// [`active_task_for_issue`](Self::active_task_for_issue) (LIMIT 1) resolves only
+    /// the newest sibling, so cancelling on it alone leaves the leader + the other
+    /// members burning. The `WHERE ... workspace_id = ?` clause is the tenant guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query or a row decode fails.
+    pub async fn active_tasks_for_issue(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+    ) -> Result<Vec<Task>, sqlx::Error> {
+        let rows = sqlx::query(&format!(
+            "SELECT {COLUMNS} FROM agent_task_queue \
+             WHERE workspace_id = ? AND issue_id = ? \
+               AND status IN ('queued','dispatched','running') \
+             ORDER BY created_at DESC, id DESC"
+        ))
+        .bind(workspace_id)
+        .bind(issue_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(task_from_row).collect()
+    }
+
+    /// The AGGREGATE terminal outcome of an issue's tasks — the single card-state
+    /// token to auto-move a card by, but ONLY once the issue's active set has
+    /// DRAINED (tcp T4 / FANOUT-SEMANTICS).
+    ///
+    /// Returns:
+    /// - `None` when the issue still has ANY active (`queued`/`dispatched`/
+    ///   `running`) task — the squad has NOT finished, so the card must not
+    ///   terminal-auto-move yet (this is the drain gate);
+    /// - `None` when the issue has no tasks at all (nothing to move on);
+    /// - otherwise the aggregate of the terminal statuses, by precedence
+    ///   **`failed` > `cancelled` > `done`**: any failed sibling fails the card;
+    ///   else any cancelled sibling cancels it; else every sibling is `done`, so
+    ///   the card succeeded. Precedence is deliberate — a squad where one member
+    ///   failed is a card-level failure even if the rest succeeded.
+    ///
+    /// # Single run generation (known limitation)
+    ///
+    /// The fold spans EVERY task the issue has ever had, so it assumes those tasks are
+    /// ONE run generation — true for a single fan-out. A card RE-RUN after a prior
+    /// `failed`/`cancelled` run leaves those older terminal rows in the table, and
+    /// precedence would then still report `failed`/`cancelled` even after a clean
+    /// rerun. Scoping to the latest run needs a run-generation marker (follow-up); the
+    /// concurrent-fan-out contract this backs is unaffected.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn issue_aggregate_terminal_state(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        // One pass over the issue's tasks: NULL while any task is still active (the
+        // drain gate), else the highest-precedence terminal token present. `SUM(bool)`
+        // over zero rows is NULL, so a task-less issue also yields NULL.
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT CASE \
+               WHEN SUM(status IN ('queued','dispatched','running')) > 0 THEN NULL \
+               WHEN SUM(status = 'failed') > 0 THEN 'failed' \
+               WHEN SUM(status = 'cancelled') > 0 THEN 'cancelled' \
+               WHEN SUM(status = 'done') > 0 THEN 'done' \
+               ELSE NULL END \
+             FROM agent_task_queue WHERE workspace_id = ? AND issue_id = ?",
+        )
+        .bind(workspace_id)
+        .bind(issue_id)
+        .fetch_one(pool)
+        .await
+    }
+
     /// List the *pending* (`queued` or `dispatched`) tasks for a runtime,
     /// oldest first. This is the queue the P1 FSM drains.
     ///
@@ -428,4 +509,146 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         agent_kind: row.try_get("agent_kind")?,
         branch: row.try_get("branch")?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Store;
+
+    const WS: &str = "ws-a";
+
+    async fn open() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        (dir, store)
+    }
+
+    /// Seed the minimal FK chain (workspace / runtime / agent / issue) once so task
+    /// rows insert cleanly.
+    async fn seed_chain(pool: &SqlitePool, issue_id: &str) {
+        sqlx::query("INSERT OR IGNORE INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, 0)")
+            .bind(WS).bind(WS).bind(WS).execute(pool).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
+            .execute(pool).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt', ?, 'd','claude','local','online')")
+            .bind(WS).execute(pool).await.unwrap();
+        sqlx::query("INSERT OR IGNORE INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag', ?, 'A','rt','x','workspace','u')")
+            .bind(WS).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO issue (id, workspace_id, title, creator_type, creator_id, created_at) \
+             VALUES (?, ?, ?, 'member', 'u', 0)",
+        )
+        .bind(issue_id).bind(WS).bind(issue_id).execute(pool).await.unwrap();
+    }
+
+    /// Insert one task row on `issue_id` with an explicit id / status / created_at,
+    /// bypassing the pending-unique index (it only guards `queued`/`dispatched`), so
+    /// a test can build a squad-shaped multi-task issue directly.
+    async fn seed_task(pool: &SqlitePool, issue_id: &str, id: &str, status: &str, created_at: i64) {
+        sqlx::query(
+            "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) \
+             VALUES (?, ?, 'rt', 'ag', ?, ?, ?)",
+        )
+        .bind(id).bind(WS).bind(issue_id).bind(status).bind(created_at)
+        .execute(pool).await.unwrap();
+    }
+
+    /// The active set is EVERY non-terminal task on the issue (a squad fan-out),
+    /// newest first — not just the latest sibling.
+    #[tokio::test]
+    async fn active_set_returns_all_non_terminal_siblings() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_chain(pool, "iss").await;
+        // A squad-shaped issue: leader running + two members running + one already done.
+        seed_task(pool, "iss", "leader", "running", 10).await;
+        seed_task(pool, "iss", "m1", "running", 11).await;
+        seed_task(pool, "iss", "m2", "dispatched", 12).await;
+        seed_task(pool, "iss", "old", "done", 9).await;
+
+        let active = TaskRepo::active_tasks_for_issue(pool, WS, "iss").await.unwrap();
+        let ids: Vec<&str> = active.iter().map(|t| t.id.as_str()).collect();
+        assert_eq!(ids, vec!["m2", "m1", "leader"], "the whole active set, newest first; the done task excluded");
+    }
+
+    /// A foreign-workspace issue id matches no active task (tenant guard).
+    #[tokio::test]
+    async fn active_set_is_workspace_scoped() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_chain(pool, "iss").await;
+        seed_task(pool, "iss", "t", "running", 1).await;
+        assert!(TaskRepo::active_tasks_for_issue(pool, "other-ws", "iss").await.unwrap().is_empty());
+    }
+
+    /// The aggregate is `None` while ANY sibling is still active (the drain gate),
+    /// then resolves to the highest-precedence terminal token once the set drains.
+    #[tokio::test]
+    async fn aggregate_gates_on_drain_then_folds_by_precedence() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+
+        // No tasks at all → nothing to move on.
+        seed_chain(pool, "empty").await;
+        assert_eq!(TaskRepo::issue_aggregate_terminal_state(pool, WS, "empty").await.unwrap(), None);
+
+        // A squad mid-run: two done, one still running → NOT drained → None. This is
+        // the exact fan-out bug: the latest-done sibling must NOT move the card.
+        seed_chain(pool, "mid").await;
+        seed_task(pool, "mid", "a", "done", 1).await;
+        seed_task(pool, "mid", "b", "done", 2).await;
+        seed_task(pool, "mid", "c", "running", 3).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mid").await.unwrap(),
+            None,
+            "an issue with a live sibling has not drained — no terminal auto-move"
+        );
+
+        // The last sibling finishes done → all done → aggregate `done`.
+        TaskRepo::transition_status(pool, WS, "c", ainb_hangar_core::task_status::TaskStatus::Done, 4)
+            .await.unwrap();
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mid").await.unwrap().as_deref(),
+            Some("done"),
+            "every sibling done → the card succeeded"
+        );
+    }
+
+    /// Precedence: any `failed` beats a `cancelled`/`done` sibling; a `cancelled`
+    /// beats a `done`; a fully-cancelled/failed set never yields `done`.
+    #[tokio::test]
+    async fn aggregate_precedence_failed_over_cancelled_over_done() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+
+        seed_chain(pool, "mixed").await;
+        seed_task(pool, "mixed", "mx-a", "done", 1).await;
+        seed_task(pool, "mixed", "mx-b", "cancelled", 2).await;
+        seed_task(pool, "mixed", "mx-c", "failed", 3).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mixed").await.unwrap().as_deref(),
+            Some("failed"),
+            "any failed sibling fails the card"
+        );
+
+        // done + cancelled (no failure) → cancelled wins over done.
+        seed_chain(pool, "userstop").await;
+        seed_task(pool, "userstop", "us-a", "done", 1).await;
+        seed_task(pool, "userstop", "us-b", "cancelled", 2).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "userstop").await.unwrap().as_deref(),
+            Some("cancelled"),
+            "a user cancel of a partly-done card cancels it"
+        );
+
+        // Fully cancelled → cancelled, never done.
+        seed_chain(pool, "allcancel").await;
+        seed_task(pool, "allcancel", "ac-a", "cancelled", 1).await;
+        seed_task(pool, "allcancel", "ac-b", "cancelled", 2).await;
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "allcancel").await.unwrap().as_deref(),
+            Some("cancelled")
+        );
+    }
 }

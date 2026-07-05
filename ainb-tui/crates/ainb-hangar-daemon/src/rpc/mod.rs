@@ -939,12 +939,37 @@ async fn handle_task_transition(
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let to = parse_task_status(&params.to_status)?;
+    // Read the task BEFORE the move so we can distinguish a genuine into-terminal
+    // edge from a terminal REPLAY. `transition_status` is an unconditional UPDATE, so
+    // a `done -> done` re-drag reports `moved = true`; firing the dependency unblock
+    // on that replay would RE-RUN an already-finished dependent. We only fire on a
+    // real non-terminal → terminal edge. The pre-read also carries the issue /
+    // workspace the hook keys on (unchanged by the move).
+    use ainb_hangar_store::repo::task::TaskRepo;
+    let before = TaskRepo::get_by_id(pool, &params.task_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let was_terminal = before
+        .as_ref()
+        .is_some_and(|t| matches!(t.status.as_str(), "done" | "failed" | "cancelled"));
     let moved = snapshots::task_transition(pool, &SystemClock, ws.as_str(), &params.task_id, to)
         .await
         .map_err(|e| store_err(&e))?;
     if moved {
         if let Some(event) = task_transition_event(&params.task_id, to, SystemClock.now_ms()) {
             events.emit(ws.as_str(), event);
+        }
+        // tcp T4 / F7 + FANOUT-SEMANTICS: a MANUAL move to a terminal column must
+        // fire the SAME dependency re-eval the finalize seam runs, so a card
+        // hand-completed on the Kanban unblocks (and auto-runs) its dependents just
+        // like a finalize-driven completion — but ONLY on a real non-terminal →
+        // terminal edge (never a terminal replay). The hook keys on the issue's whole
+        // active set, so a blocker that did not actually finish is a store-guarded
+        // no-op. Best-effort.
+        if to.is_terminal() && !was_terminal {
+            if let Some(task) = before {
+                crate::board::unblock_dependents_after_terminal(pool, &task).await;
+            }
         }
     }
     Ok(serde_json::json!({}))
@@ -2326,7 +2351,8 @@ async fn handle_board_card_create(
 /// D8 auto-move hook slides the card on each FSM transition. The agent resolves
 /// from the issue's assignee (D16), falling back to the workspace's agent so a
 /// card always runs. `mode` (`headless` / `interactive`, D6 `Run ▾`) is validated
-/// and echoed; both dispatch through the one provider-runner path today.
+/// and echoed; a single-agent card honours either, but a SQUAD card is a headless
+/// batch and REJECTS `interactive` (so the echoed mode is never a lie about the run).
 ///
 /// [`SquadAssignService`]: ainb_hangar_store::service::squad_assign::SquadAssignService
 async fn handle_board_card_run(
@@ -2439,6 +2465,11 @@ pub(crate) enum CardRunError {
     NotDispatchable(ainb_hangar_core::agent_kind::AgentKind),
     /// A squad fan-out was rejected (unknown squad, dangling member, …).
     Squad(ainb_hangar_store::service::squad_assign::SquadAssignError),
+    /// `interactive` mode was requested for a SQUAD card. A squad runs as a headless
+    /// batch (the leader coordinates the members), so interactive is not supported —
+    /// rejected loudly rather than silently downgraded, so the reply never lies about
+    /// the mode the card ran in (tcp T4 / FANOUT-SEMANTICS).
+    InteractiveSquad,
     /// The workspace has no agent to run a single-agent card on.
     NoAgent,
     /// A store fault.
@@ -2462,6 +2493,9 @@ fn card_run_err(e: CardRunError) -> RpcError {
             "the {kind} provider is not yet wired for dispatch (F8) — pick claude or codex",
         )),
         CardRunError::Squad(se) => squad_assign_err(&se),
+        CardRunError::InteractiveSquad => invalid_params(
+            "interactive mode is not supported for a squad card — a squad runs as a headless batch; use headless",
+        ),
         CardRunError::NoAgent => {
             invalid_params("this workspace has no agent to run the card on")
         }
@@ -2601,9 +2635,14 @@ pub(crate) async fn run_card(
         .map_err(CardRunError::Db)?;
     if let Some(squad_id) = squad_id {
         // Squad fan-out: leader brief + one task per member, each stamped with the
-        // card's repo (own worktree) + resolved provider. Headless batch (the
-        // leader coordinates); the requested `mode` is echoed by the caller.
-        let _ = mode;
+        // card's repo (own worktree) + resolved provider. A squad is a HEADLESS batch
+        // (the leader coordinates the members): `interactive` has no coherent meaning
+        // across a fan-out, so reject it loudly rather than silently discard it and
+        // echo back a mode the run never used (tcp T4 / FANOUT-SEMANTICS). Only a
+        // headless request reaches the fan-out, so the reply's echoed mode is honest.
+        if mode == "interactive" {
+            return Err(CardRunError::InteractiveSquad);
+        }
         let request = SquadAssignRequest {
             issue_id: Some(issue_id),
             repo_ref: Some(&repo_ref),
@@ -2842,16 +2881,21 @@ fn card_dep_err(e: &ainb_hangar_store::repo::card_dependency::CardDependencyErro
     }
 }
 
-/// `hangar/board_card_cancel` (tcp T3 / F6): cancel a card's in-flight run.
+/// `hangar/board_card_cancel` (tcp T3 / F6 + T4 / FANOUT-SEMANTICS): cancel a
+/// card's in-flight run(s).
 ///
-/// Resolves the card's single ACTIVE (`queued` / `dispatched` / `running`) task,
-/// flips it to `cancelled` (the idempotent `CancelTaskService` FSM edge, whose
-/// SQL conditional finalize arbitrates the cancel-vs-natural-finish race), then
-/// SIGNALS the daemon's run loop to KILL the in-flight run — a headless process
-/// group (via the runner's `kill_on_drop`) or the interactive tmux session by
-/// its exact name. The run's provisioned worktree is torn down (keep-if-dirty)
-/// on the finalize seam. A card whose latest run is already terminal cannot be
-/// retroactively cancelled (`cancelled = false`, never an error).
+/// Resolves the card's ENTIRE active set — a squad card fans out N tasks onto one
+/// issue, so cancelling only the newest sibling left the leader + the rest burning
+/// tokens (and later re-moving the "cancelled" card). This cancels EVERY active
+/// (`queued` / `dispatched` / `running`) task of the issue: each is flipped to
+/// `cancelled` (the idempotent `CancelTaskService` FSM edge, whose SQL conditional
+/// finalize arbitrates the cancel-vs-natural-finish race per task) and its run is
+/// SIGNALLED to KILL — a headless process group (via the runner's `kill_on_drop`)
+/// or the interactive tmux session by its exact name. Each run's worktree is torn
+/// down (keep-if-dirty) on its own finalize seam. The per-task outcomes fold into
+/// ONE card-level story: a single aggregate auto-move + dependency re-eval after the
+/// set drains. A card whose whole set is already terminal cannot be retroactively
+/// cancelled (`cancelled = false`, never an error).
 async fn handle_board_card_cancel(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -2872,65 +2916,90 @@ async fn handle_board_card_cancel(
         return Err(invalid_params("that issue is not a card on this board"));
     }
 
-    // Resolve the card's single ACTIVE task. `None` means the latest run is
-    // already terminal (or it never ran) — a clean no-op the caller surfaces as a
-    // note, never an error.
-    let Some(active) = TaskRepo::active_task_for_issue(pool, ws.as_str(), &params.issue_id)
+    // Resolve the card's ENTIRE active set (newest first). An empty set means the
+    // card's whole run is already terminal (or it never ran) — a clean no-op the
+    // caller surfaces as a note, never an error. The newest task is the "primary"
+    // whose id the (single-valued) reply carries, matching the pre-fan-out shape.
+    let active = TaskRepo::active_tasks_for_issue(pool, ws.as_str(), &params.issue_id)
         .await
-        .map_err(|e| store_err(&e))?
-    else {
+        .map_err(|e| store_err(&e))?;
+    let Some(primary) = active.first().cloned() else {
         return to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
             task_id: None,
             cancelled: false,
         });
     };
 
-    // Flip the row to `cancelled`. The conditional finalize is the arbiter of the
-    // cancel-vs-natural-finish race, and its outcome decides the side-effects:
-    // - `Transitioned` — THIS call won the cancel, so it owns the ONE-TIME
-    //   side-effects (signal the kill, push the event, auto-move the card).
-    // - `AlreadyTerminal` — an idempotent replay of a prior cancel (a concurrent
-    //   double-cancel); the card is already cancelled, so re-firing the event /
-    //   auto-move would only emit duplicates. Report success, do nothing more.
-    // - `TerminalMismatch` — a natural finish beat us to it; report not-cancelled
-    //   (the run genuinely finished), never an error.
-    match CancelTaskService::cancel(pool, &active.id, &SystemClock).await {
-        Ok(FinalizeOutcome::Transitioned) => {
-            // Signal the run loop to KILL the in-flight run. `false` = no live run
-            // was registered (the task was queued-but-unclaimed, or owned by
-            // another daemon) — the DB flip alone cancels it before it ever starts.
-            let signalled = crate::cancel::registry().signal(&active.id);
-            // Push the terminal transition + slide the card into any `cancelled`
-            // auto-move column so the board leaves the running state without a
-            // snapshot re-pull (mirrors the FSM finalize seam; idempotent with the
-            // run future's own artifact reclaim).
-            crate::run_loop::emit_task_finished(
-                events,
-                &active,
-                ainb_hangar_proto::events::TaskResult::Cancelled,
-                &SystemClock,
-            );
-            crate::board::auto_move_after_transition(pool, &active, "cancelled").await;
-            tracing::info!(task_id = %active.id, signalled, "board card cancelled");
-            to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
-                task_id: Some(active.id),
-                cancelled: true,
-            })
+    // Cancel EVERY active task of the card. Each cancel's conditional finalize is
+    // the per-task arbiter of the cancel-vs-natural-finish race:
+    // - `Transitioned` — this call won the cancel for that task: SIGNAL its kill and
+    //   push its terminal event.
+    // - `AlreadyTerminal` — an idempotent replay of a prior cancel; nothing more.
+    // - `TerminalMismatch` — that task finished naturally first; leave it.
+    // A per-task store fault is logged and the loop continues (leaving a sibling
+    // running is worse than a clean error); it only surfaces if NOTHING cancelled.
+    let mut any_cancelled = false;
+    let mut last_err: Option<String> = None;
+    for task in &active {
+        match CancelTaskService::cancel(pool, &task.id, &SystemClock).await {
+            Ok(FinalizeOutcome::Transitioned) => {
+                // `false` = no live run was registered (queued-but-unclaimed, or
+                // owned by another daemon) — the DB flip alone cancels it.
+                let signalled = crate::cancel::registry().signal(&task.id);
+                crate::run_loop::emit_task_finished(
+                    events,
+                    task,
+                    ainb_hangar_proto::events::TaskResult::Cancelled,
+                    &SystemClock,
+                );
+                tracing::info!(task_id = %task.id, signalled, issue = %params.issue_id, "card cancel: sibling cancelled");
+                any_cancelled = true;
+            }
+            Ok(FinalizeOutcome::AlreadyTerminal) => any_cancelled = true,
+            Err(FinalizeError::TerminalMismatch { .. }) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "card cancel: a sibling cancel errored; continuing");
+                last_err = Some(e.to_string());
+            }
         }
-        Ok(FinalizeOutcome::AlreadyTerminal) => {
-            to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
-                task_id: Some(active.id),
-                cancelled: true,
-            })
-        }
-        Err(FinalizeError::TerminalMismatch { .. }) => {
-            to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
-                task_id: Some(active.id),
-                cancelled: false,
-            })
-        }
-        Err(e) => Err(internal(&format!("cancel: {e}"))),
     }
+
+    // Honesty guard: if any per-task cancel raised a store fault, the cancel may be
+    // PARTIAL — re-read the active set and surface an error when siblings survived,
+    // rather than reporting a clean success while a leader/member keeps burning. An
+    // errored task that ended up terminal anyway (it raced to a natural finish) leaves
+    // an empty residual and is tolerated.
+    if let Some(e) = last_err {
+        let residual = TaskRepo::active_tasks_for_issue(pool, ws.as_str(), &params.issue_id)
+            .await
+            .map_err(|e| store_err(&e))?;
+        if !residual.is_empty() {
+            return Err(internal(&format!(
+                "cancel partially failed: {} task(s) still active ({e})",
+                residual.len()
+            )));
+        }
+    }
+
+    if !any_cancelled {
+        // Nothing to cancel — every active task finished naturally between the read
+        // and the cancel. Report not-cancelled, never an error.
+        return to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
+            task_id: Some(primary.id),
+            cancelled: false,
+        });
+    }
+
+    // ONE card-level story now the set has drained: aggregate-auto-move the card
+    // (lands in the `cancelled` column unless a sibling had failed) and re-evaluate
+    // dependents (a partly-done-then-cancelled blocker can still unblock). Both are
+    // best-effort and idempotent with each run future's own finalize seam.
+    crate::board::auto_move_after_terminal(pool, &primary).await;
+    crate::board::unblock_dependents_after_terminal(pool, &primary).await;
+    to_value(&ainb_hangar_proto::snapshots::BoardCardCancelResult {
+        task_id: Some(primary.id),
+        cancelled: true,
+    })
 }
 
 /// `hangar/board_card_reorder` (tcp T3 / F6): set the order of one column's cards.

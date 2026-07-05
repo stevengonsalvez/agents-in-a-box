@@ -12,8 +12,9 @@
 //!   - [`CardDependencyRepo::blockers_of`] / [`CardDependencyRepo::dependents_of`]
 //!     — the forward / reverse adjacency;
 //!   - [`CardDependencyRepo::unfinished_blockers_of`] — the refuse-run guard: the
-//!     dependent's blockers whose latest task is not `done` (a card with any
-//!     unfinished blocker refuses to run and is never auto-dispatched);
+//!     dependent's blockers that have not FINISHED (their active set drained with a
+//!     `done`; a card with any unfinished blocker refuses to run and is never
+//!     auto-dispatched);
 //!   - [`CardDependencyRepo::edges_of_workspace`] — every edge in the workspace,
 //!     for the board snapshot's 🔒 blocked-state render;
 //!   - [`CardDependencyRepo::set_auto_run`] / [`CardDependencyRepo::get_auto_run`]
@@ -29,13 +30,15 @@
 //! engine-enforced invariant; existence, scoping, and acyclicity are enforced
 //! here in application code (mirroring `BoardRepo`).
 //!
-//! # "Finished" = latest task `done`
+//! # "Finished" = the whole active set drained, with a success
 //!
-//! A blocker is FINISHED when its issue's most recent task status is `done` — the
-//! same signal the board uses to turn a card green (`enrich_board_card`) and the
-//! D8 auto-move fires on. A blocker with no task, or whose latest task is
-//! `running`/`failed`/`cancelled`, is UNFINISHED (it has not successfully
-//! completed), so the dependent stays blocked.
+//! A blocker is FINISHED when EVERY task on its issue is terminal (its active set
+//! has drained) AND at least one of them reached `done`. A squad blocker fans out
+//! N tasks onto one issue, so keying on the whole set — not just the latest task —
+//! is what stops a dependent unblocking while the leader / other members still run
+//! (tcp T4 / FANOUT-SEMANTICS). A blocker with no task, with any still-active task,
+//! or whose tasks all ended `failed`/`cancelled` (no `done`) is UNFINISHED, so the
+//! dependent stays blocked. See [`CardDependencyRepo::unfinished_blockers_of`].
 
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::{Row, SqlitePool};
@@ -181,13 +184,35 @@ impl CardDependencyRepo {
         .await
     }
 
-    /// The dependent card's UNFINISHED blockers: the blockers whose issue's latest
-    /// task status is not `done` (never-ran counts as unfinished). Empty ⇒ the card
-    /// is runnable. This is the refuse-run guard AND the "last blocker completed"
-    /// check the finalize seam re-evaluates.
+    /// The dependent card's UNFINISHED blockers. Empty ⇒ the card is runnable. This
+    /// is the refuse-run guard AND the "blocker completed" check the finalize seam
+    /// re-evaluates.
     ///
-    /// A blocker's "latest task" is its issue's most recent `agent_task_queue` row
-    /// (`created_at DESC, id DESC`), matching the board's card-state fold.
+    /// # "Finished" = the blocker's WHOLE active set drained, with a success
+    ///
+    /// A blocker is FINISHED (drops off this list, satisfying the dependency) iff
+    /// EVERY task on its issue is terminal (its active set has drained) AND at least
+    /// one of those tasks reached `done`. It is UNFINISHED (kept here, the dependent
+    /// stays blocked) iff:
+    ///   - it has NO task at all (never ran), OR
+    ///   - ANY of its tasks is still active (`queued`/`dispatched`/`running`), OR
+    ///   - all its tasks are terminal but NONE reached `done`.
+    ///
+    /// This is the tcp T4 / FANOUT-SEMANTICS fix: a squad blocker fans out N tasks
+    /// onto one issue, so the old "latest task is `done`" test unblocked the
+    /// dependent the instant the last-inserted sibling finished while the leader +
+    /// other members still ran. Keying on the WHOLE set closes that. A consequence,
+    /// by design: a fully-failed or fully-cancelled blocker (no `done`) NEVER
+    /// unblocks its dependents, and a blocker that is re-running (fresh active tasks)
+    /// re-blocks them until it drains again.
+    ///
+    /// # Single run generation (known limitation)
+    ///
+    /// The "any `done`" test spans EVERY task the blocker has ever had, so it assumes
+    /// one run generation. A blocker that succeeded once, then was RE-RUN and failed,
+    /// keeps an old `done` row and so stays "finished" here. Scoping to the latest run
+    /// needs a run-generation marker (follow-up); the concurrent-fan-out contract is
+    /// unaffected.
     ///
     /// # Errors
     ///
@@ -196,17 +221,23 @@ impl CardDependencyRepo {
         pool: &SqlitePool,
         dependent_issue_id: &str,
     ) -> Result<Vec<String>, sqlx::Error> {
-        // For each blocker, resolve its latest task status and keep the blocker
-        // when that status is not `done` (or it has no task at all). The
-        // correlated subquery picks the most recent task per blocker issue.
+        // Keep a blocker UNLESS its active set has drained (no active task left) AND
+        // it has at least one `done` task. The two EXISTS probes are indexed lookups
+        // on `issue_id`, cheap even with a full task history per blocker.
         sqlx::query_scalar(
             "SELECT d.blocker_issue_id FROM card_dependency d \
              WHERE d.dependent_issue_id = ? \
-               AND COALESCE(( \
-                     SELECT t.status FROM agent_task_queue t \
-                     WHERE t.issue_id = d.blocker_issue_id \
-                     ORDER BY t.created_at DESC, t.id DESC LIMIT 1 \
-                   ), '') <> 'done' \
+               AND NOT ( \
+                     EXISTS ( \
+                       SELECT 1 FROM agent_task_queue t \
+                       WHERE t.issue_id = d.blocker_issue_id AND t.status = 'done' \
+                     ) \
+                     AND NOT EXISTS ( \
+                       SELECT 1 FROM agent_task_queue t \
+                       WHERE t.issue_id = d.blocker_issue_id \
+                         AND t.status IN ('queued','dispatched','running') \
+                     ) \
+                   ) \
              ORDER BY d.created_at, d.blocker_issue_id",
         )
         .bind(dependent_issue_id)
@@ -371,6 +402,15 @@ mod tests {
         .execute(pool).await.unwrap();
     }
 
+    /// Transition an existing task row's status in place (a task's own lifecycle
+    /// move `running -> done`), so the active-set semantics are exercised on real
+    /// transitions rather than by inserting a new sibling.
+    async fn set_task_status(pool: &SqlitePool, task_id: &str, status: &str) {
+        sqlx::query("UPDATE agent_task_queue SET status = ? WHERE id = ?")
+            .bind(status).bind(task_id)
+            .execute(pool).await.unwrap();
+    }
+
     async fn open() -> (tempfile::TempDir, Store) {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
@@ -491,11 +531,76 @@ mod tests {
             "a is done (finished); b is still unfinished"
         );
 
-        // b finishes too → the dependent has no unfinished blockers (runnable).
-        seed_task_on_issue(pool, "ws-a", "b", "t-b2", "done").await;
+        // b's task finishes too (its own running -> done) → the dependent has no
+        // unfinished blockers (runnable).
+        set_task_status(pool, "t-b", "done").await;
         assert!(
             CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
             "both blockers done → the dependent is runnable"
+        );
+    }
+
+    /// A SQUAD blocker fans out several tasks onto one issue: the dependent stays
+    /// blocked until the WHOLE set drains — the last-inserted sibling finishing
+    /// `done` while others still run must NOT unblock it (the tcp T4 fan-out bug).
+    #[tokio::test]
+    async fn a_squad_blocker_unblocks_only_when_the_whole_set_drains() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "sq").await;
+        seed_issue(pool, "ws-a", "dep").await;
+        CardDependencyRepo::add_edge(pool, &ws("ws-a"), "dep", "sq", 1).await.unwrap();
+
+        // Fan-out: leader + two members, all running.
+        seed_task_on_issue(pool, "ws-a", "sq", "leader", "running").await;
+        seed_task_on_issue(pool, "ws-a", "sq", "m1", "running").await;
+        seed_task_on_issue(pool, "ws-a", "sq", "m2", "running").await;
+
+        // The LAST-inserted member finishes done — the old latest-wins logic would
+        // have unblocked here. The whole-set contract keeps dep blocked.
+        set_task_status(pool, "m2", "done").await;
+        assert_eq!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap(),
+            vec!["sq"],
+            "one member done but the leader + m1 still run — the set has not drained"
+        );
+
+        // Leader + m1 finish too → the set has drained with a success → runnable.
+        set_task_status(pool, "leader", "done").await;
+        set_task_status(pool, "m1", "done").await;
+        assert!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            "the whole squad drained with a done → the dependent is runnable"
+        );
+    }
+
+    /// A blocker whose whole set ended without a single `done` (all failed, all
+    /// cancelled, or a failed+cancelled mix) NEVER unblocks its dependent.
+    #[tokio::test]
+    async fn a_fully_failed_or_cancelled_blocker_never_unblocks() {
+        let (_d, store) = open().await;
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        for id in ["blk", "dep"] {
+            seed_issue(pool, "ws-a", id).await;
+        }
+        CardDependencyRepo::add_edge(pool, &ws("ws-a"), "dep", "blk", 1).await.unwrap();
+
+        // A squad that ended failed + cancelled, no `done` → drained but no success.
+        seed_task_on_issue(pool, "ws-a", "blk", "t1", "failed").await;
+        seed_task_on_issue(pool, "ws-a", "blk", "t2", "cancelled").await;
+        assert_eq!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap(),
+            vec!["blk"],
+            "a drained-but-never-succeeded blocker does not satisfy the dependency"
+        );
+
+        // A retry that finally succeeds flips it finished (the set now has a done).
+        seed_task_on_issue(pool, "ws-a", "blk", "t3", "done").await;
+        assert!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            "a later done in the set unblocks the dependent"
         );
     }
 

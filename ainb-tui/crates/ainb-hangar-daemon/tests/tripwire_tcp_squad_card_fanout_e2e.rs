@@ -37,7 +37,8 @@ mod common;
 use common::{
     BOARD_RUN_BOARD, DaemonRpc, INTERACTIVE_RELEASE_SENTINEL, T4_SQUAD_CARD_ISSUE,
     WORKTREE_REPO_NAME, budget_scale, daemon_bin, git_available, git_branch_exists,
-    prepare_pipeline_squad_card, skip, task_short_id, worktree_branch, worktree_dir,
+    prepare_pipeline_squad_card, skip, task_count_for_issue, task_short_id, task_status_by_id,
+    worktree_branch, worktree_dir,
 };
 
 #[test]
@@ -123,6 +124,133 @@ fn squad_card_run_fans_out_to_own_worktrees() {
     drop(pipe);
 
     assert!(all_gone, "every fanned worktree must be torn down after its run ({dirs:?})");
+}
+
+/// tcp T4 / FANOUT-SEMANTICS — cancelling a SQUAD card cancels EVERY member.
+///
+/// The fan-out creates N concurrent active tasks on one issue, but the old cancel
+/// path resolved a single task (LIMIT 1) and cancelled only the newest sibling — the
+/// leader + the other members kept burning tokens and later re-moved the "cancelled"
+/// card. This proves the fix end-to-end against the REAL daemon: with all three
+/// fanned runs LIVE, one `board_card_cancel` drives ALL THREE task rows to
+/// `cancelled` and tears down ALL THREE worktrees — WITHOUT releasing the sentinel
+/// (the cancel is what stops the agents).
+#[test]
+fn cancelling_a_squad_card_cancels_every_member() {
+    if daemon_bin().is_none() || !git_available() {
+        skip("tcp_squad_card_cancel_e2e");
+        return;
+    }
+
+    let pipe = prepare_pipeline_squad_card();
+    let scale = budget_scale();
+    let repo = pipe.home().join(WORKTREE_REPO_NAME);
+    let mut rpc = DaemonRpc::connect_and_auth(pipe.home());
+
+    // Fan the squad card out (headless) and collect all three task ids.
+    let run = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        serde_json::json!({
+            "workspace_id": ainb_hangar_daemon::seed::WS_SLUG,
+            "board_id": BOARD_RUN_BOARD,
+            "issue_id": T4_SQUAD_CARD_ISSUE,
+            "mode": "headless",
+        }),
+    );
+    assert!(run["error"].is_null(), "squad card run must ack, got: {run}");
+    let mut all_task_ids = vec![run["result"]["task_id"].as_str().unwrap_or("").to_string()];
+    all_task_ids.extend(
+        run["result"]["member_task_ids"]
+            .as_array()
+            .unwrap_or_else(|| panic!("run must carry member_task_ids: {run}"))
+            .iter()
+            .map(|v| v.as_str().unwrap().to_string()),
+    );
+    assert_eq!(all_task_ids.len(), 3, "leader + two members: {run}");
+
+    // Wait until all three runs are LIVE (their worktrees exist) — so the cancel
+    // stops three genuinely-running siblings, not a half-started fan-out.
+    let slugs: Vec<String> = all_task_ids.iter().map(|t| task_short_id(t).to_string()).collect();
+    let dirs: Vec<_> = slugs.iter().map(|s| worktree_dir(pipe.home(), s)).collect();
+    let live_deadline = Instant::now() + Duration::from_secs(45 * scale);
+    let all_live = poll_until(live_deadline, || {
+        dirs.iter().zip(&slugs).all(|(dir, slug)| is_worktree_live(dir, &repo, &worktree_branch(slug)))
+    });
+    assert!(all_live, "all three fanned runs must be live before the cancel ({dirs:?})");
+
+    // ONE cancel of the card — never releasing the sentinel.
+    let cancel = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_CANCEL,
+        serde_json::json!({
+            "workspace_id": ainb_hangar_daemon::seed::WS_SLUG,
+            "board_id": BOARD_RUN_BOARD,
+            "issue_id": T4_SQUAD_CARD_ISSUE,
+        }),
+    );
+    assert!(cancel["error"].is_null(), "squad cancel must ack: {cancel}");
+    assert_eq!(cancel["result"]["cancelled"], true, "the squad card must report cancelled: {cancel}");
+
+    // EVERY member task must reach `cancelled` — not just the newest sibling.
+    let cancel_deadline = Instant::now() + Duration::from_secs(45 * scale);
+    let all_cancelled = poll_until(cancel_deadline, || {
+        all_task_ids
+            .iter()
+            .all(|id| task_status_by_id(pipe.home(), id).as_deref() == Some("cancelled"))
+    });
+
+    // And every worktree must be torn down (each cancelled run reclaims its own).
+    let teardown_deadline = Instant::now() + Duration::from_secs(45 * scale);
+    let all_gone = poll_until(teardown_deadline, || dirs.iter().all(|d| !d.exists()));
+
+    // Snapshot the per-task states for a precise failure message before teardown.
+    let states: Vec<Option<String>> = all_task_ids.iter().map(|id| task_status_by_id(pipe.home(), id)).collect();
+
+    drop(rpc);
+    drop(pipe);
+
+    assert!(all_cancelled, "every fanned member task must be cancelled, got {states:?}");
+    assert!(all_gone, "every fanned worktree must be torn down after the cancel ({dirs:?})");
+}
+
+/// tcp T4 / FANOUT-SEMANTICS — a squad card REJECTS `interactive` mode loudly.
+///
+/// A squad runs as a HEADLESS batch (the leader coordinates the members), so
+/// `interactive` has no coherent meaning across the fan-out. The old handler silently
+/// discarded the requested mode yet echoed it back in the reply — a lie. This proves
+/// the fix: running a squad card with `mode: interactive` is refused with a clear
+/// error, and nothing is dispatched.
+#[test]
+fn running_a_squad_card_interactive_is_rejected() {
+    if daemon_bin().is_none() || !git_available() {
+        skip("tcp_squad_card_interactive_reject_e2e");
+        return;
+    }
+
+    let pipe = prepare_pipeline_squad_card();
+    let mut rpc = DaemonRpc::connect_and_auth(pipe.home());
+
+    let run = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        serde_json::json!({
+            "workspace_id": ainb_hangar_daemon::seed::WS_SLUG,
+            "board_id": BOARD_RUN_BOARD,
+            "issue_id": T4_SQUAD_CARD_ISSUE,
+            "mode": "interactive",
+        }),
+    );
+    let err = run["error"]["message"].as_str().unwrap_or("").to_string();
+    // NEGATIVE: the refused run fanned nothing out.
+    let dispatched = task_count_for_issue(pipe.home(), T4_SQUAD_CARD_ISSUE);
+
+    drop(rpc);
+    drop(pipe);
+
+    assert!(!run["error"].is_null(), "an interactive squad run must be refused: {run}");
+    assert!(
+        err.contains("interactive") && err.contains("squad"),
+        "the refusal must name interactive + squad ({err:?})"
+    );
+    assert_eq!(dispatched, 0, "a refused interactive squad run must not dispatch any task");
 }
 
 /// Whether the worktree at `dir` exists AND `branch` is registered in `repo`.
