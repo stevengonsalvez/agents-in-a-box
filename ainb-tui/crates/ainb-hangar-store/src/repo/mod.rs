@@ -11,6 +11,7 @@ pub mod atc_instance;
 pub mod attention;
 pub mod autopilot;
 pub mod board;
+pub mod card_dependency;
 pub mod autopilot_run;
 pub mod autopilot_webhook;
 pub mod beads_mapping;

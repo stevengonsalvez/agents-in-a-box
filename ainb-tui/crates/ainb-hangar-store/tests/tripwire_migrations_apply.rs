@@ -888,7 +888,7 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_thirty_five_tables() {
+async fn all_migrations_create_exactly_thirty_six_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -918,6 +918,8 @@ async fn all_migrations_create_exactly_thirty_five_tables() {
         "board",
         "board_card",
         "board_column",
+        // tcp T4 / F7: beads-style card dependency edges (migration 0036).
+        "card_dependency",
         "comment",
         "daemon_config",
         "daemon_socket_token",
@@ -945,13 +947,74 @@ async fn all_migrations_create_exactly_thirty_five_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 35, "expected 35 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 36, "expected 36 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
             "missing table {table} in {names:?}"
         );
     }
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0035_adds_issue_squad_id_column() {
+    // tcp T4 / F7: a card's assignee can be a whole SQUAD, persisted as a nullable
+    // `issue.squad_id` (NULL = single-agent run; set = fan out across the squad).
+    // ALTER TABLE ADD COLUMN with no default rewrites the catalog SQL, so the new
+    // column shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(
+        issue.contains("squad_id TEXT"),
+        "issue.squad_id nullable squad ref: {issue}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0036_creates_card_dependency_and_auto_run() {
+    // tcp T4 / F7: beads-style card dependencies. A `card_dependency` edge table
+    // (dependent -> blocker, composite PK, blocker reverse-lookup index) plus a
+    // per-card `issue.auto_run` flag (default OFF) governing auto-launch when the
+    // last blocker completes. `CREATE TABLE`/`CREATE INDEX` and the defaulted
+    // ALTER are catalog-only, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let dep = table_sql(&pool, "card_dependency").await;
+    assert!(
+        dep.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "card_dependency.workspace_id FK: {dep}"
+    );
+    assert!(
+        dep.contains("dependent_issue_id TEXT NOT NULL"),
+        "card_dependency.dependent_issue_id: {dep}"
+    );
+    assert!(
+        dep.contains("blocker_issue_id TEXT NOT NULL"),
+        "card_dependency.blocker_issue_id: {dep}"
+    );
+    assert!(
+        dep.contains("PRIMARY KEY (dependent_issue_id, blocker_issue_id)"),
+        "card_dependency composite PK (a card depends on another at most once): {dep}"
+    );
+
+    let idx = index_sql(&pool, "idx_card_dependency_blocker").await;
+    assert!(
+        idx.contains("card_dependency") && idx.contains("(blocker_issue_id)"),
+        "idx_card_dependency_blocker serves the finalize-seam reverse lookup: {idx}"
+    );
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(
+        issue.contains("auto_run INTEGER NOT NULL DEFAULT 0"),
+        "issue.auto_run default OFF (explicit run stays the default): {issue}"
+    );
 
     pool.close().await;
 }
