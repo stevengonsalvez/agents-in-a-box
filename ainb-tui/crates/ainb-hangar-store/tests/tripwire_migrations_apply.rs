@@ -930,6 +930,8 @@ async fn all_migrations_create_exactly_thirty_six_tables() {
         "issue_label",
         "label",
         "member",
+        // tcp T5: per-attention-kind notification routing rules (migration 0037).
+        "notify_rule",
         "pat",
         // P5 / D14-D16: the fs-watch-maintained INDEX over the on-disk agent
         // profile masters (migration 0030). The bodies live on disk; this table
@@ -947,7 +949,7 @@ async fn all_migrations_create_exactly_thirty_six_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 36, "expected 36 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 37, "expected 37 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
