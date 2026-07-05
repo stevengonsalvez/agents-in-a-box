@@ -98,10 +98,7 @@ impl LogsState {
 
     /// The lines visible under the active filter, oldest-first.
     fn visible(&self) -> Vec<&LogLine> {
-        self.lines
-            .iter()
-            .filter(|l| l.passes_level(self.filter))
-            .collect()
+        self.lines.iter().filter(|l| l.passes_level(self.filter)).collect()
     }
 }
 

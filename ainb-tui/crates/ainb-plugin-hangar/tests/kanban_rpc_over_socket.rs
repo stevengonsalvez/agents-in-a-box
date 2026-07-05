@@ -10,11 +10,11 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ainb_hangar_proto::{methods as daemon_methods, RpcRequest, RpcResponse};
+use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
-    HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind,
-    UnixSocketSendParams, KEY_MOD_SHIFT,
+    HandleEventParams, KEY_MOD_SHIFT, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind,
+    UnixSocketSendParams,
 };
 use ainb_plugin_protocol::{framing, methods};
 use ainb_plugin_sdk::Server;
@@ -89,9 +89,7 @@ fn spawn_daemon(listener: UnixListener, seen: Seen) {
             let Ok(req) = serde_json::from_value::<RpcRequest>(raw) else {
                 return;
             };
-            seen.lock()
-                .unwrap()
-                .push((req.method.clone(), req.params.clone()));
+            seen.lock().unwrap().push((req.method.clone(), req.params.clone()));
             let resp = RpcResponse {
                 jsonrpc: "2.0".into(),
                 id: req.id,
@@ -320,9 +318,7 @@ async fn shift_right_issues_task_transition() {
         let (daemon_read, mut daemon_write) = daemon.into_split();
         let mut daemon_reader = BufReader::new(daemon_read);
 
-        let ack = read_one_raw_frame(&mut daemon_reader)
-            .await
-            .expect("subscribe ack");
+        let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
         push_data(&mut host_write, &stream_id, &ack).await;
         pump_snapshots(
             &mut host_write,

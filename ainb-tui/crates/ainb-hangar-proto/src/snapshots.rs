@@ -2459,7 +2459,10 @@ mod tests {
             ],
         };
         let s = serde_json::to_string(&fanout).unwrap();
-        assert_eq!(serde_json::from_str::<SquadFanoutResult>(&s).unwrap(), fanout);
+        assert_eq!(
+            serde_json::from_str::<SquadFanoutResult>(&s).unwrap(),
+            fanout
+        );
     }
 
     /// `SquadAssignParams` omits its optional fields on the wire and defaults
@@ -2509,7 +2512,10 @@ mod tests {
             }],
         };
         let s = serde_json::to_string(&result).unwrap();
-        assert_eq!(serde_json::from_str::<BoardsListResult>(&s).unwrap(), result);
+        assert_eq!(
+            serde_json::from_str::<BoardsListResult>(&s).unwrap(),
+            result
+        );
 
         // Omitted fsm_state => None (leave the mapping unchanged).
         let omitted: BoardColumnUpdateParams = serde_json::from_str(
@@ -2541,15 +2547,31 @@ mod tests {
             agent: None,
             squad_id: Some("sq-1".into()),
             member_states: vec![
-                CardMemberChip { agent_id: "a-lead".into(), agent_name: "lead".into(), state: Some("running".into()) },
-                CardMemberChip { agent_id: "a-m1".into(), agent_name: "m1".into(), state: Some("queued".into()) },
+                CardMemberChip {
+                    agent_id: "a-lead".into(),
+                    agent_name: "lead".into(),
+                    state: Some("running".into()),
+                },
+                CardMemberChip {
+                    agent_id: "a-m1".into(),
+                    agent_name: "m1".into(),
+                    state: Some("queued".into()),
+                },
             ],
             blocked_by: vec!["ock-2".into()],
             auto_run: true,
         };
         let s = serde_json::to_string(&squad_card).unwrap();
-        assert_eq!(serde_json::from_str::<BoardCardWireRow>(&s).unwrap(), squad_card);
-        assert!(s.contains("squad_id") && s.contains("member_states") && s.contains("blocked_by") && s.contains("auto_run"));
+        assert_eq!(
+            serde_json::from_str::<BoardCardWireRow>(&s).unwrap(),
+            squad_card
+        );
+        assert!(
+            s.contains("squad_id")
+                && s.contains("member_states")
+                && s.contains("blocked_by")
+                && s.contains("auto_run")
+        );
 
         // A single-agent card leaves every T4 field at its default → the wire omits
         // them all (a pre-T4 reader sees the exact old shape).
@@ -2568,7 +2590,10 @@ mod tests {
         };
         let s = serde_json::to_string(&plain).unwrap();
         for k in ["squad_id", "member_states", "blocked_by", "auto_run"] {
-            assert!(!s.contains(k), "default T4 field {k} must be omitted, got {s}");
+            assert!(
+                !s.contains(k),
+                "default T4 field {k} must be omitted, got {s}"
+            );
         }
 
         // The run result carries the fanned-out member task ids for a squad card.
@@ -2615,10 +2640,9 @@ mod tests {
     /// decodes, defaulting the new fields to None; a parity frame carries them.
     #[test]
     fn board_card_create_params_are_append_only() {
-        let legacy: BoardCardCreateParams = serde_json::from_str(
-            r#"{"workspace_id":"ws-1","board_id":"b1","title":"Fix it"}"#,
-        )
-        .unwrap();
+        let legacy: BoardCardCreateParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","board_id":"b1","title":"Fix it"}"#)
+                .unwrap();
         assert_eq!(legacy.repo_ref, None);
         assert_eq!(legacy.agent, None);
 

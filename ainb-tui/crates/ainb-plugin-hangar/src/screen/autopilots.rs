@@ -122,9 +122,7 @@ impl AutopilotsState {
             glyph: '◷',
             name: "Autopilots".to_string(),
             cards,
-            scroll_offset: self
-                .scroll_offset
-                .min(self.autopilots.len().saturating_sub(1)),
+            scroll_offset: self.scroll_offset.min(self.autopilots.len().saturating_sub(1)),
         }]
     }
 
@@ -156,11 +154,9 @@ impl AutopilotsState {
     /// saturating at `0` and capped at the last card. A wheel-scroll drives this.
     pub fn scroll(&mut self, delta: i32) {
         let next = if delta >= 0 {
-            self.scroll_offset
-                .saturating_add(delta.unsigned_abs() as usize)
+            self.scroll_offset.saturating_add(delta.unsigned_abs() as usize)
         } else {
-            self.scroll_offset
-                .saturating_sub(delta.unsigned_abs() as usize)
+            self.scroll_offset.saturating_sub(delta.unsigned_abs() as usize)
         };
         self.scroll_offset = next.min(self.autopilots.len().saturating_sub(1));
     }
@@ -287,9 +283,7 @@ fn move_selection(state: &AutopilotsState, delta: i32) -> AutopilotsReduction {
     next.selected =
         usize::try_from((cur + delta).clamp(0, i32::try_from(max).unwrap_or(0))).unwrap_or(0);
     // Selection changed → pull the new row's run history.
-    let intent = next
-        .selected_autopilot()
-        .map(|ap| AutopilotsIntent::LoadRuns(ap.id.clone()));
+    let intent = next.selected_autopilot().map(|ap| AutopilotsIntent::LoadRuns(ap.id.clone()));
     AutopilotsReduction {
         state: next,
         intent,
@@ -322,10 +316,7 @@ fn fold_event(state: &AutopilotsState, event: HangarEvent) -> AutopilotsReductio
         }
         HangarEvent::AutopilotRunChanged { autopilot_id, .. } => {
             // Re-pull the run history when the change is for the selected row.
-            if state
-                .selected_autopilot()
-                .is_some_and(|ap| ap.id == autopilot_id)
-            {
+            if state.selected_autopilot().is_some_and(|ap| ap.id == autopilot_id) {
                 with_intent(state.clone(), AutopilotsIntent::LoadRuns(autopilot_id))
             } else {
                 unchanged(state)
@@ -539,9 +530,8 @@ mod tests {
     /// capped at the last card.
     #[test]
     fn scroll_offsets_and_saturates() {
-        let aps: Vec<AutopilotRow> = (0..4)
-            .map(|i| autopilot(&format!("ap-{i}"), &format!("n{i}"), true))
-            .collect();
+        let aps: Vec<AutopilotRow> =
+            (0..4).map(|i| autopilot(&format!("ap-{i}"), &format!("n{i}"), true)).collect();
         let mut state = AutopilotsState::new(aps);
         state.scroll(1);
         state.scroll(1);

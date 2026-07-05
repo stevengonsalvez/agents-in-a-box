@@ -203,7 +203,10 @@ mod tests {
 
     /// Write `favorites.yaml` + the scan cache into a fresh `.agents-in-a-box`
     /// dir and return it.
-    fn seed_dir(favorites_yaml: Option<&str>, cache_json: Option<&str>) -> (tempfile::TempDir, PathBuf) {
+    fn seed_dir(
+        favorites_yaml: Option<&str>,
+        cache_json: Option<&str>,
+    ) -> (tempfile::TempDir, PathBuf) {
         let tmp = tempfile::tempdir().unwrap();
         let dir = tmp.path().join(".agents-in-a-box");
         fs::create_dir_all(dir.join("cache")).unwrap();

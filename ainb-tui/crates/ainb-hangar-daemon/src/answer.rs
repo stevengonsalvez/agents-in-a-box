@@ -363,7 +363,10 @@ mod tests {
             session("a", "/work/x", SessionSource::Ainb),
             session("b", "/work/x", SessionSource::Ainb),
         ];
-        assert_eq!(resolve_decision(&raw, "hook-sid", "/work/x"), Decision::Refuse);
+        assert_eq!(
+            resolve_decision(&raw, "hook-sid", "/work/x"),
+            Decision::Refuse
+        );
     }
 
     #[test]
@@ -372,7 +375,10 @@ mod tests {
             session("a", "/work/x", SessionSource::Ainb),
             session("a", "/work/x", SessionSource::Peers),
         ];
-        assert_eq!(resolve_decision(&raw, "hook-sid", "/work/x"), Decision::Refuse);
+        assert_eq!(
+            resolve_decision(&raw, "hook-sid", "/work/x"),
+            Decision::Refuse
+        );
     }
 
     /// Plant a transcript `<name>` under a UNIQUE cwd's `~/.claude/projects`
@@ -409,7 +415,10 @@ mod tests {
         // The captured transcript IS the newest in the cwd → the raiser owns it.
         assert!(transcript_still_owns_cwd(&fx.cwd, file.to_str().unwrap()));
         // A stale/never-there transcript name → not owning.
-        assert!(!transcript_still_owns_cwd(&fx.cwd, "/anywhere/session-gone.jsonl"));
+        assert!(!transcript_still_owns_cwd(
+            &fx.cwd,
+            "/anywhere/session-gone.jsonl"
+        ));
     }
 
     #[test]
@@ -426,13 +435,19 @@ mod tests {
             "a newer session in the cwd means the original no longer owns it"
         );
         // The newcomer (had it been the raiser) would own it.
-        assert!(transcript_still_owns_cwd(&fx.cwd, newcomer.to_str().unwrap()));
+        assert!(transcript_still_owns_cwd(
+            &fx.cwd,
+            newcomer.to_str().unwrap()
+        ));
     }
 
     #[test]
     fn no_session_in_cwd_is_no_match_not_refuse() {
         let raw = vec![session("a", "/other", SessionSource::Ainb)];
-        assert_eq!(resolve_decision(&raw, "hook-sid", "/work/x"), Decision::NoMatch);
+        assert_eq!(
+            resolve_decision(&raw, "hook-sid", "/work/x"),
+            Decision::NoMatch
+        );
     }
 
     #[test]
@@ -542,10 +557,15 @@ mod tests {
         let row = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
 
         // The send failed → compensate.
-        reopen_on_failed_delivery(store.pool(), &sink, &row, &params, 5000).await.unwrap();
+        reopen_on_failed_delivery(store.pool(), &sink, &row, &params, 5000)
+            .await
+            .unwrap();
 
         let after = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
-        assert_eq!(after.state, "open", "a failed delivery must not strand the row");
+        assert_eq!(
+            after.state, "open",
+            "a failed delivery must not strand the row"
+        );
         assert!(after.answered_by.is_none());
         // A later, live re-answer is therefore possible (row is open again).
         assert_eq!(
@@ -563,9 +583,19 @@ mod tests {
         // be claimed — an undeliverable answer leaves it answerable later.
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        let nonce = format!("{}-{}", std::process::id(), chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0));
+        let nonce = format!(
+            "{}-{}",
+            std::process::id(),
+            chrono::Utc::now().timestamp_nanos_opt().unwrap_or(0)
+        );
         let cwd = format!("/no/such/cwd/{nonce}");
-        seed_ws_and_open_row(store.pool(), "a1", &format!("no-such-session-{nonce}"), &cwd).await;
+        seed_ws_and_open_row(
+            store.pool(),
+            "a1",
+            &format!("no-such-session-{nonce}"),
+            &cwd,
+        )
+        .await;
 
         let (_b, sink) = broker_sink();
         let params = AnswerParams {
@@ -581,6 +611,9 @@ mod tests {
         );
         // The row is still open — we never claimed an undeliverable answer.
         let row = AttentionRepo::get(store.pool(), "a1").await.unwrap().unwrap();
-        assert_eq!(row.state, "open", "an unresolved answer leaves the row open");
+        assert_eq!(
+            row.state, "open",
+            "an unresolved answer leaves the row open"
+        );
     }
 }

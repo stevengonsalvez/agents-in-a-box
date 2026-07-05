@@ -347,8 +347,7 @@ impl IssueListState {
 
     /// Iterate the visible rows that fall into `column`, in daemon order.
     pub fn rows_in_column(&self, column: IssueColumn) -> impl Iterator<Item = &IssueRow> {
-        self.visible_rows()
-            .filter(move |r| IssueColumn::for_state(&r.state) == column)
+        self.visible_rows().filter(move |r| IssueColumn::for_state(&r.state) == column)
     }
 
     /// Count of visible rows in `column` (for the `Todo (12)` header suffix).
@@ -434,10 +433,7 @@ impl IssueListState {
     /// hover highlight resolvers (63l.4).
     fn board_position_of(&self, id: &str) -> Option<(usize, usize)> {
         for (col_idx, column) in IssueColumn::all().into_iter().enumerate() {
-            if let Some(card_idx) = self
-                .rows_in_column(column)
-                .position(|r| r.id.as_str() == id)
-            {
+            if let Some(card_idx) = self.rows_in_column(column).position(|r| r.id.as_str() == id) {
                 return Some((col_idx, card_idx));
             }
         }
@@ -792,8 +788,7 @@ fn fold_event(state: &IssueListState, event: HangarEvent) -> IssueListReduction 
         } => {
             // Remember which issue this task belongs to so a later TaskStarted
             // (which carries only the task id) can promote the right issue.
-            next.task_issue
-                .insert(task_id.as_str().to_string(), issue_id);
+            next.task_issue.insert(task_id.as_str().to_string(), issue_id);
         }
         HangarEvent::TaskStarted { task_id, .. } => {
             if let Some(issue_id) = next.task_issue.get(task_id.as_str()).cloned() {
@@ -876,10 +871,7 @@ pub fn render_issue_list(
     // Filter-chip bar on the first body row, reusing the shared widget so the
     // chips render identically here and on the skill manager (P4.6).
     let chip_labels: Vec<&str> = FilterChip::all().iter().map(|c| c.label()).collect();
-    let active_chip = FilterChip::all()
-        .iter()
-        .position(|c| *c == state.filter)
-        .unwrap_or(0);
+    let active_chip = FilterChip::all().iter().position(|c| *c == state.filter).unwrap_or(0);
     crate::widgets::filter_chip::render_chip_bar(buf, top, area_w, &chip_labels, active_chip);
     // Working-agents avatar stack, right-aligned on the same chip row.
     crate::widgets::working_chip::render_working_chip(buf, top, area_w, working_count);
@@ -1158,9 +1150,7 @@ mod tests {
     /// board columns so the render skips the scrolled-off cards.
     #[test]
     fn scroll_column_offsets_board_and_saturates() {
-        let rows: Vec<IssueRow> = (0..4)
-            .map(|i| row(&format!("t{i}"), "todo", None))
-            .collect();
+        let rows: Vec<IssueRow> = (0..4).map(|i| row(&format!("t{i}"), "todo", None)).collect();
         let mut s = IssueListState::with_rows(rows);
 
         // Scroll the Todo column down twice → offset 2.
@@ -1195,45 +1185,30 @@ mod tests {
             row("p0", "in_progress", None),
         ]);
         // Todo order starts t0, t1, t2.
-        let order: Vec<&str> = s
-            .rows_in_column(IssueColumn::Todo)
-            .map(|r| r.id.as_str())
-            .collect();
+        let order: Vec<&str> = s.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str()).collect();
         assert_eq!(order, vec!["t0", "t1", "t2"]);
 
         // Drag t0 to slot 2 (the bottom of the Todo column) — a downward move.
         s.reorder_within_column("t0", 2);
-        let order: Vec<&str> = s
-            .rows_in_column(IssueColumn::Todo)
-            .map(|r| r.id.as_str())
-            .collect();
+        let order: Vec<&str> = s.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str()).collect();
         assert_eq!(order, vec!["t1", "t2", "t0"], "t0 reseats to the bottom");
 
         // Drag t0 back to slot 0 (the top) — an upward move.
         s.reorder_within_column("t0", 0);
-        let order: Vec<&str> = s
-            .rows_in_column(IssueColumn::Todo)
-            .map(|r| r.id.as_str())
-            .collect();
+        let order: Vec<&str> = s.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str()).collect();
         assert_eq!(order, vec!["t0", "t1", "t2"], "t0 reseats back to the top");
 
         // The In Progress column is untouched.
-        let prog: Vec<&str> = s
-            .rows_in_column(IssueColumn::InProgress)
-            .map(|r| r.id.as_str())
-            .collect();
+        let prog: Vec<&str> =
+            s.rows_in_column(IssueColumn::InProgress).map(|r| r.id.as_str()).collect();
         assert_eq!(prog, vec!["p0"]);
 
         // A reorder of an unknown id is a no-op.
-        let before: Vec<String> = s
-            .rows_in_column(IssueColumn::Todo)
-            .map(|r| r.id.as_str().to_string())
-            .collect();
+        let before: Vec<String> =
+            s.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str().to_string()).collect();
         s.reorder_within_column("ghost", 0);
-        let after: Vec<String> = s
-            .rows_in_column(IssueColumn::Todo)
-            .map(|r| r.id.as_str().to_string())
-            .collect();
+        let after: Vec<String> =
+            s.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str().to_string()).collect();
         assert_eq!(before, after);
     }
 

@@ -17,9 +17,9 @@
 //!     are each verifiable on their own.
 
 use ainb_hangar_proto::settings::{
-    ClaimCache, DaemonHealthSnapshot, RuntimeHealthRow, ThroughputSample, THROUGHPUT_WINDOW,
+    ClaimCache, DaemonHealthSnapshot, RuntimeHealthRow, THROUGHPUT_WINDOW, ThroughputSample,
 };
-use ainb_plugin_hangar::screen::daemon_health::{render_daemon_health, DaemonHealthState};
+use ainb_plugin_hangar::screen::daemon_health::{DaemonHealthState, render_daemon_health};
 use ainb_plugin_hangar::widgets::sparkline_dual::{SPARK_GREEN, SPARK_RED};
 use ainb_plugin_sdk::WireBuffer;
 
@@ -126,12 +126,7 @@ fn sparkline_has_60_columns() {
     let mut cols: Vec<u16> = buf
         .cells
         .iter()
-        .filter(|(_, cell)| {
-            cell.symbol
-                .chars()
-                .next()
-                .is_some_and(|c| spark_glyphs.contains(&c))
-        })
+        .filter(|(_, cell)| cell.symbol.chars().next().is_some_and(|c| spark_glyphs.contains(&c)))
         .map(|(coord, _)| coord.x)
         .collect();
     cols.sort_unstable();
@@ -161,11 +156,7 @@ fn sparkline_heights_monotone_over_completed() {
             .iter()
             .filter(|(coord, cell)| {
                 coord.x == x
-                    && cell
-                        .symbol
-                        .chars()
-                        .next()
-                        .is_some_and(|c| spark_glyphs.contains(&c))
+                    && cell.symbol.chars().next().is_some_and(|c| spark_glyphs.contains(&c))
             })
             .count()
     };
@@ -190,11 +181,8 @@ fn sparkline_spike_band_is_red() {
     let mut buf = WireBuffer::new(70, 20);
     render_daemon_health(&mut buf, 70, 0, 20, &state);
 
-    let red_at = |x: u16| {
-        buf.cells
-            .iter()
-            .any(|(coord, cell)| coord.x == x && cell.fg == Some(SPARK_RED))
-    };
+    let red_at =
+        |x: u16| buf.cells.iter().any(|(coord, cell)| coord.x == x && cell.fg == Some(SPARK_RED));
     let green_at = |x: u16| {
         buf.cells
             .iter()

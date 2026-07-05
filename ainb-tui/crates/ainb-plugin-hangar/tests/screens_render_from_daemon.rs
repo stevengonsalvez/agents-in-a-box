@@ -15,7 +15,7 @@
 
 use std::time::Duration;
 
-use ainb_hangar_proto::{methods as daemon_methods, RpcRequest, RpcResponse};
+use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
     HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind,
@@ -142,10 +142,7 @@ fn chrome_text(render_resp: &serde_json::Value) -> String {
     render_resp["result"]["buffer"]["cells"]
         .as_array()
         .map(|cells| {
-            cells
-                .iter()
-                .map(|c| c[1]["symbol"].as_str().unwrap_or(""))
-                .collect::<String>()
+            cells.iter().map(|c| c[1]["symbol"].as_str().unwrap_or("")).collect::<String>()
         })
         .unwrap_or_default()
 }
@@ -373,9 +370,7 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         let mut daemon_reader = BufReader::new(daemon_read);
 
         // Subscribe ack → arms snapshot fetch.
-        let ack = read_one_raw_frame(&mut daemon_reader)
-            .await
-            .expect("subscribe ack");
+        let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
         push_data(&mut host_write, &stream_id, &ack).await;
 
         // Pump the four snapshot requests + replies.
@@ -409,9 +404,7 @@ async fn issue_list_renders_seeded_rows_then_tab_to_skills() {
         server.abort();
     };
 
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded e2e budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded e2e budget");
 }
 
 /// Relay one reverse `unix_socket_send` (the plugin firing a daemon RPC) to the
@@ -486,9 +479,7 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
         let mut daemon_reader = BufReader::new(daemon_read);
 
         // Subscribe ack → arms snapshot fetch.
-        let ack = read_one_raw_frame(&mut daemon_reader)
-            .await
-            .expect("subscribe ack");
+        let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
         push_data(&mut host_write, &stream_id, &ack).await;
         pump_snapshots(
             &mut host_write,
@@ -516,12 +507,7 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
                 &stream_id,
             )
             .await;
-            if seen
-                .lock()
-                .unwrap()
-                .iter()
-                .any(|m| m == daemon_methods::HANGAR_SKILLS_SYNC)
-            {
+            if seen.lock().unwrap().iter().any(|m| m == daemon_methods::HANGAR_SKILLS_SYNC) {
                 sent = true;
                 break;
             }
@@ -537,7 +523,5 @@ async fn skill_screen_s_invokes_skills_sync_rpc() {
         server.abort();
     };
 
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded sync-rpc budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded sync-rpc budget");
 }

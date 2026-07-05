@@ -8,7 +8,7 @@
 use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
 use ainb_hangar_proto::events::{HangarEvent, MessageKind, TaskResult};
 use ainb_plugin_hangar::screen::banner_state::{
-    reduce_banner, BannerEvent, BannerIntent, BannerState,
+    BannerEvent, BannerIntent, BannerState, reduce_banner,
 };
 use ainb_plugin_sdk::WireBuffer;
 use chrono::{TimeZone, Utc};

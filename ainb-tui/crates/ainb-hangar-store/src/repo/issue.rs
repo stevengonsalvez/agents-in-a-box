@@ -600,21 +600,30 @@ mod tests {
         seed_issue(pool, "ws-a", "issue-1", "Old title", Some("body"), 1).await;
 
         // A title-only edit is NOT empty (would previously short-circuit).
-        let update = IssueFieldUpdate { title: Some("New title".into()), ..Default::default() };
+        let update = IssueFieldUpdate {
+            title: Some("New title".into()),
+            ..Default::default()
+        };
         assert!(!update.is_empty(), "a title edit must write");
         let touched = IssueRepo::update_fields(pool, "ws-a", "issue-1", &update).await.unwrap();
         assert!(touched, "one row updated");
 
         let issue = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
         assert_eq!(issue.title, "New title", "title rewritten");
-        assert_eq!(issue.description.as_deref(), Some("body"), "other columns untouched");
+        assert_eq!(
+            issue.description.as_deref(),
+            Some("body"),
+            "other columns untouched"
+        );
 
         // A cross-tenant edit (right id, wrong workspace) touches no row.
-        let cross =
-            IssueRepo::update_fields(pool, "ws-b", "issue-1", &update).await.unwrap();
+        let cross = IssueRepo::update_fields(pool, "ws-b", "issue-1", &update).await.unwrap();
         assert!(!cross, "a foreign-workspace title edit must miss");
         let unchanged = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
-        assert_eq!(unchanged.title, "New title", "foreign-tenant edit left the title");
+        assert_eq!(
+            unchanged.title, "New title",
+            "foreign-tenant edit left the title"
+        );
     }
 
     /// A title hit outranks a description hit outranks a comment-only hit; a

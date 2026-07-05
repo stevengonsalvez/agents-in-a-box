@@ -121,10 +121,7 @@ impl AtcInstanceRepo {
     ///
     /// Returns a [`sqlx::Error`] if the query fails.
     pub async fn get(pool: &SqlitePool, name: &str) -> Result<Option<AtcInstanceRow>, sqlx::Error> {
-        let row = sqlx::query(SELECT_INSTANCE_COLS)
-            .bind(name)
-            .fetch_optional(pool)
-            .await?;
+        let row = sqlx::query(SELECT_INSTANCE_COLS).bind(name).fetch_optional(pool).await?;
         Ok(row.as_ref().map(instance_from_sqlite))
     }
 
@@ -324,8 +321,7 @@ impl AtcInstanceRepo {
 }
 
 /// The single-instance select column list, shared by `get` (needs the `WHERE`).
-const SELECT_INSTANCE_COLS: &str =
-    "SELECT name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
+const SELECT_INSTANCE_COLS: &str = "SELECT name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
             next_tick_at, enabled, last_heartbeat_at, created_at \
      FROM atc_instance WHERE name = ?";
 
@@ -408,28 +404,48 @@ mod tests {
         let got = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
         assert!(got.enabled, "re-register re-enables");
         assert_eq!(got.heartbeat_cron, "*/5 * * * *", "config refreshed");
-        assert_eq!(got.created_at, 1000, "created_at preserved across re-register");
-        assert_eq!(AtcInstanceRepo::list(store.pool()).await.unwrap().len(), 1, "no duplicate row");
+        assert_eq!(
+            got.created_at, 1000,
+            "created_at preserved across re-register"
+        );
+        assert_eq!(
+            AtcInstanceRepo::list(store.pool()).await.unwrap().len(),
+            1,
+            "no duplicate row"
+        );
     }
 
     #[tokio::test]
     async fn schedulable_excludes_disabled_and_unscheduled() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        AtcInstanceRepo::register(store.pool(), &reg("a", "* * * * *", Some(3000)), 1).await.unwrap();
-        AtcInstanceRepo::register(store.pool(), &reg("b", "* * * * *", Some(1000)), 1).await.unwrap();
-        AtcInstanceRepo::register(store.pool(), &reg("c", "* * * * *", None), 1).await.unwrap();
-        AtcInstanceRepo::set_enabled(store.pool(), "a", false, Some(3000)).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("a", "* * * * *", Some(3000)), 1)
+            .await
+            .unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("b", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("c", "* * * * *", None), 1)
+            .await
+            .unwrap();
+        AtcInstanceRepo::set_enabled(store.pool(), "a", false, Some(3000))
+            .await
+            .unwrap();
         let sched = AtcInstanceRepo::list_schedulable(store.pool()).await.unwrap();
         // `a` is disabled, `c` has no next_tick → only `b`, and earliest-first.
-        assert_eq!(sched.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(), ["b"]);
+        assert_eq!(
+            sched.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
+            ["b"]
+        );
     }
 
     #[tokio::test]
     async fn retry_ledger_records_and_resets() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1)), 1).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1)), 1)
+            .await
+            .unwrap();
         assert_eq!(
             AtcInstanceRepo::record_continue(store.pool(), "main", "s1", 100).await.unwrap(),
             1
@@ -451,7 +467,9 @@ mod tests {
     async fn mark_heartbeat_and_reschedule() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1000)), 1).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
         AtcInstanceRepo::mark_heartbeat(store.pool(), "main", 5000).await.unwrap();
         AtcInstanceRepo::set_next_tick(store.pool(), "main", Some(6000)).await.unwrap();
         let got = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();

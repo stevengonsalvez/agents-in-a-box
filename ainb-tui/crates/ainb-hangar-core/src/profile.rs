@@ -393,9 +393,7 @@ fn split_frontmatter(text: &str) -> Result<(&str, &str), ProfileParseError> {
 /// Normalise a body: strip a single leading newline (the gap after the closing
 /// fence) and any trailing whitespace-only tail, so round-trips are stable.
 fn normalise_body(body: &str) -> String {
-    body.trim_matches(|c| c == '\n' || c == '\r')
-        .trim_end()
-        .to_string()
+    body.trim_matches(|c| c == '\n' || c == '\r').trim_end().to_string()
 }
 
 /// Split a comma-separated `tools:` value into trimmed, non-empty entries.
@@ -538,7 +536,10 @@ Check the diff line by line.\n";
     fn compile_codex_is_lossy_with_warnings_golden() {
         let m = ProfileMaster::parse("code-reviewer", SAMPLE).unwrap();
         let out = m.compile_codex();
-        assert_eq!(out.config_fragment, "[profiles.code-reviewer]\nmodel = \"gpt-5\"\n");
+        assert_eq!(
+            out.config_fragment,
+            "[profiles.code-reviewer]\nmodel = \"gpt-5\"\n"
+        );
         assert_eq!(out.prompt_filename, "code-reviewer.md");
         assert_eq!(
             out.prompt_contents,
@@ -558,7 +559,10 @@ Check the diff line by line.\n";
         let m = ProfileMaster::parse("plain", text).unwrap();
         let out = m.compile_codex();
         assert!(out.warnings.is_empty());
-        assert_eq!(out.config_fragment, "[profiles.plain]\nmodel = \"gpt-5-mini\"\n");
+        assert_eq!(
+            out.config_fragment,
+            "[profiles.plain]\nmodel = \"gpt-5-mini\"\n"
+        );
     }
 
     #[test]

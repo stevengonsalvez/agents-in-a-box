@@ -241,7 +241,10 @@ mod tests {
         assert_eq!(store["sessions"]["tmux_other"]["agent_type"], "Codex");
         assert_eq!(store["sessions"]["tmux_other"]["headroom_enabled"], true);
         // Our entry landed alongside it.
-        assert_eq!(store["sessions"]["tmux_hangar-new"]["workspace_name"], "proj");
+        assert_eq!(
+            store["sessions"]["tmux_hangar-new"]["workspace_name"],
+            "proj"
+        );
     }
 
     #[test]
@@ -254,7 +257,11 @@ mod tests {
         register_session_at(&path, &b).unwrap();
 
         let store = read(&path);
-        assert_eq!(store["sessions"].as_object().unwrap().len(), 1, "same key upserts");
+        assert_eq!(
+            store["sessions"].as_object().unwrap().len(),
+            1,
+            "same key upserts"
+        );
         assert_eq!(store["sessions"]["tmux_hangar-x"]["workspace_name"], "wsB");
     }
 

@@ -359,9 +359,8 @@ impl SquadAssignService {
         let Some(repo_ref) = request.repo_ref else {
             return Ok(());
         };
-        let agent_kind = request
-            .agent_kind
-            .unwrap_or(ainb_hangar_core::agent_kind::AgentKind::DEFAULT);
+        let agent_kind =
+            request.agent_kind.unwrap_or(ainb_hangar_core::agent_kind::AgentKind::DEFAULT);
         crate::repo::card_parity::CardParityRepo::set_task_repo_agent_in_tx(
             tx,
             task_id,

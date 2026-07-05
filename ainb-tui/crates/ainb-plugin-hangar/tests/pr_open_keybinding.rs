@@ -9,7 +9,7 @@
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::ids::{IssueId, TaskId};
 use ainb_hangar_proto::events::IssueRow;
-use ainb_plugin_hangar::screen::{route_key, AppState, NavIntent, Screen, ScreenStates};
+use ainb_plugin_hangar::screen::{AppState, NavIntent, Screen, ScreenStates, route_key};
 use ainb_plugin_protocol::params::{KeyCode, KeyEvent, KeyKind};
 
 const fn key(ch: char) -> KeyEvent {

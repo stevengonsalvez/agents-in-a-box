@@ -124,7 +124,10 @@ pub fn resolve_reply(
             answer: intent.answer.clone(),
         },
         n => ReplyRoute::Ambiguous {
-            reason: format!("{n} open requests in {} — cannot safely route the answer", target.cwd),
+            reason: format!(
+                "{n} open requests in {} — cannot safely route the answer",
+                target.cwd
+            ),
         },
     }
 }
@@ -157,10 +160,16 @@ mod tests {
     fn strips_reply_keyword_variants() {
         assert_eq!(strip_reply_keyword("reply 2"), "2");
         assert_eq!(strip_reply_keyword("REPLY: yes"), "yes");
-        assert_eq!(strip_reply_keyword("  reply   later please "), "later please");
+        assert_eq!(
+            strip_reply_keyword("  reply   later please "),
+            "later please"
+        );
         // Not the keyword — free-text answers pass through untouched.
         assert_eq!(strip_reply_keyword("yes do it"), "yes do it");
-        assert_eq!(strip_reply_keyword("replying to your point"), "replying to your point");
+        assert_eq!(
+            strip_reply_keyword("replying to your point"),
+            "replying to your point"
+        );
     }
 
     // ── intent parsing ─────────────────────────────────────────────────────
@@ -233,10 +242,7 @@ mod tests {
     #[test]
     fn two_open_rows_in_cwd_is_ambiguous_and_refused() {
         let sessions = vec![sess("backend", "/w/b", "hook-differs")];
-        let rows = vec![
-            row("att-1", "sid-1", "/w/b"),
-            row("att-2", "sid-2", "/w/b"),
-        ];
+        let rows = vec![row("att-1", "sid-1", "/w/b"), row("att-2", "sid-2", "/w/b")];
         let intent = ReplyIntent {
             target: Some("backend".into()),
             answer: "2".into(),

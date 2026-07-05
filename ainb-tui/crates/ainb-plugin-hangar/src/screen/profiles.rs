@@ -414,7 +414,14 @@ fn render_detail(
     let Some(detail) = &state.detail else {
         // Selection made, detail still fetching.
         let slug = state.selected_slug().unwrap_or("");
-        put_str(buf, x, row, &format!("{slug} · loading…"), MUTED_GRAY, right);
+        put_str(
+            buf,
+            x,
+            row,
+            &format!("{slug} · loading…"),
+            MUTED_GRAY,
+            right,
+        );
         return;
     };
 
@@ -530,11 +537,7 @@ fn put_line(
 
 /// Advance one blank row (bounded by `bottom`).
 fn blank(row: u16, bottom: u16) -> u16 {
-    if row > bottom {
-        row
-    } else {
-        row + 1
-    }
+    if row > bottom { row } else { row + 1 }
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at `right`. Returns the next free
@@ -578,9 +581,18 @@ mod tests {
 
     fn roster3() -> Vec<ProfileRosterEntry> {
         vec![
-            ProfileRosterEntry { slug: "author".into(), tier: "balanced".into() },
-            ProfileRosterEntry { slug: "code-reviewer".into(), tier: "premium".into() },
-            ProfileRosterEntry { slug: "docs-writer".into(), tier: "fast".into() },
+            ProfileRosterEntry {
+                slug: "author".into(),
+                tier: "balanced".into(),
+            },
+            ProfileRosterEntry {
+                slug: "code-reviewer".into(),
+                tier: "premium".into(),
+            },
+            ProfileRosterEntry {
+                slug: "docs-writer".into(),
+                tier: "fast".into(),
+            },
         ]
     }
 
@@ -588,7 +600,10 @@ mod tests {
     fn set_roster_clamps_selection_and_clears_stale_detail() {
         let mut s = ProfilesState::default();
         s.set_roster(roster3());
-        s.set_detail(ProfileDetailView { slug: "author".into(), ..Default::default() });
+        s.set_detail(ProfileDetailView {
+            slug: "author".into(),
+            ..Default::default()
+        });
         assert_eq!(s.selected(), 0);
         // Shrinking the roster below the selection clamps it and clears detail.
         s.selected = 2;
@@ -600,8 +615,14 @@ mod tests {
     fn set_detail_ignored_for_non_selected_slug() {
         let mut s = ProfilesState::default();
         s.set_roster(roster3()); // selected = author
-        s.set_detail(ProfileDetailView { slug: "docs-writer".into(), ..Default::default() });
-        assert!(s.detail.is_none(), "stale detail for a non-selected row is dropped");
+        s.set_detail(ProfileDetailView {
+            slug: "docs-writer".into(),
+            ..Default::default()
+        });
+        assert!(
+            s.detail.is_none(),
+            "stale detail for a non-selected row is dropped"
+        );
     }
 
     #[test]
@@ -631,13 +652,19 @@ mod tests {
         s.set_roster(roster3()); // author = balanced
         // Detail must be loaded for a tier cycle to persist (a partial upsert
         // would wipe the master), so load it before pressing `t`.
-        s.set_detail(ProfileDetailView { slug: "author".into(), ..Default::default() });
+        s.set_detail(ProfileDetailView {
+            slug: "author".into(),
+            ..Default::default()
+        });
         let out = reduce_profiles(&s, ProfilesEvent::Key('t'));
         // balanced → fast, reflected optimistically + persisted.
         assert_eq!(out.state.roster[0].tier, "fast");
         assert_eq!(
             out.intent,
-            Some(ProfilesIntent::CycleTier { slug: "author".into(), tier: "fast".into() })
+            Some(ProfilesIntent::CycleTier {
+                slug: "author".into(),
+                tier: "fast".into()
+            })
         );
     }
 
@@ -667,7 +694,10 @@ mod tests {
         assert_eq!(s.needs_detail(), None, "empty roster needs nothing");
         s.set_roster(roster3()); // selected = author, no detail
         assert_eq!(s.needs_detail(), Some("author".to_string()));
-        s.set_detail(ProfileDetailView { slug: "author".into(), ..Default::default() });
+        s.set_detail(ProfileDetailView {
+            slug: "author".into(),
+            ..Default::default()
+        });
         assert_eq!(s.needs_detail(), None, "loaded selection needs nothing");
     }
 

@@ -57,8 +57,7 @@ const AUTOPILOT_CRON: &str = "0 9 * * *";
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let home =
-        PathBuf::from(args.next().expect("usage: seed_autopilot_fire <HOME> <DAEMON_BIN>"));
+    let home = PathBuf::from(args.next().expect("usage: seed_autopilot_fire <HOME> <DAEMON_BIN>"));
     let daemon_bin =
         PathBuf::from(args.next().expect("usage: seed_autopilot_fire <HOME> <DAEMON_BIN>"));
 
@@ -132,7 +131,11 @@ fn main() {
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(socket.exists(), "daemon never bound its socket at {}", socket.display());
+    assert!(
+        socket.exists(),
+        "daemon never bound its socket at {}",
+        socket.display()
+    );
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());

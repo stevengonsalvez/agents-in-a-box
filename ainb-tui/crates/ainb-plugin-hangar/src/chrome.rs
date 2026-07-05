@@ -411,7 +411,7 @@ mod tests {
     /// land on the wrong screen (or no screen) and fail here.
     #[test]
     fn numbered_tab_keys_select_their_labelled_screen() {
-        use crate::screen::{reduce, AppEvent, AppState, Screen as RouteScreen};
+        use crate::screen::{AppEvent, AppState, Screen as RouteScreen, reduce};
         use ainb_hangar_core::ids::{TaskId, WorkspaceId};
 
         let mut buf = WireBuffer::new(120, 24);
@@ -439,10 +439,7 @@ mod tests {
     /// Pull the digit hotkeys out of a rendered tab row in display order. A tab is
     /// `[N]Label`; this finds every `[<digit>]` and returns the digit values.
     fn numbered_hotkeys(row: &str) -> Vec<u32> {
-        numbered_tabs_with_labels(row)
-            .into_iter()
-            .map(|(d, _)| d)
-            .collect()
+        numbered_tabs_with_labels(row).into_iter().map(|(d, _)| d).collect()
     }
 
     /// Pull `(digit, label)` pairs out of a rendered tab row in display order,

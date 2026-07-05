@@ -485,7 +485,11 @@ mod tests {
         SquadRepo::add_member(pool, &ws("ws-a"), "s1", &member("u-1")).await.unwrap();
 
         let ids = SquadRepo::member_agent_ids(pool, &ws("ws-a"), "s1").await.unwrap();
-        assert_eq!(ids, vec!["a-1".to_string(), "a-2".to_string()], "agent-only, ordered");
+        assert_eq!(
+            ids,
+            vec!["a-1".to_string(), "a-2".to_string()],
+            "agent-only, ordered"
+        );
 
         // A foreign tenant resolves to an empty list (tenant guard).
         seed_ws(pool, "ws-b").await;

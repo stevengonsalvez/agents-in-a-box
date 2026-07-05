@@ -14,7 +14,8 @@ fn home_helper_redirects_db_to_tempdir() {
     // before the open — capture that the redirect, not a stale file, is what we
     // observe. Also snapshot whether the real `$HOME/.agents-in-a-box/hangar.db` exists so
     // the negative control can prove the open did not freshly create it.
-    let real_home_db = dirs::home_dir().expect("home dir").join(".agents-in-a-box").join("hangar.db");
+    let real_home_db =
+        dirs::home_dir().expect("home dir").join(".agents-in-a-box").join("hangar.db");
     let real_home_db_existed_before = real_home_db.exists();
 
     with_isolated_home(|home| {

@@ -7,7 +7,7 @@
 
 use ainb_hangar_proto::events::{AutopilotRow, HangarEvent};
 use ainb_plugin_hangar::screen::autopilots::{
-    reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsState,
+    AutopilotsEvent, AutopilotsIntent, AutopilotsState, reduce_autopilots,
 };
 
 fn autopilot(id: &str, name: &str, enabled: bool) -> AutopilotRow {
@@ -111,12 +111,7 @@ fn event_autopilot_updated_refreshes_row() {
         &s,
         AutopilotsEvent::Event(HangarEvent::AutopilotUpdated(updated)),
     );
-    let row = out
-        .state
-        .autopilots()
-        .iter()
-        .find(|a| a.id == "ap-1")
-        .unwrap();
+    let row = out.state.autopilots().iter().find(|a| a.id == "ap-1").unwrap();
     assert!(
         !row.enabled,
         "the updated row's enabled flag must be folded in"

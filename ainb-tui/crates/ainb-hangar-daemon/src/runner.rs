@@ -69,7 +69,10 @@ impl RunLocation {
     /// root (the workdir is already under the sandbox's write base).
     #[must_use]
     pub fn in_task_tree(env: &ExecEnv) -> Self {
-        Self { cwd: env.workdir.clone(), extra_root: None }
+        Self {
+            cwd: env.workdir.clone(),
+            extra_root: None,
+        }
     }
 }
 
@@ -532,8 +535,14 @@ impl Runner {
         I: IntoIterator<Item = (String, String)>,
         E: IntoIterator<Item = (String, String)>,
     {
-        self.run_codex_in(env, source_env, extra_env, invocation, &RunLocation::in_task_tree(env))
-            .await
+        self.run_codex_in(
+            env,
+            source_env,
+            extra_env,
+            invocation,
+            &RunLocation::in_task_tree(env),
+        )
+        .await
     }
 
     /// [`Self::run_codex_with_env`], but executing in an explicit [`RunLocation`]
@@ -555,7 +564,15 @@ impl Runner {
         E: IntoIterator<Item = (String, String)>,
     {
         let spec = Self::codex_spec(invocation);
-        self.run_provider(&self.cfg.codex_path, env, source_env, extra_env, spec, location).await
+        self.run_provider(
+            &self.cfg.codex_path,
+            env,
+            source_env,
+            extra_env,
+            spec,
+            location,
+        )
+        .await
     }
 
     /// The program path + argv for a provider run, WITHOUT spawning it (ccc / D6).
@@ -573,7 +590,10 @@ impl Runner {
     ) -> (PathBuf, Vec<String>) {
         match backend {
             Backend::Claude => (self.cfg.claude_path.clone(), Self::claude_spec().argv),
-            Backend::Codex => (self.cfg.codex_path.clone(), Self::codex_spec(invocation).argv),
+            Backend::Codex => (
+                self.cfg.codex_path.clone(),
+                Self::codex_spec(invocation).argv,
+            ),
         }
     }
 
@@ -916,7 +936,10 @@ mod tests {
             std::iter::empty(),
         );
         assert!(child.contains(&pair("HOME", "/h")));
-        assert!(child.iter().all(|(k, _)| k != "SECRET_KEY"), "secret filtered");
+        assert!(
+            child.iter().all(|(k, _)| k != "SECRET_KEY"),
+            "secret filtered"
+        );
     }
 
     #[test]
@@ -938,7 +961,10 @@ mod tests {
                 ainb_fleet_core::session_registry::PARENT_ENV,
                 "hangar-daemon",
             )],
-            vec![pair(ainb_fleet_core::session_registry::PARENT_ENV, "agent-hijack")],
+            vec![pair(
+                ainb_fleet_core::session_registry::PARENT_ENV,
+                "agent-hijack",
+            )],
         );
         let parent: Vec<&String> = child
             .iter()

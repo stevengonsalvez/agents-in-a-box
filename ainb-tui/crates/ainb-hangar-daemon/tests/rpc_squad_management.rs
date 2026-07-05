@@ -547,10 +547,21 @@ async fn squad_fanout_rpc_briefs_leader_and_fans_members_claimable_in_parallel()
         "the leader gets the brief: {fanned}"
     );
     let members = fanned["result"]["members"].as_array().unwrap();
-    assert_eq!(members.len(), 2, "two agent members fanned out (human skipped): {fanned}");
-    let member_agents: Vec<&str> = members.iter().map(|m| m["agent_id"].as_str().unwrap()).collect();
-    assert!(member_agents.contains(&"agent-3"), "agent-3 fanned: {fanned}");
-    assert!(member_agents.contains(&"agent-4"), "agent-4 fanned: {fanned}");
+    assert_eq!(
+        members.len(),
+        2,
+        "two agent members fanned out (human skipped): {fanned}"
+    );
+    let member_agents: Vec<&str> =
+        members.iter().map(|m| m["agent_id"].as_str().unwrap()).collect();
+    assert!(
+        member_agents.contains(&"agent-3"),
+        "agent-3 fanned: {fanned}"
+    );
+    assert!(
+        member_agents.contains(&"agent-4"),
+        "agent-4 fanned: {fanned}"
+    );
 
     // PARALLEL CLAIM: every runtime claims its own task on issue-2 at once.
     let clock = FixedClock(10_000);
@@ -563,7 +574,10 @@ async fn squad_fanout_rpc_briefs_leader_and_fans_members_claimable_in_parallel()
             .await
             .unwrap()
             .unwrap_or_else(|| panic!("{runtime} claims its squad task"));
-        assert_eq!(claimed.agent_id, agent, "{runtime} claimed the wrong agent's task");
+        assert_eq!(
+            claimed.agent_id, agent,
+            "{runtime} claimed the wrong agent's task"
+        );
         assert_eq!(
             claimed.issue_id.as_deref(),
             Some("issue-2"),

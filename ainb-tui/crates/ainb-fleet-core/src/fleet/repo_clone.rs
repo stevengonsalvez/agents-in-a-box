@@ -67,10 +67,20 @@ fn sanitized_tail(canonical: &str) -> String {
         .unwrap_or_else(|| canonical.rsplit(['/', ':']).next().unwrap_or("repo"));
     let cleaned: String = raw
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-') {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = cleaned.trim_matches('-');
-    if trimmed.is_empty() { "repo".to_string() } else { trimmed.to_string() }
+    if trimmed.is_empty() {
+        "repo".to_string()
+    } else {
+        trimmed.to_string()
+    }
 }
 
 /// Whether `dir` is a usable git checkout (carries a `.git` entry).
@@ -148,8 +158,13 @@ mod tests {
         let work = root.join(format!("src-{name}"));
         std::fs::create_dir_all(&work).unwrap();
         let git = |args: &[&str]| {
-            let ok =
-                Command::new("git").args(args).current_dir(&work).output().unwrap().status.success();
+            let ok = Command::new("git")
+                .args(args)
+                .current_dir(&work)
+                .output()
+                .unwrap()
+                .status
+                .success();
             assert!(ok, "git {args:?} failed");
         };
         git(&["init", "-q"]);
@@ -173,7 +188,10 @@ mod tests {
 
     #[test]
     fn owner_repo_shorthand_expands_to_github_https() {
-        assert_eq!(canonical_remote("acme/widget"), "https://github.com/acme/widget.git");
+        assert_eq!(
+            canonical_remote("acme/widget"),
+            "https://github.com/acme/widget.git"
+        );
     }
 
     #[test]
@@ -182,8 +200,14 @@ mod tests {
             canonical_remote("https://example.com/x/y.git"),
             "https://example.com/x/y.git"
         );
-        assert_eq!(canonical_remote("git@github.com:x/y.git"), "git@github.com:x/y.git");
-        assert_eq!(canonical_remote("/tmp/local/bare.git"), "/tmp/local/bare.git");
+        assert_eq!(
+            canonical_remote("git@github.com:x/y.git"),
+            "git@github.com:x/y.git"
+        );
+        assert_eq!(
+            canonical_remote("/tmp/local/bare.git"),
+            "/tmp/local/bare.git"
+        );
     }
 
     /// Two DIFFERENT remotes sharing a tail get DISTINCT clone dirs (trap: slug
@@ -210,7 +234,10 @@ mod tests {
         let first = ensure_clone(&ainb, remote_str).unwrap();
         assert_eq!(first, clone_path(&ainb, remote_str));
         assert!(first.join(".git").exists(), "a real checkout landed");
-        assert!(first.join("README.md").exists(), "the remote's content is present");
+        assert!(
+            first.join("README.md").exists(),
+            "the remote's content is present"
+        );
 
         // … a second pick reuses the SAME checkout (idempotent — no error, no
         // re-clone). Drop a marker and confirm it survives.
@@ -218,7 +245,10 @@ mod tests {
         std::fs::write(&marker, "x").unwrap();
         let second = ensure_clone(&ainb, remote_str).unwrap();
         assert_eq!(second, first);
-        assert!(marker.exists(), "existing clone reused as-is, not wiped + re-cloned");
+        assert!(
+            marker.exists(),
+            "existing clone reused as-is, not wiped + re-cloned"
+        );
     }
 
     #[test]
@@ -234,8 +264,14 @@ mod tests {
         std::fs::write(dest.join("garbage.txt"), "junk").unwrap();
 
         let path = ensure_clone(&ainb, remote_str).unwrap();
-        assert!(path.join(".git").exists(), "leftover wiped, clean clone landed");
-        assert!(!path.join("garbage.txt").exists(), "the non-git leftover was removed");
+        assert!(
+            path.join(".git").exists(),
+            "leftover wiped, clean clone landed"
+        );
+        assert!(
+            !path.join("garbage.txt").exists(),
+            "the non-git leftover was removed"
+        );
     }
 
     #[test]

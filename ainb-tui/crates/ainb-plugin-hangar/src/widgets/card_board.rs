@@ -871,10 +871,7 @@ mod tests {
         assert!(painted.contains('┏'), "heavy border corner: {painted}");
         // And painted in clay.
         let clay = CLAY;
-        let heavy_in_clay = buf
-            .cells
-            .iter()
-            .any(|(_, c)| c.symbol == "┏" && c.fg == Some(clay));
+        let heavy_in_clay = buf.cells.iter().any(|(_, c)| c.symbol == "┏" && c.fg == Some(clay));
         assert!(heavy_in_clay, "the heavy border must be painted in clay");
         // The UNSELECTED cards keep the rounded corner.
         assert!(
@@ -988,9 +985,7 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         let layout = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
         for col in &layout.columns {
-            let plus_x = col
-                .create_affordance_x
-                .expect("a wide column paints a + affordance");
+            let plus_x = col.create_affordance_x.expect("a wide column paints a + affordance");
             assert!(
                 plus_x >= col.rect.x && plus_x < col.rect.right(),
                 "the + affordance must sit inside the column rect",
@@ -1085,8 +1080,14 @@ mod tests {
         let plus_x = right - 2;
         let row0 = row_text(&buf, 0, MIN_COL_W);
         let cells: Vec<char> = row0.chars().collect();
-        assert_eq!(cells[ctx_x as usize], '⋯', "the ⋯ affordance paints: {row0:?}");
-        assert_eq!(cells[plus_x as usize], '+', "the + affordance paints: {row0:?}");
+        assert_eq!(
+            cells[ctx_x as usize], '⋯',
+            "the ⋯ affordance paints: {row0:?}"
+        );
+        assert_eq!(
+            cells[plus_x as usize], '+',
+            "the + affordance paints: {row0:?}"
+        );
         // …and the header no longer bleeds THROUGH them: the cell between `⋯` and
         // `+`, and the inset cell past `+`, stay blank. In the garbled original a
         // clipped-but-unbounded header painted characters into exactly these cells
@@ -1102,7 +1103,10 @@ mod tests {
             "the inset past + stays blank: {row0:?}"
         );
         // And the leading title still reads (clipped, not truncated into nothing).
-        assert!(row0.starts_with("◈ Queued"), "clipped header stays legible: {row0:?}");
+        assert!(
+            row0.starts_with("◈ Queued"),
+            "clipped header stays legible: {row0:?}"
+        );
     }
 
     /// A multi-byte title wraps without panicking on a byte split

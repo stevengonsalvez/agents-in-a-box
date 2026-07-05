@@ -585,10 +585,19 @@ mod tests {
     /// Seed the minimal FK chain (workspace / runtime / agent / issue) once so task
     /// rows insert cleanly.
     async fn seed_chain(pool: &SqlitePool, issue_id: &str) {
-        sqlx::query("INSERT OR IGNORE INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, 0)")
-            .bind(WS).bind(WS).bind(WS).execute(pool).await.unwrap();
+        sqlx::query(
+            "INSERT OR IGNORE INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, 0)",
+        )
+        .bind(WS)
+        .bind(WS)
+        .bind(WS)
+        .execute(pool)
+        .await
+        .unwrap();
         sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
-            .execute(pool).await.unwrap();
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT OR IGNORE INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt', ?, 'd','claude','local','online')")
             .bind(WS).execute(pool).await.unwrap();
         sqlx::query("INSERT OR IGNORE INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag', ?, 'A','rt','x','workspace','u')")
@@ -645,7 +654,11 @@ mod tests {
 
         let active = TaskRepo::active_tasks_for_issue(pool, WS, "iss").await.unwrap();
         let ids: Vec<&str> = active.iter().map(|t| t.id.as_str()).collect();
-        assert_eq!(ids, vec!["m2", "m1", "leader"], "the whole active set, newest first; the done task excluded");
+        assert_eq!(
+            ids,
+            vec!["m2", "m1", "leader"],
+            "the whole active set, newest first; the done task excluded"
+        );
     }
 
     /// A foreign-workspace issue id matches no active task (tenant guard).
@@ -655,7 +668,12 @@ mod tests {
         let pool = store.pool();
         seed_chain(pool, "iss").await;
         seed_task(pool, "iss", "t", "running", 1).await;
-        assert!(TaskRepo::active_tasks_for_issue(pool, "other-ws", "iss").await.unwrap().is_empty());
+        assert!(
+            TaskRepo::active_tasks_for_issue(pool, "other-ws", "iss")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// The aggregate is `None` while ANY sibling is still active (the drain gate),
@@ -667,7 +685,10 @@ mod tests {
 
         // No tasks at all → nothing to move on.
         seed_chain(pool, "empty").await;
-        assert_eq!(TaskRepo::issue_aggregate_terminal_state(pool, WS, "empty").await.unwrap(), None);
+        assert_eq!(
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "empty").await.unwrap(),
+            None
+        );
 
         // A squad mid-run: two done, one still running → NOT drained → None. This is
         // the exact fan-out bug: the latest-done sibling must NOT move the card.
@@ -682,10 +703,20 @@ mod tests {
         );
 
         // The last sibling finishes done → all done → aggregate `done`.
-        TaskRepo::transition_status(pool, WS, "c", ainb_hangar_core::task_status::TaskStatus::Done, 4)
-            .await.unwrap();
+        TaskRepo::transition_status(
+            pool,
+            WS,
+            "c",
+            ainb_hangar_core::task_status::TaskStatus::Done,
+            4,
+        )
+        .await
+        .unwrap();
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mid").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mid")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("done"),
             "every sibling done → the card succeeded"
         );
@@ -703,7 +734,10 @@ mod tests {
         seed_task(pool, "mixed", "mx-b", "cancelled", 2).await;
         seed_task(pool, "mixed", "mx-c", "failed", 3).await;
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mixed").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "mixed")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("failed"),
             "any failed sibling fails the card"
         );
@@ -713,7 +747,10 @@ mod tests {
         seed_task(pool, "userstop", "us-a", "done", 1).await;
         seed_task(pool, "userstop", "us-b", "cancelled", 2).await;
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "userstop").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "userstop")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("cancelled"),
             "a user cancel of a partly-done card cancels it"
         );
@@ -723,7 +760,10 @@ mod tests {
         seed_task(pool, "allcancel", "ac-a", "cancelled", 1).await;
         seed_task(pool, "allcancel", "ac-b", "cancelled", 2).await;
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "allcancel").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "allcancel")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("cancelled")
         );
     }
@@ -747,9 +787,14 @@ mod tests {
              VALUES ('child', ?, 'rt', 'ag', 'retry', 'done', 2, 0, 'parent', 2)",
         )
         .bind(WS)
-        .execute(pool).await.unwrap();
+        .execute(pool)
+        .await
+        .unwrap();
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "retry").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "retry")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("done"),
             "the superseded failed attempt is excluded; the retry child's done wins"
         );
@@ -764,9 +809,14 @@ mod tests {
              VALUES ('cp-child', ?, 'rt', 'ag', 'capped', 'failed', 2, 0, 'cp-parent', 2)",
         )
         .bind(WS)
-        .execute(pool).await.unwrap();
+        .execute(pool)
+        .await
+        .unwrap();
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "capped").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "capped")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("failed"),
             "a capped chain's LAST failure has no child and still fails the card"
         );
@@ -779,11 +829,23 @@ mod tests {
         let (_d, store) = open().await;
         let pool = store.pool();
         seed_chain(pool, "iss").await;
-        assert_eq!(TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(), 0, "never-run → 0");
+        assert_eq!(
+            TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(),
+            0,
+            "never-run → 0"
+        );
         seed_task_gen(pool, "iss", "g0", "failed", 1, 0).await;
-        assert_eq!(TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(), 1, "one past gen 0");
+        assert_eq!(
+            TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(),
+            1,
+            "one past gen 0"
+        );
         seed_task_gen(pool, "iss", "g1", "done", 2, 1).await;
-        assert_eq!(TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(), 2, "one past gen 1");
+        assert_eq!(
+            TaskRepo::next_generation_for_issue(pool, "iss").await.unwrap(),
+            2,
+            "one past gen 1"
+        );
     }
 
     /// The 8ln bug: a failed run (gen 0) then a clean rerun (gen 1, done) must
@@ -798,7 +860,10 @@ mod tests {
         // Generation 0: the card ran and FAILED.
         seed_task_gen(pool, "rerun", "g0", "failed", 1, 0).await;
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("failed"),
             "the only generation is the failed one"
         );
@@ -807,7 +872,10 @@ mod tests {
         // is excluded — the card is now `done`.
         seed_task_gen(pool, "rerun", "g1", "done", 2, 1).await;
         assert_eq!(
-            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun").await.unwrap().as_deref(),
+            TaskRepo::issue_aggregate_terminal_state(pool, WS, "rerun")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("done"),
             "the latest generation succeeded — prior failure does not poison it"
         );

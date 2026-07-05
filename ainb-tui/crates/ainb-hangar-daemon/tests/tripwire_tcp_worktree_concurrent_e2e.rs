@@ -31,9 +31,9 @@ use std::time::{Duration, Instant};
 #[path = "tripwire_p4_common.rs"]
 mod common;
 use common::{
-    WORKTREE_REPO_NAME, budget_scale, daemon_bin, enqueue_task_with_repo, git_available,
-    git_branch_exists, prepare_pipeline_worktree_concurrent, skip, worktree_branch, worktree_dir,
-    INTERACTIVE_RELEASE_SENTINEL,
+    INTERACTIVE_RELEASE_SENTINEL, WORKTREE_REPO_NAME, budget_scale, daemon_bin,
+    enqueue_task_with_repo, git_available, git_branch_exists, prepare_pipeline_worktree_concurrent,
+    skip, worktree_branch, worktree_dir,
 };
 
 #[test]
@@ -61,7 +61,10 @@ fn two_cards_on_the_same_repo_run_in_two_distinct_worktrees() {
 
     // NEGATIVE (no collision): the two tasks resolve to DISTINCT worktree dirs +
     // branches before either runs — the a54 uniqueness comes from the per-task slug.
-    assert_ne!(wt_a, wt_b, "the two same-repo tasks must map to distinct worktree dirs");
+    assert_ne!(
+        wt_a, wt_b,
+        "the two same-repo tasks must map to distinct worktree dirs"
+    );
     assert_ne!(
         worktree_branch(&slug_a),
         worktree_branch(&slug_b),

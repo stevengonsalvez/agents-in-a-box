@@ -138,14 +138,18 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
 
 /// The id of the (single) board in a `boards_list`-shaped result.
 fn only_board_id(resp: &serde_json::Value) -> String {
-    let boards = resp["result"]["boards"].as_array().unwrap_or_else(|| panic!("boards array: {resp}"));
+    let boards = resp["result"]["boards"]
+        .as_array()
+        .unwrap_or_else(|| panic!("boards array: {resp}"));
     assert_eq!(boards.len(), 1, "exactly one board: {resp}");
     boards[0]["id"].as_str().unwrap().to_string()
 }
 
 /// The (single) board in a `boards_list`-shaped result.
 fn only_board(resp: &serde_json::Value) -> &serde_json::Value {
-    let boards = resp["result"]["boards"].as_array().unwrap_or_else(|| panic!("boards array: {resp}"));
+    let boards = resp["result"]["boards"]
+        .as_array()
+        .unwrap_or_else(|| panic!("boards array: {resp}"));
     assert_eq!(boards.len(), 1, "exactly one board: {resp}");
     &boards[0]
 }
@@ -167,7 +171,10 @@ async fn board_create_columns_cards_round_trip() {
             serde_json::json!({ "workspace_id": WS_SLUG, "name": "Sprint" }),
         )
         .await;
-    assert!(created["error"].is_null(), "board_create must ack: {created}");
+    assert!(
+        created["error"].is_null(),
+        "board_create must ack: {created}"
+    );
     let board_id = only_board_id(&created);
 
     // Two columns: a manual "Todo" and an auto-move "Done" mapped to `done`.
@@ -177,7 +184,10 @@ async fn board_create_columns_cards_round_trip() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
         )
         .await;
-    assert!(with_todo["error"].is_null(), "column_add must ack: {with_todo}");
+    assert!(
+        with_todo["error"].is_null(),
+        "column_add must ack: {with_todo}"
+    );
     let with_done = c
         .call(
             methods::HANGAR_BOARD_COLUMN_ADD,
@@ -200,7 +210,10 @@ async fn board_create_columns_cards_round_trip() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": "issue-2", "column_id": todo_id }),
         )
         .await;
-    assert!(with_card["error"].is_null(), "card_add must ack: {with_card}");
+    assert!(
+        with_card["error"].is_null(),
+        "card_add must ack: {with_card}"
+    );
 
     // boards_list reads it back, with the card enriched by its issue title.
     let list = c
@@ -226,7 +239,10 @@ async fn board_create_columns_cards_round_trip() {
             serde_json::json!({ "workspace_id": WS_SLUG, "name": "Sprint" }),
         )
         .await;
-    assert!(!dup["error"].is_null(), "a duplicate board name must be rejected: {dup}");
+    assert!(
+        !dup["error"].is_null(),
+        "a duplicate board name must be rejected: {dup}"
+    );
 }
 
 /// `board_column_reorder` rewrites the order without moving a card, and
@@ -271,7 +287,10 @@ async fn column_reorder_and_delete_preserve_cards() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_ids": [col_ids[2], col_ids[0], col_ids[1]] }),
         )
         .await;
-    assert!(reordered["error"].is_null(), "reorder must ack: {reordered}");
+    assert!(
+        reordered["error"].is_null(),
+        "reorder must ack: {reordered}"
+    );
     let names: Vec<String> = only_board(&reordered)["columns"]
         .as_array()
         .unwrap()
@@ -286,7 +305,11 @@ async fn column_reorder_and_delete_preserve_cards() {
         .iter()
         .find(|col| col["id"] == serde_json::json!(col_ids[1]))
         .unwrap();
-    assert_eq!(b_col["cards"].as_array().unwrap().len(), 1, "card stayed in B");
+    assert_eq!(
+        b_col["cards"].as_array().unwrap().len(),
+        1,
+        "card stayed in B"
+    );
 
     // Delete column B — its card parks unmapped, not lost.
     let deleted = c
@@ -295,11 +318,22 @@ async fn column_reorder_and_delete_preserve_cards() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": col_ids[1] }),
         )
         .await;
-    assert!(deleted["error"].is_null(), "column_delete must ack: {deleted}");
+    assert!(
+        deleted["error"].is_null(),
+        "column_delete must ack: {deleted}"
+    );
     let board = only_board(&deleted);
-    assert_eq!(board["columns"].as_array().unwrap().len(), 2, "two columns remain");
+    assert_eq!(
+        board["columns"].as_array().unwrap().len(),
+        2,
+        "two columns remain"
+    );
     let unmapped = board["unmapped"].as_array().unwrap();
-    assert_eq!(unmapped.len(), 1, "the card parked unmapped, not lost: {deleted}");
+    assert_eq!(
+        unmapped.len(),
+        1,
+        "the card parked unmapped, not lost: {deleted}"
+    );
     assert_eq!(unmapped[0]["issue_id"], "issue-2");
 }
 
@@ -350,11 +384,17 @@ async fn card_create_assigns_profile_then_run_enqueues() {
             }),
         )
         .await;
-    assert!(with_card["error"].is_null(), "card_create must ack: {with_card}");
+    assert!(
+        with_card["error"].is_null(),
+        "card_create must ack: {with_card}"
+    );
     let card = &only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"]
         .as_array()
         .unwrap()[0];
-    assert_eq!(card["title"], "Ship the boards", "card carries the typed title");
+    assert_eq!(
+        card["title"], "Ship the boards",
+        "card carries the typed title"
+    );
     let issue_id = card["issue_id"].as_str().unwrap().to_string();
 
     // Run the card headless → routed to the assignee agent's runtime.
@@ -365,9 +405,18 @@ async fn card_create_assigns_profile_then_run_enqueues() {
         )
         .await;
     assert!(run["error"].is_null(), "card_run must ack: {run}");
-    assert_eq!(run["result"]["agent_id"], "agent-1", "routed to the assignee agent: {run}");
-    assert_eq!(run["result"]["runtime_id"], "runtime-1", "keyed to the agent's runtime: {run}");
-    assert_eq!(run["result"]["mode"], "headless", "the launch mode is echoed: {run}");
+    assert_eq!(
+        run["result"]["agent_id"], "agent-1",
+        "routed to the assignee agent: {run}"
+    );
+    assert_eq!(
+        run["result"]["runtime_id"], "runtime-1",
+        "keyed to the agent's runtime: {run}"
+    );
+    assert_eq!(
+        run["result"]["mode"], "headless",
+        "the launch mode is echoed: {run}"
+    );
     let task_id = run["result"]["task_id"].as_str().unwrap().to_string();
 
     // A queued task row exists for the card's issue, routed to agent-1/runtime-1.
@@ -381,7 +430,10 @@ async fn card_create_assigns_profile_then_run_enqueues() {
     assert_eq!(row.0, "agent-1");
     assert_eq!(row.1, "runtime-1");
     assert_eq!(row.2.as_deref(), Some(issue_id.as_str()));
-    assert_eq!(row.3, "queued", "the run task starts queued for the claim loop");
+    assert_eq!(
+        row.3, "queued",
+        "the run task starts queued for the claim loop"
+    );
 
     // F2/F4: the card's repo + chosen agent flowed onto the dispatched task.
     let parity: (Option<String>, String) =
@@ -390,8 +442,15 @@ async fn card_create_assigns_profile_then_run_enqueues() {
             .fetch_one(store.pool())
             .await
             .expect("the run task carries the card's repo + agent");
-    assert_eq!(parity.0.as_deref(), Some("scratch"), "the card's repo flowed onto the task");
-    assert_eq!(parity.1, "codex", "the card's chosen agent flowed onto the task");
+    assert_eq!(
+        parity.0.as_deref(),
+        Some("scratch"),
+        "the card's repo flowed onto the task"
+    );
+    assert_eq!(
+        parity.1, "codex",
+        "the card's chosen agent flowed onto the task"
+    );
 
     // A card whose profile never resolves still runs — the workspace agent is the
     // fallback so a card is never a dead end.
@@ -412,10 +471,7 @@ async fn card_create_assigns_profile_then_run_enqueues() {
         let cards = only_board(&orphan)["columns"].as_array().unwrap()[0]["cards"]
             .as_array()
             .unwrap();
-        cards
-            .iter()
-            .find(|c| c["title"] == "No such profile")
-            .unwrap()["issue_id"]
+        cards.iter().find(|c| c["title"] == "No such profile").unwrap()["issue_id"]
             .as_str()
             .unwrap()
             .to_string()
@@ -426,9 +482,18 @@ async fn card_create_assigns_profile_then_run_enqueues() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": orphan_issue, "mode": "interactive" }),
         )
         .await;
-    assert!(orphan_run["error"].is_null(), "an unassigned card still runs: {orphan_run}");
-    assert_eq!(orphan_run["result"]["agent_id"], "agent-1", "fell back to the workspace agent");
-    assert_eq!(orphan_run["result"]["mode"], "interactive", "interactive mode echoed");
+    assert!(
+        orphan_run["error"].is_null(),
+        "an unassigned card still runs: {orphan_run}"
+    );
+    assert_eq!(
+        orphan_run["result"]["agent_id"], "agent-1",
+        "fell back to the workspace agent"
+    );
+    assert_eq!(
+        orphan_run["result"]["mode"], "interactive",
+        "interactive mode echoed"
+    );
 
     // A bad mode is a client error, never a silent default.
     let bad = c
@@ -437,7 +502,10 @@ async fn card_create_assigns_profile_then_run_enqueues() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "yolo" }),
         )
         .await;
-    assert!(!bad["error"].is_null(), "an unknown run mode must be rejected: {bad}");
+    assert!(
+        !bad["error"].is_null(),
+        "an unknown run mode must be rejected: {bad}"
+    );
 
     // MEMBERSHIP GUARD: running a workspace issue that is NOT a card on the board
     // is rejected (the run is a card affordance, not a bare issue dispatch).
@@ -478,7 +546,10 @@ async fn card_create_assigns_profile_then_run_enqueues() {
         .fetch_one(store.pool())
         .await
         .unwrap();
-    assert_eq!(before, after, "a rejected card-create must not strand an orphan issue");
+    assert_eq!(
+        before, after,
+        "a rejected card-create must not strand an orphan issue"
+    );
 }
 
 /// A shared helper: create a board + one Todo column, returning `(board_id,
@@ -505,7 +576,12 @@ async fn board_with_todo(c: &mut Client, name: &str) -> (String, String) {
 }
 
 /// Create a card and return its issue id.
-async fn create_card(c: &mut Client, board_id: &str, col_id: &str, body: serde_json::Value) -> String {
+async fn create_card(
+    c: &mut Client,
+    board_id: &str,
+    col_id: &str,
+    body: serde_json::Value,
+) -> String {
     let mut params = serde_json::json!({
         "workspace_id": WS_SLUG,
         "board_id": board_id,
@@ -571,7 +647,10 @@ async fn card_run_requires_a_repo() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless", "repo_ref": "scratch" }),
         )
         .await;
-    assert!(ok["error"].is_null(), "a repo override makes the card runnable (F2): {ok}");
+    assert!(
+        ok["error"].is_null(),
+        "a repo override makes the card runnable (F2): {ok}"
+    );
 }
 
 /// F8: copilot is picker-visible but its runner is not wired — a dispatch on it
@@ -598,9 +677,15 @@ async fn card_run_rejects_copilot_dispatch() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }),
         )
         .await;
-    assert!(!refused["error"].is_null(), "copilot dispatch must be refused (F8): {refused}");
+    assert!(
+        !refused["error"].is_null(),
+        "copilot dispatch must be refused (F8): {refused}"
+    );
     let msg = refused["error"]["message"].as_str().unwrap();
-    assert!(msg.contains("copilot") && msg.contains("F8"), "the refusal names copilot + F8: {refused}");
+    assert!(
+        msg.contains("copilot") && msg.contains("F8"),
+        "the refusal names copilot + F8: {refused}"
+    );
 }
 
 /// F4 cascade: a card with a repo but NO chosen agent resolves the run's agent
@@ -636,12 +721,16 @@ async fn card_run_resolves_agent_via_cascade() {
         .await;
     assert!(run["error"].is_null(), "card_run must ack: {run}");
     let task_id = run["result"]["task_id"].as_str().unwrap().to_string();
-    let agent_kind: String = sqlx::query_scalar("SELECT agent_kind FROM agent_task_queue WHERE id = ?")
-        .bind(&task_id)
-        .fetch_one(store.pool())
-        .await
-        .unwrap();
-    assert_eq!(agent_kind, "codex", "cascade resolved the workspace default (F4)");
+    let agent_kind: String =
+        sqlx::query_scalar("SELECT agent_kind FROM agent_task_queue WHERE id = ?")
+            .bind(&task_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        agent_kind, "codex",
+        "cascade resolved the workspace default (F4)"
+    );
 
     // The run also recorded codex as the last-used agent (top of the cascade).
     let last_used: Option<String> =
@@ -650,7 +739,11 @@ async fn card_run_resolves_agent_via_cascade() {
             .await
             .unwrap()
             .flatten();
-    assert_eq!(last_used.as_deref(), Some("codex"), "last-used agent recorded (F4)");
+    assert_eq!(
+        last_used.as_deref(),
+        Some("codex"),
+        "last-used agent recorded (F4)"
+    );
 }
 
 /// F3: `hangar/repo_list` answers with a well-formed roster array (no error).
@@ -665,7 +758,10 @@ async fn repo_list_answers_with_a_roster() {
 
     let resp = c.call(methods::HANGAR_REPO_LIST, serde_json::json!({})).await;
     assert!(resp["error"].is_null(), "repo_list must ack: {resp}");
-    assert!(resp["result"]["repos"].is_array(), "repo_list returns a repos array: {resp}");
+    assert!(
+        resp["result"]["repos"].is_array(),
+        "repo_list returns a repos array: {resp}"
+    );
 }
 
 /// Board mutations are workspace-scoped: a sibling tenant cannot see the board,
@@ -767,8 +863,17 @@ async fn card_reorder_persists_within_column_and_rejects_bad_set() {
             .map(|c| c["issue_id"].as_str().unwrap().to_string())
             .collect()
     };
-    let list = c.call(methods::HANGAR_BOARDS_LIST, serde_json::json!({ "workspace_id": WS_SLUG })).await;
-    assert_eq!(order(&list), vec!["issue-1", "issue-2"], "cards append in insertion order");
+    let list = c
+        .call(
+            methods::HANGAR_BOARDS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert_eq!(
+        order(&list),
+        vec!["issue-1", "issue-2"],
+        "cards append in insertion order"
+    );
 
     // Reorder to [issue-2, issue-1]; the reply reflects it.
     let reordered = c
@@ -777,13 +882,29 @@ async fn card_reorder_persists_within_column_and_rejects_bad_set() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "issue_ids": ["issue-2", "issue-1"] }),
         )
         .await;
-    assert!(reordered["error"].is_null(), "reorder must ack: {reordered}");
-    assert_eq!(order(&reordered), vec!["issue-2", "issue-1"], "reply reflects the new order");
+    assert!(
+        reordered["error"].is_null(),
+        "reorder must ack: {reordered}"
+    );
+    assert_eq!(
+        order(&reordered),
+        vec!["issue-2", "issue-1"],
+        "reply reflects the new order"
+    );
 
     // A fresh boards_list proves the order PERSISTED (ord written to disk), not
     // just echoed by the mutation reply.
-    let refetched = c.call(methods::HANGAR_BOARDS_LIST, serde_json::json!({ "workspace_id": WS_SLUG })).await;
-    assert_eq!(order(&refetched), vec!["issue-2", "issue-1"], "the reorder persisted across a re-fetch");
+    let refetched = c
+        .call(
+            methods::HANGAR_BOARDS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert_eq!(
+        order(&refetched),
+        vec!["issue-2", "issue-1"],
+        "the reorder persisted across a re-fetch"
+    );
 
     // A set that is not exactly the column's cards is rejected, nothing written.
     let bad = c
@@ -792,9 +913,21 @@ async fn card_reorder_persists_within_column_and_rejects_bad_set() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "issue_ids": ["issue-2"] }),
         )
         .await;
-    assert!(!bad["error"].is_null(), "an incomplete reorder set must be rejected: {bad}");
-    let after = c.call(methods::HANGAR_BOARDS_LIST, serde_json::json!({ "workspace_id": WS_SLUG })).await;
-    assert_eq!(order(&after), vec!["issue-2", "issue-1"], "a rejected reorder leaves the order intact");
+    assert!(
+        !bad["error"].is_null(),
+        "an incomplete reorder set must be rejected: {bad}"
+    );
+    let after = c
+        .call(
+            methods::HANGAR_BOARDS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert_eq!(
+        order(&after),
+        vec!["issue-2", "issue-1"],
+        "a rejected reorder leaves the order intact"
+    );
 }
 
 /// tcp T3 / F6: `board_card_remove` takes a card OFF a board but keeps the
@@ -865,7 +998,10 @@ async fn card_remove_keeps_issue_and_refuses_active_run() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }),
         )
         .await;
-    assert!(!refused["error"].is_null(), "removing a card with an active run must be refused: {refused}");
+    assert!(
+        !refused["error"].is_null(),
+        "removing a card with an active run must be refused: {refused}"
+    );
     assert!(
         refused["error"]["message"].as_str().unwrap_or_default().contains("active run"),
         "the refusal names the active run: {refused}"
@@ -885,8 +1021,13 @@ async fn card_remove_keeps_issue_and_refuses_active_run() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }),
         )
         .await;
-    assert!(removed["error"].is_null(), "remove after cancel must ack: {removed}");
-    let cards = only_board(&removed)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap();
+    assert!(
+        removed["error"].is_null(),
+        "remove after cancel must ack: {removed}"
+    );
+    let cards = only_board(&removed)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap();
     assert!(cards.is_empty(), "the card is off the board: {removed}");
 
     // The underlying issue SURVIVES the card removal (removing a card is not
@@ -896,7 +1037,11 @@ async fn card_remove_keeps_issue_and_refuses_active_run() {
         .fetch_optional(store.pool())
         .await
         .expect("issue query");
-    assert_eq!(issue_alive, Some(1), "the issue is kept after the card is removed");
+    assert_eq!(
+        issue_alive,
+        Some(1),
+        "the issue is kept after the card is removed"
+    );
 
     // Removing a NON-card issue (issue-1 was never added) is an idempotent no-op.
     let noop = c
@@ -905,7 +1050,10 @@ async fn card_remove_keeps_issue_and_refuses_active_run() {
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": "issue-1" }),
         )
         .await;
-    assert!(noop["error"].is_null(), "removing a non-card is a clean no-op: {noop}");
+    assert!(
+        noop["error"].is_null(),
+        "removing a non-card is a clean no-op: {noop}"
+    );
 }
 
 /// tcp T3 / F6 (P10 §4.9): `board_card_timeline` returns the RAW provider
@@ -926,26 +1074,43 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
     c.auth_from_file(dir.path()).await;
 
     let created = c
-        .call(methods::HANGAR_BOARD_CREATE, serde_json::json!({ "workspace_id": WS_SLUG, "name": "Obs" }))
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Obs" }),
+        )
         .await;
     let board_id = only_board_id(&created);
     let with_col = c
-        .call(methods::HANGAR_BOARD_COLUMN_ADD, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }))
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
         .await;
-    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let with_card = c
         .call(
             methods::HANGAR_BOARD_CARD_CREATE,
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "title": "Watch me", "assignee_profile": "claude-agent", "repo_ref": "scratch" }),
         )
         .await;
-    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap()[0]["issue_id"].as_str().unwrap().to_string();
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap()[0]["issue_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // A card with NO run yet → an empty transcript (a read, never an error).
     let empty = c
         .call(methods::HANGAR_BOARD_CARD_TIMELINE, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
         .await;
-    assert!(empty["error"].is_null(), "timeline of an unrun card is not an error: {empty}");
+    assert!(
+        empty["error"].is_null(),
+        "timeline of an unrun card is not an error: {empty}"
+    );
     assert_eq!(empty["result"]["jsonl"], "", "no run → empty transcript");
 
     // Enqueue a run, then seed a fixture transcript at that task's deterministic
@@ -973,7 +1138,10 @@ async fn card_timeline_serves_the_run_transcript_jsonl() {
         .call(methods::HANGAR_BOARD_CARD_TIMELINE, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
         .await;
     assert!(tl["error"].is_null(), "timeline must ack: {tl}");
-    assert_eq!(tl["result"]["task_id"], task_id, "the newest task's transcript");
+    assert_eq!(
+        tl["result"]["task_id"], task_id,
+        "the newest task's transcript"
+    );
     assert_eq!(tl["result"]["provider"], "claude", "read the claude log");
     let jsonl = tl["result"]["jsonl"].as_str().unwrap();
     assert!(
@@ -997,20 +1165,34 @@ async fn rerun_while_running_is_rejected() {
     c.auth_from_file(dir.path()).await;
 
     let created = c
-        .call(methods::HANGAR_BOARD_CREATE, serde_json::json!({ "workspace_id": WS_SLUG, "name": "Race" }))
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Race" }),
+        )
         .await;
     let board_id = only_board_id(&created);
     let with_col = c
-        .call(methods::HANGAR_BOARD_COLUMN_ADD, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }))
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
         .await;
-    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let with_card = c
         .call(
             methods::HANGAR_BOARD_CARD_CREATE,
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "title": "Run once", "assignee_profile": "claude-agent", "repo_ref": "scratch" }),
         )
         .await;
-    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap()[0]["issue_id"].as_str().unwrap().to_string();
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap()[0]["issue_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // First run enqueues a task; drive it to `running` so the guard covers the
     // running (not merely pending) case.
@@ -1028,9 +1210,15 @@ async fn rerun_while_running_is_rejected() {
     let second = c
         .call(methods::HANGAR_BOARD_CARD_RUN, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id, "mode": "headless" }))
         .await;
-    assert!(!second["error"].is_null(), "a rerun while running must be rejected: {second}");
     assert!(
-        second["error"]["message"].as_str().unwrap_or_default().contains("already active"),
+        !second["error"].is_null(),
+        "a rerun while running must be rejected: {second}"
+    );
+    assert!(
+        second["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already active"),
         "the rejection names the active run: {second}"
     );
 
@@ -1056,20 +1244,34 @@ async fn cancel_before_start_cancels_a_queued_run() {
     c.auth_from_file(dir.path()).await;
 
     let created = c
-        .call(methods::HANGAR_BOARD_CREATE, serde_json::json!({ "workspace_id": WS_SLUG, "name": "Preempt" }))
+        .call(
+            methods::HANGAR_BOARD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "Preempt" }),
+        )
         .await;
     let board_id = only_board_id(&created);
     let with_col = c
-        .call(methods::HANGAR_BOARD_COLUMN_ADD, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }))
+        .call(
+            methods::HANGAR_BOARD_COLUMN_ADD,
+            serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "name": "Todo" }),
+        )
         .await;
-    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"].as_str().unwrap().to_string();
+    let todo_id = only_board(&with_col)["columns"].as_array().unwrap()[0]["id"]
+        .as_str()
+        .unwrap()
+        .to_string();
     let with_card = c
         .call(
             methods::HANGAR_BOARD_CARD_CREATE,
             serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "column_id": todo_id, "title": "Never starts", "assignee_profile": "claude-agent", "repo_ref": "scratch" }),
         )
         .await;
-    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"].as_array().unwrap()[0]["issue_id"].as_str().unwrap().to_string();
+    let issue_id = only_board(&with_card)["columns"].as_array().unwrap()[0]["cards"]
+        .as_array()
+        .unwrap()[0]["issue_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     // Enqueue a run — no claim loop is running here, so the task stays `queued`.
     let run = c
@@ -1088,18 +1290,30 @@ async fn cancel_before_start_cancels_a_queued_run() {
         .call(methods::HANGAR_BOARD_CARD_CANCEL, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
         .await;
     assert!(cancelled["error"].is_null(), "cancel must ack: {cancelled}");
-    assert_eq!(cancelled["result"]["cancelled"], true, "a queued run cancels: {cancelled}");
+    assert_eq!(
+        cancelled["result"]["cancelled"], true,
+        "a queued run cancels: {cancelled}"
+    );
     let status: String = sqlx::query_scalar("SELECT status FROM agent_task_queue WHERE id = ?")
         .bind(&task_id)
         .fetch_one(store.pool())
         .await
         .unwrap();
-    assert_eq!(status, "cancelled", "the queued task flipped straight to cancelled");
+    assert_eq!(
+        status, "cancelled",
+        "the queued task flipped straight to cancelled"
+    );
 
     // A second cancel is an idempotent no-op success (the card has no active task).
     let again = c
         .call(methods::HANGAR_BOARD_CARD_CANCEL, serde_json::json!({ "workspace_id": WS_SLUG, "board_id": board_id, "issue_id": issue_id }))
         .await;
-    assert!(again["error"].is_null(), "a repeat cancel is not an error: {again}");
-    assert_eq!(again["result"]["cancelled"], false, "nothing left to cancel: {again}");
+    assert!(
+        again["error"].is_null(),
+        "a repeat cancel is not an error: {again}"
+    );
+    assert_eq!(
+        again["result"]["cancelled"], false,
+        "nothing left to cancel: {again}"
+    );
 }

@@ -290,11 +290,12 @@ impl BoardRepo {
                 }
             }
         }
-        let next_ord: i64 =
-            sqlx::query_scalar("SELECT COALESCE(MAX(ord) + 1, 0) FROM board_column WHERE board_id = ?")
-                .bind(board_id)
-                .fetch_one(&mut *tx)
-                .await?;
+        let next_ord: i64 = sqlx::query_scalar(
+            "SELECT COALESCE(MAX(ord) + 1, 0) FROM board_column WHERE board_id = ?",
+        )
+        .bind(board_id)
+        .fetch_one(&mut *tx)
+        .await?;
         sqlx::query(
             "INSERT INTO board_column (id, board_id, ord, name, fsm_state, auto_move) \
              VALUES (?, ?, ?, ?, ?, ?)",
@@ -1008,9 +1009,15 @@ mod tests {
 
         seed_issue(pool, "ws-a", "issue-1").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true).await.unwrap();
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true)
+            .await
+            .unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10)
+            .await
+            .unwrap();
 
         let boards = BoardRepo::list(pool, &ws("ws-a")).await.unwrap();
         assert_eq!(boards.len(), 1);
@@ -1058,15 +1065,28 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "A", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "B", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c3", "C", None, false).await.unwrap();
-        seed_issue(pool, "ws-a", "issue-1").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c2"), 10).await.unwrap();
-
-        BoardRepo::column_reorder(pool, &ws("ws-a"), "b1", &["c3".into(), "c1".into(), "c2".into()])
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "A", None, false)
             .await
             .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "B", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c3", "C", None, false)
+            .await
+            .unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c2"), 10)
+            .await
+            .unwrap();
+
+        BoardRepo::column_reorder(
+            pool,
+            &ws("ws-a"),
+            "b1",
+            &["c3".into(), "c1".into(), "c2".into()],
+        )
+        .await
+        .unwrap();
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
         assert_eq!(
             b.columns.iter().map(|c| c.name.as_str()).collect::<Vec<_>>(),
@@ -1092,10 +1112,16 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "A", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "B", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "A", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "B", None, false)
+            .await
+            .unwrap();
         seed_issue(pool, "ws-a", "issue-1").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10)
+            .await
+            .unwrap();
 
         BoardRepo::column_delete(pool, &ws("ws-a"), "b1", "c1").await.unwrap();
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
@@ -1115,31 +1141,51 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true)
+            .await
+            .unwrap();
         seed_issue(pool, "ws-a", "issue-1").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10)
+            .await
+            .unwrap();
 
         // A non-matching state moves nothing.
-        let none = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "running").await.unwrap();
+        let none = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "running")
+            .await
+            .unwrap();
         assert!(none.is_empty(), "no column maps `running`");
 
         // `done` moves the card to c2 (the auto-move target).
-        let moved = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "done").await.unwrap();
+        let moved = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "done")
+            .await
+            .unwrap();
         assert_eq!(moved.len(), 1);
         assert_eq!(moved[0].column_id, "c2");
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
-        assert_eq!(b.cards[0].column_id.as_deref(), Some("c2"), "card auto-moved to Done");
+        assert_eq!(
+            b.cards[0].column_id.as_deref(),
+            Some("c2"),
+            "card auto-moved to Done"
+        );
 
         // Re-firing `done` is a no-op (already there).
-        let again = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "done").await.unwrap();
+        let again = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "done")
+            .await
+            .unwrap();
         assert!(again.is_empty(), "already in the target column");
 
         // With the board master toggle OFF, auto-move does nothing.
         seed_issue(pool, "ws-a", "issue-2").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-2", Some("c1"), 11).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-2", Some("c1"), 11)
+            .await
+            .unwrap();
         BoardRepo::update(pool, &ws("ws-a"), "b1", None, Some(false)).await.unwrap();
-        let off = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-2", "done").await.unwrap();
+        let off = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-2", "done")
+            .await
+            .unwrap();
         assert!(off.is_empty(), "master toggle off suppresses auto-move");
     }
 
@@ -1153,7 +1199,9 @@ mod tests {
         seed_ws(pool, "ws-b").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
 
-        let err = BoardRepo::column_add(pool, &ws("ws-b"), "b1", "c1", "X", None, false).await.unwrap_err();
+        let err = BoardRepo::column_add(pool, &ws("ws-b"), "b1", "c1", "X", None, false)
+            .await
+            .unwrap_err();
         assert!(matches!(err, BoardRepoError::NotFound), "got {err:?}");
         let err = BoardRepo::delete(pool, &ws("ws-b"), "b1").await.unwrap_err();
         assert!(matches!(err, BoardRepoError::NotFound), "got {err:?}");
@@ -1173,19 +1221,27 @@ mod tests {
         // issue-b belongs to ws-b, not ws-a.
         seed_issue(pool, "ws-b", "issue-b").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
 
         // No such issue anywhere.
         let missing = BoardRepo::card_add(pool, &ws("ws-a"), "b1", "nope", Some("c1"), 10)
             .await
             .unwrap_err();
-        assert!(matches!(missing, BoardRepoError::NotFound), "got {missing:?}");
+        assert!(
+            matches!(missing, BoardRepoError::NotFound),
+            "got {missing:?}"
+        );
 
         // The issue exists, but in a sibling workspace — still rejected.
         let foreign = BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-b", Some("c1"), 10)
             .await
             .unwrap_err();
-        assert!(matches!(foreign, BoardRepoError::NotFound), "got {foreign:?}");
+        assert!(
+            matches!(foreign, BoardRepoError::NotFound),
+            "got {foreign:?}"
+        );
 
         // Nothing was persisted.
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
@@ -1204,28 +1260,54 @@ mod tests {
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
         // First auto-move `done` column: fine.
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Done", Some("done"), true).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Done", Some("done"), true)
+            .await
+            .unwrap();
 
         // Second auto-move `done` column on the same board: rejected.
         let dup = BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done2", Some("done"), true)
             .await
             .unwrap_err();
-        assert!(matches!(dup, BoardRepoError::DuplicateAutoMove), "got {dup:?}");
+        assert!(
+            matches!(dup, BoardRepoError::DuplicateAutoMove),
+            "got {dup:?}"
+        );
 
         // A NON-auto-move `done` column is allowed (no ambiguity).
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c3", "Done-manual", Some("done"), false).await.unwrap();
+        BoardRepo::column_add(
+            pool,
+            &ws("ws-a"),
+            "b1",
+            "c3",
+            "Done-manual",
+            Some("done"),
+            false,
+        )
+        .await
+        .unwrap();
 
         // Flipping the manual `done` column's auto-move ON now clashes with c1: rejected.
         let flip = BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c3", None, None, Some(true))
             .await
             .unwrap_err();
-        assert!(matches!(flip, BoardRepoError::DuplicateAutoMove), "got {flip:?}");
+        assert!(
+            matches!(flip, BoardRepoError::DuplicateAutoMove),
+            "got {flip:?}"
+        );
 
         // Re-mapping c1 onto its OWN state (a no-op clash with itself) is allowed —
         // the conflict check excludes the column being updated.
-        BoardRepo::column_update(pool, &ws("ws-a"), "b1", "c1", None, Some(Some("done")), Some(true))
-            .await
-            .unwrap();
+        BoardRepo::column_update(
+            pool,
+            &ws("ws-a"),
+            "b1",
+            "c1",
+            None,
+            Some(Some("done")),
+            Some(true),
+        )
+        .await
+        .unwrap();
     }
 
     /// Cards append in insertion order within a column (`ord` 0,1,2…), a reorder
@@ -1238,25 +1320,51 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Doing", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Doing", None, false)
+            .await
+            .unwrap();
         for i in 1..=3 {
             seed_issue(pool, "ws-a", &format!("issue-{i}")).await;
-            BoardRepo::card_add(pool, &ws("ws-a"), "b1", &format!("issue-{i}"), Some("c1"), 10 + i)
-                .await
-                .unwrap();
+            BoardRepo::card_add(
+                pool,
+                &ws("ws-a"),
+                "b1",
+                &format!("issue-{i}"),
+                Some("c1"),
+                10 + i,
+            )
+            .await
+            .unwrap();
         }
         // A card in the OTHER column, so a c1 reorder must not touch it.
         seed_issue(pool, "ws-a", "other").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "other", Some("c2"), 20).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "other", Some("c2"), 20)
+            .await
+            .unwrap();
 
         // Cards append in insertion order: issue-1, issue-2, issue-3 (ord 0,1,2).
         let cards = |b: &Board| -> Vec<(String, Option<String>, i64)> {
-            b.cards.iter().map(|c| (c.issue_id.clone(), c.column_id.clone(), c.ord)).collect()
+            b.cards
+                .iter()
+                .map(|c| (c.issue_id.clone(), c.column_id.clone(), c.ord))
+                .collect()
         };
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
-        let c1: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c1")).map(|c| c.issue_id.as_str()).collect();
-        assert_eq!(c1, ["issue-1", "issue-2", "issue-3"], "cards append in order: {:?}", cards(b));
+        let c1: Vec<&str> = b
+            .cards
+            .iter()
+            .filter(|c| c.column_id.as_deref() == Some("c1"))
+            .map(|c| c.issue_id.as_str())
+            .collect();
+        assert_eq!(
+            c1,
+            ["issue-1", "issue-2", "issue-3"],
+            "cards append in order: {:?}",
+            cards(b)
+        );
 
         // Reverse c1's cards. Only c1 is rewritten; `other` in c2 is untouched.
         BoardRepo::card_reorder(
@@ -1269,10 +1377,24 @@ mod tests {
         .await
         .unwrap();
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
-        let c1: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c1")).map(|c| c.issue_id.as_str()).collect();
+        let c1: Vec<&str> = b
+            .cards
+            .iter()
+            .filter(|c| c.column_id.as_deref() == Some("c1"))
+            .map(|c| c.issue_id.as_str())
+            .collect();
         assert_eq!(c1, ["issue-3", "issue-2", "issue-1"], "reorder rewrote c1");
-        let c2: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c2")).map(|c| c.issue_id.as_str()).collect();
-        assert_eq!(c2, ["other"], "the other column is untouched by a c1 reorder");
+        let c2: Vec<&str> = b
+            .cards
+            .iter()
+            .filter(|c| c.column_id.as_deref() == Some("c2"))
+            .map(|c| c.issue_id.as_str())
+            .collect();
+        assert_eq!(
+            c2,
+            ["other"],
+            "the other column is untouched by a c1 reorder"
+        );
 
         // A set that is not exactly c1's cards is rejected, nothing written.
         let bad = BoardRepo::card_reorder(
@@ -1307,9 +1429,13 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
         seed_issue(pool, "ws-a", "issue-1").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10)
+            .await
+            .unwrap();
 
         let out = BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap();
         assert_eq!(out, CardRemoveOutcome::Removed);
@@ -1322,7 +1448,9 @@ mod tests {
             .unwrap();
         assert_eq!(issue, Some(1), "the underlying issue is untouched");
         // Re-add works, and a second remove of the same card is a clean no-op.
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 11).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 11)
+            .await
+            .unwrap();
         assert_eq!(
             BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap(),
             CardRemoveOutcome::Removed
@@ -1350,11 +1478,18 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
         seed_issue(pool, "ws-a", "issue-1").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10)
+            .await
+            .unwrap();
         // Minimal FK chain for an active task on the card's issue.
-        sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u','u@e.com',0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt','ws-a','d','claude','local','online')").execute(pool).await.unwrap();
         sqlx::query("INSERT INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag','ws-a','A','rt','x','workspace','u')").execute(pool).await.unwrap();
         sqlx::query("INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) VALUES ('t1','ws-a','rt','ag','issue-1','running',0)").execute(pool).await.unwrap();
@@ -1371,7 +1506,10 @@ mod tests {
         );
 
         // Once the task is terminal, the remove proceeds.
-        sqlx::query("UPDATE agent_task_queue SET status = 'cancelled' WHERE id = 't1'").execute(pool).await.unwrap();
+        sqlx::query("UPDATE agent_task_queue SET status = 'cancelled' WHERE id = 't1'")
+            .execute(pool)
+            .await
+            .unwrap();
         assert_eq!(
             BoardRepo::card_remove(pool, &ws("ws-a"), "b1", "issue-1").await.unwrap(),
             CardRemoveOutcome::Removed
@@ -1387,19 +1525,45 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false).await.unwrap();
-        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Doing", None, false).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Doing", None, false)
+            .await
+            .unwrap();
         for i in 1..=2 {
             seed_issue(pool, "ws-a", &format!("dst-{i}")).await;
-            BoardRepo::card_add(pool, &ws("ws-a"), "b1", &format!("dst-{i}"), Some("c2"), 10 + i).await.unwrap();
+            BoardRepo::card_add(
+                pool,
+                &ws("ws-a"),
+                "b1",
+                &format!("dst-{i}"),
+                Some("c2"),
+                10 + i,
+            )
+            .await
+            .unwrap();
         }
         seed_issue(pool, "ws-a", "mover").await;
-        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "mover", Some("c1"), 5).await.unwrap();
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "mover", Some("c1"), 5)
+            .await
+            .unwrap();
 
         // Move `mover` into c2: it lands AFTER dst-1, dst-2 (append, not front).
-        BoardRepo::card_move(pool, &ws("ws-a"), "b1", "mover", Some("c2")).await.unwrap();
+        BoardRepo::card_move(pool, &ws("ws-a"), "b1", "mover", Some("c2"))
+            .await
+            .unwrap();
         let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
-        let c2: Vec<&str> = b.cards.iter().filter(|c| c.column_id.as_deref() == Some("c2")).map(|c| c.issue_id.as_str()).collect();
-        assert_eq!(c2, ["dst-1", "dst-2", "mover"], "moved card appends at the end");
+        let c2: Vec<&str> = b
+            .cards
+            .iter()
+            .filter(|c| c.column_id.as_deref() == Some("c2"))
+            .map(|c| c.issue_id.as_str())
+            .collect();
+        assert_eq!(
+            c2,
+            ["dst-1", "dst-2", "mover"],
+            "moved card appends at the end"
+        );
     }
 }

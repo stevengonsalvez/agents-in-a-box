@@ -59,7 +59,9 @@ fn main() {
         .expect("seed runtime");
     rt.block_on(async {
         let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open seed store");
-        ainb_hangar_daemon::seed::seed_p4_fixture(store.pool()).await.expect("seed P4 fixture");
+        ainb_hangar_daemon::seed::seed_p4_fixture(store.pool())
+            .await
+            .expect("seed P4 fixture");
         let pool = store.pool();
 
         // Newer WAIT row (idle-at-prompt marker) — ranks BELOW the ASK.
@@ -145,7 +147,11 @@ fn main() {
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(socket.exists(), "daemon never bound its socket at {}", socket.display());
+    assert!(
+        socket.exists(),
+        "daemon never bound its socket at {}",
+        socket.display()
+    );
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());

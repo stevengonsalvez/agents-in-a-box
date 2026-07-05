@@ -17,8 +17,8 @@
 use ainb_hangar_core::ids::{IssueId, TaskId};
 use ainb_hangar_proto::events::IssueRow;
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
-use ainb_plugin_hangar::screen::task_detail::{render_task_detail, TaskDetailState};
 use ainb_plugin_hangar::screen::ScreenStates;
+use ainb_plugin_hangar::screen::task_detail::{TaskDetailState, render_task_detail};
 use ainb_plugin_sdk::WireBuffer;
 
 fn issue_with_pr(pr_url: Option<&str>) -> IssueRow {
@@ -66,10 +66,7 @@ fn badge_cells(buf: &WireBuffer) -> Vec<(String, Option<ainb_plugin_sdk::Color>)
 
 /// The set of distinct foreground colours painted on the badge row.
 fn badge_colors(buf: &WireBuffer) -> std::collections::HashSet<ainb_plugin_sdk::Color> {
-    badge_cells(buf)
-        .into_iter()
-        .filter_map(|(_, fg)| fg)
-        .collect()
+    badge_cells(buf).into_iter().filter_map(|(_, fg)| fg).collect()
 }
 
 /// Reconstruct the rendered glyph column (first `cols` columns) per row as

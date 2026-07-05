@@ -59,7 +59,12 @@ fn create_focused_card(sess: &TuiSession, title: &str, repo_down: u32, scale: u6
     sess.poll_capture(Instant::now() + Duration::from_secs(20 * scale), |c| {
         c.contains(title) && c.contains("Board: Delivery")
     })
-    .unwrap_or_else(|| panic!("created card never rendered on the board:\n{}", sess.capture()));
+    .unwrap_or_else(|| {
+        panic!(
+            "created card never rendered on the board:\n{}",
+            sess.capture()
+        )
+    });
 }
 
 /// Open the `Run ▾` menu over the focused card (re-sent — a lone Enter can drop).
@@ -68,7 +73,9 @@ fn open_run_menu(sess: &TuiSession, scale: u64) {
     while Instant::now() < deadline {
         sess.send_enter();
         if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("Run ▾"))
+            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                c.contains("Run ▾")
+            })
             .is_some()
         {
             return;
@@ -82,7 +89,12 @@ fn open_run_menu(sess: &TuiSession, scale: u64) {
 /// confirm (a no-op if already open); Enter confirms. Cancel is idempotent (a
 /// double-cancel is a no-op), so re-driving absorbs a dropped keystroke without
 /// over-cancelling.
-fn cancel_until_terminal(sess: &TuiSession, home: &std::path::Path, title: &str, scale: u64) -> bool {
+fn cancel_until_terminal(
+    sess: &TuiSession,
+    home: &std::path::Path,
+    title: &str,
+    scale: u64,
+) -> bool {
     let deadline = Instant::now() + Duration::from_secs(40 * scale);
     while Instant::now() < deadline {
         // `X` opens the confirm overlay; Enter fires the cancel.
@@ -169,7 +181,10 @@ fn cancelling_a_headless_run_cancels_the_card_and_tears_down_its_worktree() {
     let pane = sess.capture();
     drop(sess); // kill the TUI tmux session by exact name before the assertions.
 
-    assert!(cancelled, "the running card must finalize to `cancelled`\npane:\n{pane}");
+    assert!(
+        cancelled,
+        "the running card must finalize to `cancelled`\npane:\n{pane}"
+    );
     assert!(
         torn_down,
         "the cancelled run's worktree at {} must be torn down",
@@ -220,8 +235,8 @@ fn cancelling_an_interactive_run_reaps_its_tmux_session() {
         }
         std::thread::sleep(Duration::from_millis(200));
     }
-    let session_name = session_name
-        .unwrap_or_else(|| panic!("the interactive run never recorded a session name"));
+    let session_name =
+        session_name.unwrap_or_else(|| panic!("the interactive run never recorded a session name"));
 
     // POSITIVE (system truth): a REAL tmux session is live under that name.
     let live_deadline = Instant::now() + Duration::from_secs(15 * scale);
@@ -256,7 +271,10 @@ fn cancelling_an_interactive_run_reaps_its_tmux_session() {
     let pane = sess.capture();
     drop(sess); // kill the TUI tmux session by exact name before the assertions.
 
-    assert!(cancelled, "the running card must finalize to `cancelled`\npane:\n{pane}");
+    assert!(
+        cancelled,
+        "the running card must finalize to `cancelled`\npane:\n{pane}"
+    );
     assert!(
         reaped,
         "the cancelled interactive run's tmux session `{session_name}` must be reaped"

@@ -343,13 +343,33 @@ mod tests {
         // Two runs of the SAME task — the append-only contract keeps BOTH.
         RunHistoryRepo::record(
             pool,
-            &run("r1", Some("t1"), "ws-a", "claude", 1000, "failed", 100, 20, 0.001),
+            &run(
+                "r1",
+                Some("t1"),
+                "ws-a",
+                "claude",
+                1000,
+                "failed",
+                100,
+                20,
+                0.001,
+            ),
         )
         .await
         .unwrap();
         RunHistoryRepo::record(
             pool,
-            &run("r2", Some("t1"), "ws-a", "claude", 2000, "success", 500, 80, 0.005),
+            &run(
+                "r2",
+                Some("t1"),
+                "ws-a",
+                "claude",
+                2000,
+                "success",
+                500,
+                80,
+                0.005,
+            ),
         )
         .await
         .unwrap();
@@ -376,7 +396,17 @@ mod tests {
         for i in 0..5 {
             RunHistoryRepo::record(
                 pool,
-                &run(&format!("a{i}"), None, "ws-a", "claude", 1000 + i, "success", 10, 5, 0.0),
+                &run(
+                    &format!("a{i}"),
+                    None,
+                    "ws-a",
+                    "claude",
+                    1000 + i,
+                    "success",
+                    10,
+                    5,
+                    0.0,
+                ),
             )
             .await
             .unwrap();

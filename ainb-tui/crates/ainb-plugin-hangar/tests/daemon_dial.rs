@@ -86,10 +86,7 @@ fn render_text(render_resp: &serde_json::Value) -> String {
     render_resp["result"]["buffer"]["cells"]
         .as_array()
         .map(|cells| {
-            cells
-                .iter()
-                .map(|c| c[1]["symbol"].as_str().unwrap_or(""))
-                .collect::<String>()
+            cells.iter().map(|c| c[1]["symbol"].as_str().unwrap_or("")).collect::<String>()
         })
         .unwrap_or_default()
 }

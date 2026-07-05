@@ -128,7 +128,10 @@ fn main() {
     cmd.env("HOME", &home)
         .env_remove("AINB_HANGAR_HOME")
         .env("HANGAR_DAEMON_RUNTIME_ID", "runtime-1")
-        .env("HANGAR_CLAUDE_PATH", fake_claude.to_str().expect("utf8 fake-claude path"))
+        .env(
+            "HANGAR_CLAUDE_PATH",
+            fake_claude.to_str().expect("utf8 fake-claude path"),
+        )
         .env("HANGAR_DAEMON_POLL_MS", "200")
         .env("HANGAR_DAEMON_DISABLE_SANDBOX", "1")
         .stdin(std::process::Stdio::null())
@@ -138,7 +141,11 @@ fn main() {
 
     let socket = hangar_dir.join("hangar.sock");
     wait_for(Duration::from_secs(15), || socket.exists());
-    assert!(socket.exists(), "daemon never bound its socket under {}", hangar_dir.display());
+    assert!(
+        socket.exists(),
+        "daemon never bound its socket under {}",
+        hangar_dir.display()
+    );
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());
@@ -185,12 +192,18 @@ fn seed_scanned_repo(home: &Path, name: &str) {
         &["config", "user.name", "t"],
     ] {
         let ok = Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+        assert!(
+            ok.is_ok_and(|s| s.success()),
+            "git {args:?} in the scanned repo"
+        );
     }
     std::fs::write(repo.join("README.md"), "seed").expect("write scanned repo README");
     for args in [&["add", "."][..], &["commit", "--quiet", "-m", "seed"]] {
         let ok = Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+        assert!(
+            ok.is_ok_and(|s| s.success()),
+            "git {args:?} in the scanned repo"
+        );
     }
 
     let cache_dir = home.join(".agents-in-a-box").join("cache");

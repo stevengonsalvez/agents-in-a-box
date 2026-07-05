@@ -400,8 +400,7 @@ fn execute_resume(session: &str) -> Result<()> {
     };
 
     // Locked RMW (pu4): serialise recovery's re-register against live writers.
-    SessionStore::mutate(|store| store.upsert(metadata))
-        .context("Failed to save session store")?;
+    SessionStore::mutate(|store| store.upsert(metadata)).context("Failed to save session store")?;
 
     let short_id = &matched.id[..8.min(matched.id.len())];
     println!("Resumed session '{workspace}' (tmux: {tmux_name}).");

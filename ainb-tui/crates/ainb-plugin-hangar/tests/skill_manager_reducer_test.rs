@@ -8,7 +8,7 @@
 
 use ainb_hangar_proto::events::{HangarEvent, SkillFile, SkillRow};
 use ainb_plugin_hangar::screen::skill_manager::{
-    reduce_skill_manager, SkillFilter, SkillManagerEvent, SkillManagerIntent, SkillManagerState,
+    SkillFilter, SkillManagerEvent, SkillManagerIntent, SkillManagerState, reduce_skill_manager,
 };
 
 fn skill(slug: &str, name: &str, used: bool, updated_at: i64) -> SkillRow {

@@ -226,9 +226,16 @@ async fn run_history_respects_limit_and_unknown_workspace() {
     // Limit caps to the two newest.
     let capped = c.run_history(WS_SLUG, Some(2)).await;
     assert_eq!(capped.len(), 2, "limit=2 returns two rows");
-    assert_eq!(capped[0]["run_id"].as_str(), Some("r4"), "newest first under the cap");
+    assert_eq!(
+        capped[0]["run_id"].as_str(),
+        Some("r4"),
+        "newest first under the cap"
+    );
 
     // Unknown workspace: empty timeline, never an error.
     let none = c.run_history("ws-does-not-exist", None).await;
-    assert!(none.is_empty(), "unknown workspace yields an empty timeline");
+    assert!(
+        none.is_empty(),
+        "unknown workspace yields an empty timeline"
+    );
 }

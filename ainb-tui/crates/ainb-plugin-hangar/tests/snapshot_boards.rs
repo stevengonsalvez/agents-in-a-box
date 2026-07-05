@@ -13,7 +13,7 @@ use ainb_hangar_proto::snapshots::{
     BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult, CardMemberChip,
 };
 use ainb_plugin_hangar::{
-    reduce_boards, render_boards, BoardsEvent, BoardsKey, BoardsState, BoardsStatus, RepoOption,
+    BoardsEvent, BoardsKey, BoardsState, BoardsStatus, RepoOption, reduce_boards, render_boards,
 };
 use ainb_plugin_sdk::WireBuffer;
 
@@ -59,11 +59,41 @@ fn five_column_board() -> BoardsListResult {
             name: "Delivery".into(),
             auto_move: true,
             columns: vec![
-                col("c1", "Backlog", None, false, vec![card("bk01", "Write the spec", None)]),
-                col("c2", "Queued", Some("queued"), true, vec![card("q002", "Wire the RPC", Some("queued"))]),
-                col("c3", "Running", Some("running"), true, vec![card("r003", "Build the board", Some("running"))]),
-                col("c4", "Failed", Some("failed"), true, vec![card("f004", "Flaky migration", Some("failed"))]),
-                col("c5", "Done", Some("done"), true, vec![card("d005", "Ship the tables", Some("done"))]),
+                col(
+                    "c1",
+                    "Backlog",
+                    None,
+                    false,
+                    vec![card("bk01", "Write the spec", None)],
+                ),
+                col(
+                    "c2",
+                    "Queued",
+                    Some("queued"),
+                    true,
+                    vec![card("q002", "Wire the RPC", Some("queued"))],
+                ),
+                col(
+                    "c3",
+                    "Running",
+                    Some("running"),
+                    true,
+                    vec![card("r003", "Build the board", Some("running"))],
+                ),
+                col(
+                    "c4",
+                    "Failed",
+                    Some("failed"),
+                    true,
+                    vec![card("f004", "Flaky migration", Some("failed"))],
+                ),
+                col(
+                    "c5",
+                    "Done",
+                    Some("done"),
+                    true,
+                    vec![card("d005", "Ship the tables", Some("done"))],
+                ),
             ],
             unmapped: Vec::new(),
         }],
@@ -111,7 +141,10 @@ fn render_loading_board_snapshot() {
     render_boards(&mut buf, 120, 0, 20, &state);
     let map = glyph_map(&buf, 120);
     assert!(map.contains("Loading boards"), "loading line:\n{map}");
-    assert!(!map.contains("No boards yet"), "not the empty prompt:\n{map}");
+    assert!(
+        !map.contains("No boards yet"),
+        "not the empty prompt:\n{map}"
+    );
     insta::assert_snapshot!(map);
 }
 
@@ -126,7 +159,10 @@ fn render_error_board_snapshot() {
     render_boards(&mut buf, 120, 0, 20, &state);
     let map = glyph_map(&buf, 120);
     assert!(map.contains("Couldn't load boards"), "error banner:\n{map}");
-    assert!(!map.contains("No boards yet"), "not the empty prompt:\n{map}");
+    assert!(
+        !map.contains("No boards yet"),
+        "not the empty prompt:\n{map}"
+    );
     insta::assert_snapshot!(map);
 }
 
@@ -178,7 +214,10 @@ fn render_narrow_board_snapshot() {
         );
     }
     let map = glyph_map(&buf, W);
-    assert!(map.contains("Board: Delivery"), "title at narrow width:\n{map}");
+    assert!(
+        map.contains("Board: Delivery"),
+        "title at narrow width:\n{map}"
+    );
     insta::assert_snapshot!(map);
 }
 
@@ -212,8 +251,16 @@ fn squad_card_board() -> BoardsListResult {
         squad_id: Some("sq-1".into()),
         auto_run: true,
         member_states: vec![
-            CardMemberChip { agent_id: "a-lead".into(), agent_name: "lead".into(), state: Some("running".into()) },
-            CardMemberChip { agent_id: "a-m1".into(), agent_name: "m1".into(), state: Some("queued".into()) },
+            CardMemberChip {
+                agent_id: "a-lead".into(),
+                agent_name: "lead".into(),
+                state: Some("running".into()),
+            },
+            CardMemberChip {
+                agent_id: "a-m1".into(),
+                agent_name: "m1".into(),
+                state: Some("queued".into()),
+            },
         ],
         ..card("sqd01", "Fan this out", Some("running"))
     };
@@ -236,7 +283,10 @@ fn render_blocked_card_snapshot() {
     let mut buf = WireBuffer::new(120, 20);
     render_boards(&mut buf, 120, 0, 20, &state);
     let map = glyph_map(&buf, 120);
-    assert!(map.contains('🔒'), "blocked card shows the lock marker:\n{map}");
+    assert!(
+        map.contains('🔒'),
+        "blocked card shows the lock marker:\n{map}"
+    );
     assert!(map.contains("ock-1"), "the blocker ref renders:\n{map}");
     insta::assert_snapshot!(map);
 }
@@ -249,7 +299,10 @@ fn render_squad_card_snapshot() {
     let mut buf = WireBuffer::new(120, 20);
     render_boards(&mut buf, 120, 0, 20, &state);
     let map = glyph_map(&buf, 120);
-    assert!(map.contains('👥'), "squad card shows the members marker:\n{map}");
+    assert!(
+        map.contains('👥'),
+        "squad card shows the members marker:\n{map}"
+    );
     assert!(
         map.contains("lead:running") && map.contains("m1:queued"),
         "per-member chips render:\n{map}"
@@ -267,8 +320,18 @@ fn render_squad_card_snapshot() {
 /// A repo roster (one ★ favorite + one scanned) for the card-create snapshots.
 fn repo_roster() -> Vec<RepoOption> {
     vec![
-        RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true, is_remote_only: false },
-        RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false, is_remote_only: false },
+        RepoOption {
+            label: "ainb".into(),
+            repo_ref: "/src/ainb".into(),
+            is_favorite: true,
+            is_remote_only: false,
+        },
+        RepoOption {
+            label: "widget".into(),
+            repo_ref: "/src/widget".into(),
+            is_favorite: false,
+            is_remote_only: false,
+        },
     ]
 }
 
@@ -310,7 +373,10 @@ fn render_card_repo_closed_snapshot() {
     render_boards(&mut buf, 120, 0, 20, &state);
     let map = glyph_map(&buf, 120);
     assert!(map.contains("Repo for"), "repo prompt:\n{map}");
-    assert!(map.contains("scratch always available"), "closed-field scratch pointer:\n{map}");
+    assert!(
+        map.contains("scratch always available"),
+        "closed-field scratch pointer:\n{map}"
+    );
     insta::assert_snapshot!(map);
 }
 
@@ -324,7 +390,10 @@ fn render_card_repo_at_open_snapshot() {
     let map = glyph_map(&buf, 120);
     assert!(map.contains("Repo for"), "repo prompt:\n{map}");
     assert!(map.contains("scratch"), "scratch always first:\n{map}");
-    assert!(map.contains("ainb") && map.contains('★'), "★ favorite in the dropdown:\n{map}");
+    assert!(
+        map.contains("ainb") && map.contains('★'),
+        "★ favorite in the dropdown:\n{map}"
+    );
     insta::assert_snapshot!(map);
 }
 

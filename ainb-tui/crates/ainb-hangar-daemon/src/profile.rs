@@ -270,22 +270,21 @@ pub fn spawn_index_watch(pool: SqlitePool, dir: PathBuf) -> Option<notify::Recom
             }
         });
     }
-    let mut watcher = match notify::recommended_watcher(
-        move |res: notify::Result<notify::Event>| match res {
+    let mut watcher =
+        match notify::recommended_watcher(move |res: notify::Result<notify::Event>| match res {
             Ok(_event) => {
                 // Non-blocking: a full channel already has a reconcile queued, so
                 // a dropped send just coalesces into that pending run.
                 let _ = tx.try_send(());
             }
             Err(e) => tracing::warn!(error = %e, "profile watch error"),
-        },
-    ) {
-        Ok(w) => w,
-        Err(e) => {
-            tracing::warn!(error = %e, "profile watch: watcher construction failed");
-            return None;
-        }
-    };
+        }) {
+            Ok(w) => w,
+            Err(e) => {
+                tracing::warn!(error = %e, "profile watch: watcher construction failed");
+                return None;
+            }
+        };
 
     if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
         tracing::warn!(dir = %dir.display(), error = %e, "profile watch: watch() failed");
@@ -556,10 +555,9 @@ You are a reviewer.\n";
             report.home_env,
             Some(("CLAUDE_HOME".to_string(), root.path().to_path_buf()))
         );
-        let written = fs::read_to_string(
-            root.path().join(".claude").join("agents").join("reviewer.md"),
-        )
-        .unwrap();
+        let written =
+            fs::read_to_string(root.path().join(".claude").join("agents").join("reviewer.md"))
+                .unwrap();
         // Tier resolved to a Claude model; every field preserved.
         assert!(written.contains("model: opus"));
         assert!(written.contains("tools: Read, Grep"));
@@ -577,13 +575,11 @@ You are a reviewer.\n";
             report.home_env,
             Some(("CODEX_HOME".to_string(), root.path().join(".codex")))
         );
-        let config =
-            fs::read_to_string(root.path().join(".codex").join("config.toml")).unwrap();
+        let config = fs::read_to_string(root.path().join(".codex").join("config.toml")).unwrap();
         assert_eq!(config, "[profiles.reviewer]\nmodel = \"gpt-5\"\n");
-        let prompt = fs::read_to_string(
-            root.path().join(".codex").join("prompts").join("reviewer.md"),
-        )
-        .unwrap();
+        let prompt =
+            fs::read_to_string(root.path().join(".codex").join("prompts").join("reviewer.md"))
+                .unwrap();
         assert!(prompt.contains("You are a reviewer."));
     }
 

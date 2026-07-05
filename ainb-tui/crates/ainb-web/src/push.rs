@@ -25,12 +25,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ainb_hangar_proto::{Channel, ChannelSet};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use axum::{Json, Router};
-use ainb_hangar_proto::{Channel, ChannelSet};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::sync::Mutex;
@@ -748,10 +748,17 @@ mod tests {
             { "kind": "ERR", "cwd": "/work/two", "sessionId": "s2", "channels": ["os"] },
         ]);
         let map = attention_by_key(&needs);
-        assert_eq!(map.len(), 2, "each card keys on its own cwd, not one shared key");
+        assert_eq!(
+            map.len(),
+            2,
+            "each card keys on its own cwd, not one shared key"
+        );
         assert_eq!(map.get("/work/one").map(|(k, _)| k.as_str()), Some("ASK"));
         assert_eq!(map.get("/work/two").map(|(k, _)| k.as_str()), Some("ERR"));
-        assert!(!map.contains_key("session"), "cards must not collapse onto the fallback key");
+        assert!(
+            !map.contains_key("session"),
+            "cards must not collapse onto the fallback key"
+        );
 
         // A card with an empty top-level cwd falls back to sessionId, still distinct.
         let by_id = json!([{ "kind": "ASK", "cwd": "", "sessionId": "s9", "channels": ["web"] }]);
@@ -773,9 +780,18 @@ mod tests {
             { "kind": "ERR",  "session": { "cwd": "/err" },  "channels": ["os"] },
         ]);
         let map = attention_by_key(&needs);
-        assert!(map.get("/ask").unwrap().1.contains(Channel::Web), "ASK is web-routed");
-        assert!(!map.get("/wait").unwrap().1.contains(Channel::Web), "board-only WAIT is not");
-        assert!(!map.get("/err").unwrap().1.contains(Channel::Web), "os-only ERR is not");
+        assert!(
+            map.get("/ask").unwrap().1.contains(Channel::Web),
+            "ASK is web-routed"
+        );
+        assert!(
+            !map.get("/wait").unwrap().1.contains(Channel::Web),
+            "board-only WAIT is not"
+        );
+        assert!(
+            !map.get("/err").unwrap().1.contains(Channel::Web),
+            "os-only ERR is not"
+        );
         // A card that omits `channels` reads as board-only (no web buzz).
         let legacy = json!([{ "kind": "ASK", "session": { "cwd": "/x" } }]);
         assert!(!attention_by_key(&legacy).get("/x").unwrap().1.contains(Channel::Web));
@@ -838,8 +854,16 @@ mod tests {
         );
         let last =
             deliver_web_transitions(&push, &snap, &std::collections::HashMap::new(), false).await;
-        assert_eq!(sender.sent.load(Ordering::SeqCst), 0, "baseline never buzzes");
-        assert_eq!(last.get("/ask").map(String::as_str), Some("ASK"), "but records state");
+        assert_eq!(
+            sender.sent.load(Ordering::SeqCst),
+            0,
+            "baseline never buzzes"
+        );
+        assert_eq!(
+            last.get("/ask").map(String::as_str),
+            Some("ASK"),
+            "but records state"
+        );
     }
 
     #[test]

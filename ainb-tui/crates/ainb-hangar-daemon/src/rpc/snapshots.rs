@@ -28,8 +28,8 @@ use ainb_hangar_proto::events::{
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
-use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
+use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
@@ -37,9 +37,9 @@ use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
+use ainb_hangar_store::repo::run_history::RunHistoryRepo;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
-use ainb_hangar_store::repo::run_history::RunHistoryRepo;
 use ainb_hangar_store::repo::usage::UsageRepo;
 use ainb_hangar_store::repo::workspace::{apply_issue_prefix, issue_display_id};
 use sqlx::{Row, SqlitePool};
@@ -601,11 +601,13 @@ async fn squad_member_chips(
     .await?;
     Ok(rows
         .into_iter()
-        .map(|(agent_id, agent_name, status)| ainb_hangar_proto::snapshots::CardMemberChip {
-            agent_id,
-            agent_name,
-            state: Some(status),
-        })
+        .map(
+            |(agent_id, agent_name, status)| ainb_hangar_proto::snapshots::CardMemberChip {
+                agent_id,
+                agent_name,
+                state: Some(status),
+            },
+        )
         .collect())
 }
 
@@ -1107,10 +1109,8 @@ async fn fetch_pr_statuses(
         set.spawn(async move {
             // Hold a permit for the fetch's duration, capping in-flight `gh`
             // subprocesses. The semaphore is never closed, so acquire cannot fail.
-            let _permit = limiter
-                .acquire_owned()
-                .await
-                .expect("pr-fetch semaphore is never closed");
+            let _permit =
+                limiter.acquire_owned().await.expect("pr-fetch semaphore is never closed");
             let status = provider.fetch(&url).await;
             (url, status)
         });
@@ -2096,7 +2096,10 @@ mod pr_fetch_bound_tests {
             let delay = self.delay;
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
-                PrStatus { ci: CiRollup::Pass, ..Default::default() }
+                PrStatus {
+                    ci: CiRollup::Pass,
+                    ..Default::default()
+                }
             })
         }
     }
@@ -2124,7 +2127,10 @@ mod pr_fetch_bound_tests {
             Box::pin(async move {
                 tokio::time::sleep(delay).await;
                 in_flight.fetch_sub(1, Ordering::SeqCst);
-                PrStatus { ci: CiRollup::Pass, ..Default::default() }
+                PrStatus {
+                    ci: CiRollup::Pass,
+                    ..Default::default()
+                }
             })
         }
     }
@@ -2138,7 +2144,10 @@ mod pr_fetch_bound_tests {
         const N: usize = 12;
         let delay = Duration::from_millis(300);
         let calls = Arc::new(AtomicUsize::new(0));
-        let provider = Arc::new(SlowProvider { delay, calls: Arc::clone(&calls) });
+        let provider = Arc::new(SlowProvider {
+            delay,
+            calls: Arc::clone(&calls),
+        });
 
         let urls: std::collections::HashSet<String> =
             (0..N).map(|i| format!("https://github.com/o/r/pull/{i}")).collect();
@@ -2148,7 +2157,11 @@ mod pr_fetch_bound_tests {
         let elapsed = started.elapsed();
 
         assert_eq!(statuses.len(), N, "every distinct url yields a status");
-        assert_eq!(calls.load(Ordering::SeqCst), N, "each distinct url fetched exactly once");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            N,
+            "each distinct url fetched exactly once"
+        );
         // Serial would be N * 300ms = 3.6s. Concurrent is ~300ms; a 1.5s ceiling
         // absorbs scheduler jitter while still failing a serial regression.
         assert!(
@@ -2184,7 +2197,10 @@ mod pr_fetch_bound_tests {
             peak <= PR_FETCH_CONCURRENCY,
             "in-flight fetches never exceed the cap ({peak} > {PR_FETCH_CONCURRENCY})"
         );
-        assert!(peak > 1, "fetches still overlap (peak {peak} proves it is not serial)");
+        assert!(
+            peak > 1,
+            "fetches still overlap (peak {peak} proves it is not serial)"
+        );
     }
 
     /// The same url appearing on many cards collapses to ONE fetch (the caller
@@ -2199,6 +2215,10 @@ mod pr_fetch_bound_tests {
         });
         let statuses = fetch_pr_statuses(provider, std::collections::HashSet::new()).await;
         assert!(statuses.is_empty());
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "no urls → no fetches spawned");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "no urls → no fetches spawned"
+        );
     }
 }

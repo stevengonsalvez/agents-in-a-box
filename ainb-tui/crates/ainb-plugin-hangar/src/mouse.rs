@@ -160,9 +160,7 @@ impl HitMap {
     #[must_use]
     pub fn column_at(&self, col: u16, row: u16) -> Option<IssueLifecycle> {
         self.entries.iter().find_map(|(rect, target)| {
-            (rect.contains(col, row))
-                .then(|| column_status(target))
-                .flatten()
+            (rect.contains(col, row)).then(|| column_status(target)).flatten()
         })
     }
 
@@ -377,9 +375,8 @@ impl MouseFsm {
             }),
             // Left-press a card → select + arm the press (a possible drag/click).
             (MouseButton::Left, Target::Card(id)) => {
-                let origin = map
-                    .card_rect_at(col, row)
-                    .unwrap_or_else(|| Rect::new(col, row, 1, 1));
+                let origin =
+                    map.card_rect_at(col, row).unwrap_or_else(|| Rect::new(col, row, 1, 1));
                 self.state = MouseState::Pressed {
                     card: id.clone(),
                     origin,
@@ -521,7 +518,7 @@ fn reorder_index(map: &HitMap, status: IssueLifecycle, row: u16) -> usize {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::card_board::{render_card_board, BoardCard, BoardColumn, PriorityChip};
+    use crate::widgets::card_board::{BoardCard, BoardColumn, PriorityChip, render_card_board};
     use ainb_plugin_sdk::WireBuffer;
 
     /// The hit-map built from a real card-board render resolves a click on a

@@ -184,7 +184,9 @@ async fn attention_list_scopes_fleet_workspace_and_host() {
     let (socket, store, _sink) = start_server(dir.path()).await;
 
     // One workspace-owned row + one no-workspace host row.
-    AttentionRepo::insert(store.pool(), &ask("a1", "s1", Some(WS_ID), 1000)).await.unwrap();
+    AttentionRepo::insert(store.pool(), &ask("a1", "s1", Some(WS_ID), 1000))
+        .await
+        .unwrap();
     AttentionRepo::insert(store.pool(), &ask("h1", "s2", None, 2000)).await.unwrap();
 
     let mut client = Client::connect(&socket).await;
@@ -192,7 +194,10 @@ async fn attention_list_scopes_fleet_workspace_and_host() {
 
     // Fleet-wide → both rows, oldest first.
     let fleet = client
-        .call(methods::ATTENTION_LIST, serde_json::json!({ "fleet": true }))
+        .call(
+            methods::ATTENTION_LIST,
+            serde_json::json!({ "fleet": true }),
+        )
         .await;
     assert!(fleet["error"].is_null(), "attention/list must ack: {fleet}");
     let ids: Vec<&str> = fleet["result"]["attention"]
@@ -220,7 +225,10 @@ async fn attention_list_scopes_fleet_workspace_and_host() {
 
     // No workspace → only the host row.
     let host = client
-        .call(methods::ATTENTION_LIST, serde_json::json!({ "fleet": false }))
+        .call(
+            methods::ATTENTION_LIST,
+            serde_json::json!({ "fleet": false }),
+        )
         .await;
     let host_ids: Vec<&str> = host["result"]["attention"]
         .as_array()
@@ -242,7 +250,10 @@ async fn attention_subscribe_delivers_a_fleet_wide_raised_delta() {
     // Subscribe fleet-wide (no workspace filter). The ack carries the (empty) open
     // snapshot; the live forwarder is registered right after.
     let ack = client.call(methods::ATTENTION_SUBSCRIBE, serde_json::json!({})).await;
-    assert!(ack["error"].is_null(), "attention/subscribe must ack: {ack}");
+    assert!(
+        ack["error"].is_null(),
+        "attention/subscribe must ack: {ack}"
+    );
     assert!(ack["result"]["attention"].as_array().unwrap().is_empty());
 
     // Let the forwarder register (it is spawned just after the ack is queued),
@@ -263,7 +274,10 @@ async fn attention_subscribe_delivers_a_fleet_wide_raised_delta() {
     assert_eq!(note["method"], ainb_hangar_proto::events::EVENT_METHOD);
     assert_eq!(note["params"]["event"], "attention_raised");
     assert_eq!(note["params"]["attention_id"], "att-9");
-    assert!(note["params"].get("id").is_none(), "a notification carries no id");
+    assert!(
+        note["params"].get("id").is_none(),
+        "a notification carries no id"
+    );
 }
 
 #[tokio::test]
@@ -272,7 +286,9 @@ async fn attention_answer_already_answered_reports_the_winner() {
     let (socket, store, _sink) = start_server(dir.path()).await;
 
     // Seed an OPEN row, then let a prior surface win the answer.
-    AttentionRepo::insert(store.pool(), &ask("a1", "s1", Some(WS_ID), 1000)).await.unwrap();
+    AttentionRepo::insert(store.pool(), &ask("a1", "s1", Some(WS_ID), 1000))
+        .await
+        .unwrap();
     AttentionRepo::mark_answered_if_open(store.pool(), "a1", "web", "first", 3000)
         .await
         .unwrap();

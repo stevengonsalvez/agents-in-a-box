@@ -270,16 +270,12 @@ impl ContextMenuHitMap {
 
     /// The root index whose painted row covers `(col, row)`, if any.
     fn root_at(&self, col: u16, row: u16) -> Option<usize> {
-        self.root
-            .iter()
-            .find_map(|(rect, i)| rect.contains(col, row).then_some(*i))
+        self.root.iter().find_map(|(rect, i)| rect.contains(col, row).then_some(*i))
     }
 
     /// The submenu index whose painted row covers `(col, row)`, if any.
     fn sub_at(&self, col: u16, row: u16) -> Option<usize> {
-        self.sub
-            .iter()
-            .find_map(|(rect, i)| rect.contains(col, row).then_some(*i))
+        self.sub.iter().find_map(|(rect, i)| rect.contains(col, row).then_some(*i))
     }
 }
 
@@ -692,11 +688,9 @@ fn render_submenu(
             .iter()
             .map(|(chip, p)| (chip.label().to_string(), *p == state.current_priority))
             .collect(),
-        SubMenu::Assign(_) => state
-            .actors
-            .iter()
-            .map(|a| (a.display_name.clone(), false))
-            .collect(),
+        SubMenu::Assign(_) => {
+            state.actors.iter().map(|a| (a.display_name.clone(), false)).collect()
+        }
     };
 
     let sub_sel = state.current_submenu_index();

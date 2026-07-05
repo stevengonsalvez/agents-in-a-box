@@ -257,8 +257,16 @@ async fn issue_update_edits_title_and_persists_card_repo_agent() {
             .fetch_one(store.pool())
             .await
             .unwrap();
-    assert_eq!(repo_ref.as_deref(), Some("/repos/widget"), "repo persisted on the card");
-    assert_eq!(agent_kind.as_deref(), Some("codex"), "the NEW agent persisted on the card");
+    assert_eq!(
+        repo_ref.as_deref(),
+        Some("/repos/widget"),
+        "repo persisted on the card"
+    );
+    assert_eq!(
+        agent_kind.as_deref(),
+        Some("codex"),
+        "the NEW agent persisted on the card"
+    );
 
     // The title change is visible in a fresh snapshot.
     let list = c
@@ -269,7 +277,10 @@ async fn issue_update_edits_title_and_persists_card_repo_agent() {
         .await;
     let issues = list["result"]["issues"].as_array().unwrap();
     let edited = issues.iter().find(|i| i["id"] == "issue-1").expect("issue-1 present");
-    assert_eq!(edited["title"], "Renamed by the edit overlay", "title persisted");
+    assert_eq!(
+        edited["title"], "Renamed by the edit overlay",
+        "title persisted"
+    );
 }
 
 /// A blank title is a client error, never a stored empty title (mirrors
@@ -292,7 +303,10 @@ async fn issue_update_rejects_a_blank_title() {
             }),
         )
         .await;
-    assert!(!resp["error"].is_null(), "a blank title must be rejected: {resp}");
+    assert!(
+        !resp["error"].is_null(),
+        "a blank title must be rejected: {resp}"
+    );
 }
 
 /// A mistyped / foreign workspace is rejected with an error — never a silent

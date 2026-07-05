@@ -812,7 +812,10 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_a","name":"AskUserQuestion","input":{"questions":[{"question":"Scope?","options":[{"label":"a"}]}]}}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_a","content":"Your questions have been answered: \"Scope?\"=\"a\"."}]}}"#,
         ]);
-        assert!(aq.is_none(), "an answered ask must fall through, not stick as ASK");
+        assert!(
+            aq.is_none(),
+            "an answered ask must fall through, not stick as ASK"
+        );
     }
 
     #[test]
@@ -822,7 +825,10 @@ mod tests {
             r#"{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_t","name":"AskUserQuestion","input":{"questions":[{"question":"Pick?","options":[{"label":"a"}]}]}}]}}"#,
             r#"{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_t","content":"No response after 60s — the user may be away from keyboard."}]}}"#,
         ]);
-        assert!(aq.is_none(), "an AFK-timed-out ask is closed, not an open need");
+        assert!(
+            aq.is_none(),
+            "an AFK-timed-out ask is closed, not an open need"
+        );
     }
 
     #[test]
@@ -862,7 +868,10 @@ mod tests {
 
         let via_link = canonical_cwd(link.to_str().unwrap());
         let via_real = canonical_cwd(real.to_str().unwrap());
-        assert_eq!(via_link, via_real, "a symlinked cwd canonicalizes to its real dir");
+        assert_eq!(
+            via_link, via_real,
+            "a symlinked cwd canonicalizes to its real dir"
+        );
         assert_eq!(
             cwd_to_project_slug(&via_link),
             cwd_to_project_slug(&via_real),

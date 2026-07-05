@@ -11,8 +11,8 @@ use ainb_hangar_proto::events::{
     CommentRow, HangarEvent, IssueRow, MessageKind, PresenceState, TaskResult,
 };
 use ainb_plugin_hangar::screen::task_detail::{
-    reduce_task_detail, TaskDetailEvent, TaskDetailIntent, TaskDetailState, TaskLifecycle,
-    TranscriptEntry,
+    TaskDetailEvent, TaskDetailIntent, TaskDetailState, TaskLifecycle, TranscriptEntry,
+    reduce_task_detail,
 };
 use chrono::{TimeZone, Utc};
 
@@ -130,9 +130,7 @@ fn r_key_emits_retry_intent_only_when_task_finished_or_failed() {
     )
     .state;
     assert_eq!(running.lifecycle(), TaskLifecycle::Running);
-    assert!(reduce_task_detail(&running, TaskDetailEvent::Key('R'))
-        .intent
-        .is_none());
+    assert!(reduce_task_detail(&running, TaskDetailEvent::Key('R')).intent.is_none());
 
     // Finished failure: retry allowed.
     let failed = reduce_task_detail(

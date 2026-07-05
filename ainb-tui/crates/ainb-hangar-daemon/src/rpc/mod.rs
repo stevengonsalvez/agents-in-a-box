@@ -740,8 +740,7 @@ async fn handle_profile_get(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::ProfileGetParams =
-        parse_params(req, "{ slug }")?;
+    let params: ainb_hangar_proto::snapshots::ProfileGetParams = parse_params(req, "{ slug }")?;
     // Containment guard: the slug is joined into `<profiles>/<slug>.md`, so an
     // unvalidated `../` would escape the profiles dir and read any parseable
     // `.md` on disk. Mirror the `profile/upsert` guard — an invalid slug is a
@@ -769,7 +768,7 @@ async fn handle_profile_upsert(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_core::profile::{is_valid_slug, ModelTier, ProfileMaster};
+    use ainb_hangar_core::profile::{ModelTier, ProfileMaster, is_valid_slug};
     let params: ainb_hangar_proto::snapshots::ProfileUpsertParams =
         parse_params(req, "{ slug, description, tier, tools, color, body }")?;
 
@@ -946,9 +945,7 @@ async fn handle_task_transition(
     // real non-terminal → terminal edge. The pre-read also carries the issue /
     // workspace the hook keys on (unchanged by the move).
     use ainb_hangar_store::repo::task::TaskRepo;
-    let before = TaskRepo::get_by_id(pool, &params.task_id)
-        .await
-        .map_err(|e| store_err(&e))?;
+    let before = TaskRepo::get_by_id(pool, &params.task_id).await.map_err(|e| store_err(&e))?;
     let was_terminal = before
         .as_ref()
         .is_some_and(|t| matches!(t.status.as_str(), "done" | "failed" | "cancelled"));
@@ -1844,11 +1841,11 @@ async fn squad_assign_generation(
     issue_id: Option<&str>,
 ) -> Result<i64, RpcError> {
     match issue_id {
-        Some(issue_id) => ainb_hangar_store::repo::task::TaskRepo::next_generation_for_issue(
-            pool, issue_id,
-        )
-        .await
-        .map_err(|e| store_err(&e)),
+        Some(issue_id) => {
+            ainb_hangar_store::repo::task::TaskRepo::next_generation_for_issue(pool, issue_id)
+                .await
+                .map_err(|e| store_err(&e))
+        }
         None => Ok(0),
     }
 }
@@ -2112,8 +2109,10 @@ async fn handle_board_column_add(
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::board::BoardRepo;
 
-    let params: ainb_hangar_proto::snapshots::BoardColumnAddParams =
-        parse_params(req, "{ workspace_id, board_id, name, fsm_state?, auto_move? }")?;
+    let params: ainb_hangar_proto::snapshots::BoardColumnAddParams = parse_params(
+        req,
+        "{ workspace_id, board_id, name, fsm_state?, auto_move? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     if params.name.trim().is_empty() {
         return Err(invalid_params("column name must not be empty"));
@@ -2145,8 +2144,10 @@ async fn handle_board_column_update(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::board::BoardRepo;
 
-    let params: ainb_hangar_proto::snapshots::BoardColumnUpdateParams =
-        parse_params(req, "{ workspace_id, board_id, column_id, name?, fsm_state?, auto_move? }")?;
+    let params: ainb_hangar_proto::snapshots::BoardColumnUpdateParams = parse_params(
+        req,
+        "{ workspace_id, board_id, column_id, name?, fsm_state?, auto_move? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     if let Some(n) = params.name.as_deref() {
         if n.trim().is_empty() {
@@ -2293,8 +2294,10 @@ async fn handle_board_card_create(
     use ainb_hangar_store::repo::board::BoardRepo;
     use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
-    let params: ainb_hangar_proto::snapshots::BoardCardCreateParams =
-        parse_params(req, "{ workspace_id, board_id, column_id?, title, assignee_profile? }")?;
+    let params: ainb_hangar_proto::snapshots::BoardCardCreateParams = parse_params(
+        req,
+        "{ workspace_id, board_id, column_id?, title, assignee_profile? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     if params.title.trim().is_empty() {
         return Err(invalid_params("card title must not be empty"));
@@ -2423,7 +2426,11 @@ async fn resolve_card_repo_ref(ainb_dir: &Path, repo_ref: &str) -> Result<String
     })
     .await
     .map_err(|e| internal(&format!("clone task failed to join: {e}")))?
-    .map_err(|e| internal(&format!("clone of remote favorite {repo_ref:?} failed: {e}")))?;
+    .map_err(|e| {
+        internal(&format!(
+            "clone of remote favorite {repo_ref:?} failed: {e}"
+        ))
+    })?;
     path.into_os_string()
         .into_string()
         .map_err(|_| internal("cloned repo path is not valid UTF-8"))
@@ -2495,15 +2502,17 @@ async fn handle_board_card_run(
     .map_err(card_run_err)?;
 
     let result = match outcome {
-        CardRunOutcome::Single { task_id, agent_id, runtime_id } => {
-            ainb_hangar_proto::snapshots::BoardCardRunResult {
-                task_id,
-                agent_id,
-                runtime_id,
-                mode: mode.to_string(),
-                member_task_ids: Vec::new(),
-            }
-        }
+        CardRunOutcome::Single {
+            task_id,
+            agent_id,
+            runtime_id,
+        } => ainb_hangar_proto::snapshots::BoardCardRunResult {
+            task_id,
+            agent_id,
+            runtime_id,
+            mode: mode.to_string(),
+            member_task_ids: Vec::new(),
+        },
         CardRunOutcome::Squad {
             leader_task_id,
             leader_agent_id,
@@ -2583,9 +2592,7 @@ fn card_run_err(e: CardRunError) -> RpcError {
         CardRunError::InteractiveSquad => invalid_params(
             "interactive mode is not supported for a squad card — a squad runs as a headless batch; use headless",
         ),
-        CardRunError::NoAgent => {
-            invalid_params("this workspace has no agent to run the card on")
-        }
+        CardRunError::NoAgent => invalid_params("this workspace has no agent to run the card on"),
         CardRunError::Db(db) => store_err(&db),
     }
 }
@@ -2601,8 +2608,9 @@ fn card_run_err(e: CardRunError) -> RpcError {
 /// socket, the claim loop, AND the store — architecture invariant #1), so an
 /// in-process per-issue slot held across the whole check+enqueue serializes them:
 /// the loser refuses exactly like a run that lost to an already-active task.
-static CARD_LAUNCHES_IN_FLIGHT: std::sync::LazyLock<std::sync::Mutex<std::collections::HashSet<String>>> =
-    std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
+static CARD_LAUNCHES_IN_FLIGHT: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashSet<String>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
 
 /// RAII slot in [`CARD_LAUNCHES_IN_FLIGHT`]: acquired at [`run_card`] entry,
 /// released on drop (any exit path). The mutex is only held inside
@@ -2706,10 +2714,7 @@ pub(crate) async fn run_card(
         .await
         .map_err(CardRunError::Db)?
         .unwrap_or((None, None));
-    let repo_ref = repo_override
-        .map(str::to_string)
-        .or(card_repo)
-        .ok_or(CardRunError::NoRepo)?;
+    let repo_ref = repo_override.map(str::to_string).or(card_repo).ok_or(CardRunError::NoRepo)?;
 
     // 4. F4 agent cascade + F8 dispatchable check.
     let agent_kind = match agent_override.or(card_agent) {
@@ -2832,10 +2837,7 @@ async fn resolve_run_agent_opt(
             }
         }
     }
-    Ok(AgentRepo::list_by_workspace(pool, ws.as_str())
-        .await?
-        .into_iter()
-        .next())
+    Ok(AgentRepo::list_by_workspace(pool, ws.as_str()).await?.into_iter().next())
 }
 
 /// `hangar/board_card_assign_squad` (tcp T4 / F7): assign (or clear) a SQUAD as a
@@ -2901,8 +2903,10 @@ async fn handle_board_card_dep(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
 
-    let params: ainb_hangar_proto::snapshots::BoardCardDepParams =
-        parse_params(req, "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id }")?;
+    let params: ainb_hangar_proto::snapshots::BoardCardDepParams = parse_params(
+        req,
+        "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
 
     // Both endpoints must be cards on this board — a dependency is a board
@@ -2974,9 +2978,7 @@ fn card_dep_err(e: &ainb_hangar_store::repo::card_dependency::CardDependencyErro
     match e {
         CardDependencyError::SelfDependency => invalid_params("a card cannot depend on itself"),
         CardDependencyError::Cycle => invalid_params("that dependency would create a cycle"),
-        CardDependencyError::NotFound => {
-            invalid_params("both cards must be on this board")
-        }
+        CardDependencyError::NotFound => invalid_params("both cards must be on this board"),
         CardDependencyError::Db(db) => store_err(db),
     }
 }
@@ -3319,7 +3321,6 @@ async fn resolve_agent_by_name(
     Ok(agents.into_iter().find(|a| a.name == slug))
 }
 
-
 /// Re-read `ws`'s boards and serialize them as a
 /// [`BoardsListResult`](ainb_hangar_proto::snapshots::BoardsListResult) wire
 /// value — the refreshed view every `board_*` mutation answers with.
@@ -3622,9 +3623,9 @@ async fn attention_snapshot(
     }
     match workspace_wire {
         Some(wire) => match resolve_workspace_id(pool, wire).await.map_err(|e| store_err(&e))? {
-            Some(real) => {
-                snapshots::attention_list(pool, Some(&real), false).await.map_err(|e| store_err(&e))
-            }
+            Some(real) => snapshots::attention_list(pool, Some(&real), false)
+                .await
+                .map_err(|e| store_err(&e)),
             // Unknown workspace → empty list (a read, never an error).
             None => Ok(Vec::new()),
         },
@@ -3676,9 +3677,7 @@ async fn handle_atc_register(
     let next_tick_at = crate::atc::next_heartbeat_tick(&cron, now_ms);
     // A cron that does not parse is a client error (never a silently-unscheduled
     // instance).
-    if next_tick_at.is_none()
-        && ainb_hangar_core::autopilot::cron::parse_cron(&cron).is_err()
-    {
+    if next_tick_at.is_none() && ainb_hangar_core::autopilot::cron::parse_cron(&cron).is_err() {
         return Err(invalid_params(&format!("invalid heartbeat cron: {cron}")));
     }
     let reg = RegisterAtc {
@@ -3732,10 +3731,14 @@ async fn handle_atc_escalate(
     req: &RpcRequest,
     events: &EventSink,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AtcEscalateParams =
-        parse_params(req, "{ instance_name, session_id, cwd?, workspace_id?, reason }")?;
+    let params: ainb_hangar_proto::snapshots::AtcEscalateParams = parse_params(
+        req,
+        "{ instance_name, session_id, cwd?, workspace_id?, reason }",
+    )?;
     if params.instance_name.trim().is_empty() || params.session_id.trim().is_empty() {
-        return Err(invalid_params("atc escalate requires instance_name and session_id"));
+        return Err(invalid_params(
+            "atc escalate requires instance_name and session_id",
+        ));
     }
     let attention_id = crate::atc::raise_escalation(
         pool,
@@ -3811,9 +3814,14 @@ async fn handle_notify_rule_set(
         Some(w) => Some(resolve_wire_or_reject(pool, w).await?),
         None => None,
     };
-    NotifyRuleRepo::set(pool, ws.as_ref().map(WorkspaceId::as_str), kind, params.channels)
-        .await
-        .map_err(|e| store_err(&e))?;
+    NotifyRuleRepo::set(
+        pool,
+        ws.as_ref().map(WorkspaceId::as_str),
+        kind,
+        params.channels,
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::NotifyRuleSetResult {
         kind: kind.as_str().to_string(),
         channels: params.channels,
@@ -3833,8 +3841,7 @@ async fn handle_atc_unregister(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
 
-    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams =
-        parse_params(req, "{ name }")?;
+    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams = parse_params(req, "{ name }")?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("atc instance name must not be empty"));
@@ -4061,10 +4068,7 @@ mod tests {
     #[test]
     fn profile_upsert_get_list_over_dispatch() {
         ainb_hangar_store::test_support::with_isolated_home(|home| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
                 let store = Store::open_in(home).await.unwrap();
                 let pool = store.pool();
@@ -4088,12 +4092,7 @@ mod tests {
                 )
                 .await;
                 assert!(up.error.is_none(), "upsert must ack: {up:?}");
-                assert!(
-                    up.result.unwrap()["path"]
-                        .as_str()
-                        .unwrap()
-                        .ends_with("code-reviewer.md")
-                );
+                assert!(up.result.unwrap()["path"].as_str().unwrap().ends_with("code-reviewer.md"));
 
                 // Get returns the parsed fields + both previews.
                 let got = dispatch(
@@ -4127,10 +4126,15 @@ mod tests {
                 );
 
                 // List shows the indexed row.
-                let list = dispatch(pool, &req(methods::PROFILE_LIST, serde_json::json!({})), &health(), &sink())
-                    .await
-                    .result
-                    .expect("list result");
+                let list = dispatch(
+                    pool,
+                    &req(methods::PROFILE_LIST, serde_json::json!({})),
+                    &health(),
+                    &sink(),
+                )
+                .await
+                .result
+                .expect("list result");
                 let profiles = list["profiles"].as_array().unwrap();
                 assert_eq!(profiles.len(), 1);
                 assert_eq!(profiles[0]["slug"], "code-reviewer");
@@ -4143,10 +4147,7 @@ mod tests {
     #[test]
     fn profile_get_unknown_slug_is_not_found() {
         ainb_hangar_store::test_support::with_isolated_home(|home| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
                 let store = Store::open_in(home).await.unwrap();
                 let got = dispatch(
@@ -4167,10 +4168,7 @@ mod tests {
     #[test]
     fn profile_upsert_rejects_bad_slug() {
         ainb_hangar_store::test_support::with_isolated_home(|home| {
-            let rt = tokio::runtime::Builder::new_current_thread()
-                .enable_all()
-                .build()
-                .unwrap();
+            let rt = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
             rt.block_on(async {
                 let store = Store::open_in(home).await.unwrap();
                 let resp = dispatch(
@@ -4986,12 +4984,19 @@ mod tests {
             mergeable: Mergeable::Mergeable,
             state: MergeState::Open,
         });
-        let cards =
-            snapshots::tasks_list(store.pool(), crate::seed::WS_ID, std::sync::Arc::new(provider))
-                .await
-                .unwrap();
+        let cards = snapshots::tasks_list(
+            store.pool(),
+            crate::seed::WS_ID,
+            std::sync::Arc::new(provider),
+        )
+        .await
+        .unwrap();
         let card = cards.iter().find(|c| c.id.as_str() == "task-1").unwrap();
-        assert_eq!(card.branch.as_deref(), Some("ainb/task-1"), "branch surfaced");
+        assert_eq!(
+            card.branch.as_deref(),
+            Some("ainb/task-1"),
+            "branch surfaced"
+        );
         assert_eq!(
             card.pr_url.as_deref(),
             Some("https://github.com/o/r/pull/9"),
@@ -5002,7 +5007,10 @@ mod tests {
             Some(CiRollup::Pass),
             "the PR's CI rollup is fetched and surfaced on the card"
         );
-        assert_eq!(card.pr_status.map(|s| s.mergeable), Some(Mergeable::Mergeable));
+        assert_eq!(
+            card.pr_status.map(|s| s.mergeable),
+            Some(Mergeable::Mergeable)
+        );
     }
 
     /// A card that captured no PR carries no `pr_url` and no `pr_status` — the
@@ -5020,10 +5028,13 @@ mod tests {
             mergeable: Mergeable::Conflicting,
             state: MergeState::Closed,
         });
-        let cards =
-            snapshots::tasks_list(store.pool(), crate::seed::WS_ID, std::sync::Arc::new(provider))
-                .await
-                .unwrap();
+        let cards = snapshots::tasks_list(
+            store.pool(),
+            crate::seed::WS_ID,
+            std::sync::Arc::new(provider),
+        )
+        .await
+        .unwrap();
         let card = cards.iter().find(|c| c.id.as_str() == "task-1").unwrap();
         assert_eq!(card.pr_url, None, "no PR captured");
         assert_eq!(card.pr_status, None, "no PR → no status fetched");
@@ -5060,7 +5071,10 @@ mod tests {
             .await
             .unwrap()
             .expect("issue-2 exists");
-        assert_eq!(no_branch.branch, None, "no committed branch → None, not empty");
+        assert_eq!(
+            no_branch.branch, None,
+            "no committed branch → None, not empty"
+        );
     }
 
     /// A foreign workspace yields an empty task list (tenant isolation).
@@ -5092,7 +5106,13 @@ mod tests {
         std::fs::create_dir_all(&work).unwrap();
         let git = |args: &[&str]| {
             assert!(
-                Command::new("git").args(args).current_dir(&work).output().unwrap().status.success(),
+                Command::new("git")
+                    .args(args)
+                    .current_dir(&work)
+                    .output()
+                    .unwrap()
+                    .status
+                    .success(),
                 "git {args:?} failed"
             );
         };
@@ -5123,10 +5143,19 @@ mod tests {
     async fn resolve_card_repo_ref_passes_through_path_and_scratch() {
         let tmp = tempfile::tempdir().unwrap();
         let ainb = tmp.path().join(".agents-in-a-box");
-        assert_eq!(resolve_card_repo_ref(&ainb, "scratch").await.unwrap(), "scratch");
-        assert_eq!(resolve_card_repo_ref(&ainb, "/src/widget").await.unwrap(), "/src/widget");
+        assert_eq!(
+            resolve_card_repo_ref(&ainb, "scratch").await.unwrap(),
+            "scratch"
+        );
+        assert_eq!(
+            resolve_card_repo_ref(&ainb, "/src/widget").await.unwrap(),
+            "/src/widget"
+        );
         // Neither pass-through touched the clones dir.
-        assert!(!ainb.join("clones").exists(), "no clone dir created for path/scratch");
+        assert!(
+            !ainb.join("clones").exists(),
+            "no clone dir created for path/scratch"
+        );
     }
 
     /// A remote-only favorite pick (a `file://` remote here) is CLONED into the
@@ -5141,14 +5170,26 @@ mod tests {
 
         let resolved = resolve_card_repo_ref(&ainb, &remote).await.unwrap();
         let path = std::path::Path::new(&resolved);
-        assert!(path.is_absolute(), "resolved to an absolute local path, not a remote");
-        assert!(path.starts_with(ainb.join("clones")), "clone lives under the managed dir");
+        assert!(
+            path.is_absolute(),
+            "resolved to an absolute local path, not a remote"
+        );
+        assert!(
+            path.starts_with(ainb.join("clones")),
+            "clone lives under the managed dir"
+        );
         assert!(path.join(".git").exists(), "a real checkout landed");
-        assert!(path.join("README.md").exists(), "the remote's content is present");
+        assert!(
+            path.join("README.md").exists(),
+            "the remote's content is present"
+        );
 
         // A second pick of the same remote reuses the SAME clone (idempotent).
         let again = resolve_card_repo_ref(&ainb, &remote).await.unwrap();
-        assert_eq!(again, resolved, "the clone is reused, not re-cloned to a new dir");
+        assert_eq!(
+            again, resolved,
+            "the clone is reused, not re-cloned to a new dir"
+        );
     }
 
     /// A remote that cannot be cloned surfaces an error (the card is not created;
@@ -5160,7 +5201,10 @@ mod tests {
         // A file:// URL to a path that is not a repo → clone fails.
         let bad = format!("file://{}/nope.git", tmp.path().display());
         let err = resolve_card_repo_ref(&ainb, &bad).await;
-        assert!(err.is_err(), "an unclonable remote is an error, not a bogus repo_ref");
+        assert!(
+            err.is_err(),
+            "an unclonable remote is an error, not a bogus repo_ref"
+        );
     }
 
     /// `hangar/task_transition` drives the real store FSM: moving the seeded
@@ -5492,10 +5536,22 @@ mod tests {
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
         let rules = resp.result.unwrap()["rules"].clone();
-        assert_eq!(row_for(&rules, "escalation")["channels"], serde_json::json!(["phone", "web", "os"]));
-        assert_eq!(row_for(&rules, "ask_user_question")["channels"], serde_json::json!(["phone", "web", "os", "atc"]));
-        assert_eq!(row_for(&rules, "waiting")["channels"], serde_json::json!([]));
-        assert_eq!(row_for(&rules, "error")["overridden"], serde_json::json!(false));
+        assert_eq!(
+            row_for(&rules, "escalation")["channels"],
+            serde_json::json!(["phone", "web", "os"])
+        );
+        assert_eq!(
+            row_for(&rules, "ask_user_question")["channels"],
+            serde_json::json!(["phone", "web", "os", "atc"])
+        );
+        assert_eq!(
+            row_for(&rules, "waiting")["channels"],
+            serde_json::json!([])
+        );
+        assert_eq!(
+            row_for(&rules, "error")["overridden"],
+            serde_json::json!(false)
+        );
 
         // Override ASK for the seeded `default` workspace → phone only.
         let set = dispatch(
@@ -5513,12 +5569,18 @@ mod tests {
         )
         .await;
         assert!(set.error.is_none(), "{set:?}");
-        assert_eq!(set.result.unwrap()["channels"], serde_json::json!(["phone"]));
+        assert_eq!(
+            set.result.unwrap()["channels"],
+            serde_json::json!(["phone"])
+        );
 
         // The workspace grid shows the override (marked)...
         let ws_rules = dispatch(
             pool,
-            &req(methods::HANGAR_NOTIFY_RULES_LIST, serde_json::json!({"workspace_id": "default"})),
+            &req(
+                methods::HANGAR_NOTIFY_RULES_LIST,
+                serde_json::json!({"workspace_id": "default"}),
+            ),
             &health(),
             &sink(),
         )

@@ -210,10 +210,7 @@ mod tests {
 
         // The two entries render their kind + summary below the hint row
         // (title=0, hint=1, blank=2, entries from row 3).
-        let body = (3..7)
-            .map(|r| row_text(&buf, r, 60))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body = (3..7).map(|r| row_text(&buf, r, 60)).collect::<Vec<_>>().join("\n");
         assert!(body.contains("issue"), "issue entry: {body}");
         assert!(
             body.contains("New issue: Refactor API"),
@@ -255,10 +252,7 @@ mod tests {
         let mut buf = WireBuffer::new(60, 24);
         render_inbox(&mut buf, 60, 0, 20, &state);
         // The empty placeholder renders at row 3 (title=0, hint=1, blank=2).
-        let body = (3..5)
-            .map(|r| row_text(&buf, r, 60))
-            .collect::<Vec<_>>()
-            .join("\n");
+        let body = (3..5).map(|r| row_text(&buf, r, 60)).collect::<Vec<_>>().join("\n");
         assert!(
             body.contains("no notifications"),
             "empty placeholder: {body}"

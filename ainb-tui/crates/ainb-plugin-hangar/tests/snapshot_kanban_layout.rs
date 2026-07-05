@@ -10,7 +10,7 @@
 //! card.
 
 use ainb_hangar_proto::events::TaskCardRow;
-use ainb_plugin_hangar::screen::kanban::{render_kanban, BoardColumn, KanbanState};
+use ainb_plugin_hangar::screen::kanban::{BoardColumn, KanbanState, render_kanban};
 use ainb_plugin_sdk::{Color, WireBuffer};
 
 /// Fixed render clock so the age labels are deterministic.
@@ -165,10 +165,8 @@ fn focused_card_has_heavy_clay_border() {
     let state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
     let mut buf = WireBuffer::new(120, 30);
     render_kanban(&mut buf, 120, 0, 30, &state, NOW_MS);
-    let heavy_in_clay = buf
-        .cells
-        .iter()
-        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
+    let heavy_in_clay =
+        buf.cells.iter().any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
         heavy_in_clay,
         "the focused card must carry the heavy clay border (card-board highlight)"

@@ -102,21 +102,35 @@ mod tests {
         assert!(DaemonConfigRepo::get(store.pool(), "nope").await.unwrap().is_none());
         // Typed accessors fall back to the coded default for an unset key.
         assert!(DaemonConfigRepo::get_bool(store.pool(), "nope", true).await.unwrap());
-        assert_eq!(DaemonConfigRepo::get_i64(store.pool(), "nope", 15).await.unwrap(), 15);
+        assert_eq!(
+            DaemonConfigRepo::get_i64(store.pool(), "nope", 15).await.unwrap(),
+            15
+        );
     }
 
     #[tokio::test]
     async fn set_then_get_roundtrips_and_upserts() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        DaemonConfigRepo::set(store.pool(), "autostandup.enabled", "false").await.unwrap();
+        DaemonConfigRepo::set(store.pool(), "autostandup.enabled", "false")
+            .await
+            .unwrap();
         assert_eq!(
-            DaemonConfigRepo::get(store.pool(), "autostandup.enabled").await.unwrap().as_deref(),
+            DaemonConfigRepo::get(store.pool(), "autostandup.enabled")
+                .await
+                .unwrap()
+                .as_deref(),
             Some("false")
         );
         // A second write to the same key overwrites (upsert, not a duplicate-row error).
-        DaemonConfigRepo::set(store.pool(), "autostandup.enabled", "true").await.unwrap();
-        assert!(DaemonConfigRepo::get_bool(store.pool(), "autostandup.enabled", false).await.unwrap());
+        DaemonConfigRepo::set(store.pool(), "autostandup.enabled", "true")
+            .await
+            .unwrap();
+        assert!(
+            DaemonConfigRepo::get_bool(store.pool(), "autostandup.enabled", false)
+                .await
+                .unwrap()
+        );
     }
 
     #[tokio::test]
@@ -126,10 +140,16 @@ mod tests {
         DaemonConfigRepo::set(store.pool(), "b", "ON").await.unwrap();
         assert!(DaemonConfigRepo::get_bool(store.pool(), "b", false).await.unwrap());
         DaemonConfigRepo::set(store.pool(), "n", "42").await.unwrap();
-        assert_eq!(DaemonConfigRepo::get_i64(store.pool(), "n", 0).await.unwrap(), 42);
+        assert_eq!(
+            DaemonConfigRepo::get_i64(store.pool(), "n", 0).await.unwrap(),
+            42
+        );
         // A malformed value falls back to the default rather than erroring.
         DaemonConfigRepo::set(store.pool(), "bad", "not-a-number").await.unwrap();
-        assert_eq!(DaemonConfigRepo::get_i64(store.pool(), "bad", 7).await.unwrap(), 7);
+        assert_eq!(
+            DaemonConfigRepo::get_i64(store.pool(), "bad", 7).await.unwrap(),
+            7
+        );
         DaemonConfigRepo::set(store.pool(), "badb", "maybe").await.unwrap();
         assert!(DaemonConfigRepo::get_bool(store.pool(), "badb", true).await.unwrap());
     }

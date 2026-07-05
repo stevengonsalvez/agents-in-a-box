@@ -18,7 +18,7 @@
 //! new columns) and delegates the precedence to the pure
 //! [`ainb_hangar_core::agent_kind::resolve_agent_cascade`].
 
-use ainb_hangar_core::agent_kind::{resolve_agent_cascade, AgentKind};
+use ainb_hangar_core::agent_kind::{AgentKind, resolve_agent_cascade};
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::SqlitePool;
 
@@ -207,14 +207,13 @@ impl CardParityRepo {
         board_id: &str,
         agent_kind: Option<AgentKind>,
     ) -> Result<bool, sqlx::Error> {
-        let res = sqlx::query(
-            "UPDATE board SET default_agent = ? WHERE id = ? AND workspace_id = ?",
-        )
-        .bind(agent_kind.map(|a| a.as_str()))
-        .bind(board_id)
-        .bind(workspace.as_str())
-        .execute(pool)
-        .await?;
+        let res =
+            sqlx::query("UPDATE board SET default_agent = ? WHERE id = ? AND workspace_id = ?")
+                .bind(agent_kind.map(|a| a.as_str()))
+                .bind(board_id)
+                .bind(workspace.as_str())
+                .execute(pool)
+                .await?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -229,13 +228,12 @@ impl CardParityRepo {
         workspace: &WorkspaceId,
         board_id: &str,
     ) -> Result<Option<AgentKind>, sqlx::Error> {
-        let raw: Option<Option<String>> = sqlx::query_scalar(
-            "SELECT default_agent FROM board WHERE id = ? AND workspace_id = ?",
-        )
-        .bind(board_id)
-        .bind(workspace.as_str())
-        .fetch_optional(pool)
-        .await?;
+        let raw: Option<Option<String>> =
+            sqlx::query_scalar("SELECT default_agent FROM board WHERE id = ? AND workspace_id = ?")
+                .bind(board_id)
+                .bind(workspace.as_str())
+                .fetch_optional(pool)
+                .await?;
         Ok(raw.flatten().as_deref().and_then(AgentKind::parse))
     }
 
@@ -335,7 +333,12 @@ impl CardParityRepo {
         };
         let workspace_default = Self::get_workspace_default_agent(pool, workspace).await?;
         let global = Self::get_global_default_agent(pool).await?;
-        Ok(resolve_agent_cascade(last_used, board, workspace_default, global))
+        Ok(resolve_agent_cascade(
+            last_used,
+            board,
+            workspace_default,
+            global,
+        ))
     }
 }
 
@@ -439,14 +442,26 @@ mod tests {
         seed_issue(pool, "ws-a", "issue-1").await;
 
         // Seed both fields.
-        CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", Some("/repos/app"), Some(AgentKind::Codex))
-            .await
-            .unwrap();
+        CardParityRepo::set_issue_repo_agent(
+            pool,
+            "ws-a",
+            "issue-1",
+            Some("/repos/app"),
+            Some(AgentKind::Codex),
+        )
+        .await
+        .unwrap();
 
         // Agent-only edit leaves the repo untouched.
-        let ok = CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", None, Some(AgentKind::Claude))
-            .await
-            .unwrap();
+        let ok = CardParityRepo::set_issue_repo_agent(
+            pool,
+            "ws-a",
+            "issue-1",
+            None,
+            Some(AgentKind::Claude),
+        )
+        .await
+        .unwrap();
         assert!(ok);
         assert_eq!(
             CardParityRepo::get_issue_repo_agent(pool, "issue-1").await.unwrap(),
@@ -455,9 +470,10 @@ mod tests {
         );
 
         // Repo-only edit leaves the agent untouched.
-        let ok = CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", Some("scratch"), None)
-            .await
-            .unwrap();
+        let ok =
+            CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", Some("scratch"), None)
+                .await
+                .unwrap();
         assert!(ok);
         assert_eq!(
             CardParityRepo::get_issue_repo_agent(pool, "issue-1").await.unwrap(),
@@ -466,9 +482,15 @@ mod tests {
         );
 
         // Both-None is a no-op; a foreign-workspace write matches no row.
-        assert!(!CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", None, None).await.unwrap());
         assert!(
-            !CardParityRepo::set_issue_repo_agent(pool, "ws-b", "issue-1", Some("/x"), None).await.unwrap(),
+            !CardParityRepo::set_issue_repo_agent(pool, "ws-a", "issue-1", None, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !CardParityRepo::set_issue_repo_agent(pool, "ws-b", "issue-1", Some("/x"), None)
+                .await
+                .unwrap(),
             "a cross-tenant repo/agent write must miss"
         );
         assert_eq!(
@@ -486,7 +508,10 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         // Minimal user + runtime + agent + task so the FK chain holds.
-        sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u','u@e.com',0)").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt','ws-a','d','claude','local','online')").execute(pool).await.unwrap();
         sqlx::query("INSERT INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag','ws-a','A','rt','x','workspace','u')").execute(pool).await.unwrap();
         sqlx::query("INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, status, created_at) VALUES ('t1','ws-a','rt','ag','queued',0)").execute(pool).await.unwrap();
@@ -519,14 +544,18 @@ mod tests {
 
         // Nothing set → falls back to the hard default (claude).
         assert_eq!(
-            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1")).await.unwrap(),
+            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1"))
+                .await
+                .unwrap(),
             AgentKind::Claude
         );
 
         // Global only.
         DaemonConfigRepo::set(pool, AGENT_GLOBAL_DEFAULT_KEY, "codex").await.unwrap();
         assert_eq!(
-            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1")).await.unwrap(),
+            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1"))
+                .await
+                .unwrap(),
             AgentKind::Codex
         );
 
@@ -535,7 +564,9 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1")).await.unwrap(),
+            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1"))
+                .await
+                .unwrap(),
             AgentKind::Copilot
         );
 
@@ -544,14 +575,18 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(
-            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1")).await.unwrap(),
+            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1"))
+                .await
+                .unwrap(),
             AgentKind::Claude
         );
 
         // Last-used beats everything.
         CardParityRepo::set_last_used_agent(pool, AgentKind::Codex).await.unwrap();
         assert_eq!(
-            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1")).await.unwrap(),
+            CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), Some("b1"))
+                .await
+                .unwrap(),
             AgentKind::Codex
         );
 
@@ -575,26 +610,47 @@ mod tests {
         seed_issue(pool, "ws-a", "issue-1").await;
 
         // Unassigned by default; a missing issue reads None.
-        assert_eq!(CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(), None);
-        assert_eq!(CardParityRepo::get_issue_squad(pool, "nope").await.unwrap(), None);
+        assert_eq!(
+            CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(),
+            None
+        );
+        assert_eq!(
+            CardParityRepo::get_issue_squad(pool, "nope").await.unwrap(),
+            None
+        );
 
         // Assign a squad.
-        assert!(CardParityRepo::set_issue_squad(pool, &ws("ws-a"), "issue-1", Some("sq-1")).await.unwrap());
+        assert!(
+            CardParityRepo::set_issue_squad(pool, &ws("ws-a"), "issue-1", Some("sq-1"))
+                .await
+                .unwrap()
+        );
         assert_eq!(
             CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(),
             Some("sq-1".to_string())
         );
 
         // A cross-tenant write misses (leaves the assignment intact).
-        assert!(!CardParityRepo::set_issue_squad(pool, &ws("ws-b"), "issue-1", Some("sq-x")).await.unwrap());
+        assert!(
+            !CardParityRepo::set_issue_squad(pool, &ws("ws-b"), "issue-1", Some("sq-x"))
+                .await
+                .unwrap()
+        );
         assert_eq!(
             CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(),
             Some("sq-1".to_string())
         );
 
         // Clear it.
-        assert!(CardParityRepo::set_issue_squad(pool, &ws("ws-a"), "issue-1", None).await.unwrap());
-        assert_eq!(CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(), None);
+        assert!(
+            CardParityRepo::set_issue_squad(pool, &ws("ws-a"), "issue-1", None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(),
+            None
+        );
     }
 
     /// Board default is workspace-scoped: a foreign workspace neither reads nor

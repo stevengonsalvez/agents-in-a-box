@@ -68,11 +68,22 @@ fn main() {
         // human member (the human is shown but skipped by the fan-out).
         let ws = WorkspaceId::from_str(WS_ID).expect("workspace id");
         let agent = |id: &str| ActorRef::new(ActorKind::Agent, id).expect("agent ref");
-        SquadRepo::create(pool, &ws, "squad-1", "shippers", &agent("agent-2"), 1_700_000_000_000)
+        SquadRepo::create(
+            pool,
+            &ws,
+            "squad-1",
+            "shippers",
+            &agent("agent-2"),
+            1_700_000_000_000,
+        )
+        .await
+        .expect("create squad");
+        SquadRepo::add_member(pool, &ws, "squad-1", &agent("agent-3"))
             .await
-            .expect("create squad");
-        SquadRepo::add_member(pool, &ws, "squad-1", &agent("agent-3")).await.expect("add agent-3");
-        SquadRepo::add_member(pool, &ws, "squad-1", &agent("agent-4")).await.expect("add agent-4");
+            .expect("add agent-3");
+        SquadRepo::add_member(pool, &ws, "squad-1", &agent("agent-4"))
+            .await
+            .expect("add agent-4");
         SquadRepo::add_member(
             pool,
             &ws,
@@ -102,7 +113,11 @@ fn main() {
     while !socket.exists() && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(50));
     }
-    assert!(socket.exists(), "daemon never bound its socket at {}", socket.display());
+    assert!(
+        socket.exists(),
+        "daemon never bound its socket at {}",
+        socket.display()
+    );
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());

@@ -490,8 +490,16 @@ mod tests {
         // Same 10-char timestamp prefix, different random parts (real ULID shape).
         let a = "01JB2K3W4APQRSTUVWXYZ23456";
         let b = "01JB2K3W4APQRSTUVWXYZ23457";
-        assert_eq!(&a[..8], &b[..8], "the fixture ids share the coarse-ts prefix");
-        assert_ne!(short_id(a), short_id(b), "same-instant ids must map to distinct slugs");
+        assert_eq!(
+            &a[..8],
+            &b[..8],
+            "the fixture ids share the coarse-ts prefix"
+        );
+        assert_ne!(
+            short_id(a),
+            short_id(b),
+            "same-instant ids must map to distinct slugs"
+        );
         assert_eq!(short_id(a), "01JB2K3WZ23456");
     }
 
@@ -521,7 +529,11 @@ mod tests {
         let home = Path::new("/home");
         let ulid = "01JB2K3W4APQRSTUVWXYZ23456";
         let cands = logs_dir_candidates(home, "ws", ulid);
-        assert_eq!(cands.len(), 3, "a ULID yields full + short + legacy candidates");
+        assert_eq!(
+            cands.len(),
+            3,
+            "a ULID yields full + short + legacy candidates"
+        );
         assert!(
             cands[0].ends_with("workspaces/ws/01JB2K3W4APQRSTUVWXYZ23456/logs"),
             "the FULL-id dir is tried first: {:?}",
@@ -540,7 +552,11 @@ mod tests {
 
         // A short id is identical under every scheme → one candidate only.
         let short = logs_dir_candidates(home, "ws", "wt-a");
-        assert_eq!(short.len(), 1, "no duplicate candidate when the schemes agree");
+        assert_eq!(
+            short.len(),
+            1,
+            "no duplicate candidate when the schemes agree"
+        );
     }
 
     /// Collision proof (tcp vpm): two distinct task ids that COLLIDE under BOTH
@@ -554,7 +570,11 @@ mod tests {
         // differing only in the middle of the random part.
         let a = "01JB2K3W4AAAAAAAAAAAAAABCDEF".to_string();
         let b = "01JB2K3W4ABBBBBBBBBBBBBABCDEF".to_string();
-        assert_eq!(short_id(&a), short_id(&b), "the two ids alias under the T4 slug");
+        assert_eq!(
+            short_id(&a),
+            short_id(&b),
+            "the two ids alias under the T4 slug"
+        );
         assert_eq!(
             legacy_short_id(&a),
             legacy_short_id(&b),

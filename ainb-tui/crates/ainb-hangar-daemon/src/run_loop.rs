@@ -831,8 +831,10 @@ async fn execute_claimed(
         RunOutcome::Failed { reason, result } => {
             // running -> failed: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
-            finalize_failure(pool, &task, &run_wd, reason, result, provider, clock, stats, events)
-                .await?;
+            finalize_failure(
+                pool, &task, &run_wd, reason, result, provider, clock, stats, events,
+            )
+            .await?;
         }
         RunOutcome::Cancelled(result) => {
             // running -> cancelled (tcp T3 / F6): the cancel RPC is the
@@ -1564,11 +1566,15 @@ fn run_location_for(run_wd: &crate::workdir_provision::RunWorkdir) -> crate::run
     use crate::workdir_provision::RunWorkdir;
     match run_wd {
         RunWorkdir::Worktree { path, .. } | RunWorkdir::Scratch { path } => {
-            crate::runner::RunLocation { cwd: path.clone(), extra_root: Some(path.clone()) }
+            crate::runner::RunLocation {
+                cwd: path.clone(),
+                extra_root: Some(path.clone()),
+            }
         }
-        RunWorkdir::Fallback { path } => {
-            crate::runner::RunLocation { cwd: path.clone(), extra_root: None }
-        }
+        RunWorkdir::Fallback { path } => crate::runner::RunLocation {
+            cwd: path.clone(),
+            extra_root: None,
+        },
     }
 }
 
@@ -1623,7 +1629,10 @@ fn teardown_workdir(run_wd: &crate::workdir_provision::RunWorkdir, task_id: &str
 }
 
 /// Look up a workspace's slug by id.
-pub(crate) async fn workspace_slug(pool: &SqlitePool, workspace_id: &str) -> anyhow::Result<String> {
+pub(crate) async fn workspace_slug(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> anyhow::Result<String> {
     let row = sqlx::query("SELECT slug FROM workspace WHERE id = ?")
         .bind(workspace_id)
         .fetch_optional(pool)

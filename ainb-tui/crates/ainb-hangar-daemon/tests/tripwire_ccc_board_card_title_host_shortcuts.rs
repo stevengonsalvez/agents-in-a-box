@@ -33,9 +33,7 @@ use std::time::{Duration, Instant};
 
 #[path = "tripwire_p4_common.rs"]
 mod common;
-use common::{
-    TuiSession, budget_scale, can_run_tripwire, prepare_pipeline_board_run, skip,
-};
+use common::{TuiSession, budget_scale, can_run_tripwire, prepare_pipeline_board_run, skip};
 
 /// The adversarial card title: every host global single-char shortcut (`H`, `W`,
 /// `?`) plus distinctive `Q`/`zz` framing so it can never alias a column header
@@ -66,7 +64,12 @@ fn typing_host_shortcut_chars_into_the_card_title_lands_verbatim() {
     // opens — the first frames after a tab switch can drop a lone keystroke).
     let title_deadline = Instant::now() + Duration::from_secs(20 * scale);
     let opened = press_until(&sess, "c", title_deadline, |c| c.contains("New card title"))
-        .unwrap_or_else(|| panic!("card-title input never opened after `c`:\n{}", sess.capture()));
+        .unwrap_or_else(|| {
+            panic!(
+                "card-title input never opened after `c`:\n{}",
+                sess.capture()
+            )
+        });
     assert!(
         opened.contains("New card title"),
         "the `c` key must open the card-title input:\n{opened}"

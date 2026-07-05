@@ -202,9 +202,7 @@ impl SkillManagerState {
             glyph: '◆',
             name: "Skills".to_string(),
             cards,
-            scroll_offset: self
-                .scroll_offset
-                .min(self.visible_skills().len().saturating_sub(1)),
+            scroll_offset: self.scroll_offset.min(self.visible_skills().len().saturating_sub(1)),
         }]
     }
 
@@ -238,11 +236,9 @@ impl SkillManagerState {
     pub fn scroll(&mut self, delta: i32) {
         let len = self.visible_skills().len();
         let next = if delta >= 0 {
-            self.scroll_offset
-                .saturating_add(delta.unsigned_abs() as usize)
+            self.scroll_offset.saturating_add(delta.unsigned_abs() as usize)
         } else {
-            self.scroll_offset
-                .saturating_sub(delta.unsigned_abs() as usize)
+            self.scroll_offset.saturating_sub(delta.unsigned_abs() as usize)
         };
         self.scroll_offset = next.min(len.saturating_sub(1));
     }

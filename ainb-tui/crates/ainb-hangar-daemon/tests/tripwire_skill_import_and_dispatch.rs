@@ -295,7 +295,12 @@ fn tripwire_skill_import_and_dispatch_materialises_skill_md() {
     // 4. Poll for the materialised SKILL.md under the per-task env. The on-disk
     //    layout uses a short id of the task, so we glob the workspaces dir rather
     //    than computing it.
-    let workspaces = home.path().join(".agents-in-a-box").join("hangar").join("workspaces").join("default");
+    let workspaces = home
+        .path()
+        .join(".agents-in-a-box")
+        .join("hangar")
+        .join("workspaces")
+        .join("default");
     let materialised = poll_for_skill_md(&workspaces, ASSERT_SKILL, Duration::from_secs(30));
 
     let path = materialised.unwrap_or_else(|| {

@@ -19,16 +19,17 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ainb_hangar_core::ids::IssueId;
 use ainb_hangar_proto::events::{ActorRow, IssueRow, PresenceState};
 use ainb_hangar_proto::snapshots::{
     AgentsListResult, IssuesListResult, SquadAssignResult, SquadFanoutResult,
     SquadMemberDispatchRow, SquadWireRow, SquadsListResult,
 };
-use ainb_hangar_proto::{methods as daemon_methods, RpcRequest, RpcResponse};
-use ainb_hangar_core::ids::IssueId;
+use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
-    HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams,
+    HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind,
+    UnixSocketSendParams,
 };
 use ainb_plugin_protocol::{framing, methods};
 use ainb_plugin_sdk::Server;
@@ -162,9 +163,7 @@ fn spawn_daemon(listener: UnixListener, seen: Seen) {
             let Ok(req) = serde_json::from_value::<RpcRequest>(raw) else {
                 return;
             };
-            seen.lock()
-                .unwrap()
-                .push((req.method.clone(), req.params.clone()));
+            seen.lock().unwrap().push((req.method.clone(), req.params.clone()));
             let result = result_for(&req.method);
             let resp = RpcResponse {
                 jsonrpc: "2.0".into(),
@@ -226,10 +225,7 @@ fn render_text(render_resp: &serde_json::Value) -> String {
     render_resp["result"]["buffer"]["cells"]
         .as_array()
         .map(|cells| {
-            cells
-                .iter()
-                .map(|c| c[1]["symbol"].as_str().unwrap_or(""))
-                .collect::<String>()
+            cells.iter().map(|c| c[1]["symbol"].as_str().unwrap_or("")).collect::<String>()
         })
         .unwrap_or_default()
 }
@@ -284,7 +280,11 @@ where
     }
 }
 
-async fn push_data<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, stream_id: &str, reply: &[u8]) {
+async fn push_data<W: tokio::io::AsyncWrite + Unpin>(
+    host_write: &mut W,
+    stream_id: &str,
+    reply: &[u8],
+) {
     let event = UnixSocketEvent {
         kind: UnixSocketEventKind::Data,
         bytes: Some(reply.to_vec().into()),
@@ -461,16 +461,17 @@ async fn squads_screen_shows_leader_and_member_rows() {
         // POSITIVE: the squad, its leader, and its MEMBER rows all render.
         assert!(post.contains("shippers"), "squad name missing:\n{post}");
         assert!(post.contains("lead-bot"), "leader missing:\n{post}");
-        assert!(post.contains("worker-bot"), "agent member row missing:\n{post}");
+        assert!(
+            post.contains("worker-bot"),
+            "agent member row missing:\n{post}"
+        );
         assert!(post.contains("alice"), "human member row missing:\n{post}");
         assert!(post.contains("leader:"), "leader tag missing:\n{post}");
 
         drop(hw);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded squads-render budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded squads-render budget");
 }
 
 /// Pressing `c` + typing + Enter issues a `hangar/squad_create` (leader = first
@@ -502,7 +503,8 @@ async fn create_and_assign_fire_the_squad_rpcs() {
             created = seen.lock().unwrap().iter().any(|(m, p)| {
                 m == daemon_methods::HANGAR_SQUAD_CREATE
                     && p.get("name").and_then(serde_json::Value::as_str) == Some("qa")
-                    && p.get("leader").and_then(serde_json::Value::as_str) == Some("agent:agent-lead")
+                    && p.get("leader").and_then(serde_json::Value::as_str)
+                        == Some("agent:agent-lead")
             });
             if created {
                 break;
@@ -539,7 +541,5 @@ async fn create_and_assign_fire_the_squad_rpcs() {
         drop(hw);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded squad-rpc budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded squad-rpc budget");
 }

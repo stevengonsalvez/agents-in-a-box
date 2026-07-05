@@ -39,7 +39,11 @@ const EDIT_MARKER: &str = "EDITED";
 /// Enter can drop after a screen change). Returns the matching capture, or `None`
 /// on timeout. Stops the instant `pred` holds, so a committed overlay never eats a
 /// stray Enter that would open the next affordance.
-fn enter_until(sess: &TuiSession, deadline: Instant, pred: impl Fn(&str) -> bool) -> Option<String> {
+fn enter_until(
+    sess: &TuiSession,
+    deadline: Instant,
+    pred: impl Fn(&str) -> bool,
+) -> Option<String> {
     loop {
         if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(200), &pred) {
             return Some(c);
@@ -57,8 +61,12 @@ fn enter_until(sess: &TuiSession, deadline: Instant, pred: impl Fn(&str) -> bool
 /// Open the `Run ▾` menu over the focused card and launch headless (`Enter`
 /// re-sent — a lone key can drop after a screen change).
 fn launch_headless(sess: &TuiSession, scale: u64) {
-    enter_until(sess, Instant::now() + Duration::from_secs(20 * scale), |c| c.contains("Run ▾"))
-        .unwrap_or_else(|| panic!("Run ▾ menu never opened:\n{}", sess.capture()));
+    enter_until(
+        sess,
+        Instant::now() + Duration::from_secs(20 * scale),
+        |c| c.contains("Run ▾"),
+    )
+    .unwrap_or_else(|| panic!("Run ▾ menu never opened:\n{}", sess.capture()));
     sess.send_enter(); // headless launch → hangar/board_card_run
 }
 
@@ -89,10 +97,17 @@ fn editing_a_card_rewrites_its_title_and_reroutes_the_next_run_to_the_new_agent(
     // until the picker CLOSES (a lone Enter can drop; and the card title also
     // appears in the picker prompt, so the pane text alone is an unreliable
     // "committed" signal — the picker-gone transition is the reliable one).
-    enter_until(&sess, Instant::now() + Duration::from_secs(20 * scale), |c| {
-        !c.contains("Assignee profile")
-    })
-    .unwrap_or_else(|| panic!("create never committed off the profile picker:\n{}", sess.capture()));
+    enter_until(
+        &sess,
+        Instant::now() + Duration::from_secs(20 * scale),
+        |c| !c.contains("Assignee profile"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "create never committed off the profile picker:\n{}",
+            sess.capture()
+        )
+    });
     // Confirm the card actually landed in the db (the durable commit signal).
     let create_deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut created_agent = None;
@@ -112,9 +127,12 @@ fn editing_a_card_rewrites_its_title_and_reroutes_the_next_run_to_the_new_agent(
     );
 
     // EDIT: `e` opens the create overlay PREFILLED with the card's title.
-    common::press_until(&sess, "e", Instant::now() + Duration::from_secs(20 * scale), |c| {
-        c.contains("Edit card title")
-    })
+    common::press_until(
+        &sess,
+        "e",
+        Instant::now() + Duration::from_secs(20 * scale),
+        |c| c.contains("Edit card title"),
+    )
     .unwrap_or_else(|| panic!("edit title stage never opened:\n{}", sess.capture()));
     // Append the marker to the prefilled title (the title INPUT is not width-
     // clipped, so the marker echoes here even though the board card may truncate).
@@ -126,11 +144,17 @@ fn editing_a_card_rewrites_its_title_and_reroutes_the_next_run_to_the_new_agent(
 
     // Enter → repo stage; Enter again KEEPS the card's current repo (edit prefill)
     // and advances to the agent stage. Each transition re-sends on a dropped key.
-    enter_until(&sess, Instant::now() + Duration::from_secs(15 * scale), |c| c.contains("Repo for"))
-        .unwrap_or_else(|| panic!("edit repo stage never opened:\n{}", sess.capture()));
-    enter_until(&sess, Instant::now() + Duration::from_secs(15 * scale), |c| {
-        c.contains("Edit agent for") && c.contains("Enter save")
-    })
+    enter_until(
+        &sess,
+        Instant::now() + Duration::from_secs(15 * scale),
+        |c| c.contains("Repo for"),
+    )
+    .unwrap_or_else(|| panic!("edit repo stage never opened:\n{}", sess.capture()));
+    enter_until(
+        &sess,
+        Instant::now() + Duration::from_secs(15 * scale),
+        |c| c.contains("Edit agent for") && c.contains("Enter save"),
+    )
     .unwrap_or_else(|| panic!("edit agent stage never opened:\n{}", sess.capture()));
 
     // Nudge the agent claude → codex, confirming the highlight before saving (only
@@ -141,7 +165,10 @@ fn editing_a_card_rewrites_its_title_and_reroutes_the_next_run_to_the_new_agent(
         if c.contains("▶ codex") {
             break;
         }
-        assert!(Instant::now() < agent_deadline, "agent never moved to codex:\n{c}");
+        assert!(
+            Instant::now() < agent_deadline,
+            "agent never moved to codex:\n{c}"
+        );
         if c.contains("▶ claude") {
             sess.send_key("Down");
         }
@@ -150,10 +177,17 @@ fn editing_a_card_rewrites_its_title_and_reroutes_the_next_run_to_the_new_agent(
 
     // Enter SAVES (commits issue_update, no profile pick); re-send until the agent
     // overlay closes.
-    enter_until(&sess, Instant::now() + Duration::from_secs(20 * scale), |c| {
-        !c.contains("Edit agent for")
-    })
-    .unwrap_or_else(|| panic!("edit never saved (agent overlay still open):\n{}", sess.capture()));
+    enter_until(
+        &sess,
+        Instant::now() + Duration::from_secs(20 * scale),
+        |c| !c.contains("Edit agent for"),
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "edit never saved (agent overlay still open):\n{}",
+            sess.capture()
+        )
+    });
 
     // The edit persisted on the durable card: the title carries the marker and the
     // agent flipped to codex.
@@ -170,9 +204,15 @@ fn editing_a_card_rewrites_its_title_and_reroutes_the_next_run_to_the_new_agent(
         std::thread::sleep(Duration::from_millis(200));
     }
     let title = edited.unwrap_or_else(|| {
-        panic!("the edit never persisted the new title + codex agent:\n{}", sess.capture())
+        panic!(
+            "the edit never persisted the new title + codex agent:\n{}",
+            sess.capture()
+        )
     });
-    assert!(title.contains(EDIT_MARKER), "the title rewrite persisted: {title}");
+    assert!(
+        title.contains(EDIT_MARKER),
+        "the title rewrite persisted: {title}"
+    );
 
     // RUN: launch the edited card. The enqueued task must route to the NEW agent —
     // the durable "the run uses the edited agent" proof, read off the task row.

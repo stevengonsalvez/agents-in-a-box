@@ -163,7 +163,10 @@ async fn migration_0029_upgrades_populated_database_in_place() {
     .fetch_one(&pool)
     .await
     .expect("probe run_history/cost_rollup before");
-    assert_eq!(exists_before, 0, "run_history + cost_rollup must not exist before 0029");
+    assert_eq!(
+        exists_before, 0,
+        "run_history + cost_rollup must not exist before 0029"
+    );
 
     // Upgrade: the embedded migrator skips 0001..0028 (already recorded) and
     // applies 0029.
@@ -261,7 +264,10 @@ async fn migration_0029_upgrades_populated_database_in_place() {
         .fetch_one(&pool)
         .await
         .expect("count runs after re-apply");
-    assert_eq!(still, 2, "double-apply must not change any row (run-1 + run-3)");
+    assert_eq!(
+        still, 2,
+        "double-apply must not change any row (run-1 + run-3)"
+    );
 
     pool.close().await;
 }

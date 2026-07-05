@@ -471,9 +471,6 @@ mod tests {
 
     /// Flatten a [`WireBuffer`] into a single string for substring assertions.
     fn buf_text(buf: &WireBuffer) -> String {
-        buf.cells
-            .iter()
-            .map(|(_, cell)| cell.symbol.clone())
-            .collect()
+        buf.cells.iter().map(|(_, cell)| cell.symbol.clone()).collect()
     }
 }

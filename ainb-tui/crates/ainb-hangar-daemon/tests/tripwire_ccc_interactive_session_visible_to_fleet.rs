@@ -150,7 +150,10 @@ async fn interactive_card_run_is_registered_and_raises_attention() {
         tmux_kill_session(&session_name);
         panic!("the interactive card run's AskUserQuestion never reached the attention inbox")
     });
-    assert_eq!(kind, "ask_user_question", "the raised attention row must be an ASK");
+    assert_eq!(
+        kind, "ask_user_question",
+        "the raised attention row must be an ASK"
+    );
 
     // Release the blocked agent so it exits → the daemon reaps the session +
     // finalizes the task.
@@ -169,7 +172,10 @@ async fn interactive_card_run_is_registered_and_raises_attention() {
     }
     // Defensive exact-name teardown in case the daemon was slow to reap.
     tmux_kill_session(&session_name);
-    assert!(reaped, "the interactive tmux session `{session_name}` must be reaped after the agent exits");
+    assert!(
+        reaped,
+        "the interactive tmux session `{session_name}` must be reaped after the agent exits"
+    );
 }
 
 /// Open a WAL sqlite pool at `db_path` (matches the daemon's connection mode).

@@ -29,7 +29,7 @@
 
 use std::time::Duration;
 
-use ainb_hangar_proto::events::{HangarEvent, EVENT_METHOD};
+use ainb_hangar_proto::events::{EVENT_METHOD, HangarEvent};
 
 /// Soft cap on a single notification body. Daemon events are tiny; anything
 /// larger is treated as a desync and surfaced as a [`StreamError`] rather than

@@ -89,7 +89,10 @@ impl ProfileRepo {
     /// # Errors
     ///
     /// Returns [`sqlx::Error`] on a store failure.
-    pub async fn get(pool: &SqlitePool, slug: &str) -> Result<Option<ProfileIndexRow>, sqlx::Error> {
+    pub async fn get(
+        pool: &SqlitePool,
+        slug: &str,
+    ) -> Result<Option<ProfileIndexRow>, sqlx::Error> {
         let row = sqlx::query("SELECT slug, tier, mtime FROM profile WHERE slug = ?")
             .bind(slug)
             .fetch_optional(pool)
@@ -118,13 +121,8 @@ impl ProfileRepo {
     ///
     /// Returns [`sqlx::Error`] on a store failure.
     pub async fn list_slugs(pool: &SqlitePool) -> Result<Vec<String>, sqlx::Error> {
-        let rows = sqlx::query("SELECT slug FROM profile ORDER BY slug")
-            .fetch_all(pool)
-            .await?;
-        Ok(rows
-            .into_iter()
-            .map(|r| r.get::<String, _>("slug"))
-            .collect())
+        let rows = sqlx::query("SELECT slug FROM profile ORDER BY slug").fetch_all(pool).await?;
+        Ok(rows.into_iter().map(|r| r.get::<String, _>("slug")).collect())
     }
 }
 

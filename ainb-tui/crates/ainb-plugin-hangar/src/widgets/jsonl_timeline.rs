@@ -98,11 +98,7 @@ impl Parser {
     /// the session id / subtype reads without inventing a taxonomy lane.
     fn fold_system(&mut self, v: &Value) {
         let subtype = v.get("subtype").and_then(Value::as_str).unwrap_or("system");
-        let session = v
-            .get("session_id")
-            .and_then(Value::as_str)
-            .map(short_id)
-            .unwrap_or_default();
+        let session = v.get("session_id").and_then(Value::as_str).map(short_id).unwrap_or_default();
         let body = if session.is_empty() {
             format!("· {subtype}")
         } else {
@@ -116,10 +112,7 @@ impl Parser {
     /// tool_use → a tool call (name + compact input), tool_result → a tool result
     /// (named + a per-tool duration when both timestamps are known).
     fn fold_message(&mut self, v: &Value, line_ts: Option<i64>) {
-        let content = v
-            .get("message")
-            .and_then(|m| m.get("content"))
-            .and_then(Value::as_array);
+        let content = v.get("message").and_then(|m| m.get("content")).and_then(Value::as_array);
         let Some(blocks) = content else {
             return;
         };
@@ -172,11 +165,7 @@ impl Parser {
             .and_then(value_text)
             .map(|s| truncate_chars(&one_line(&s), SUMMARY_MAX))
             .unwrap_or_default();
-        let dur = self
-            .tool_starts
-            .get(id)
-            .zip(line_ts)
-            .map(|(start, end)| fmt_dur(end - start));
+        let dur = self.tool_starts.get(id).zip(line_ts).map(|(start, end)| fmt_dur(end - start));
         let mut body = match (snippet.is_empty(), &dur) {
             (true, Some(d)) => format!("{name}  ({d})"),
             (true, None) => name.to_string(),
@@ -245,9 +234,7 @@ impl Parser {
 /// best-effort enrichment, absent (no duration shown) when the log carries no
 /// machine timestamp rather than guessed.
 fn ts_of(v: &Value) -> Option<i64> {
-    v.get("timestamp")
-        .or_else(|| v.get("ts"))
-        .and_then(Value::as_i64)
+    v.get("timestamp").or_else(|| v.get("ts")).and_then(Value::as_i64)
 }
 
 /// Split `text` into non-empty trimmed lines and push one entry per line in
@@ -271,7 +258,15 @@ fn compact_input(input: Option<&Value>) -> String {
     let Some(obj) = input.and_then(Value::as_object) else {
         return input.map(compact_value).unwrap_or_default();
     };
-    for key in ["command", "file_path", "path", "pattern", "query", "url", "prompt"] {
+    for key in [
+        "command",
+        "file_path",
+        "path",
+        "pattern",
+        "query",
+        "url",
+        "prompt",
+    ] {
         if let Some(s) = obj.get(key).and_then(value_text) {
             return truncate_chars(&one_line(&s), SUMMARY_MAX);
         }
@@ -295,9 +290,10 @@ fn value_text(v: &Value) -> Option<String> {
             let joined = items
                 .iter()
                 .filter_map(|it| {
-                    it.get("text").and_then(Value::as_str).map(str::to_string).or_else(|| {
-                        it.as_str().map(str::to_string)
-                    })
+                    it.get("text")
+                        .and_then(Value::as_str)
+                        .map(str::to_string)
+                        .or_else(|| it.as_str().map(str::to_string))
                 })
                 .collect::<Vec<_>>()
                 .join(" ");
@@ -405,7 +401,9 @@ mod tests {
         );
         // The assistant prose lands in the agent lane.
         assert!(
-            lanes.iter().any(|(k, b)| *k == MessageKind::Agent && b.contains("check the tests")),
+            lanes
+                .iter()
+                .any(|(k, b)| *k == MessageKind::Agent && b.contains("check the tests")),
             "assistant prose in the agent lane: {lanes:?}"
         );
         // The result surfaces a LAST REPLY block + a status transition with cost +
@@ -415,7 +413,9 @@ mod tests {
             "a LAST REPLY marker: {lanes:?}"
         );
         assert!(
-            lanes.iter().any(|(k, b)| *k == MessageKind::Agent && b.contains("All 42 tests pass")),
+            lanes
+                .iter()
+                .any(|(k, b)| *k == MessageKind::Agent && b.contains("All 42 tests pass")),
             "the final reply text: {lanes:?}"
         );
         assert!(
@@ -448,7 +448,10 @@ mod tests {
     fn skips_blank_noise_and_unknown_lines() {
         let jsonl = "\n\nnot json at all\n{\"type\":\"future_kind\",\"x\":1}\n{\"type\":\"assistant\",\"message\":{\"content\":[{\"type\":\"text\",\"text\":\"hi\"}]}}\n";
         let entries = parse_timeline(jsonl);
-        assert_eq!(lanes(&entries), vec![(MessageKind::Agent, "hi".to_string())]);
+        assert_eq!(
+            lanes(&entries),
+            vec![(MessageKind::Agent, "hi".to_string())]
+        );
     }
 
     /// A tool_use with no matching (timestamped) result renders the call without a
@@ -468,7 +471,9 @@ mod tests {
             "no duration parens when timestamps are absent: {lanes:?}"
         );
         assert!(
-            lanes.iter().any(|(k, b)| *k == MessageKind::Error && b.contains("Read") && b.contains("boom")),
+            lanes
+                .iter()
+                .any(|(k, b)| *k == MessageKind::Error && b.contains("Read") && b.contains("boom")),
             "an is_error result is in the error lane: {lanes:?}"
         );
     }

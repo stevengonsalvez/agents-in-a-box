@@ -277,11 +277,9 @@ impl KanbanState {
             return;
         };
         let next = if delta >= 0 {
-            col.scroll_offset
-                .saturating_add(delta.unsigned_abs() as usize)
+            col.scroll_offset.saturating_add(delta.unsigned_abs() as usize)
         } else {
-            col.scroll_offset
-                .saturating_sub(delta.unsigned_abs() as usize)
+            col.scroll_offset.saturating_sub(delta.unsigned_abs() as usize)
         };
         col.scroll_offset = next.min(cards_len_floor(&col.cards));
     }
@@ -313,10 +311,7 @@ impl KanbanState {
     /// path reads to build the task-detail screen for the clicked task.
     #[must_use]
     pub fn card_for_task(&self, task_id: &str) -> Option<&CardSummary> {
-        self.columns
-            .iter()
-            .flat_map(|c| c.cards.iter())
-            .find(|c| c.task_id == task_id)
+        self.columns.iter().flat_map(|c| c.cards.iter()).find(|c| c.task_id == task_id)
     }
 
     /// The four columns, left-to-right.
@@ -770,7 +765,10 @@ mod tests {
         c.pr_status = None; // status not fetched yet
         let state = KanbanState::from_tasks(&[c], NOW);
         let title = &state.board_columns(NOW)[2].cards[0].title;
-        assert!(title.contains("PR …"), "unresolved CI is in-flight: {title:?}");
+        assert!(
+            title.contains("PR …"),
+            "unresolved CI is in-flight: {title:?}"
+        );
     }
 
     /// A wheel-scroll over a column nudges that column's scroll offset, saturating
@@ -778,9 +776,8 @@ mod tests {
     /// column moves (the click resolves the column, not a hard-wired one).
     #[test]
     fn scroll_column_offsets_only_that_column_and_saturates() {
-        let tasks: Vec<TaskCardRow> = (0..4)
-            .map(|i| task(&format!("01HANGARTASKQUEUE0{i}"), "queued"))
-            .collect();
+        let tasks: Vec<TaskCardRow> =
+            (0..4).map(|i| task(&format!("01HANGARTASKQUEUE0{i}"), "queued")).collect();
         let mut state = KanbanState::from_tasks(&tasks, NOW);
         // Scroll the queued column (index 0) down twice → offset 2.
         state.scroll_column(0, 1);

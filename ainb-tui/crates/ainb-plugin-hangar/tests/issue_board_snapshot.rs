@@ -18,8 +18,8 @@
 
 use ainb_hangar_core::ids::IssueId;
 use ainb_hangar_proto::events::IssueRow;
-use ainb_plugin_hangar::screen::issue_list::render_issue_list;
 use ainb_plugin_hangar::IssueListState;
+use ainb_plugin_hangar::screen::issue_list::render_issue_list;
 use ainb_plugin_sdk::{Color, WireBuffer};
 
 /// `CLAY` — the heavy highlight border colour of the selected card-board card.
@@ -147,10 +147,8 @@ fn render_full_issue_board_snapshot() {
 
     // NON-VACUOUS COLOUR CHECK — the selected (first visible) card carries the
     // heavy clay highlight border the card-board raises.
-    let heavy_in_clay = buf
-        .cells
-        .iter()
-        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
+    let heavy_in_clay =
+        buf.cells.iter().any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
         heavy_in_clay,
         "the selected issue card must carry the heavy clay highlight border"

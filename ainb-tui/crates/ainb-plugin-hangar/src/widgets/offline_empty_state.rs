@@ -206,10 +206,7 @@ mod tests {
     }
 
     fn full_text(buf: &WireBuffer, width: u16, height: u16) -> String {
-        (0..height)
-            .map(|r| row_text(buf, r, width))
-            .collect::<Vec<_>>()
-            .join("\n")
+        (0..height).map(|r| row_text(buf, r, width)).collect::<Vec<_>>().join("\n")
     }
 
     /// The panel paints the offline guidance, the `[s]` hint, and the literal
@@ -239,10 +236,7 @@ mod tests {
         let text = full_text(&buf, 80, 24);
         assert!(text.contains("start failed"), "missing error line:\n{text}");
         // The error cell is red.
-        let has_red = buf
-            .cells
-            .iter()
-            .any(|(_, c)| c.fg == Some(ERROR_RED) && c.symbol != " ");
+        let has_red = buf.cells.iter().any(|(_, c)| c.fg == Some(ERROR_RED) && c.symbol != " ");
         assert!(has_red, "error line must be red");
     }
 

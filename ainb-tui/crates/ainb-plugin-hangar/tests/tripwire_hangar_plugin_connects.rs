@@ -47,7 +47,7 @@
 
 use std::time::Duration;
 
-use ainb_hangar_proto::{methods as daemon_methods, RpcRequest, RpcResponse};
+use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
     HandleEventParams, UnixSocketEvent, UnixSocketEventKind, UnixSocketSendParams,
@@ -175,10 +175,7 @@ fn chrome_text(render_resp: &serde_json::Value) -> String {
     render_resp["result"]["buffer"]["cells"]
         .as_array()
         .map(|cells| {
-            cells
-                .iter()
-                .map(|c| c[1]["symbol"].as_str().unwrap_or(""))
-                .collect::<String>()
+            cells.iter().map(|c| c[1]["symbol"].as_str().unwrap_or("")).collect::<String>()
         })
         .unwrap_or_default()
 }
@@ -255,9 +252,7 @@ where
         let frame = read_frame(host_read).await.expect("plugin link alive");
         match frame.get("method").and_then(|m| m.as_str()) {
             Some(methods::HOST_UNIX_SOCKET_DIAL) => {
-                let conn = UnixStream::connect(socket_path)
-                    .await
-                    .expect("host dials daemon");
+                let conn = UnixStream::connect(socket_path).await.expect("host dials daemon");
                 daemon_conn = Some(conn);
                 let id = frame["id"].clone();
                 host_write

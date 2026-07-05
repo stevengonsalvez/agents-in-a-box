@@ -136,7 +136,9 @@ pub fn provision(
 ) -> io::Result<RunWorkdir> {
     let repo_ref = repo_ref.map(str::trim).filter(|s| !s.is_empty());
     match repo_ref {
-        None => Ok(RunWorkdir::Fallback { path: fallback.to_path_buf() }),
+        None => Ok(RunWorkdir::Fallback {
+            path: fallback.to_path_buf(),
+        }),
         Some("scratch") => provision_scratch(scratch_slug, home),
         Some(path) => provision_worktree(Path::new(path), slug, home),
     }
@@ -376,9 +378,7 @@ fn remove_and_deregister_worktree(worktree: &Path) -> io::Result<()> {
         Err(e) => return Err(e),
     }
     if let Some(gitdir) = common.as_ref().and_then(|p| p.to_str()) {
-        let _ = Command::new("git")
-            .args(["--git-dir", gitdir, "worktree", "prune"])
-            .output()?;
+        let _ = Command::new("git").args(["--git-dir", gitdir, "worktree", "prune"]).output()?;
     }
     Ok(())
 }
@@ -400,7 +400,11 @@ fn worktree_common_git_dir(worktree: &Path) -> Option<PathBuf> {
         return None;
     }
     let p = Path::new(&raw);
-    let abs = if p.is_absolute() { p.to_path_buf() } else { worktree.join(p) };
+    let abs = if p.is_absolute() {
+        p.to_path_buf()
+    } else {
+        worktree.join(p)
+    };
     std::fs::canonicalize(&abs).ok().or(Some(abs))
 }
 
@@ -490,7 +494,11 @@ mod tests {
 
         // Run 2 of the SAME card (a DIFFERENT per-run slug) reuses the same dir.
         let second = provision(Some("scratch"), "run-2", "card-x", home.path(), &fallback).unwrap();
-        assert_eq!(first.path(), second.path(), "a rerun reuses the card's scratch dir");
+        assert_eq!(
+            first.path(),
+            second.path(),
+            "a rerun reuses the card's scratch dir"
+        );
         assert_eq!(
             std::fs::read_to_string(second.path().join("notes.txt")).unwrap(),
             "prior scratch work",
@@ -505,9 +513,27 @@ mod tests {
     fn scratch_isolates_distinct_slugs() {
         let home = tempfile::tempdir().unwrap();
         let fallback = home.path().join("fallback");
-        let a = provision(Some("scratch"), "run-a", "card-x-agentA", home.path(), &fallback).unwrap();
-        let b = provision(Some("scratch"), "run-b", "card-x-agentB", home.path(), &fallback).unwrap();
-        assert_ne!(a.path(), b.path(), "distinct scratch slugs get distinct dirs");
+        let a = provision(
+            Some("scratch"),
+            "run-a",
+            "card-x-agentA",
+            home.path(),
+            &fallback,
+        )
+        .unwrap();
+        let b = provision(
+            Some("scratch"),
+            "run-b",
+            "card-x-agentB",
+            home.path(),
+            &fallback,
+        )
+        .unwrap();
+        assert_ne!(
+            a.path(),
+            b.path(),
+            "distinct scratch slugs get distinct dirs"
+        );
     }
 
     /// A real repo provisions a worktree on branch `ainb/<slug>`.
@@ -532,7 +558,10 @@ mod tests {
         };
         assert_eq!(branch, "ainb/slug-a");
         assert!(path.join(".git").exists(), "worktree is a checkout");
-        assert!(path.join("README.md").exists(), "the repo's tree is checked out");
+        assert!(
+            path.join("README.md").exists(),
+            "the repo's tree is checked out"
+        );
         // The branch really exists in the repo.
         let branches = Command::new("git")
             .args(["branch", "--list", "ainb/slug-a"])
@@ -578,7 +607,14 @@ mod tests {
         let home = tmp.path().join("home");
         let fallback = home.join("fallback");
 
-        let wd = provision(Some(repo.to_str().unwrap()), "clean", "clean", &home, &fallback).unwrap();
+        let wd = provision(
+            Some(repo.to_str().unwrap()),
+            "clean",
+            "clean",
+            &home,
+            &fallback,
+        )
+        .unwrap();
         let path = wd.path().to_path_buf();
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::Removed);
         assert!(!path.exists(), "clean worktree removed");
@@ -603,12 +639,22 @@ mod tests {
         let home = tmp.path().join("home");
         let fallback = home.join("fallback");
 
-        let wd = provision(Some(repo.to_str().unwrap()), "dirty", "dirty", &home, &fallback).unwrap();
+        let wd = provision(
+            Some(repo.to_str().unwrap()),
+            "dirty",
+            "dirty",
+            &home,
+            &fallback,
+        )
+        .unwrap();
         // Leave an uncommitted change in the worktree.
         std::fs::write(wd.path().join("new.txt"), "work in progress").unwrap();
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::KeptDirty);
         assert!(wd.path().exists(), "a dirty worktree is kept, not deleted");
-        assert!(wd.path().join("new.txt").exists(), "the uncommitted work survives");
+        assert!(
+            wd.path().join("new.txt").exists(),
+            "the uncommitted work survives"
+        );
     }
 
     /// A worktree run with NO commits reports 0 ahead; one that commits reports
@@ -623,7 +669,14 @@ mod tests {
         let fallback = home.join("fallback");
 
         // Fresh worktree, no agent commits yet → 0 ahead (nothing to surface).
-        let wd = provision(Some(repo.to_str().unwrap()), "ahead", "ahead", &home, &fallback).unwrap();
+        let wd = provision(
+            Some(repo.to_str().unwrap()),
+            "ahead",
+            "ahead",
+            &home,
+            &fallback,
+        )
+        .unwrap();
         assert_eq!(commits_ahead(&wd).unwrap(), 0, "a no-commit run is 0 ahead");
 
         // The agent commits inside its worktree → the branch is ahead of its base.
@@ -632,7 +685,11 @@ mod tests {
         std::fs::write(wd.path().join("work.txt"), "agent output").unwrap();
         run_git(wd.path(), &["add", "."]).unwrap();
         run_git(wd.path(), &["commit", "--quiet", "-m", "agent work"]).unwrap();
-        assert_eq!(commits_ahead(&wd).unwrap(), 1, "one agent commit is 1 ahead");
+        assert_eq!(
+            commits_ahead(&wd).unwrap(),
+            1,
+            "one agent commit is 1 ahead"
+        );
 
         // The origin's HEAD advancing during the run must NOT mask the agent's
         // commit (the count is HEAD..branch, and the agent's commit is never on
@@ -658,7 +715,12 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         let fallback = home.path().join("execenv-workdir");
         let wd = provision(None, "chat", "chat", home.path(), &fallback).unwrap();
-        assert_eq!(wd, RunWorkdir::Fallback { path: fallback.clone() });
+        assert_eq!(
+            wd,
+            RunWorkdir::Fallback {
+                path: fallback.clone()
+            }
+        );
         assert_eq!(wd.path(), fallback);
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::NoOp);
         // A blank ref is treated the same as None.

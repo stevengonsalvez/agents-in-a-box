@@ -18,16 +18,25 @@
 //! text.
 
 use ainb_plugin_hangar::screen::profiles::{
-    colors, render_profiles, ProfileDetailView, ProfileRosterEntry, ProfilesState,
+    ProfileDetailView, ProfileRosterEntry, ProfilesState, colors, render_profiles,
 };
 use ainb_plugin_sdk::WireBuffer;
 
 /// A three-profile roster (slug-ordered, as the daemon returns it).
 fn roster() -> Vec<ProfileRosterEntry> {
     vec![
-        ProfileRosterEntry { slug: "author".into(), tier: "balanced".into() },
-        ProfileRosterEntry { slug: "code-reviewer".into(), tier: "premium".into() },
-        ProfileRosterEntry { slug: "docs-writer".into(), tier: "fast".into() },
+        ProfileRosterEntry {
+            slug: "author".into(),
+            tier: "balanced".into(),
+        },
+        ProfileRosterEntry {
+            slug: "code-reviewer".into(),
+            tier: "premium".into(),
+        },
+        ProfileRosterEntry {
+            slug: "docs-writer".into(),
+            tier: "fast".into(),
+        },
     ]
 }
 
@@ -41,8 +50,8 @@ fn author_detail() -> ProfileDetailView {
         tools: vec!["Read".into(), "Grep".into()],
         color: "cyan".into(),
         body: "You draft notes.".into(),
-        claude_preview: "---\nname: author\nmodel: sonnet\ntools: Read, Grep\n---\nYou draft notes."
-            .into(),
+        claude_preview:
+            "---\nname: author\nmodel: sonnet\ntools: Read, Grep\n---\nYou draft notes.".into(),
         codex_fragment: "[profiles.author]\nmodel = \"gpt-5-codex\"".into(),
         codex_prompt: "You draft notes.".into(),
         codex_warnings: vec![
@@ -79,7 +88,10 @@ fn empty_profiles_snapshot() {
     let full = glyph_map(&buf, 100);
     assert!(full.contains("Profiles"), "title:\n{full}");
     assert!(full.contains("0 profiles"), "count:\n{full}");
-    assert!(full.contains("no profiles yet"), "empty placeholder:\n{full}");
+    assert!(
+        full.contains("no profiles yet"),
+        "empty placeholder:\n{full}"
+    );
     insta::assert_snapshot!(full);
 }
 
@@ -99,10 +111,19 @@ fn loaded_profiles_snapshot() {
     assert!(full.contains("CLAUDE"), "claude preview label:\n{full}");
     assert!(full.contains("CODEX"), "codex preview label:\n{full}");
     // The Claude preview resolves the tier to a model; the Codex fragment too.
-    assert!(full.contains("model: sonnet"), "claude resolved model:\n{full}");
-    assert!(full.contains("gpt-5-codex"), "codex resolved model:\n{full}");
+    assert!(
+        full.contains("model: sonnet"),
+        "claude resolved model:\n{full}"
+    );
+    assert!(
+        full.contains("gpt-5-codex"),
+        "codex resolved model:\n{full}"
+    );
     // Dropped-field warnings render.
-    assert!(full.contains("dropped Claude-only field"), "codex warnings:\n{full}");
+    assert!(
+        full.contains("dropped Claude-only field"),
+        "codex warnings:\n{full}"
+    );
     insta::assert_snapshot!(full);
 }
 
@@ -145,13 +166,22 @@ fn selection_is_green_section_blue_warnings_amber() {
         .cells
         .iter()
         .any(|(_, c)| c.symbol == "▶" && c.fg == Some(colors::SELECTION));
-    assert!(green_marker, "the selected profile's ▶ marker must be selection-green");
+    assert!(
+        green_marker,
+        "the selected profile's ▶ marker must be selection-green"
+    );
 
     // A CLAUDE/CODEX section label is painted section-blue.
     let section_blue = buf.cells.iter().any(|(_, c)| c.fg == Some(colors::SECTION));
-    assert!(section_blue, "the preview section labels must be section-blue");
+    assert!(
+        section_blue,
+        "the preview section labels must be section-blue"
+    );
 
     // A dropped-field warning glyph is amber.
     let warn_amber = buf.cells.iter().any(|(_, c)| c.fg == Some(colors::WARN));
-    assert!(warn_amber, "the Codex dropped-field warnings must be warning-amber");
+    assert!(
+        warn_amber,
+        "the Codex dropped-field warnings must be warning-amber"
+    );
 }

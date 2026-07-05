@@ -5,7 +5,7 @@
 //! plus an [`AppEvent`] to a new [`AppState`] and an optional [`Intent`].
 
 use ainb_hangar_core::ids::{TaskId, WorkspaceId};
-use ainb_plugin_hangar::screen::{reduce, AppEvent, AppState, Intent, Screen};
+use ainb_plugin_hangar::screen::{AppEvent, AppState, Intent, Screen, reduce};
 
 /// Build a default `AppState` rooted on the issue list for workspace `default`.
 fn issue_list_state() -> AppState {

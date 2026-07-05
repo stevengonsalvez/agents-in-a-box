@@ -81,14 +81,21 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
     sess.poll_capture(Instant::now() + Duration::from_secs(20 * scale), |c| {
         c.contains(CARD_TITLE) && c.contains("Board: Delivery")
     })
-    .unwrap_or_else(|| panic!("created card never rendered on the board:\n{}", sess.capture()));
+    .unwrap_or_else(|| {
+        panic!(
+            "created card never rendered on the board:\n{}",
+            sess.capture()
+        )
+    });
 
     let run_deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut opened = false;
     while Instant::now() < run_deadline {
         sess.send_enter();
         if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("Run ▾"))
+            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                c.contains("Run ▾")
+            })
             .is_some()
         {
             opened = true;
@@ -142,7 +149,10 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
         "the branch must survive teardown in the origin repo (the durable artifact)"
     );
     // The clean worktree is torn down, but the branch remains — that is the point.
-    assert!(!worktree.exists(), "the clean worktree is torn down after the run");
+    assert!(
+        !worktree.exists(),
+        "the clean worktree is torn down after the run"
+    );
 
     // POSITIVE (tcp T2): the Kanban board's TASK card SHOWS the durable branch AND
     // a PR chip carrying the stub gh's passing CI. The TaskFinished re-pull already

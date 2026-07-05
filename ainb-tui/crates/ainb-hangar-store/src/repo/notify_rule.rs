@@ -191,13 +191,11 @@ impl NotifyRuleRepo {
         workspace_id: &str,
         kind: AttentionKind,
     ) -> Result<u64, sqlx::Error> {
-        let res = sqlx::query(
-            "DELETE FROM notify_rule WHERE workspace_id = ? AND kind = ?",
-        )
-        .bind(workspace_id)
-        .bind(kind.as_str())
-        .execute(pool)
-        .await?;
+        let res = sqlx::query("DELETE FROM notify_rule WHERE workspace_id = ? AND kind = ?")
+            .bind(workspace_id)
+            .bind(kind.as_str())
+            .execute(pool)
+            .await?;
         Ok(res.rows_affected())
     }
 
@@ -281,7 +279,9 @@ mod tests {
         // pre-T5 bridge behaviour after 0037 dropped it) AND atc (0040 folds the
         // ATC feed into the actionable defaults so the heartbeat nudges resume).
         assert_eq!(
-            NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None).await.unwrap(),
+            NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None)
+                .await
+                .unwrap(),
             ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         assert_eq!(
@@ -289,7 +289,9 @@ mod tests {
             ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         assert_eq!(
-            NotifyRuleRepo::resolve(pool, AttentionKind::CodexRequestUser, None).await.unwrap(),
+            NotifyRuleRepo::resolve(pool, AttentionKind::CodexRequestUser, None)
+                .await
+                .unwrap(),
             ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         // error stays a local heads-up (os) plus atc (0040).
@@ -340,7 +342,9 @@ mod tests {
         // ...but the global row is untouched (a no-workspace session, and a
         // DIFFERENT workspace, both still see the phone+web+os+atc default).
         assert_eq!(
-            NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None).await.unwrap(),
+            NotifyRuleRepo::resolve(pool, AttentionKind::AskUserQuestion, None)
+                .await
+                .unwrap(),
             ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os, Channel::Atc]),
         );
         seed_workspace(pool, "ws-b").await;
@@ -373,9 +377,14 @@ mod tests {
         let pool = store.pool();
 
         // Overwrite a global default; the row is replaced, not duplicated.
-        NotifyRuleRepo::set(pool, None, AttentionKind::Error, ChannelSet::from_channels([Channel::Phone, Channel::Os]))
-            .await
-            .unwrap();
+        NotifyRuleRepo::set(
+            pool,
+            None,
+            AttentionKind::Error,
+            ChannelSet::from_channels([Channel::Phone, Channel::Os]),
+        )
+        .await
+        .unwrap();
         assert_eq!(
             NotifyRuleRepo::resolve(pool, AttentionKind::Error, None).await.unwrap(),
             ChannelSet::from_channels([Channel::Phone, Channel::Os]),

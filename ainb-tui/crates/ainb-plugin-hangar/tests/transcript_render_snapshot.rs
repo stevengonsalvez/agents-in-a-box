@@ -13,7 +13,7 @@
 use ainb_hangar_core::ids::{IssueId, TaskId};
 use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind};
 use ainb_plugin_hangar::screen::task_detail::{
-    reduce_task_detail, render_task_detail, TaskDetailEvent, TaskDetailState,
+    TaskDetailEvent, TaskDetailState, reduce_task_detail, render_task_detail,
 };
 use ainb_plugin_sdk::WireBuffer;
 

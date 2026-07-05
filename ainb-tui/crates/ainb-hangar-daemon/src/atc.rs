@@ -137,7 +137,9 @@ pub async fn raise_escalation(
 /// freshly-registered instance is immediately schedulable.
 #[must_use]
 pub fn next_heartbeat_tick(cron_expr: &str, now_ms: i64) -> Option<i64> {
-    use ainb_hangar_core::autopilot::cron::{millis_to_utc, next_tick_after, parse_cron, utc_to_millis};
+    use ainb_hangar_core::autopilot::cron::{
+        millis_to_utc, next_tick_after, parse_cron, utc_to_millis,
+    };
     let schedule = parse_cron(cron_expr).ok()?;
     let after = millis_to_utc(now_ms)?;
     next_tick_after(&schedule, after).map(utc_to_millis)
@@ -300,7 +302,8 @@ impl AtcHeartbeatScheduler {
 
     /// Recompute + persist the instance's next heartbeat tick from the fired slot.
     async fn reschedule(&self, inst: &AtcInstanceRow) {
-        let next = recompute_next_tick(&inst.heartbeat_cron, inst.next_tick_at, self.clock.now_ms());
+        let next =
+            recompute_next_tick(&inst.heartbeat_cron, inst.next_tick_at, self.clock.now_ms());
         if let Err(e) = AtcInstanceRepo::set_next_tick(&self.pool, &inst.name, next).await {
             tracing::error!(instance = %inst.name, error = %e, "ATC heartbeat reschedule failed");
         }
@@ -311,7 +314,12 @@ impl AtcHeartbeatScheduler {
     #[must_use]
     pub fn spawn(pool: SqlitePool, events: EventSink) -> tokio::task::JoinHandle<()> {
         use ainb_hangar_core::clock::SystemClock;
-        let sched = Self::new(pool, events, Arc::new(SystemClock), CancellationToken::new());
+        let sched = Self::new(
+            pool,
+            events,
+            Arc::new(SystemClock),
+            CancellationToken::new(),
+        );
         tokio::spawn(sched.run())
     }
 }
@@ -341,9 +349,7 @@ fn atc_send_target(name: &str, cwd: &str, tmux_session: &str) -> Session {
 /// the store, so this body only summarises the live state.
 fn build_nudge(rows: &[NeedsContextRow], now_ms: i64) -> String {
     if rows.is_empty() {
-        return format!(
-            "[HEARTBEAT {now_ms}] fleet quiet — 0 sessions need attention. Stand by."
-        );
+        return format!("[HEARTBEAT {now_ms}] fleet quiet — 0 sessions need attention. Stand by.");
     }
     let (mut ask, mut err, mut idle, mut wait) = (0u32, 0u32, 0u32, 0u32);
     for r in rows {
@@ -383,12 +389,11 @@ async fn probe_fleet_needs(now_ms: i64) -> Vec<NeedsContextRow> {
     let mut out = Vec::new();
     for session in merged {
         let s = session.clone();
-        if let Some(row) = tokio::task::spawn_blocking(move || {
-            classify(ClassifyInput::from_env(s, None, now_ms))
-        })
-        .await
-        .ok()
-        .flatten()
+        if let Some(row) =
+            tokio::task::spawn_blocking(move || classify(ClassifyInput::from_env(s, None, now_ms)))
+                .await
+                .ok()
+                .flatten()
         {
             out.push(row);
         }
@@ -504,7 +509,9 @@ mod tests {
 
         // Drive the session to its cap (3) so the next decision escalates.
         for _ in 0..3 {
-            AtcInstanceRepo::record_continue(store.pool(), "main", "sess-1", NOW).await.unwrap();
+            AtcInstanceRepo::record_continue(store.pool(), "main", "sess-1", NOW)
+                .await
+                .unwrap();
         }
 
         // First heartbeat at cap → escalates exactly once and flags the ledger.
@@ -524,7 +531,15 @@ mod tests {
 
         // Second heartbeat two minutes later, session still stuck ERR at cap → the
         // escalated flag short-circuits: NO brand-new attention row is minted.
-        sched.enforce_err_cap(&inst, "sess-1", "/work/x", "overloaded_error", NOW + 120_000).await;
+        sched
+            .enforce_err_cap(
+                &inst,
+                "sess-1",
+                "/work/x",
+                "overloaded_error",
+                NOW + 120_000,
+            )
+            .await;
         assert_eq!(
             AttentionRepo::list_fleet(store.pool()).await.unwrap().len(),
             1,

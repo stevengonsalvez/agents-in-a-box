@@ -119,9 +119,7 @@ fn stream_reconnect_on_eof_replays_subscribe() {
     // After reconnect the decoder is reset — a stale partial body can't poison
     // the fresh stream.
     let ev = sample_message();
-    let out = client
-        .push(&event_frame(&ev))
-        .expect("decode after reconnect");
+    let out = client.push(&event_frame(&ev)).expect("decode after reconnect");
     assert_eq!(out, vec![ev]);
 }
 

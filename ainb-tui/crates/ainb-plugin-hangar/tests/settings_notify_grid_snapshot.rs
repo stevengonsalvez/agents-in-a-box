@@ -13,7 +13,7 @@ use ainb_hangar_proto::settings::HealthSnapshot;
 use ainb_hangar_proto::snapshots::NotifyRuleWireRow;
 use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_hangar::screen::settings::{
-    reduce_settings, render_settings, SettingsEvent, SettingsSection, SettingsState,
+    SettingsEvent, SettingsSection, SettingsState, reduce_settings, render_settings,
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 
@@ -90,12 +90,11 @@ fn tui_renders_notify_routing_grid() {
 
     // NON-VACUOUS: the cursor starts on (ask, phone) — that cell paints in the
     // CURSOR accent (bracketed ○, since ask is not routed to phone by default).
-    let cursor_glyphs: usize = buf
-        .cells
-        .iter()
-        .filter(|(_, cell)| cell.fg == Some(CURSOR))
-        .count();
-    assert!(cursor_glyphs > 0, "the cursor cell must paint in the accent colour");
+    let cursor_glyphs: usize = buf.cells.iter().filter(|(_, cell)| cell.fg == Some(CURSOR)).count();
+    assert!(
+        cursor_glyphs > 0,
+        "the cursor cell must paint in the accent colour"
+    );
 }
 
 /// Moving the cursor down a kind and right a channel moves the accent onto the

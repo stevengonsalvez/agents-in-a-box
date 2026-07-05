@@ -1206,8 +1206,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                 };
                 let out = reduce_settings(&s, ev);
                 let section = out.state.section();
-                let now_on_workspaces =
-                    section == super::settings::SettingsSection::Workspaces;
+                let now_on_workspaces = section == super::settings::SettingsSection::Workspaces;
                 let now_on_notifications =
                     section == super::settings::SettingsSection::Notifications;
                 // Capture the grid's edit scope before the state is moved back —
@@ -1236,8 +1235,9 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     // `g` flipped the scope: re-list the rules for the new scope so
                     // the grid shows what the human is now editing.
                     Some(SettingsIntent::RefreshNotifyRules) => {
-                        states.pending_notify_action =
-                            Some(NotifyAction::Refresh { scope: notify_scope });
+                        states.pending_notify_action = Some(NotifyAction::Refresh {
+                            scope: notify_scope,
+                        });
                     }
                     // KeychainWrite / New / Rename land in their own beads.
                     _ => {
@@ -1250,8 +1250,9 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                         // Notifications section (tcp T5), scoped to the default
                         // (global) scope.
                         if now_on_notifications && states.notify_rule_rows.is_empty() {
-                            states.pending_notify_action =
-                                Some(NotifyAction::Refresh { scope: notify_scope });
+                            states.pending_notify_action = Some(NotifyAction::Refresh {
+                                scope: notify_scope,
+                            });
                         }
                     }
                 }
@@ -1624,18 +1625,15 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             issue_id,
             mode: mode.wire().to_string(),
         }),
-        BoardsIntent::AttachCard { board_id, issue_id } => Some(BoardsAction::CardAttach {
-            board_id,
-            issue_id,
-        }),
-        BoardsIntent::CancelCard { board_id, issue_id } => Some(BoardsAction::CardCancel {
-            board_id,
-            issue_id,
-        }),
-        BoardsIntent::RemoveCard { board_id, issue_id } => Some(BoardsAction::CardRemove {
-            board_id,
-            issue_id,
-        }),
+        BoardsIntent::AttachCard { board_id, issue_id } => {
+            Some(BoardsAction::CardAttach { board_id, issue_id })
+        }
+        BoardsIntent::CancelCard { board_id, issue_id } => {
+            Some(BoardsAction::CardCancel { board_id, issue_id })
+        }
+        BoardsIntent::RemoveCard { board_id, issue_id } => {
+            Some(BoardsAction::CardRemove { board_id, issue_id })
+        }
         BoardsIntent::ReorderCards {
             board_id,
             column_id,
@@ -1645,10 +1643,9 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             column_id,
             issue_ids,
         }),
-        BoardsIntent::ShowTimeline { board_id, issue_id } => Some(BoardsAction::CardTimeline {
-            board_id,
-            issue_id,
-        }),
+        BoardsIntent::ShowTimeline { board_id, issue_id } => {
+            Some(BoardsAction::CardTimeline { board_id, issue_id })
+        }
         BoardsIntent::EditCard {
             issue_id,
             title,

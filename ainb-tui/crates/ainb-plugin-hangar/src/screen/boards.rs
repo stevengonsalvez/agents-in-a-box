@@ -892,10 +892,7 @@ impl BoardsState {
     #[must_use]
     pub fn focused_card(&self) -> Option<&CardView> {
         let board = self.boards.get(self.focused_board)?;
-        board
-            .columns
-            .get(self.focused_col)
-            .and_then(|c| c.cards.get(self.focused_card))
+        board.columns.get(self.focused_col).and_then(|c| c.cards.get(self.focused_card))
     }
 
     /// The focused column, if any (the rename / delete / reorder / add-card
@@ -1203,13 +1200,17 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
         }),
         // Cancel opens a confirm overlay (a destructive action rides the
         // text-capture signal); Enter there emits the CancelCard intent.
-        BoardsEvent::CancelFocusedCard => open_overlay(state, |_, c| BoardsOverlay::CancelConfirm {
-            issue_id: c.issue_id.clone(),
-        }),
+        BoardsEvent::CancelFocusedCard => {
+            open_overlay(state, |_, c| BoardsOverlay::CancelConfirm {
+                issue_id: c.issue_id.clone(),
+            })
+        }
         // Remove opens a confirm overlay too; Enter there emits the RemoveCard intent.
-        BoardsEvent::RemoveFocusedCard => open_overlay(state, |_, c| BoardsOverlay::RemoveConfirm {
-            issue_id: c.issue_id.clone(),
-        }),
+        BoardsEvent::RemoveFocusedCard => {
+            open_overlay(state, |_, c| BoardsOverlay::RemoveConfirm {
+                issue_id: c.issue_id.clone(),
+            })
+        }
         BoardsEvent::ReorderCardUp => reorder_card(state, -1),
         BoardsEvent::ReorderCardDown => reorder_card(state, 1),
         // Timeline fetch: emit the intent (the glue does the IO + parse + stash).
@@ -1221,10 +1222,12 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
             board_id: b.id.clone(),
         }),
         // Rename opens the column-name input seeded with the current name.
-        BoardsEvent::RenameColumn => open_column_overlay(state, |col| BoardsOverlay::ColumnRename {
-            column_id: col.id.clone(),
-            name: col.name.clone(),
-        }),
+        BoardsEvent::RenameColumn => {
+            open_column_overlay(state, |col| BoardsOverlay::ColumnRename {
+                column_id: col.id.clone(),
+                name: col.name.clone(),
+            })
+        }
         BoardsEvent::DeleteColumn => column_intent(state, |b, col| BoardsIntent::DeleteColumn {
             board_id: b.id.clone(),
             column_id: col.id.clone(),
@@ -1299,9 +1302,7 @@ fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
         BoardsOverlay::ColumnRename { column_id, name } => {
             column_rename_key(state, &column_id, name, key)
         }
-        BoardsOverlay::RunMode { issue_id, cursor } => {
-            run_mode_key(state, &issue_id, cursor, key)
-        }
+        BoardsOverlay::RunMode { issue_id, cursor } => run_mode_key(state, &issue_id, cursor, key),
         BoardsOverlay::CancelConfirm { issue_id } => cancel_confirm_key(state, &issue_id, key),
         BoardsOverlay::RemoveConfirm { issue_id } => remove_confirm_key(state, &issue_id, key),
         BoardsOverlay::SquadPick { issue_id, cursor } => {
@@ -1363,7 +1364,10 @@ fn squad_pick_key(
                     None => {
                         let mut next = state.clone();
                         next.set_note("Squad roster unavailable — reopen to assign");
-                        return BoardsReduction { state: next, intent: None };
+                        return BoardsReduction {
+                            state: next,
+                            intent: None,
+                        };
                     }
                 },
             };
@@ -1482,9 +1486,12 @@ fn remove_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
             }
         }
         BoardsKey::Esc => close_overlay(state),
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => {
-            set_overlay(state, BoardsOverlay::RemoveConfirm { issue_id: issue_id.to_string() })
-        }
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::RemoveConfirm {
+                issue_id: issue_id.to_string(),
+            },
+        ),
     }
 }
 
@@ -1511,9 +1518,12 @@ fn cancel_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
             }
         }
         BoardsKey::Esc => close_overlay(state),
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => {
-            set_overlay(state, BoardsOverlay::CancelConfirm { issue_id: issue_id.to_string() })
-        }
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => set_overlay(
+            state,
+            BoardsOverlay::CancelConfirm {
+                issue_id: issue_id.to_string(),
+            },
+        ),
     }
 }
 
@@ -1643,9 +1653,7 @@ fn card_repo_key(
             query.pop();
             reopen(state, query, Some(0))
         }
-        (Some(cursor), BoardsKey::Up) => {
-            reopen(state, query, Some(cursor.saturating_sub(1)))
-        }
+        (Some(cursor), BoardsKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
         (Some(cursor), BoardsKey::Down) => {
             let n = repo_candidates(state.repos(), &query).len();
             reopen(state, query, Some((cursor + 1).min(n.saturating_sub(1))))
@@ -2146,7 +2154,13 @@ fn unchanged(state: &BoardsState) -> BoardsReduction {
 /// master toggle; row `top+1` is the key-hint band (`feedback_keybinding_hints_
 /// near_control`); the card-board fills the rest. An empty state (no boards)
 /// paints a prompt to create one.
-pub fn render_boards(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, state: &BoardsState) {
+pub fn render_boards(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    top: u16,
+    bottom: u16,
+    state: &BoardsState,
+) {
     // The timeline overlay, when open, takes the whole body (a read-only
     // scrollable transcript over the board).
     if let Some(tl) = state.timeline() {
@@ -2238,7 +2252,14 @@ fn render_timeline_overlay(
     }
     let entries = tl.entries();
     if entries.is_empty() {
-        put_str(buf, 0, body_top, "no run transcript yet — launch this card first", MUTED, area_w);
+        put_str(
+            buf,
+            0,
+            body_top,
+            "no run transcript yet — launch this card first",
+            MUTED,
+            area_w,
+        );
         return;
     }
     let from = tl.scroll().min(entries.len().saturating_sub(1));
@@ -2270,10 +2291,20 @@ fn render_overlay(
             let shown = format!("> {title}\u{2588}");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
-        BoardsOverlay::CardRepo { title, query, dropdown, .. } => {
+        BoardsOverlay::CardRepo {
+            title,
+            query,
+            dropdown,
+            ..
+        } => {
             render_card_repo(buf, area_w, row, value_row, title, query, *dropdown, repos);
         }
-        BoardsOverlay::CardAgent { title, repo_ref, cursor, .. } => {
+        BoardsOverlay::CardAgent {
+            title,
+            repo_ref,
+            cursor,
+            ..
+        } => {
             // An edit commits at this stage (`Enter save`), so the prompt names the
             // action + the prefilled repo the run will use; a create advances to
             // the profile pick.
@@ -2300,7 +2331,14 @@ fn render_overlay(
             let prompt = format!("Assignee profile for \"{title}\" (↑↓ pick, Enter run-ready):");
             put_str(buf, 0, row, &prompt, GOLD, area_w);
             if profiles.is_empty() {
-                put_str(buf, 0, value_row, "> (no profiles — card is unassigned)", MUTED, area_w);
+                put_str(
+                    buf,
+                    0,
+                    value_row,
+                    "> (no profiles — card is unassigned)",
+                    MUTED,
+                    area_w,
+                );
             } else {
                 let mut x = 0u16;
                 for (i, slug) in profiles.iter().enumerate() {
@@ -2319,12 +2357,26 @@ fn render_overlay(
             }
         }
         BoardsOverlay::ColumnRename { name, .. } => {
-            put_str(buf, 0, row, "Rename column (Enter commit, Esc cancel):", GOLD, area_w);
+            put_str(
+                buf,
+                0,
+                row,
+                "Rename column (Enter commit, Esc cancel):",
+                GOLD,
+                area_w,
+            );
             let shown = format!("> {name}\u{2588}");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
         BoardsOverlay::RunMode { cursor, .. } => {
-            put_str(buf, 0, row, "Run ▾ (↑↓ pick mode, Enter launch, Esc cancel):", GOLD, area_w);
+            put_str(
+                buf,
+                0,
+                row,
+                "Run ▾ (↑↓ pick mode, Enter launch, Esc cancel):",
+                GOLD,
+                area_w,
+            );
             let mut x = 0u16;
             for (i, mode) in RunMode::ALL.iter().enumerate() {
                 let sel = i == *cursor;
@@ -2339,17 +2391,38 @@ fn render_overlay(
             }
         }
         BoardsOverlay::CancelConfirm { issue_id } => {
-            put_str(buf, 0, row, "Cancel this card's run? (Enter confirm, Esc abort):", GOLD, area_w);
+            put_str(
+                buf,
+                0,
+                row,
+                "Cancel this card's run? (Enter confirm, Esc abort):",
+                GOLD,
+                area_w,
+            );
             let shown = format!("kill the in-flight run for #{issue_id}");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
         BoardsOverlay::RemoveConfirm { issue_id } => {
-            put_str(buf, 0, row, "Remove this card from the board? (Enter confirm, Esc abort):", GOLD, area_w);
+            put_str(
+                buf,
+                0,
+                row,
+                "Remove this card from the board? (Enter confirm, Esc abort):",
+                GOLD,
+                area_w,
+            );
             let shown = format!("take #{issue_id} off the board (the issue is kept)");
             put_str(buf, 0, value_row, &shown, GREEN, area_w);
         }
         BoardsOverlay::SquadPick { cursor, .. } => {
-            put_str(buf, 0, row, "Assign squad (↑↓ pick, Enter commit, Esc cancel):", GOLD, area_w);
+            put_str(
+                buf,
+                0,
+                row,
+                "Assign squad (↑↓ pick, Enter commit, Esc cancel):",
+                GOLD,
+                area_w,
+            );
             // Row 0 is the "clear" option; rows 1.. are the injected squad roster.
             let mut x = 0u16;
             let clear_sel = *cursor == 0;
@@ -2370,11 +2443,28 @@ fn render_overlay(
                 }
             }
         }
-        BoardsOverlay::DepPick { dependent_issue_id, cursor } => {
-            put_str(buf, 0, row, "Depends on (↑↓ pick a blocker card, Enter commit, Esc cancel):", GOLD, area_w);
+        BoardsOverlay::DepPick {
+            dependent_issue_id,
+            cursor,
+        } => {
+            put_str(
+                buf,
+                0,
+                row,
+                "Depends on (↑↓ pick a blocker card, Enter commit, Esc cancel):",
+                GOLD,
+                area_w,
+            );
             let candidates = dep_candidate_ids(state, dependent_issue_id);
             if candidates.is_empty() {
-                put_str(buf, 0, value_row, "> (no other cards on this board to depend on)", MUTED, area_w);
+                put_str(
+                    buf,
+                    0,
+                    value_row,
+                    "> (no other cards on this board to depend on)",
+                    MUTED,
+                    area_w,
+                );
             } else {
                 let mut x = 0u16;
                 for (i, issue_id) in candidates.iter().enumerate() {
@@ -2643,7 +2733,13 @@ mod tests {
         }
     }
 
-    fn col(id: &str, name: &str, fsm: Option<&str>, auto: bool, cards: Vec<BoardCardWireRow>) -> BoardColumnWireRow {
+    fn col(
+        id: &str,
+        name: &str,
+        fsm: Option<&str>,
+        auto: bool,
+        cards: Vec<BoardCardWireRow>,
+    ) -> BoardColumnWireRow {
         BoardColumnWireRow {
             id: id.into(),
             name: name.into(),
@@ -2661,9 +2757,21 @@ mod tests {
                 name: "Sprint".into(),
                 auto_move: true,
                 columns: vec![
-                    col("c1", "Todo", None, false, vec![card("issue-1", "Refactor API", None)]),
+                    col(
+                        "c1",
+                        "Todo",
+                        None,
+                        false,
+                        vec![card("issue-1", "Refactor API", None)],
+                    ),
                     col("c2", "Doing", Some("running"), true, vec![]),
-                    col("c3", "Done", Some("done"), true, vec![card("issue-2", "Fix flaky test", Some("done"))]),
+                    col(
+                        "c3",
+                        "Done",
+                        Some("done"),
+                        true,
+                        vec![card("issue-2", "Fix flaky test", Some("done"))],
+                    ),
                 ],
                 unmapped: Vec::new(),
             }],
@@ -2733,7 +2841,10 @@ mod tests {
                 issue_id: "issue-1".into(),
             })
         );
-        assert!(confirmed.state.overlay().is_none(), "confirm closes on Enter");
+        assert!(
+            confirmed.state.overlay().is_none(),
+            "confirm closes on Enter"
+        );
     }
 
     /// Esc aborts the cancel confirm — the run is left untouched.
@@ -2756,7 +2867,10 @@ mod tests {
         assert!(empty.state.focused_card().is_none());
         let out = reduce_boards(&empty.state, BoardsEvent::CancelFocusedCard);
         assert_eq!(out.intent, None, "no card focused → no cancel intent");
-        assert!(out.state.overlay().is_none(), "no card focused → no confirm");
+        assert!(
+            out.state.overlay().is_none(),
+            "no card focused → no confirm"
+        );
     }
 
     /// A board whose first column holds two cards, so a within-column reorder has
@@ -2773,7 +2887,10 @@ mod tests {
                         "Todo",
                         None,
                         false,
-                        vec![card("issue-1", "First", None), card("issue-2", "Second", None)],
+                        vec![
+                            card("issue-1", "First", None),
+                            card("issue-2", "Second", None),
+                        ],
                     ),
                     col("c2", "Done", Some("done"), true, vec![]),
                 ],
@@ -2832,7 +2949,10 @@ mod tests {
                 issue_id: "issue-1".into(),
             })
         );
-        assert!(r.state.timeline().is_none(), "the overlay opens on the reply, not now");
+        assert!(
+            r.state.timeline().is_none(),
+            "the overlay opens on the reply, not now"
+        );
     }
 
     /// A populated timeline overlay renders its title + the parsed transcript
@@ -2846,21 +2966,35 @@ mod tests {
         let entries = crate::widgets::jsonl_timeline::parse_timeline(jsonl);
         assert!(!entries.is_empty(), "fixture parses to entries");
         let mut state = BoardsState::from_snapshot(&one_board());
-        state.set_timeline(TimelineView::new("Timeline · claude", Some("task-1".into()), entries));
+        state.set_timeline(TimelineView::new(
+            "Timeline · claude",
+            Some("task-1".into()),
+            entries,
+        ));
         assert!(state.timeline().is_some());
 
         let mut buf = WireBuffer::new(80, 12);
         render_boards(&mut buf, 80, 0, 11, &state);
         let map = painted(&buf);
-        assert!(map.contains("Timeline"), "the overlay title renders:\n{map}");
-        assert!(map.contains("Bash"), "the parsed tool call renders on the board:\n{map}");
+        assert!(
+            map.contains("Timeline"),
+            "the overlay title renders:\n{map}"
+        );
+        assert!(
+            map.contains("Bash"),
+            "the parsed tool call renders on the board:\n{map}"
+        );
 
         // Scroll clamps: up past the top stays at 0, down past the end caps.
         state.scroll_timeline(-5);
         assert_eq!(state.timeline().unwrap().scroll(), 0, "clamped at the top");
         state.scroll_timeline(100);
         let last = state.timeline().unwrap().entries().len() - 1;
-        assert_eq!(state.timeline().unwrap().scroll(), last, "capped at the last entry");
+        assert_eq!(
+            state.timeline().unwrap().scroll(),
+            last,
+            "capped at the last entry"
+        );
 
         // Closing drops the overlay.
         state.close_timeline();
@@ -2872,19 +3006,36 @@ mod tests {
     #[test]
     fn timeline_live_appends_only_matching_task_messages() {
         let mut state = BoardsState::from_snapshot(&one_board());
-        state.set_timeline(TimelineView::new("Timeline · claude", Some("task-1".into()), Vec::new()));
+        state.set_timeline(TimelineView::new(
+            "Timeline · claude",
+            Some("task-1".into()),
+            Vec::new(),
+        ));
 
         // A line for THIS task appends + follows the tail (scroll tracks the last
         // entry since we were already at the tail).
-        let appended = state.fold_timeline_message("task-1", MessageKind::Agent, "hello from the run");
+        let appended =
+            state.fold_timeline_message("task-1", MessageKind::Agent, "hello from the run");
         assert!(appended, "a matching TaskMessage appends");
-        assert_eq!(state.timeline().unwrap().entries().len(), 1, "one live line landed");
-        assert_eq!(state.timeline().unwrap().scroll(), 0, "the tail-follow keeps the last entry visible");
+        assert_eq!(
+            state.timeline().unwrap().entries().len(),
+            1,
+            "one live line landed"
+        );
+        assert_eq!(
+            state.timeline().unwrap().scroll(),
+            0,
+            "the tail-follow keeps the last entry visible"
+        );
 
         // A line for another task is ignored (never appended to this overlay).
         let other = state.fold_timeline_message("task-99", MessageKind::Agent, "not mine");
         assert!(!other, "a foreign-task TaskMessage is ignored");
-        assert_eq!(state.timeline().unwrap().entries().len(), 1, "no cross-task append");
+        assert_eq!(
+            state.timeline().unwrap().entries().len(),
+            1,
+            "no cross-task append"
+        );
 
         // With no timeline open, folding is a no-op.
         state.close_timeline();
@@ -2910,7 +3061,10 @@ mod tests {
                 issue_id: "issue-1".into(),
             })
         );
-        assert!(confirmed.state.overlay().is_none(), "confirm closes on Enter");
+        assert!(
+            confirmed.state.overlay().is_none(),
+            "confirm closes on Enter"
+        );
     }
 
     /// Esc aborts the remove confirm — the card is left on the board.
@@ -2994,8 +3148,18 @@ mod tests {
     /// as the daemon returns them).
     fn repo_roster() -> Vec<RepoOption> {
         vec![
-            RepoOption { label: "ainb".into(), repo_ref: "/src/ainb".into(), is_favorite: true, is_remote_only: false },
-            RepoOption { label: "widget".into(), repo_ref: "/src/widget".into(), is_favorite: false, is_remote_only: false },
+            RepoOption {
+                label: "ainb".into(),
+                repo_ref: "/src/ainb".into(),
+                is_favorite: true,
+                is_remote_only: false,
+            },
+            RepoOption {
+                label: "widget".into(),
+                repo_ref: "/src/widget".into(),
+                is_favorite: false,
+                is_remote_only: false,
+            },
         ]
     }
 
@@ -3017,7 +3181,13 @@ mod tests {
         ));
         // `@` opens the dropdown (scratch first, then the roster).
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
-        assert!(matches!(s.overlay(), Some(BoardsOverlay::CardRepo { dropdown: Some(0), .. })));
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardRepo {
+                dropdown: Some(0),
+                ..
+            })
+        ));
         // Down to the ★ favorite (index 1 — scratch is 0), Enter picks it → agent.
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
@@ -3084,7 +3254,13 @@ mod tests {
         let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(out.intent, None, "repo-less create never commits");
         assert!(
-            matches!(out.state.overlay(), Some(BoardsOverlay::CardRepo { dropdown: Some(0), .. })),
+            matches!(
+                out.state.overlay(),
+                Some(BoardsOverlay::CardRepo {
+                    dropdown: Some(0),
+                    ..
+                })
+            ),
             "Enter with no repo re-opens the dropdown at scratch"
         );
     }
@@ -3117,13 +3293,19 @@ mod tests {
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Char('@'))).state;
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state; // scratch → agent
         // Cascade default codex is pre-selected (index 1).
-        assert!(matches!(s.overlay(), Some(BoardsOverlay::CardAgent { cursor: 1, .. })));
+        assert!(matches!(
+            s.overlay(),
+            Some(BoardsOverlay::CardAgent { cursor: 1, .. })
+        ));
         // Down to copilot (index 2) — selectable, and Enter advances to profile.
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Down)).state;
         let s = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter)).state;
         assert!(matches!(
             s.overlay(),
-            Some(BoardsOverlay::CardProfile { agent: AgentChip::Copilot, .. })
+            Some(BoardsOverlay::CardProfile {
+                agent: AgentChip::Copilot,
+                ..
+            })
         ));
     }
 
@@ -3134,7 +3316,10 @@ mod tests {
         let s = reduce_boards(&state, BoardsEvent::AddCard).state;
         let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(out.intent, None);
-        assert!(matches!(out.state.overlay(), Some(BoardsOverlay::CardTitle { .. })));
+        assert!(matches!(
+            out.state.overlay(),
+            Some(BoardsOverlay::CardTitle { .. })
+        ));
     }
 
     /// With no profiles cached, a card still commits with an unassigned profile
@@ -3165,7 +3350,10 @@ mod tests {
     #[test]
     fn fuzzy_matches_is_case_insensitive_subsequence() {
         assert!(fuzzy_matches("widget", "wid"));
-        assert!(fuzzy_matches("MyRepo", "mr"), "subsequence, case-insensitive");
+        assert!(
+            fuzzy_matches("MyRepo", "mr"),
+            "subsequence, case-insensitive"
+        );
         assert!(fuzzy_matches("anything", ""), "empty query matches all");
         assert!(!fuzzy_matches("ainb", "xyz"));
     }
@@ -3219,7 +3407,10 @@ mod tests {
         let mut refreshed = BoardsState::from_snapshot(&one_board());
         refreshed.adopt_context(&typing);
         assert_eq!(refreshed.profiles(), ["claude-agent"]);
-        assert!(refreshed.overlay().is_some(), "the open title input survives a refresh");
+        assert!(
+            refreshed.overlay().is_some(),
+            "the open title input survives a refresh"
+        );
     }
 
     /// agents-in-a-box-1ah: a refused Run on a blocked card re-fetches the board;
@@ -3230,9 +3421,17 @@ mod tests {
     fn refresh_keeps_focus_on_the_acted_on_card_after_a_refused_run() {
         // Focus the SECOND card (issue-2) — the one the user acts on.
         let state = BoardsState::from_snapshot(&two_card_board());
-        assert_eq!(state.focused_card().unwrap().issue_id, "issue-1", "starts on card A");
+        assert_eq!(
+            state.focused_card().unwrap().issue_id,
+            "issue-1",
+            "starts on card A"
+        );
         let acted = reduce_boards(&state, BoardsEvent::FocusDown).state;
-        assert_eq!(acted.focused_card().unwrap().issue_id, "issue-2", "moved to card B");
+        assert_eq!(
+            acted.focused_card().unwrap().issue_id,
+            "issue-2",
+            "moved to card B"
+        );
 
         // A refused Run re-fetches the board — the same snapshot lands unchanged.
         let mut refreshed = BoardsState::from_snapshot(&two_card_board());
@@ -3330,9 +3529,18 @@ mod tests {
         // Dropdown open at cursor 0 (scratch), empty query → all candidates shown.
         render_card_repo(&mut buf, 80, 0, 1, "T", "", Some(0), &repos);
         let map = painted(&buf);
-        assert!(map.contains("★☁widget"), "remote-only favorite shows ★☁:\n{map}");
-        assert!(map.contains("★local"), "path-backed favorite shows plain ★:\n{map}");
-        assert!(!map.contains("★☁local"), "a local favorite is not marked remote:\n{map}");
+        assert!(
+            map.contains("★☁widget"),
+            "remote-only favorite shows ★☁:\n{map}"
+        );
+        assert!(
+            map.contains("★local"),
+            "path-backed favorite shows plain ★:\n{map}"
+        );
+        assert!(
+            !map.contains("★☁local"),
+            "a local favorite is not marked remote:\n{map}"
+        );
     }
 
     /// A LOADED but empty board list renders the create prompt (the genuine
@@ -3387,8 +3595,14 @@ mod tests {
     fn empty_snapshot_is_inert() {
         let state = BoardsState::from_snapshot(&BoardsListResult { boards: Vec::new() });
         assert!(state.focused_board().is_none());
-        assert_eq!(reduce_boards(&state, BoardsEvent::RunFocusedCard).intent, None);
-        assert_eq!(reduce_boards(&state, BoardsEvent::ToggleAutoMove).intent, None);
+        assert_eq!(
+            reduce_boards(&state, BoardsEvent::RunFocusedCard).intent,
+            None
+        );
+        assert_eq!(
+            reduce_boards(&state, BoardsEvent::ToggleAutoMove).intent,
+            None
+        );
         // CreateBoard is the one mutation that works with no board focused, so the
         // empty state is never a dead end.
         assert_eq!(
@@ -3411,7 +3625,12 @@ mod tests {
                     "Todo",
                     None,
                     false,
-                    vec![card_with_repo_agent("issue-9", "Edit me", "/src/widget", "codex")],
+                    vec![card_with_repo_agent(
+                        "issue-9",
+                        "Edit me",
+                        "/src/widget",
+                        "codex",
+                    )],
                 )],
                 unmapped: Vec::new(),
             }],
@@ -3466,8 +3685,15 @@ mod tests {
             }),
             "the agent-stage Enter commits the edit with the new title + agent"
         );
-        assert!(out.state.overlay().is_none(), "the overlay closes on commit");
-        assert_eq!(out.state.editing(), None, "the edit side-flag clears on commit");
+        assert!(
+            out.state.overlay().is_none(),
+            "the overlay closes on commit"
+        );
+        assert_eq!(
+            out.state.editing(),
+            None,
+            "the edit side-flag clears on commit"
+        );
     }
 
     /// Cancelling an edit (Esc at the title stage) closes the overlay AND drops the
@@ -3517,9 +3743,21 @@ mod tests {
         assert!(cv.auto_run);
 
         let bc = card_view_to_board_card(&cv);
-        assert!(bc.display_id.starts_with("🔒 #"), "blocked marker: {}", bc.display_id);
-        assert!(bc.title.contains("🔒[ock-9]"), "blocker badge: {}", bc.title);
-        assert!(bc.title.contains("👥[lead:running]"), "member chip badge: {}", bc.title);
+        assert!(
+            bc.display_id.starts_with("🔒 #"),
+            "blocked marker: {}",
+            bc.display_id
+        );
+        assert!(
+            bc.title.contains("🔒[ock-9]"),
+            "blocker badge: {}",
+            bc.title
+        );
+        assert!(
+            bc.title.contains("👥[lead:running]"),
+            "member chip badge: {}",
+            bc.title
+        );
         assert!(bc.title.contains('⏵'), "auto-run marker: {}", bc.title);
     }
 
@@ -3529,13 +3767,25 @@ mod tests {
     fn assign_squad_picker_commits_clear_and_pick() {
         let mut state = BoardsState::from_snapshot(&one_board());
         state.set_squads(vec![
-            SquadOption { id: "sq-1".into(), name: "alpha".into() },
-            SquadOption { id: "sq-2".into(), name: "beta".into() },
+            SquadOption {
+                id: "sq-1".into(),
+                name: "alpha".into(),
+            },
+            SquadOption {
+                id: "sq-2".into(),
+                name: "beta".into(),
+            },
         ]);
         // `q` opens the picker over the focused card (issue-1), cursor at 0 (clear).
         let opened = reduce_boards(&state, BoardsEvent::AssignSquad);
-        assert!(matches!(opened.state.overlay(), Some(BoardsOverlay::SquadPick { .. })));
-        assert_eq!(opened.intent, None, "opening the picker raises no intent yet");
+        assert!(matches!(
+            opened.state.overlay(),
+            Some(BoardsOverlay::SquadPick { .. })
+        ));
+        assert_eq!(
+            opened.intent, None,
+            "opening the picker raises no intent yet"
+        );
 
         // Enter on the clear row → AssignSquad { squad_id: None }.
         let cleared = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
@@ -3569,16 +3819,32 @@ mod tests {
     fn refresh_preserves_squad_roster() {
         let mut state = BoardsState::from_snapshot(&one_board());
         state.set_squads(vec![
-            SquadOption { id: "sq-1".into(), name: "alpha".into() },
-            SquadOption { id: "sq-2".into(), name: "beta".into() },
+            SquadOption {
+                id: "sq-1".into(),
+                name: "alpha".into(),
+            },
+            SquadOption {
+                id: "sq-2".into(),
+                name: "beta".into(),
+            },
         ]);
         let opened = reduce_boards(&state, BoardsEvent::AssignSquad).state;
-        assert!(matches!(opened.overlay(), Some(BoardsOverlay::SquadPick { .. })));
+        assert!(matches!(
+            opened.overlay(),
+            Some(BoardsOverlay::SquadPick { .. })
+        ));
 
         let mut refreshed = BoardsState::from_snapshot(&one_board());
         refreshed.adopt_context(&opened);
-        assert_eq!(refreshed.squads().len(), 2, "the squad roster survives a refresh");
-        assert!(refreshed.overlay().is_some(), "the open SquadPick survives too");
+        assert_eq!(
+            refreshed.squads().len(),
+            2,
+            "the squad roster survives a refresh"
+        );
+        assert!(
+            refreshed.overlay().is_some(),
+            "the open SquadPick survives too"
+        );
     }
 
     /// The SquadPick commit guard (holistic tcp review): if the roster is emptied
@@ -3589,8 +3855,14 @@ mod tests {
     fn squad_pick_over_missing_row_is_a_noop_not_a_silent_clear() {
         let mut state = BoardsState::from_snapshot(&one_board());
         state.set_squads(vec![
-            SquadOption { id: "sq-1".into(), name: "alpha".into() },
-            SquadOption { id: "sq-2".into(), name: "beta".into() },
+            SquadOption {
+                id: "sq-1".into(),
+                name: "alpha".into(),
+            },
+            SquadOption {
+                id: "sq-2".into(),
+                name: "beta".into(),
+            },
         ]);
         let opened = reduce_boards(&state, BoardsEvent::AssignSquad).state;
         // Move the cursor onto a real squad row (cursor 1 = roster squad 0)...
@@ -3599,12 +3871,18 @@ mod tests {
         on_squad.set_squads(vec![]);
 
         let out = reduce_boards(&on_squad, BoardsEvent::Key(BoardsKey::Enter));
-        assert_eq!(out.intent, None, "a cursor over a missing row commits NO AssignSquad");
+        assert_eq!(
+            out.intent, None,
+            "a cursor over a missing row commits NO AssignSquad"
+        );
         assert!(
             matches!(out.state.overlay(), Some(BoardsOverlay::SquadPick { .. })),
             "the overlay stays open to retry"
         );
-        assert!(out.state.note().is_some(), "a note explains why nothing was assigned");
+        assert!(
+            out.state.note().is_some(),
+            "a note explains why nothing was assigned"
+        );
     }
 
     /// `D` opens the dependency picker over the board's OTHER cards; Enter commits
@@ -3614,7 +3892,10 @@ mod tests {
         let state = BoardsState::from_snapshot(&one_board());
         // Focused card is issue-1; the only other card is issue-2 (in Done).
         let opened = reduce_boards(&state, BoardsEvent::AddDependency);
-        assert!(matches!(opened.state.overlay(), Some(BoardsOverlay::DepPick { .. })));
+        assert!(matches!(
+            opened.state.overlay(),
+            Some(BoardsOverlay::DepPick { .. })
+        ));
         let picked = reduce_boards(&opened.state, BoardsEvent::Key(BoardsKey::Enter));
         assert_eq!(
             picked.intent,
@@ -3642,6 +3923,9 @@ mod tests {
                 auto_run: true,
             })
         );
-        assert!(out.state.overlay().is_none(), "no overlay — a direct toggle");
+        assert!(
+            out.state.overlay().is_none(),
+            "no overlay — a direct toggle"
+        );
     }
 }

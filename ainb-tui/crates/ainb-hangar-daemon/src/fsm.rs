@@ -290,11 +290,7 @@ mod tests {
     #[test]
     fn seed_path_reaches_each_state() {
         for from in ALL_STATES {
-            assert_eq!(
-                drive(from, None),
-                from,
-                "seed_path did not reach {from:?}",
-            );
+            assert_eq!(drive(from, None), from, "seed_path did not reach {from:?}",);
         }
     }
 

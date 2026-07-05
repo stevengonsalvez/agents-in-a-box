@@ -49,9 +49,12 @@ async fn legacy_unstamped_rows_resolve_channels_at_read() {
     seed_workspace(pool, "ws-a").await;
 
     // A legacy ASK row (unstamped) — before the upgrade this paged the phone.
-    AttentionRepo::insert(pool, &legacy_row("ask", AttentionKind::AskUserQuestion, "ws-a"))
-        .await
-        .unwrap();
+    AttentionRepo::insert(
+        pool,
+        &legacy_row("ask", AttentionKind::AskUserQuestion, "ws-a"),
+    )
+    .await
+    .unwrap();
     // A legacy waiting row (unstamped) — genuinely board-only, no push.
     AttentionRepo::insert(pool, &legacy_row("wait", AttentionKind::Waiting, "ws-a"))
         .await

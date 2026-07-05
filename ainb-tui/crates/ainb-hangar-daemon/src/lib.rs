@@ -26,14 +26,6 @@ pub mod answer;
 /// `escalation` attention row so it reaches the phone/web push instead of
 /// dead-ending in `task-log.md`.
 pub mod atc;
-/// The board auto-move dispatch hook (P4 / D8): on every task FSM transition the
-/// claim loop moves the task's issue card to the `fsm_state`-matched auto-move
-/// column of every board carrying it (best-effort, never blocks the FSM).
-pub mod board;
-/// The in-flight run kill registry (tcp T3 / F6): the process-global seam a
-/// cancel RPC uses to signal the claim loop to stop a live run (headless process
-/// group / interactive tmux session). See [`cancel::registry`].
-pub mod cancel;
 /// The attention ingest producer (spec P2, D10): the daemon's own tail of the
 /// shared hook `events.jsonl` into the `attention` table — classifies every
 /// qualifying session event and raises an answerable row + an `AttentionRaised`
@@ -50,6 +42,14 @@ pub mod beads_adapter;
 /// (replays short-circuit via the mapping repo), and non-fatal (a `bd` failure
 /// surfaces a [`beads_sync::SyncError`] without corrupting Hangar state).
 pub mod beads_sync;
+/// The board auto-move dispatch hook (P4 / D8): on every task FSM transition the
+/// claim loop moves the task's issue card to the `fsm_state`-matched auto-move
+/// column of every board carrying it (best-effort, never blocks the FSM).
+pub mod board;
+/// The in-flight run kill registry (tcp T3 / F6): the process-global seam a
+/// cancel RPC uses to signal the claim loop to stop a live run (headless process
+/// group / interactive tmux session). See [`cancel::registry`].
+pub mod cancel;
 /// Env allowlist config + task-env builder (P5.3).
 ///
 /// Loads/saves `~/.agents-in-a-box/hangar/env.allow.toml` (foreign sections preserved,
@@ -77,14 +77,15 @@ pub mod events;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
-/// Interactive-mode launch: a real, attachable tmux session per task (ccc / D6).
+/// The task-lifecycle state machine (T8): `statig` typed compile-time
+/// transitions.
 ///
-/// [`interactive::spawn`] runs the provider inside a detached tmux session
-/// (`tmux_hangar-<task_id>`) the way `ainb run` sessions look, and
-/// [`interactive::TmuxRun::wait`] maps its recorded exit code onto the same
-/// [`runner::RunOutcome`] the headless path returns, so the finalize seam is
-/// shared across both modes.
-pub mod interactive;
+/// [`fsm::LifecycleGuard`] types the in-process transition ordering the claim
+/// loop drives (`dispatched -> running -> done|failed`); the migration-0012 SQL
+/// claim guard and the store-service idempotent finalize remain the DB-level
+/// enforcers. Crate-internal: the generated `State` enum is an implementation
+/// detail of the typed FSM, not part of the daemon's public surface.
+mod fsm;
 /// In-memory daemon health stats for the daemon-health pane (P8.5).
 ///
 /// The rolling task-throughput ring buffer + the bounded claim-slot cache figure.
@@ -102,6 +103,14 @@ pub mod inbox_aggregator;
 /// (`inbox/hangar-daemon.jsonl`) — pure exhaust the daemon never drains, bounded
 /// to its most-recent-N records on the sweeper tick. See [`inbox_sweep`].
 pub(crate) mod inbox_sweep;
+/// Interactive-mode launch: a real, attachable tmux session per task (ccc / D6).
+///
+/// [`interactive::spawn`] runs the provider inside a detached tmux session
+/// (`tmux_hangar-<task_id>`) the way `ainb run` sessions look, and
+/// [`interactive::TmuxRun::wait`] maps its recorded exit code onto the same
+/// [`runner::RunOutcome`] the headless path returns, so the finalize seam is
+/// shared across both modes.
+pub mod interactive;
 /// Dispatch-time materialisation of an agent's skills into its per-task env
 /// (P6.4).
 ///
@@ -165,15 +174,6 @@ pub mod progress_comment;
 /// repos. The plugin dials this socket through the host `unix_socket_dial` cap
 /// to populate its screens with live data.
 pub mod rpc;
-/// The task-lifecycle state machine (T8): `statig` typed compile-time
-/// transitions.
-///
-/// [`fsm::LifecycleGuard`] types the in-process transition ordering the claim
-/// loop drives (`dispatched -> running -> done|failed`); the migration-0012 SQL
-/// claim guard and the store-service idempotent finalize remain the DB-level
-/// enforcers. Crate-internal: the generated `State` enum is an implementation
-/// detail of the typed FSM, not part of the daemon's public surface.
-mod fsm;
 /// The daemon's claim loop + sweeper scheduler (P1.7).
 ///
 /// Polls [`ainb_hangar_store::service::claim`] for the oldest queued task bound
@@ -203,15 +203,6 @@ pub mod runtime_register;
 /// `autopilot.tick_skipped`), then recomputes the next tick from the fired slot
 /// to avoid drift. A [`tokio_util::sync::CancellationToken`] exits it cleanly.
 pub mod scheduler;
-/// Auto-standup watcher (D13, Stevie's LOCKED override; spec P9 §4.8).
-///
-/// [`standup::StandupWatcher`] is a daemon-global periodic scan that WRITES
-/// `/standup` into a stagnant, idle-at-prompt session via the one verified send
-/// path — behind every guardrail: a global toggle (default ON), a per-session
-/// opt-out, a 60-minute per-session cooldown, and a max-one-concurrent cap. The
-/// pure [`standup::decide_standup`] gate is the exhaustively-tested heart; a busy
-/// / mid-turn session is NEVER written to (hook status, never a pane heuristic).
-pub mod standup;
 /// Deterministic P4 seed fixture for the e2e tripwires (`test-support` only).
 ///
 /// Writes a `default` workspace with issues/agents/skills + a running task into
@@ -228,6 +219,15 @@ pub mod seed;
 /// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
 /// and all-or-nothing.
 pub mod skills_sync;
+/// Auto-standup watcher (D13, Stevie's LOCKED override; spec P9 §4.8).
+///
+/// [`standup::StandupWatcher`] is a daemon-global periodic scan that WRITES
+/// `/standup` into a stagnant, idle-at-prompt session via the one verified send
+/// path — behind every guardrail: a global toggle (default ON), a per-session
+/// opt-out, a 60-minute per-session cooldown, and a max-one-concurrent cap. The
+/// pure [`standup::decide_standup`] gate is the exhaustively-tested heart; a busy
+/// / mid-turn session is NEVER written to (hook status, never a pane heuristic).
+pub mod standup;
 /// TTL sweepers + stale-dispatch reclaim (P1.4).
 ///
 /// The daemon's tokio runtime registers these as periodic tasks; they are also
@@ -253,12 +253,12 @@ pub mod warnings;
 /// wrong-signature / disabled / unknown request fires nothing (401/403/404) and
 /// is recorded in the delivery audit log.
 pub mod webhook_ingress;
-/// Git-worktree integration for per-task working dirs (P1.6).
-pub mod worktree;
 /// Per-run working-dir provisioning from a card's `repo_ref` (spec F5): a
 /// volatile `ainb/<slug>` worktree for a real repo, an in-place git-inited
 /// scratch repo, or the fallback execenv workdir for a chat task.
 pub mod workdir_provision;
+/// Git-worktree integration for per-task working dirs (P1.6).
+pub mod worktree;
 
 /// Resolve the directory that holds `hangar.db`.
 ///
@@ -482,7 +482,8 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // sessions through the attention pipeline), and reschedules from the fired
     // slot. Non-fatal like the scheduler; the handle is dropped (process exit
     // tears the task down).
-    let _atc_heartbeat = crate::atc::AtcHeartbeatScheduler::spawn(store.pool().clone(), broker.sink());
+    let _atc_heartbeat =
+        crate::atc::AtcHeartbeatScheduler::spawn(store.pool().clone(), broker.sink());
     tracing::info!("ATC heartbeat cron spawned");
 
     // e38.18: the webhook ingress. OPT-IN — it only binds when

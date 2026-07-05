@@ -10,8 +10,8 @@
 use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
 use ainb_hangar_proto::events::{HangarEvent, IssueRow};
 use ainb_plugin_hangar::screen::issue_list::{
-    reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
-    IssueListState,
+    FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode, IssueListState,
+    reduce_issue_list,
 };
 
 /// A wire `IssueRow` for tests. `state` drives column grouping (`open` → Todo,
@@ -164,11 +164,8 @@ fn event_issue_created_appears_in_todo_column() {
         IssueListEvent::Event(HangarEvent::IssueCreated(new_row)),
     );
 
-    let todo: Vec<&str> = out
-        .state
-        .rows_in_column(IssueColumn::Todo)
-        .map(|r| r.id.as_str())
-        .collect();
+    let todo: Vec<&str> =
+        out.state.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str()).collect();
     assert_eq!(todo, vec!["i9"]);
 }
 

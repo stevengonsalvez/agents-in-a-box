@@ -64,9 +64,15 @@ fn squad_card_run_fans_out_to_own_worktrees() {
             "mode": "headless",
         }),
     );
-    assert!(run["error"].is_null(), "squad card run must ack, got: {run}");
+    assert!(
+        run["error"].is_null(),
+        "squad card run must ack, got: {run}"
+    );
     let leader_task = run["result"]["task_id"].as_str().unwrap_or("").to_string();
-    assert!(!leader_task.is_empty(), "run result must carry a leader task id: {run}");
+    assert!(
+        !leader_task.is_empty(),
+        "run result must carry a leader task id: {run}"
+    );
     let member_tasks: Vec<String> = run["result"]["member_task_ids"]
         .as_array()
         .unwrap_or_else(|| panic!("run result must carry member_task_ids: {run}"))
@@ -86,13 +92,19 @@ fn squad_card_run_fans_out_to_own_worktrees() {
     let slugs: Vec<String> = all_task_ids.iter().map(|t| task_short_id(t).to_string()).collect();
     let dirs: Vec<_> = slugs.iter().map(|s| worktree_dir(pipe.home(), s)).collect();
     let distinct: HashSet<&std::path::PathBuf> = dirs.iter().collect();
-    assert_eq!(distinct.len(), 3, "the leader + two members must map to three distinct worktree dirs");
+    assert_eq!(
+        distinct.len(),
+        3,
+        "the leader + two members must map to three distinct worktree dirs"
+    );
 
     // POSITIVE (own worktrees): all THREE worktrees exist AT ONCE (every agent
     // blocked on the release sentinel), each on its own ainb/<slug> branch.
     let live_deadline = Instant::now() + Duration::from_secs(45 * scale);
     let all_live = poll_until(live_deadline, || {
-        dirs.iter().zip(&slugs).all(|(dir, slug)| is_worktree_live(dir, &repo, &worktree_branch(slug)))
+        dirs.iter()
+            .zip(&slugs)
+            .all(|(dir, slug)| is_worktree_live(dir, &repo, &worktree_branch(slug)))
     });
     assert!(
         all_live,
@@ -114,7 +126,8 @@ fn squad_card_run_fans_out_to_own_worktrees() {
 
     // Release the blocked agents → all three finalize → all three CLEAN worktrees
     // torn down (F5 teardown holds for every fanned run).
-    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go").expect("write release sentinel");
+    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go")
+        .expect("write release sentinel");
 
     let teardown_deadline = Instant::now() + Duration::from_secs(45 * scale);
     let all_gone = poll_until(teardown_deadline, || dirs.iter().all(|d| !d.exists()));
@@ -123,7 +136,10 @@ fn squad_card_run_fans_out_to_own_worktrees() {
     drop(rpc);
     drop(pipe);
 
-    assert!(all_gone, "every fanned worktree must be torn down after its run ({dirs:?})");
+    assert!(
+        all_gone,
+        "every fanned worktree must be torn down after its run ({dirs:?})"
+    );
 }
 
 /// tcp T4 / FANOUT-SEMANTICS — cancelling a SQUAD card cancels EVERY member.
@@ -157,7 +173,10 @@ fn cancelling_a_squad_card_cancels_every_member() {
             "mode": "headless",
         }),
     );
-    assert!(run["error"].is_null(), "squad card run must ack, got: {run}");
+    assert!(
+        run["error"].is_null(),
+        "squad card run must ack, got: {run}"
+    );
     let mut all_task_ids = vec![run["result"]["task_id"].as_str().unwrap_or("").to_string()];
     all_task_ids.extend(
         run["result"]["member_task_ids"]
@@ -174,9 +193,14 @@ fn cancelling_a_squad_card_cancels_every_member() {
     let dirs: Vec<_> = slugs.iter().map(|s| worktree_dir(pipe.home(), s)).collect();
     let live_deadline = Instant::now() + Duration::from_secs(45 * scale);
     let all_live = poll_until(live_deadline, || {
-        dirs.iter().zip(&slugs).all(|(dir, slug)| is_worktree_live(dir, &repo, &worktree_branch(slug)))
+        dirs.iter()
+            .zip(&slugs)
+            .all(|(dir, slug)| is_worktree_live(dir, &repo, &worktree_branch(slug)))
     });
-    assert!(all_live, "all three fanned runs must be live before the cancel ({dirs:?})");
+    assert!(
+        all_live,
+        "all three fanned runs must be live before the cancel ({dirs:?})"
+    );
 
     // ONE cancel of the card — never releasing the sentinel.
     let cancel = rpc.call(
@@ -188,7 +212,10 @@ fn cancelling_a_squad_card_cancels_every_member() {
         }),
     );
     assert!(cancel["error"].is_null(), "squad cancel must ack: {cancel}");
-    assert_eq!(cancel["result"]["cancelled"], true, "the squad card must report cancelled: {cancel}");
+    assert_eq!(
+        cancel["result"]["cancelled"], true,
+        "the squad card must report cancelled: {cancel}"
+    );
 
     // EVERY member task must reach `cancelled` — not just the newest sibling.
     let cancel_deadline = Instant::now() + Duration::from_secs(45 * scale);
@@ -203,13 +230,20 @@ fn cancelling_a_squad_card_cancels_every_member() {
     let all_gone = poll_until(teardown_deadline, || dirs.iter().all(|d| !d.exists()));
 
     // Snapshot the per-task states for a precise failure message before teardown.
-    let states: Vec<Option<String>> = all_task_ids.iter().map(|id| task_status_by_id(pipe.home(), id)).collect();
+    let states: Vec<Option<String>> =
+        all_task_ids.iter().map(|id| task_status_by_id(pipe.home(), id)).collect();
 
     drop(rpc);
     drop(pipe);
 
-    assert!(all_cancelled, "every fanned member task must be cancelled, got {states:?}");
-    assert!(all_gone, "every fanned worktree must be torn down after the cancel ({dirs:?})");
+    assert!(
+        all_cancelled,
+        "every fanned member task must be cancelled, got {states:?}"
+    );
+    assert!(
+        all_gone,
+        "every fanned worktree must be torn down after the cancel ({dirs:?})"
+    );
 }
 
 /// tcp T4 / FANOUT-SEMANTICS — a squad card REJECTS `interactive` mode loudly.
@@ -245,12 +279,18 @@ fn running_a_squad_card_interactive_is_rejected() {
     drop(rpc);
     drop(pipe);
 
-    assert!(!run["error"].is_null(), "an interactive squad run must be refused: {run}");
+    assert!(
+        !run["error"].is_null(),
+        "an interactive squad run must be refused: {run}"
+    );
     assert!(
         err.contains("interactive") && err.contains("squad"),
         "the refusal must name interactive + squad ({err:?})"
     );
-    assert_eq!(dispatched, 0, "a refused interactive squad run must not dispatch any task");
+    assert_eq!(
+        dispatched, 0,
+        "a refused interactive squad run must not dispatch any task"
+    );
 }
 
 /// Whether the worktree at `dir` exists AND `branch` is registered in `repo`.
@@ -260,7 +300,10 @@ fn is_worktree_live(dir: &Path, repo: &Path, branch: &str) -> bool {
 
 /// The `member_states` array of the card `issue_id` in a `boards_list` result,
 /// searched across every column + the unmapped pool.
-fn find_card_member_states(list: &serde_json::Value, issue_id: &str) -> Option<Vec<serde_json::Value>> {
+fn find_card_member_states(
+    list: &serde_json::Value,
+    issue_id: &str,
+) -> Option<Vec<serde_json::Value>> {
     let boards = list["result"]["boards"].as_array()?;
     for b in boards {
         let mut buckets: Vec<&serde_json::Value> = Vec::new();

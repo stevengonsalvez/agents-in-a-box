@@ -626,10 +626,7 @@ fn open_key_entry(state: &SettingsState) -> SettingsReduction {
 /// intent for the currently-selected provider section.
 fn confirm_key_entry(state: &SettingsState) -> SettingsReduction {
     let mut next = state.clone();
-    let key = next
-        .key_entry
-        .take()
-        .unwrap_or_else(|| KeyMaterial::new(String::new()));
+    let key = next.key_entry.take().unwrap_or_else(|| KeyMaterial::new(String::new()));
     // The provider is the selected key row's provider, or the first provider as a
     // sensible default when the list is empty.
     let provider = next

@@ -11,7 +11,7 @@
 
 use ainb_hangar_core::ids::{IssueId, WorkspaceId};
 use ainb_hangar_proto::events::{ActorRow, PresenceState};
-use ainb_plugin_hangar::screen::{route_key, AppState, IssueAssignAction, NavIntent, ScreenStates};
+use ainb_plugin_hangar::screen::{AppState, IssueAssignAction, NavIntent, ScreenStates, route_key};
 use ainb_plugin_sdk::{KeyCode, KeyEvent};
 
 fn issue() -> IssueId {

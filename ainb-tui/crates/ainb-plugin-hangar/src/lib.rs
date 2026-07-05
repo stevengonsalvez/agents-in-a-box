@@ -19,30 +19,30 @@ pub mod shell;
 pub mod stream;
 pub mod widgets;
 
-pub use board_mouse::{fold_board_mouse, BoardMouseIntent};
-pub use chrome::{render_footer, render_top_bar, Presence};
+pub use board_mouse::{BoardMouseIntent, fold_board_mouse};
+pub use chrome::{Presence, render_footer, render_top_bar};
 pub use connection::{ConnState, Connection};
-pub use firstrun::{reduce_first_run, FirstRunIntent, FirstRunModal, FirstRunReduction};
+pub use firstrun::{FirstRunIntent, FirstRunModal, FirstRunReduction, reduce_first_run};
 pub use mouse::{HitMap, MouseFsm, MouseIntent, MouseState, Rect, Target};
 pub use plugin::{HangarPlugin, MANIFEST_TOML};
 pub use screen::autopilots::{
-    reduce_autopilots, AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState,
-};
-pub use screen::issue_list::{
-    reduce_issue_list, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
-    IssueListReduction, IssueListState,
+    AutopilotsEvent, AutopilotsIntent, AutopilotsReduction, AutopilotsState, reduce_autopilots,
 };
 pub use screen::boards::{
-    reduce_boards, render_boards, AgentChip, BoardView, BoardsEvent, BoardsIntent, BoardsKey,
-    BoardsOverlay, BoardsReduction, BoardsState, BoardsStatus, CardView, ColumnView, RepoOption,
+    AgentChip, BoardView, BoardsEvent, BoardsIntent, BoardsKey, BoardsOverlay, BoardsReduction,
+    BoardsState, BoardsStatus, CardView, ColumnView, RepoOption, reduce_boards, render_boards,
+};
+pub use screen::issue_list::{
+    FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode, IssueListReduction,
+    IssueListState, reduce_issue_list,
 };
 pub use screen::kanban::{
-    reduce_kanban, BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction,
-    KanbanState,
+    BoardColumn, CardSummary, Column, KanbanEvent, KanbanIntent, KanbanReduction, KanbanState,
+    reduce_kanban,
 };
-pub use screen::{reduce, ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen};
+pub use screen::{ActiveTaskBanner, AppEvent, AppState, Intent, Reduction, Screen, reduce};
 pub use shell::{
-    default_daemon_starter, default_opener, DaemonStarter, FailingDaemonStarter, Opener,
-    RecordingDaemonStarter, RecordingOpener, SystemDaemonStarter, SystemOpener,
+    DaemonStarter, FailingDaemonStarter, Opener, RecordingDaemonStarter, RecordingOpener,
+    SystemDaemonStarter, SystemOpener, default_daemon_starter, default_opener,
 };
 pub use stream::{Backoff, StreamClient, StreamError, SubscribeReplay};

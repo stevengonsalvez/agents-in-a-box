@@ -1093,7 +1093,10 @@ async fn migration_0025_creates_attention_with_kind_state_checks_and_open_index(
     let pool = fresh_pool(dir.path()).await;
 
     let att = table_sql(&pool, "attention").await;
-    assert!(att.contains("id TEXT PRIMARY KEY"), "attention.id PK: {att}");
+    assert!(
+        att.contains("id TEXT PRIMARY KEY"),
+        "attention.id PK: {att}"
+    );
     assert!(
         att.contains("session_id TEXT NOT NULL"),
         "attention.session_id NOT NULL: {att}"
@@ -1152,10 +1155,22 @@ async fn migration_0028_creates_atc_standup_and_daemon_config_tables() {
 
     // atc_instance: name PK + heartbeat_cron + the retry cap moved off the JSON.
     let atc = table_sql(&pool, "atc_instance").await;
-    assert!(atc.contains("name TEXT PRIMARY KEY"), "atc_instance.name PK: {atc}");
-    assert!(atc.contains("heartbeat_cron TEXT NOT NULL"), "heartbeat_cron: {atc}");
-    assert!(atc.contains("err_retry_cap INTEGER NOT NULL DEFAULT 3"), "err_retry_cap: {atc}");
-    assert!(atc.contains("enabled IN (0, 1)"), "atc_instance.enabled CHECK: {atc}");
+    assert!(
+        atc.contains("name TEXT PRIMARY KEY"),
+        "atc_instance.name PK: {atc}"
+    );
+    assert!(
+        atc.contains("heartbeat_cron TEXT NOT NULL"),
+        "heartbeat_cron: {atc}"
+    );
+    assert!(
+        atc.contains("err_retry_cap INTEGER NOT NULL DEFAULT 3"),
+        "err_retry_cap: {atc}"
+    );
+    assert!(
+        atc.contains("enabled IN (0, 1)"),
+        "atc_instance.enabled CHECK: {atc}"
+    );
     // The heartbeat cron's hot path is a PARTIAL index over enabled rows.
     let idx = index_sql(&pool, "idx_atc_instance_next_tick").await;
     assert!(
@@ -1169,13 +1184,25 @@ async fn migration_0028_creates_atc_standup_and_daemon_config_tables() {
         retry.contains("PRIMARY KEY (instance_name, session_id)"),
         "atc_retry composite PK: {retry}"
     );
-    assert!(retry.contains("escalated IN (0, 1)"), "atc_retry.escalated CHECK: {retry}");
+    assert!(
+        retry.contains("escalated IN (0, 1)"),
+        "atc_retry.escalated CHECK: {retry}"
+    );
 
     // standup_session: per-session opt-out + cooldown anchor + in-flight marker.
     let su = table_sql(&pool, "standup_session").await;
-    assert!(su.contains("session_id TEXT PRIMARY KEY"), "standup_session.session_id PK: {su}");
-    assert!(su.contains("opted_out INTEGER NOT NULL DEFAULT 0"), "opted_out default: {su}");
-    assert!(su.contains("in_flight INTEGER NOT NULL DEFAULT 0"), "in_flight default: {su}");
+    assert!(
+        su.contains("session_id TEXT PRIMARY KEY"),
+        "standup_session.session_id PK: {su}"
+    );
+    assert!(
+        su.contains("opted_out INTEGER NOT NULL DEFAULT 0"),
+        "opted_out default: {su}"
+    );
+    assert!(
+        su.contains("in_flight INTEGER NOT NULL DEFAULT 0"),
+        "in_flight default: {su}"
+    );
     // The max-concurrent guardrail counts in-flight rows — a PARTIAL index serves it.
     let su_idx = index_sql(&pool, "idx_standup_in_flight").await;
     assert!(
@@ -1185,8 +1212,14 @@ async fn migration_0028_creates_atc_standup_and_daemon_config_tables() {
 
     // daemon_config: a generic string kv for host-wide daemon knobs.
     let cfg = table_sql(&pool, "daemon_config").await;
-    assert!(cfg.contains("key TEXT PRIMARY KEY"), "daemon_config.key PK: {cfg}");
-    assert!(cfg.contains("value TEXT NOT NULL"), "daemon_config.value: {cfg}");
+    assert!(
+        cfg.contains("key TEXT PRIMARY KEY"),
+        "daemon_config.key PK: {cfg}"
+    );
+    assert!(
+        cfg.contains("value TEXT NOT NULL"),
+        "daemon_config.value: {cfg}"
+    );
 
     pool.close().await;
 }

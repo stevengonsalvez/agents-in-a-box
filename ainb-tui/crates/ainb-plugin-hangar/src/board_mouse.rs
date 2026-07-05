@@ -92,12 +92,10 @@ pub fn fold_board_mouse(
         // A right-press over a card anchors the context menu at the click.
         MouseKind::Down {
             button: MouseButton::Right,
-        } => layout
-            .card_at(ev.col, ev.row)
-            .map(|card| BoardMouseIntent::OpenContextMenu {
-                id: card.issue_id.clone(),
-                at: (ev.col, ev.row),
-            }),
+        } => layout.card_at(ev.col, ev.row).map(|card| BoardMouseIntent::OpenContextMenu {
+            id: card.issue_id.clone(),
+            at: (ev.col, ev.row),
+        }),
         // A left-release over a card opens it (the click).
         MouseKind::Up {
             button: MouseButton::Left,
@@ -120,18 +118,16 @@ pub fn fold_board_mouse(
 /// Resolve a wheel scroll at `(col, row)` to the board column under it, or `None`
 /// off every column.
 fn scroll(layout: &BoardLayout, col: u16, row: u16, delta: i32) -> Option<BoardMouseIntent> {
-    layout
-        .column_at(col, row)
-        .map(|c| BoardMouseIntent::ScrollColumn {
-            column: c.index,
-            delta,
-        })
+    layout.column_at(col, row).map(|c| BoardMouseIntent::ScrollColumn {
+        column: c.index,
+        delta,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::widgets::card_board::{render_card_board, BoardCard, BoardColumn, PriorityChip};
+    use crate::widgets::card_board::{BoardCard, BoardColumn, PriorityChip, render_card_board};
     use ainb_plugin_sdk::{MouseButton, MouseEvent, MouseKind, WireBuffer};
 
     fn ev(kind: MouseKind, col: u16, row: u16) -> MouseEvent {

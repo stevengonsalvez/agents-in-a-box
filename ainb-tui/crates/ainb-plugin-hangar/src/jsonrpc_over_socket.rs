@@ -15,7 +15,7 @@
 //! the cap stream is its own transport, not the host's stdio link — so a
 //! tiny self-contained Content-Length parser lives here.
 
-use ainb_hangar_proto::{RpcId, RpcRequest, RpcResponse, JSONRPC_VERSION};
+use ainb_hangar_proto::{JSONRPC_VERSION, RpcId, RpcRequest, RpcResponse};
 
 /// Encode a daemon JSON-RPC request into a Content-Length frame ready to
 /// hand to `host.unix_socket_send`.

@@ -58,7 +58,9 @@ fn main() {
         .expect("seed runtime");
     rt.block_on(async {
         let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open seed store");
-        ainb_hangar_daemon::seed::seed_p4_fixture(store.pool()).await.expect("seed P4 fixture");
+        ainb_hangar_daemon::seed::seed_p4_fixture(store.pool())
+            .await
+            .expect("seed P4 fixture");
         let pool = store.pool();
         let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
         let now: i64 = 1_700_000_000_000;
@@ -70,13 +72,23 @@ fn main() {
             .await
             .expect("lower autostandup.cooldown_min");
 
-        BoardRepo::create(pool, &ws, BOARD_ID, "Delivery", now).await.expect("create board");
+        BoardRepo::create(pool, &ws, BOARD_ID, "Delivery", now)
+            .await
+            .expect("create board");
         BoardRepo::column_add(pool, &ws, BOARD_ID, "col-backlog", "Backlog", None, false)
             .await
             .expect("add Backlog");
-        BoardRepo::column_add(pool, &ws, BOARD_ID, "col-running", "Running", Some("running"), true)
-            .await
-            .expect("add Running");
+        BoardRepo::column_add(
+            pool,
+            &ws,
+            BOARD_ID,
+            "col-running",
+            "Running",
+            Some("running"),
+            true,
+        )
+        .await
+        .expect("add Running");
         BoardRepo::column_add(pool, &ws, BOARD_ID, "col-done", "Done", Some("done"), true)
             .await
             .expect("add Done");
@@ -98,7 +110,9 @@ fn main() {
 
     let socket = hangar_dir.join("hangar").join("hangar.sock");
     let alt_socket = hangar_dir.join("hangar.sock");
-    wait_for(Duration::from_secs(15), || socket.exists() || alt_socket.exists());
+    wait_for(Duration::from_secs(15), || {
+        socket.exists() || alt_socket.exists()
+    });
     assert!(
         socket.exists() || alt_socket.exists(),
         "daemon never bound its socket under {}",

@@ -103,11 +103,7 @@ mod tests {
         assert!(text.contains("‹p0›"), "p0 chip: {text:?}");
         assert!(end > 0, "returns the advanced cursor");
         // The first glyph is painted violet.
-        let first = buf
-            .cells
-            .iter()
-            .find(|(c, _)| c.x == 0 && c.y == 0)
-            .map(|(_, cell)| cell.fg);
+        let first = buf.cells.iter().find(|(c, _)| c.x == 0 && c.y == 0).map(|(_, cell)| cell.fg);
         assert_eq!(first, Some(Some(LABEL_VIOLET)));
     }
 

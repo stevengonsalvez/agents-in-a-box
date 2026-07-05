@@ -531,7 +531,10 @@ mod tests {
             &transport,
         )
         .await;
-        assert!(fired, "Unknown routing fails open (plain-install behaviour)");
+        assert!(
+            fired,
+            "Unknown routing fails open (plain-install behaviour)"
+        );
         assert_eq!(transport.count(), 1);
     }
 
@@ -566,7 +569,9 @@ mod tests {
         let suppressed = notify(
             &e,
             &debouncer,
-            &StubResolver(ChannelResolution::Known(ChannelSet::from_channels([Channel::Web]))),
+            &StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+                Channel::Web,
+            ]))),
             &transport,
         )
         .await;
@@ -575,7 +580,9 @@ mod tests {
         let delivered = notify(
             &e,
             &debouncer,
-            &StubResolver(ChannelResolution::Known(ChannelSet::from_channels([Channel::Os]))),
+            &StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+                Channel::Os,
+            ]))),
             &transport,
         )
         .await;

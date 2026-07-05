@@ -109,15 +109,19 @@ async fn headless_card_run_hook_raises_an_attention_row() {
              inbox — the hook's fleet-membership gate did not resolve (AINB_PARENT_SESSION missing)"
         )
     });
-    assert_eq!(kind, "ask_user_question", "the raised attention row must be an ASK");
+    assert_eq!(
+        kind, "ask_user_question",
+        "the raised attention row must be an ASK"
+    );
 
     // NEGATIVE: no row exists for a session that never fired a hook — the gate did
     // not spuriously append for an unrelated session.
-    let stray: Option<String> = sqlx::query_scalar("SELECT kind FROM attention WHERE session_id = ?")
-        .bind("never-fired")
-        .fetch_optional(&pool)
-        .await
-        .expect("query stray");
+    let stray: Option<String> =
+        sqlx::query_scalar("SELECT kind FROM attention WHERE session_id = ?")
+            .bind("never-fired")
+            .fetch_optional(&pool)
+            .await
+            .expect("query stray");
     assert!(
         stray.is_none(),
         "no attention row must exist for a session that never fired a hook"

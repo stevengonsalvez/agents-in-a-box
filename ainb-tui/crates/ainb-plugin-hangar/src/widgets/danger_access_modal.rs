@@ -176,10 +176,7 @@ mod tests {
     }
 
     fn full_text(buf: &WireBuffer, width: u16, height: u16) -> String {
-        (0..height)
-            .map(|r| row_text(buf, r, width))
-            .collect::<Vec<_>>()
-            .join("\n")
+        (0..height).map(|r| row_text(buf, r, width)).collect::<Vec<_>>().join("\n")
     }
 
     /// `BODY_LINES` must track the actual body slice length (geometry relies on it).

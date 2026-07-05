@@ -413,8 +413,10 @@ mod tests {
         // whatever `latest_transcript_for_cwd` returns for this cwd is NOT an ASK.
         let fx = plant_transcript(
             "exact-transcript-cwd",
-            &[r#"{"type":"user","message":{"content":"hi"},"timestamp":"2026-01-01T00:00:00Z"}"#
-                .to_string()],
+            &[
+                r#"{"type":"user","message":{"content":"hi"},"timestamp":"2026-01-01T00:00:00Z"}"#
+                    .to_string(),
+            ],
         );
 
         // The session's EXACT transcript lives under a DIFFERENT cwd slug and DOES

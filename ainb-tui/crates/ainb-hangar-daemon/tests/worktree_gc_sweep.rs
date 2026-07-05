@@ -21,7 +21,11 @@ const WS: &str = "ws-a";
 
 fn git(dir: &Path, args: &[&str]) -> std::process::Output {
     let out = Command::new("git").args(args).current_dir(dir).output().expect("spawn git");
-    assert!(out.status.success(), "git {args:?} failed: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "git {args:?} failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     out
 }
 
@@ -48,7 +52,14 @@ fn add_worktree(origin: &Path, home: &Path, slug: &str) -> PathBuf {
     std::fs::create_dir_all(path.parent().unwrap()).expect("mkdir worktrees root");
     git(
         origin,
-        &["worktree", "add", "-q", "-b", &format!("ainb/{slug}"), path.to_str().unwrap()],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            "-b",
+            &format!("ainb/{slug}"),
+            path.to_str().unwrap(),
+        ],
     );
     path
 }
@@ -78,9 +89,16 @@ async fn seed_store(home: &Path, tasks: &[(&str, &str)]) -> Store {
 
 async fn seed_chain(pool: &SqlitePool) {
     sqlx::query("INSERT OR IGNORE INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, 0)")
-        .bind(WS).bind(WS).bind(WS).execute(pool).await.unwrap();
+        .bind(WS)
+        .bind(WS)
+        .bind(WS)
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
-        .execute(pool).await.unwrap();
+        .execute(pool)
+        .await
+        .unwrap();
     sqlx::query("INSERT OR IGNORE INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt', ?, 'd','claude','local','online')")
         .bind(WS).execute(pool).await.unwrap();
     sqlx::query("INSERT OR IGNORE INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag', ?, 'A','rt','x','workspace','u')")
@@ -119,17 +137,29 @@ async fn sweep_removes_terminal_clean_keeps_dirty_and_active() {
 
     // Terminal + clean → removed + deregistered.
     assert!(!done_wt.exists(), "a terminal, clean worktree is reclaimed");
-    assert!(!registration_present(origin.path(), done), "its git registration is pruned");
+    assert!(
+        !registration_present(origin.path(), done),
+        "its git registration is pruned"
+    );
 
     // Terminal + dirty → kept (uncommitted work preserved).
     assert!(dirty_wt.is_dir(), "a dirty worktree is preserved");
-    assert!(registration_present(origin.path(), dirty), "its registration is kept");
+    assert!(
+        registration_present(origin.path(), dirty),
+        "its registration is kept"
+    );
 
     // Active → untouched.
-    assert!(active_wt.is_dir(), "a running task's worktree is left alone");
+    assert!(
+        active_wt.is_dir(),
+        "a running task's worktree is left alone"
+    );
 
     // Unknown task id → kept (no positive terminal proof).
-    assert!(unknown_wt.is_dir(), "an unknown-task worktree is never deleted");
+    assert!(
+        unknown_wt.is_dir(),
+        "an unknown-task worktree is never deleted"
+    );
 
     assert_eq!(report.removed, 1, "exactly one worktree removed");
     assert_eq!(report.kept_dirty, 1, "exactly one kept dirty");
@@ -151,7 +181,10 @@ async fn sweep_keeps_a_terminal_but_live_registered_run() {
     let _guard = ainb_hangar_daemon::cancel::registry().register(live);
 
     let report = sweep_orphan_worktrees(store.pool(), home.path()).await.expect("sweep");
-    assert!(live_wt.is_dir(), "a live-registered run's worktree is never deleted");
+    assert!(
+        live_wt.is_dir(),
+        "a live-registered run's worktree is never deleted"
+    );
     assert_eq!(report.removed, 0);
     assert_eq!(report.kept_active, 1, "counted as kept-active (live run)");
 }

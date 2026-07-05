@@ -169,7 +169,13 @@ impl DaemonClient {
         let (read_half, mut writer) = stream.into_split();
         let mut reader = BufReader::new(read_half);
 
-        write_frame(&mut writer, methods::AUTH_HELLO, json!({ "token": self.token }), 1).await?;
+        write_frame(
+            &mut writer,
+            methods::AUTH_HELLO,
+            json!({ "token": self.token }),
+            1,
+        )
+        .await?;
         let hello = read_response(&mut reader).await?;
         if let Some(err) = hello.error {
             return Err(DaemonError::Rpc {
@@ -225,7 +231,9 @@ async fn read_frame(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, Daem
         let mut line = String::new();
         let n = reader.read_line(&mut line).await.map_err(|e| DaemonError::Io(e.to_string()))?;
         if n == 0 {
-            return Err(DaemonError::Io("connection closed while awaiting a frame".to_string()));
+            return Err(DaemonError::Io(
+                "connection closed while awaiting a frame".to_string(),
+            ));
         }
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {

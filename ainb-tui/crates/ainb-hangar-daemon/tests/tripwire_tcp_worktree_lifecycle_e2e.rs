@@ -79,14 +79,21 @@ fn running_a_card_on_a_repo_provisions_a_worktree_then_tears_it_down() {
     sess.poll_capture(Instant::now() + Duration::from_secs(20 * scale), |c| {
         c.contains(CARD_TITLE) && c.contains("Board: Delivery")
     })
-    .unwrap_or_else(|| panic!("created card never rendered on the board:\n{}", sess.capture()));
+    .unwrap_or_else(|| {
+        panic!(
+            "created card never rendered on the board:\n{}",
+            sess.capture()
+        )
+    });
 
     let run_deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut opened = false;
     while Instant::now() < run_deadline {
         sess.send_enter();
         if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("Run ▾"))
+            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                c.contains("Run ▾")
+            })
             .is_some()
         {
             opened = true;

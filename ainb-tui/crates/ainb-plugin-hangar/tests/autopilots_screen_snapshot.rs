@@ -14,7 +14,7 @@
 
 use ainb_hangar_proto::events::{AutopilotRow, AutopilotRunRow};
 use ainb_plugin_hangar::screen::autopilots::{
-    reduce_autopilots, render_autopilots, AutopilotsEvent, AutopilotsState,
+    AutopilotsEvent, AutopilotsState, reduce_autopilots, render_autopilots,
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 
@@ -143,10 +143,8 @@ fn render_three_autopilots_as_card_board() {
     assert!(full.contains("[e]dit"), "missing [e]dit hint:\n{full}");
 
     // NON-VACUOUS COLOUR CHECK: the selected card carries the heavy clay border.
-    let heavy_in_clay = buf
-        .cells
-        .iter()
-        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
+    let heavy_in_clay =
+        buf.cells.iter().any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
         heavy_in_clay,
         "the selected autopilot card must carry the heavy clay highlight border"

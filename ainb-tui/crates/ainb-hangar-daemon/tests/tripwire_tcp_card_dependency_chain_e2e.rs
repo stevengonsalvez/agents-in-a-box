@@ -50,7 +50,10 @@ fn dependent_card_refuses_until_blocker_done_then_auto_runs() {
         ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
         run_params(T4_DEP_DEPENDENT_ISSUE),
     );
-    assert!(!refused["error"].is_null(), "running a blocked card must be refused: {refused}");
+    assert!(
+        !refused["error"].is_null(),
+        "running a blocked card must be refused: {refused}"
+    );
     let msg = refused["error"]["message"].as_str().unwrap_or("");
     assert!(
         msg.contains("blocked"),
@@ -69,7 +72,10 @@ fn dependent_card_refuses_until_blocker_done_then_auto_runs() {
         ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
         run_params(T4_DEP_BLOCKER_ISSUE),
     );
-    assert!(run_a["error"].is_null(), "the unblocked blocker A must run: {run_a}");
+    assert!(
+        run_a["error"].is_null(),
+        "the unblocked blocker A must run: {run_a}"
+    );
 
     // Wait until A is actually running (claimed) before releasing, so the release
     // can never precede the claim.
@@ -80,7 +86,10 @@ fn dependent_card_refuses_until_blocker_done_then_auto_runs() {
             Some("dispatched" | "running")
         )
     });
-    assert!(a_claimed, "the claim loop must pick up A before we release it");
+    assert!(
+        a_claimed,
+        "the claim loop must pick up A before we release it"
+    );
 
     // B still has no task — nothing has unblocked it yet.
     assert_eq!(
@@ -92,7 +101,8 @@ fn dependent_card_refuses_until_blocker_done_then_auto_runs() {
     // Release: A finalizes to `done`, the finalize seam re-evaluates B (its last
     // blocker is now done) and — auto_run on — AUTO-LAUNCHES it. The same sentinel
     // is now present, so B's auto-run also completes.
-    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go").expect("write release sentinel");
+    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go")
+        .expect("write release sentinel");
 
     // AUTO-RUN: B gains a task ONLY after A completes — the finalize auto-run fired.
     let autorun_deadline = Instant::now() + Duration::from_secs(45 * scale);
@@ -136,13 +146,20 @@ fn manual_done_transition_auto_runs_dependent() {
     let mut rpc = DaemonRpc::connect_and_auth(pipe.home());
 
     // Run A (single-agent blocker); the run result carries A's task id.
-    let run_a = rpc.call(ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN, run_params(T4_DEP_BLOCKER_ISSUE));
+    let run_a = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        run_params(T4_DEP_BLOCKER_ISSUE),
+    );
     assert!(run_a["error"].is_null(), "blocker A must run: {run_a}");
     let a_task = run_a["result"]["task_id"].as_str().unwrap_or("").to_string();
     assert!(!a_task.is_empty(), "A's run must carry a task id: {run_a}");
 
     // B has no task yet — A is not done.
-    assert_eq!(task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE), 0, "B blocked until A done");
+    assert_eq!(
+        task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE),
+        0,
+        "B blocked until A done"
+    );
 
     // MANUALLY move A's task to `done` (a hand-drag on the Kanban), NOT via the
     // sentinel-driven finalize. This is the path that used to skip the unblock hook.
@@ -154,7 +171,10 @@ fn manual_done_transition_auto_runs_dependent() {
             "to_status": "done",
         }),
     );
-    assert!(done["error"].is_null(), "manual done transition must ack: {done}");
+    assert!(
+        done["error"].is_null(),
+        "manual done transition must ack: {done}"
+    );
     assert_eq!(
         task_status_by_id(pipe.home(), &a_task).as_deref(),
         Some("done"),
@@ -168,11 +188,15 @@ fn manual_done_transition_auto_runs_dependent() {
     });
 
     // Release so the blocked runs exit promptly, then kill the daemon by its handle.
-    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go").expect("write release sentinel");
+    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go")
+        .expect("write release sentinel");
     drop(rpc);
     drop(pipe);
 
-    assert!(b_ran, "a MANUAL `done` on A must fire B's dependency auto-run");
+    assert!(
+        b_ran,
+        "a MANUAL `done` on A must fire B's dependency auto-run"
+    );
 }
 
 /// tcp T4 / FANOUT-SEMANTICS — a dependent waits for the blocker's WHOLE squad, not
@@ -198,13 +222,26 @@ fn dependent_waits_for_the_whole_squad_blocker() {
 
     // Fan A out; assign_fanout inserts all three tasks before the RPC returns, so A
     // now carries three active tasks on one issue.
-    let run_a = rpc.call(ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN, run_params(T4_DEP_BLOCKER_ISSUE));
-    assert!(run_a["error"].is_null(), "the squad blocker A must run: {run_a}");
+    let run_a = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        run_params(T4_DEP_BLOCKER_ISSUE),
+    );
+    assert!(
+        run_a["error"].is_null(),
+        "the squad blocker A must run: {run_a}"
+    );
     let member_count = run_a["result"]["member_task_ids"].as_array().map_or(0, Vec::len);
-    assert_eq!(member_count, 2, "A must fan out to a leader + two members: {run_a}");
+    assert_eq!(
+        member_count, 2,
+        "A must fan out to a leader + two members: {run_a}"
+    );
 
     // B has no task — A's set has not drained.
-    assert_eq!(task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE), 0, "B blocked while A runs");
+    assert_eq!(
+        task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE),
+        0,
+        "B blocked while A runs"
+    );
 
     // Transition A's NEWEST active task to `done` while OLDER siblings still run.
     let newest = newest_active_task_for_issue(pipe.home(), T4_DEP_BLOCKER_ISSUE)
@@ -217,7 +254,10 @@ fn dependent_waits_for_the_whole_squad_blocker() {
             "to_status": "done",
         }),
     );
-    assert!(done["error"].is_null(), "completing the newest member must ack: {done}");
+    assert!(
+        done["error"].is_null(),
+        "completing the newest member must ack: {done}"
+    );
 
     // KEY DISCRIMINATOR: the newest member is done but older siblings still run — the
     // old latest-wins logic would have unblocked B here. The whole-set contract must
@@ -239,7 +279,10 @@ fn dependent_waits_for_the_whole_squad_blocker() {
                 "to_status": "done",
             }),
         );
-        assert!(d["error"].is_null(), "draining a squad member must ack: {d}");
+        assert!(
+            d["error"].is_null(),
+            "draining a squad member must ack: {d}"
+        );
     }
 
     // A's WHOLE set has now drained with a success → B becomes runnable and auto-runs.
@@ -248,11 +291,15 @@ fn dependent_waits_for_the_whole_squad_blocker() {
         task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE) >= 1
     });
 
-    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go").expect("write release sentinel");
+    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go")
+        .expect("write release sentinel");
     drop(rpc);
     drop(pipe);
 
-    assert!(b_ran, "B must auto-run only once A's ENTIRE squad set has drained with a done");
+    assert!(
+        b_ran,
+        "B must auto-run only once A's ENTIRE squad set has drained with a done"
+    );
 }
 
 /// The `board_card_run` params for a card on the fixture board (headless).

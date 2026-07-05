@@ -116,17 +116,12 @@ impl AgentPickerState {
 /// body, ties broken by rank then case-insensitive display name.
 fn sort_recent_then_alpha(actors: &mut [ActorRow]) {
     actors.sort_by(|a, b| match (a.recent_rank, b.recent_rank) {
-        (Some(ra), Some(rb)) => ra.cmp(&rb).then_with(|| {
-            a.display_name
-                .to_lowercase()
-                .cmp(&b.display_name.to_lowercase())
-        }),
+        (Some(ra), Some(rb)) => ra
+            .cmp(&rb)
+            .then_with(|| a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase())),
         (Some(_), None) => std::cmp::Ordering::Less,
         (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => a
-            .display_name
-            .to_lowercase()
-            .cmp(&b.display_name.to_lowercase()),
+        (None, None) => a.display_name.to_lowercase().cmp(&b.display_name.to_lowercase()),
     });
 }
 

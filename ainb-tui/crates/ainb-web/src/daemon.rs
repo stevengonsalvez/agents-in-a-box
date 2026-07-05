@@ -156,7 +156,13 @@ impl DaemonClient {
         let mut reader = BufReader::new(read_half);
 
         // First frame MUST be auth/hello or the daemon closes the connection.
-        write_frame(&mut writer, methods::AUTH_HELLO, json!({ "token": self.token }), 1).await?;
+        write_frame(
+            &mut writer,
+            methods::AUTH_HELLO,
+            json!({ "token": self.token }),
+            1,
+        )
+        .await?;
         let hello = read_response(&mut reader).await?;
         if let Some(err) = hello.error {
             return Err(DaemonError::Rpc {
@@ -219,7 +225,9 @@ async fn read_frame(reader: &mut BufReader<OwnedReadHalf>) -> Result<Value, Daem
         let mut line = String::new();
         let n = reader.read_line(&mut line).await.map_err(|e| DaemonError::Io(e.to_string()))?;
         if n == 0 {
-            return Err(DaemonError::Io("connection closed while awaiting a frame".to_string()));
+            return Err(DaemonError::Io(
+                "connection closed while awaiting a frame".to_string(),
+            ));
         }
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {
@@ -403,7 +411,11 @@ mod tests {
     #[test]
     fn attention_to_needs_carries_answer_id_and_display_kind() {
         let rows = vec![
-            row("a1", "ask_user_question", r#"{"question":"pick one","options":["x","y"]}"#),
+            row(
+                "a1",
+                "ask_user_question",
+                r#"{"question":"pick one","options":["x","y"]}"#,
+            ),
             row("e1", "error", "boom"),
         ];
         let needs = attention_to_needs(&rows);

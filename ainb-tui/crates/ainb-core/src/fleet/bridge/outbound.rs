@@ -196,7 +196,13 @@ mod tests {
     /// A phone-routed row (the default for the bridge's tests — the phone is the
     /// channel this consumer delivers). Use [`row_on`] for a specific channel set.
     fn row(id: &str, kind: &str, cwd: &str, payload: &str) -> AttentionRow {
-        row_on(id, kind, cwd, payload, ChannelSet::from_channels([Channel::Phone]))
+        row_on(
+            id,
+            kind,
+            cwd,
+            payload,
+            ChannelSet::from_channels([Channel::Phone]),
+        )
     }
 
     fn row_on(
@@ -228,11 +234,17 @@ mod tests {
             r#"{"question":"Ship it?","options":["yes","no","later"]}"#,
         );
         let msg = format_attention_notification(&r);
-        assert!(msg.starts_with("session backend asks: Ship it?"), "got: {msg}");
+        assert!(
+            msg.starts_with("session backend asks: Ship it?"),
+            "got: {msg}"
+        );
         assert!(msg.contains("① yes"), "got: {msg}");
         assert!(msg.contains("② no"), "got: {msg}");
         assert!(msg.contains("③ later"), "got: {msg}");
-        assert!(msg.contains("reply 2"), "prompts the reply-by-number contract: {msg}");
+        assert!(
+            msg.contains("reply 2"),
+            "prompts the reply-by-number contract: {msg}"
+        );
     }
 
     #[test]
@@ -253,7 +265,10 @@ mod tests {
     #[test]
     fn unparseable_payload_is_shown_verbatim() {
         let r = row("p", "ask_user_question", "/w/p", "just a raw prompt");
-        assert_eq!(format_attention_notification(&r), "session p asks: just a raw prompt");
+        assert_eq!(
+            format_attention_notification(&r),
+            "session p asks: just a raw prompt"
+        );
     }
 
     #[test]
@@ -282,7 +297,10 @@ mod tests {
 
         // Second poll, same open set: nothing fresh (would-be re-push suppressed).
         let fresh = take_new_rows(&mut seen, &[a.clone(), b.clone()]);
-        assert!(fresh.is_empty(), "an already-notified open row must not re-push");
+        assert!(
+            fresh.is_empty(),
+            "an already-notified open row must not re-push"
+        );
 
         // A brand-new open row is the only fresh one.
         let c = row("c", "escalation", "/w/c", "{}");
@@ -303,7 +321,12 @@ mod tests {
     async fn dispatch_pushes_one_message_per_row() {
         let notifier = RecordingNotifier(Mutex::new(Vec::new()));
         let rows = [
-            row("a1", "ask_user_question", "/w/a", r#"{"question":"go?","options":["y","n"]}"#),
+            row(
+                "a1",
+                "ask_user_question",
+                "/w/a",
+                r#"{"question":"go?","options":["y","n"]}"#,
+            ),
             row("e1", "error", "/w/e", r#"{"message":"boom"}"#),
         ];
         dispatch(&rows, &notifier).await;
@@ -342,7 +365,14 @@ mod tests {
         ];
         dispatch(&rows, &notifier).await;
         let sent = notifier.0.lock().unwrap().clone();
-        assert_eq!(sent.len(), 1, "only the phone-routed row is pushed: {sent:?}");
-        assert!(sent[0].contains("escalated"), "the delivered row is the escalation: {sent:?}");
+        assert_eq!(
+            sent.len(),
+            1,
+            "only the phone-routed row is pushed: {sent:?}"
+        );
+        assert!(
+            sent[0].contains("escalated"),
+            "the delivered row is the escalation: {sent:?}"
+        );
     }
 }

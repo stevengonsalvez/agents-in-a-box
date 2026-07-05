@@ -32,8 +32,8 @@ use std::time::Duration;
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
-use sqlx::sqlite::SqlitePoolOptions;
 use sqlx::SqlitePool;
+use sqlx::sqlite::SqlitePoolOptions;
 use tripwire_support::{DaemonSession, daemon_bin, fake_claude_happy, seed_world, wait_for_db};
 
 #[tokio::test]
@@ -77,18 +77,39 @@ async fn board_card_auto_moves_and_greens_on_run_success() {
 
     // Create a board with a manual `Todo` column and a `done`-mapped auto-move
     // `Done` column, then place the issue card in `Todo`.
-    BoardRepo::create(&pool, &ws, "board-1", "Delivery", tripwire_support::now_ms())
-        .await
-        .expect("create board");
+    BoardRepo::create(
+        &pool,
+        &ws,
+        "board-1",
+        "Delivery",
+        tripwire_support::now_ms(),
+    )
+    .await
+    .expect("create board");
     BoardRepo::column_add(&pool, &ws, "board-1", "col-todo", "Todo", None, false)
         .await
         .expect("add Todo column");
-    BoardRepo::column_add(&pool, &ws, "board-1", "col-done", "Done", Some("done"), true)
-        .await
-        .expect("add auto-move Done column");
-    BoardRepo::card_add(&pool, &ws, "board-1", issue_id, Some("col-todo"), tripwire_support::now_ms())
-        .await
-        .expect("place card in Todo");
+    BoardRepo::column_add(
+        &pool,
+        &ws,
+        "board-1",
+        "col-done",
+        "Done",
+        Some("done"),
+        true,
+    )
+    .await
+    .expect("add auto-move Done column");
+    BoardRepo::card_add(
+        &pool,
+        &ws,
+        "board-1",
+        issue_id,
+        Some("col-todo"),
+        tripwire_support::now_ms(),
+    )
+    .await
+    .expect("place card in Todo");
 
     // Precondition: the card sits in Todo before the run.
     let before = BoardRepo::list(&pool, &ws).await.expect("list before")[0].clone();

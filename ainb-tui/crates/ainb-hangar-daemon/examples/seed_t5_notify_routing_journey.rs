@@ -64,7 +64,11 @@ fn main() {
 
     let socket = hangar_dir.join("hangar.sock");
     wait_for(Duration::from_secs(15), || socket.exists());
-    assert!(socket.exists(), "daemon never bound its socket under {}", hangar_dir.display());
+    assert!(
+        socket.exists(),
+        "daemon never bound its socket under {}",
+        hangar_dir.display()
+    );
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());

@@ -87,16 +87,21 @@ fn running_a_card_interactively_spawns_a_real_tmux_session_then_reaps_and_greens
     sess.poll_capture(Instant::now() + Duration::from_secs(20 * scale), |c| {
         c.contains(CARD_TITLE) && c.contains("Board: Delivery")
     })
-    .unwrap_or_else(|| panic!("created card never rendered on the board:\n{}", sess.capture()));
+    .unwrap_or_else(|| {
+        panic!(
+            "created card never rendered on the board:\n{}",
+            sess.capture()
+        )
+    });
 
     // The new card is focused (Todo, first card). Enter opens the `Run ▾` menu.
     let run_deadline = Instant::now() + Duration::from_secs(20 * scale);
     let mut run_menu = None;
     while Instant::now() < run_deadline {
         sess.send_enter();
-        if let Some(c) =
-            sess.poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("Run ▾"))
-        {
+        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+            c.contains("Run ▾")
+        }) {
             run_menu = Some(c);
             break;
         }
@@ -188,8 +193,9 @@ fn running_a_card_interactively_spawns_a_real_tmux_session_then_reaps_and_greens
     // Kill the TUI tmux session by exact name before the assertions.
     drop(sess);
 
-    let (col, state) = landed
-        .unwrap_or_else(|| panic!("the created card never appeared in the db under `{CARD_TITLE}`"));
+    let (col, state) = landed.unwrap_or_else(|| {
+        panic!("the created card never appeared in the db under `{CARD_TITLE}`")
+    });
     assert_eq!(
         col.as_deref(),
         Some(BOARD_RUN_DONE_COL),

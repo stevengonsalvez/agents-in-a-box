@@ -157,7 +157,9 @@ pub async fn unblock_dependents_after_terminal(pool: &SqlitePool, task: &Task) {
         match CardDependencyRepo::get_auto_run(pool, &dep).await {
             Ok(true) => auto_run_dependent(pool, &ws, &dep).await,
             Ok(false) => {}
-            Err(e) => tracing::warn!(error = %e, dependent = %dep, "unblock: reading auto_run failed"),
+            Err(e) => {
+                tracing::warn!(error = %e, dependent = %dep, "unblock: reading auto_run failed")
+            }
         }
     }
 }
@@ -183,6 +185,8 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
         Err(crate::rpc::CardRunError::Blocked(_) | crate::rpc::CardRunError::ActiveRun(_)) => {
             tracing::debug!(issue = %issue_id, "auto-run skipped (not launchable right now)");
         }
-        Err(_) => tracing::warn!(issue = %issue_id, "auto-run refused (no repo/agent or store fault)"),
+        Err(_) => {
+            tracing::warn!(issue = %issue_id, "auto-run refused (no repo/agent or store fault)")
+        }
     }
 }

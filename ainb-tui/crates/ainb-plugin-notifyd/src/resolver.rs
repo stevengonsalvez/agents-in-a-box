@@ -325,11 +325,7 @@ mod tests {
             !waiting.channels.contains(Channel::Os),
             "board-only waiting excludes Os"
         );
-        let ask = result
-            .rules
-            .iter()
-            .find(|r| r.kind == "ask_user_question")
-            .unwrap();
+        let ask = result.rules.iter().find(|r| r.kind == "ask_user_question").unwrap();
         assert!(ask.channels.contains(Channel::Os), "ask includes Os");
     }
 

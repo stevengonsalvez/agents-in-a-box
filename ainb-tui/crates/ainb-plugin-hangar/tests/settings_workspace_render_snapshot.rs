@@ -11,7 +11,7 @@
 
 use ainb_hangar_proto::settings::{HealthSnapshot, WorkspaceRow};
 use ainb_plugin_hangar::screen::settings::{
-    reduce_settings, render_settings, SettingsEvent, SettingsSection, SettingsState,
+    SettingsEvent, SettingsSection, SettingsState, reduce_settings, render_settings,
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 

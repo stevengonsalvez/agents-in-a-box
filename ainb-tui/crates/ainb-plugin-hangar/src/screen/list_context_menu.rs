@@ -122,9 +122,7 @@ impl ListHitMap {
     }
 
     fn at(&self, col: u16, row: u16) -> Option<usize> {
-        self.rows
-            .iter()
-            .find_map(|(rect, i)| rect.contains(col, row).then_some(*i))
+        self.rows.iter().find_map(|(rect, i)| rect.contains(col, row).then_some(*i))
     }
 }
 
@@ -216,10 +214,7 @@ impl ListContextMenuState {
     /// Activate the selected row: fire its action, closing the menu (a `CopyId`
     /// keeps the menu open to show its confirmation note).
     fn activate(&mut self) -> Option<ListMenuAction> {
-        let action = self
-            .items
-            .get(self.selected)
-            .and_then(|i| i.action.clone())?;
+        let action = self.items.get(self.selected).and_then(|i| i.action.clone())?;
         if matches!(action, ListMenuAction::CopyId(_)) {
             self.copied = true;
         } else {

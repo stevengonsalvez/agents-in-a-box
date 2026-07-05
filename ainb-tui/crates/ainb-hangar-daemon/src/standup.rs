@@ -126,12 +126,24 @@ impl StandupConfig {
     pub async fn load(pool: &SqlitePool) -> Result<Self, sqlx::Error> {
         Ok(Self {
             enabled: DaemonConfigRepo::get_bool(pool, KEY_ENABLED, DEFAULT_ENABLED).await?,
-            stagnant_minutes: DaemonConfigRepo::get_i64(pool, KEY_STAGNANT_MIN, DEFAULT_STAGNANT_MIN)
-                .await?,
-            cooldown_minutes: DaemonConfigRepo::get_i64(pool, KEY_COOLDOWN_MIN, DEFAULT_COOLDOWN_MIN)
-                .await?,
-            max_concurrent: DaemonConfigRepo::get_i64(pool, KEY_MAX_CONCURRENT, DEFAULT_MAX_CONCURRENT)
-                .await?,
+            stagnant_minutes: DaemonConfigRepo::get_i64(
+                pool,
+                KEY_STAGNANT_MIN,
+                DEFAULT_STAGNANT_MIN,
+            )
+            .await?,
+            cooldown_minutes: DaemonConfigRepo::get_i64(
+                pool,
+                KEY_COOLDOWN_MIN,
+                DEFAULT_COOLDOWN_MIN,
+            )
+            .await?,
+            max_concurrent: DaemonConfigRepo::get_i64(
+                pool,
+                KEY_MAX_CONCURRENT,
+                DEFAULT_MAX_CONCURRENT,
+            )
+            .await?,
         })
     }
 }
@@ -436,9 +448,10 @@ impl StandupWatcher {
             let Some(fire_at) = row.last_standup_at else {
                 continue;
             };
-            let completed = observations.iter().find(|o| o.session.id == row.session_id).is_some_and(
-                |o| o.idle_at_prompt && o.last_turn_end_ms.is_some_and(|t| t > fire_at),
-            );
+            let completed =
+                observations.iter().find(|o| o.session.id == row.session_id).is_some_and(|o| {
+                    o.idle_at_prompt && o.last_turn_end_ms.is_some_and(|t| t > fire_at)
+                });
             // Stale-slot reclaim: if completion is never observed, release the slot
             // once the fire is older than the bound so one missed completion cannot
             // wedge auto-standup fleet-wide (DEFAULT_MAX_CONCURRENT = 1).
@@ -446,7 +459,8 @@ impl StandupWatcher {
             if !completed && !stale {
                 continue;
             }
-            if let Err(e) = StandupRepo::clear_in_flight(&self.pool, &row.session_id, now_ms).await {
+            if let Err(e) = StandupRepo::clear_in_flight(&self.pool, &row.session_id, now_ms).await
+            {
                 tracing::warn!(error = %e, session = %row.session_id, "auto-standup: clear in-flight failed");
                 continue;
             }
@@ -557,12 +571,12 @@ async fn probe_idle_fleet(now_ms: i64) -> Vec<IdleObservation> {
     for session in merged {
         // Classify off the runtime — reads the JSONL transcript (blocking fs I/O).
         let s = session.clone();
-        let Some(row) = tokio::task::spawn_blocking(move || {
-            classify(ClassifyInput::from_env(s, None, now_ms))
-        })
-        .await
-        .ok()
-        .flatten() else {
+        let Some(row) =
+            tokio::task::spawn_blocking(move || classify(ClassifyInput::from_env(s, None, now_ms)))
+                .await
+                .ok()
+                .flatten()
+        else {
             continue;
         };
         // Only a HOOK/JSONL-derived idle-at-prompt (an ended turn) qualifies. ASK
@@ -572,7 +586,9 @@ async fn probe_idle_fleet(now_ms: i64) -> Vec<IdleObservation> {
             out.push(IdleObservation {
                 idle_at_prompt: true,
                 idle_minutes: idle.idle_minutes,
-                last_turn_end_ms: Some(now_ms.saturating_sub(idle.idle_minutes.saturating_mul(60_000))),
+                last_turn_end_ms: Some(
+                    now_ms.saturating_sub(idle.idle_minutes.saturating_mul(60_000)),
+                ),
                 workspace_id: None,
                 session,
             });
@@ -608,7 +624,10 @@ mod tests {
 
     #[test]
     fn idle_stagnant_session_fires() {
-        assert_eq!(decide_standup(&cfg(), &idle_input(), 0, NOW), StandupDecision::Fire);
+        assert_eq!(
+            decide_standup(&cfg(), &idle_input(), 0, NOW),
+            StandupDecision::Fire
+        );
     }
 
     #[test]
@@ -675,7 +694,10 @@ mod tests {
         );
         // 61 min ago → window elapsed → fires.
         input.last_standup_at = Some(NOW - 61 * MIN_MS);
-        assert_eq!(decide_standup(&cfg(), &input, 0, NOW), StandupDecision::Fire);
+        assert_eq!(
+            decide_standup(&cfg(), &input, 0, NOW),
+            StandupDecision::Fire
+        );
     }
 
     #[test]
@@ -686,7 +708,10 @@ mod tests {
             StandupDecision::Skip(SkipReason::ConcurrencyLimit),
         );
         // Zero in flight → fires.
-        assert_eq!(decide_standup(&cfg(), &idle_input(), 0, NOW), StandupDecision::Fire);
+        assert_eq!(
+            decide_standup(&cfg(), &idle_input(), 0, NOW),
+            StandupDecision::Fire
+        );
     }
 
     #[test]
@@ -754,7 +779,9 @@ mod tests {
         );
 
         // Complete the standup (clear in-flight). Still inside cooldown → Cooldown.
-        StandupRepo::clear_in_flight(store.pool(), "s1", NOW + 2 * MIN_MS).await.unwrap();
+        StandupRepo::clear_in_flight(store.pool(), "s1", NOW + 2 * MIN_MS)
+            .await
+            .unwrap();
         assert_eq!(
             evaluate_session(store.pool(), &c, &o, 0, NOW + 10 * MIN_MS).await.unwrap(),
             StandupDecision::Skip(SkipReason::Cooldown),
@@ -773,7 +800,9 @@ mod tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         StandupRepo::set_opt_out(store.pool(), "s1", true, NOW).await.unwrap();
         assert_eq!(
-            evaluate_session(store.pool(), &cfg(), &obs("s1", true, 30), 0, NOW).await.unwrap(),
+            evaluate_session(store.pool(), &cfg(), &obs("s1", true, 30), 0, NOW)
+                .await
+                .unwrap(),
             StandupDecision::Skip(SkipReason::OptedOut),
         );
     }
@@ -853,7 +882,8 @@ mod tests {
         // fresh end-turn (peer/unhooked session, or a crash before the turn).
         StandupRepo::mark_fired(store.pool(), "s1", NOW).await.unwrap();
         // A tick just past 3× the 60-min cooldown, with NO observation of s1.
-        let stale_after = NOW + (STALE_INFLIGHT_COOLDOWN_MULTIPLE * DEFAULT_COOLDOWN_MIN + 1) * MIN_MS;
+        let stale_after =
+            NOW + (STALE_INFLIGHT_COOLDOWN_MULTIPLE * DEFAULT_COOLDOWN_MIN + 1) * MIN_MS;
         watcher.close_completed(&[], stale_after).await;
 
         // The slot is reclaimed even though completion was never seen…

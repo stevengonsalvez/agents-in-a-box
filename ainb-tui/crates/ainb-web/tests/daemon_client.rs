@@ -66,7 +66,10 @@ fn spawn_fake_daemon(reply: Value) -> PathBuf {
             let mut reader = BufReader::new(&mut stream);
             read_frame(&mut reader).await
         };
-        assert_eq!(hello["method"], "auth/hello", "first frame must be auth/hello");
+        assert_eq!(
+            hello["method"], "auth/hello",
+            "first frame must be auth/hello"
+        );
         let hello_id = hello["id"].clone();
         if hello["params"]["token"] != json!(TOKEN) {
             write_frame(

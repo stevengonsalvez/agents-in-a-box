@@ -207,16 +207,10 @@ mod tests {
         let mut buf = WireBuffer::new(60, 8);
         render_sparkline_dual(&mut buf, 0, 0, 8, &samples);
 
-        let has_red_at = |x: u16| {
-            buf.cells
-                .iter()
-                .any(|(c, cell)| c.x == x && cell.fg == Some(SPARK_RED))
-        };
-        let has_green_at = |x: u16| {
-            buf.cells
-                .iter()
-                .any(|(c, cell)| c.x == x && cell.fg == Some(SPARK_GREEN))
-        };
+        let has_red_at =
+            |x: u16| buf.cells.iter().any(|(c, cell)| c.x == x && cell.fg == Some(SPARK_RED));
+        let has_green_at =
+            |x: u16| buf.cells.iter().any(|(c, cell)| c.x == x && cell.fg == Some(SPARK_GREEN));
         assert!(has_red_at(30), "the failure-spike column must carry red");
         assert!(
             !has_red_at(10),

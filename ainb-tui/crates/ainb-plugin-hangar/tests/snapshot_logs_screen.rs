@@ -13,7 +13,7 @@
 //!     the below-floor line (the filter dimension).
 
 use ainb_hangar_core::logs::{LogLevel, LogLine};
-use ainb_plugin_hangar::screen::logs::{colors, render_logs, LogsState};
+use ainb_plugin_hangar::screen::logs::{LogsState, colors, render_logs};
 use ainb_plugin_sdk::{Color, WireBuffer};
 
 /// The three seeded P8.1-shaped JSON log lines (INFO / WARN / ERROR).

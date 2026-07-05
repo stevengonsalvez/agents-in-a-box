@@ -36,11 +36,7 @@ const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 /// row layout stays width-deterministic across terminals.)
 #[must_use]
 pub const fn actor_glyph(actor: &ActorRow) -> char {
-    if actor.is_agent {
-        '⬡'
-    } else {
-        '@'
-    }
+    if actor.is_agent { '⬡' } else { '@' }
 }
 
 /// The glyph colour for an actor: violet ring for agents, neutral for humans.

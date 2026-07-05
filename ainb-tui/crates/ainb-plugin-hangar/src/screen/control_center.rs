@@ -1425,10 +1425,7 @@ mod tests {
 
         // No rendered cell may carry a control char — every one must have been
         // replaced with the visible placeholder before reaching the buffer.
-        let has_control = buf
-            .cells
-            .iter()
-            .any(|(_, c)| c.symbol.chars().any(char::is_control));
+        let has_control = buf.cells.iter().any(|(_, c)| c.symbol.chars().any(char::is_control));
         assert!(
             !has_control,
             "no control char may survive into a rendered cell"

@@ -220,7 +220,11 @@ mod tests {
         StandupRepo::clear_in_flight(store.pool(), "sess", 6000).await.unwrap();
         let row = StandupRepo::get(store.pool(), "sess").await.unwrap().unwrap();
         assert!(!row.in_flight);
-        assert_eq!(row.last_standup_at, Some(5000), "cooldown anchor survives completion");
+        assert_eq!(
+            row.last_standup_at,
+            Some(5000),
+            "cooldown anchor survives completion"
+        );
         assert_eq!(StandupRepo::count_in_flight(store.pool()).await.unwrap(), 0);
     }
 
@@ -233,7 +237,10 @@ mod tests {
         StandupRepo::set_opt_out(store.pool(), "sess", false, 1000).await.unwrap();
         StandupRepo::mark_fired(store.pool(), "sess", 5000).await.unwrap();
         let row = StandupRepo::get(store.pool(), "sess").await.unwrap().unwrap();
-        assert!(!row.opted_out, "a fire must not silently re-opt-out the session");
+        assert!(
+            !row.opted_out,
+            "a fire must not silently re-opt-out the session"
+        );
         assert!(row.in_flight);
     }
 

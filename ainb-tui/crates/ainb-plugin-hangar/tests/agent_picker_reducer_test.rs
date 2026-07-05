@@ -9,9 +9,9 @@
 use ainb_hangar_core::ids::IssueId;
 use ainb_hangar_proto::events::{ActorRow, PresenceState};
 use ainb_plugin_hangar::screen::agent_picker::{
-    reduce_agent_picker, AgentPickerEvent, AgentPickerIntent, AgentPickerState,
+    AgentPickerEvent, AgentPickerIntent, AgentPickerState, reduce_agent_picker,
 };
-use ainb_plugin_hangar::widgets::actor_row::{actor_glyph_color, AGENT_VIOLET, HUMAN_NEUTRAL};
+use ainb_plugin_hangar::widgets::actor_row::{AGENT_VIOLET, HUMAN_NEUTRAL, actor_glyph_color};
 use ainb_plugin_sdk::WireBuffer;
 
 fn issue() -> IssueId {

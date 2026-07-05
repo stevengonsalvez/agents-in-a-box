@@ -143,10 +143,7 @@ mod tests {
         let reg = CancelRegistry::default();
         // Using the local instance (not the global) keeps the test isolated.
         let token = tokio_util::sync::CancellationToken::new();
-        reg.inner
-            .lock()
-            .unwrap()
-            .insert("01HZTASK".to_string(), token.clone());
+        reg.inner.lock().unwrap().insert("01HZTASK".to_string(), token.clone());
 
         assert!(!reg.signal("nope"), "unknown task signals nothing");
         assert!(!token.is_cancelled(), "an unrelated task stays live");

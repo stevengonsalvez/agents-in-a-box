@@ -660,10 +660,13 @@ impl HangarPlugin {
         // F6 logs-tail: a live transcript line for the task whose timeline overlay
         // is open auto-appends to it, so the shown run streams in place (no re-
         // fetch). Events for any other task — or with no timeline open — are ignored.
-        if let HangarEvent::TaskMessage { task_id, kind, body } = &event {
-            self.screens
-                .boards
-                .fold_timeline_message(task_id.as_str(), *kind, body.clone());
+        if let HangarEvent::TaskMessage {
+            task_id,
+            kind,
+            body,
+        } = &event
+        {
+            self.screens.boards.fold_timeline_message(task_id.as_str(), *kind, body.clone());
         }
         self.screens.issue_list = reduce_issue_list(
             &self.screens.issue_list,
@@ -864,7 +867,11 @@ impl HangarPlugin {
                     serde_json::Value::Object(params),
                 )
             }
-            NotifyAction::Set { scope, kind, channels } => {
+            NotifyAction::Set {
+                scope,
+                kind,
+                channels,
+            } => {
                 let mut params = serde_json::Map::new();
                 if let Some(w) = scope_of(scope) {
                     params.insert("workspace_id".into(), serde_json::json!(w));
@@ -917,10 +924,9 @@ impl HangarPlugin {
     /// indexed profiles (slug + tier), slug-ordered.
     fn apply_profiles(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
-            if let Ok(r) = serde_json::from_value::<
-                ainb_hangar_proto::snapshots::ProfileListResult,
-            >(result.clone())
-            {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::ProfileListResult>(
+                result.clone(),
+            ) {
                 // Mirror the slugs into the Boards card-create picker roster
                 // (ccc / D16) before moving `r.profiles` into the editor rows.
                 let slugs = r.profiles.iter().map(|p| p.slug.clone()).collect();
@@ -989,13 +995,10 @@ impl HangarPlugin {
             return;
         }
         if let Some(result) = &resp.result {
-            if let Ok(r) = serde_json::from_value::<
-                ainb_hangar_proto::snapshots::BoardCardRunResult,
-            >(result.clone())
-            {
-                self.screens
-                    .boards
-                    .set_note(format!("launched {} on {}", r.mode, r.agent_id));
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardCardRunResult>(
+                result.clone(),
+            ) {
+                self.screens.boards.set_note(format!("launched {} on {}", r.mode, r.agent_id));
             }
         }
     }
@@ -1037,9 +1040,9 @@ impl HangarPlugin {
         let Some(result) = &resp.result else {
             return;
         };
-        let Ok(r) = serde_json::from_value::<
-            ainb_hangar_proto::snapshots::BoardCardTimelineResult,
-        >(result.clone()) else {
+        let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::BoardCardTimelineResult>(
+            result.clone(),
+        ) else {
             return;
         };
         let entries = crate::widgets::jsonl_timeline::parse_timeline(&r.jsonl);
@@ -1056,9 +1059,9 @@ impl HangarPlugin {
         let title = format!("Timeline · {provider}");
         // Carry the run's task id so live `TaskMessage` events for THIS task
         // auto-append to the overlay while the run is in flight (F6 logs-tail).
-        self.screens
-            .boards
-            .set_timeline(crate::screen::boards::TimelineView::new(title, r.task_id, entries));
+        self.screens.boards.set_timeline(crate::screen::boards::TimelineView::new(
+            title, r.task_id, entries,
+        ));
     }
 
     /// Fold a `profile/get` result into the selected profile's detail (P5): the
@@ -1066,11 +1069,9 @@ impl HangarPlugin {
     /// dropped-field warnings). A not-found result (`found = false`) is ignored.
     fn apply_profile_detail(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
-            if let Ok(r) =
-                serde_json::from_value::<ainb_hangar_proto::snapshots::ProfileGetResult>(
-                    result.clone(),
-                )
-            {
+            if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::ProfileGetResult>(
+                result.clone(),
+            ) {
                 if !r.found {
                     return;
                 }
@@ -1371,8 +1372,11 @@ impl HangarPlugin {
             "color": d.color,
             "body": d.body,
         });
-        let Ok(body) = encode_request(PROFILE_UPSERT_REQ_ID, daemon_methods::PROFILE_UPSERT, params)
-        else {
+        let Ok(body) = encode_request(
+            PROFILE_UPSERT_REQ_ID,
+            daemon_methods::PROFILE_UPSERT,
+            params,
+        ) else {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
@@ -1892,7 +1896,9 @@ impl HangarPlugin {
             return format!("attach: #{issue_id} — tmux attach -t {name}");
         }
         match card.and_then(|c| c.state.as_deref()) {
-            Some("running") => format!("attach: #{issue_id} is running (headless — no live pane yet)"),
+            Some("running") => {
+                format!("attach: #{issue_id} is running (headless — no live pane yet)")
+            }
             Some(other) => format!("attach: #{issue_id} is {other} — press Enter to launch"),
             None => format!("attach: #{issue_id} has no run yet — press Enter to launch"),
         }
@@ -3601,9 +3607,7 @@ impl Plugin for HangarPlugin {
                 .task_detail
                 .as_ref()
                 .is_some_and(|td| td.compose_buffer().is_some()),
-            Screen::Settings => {
-                self.screens.settings.as_ref().is_some_and(|s| s.key_entry_open())
-            }
+            Screen::Settings => self.screens.settings.as_ref().is_some_and(|s| s.key_entry_open()),
             Screen::Squads => self.screens.squads.is_creating(),
             // Every open Boards overlay (create-title / profile-pick / column
             // rename / `Run ▾`) consumes all keys as input, per its routing guard.
@@ -3984,9 +3988,7 @@ mod tests {
         use ainb_hangar_core::ids::{IssueId, TaskId};
         use ainb_hangar_proto::events::{EVENT_METHOD, MessageKind};
 
-        let frame = |ev: &HangarEvent| {
-            serde_json::json!({ "method": EVENT_METHOD, "params": serde_json::to_value(ev).unwrap() })
-        };
+        let frame = |ev: &HangarEvent| serde_json::json!({ "method": EVENT_METHOD, "params": serde_json::to_value(ev).unwrap() });
 
         // A transcript line does not arm a re-fetch.
         let mut p = HangarPlugin::new();
@@ -3995,14 +3997,20 @@ mod tests {
             kind: MessageKind::Agent,
             body: "streaming line".into(),
         }));
-        assert!(!p.fetch_pending, "a TaskMessage transcript line must not re-pull snapshots");
+        assert!(
+            !p.fetch_pending,
+            "a TaskMessage transcript line must not re-pull snapshots"
+        );
 
         // A status-relevant event (issue deleted) DOES arm the reconciling re-fetch.
         let mut p = HangarPlugin::new();
         p.on_daemon_event(&frame(&HangarEvent::IssueDeleted {
             issue_id: IssueId::from_str("i1").unwrap(),
         }));
-        assert!(p.fetch_pending, "a non-transcript event must arm the reconciling re-fetch");
+        assert!(
+            p.fetch_pending,
+            "a non-transcript event must arm the reconciling re-fetch"
+        );
     }
 
     /// An EOF socket event drops a connected link back to Disconnected.
@@ -4911,10 +4919,8 @@ mod tests {
     /// is wired end to end through the real key path (not just the pure reducer).
     #[test]
     fn boards_c_opens_card_title_and_captures_tab_chars() {
-        use ainb_hangar_proto::snapshots::{
-            BoardColumnWireRow, BoardWireRow, BoardsListResult,
-        };
         use crate::screen::boards::BoardsOverlay;
+        use ainb_hangar_proto::snapshots::{BoardColumnWireRow, BoardWireRow, BoardsListResult};
         let mut p = connected_plugin_with_issue();
 
         // Load a board with one column, then land on the Boards screen.

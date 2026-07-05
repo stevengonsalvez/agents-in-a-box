@@ -34,10 +34,10 @@ use ainb_hangar_core::channel::{Channel, ChannelSet};
 use ainb_hangar_daemon::attention_ingest::AttentionIngest;
 use ainb_hangar_daemon::events::EventBroker;
 use ainb_hangar_daemon::health_stats::HealthStats;
-use ainb_hangar_daemon::rpc::{dispatch, DaemonHealth};
+use ainb_hangar_daemon::rpc::{DaemonHealth, dispatch};
 use ainb_hangar_proto::events::{AttentionRow, HangarEvent};
 use ainb_hangar_proto::snapshots::AttentionListResult;
-use ainb_hangar_proto::{methods, RpcId, RpcRequest};
+use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 
 /// Plant an AskUserQuestion transcript under `~/.claude/projects/<slug>` for a
@@ -103,7 +103,11 @@ fn deliver_to(rows: &[AttentionRow], channel: Channel) -> Vec<String> {
 
 /// Fetch the open attention feed the way a real consumer does — through the
 /// `attention/list` RPC (fleet scope), which carries each row's resolved channels.
-async fn attention_feed(store: &Store, health: &DaemonHealth, sink: &ainb_hangar_daemon::events::EventSink) -> Vec<AttentionRow> {
+async fn attention_feed(
+    store: &Store,
+    health: &DaemonHealth,
+    sink: &ainb_hangar_daemon::events::EventSink,
+) -> Vec<AttentionRow> {
     let req = RpcRequest {
         jsonrpc: ainb_hangar_proto::jsonrpc_version(),
         id: RpcId::Number(1),
@@ -145,7 +149,10 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
         params: serde_json::json!({ "kind": "ask_user_question", "channels": ["phone", "web"] }),
     };
     let flip_resp = dispatch(store.pool(), &flip, &health, &sink).await;
-    assert!(flip_resp.error.is_none(), "the rule flip RPC succeeds: {flip_resp:?}");
+    assert!(
+        flip_resp.error.is_none(),
+        "the rule flip RPC succeeds: {flip_resp:?}"
+    );
 
     // Subscribe to the attention stream BEFORE the raise so we capture the emitted
     // event's channels (the live-consumer copy of the routing decision).
@@ -161,7 +168,10 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
 
     let ingest = AttentionIngest::new(store.pool().clone(), sink.clone(), events_jsonl, cursor);
     let raised = ingest.ingest_once(5000).await;
-    assert_eq!(raised, 1, "the Notification hook raises exactly one ASK row");
+    assert_eq!(
+        raised, 1,
+        "the Notification hook raises exactly one ASK row"
+    );
 
     // The stamped row carries the FLIPPED channels (phone+web), NOT the default.
     let feed = attention_feed(&store, &health, &sink).await;
@@ -180,9 +190,20 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
     let phone = deliver_to(&feed, Channel::Phone);
     let os = deliver_to(&feed, Channel::Os);
     let web = deliver_to(&feed, Channel::Web);
-    assert_eq!(phone, vec![ask.id.clone()], "the ALLOWED phone channel fired");
-    assert!(os.is_empty(), "the SUPPRESSED os channel did NOT fire after the flip");
-    assert_eq!(web, vec![ask.id.clone()], "the still-routed web channel fired");
+    assert_eq!(
+        phone,
+        vec![ask.id.clone()],
+        "the ALLOWED phone channel fired"
+    );
+    assert!(
+        os.is_empty(),
+        "the SUPPRESSED os channel did NOT fire after the flip"
+    );
+    assert_eq!(
+        web,
+        vec![ask.id.clone()],
+        "the still-routed web channel fired"
+    );
 
     // The AttentionRaised event carried the same resolved channels (the live
     // consumers reacting to the nudge see the identical decision, no re-resolve).
@@ -286,7 +307,10 @@ async fn workspace_override_routes_a_workspace_scoped_raise_and_leaves_global_in
         }),
     };
     let flip_resp = dispatch(store.pool(), &flip, &health, &sink).await;
-    assert!(flip_resp.error.is_none(), "the workspace rule flip succeeds: {flip_resp:?}");
+    assert!(
+        flip_resp.error.is_none(),
+        "the workspace rule flip succeeds: {flip_resp:?}"
+    );
 
     // Raise an escalation FOR ws-a (a real workspace-scoped raise path) and one
     // with NO workspace (host-wide), both resolved once at emit time.
@@ -333,7 +357,10 @@ async fn workspace_override_routes_a_workspace_scoped_raise_and_leaves_global_in
         "the workspace-scoped raise resolves the workspace override (os only)"
     );
     // The flipped channel decision is what the consumers filter on.
-    assert!(deliver_to(&feed, Channel::Os).contains(&ws_row.id), "os fired for ws-a");
+    assert!(
+        deliver_to(&feed, Channel::Os).contains(&ws_row.id),
+        "os fired for ws-a"
+    );
     assert!(
         !deliver_to(&feed, Channel::Phone).contains(&ws_row.id),
         "phone was DROPPED by the ws-a override"

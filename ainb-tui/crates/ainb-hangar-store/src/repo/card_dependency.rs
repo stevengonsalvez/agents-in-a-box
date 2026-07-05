@@ -278,7 +278,12 @@ impl CardDependencyRepo {
         .fetch_all(pool)
         .await?;
         rows.iter()
-            .map(|r| Ok((r.try_get("dependent_issue_id")?, r.try_get("blocker_issue_id")?)))
+            .map(|r| {
+                Ok((
+                    r.try_get("dependent_issue_id")?,
+                    r.try_get("blocker_issue_id")?,
+                ))
+            })
             .collect()
     }
 
@@ -401,9 +406,17 @@ mod tests {
 
     /// Seed a minimal user/runtime/agent so a task row's FK chain holds, then a
     /// task on `issue_id` with `status`. Used to drive the blocker-finished check.
-    async fn seed_task_on_issue(pool: &SqlitePool, ws: &str, issue_id: &str, task_id: &str, status: &str) {
+    async fn seed_task_on_issue(
+        pool: &SqlitePool,
+        ws: &str,
+        issue_id: &str,
+        task_id: &str,
+        status: &str,
+    ) {
         sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
-            .execute(pool).await.unwrap();
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT OR IGNORE INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt', ?, 'd','claude','local','online')")
             .bind(ws).execute(pool).await.unwrap();
         sqlx::query("INSERT OR IGNORE INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag', ?, 'A','rt','x','workspace','u')")
@@ -421,8 +434,11 @@ mod tests {
     /// transitions rather than by inserting a new sibling.
     async fn set_task_status(pool: &SqlitePool, task_id: &str, status: &str) {
         sqlx::query("UPDATE agent_task_queue SET status = ? WHERE id = ?")
-            .bind(status).bind(task_id)
-            .execute(pool).await.unwrap();
+            .bind(status)
+            .bind(task_id)
+            .execute(pool)
+            .await
+            .unwrap();
     }
 
     async fn open() -> (tempfile::TempDir, Store) {
@@ -447,7 +463,10 @@ mod tests {
         // Idempotent re-add.
         CardDependencyRepo::add_edge(pool, &ws("ws-a"), "b", "a", 3).await.unwrap();
 
-        assert_eq!(CardDependencyRepo::blockers_of(pool, "b").await.unwrap(), vec!["a"]);
+        assert_eq!(
+            CardDependencyRepo::blockers_of(pool, "b").await.unwrap(),
+            vec!["a"]
+        );
         let mut deps = CardDependencyRepo::dependents_of(pool, "a").await.unwrap();
         deps.sort();
         assert_eq!(deps, vec!["b", "c"]);
@@ -466,7 +485,10 @@ mod tests {
         seed_ws(pool, "ws-a").await;
         seed_issue(pool, "ws-a", "a").await;
         let err = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "a", "a", 1).await.unwrap_err();
-        assert!(matches!(err, CardDependencyError::SelfDependency), "got {err:?}");
+        assert!(
+            matches!(err, CardDependencyError::SelfDependency),
+            "got {err:?}"
+        );
     }
 
     /// A direct cycle (a↔b) and a transitive cycle (a→b→c→a) are both rejected,
@@ -484,8 +506,12 @@ mod tests {
         CardDependencyRepo::add_edge(pool, &ws("ws-a"), "b", "c", 2).await.unwrap();
 
         // Direct cycle: b depends on a would close a<->b (a already depends on b).
-        let direct = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "b", "a", 3).await.unwrap_err();
-        assert!(matches!(direct, CardDependencyError::Cycle), "got {direct:?}");
+        let direct =
+            CardDependencyRepo::add_edge(pool, &ws("ws-a"), "b", "a", 3).await.unwrap_err();
+        assert!(
+            matches!(direct, CardDependencyError::Cycle),
+            "got {direct:?}"
+        );
 
         // Transitive cycle: c depends on a would close a -> b -> c -> a.
         let trans = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "c", "a", 4).await.unwrap_err();
@@ -509,12 +535,27 @@ mod tests {
         seed_issue(pool, "ws-b", "foreign").await;
 
         // Unknown blocker.
-        let unknown = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "a", "ghost", 1).await.unwrap_err();
-        assert!(matches!(unknown, CardDependencyError::NotFound), "got {unknown:?}");
+        let unknown = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "a", "ghost", 1)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(unknown, CardDependencyError::NotFound),
+            "got {unknown:?}"
+        );
         // Cross-tenant blocker (exists, but in ws-b).
-        let foreign = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "a", "foreign", 2).await.unwrap_err();
-        assert!(matches!(foreign, CardDependencyError::NotFound), "got {foreign:?}");
-        assert!(CardDependencyRepo::edges_of_workspace(pool, &ws("ws-a")).await.unwrap().is_empty());
+        let foreign = CardDependencyRepo::add_edge(pool, &ws("ws-a"), "a", "foreign", 2)
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(foreign, CardDependencyError::NotFound),
+            "got {foreign:?}"
+        );
+        assert!(
+            CardDependencyRepo::edges_of_workspace(pool, &ws("ws-a"))
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// unfinished_blockers_of returns blockers whose latest task is not `done`;
@@ -549,7 +590,10 @@ mod tests {
         // unfinished blockers (runnable).
         set_task_status(pool, "t-b", "done").await;
         assert!(
-            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty(),
             "both blockers done → the dependent is runnable"
         );
     }
@@ -584,7 +628,10 @@ mod tests {
         set_task_status(pool, "leader", "done").await;
         set_task_status(pool, "m1", "done").await;
         assert!(
-            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty(),
             "the whole squad drained with a done → the dependent is runnable"
         );
     }
@@ -613,7 +660,10 @@ mod tests {
         // A retry that finally succeeds flips it finished (the set now has a done).
         seed_task_on_issue(pool, "ws-a", "blk", "t3", "done").await;
         assert!(
-            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty(),
             "a later done in the set unblocks the dependent"
         );
     }
@@ -637,7 +687,12 @@ mod tests {
         );
         // A newer done task on the same blocker flips it finished (latest wins).
         seed_task_on_issue(pool, "ws-a", "a", "t2", "done").await;
-        assert!(CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty());
+        assert!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// Seed a task on `issue_id` at an explicit `generation` (migration 0039), so a
@@ -651,7 +706,9 @@ mod tests {
         generation: i64,
     ) {
         sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
-            .execute(pool).await.unwrap();
+            .execute(pool)
+            .await
+            .unwrap();
         sqlx::query("INSERT OR IGNORE INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt', ?, 'd','claude','local','online')")
             .bind(ws).execute(pool).await.unwrap();
         sqlx::query("INSERT OR IGNORE INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag', ?, 'A','rt','x','workspace','u')")
@@ -679,7 +736,10 @@ mod tests {
         // Generation 0: the blocker succeeded → the dependent is runnable.
         seed_task_gen(pool, "ws-a", "blk", "g0", "done", 0).await;
         assert!(
-            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty(),
             "a done blocker satisfies the dependency"
         );
 
@@ -703,7 +763,10 @@ mod tests {
         // A gen-2 rerun finally succeeds → runnable again.
         seed_task_gen(pool, "ws-a", "blk", "g2", "done", 2).await;
         assert!(
-            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty(),
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty(),
             "the latest generation succeeded — the dependent is runnable again"
         );
     }
@@ -717,10 +780,18 @@ mod tests {
         seed_issue(pool, "ws-a", "a").await;
         seed_issue(pool, "ws-a", "dep").await;
         CardDependencyRepo::add_edge(pool, &ws("ws-a"), "dep", "a", 1).await.unwrap();
-        assert_eq!(CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap(), vec!["a"]);
+        assert_eq!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap(),
+            vec!["a"]
+        );
 
         CardDependencyRepo::remove_edge(pool, &ws("ws-a"), "dep", "a").await.unwrap();
-        assert!(CardDependencyRepo::unfinished_blockers_of(pool, "dep").await.unwrap().is_empty());
+        assert!(
+            CardDependencyRepo::unfinished_blockers_of(pool, "dep")
+                .await
+                .unwrap()
+                .is_empty()
+        );
         // Idempotent second remove.
         CardDependencyRepo::remove_edge(pool, &ws("ws-a"), "dep", "a").await.unwrap();
     }
@@ -734,11 +805,17 @@ mod tests {
         seed_ws(pool, "ws-b").await;
         seed_issue(pool, "ws-a", "a").await;
 
-        assert!(!CardDependencyRepo::get_auto_run(pool, "a").await.unwrap(), "defaults OFF");
+        assert!(
+            !CardDependencyRepo::get_auto_run(pool, "a").await.unwrap(),
+            "defaults OFF"
+        );
         assert!(CardDependencyRepo::set_auto_run(pool, &ws("ws-a"), "a", true).await.unwrap());
         assert!(CardDependencyRepo::get_auto_run(pool, "a").await.unwrap());
         // A cross-tenant write misses.
         assert!(!CardDependencyRepo::set_auto_run(pool, &ws("ws-b"), "a", false).await.unwrap());
-        assert!(CardDependencyRepo::get_auto_run(pool, "a").await.unwrap(), "cross-tenant write left it on");
+        assert!(
+            CardDependencyRepo::get_auto_run(pool, "a").await.unwrap(),
+            "cross-tenant write left it on"
+        );
     }
 }

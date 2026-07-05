@@ -14,7 +14,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use ainb_hangar_proto::{methods as daemon_methods, RpcRequest, RpcResponse};
+use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
     HandleEventParams, KeyCode, KeyEvent, UnixSocketEvent, UnixSocketEventKind,
@@ -95,16 +95,10 @@ fn spawn_daemon(listener: UnixListener, seen: Seen, enabled: Arc<Mutex<bool>>) {
             let Ok(req) = serde_json::from_value::<RpcRequest>(raw) else {
                 return;
             };
-            seen.lock()
-                .unwrap()
-                .push((req.method.clone(), req.params.clone()));
+            seen.lock().unwrap().push((req.method.clone(), req.params.clone()));
             // A set_enabled call flips the shared flag so the next list reflects it.
             if req.method == daemon_methods::HANGAR_AUTOPILOT_SET_ENABLED {
-                if let Some(e) = req
-                    .params
-                    .get("enabled")
-                    .and_then(serde_json::Value::as_bool)
-                {
+                if let Some(e) = req.params.get("enabled").and_then(serde_json::Value::as_bool) {
                     *enabled.lock().unwrap() = e;
                 }
             }
@@ -347,9 +341,7 @@ async fn boot(
     let (daemon_read, mut daemon_write) = daemon.into_split();
     let mut daemon_reader = BufReader::new(daemon_read);
 
-    let ack = read_one_raw_frame(&mut daemon_reader)
-        .await
-        .expect("subscribe ack");
+    let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
     push_data(&mut host_write, stream_id, &ack).await;
     pump_snapshots(
         &mut host_write,
@@ -409,9 +401,7 @@ async fn key_r_fires_now() {
         drop(host_write);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded fire-now budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded fire-now budget");
 }
 
 #[tokio::test]
@@ -465,12 +455,8 @@ async fn key_d_toggles_enabled() {
             .await;
             // The re-fetch is the second autopilots_list AFTER the set_enabled.
             let after_toggle = {
-                let snapshot: Vec<String> = seen
-                    .lock()
-                    .unwrap()
-                    .iter()
-                    .map(|(m, _)| m.clone())
-                    .collect();
+                let snapshot: Vec<String> =
+                    seen.lock().unwrap().iter().map(|(m, _)| m.clone()).collect();
                 snapshot
                     .iter()
                     .position(|m| m == daemon_methods::HANGAR_AUTOPILOT_SET_ENABLED)
@@ -526,9 +512,7 @@ async fn key_d_toggles_enabled() {
         drop(host_write);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded toggle budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded toggle budget");
 }
 
 /// Pump renders relaying sends until the daemon records a `set_enabled` with the

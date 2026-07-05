@@ -27,8 +27,8 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_PROFILE, TuiSession, WORKTREE_REPO_NAME, board_card_by_title, budget_scale,
-    can_run_tripwire, drive_card_create_to_profile, git_branch_exists, prepare_pipeline_worktree_pr,
-    skip, task_short_id_by_title, worktree_branch,
+    can_run_tripwire, drive_card_create_to_profile, git_branch_exists,
+    prepare_pipeline_worktree_pr, skip, task_short_id_by_title, worktree_branch,
 };
 
 /// The distinctive card title — greppable, never aliasing a column header.
@@ -42,7 +42,9 @@ fn launch_headless(sess: &TuiSession, scale: u64) {
     while Instant::now() < deadline {
         sess.send_enter();
         if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("Run ▾"))
+            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                c.contains("Run ▾")
+            })
             .is_some()
         {
             opened = true;
@@ -137,7 +139,10 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
         std::thread::sleep(Duration::from_millis(200));
     }
     let slug2 = slug2.unwrap_or_else(|| {
-        panic!("the rerun never enqueued a fresh task (still `{slug1}`):\n{}", sess.capture())
+        panic!(
+            "the rerun never enqueued a fresh task (still `{slug1}`):\n{}",
+            sess.capture()
+        )
     });
 
     // POSITIVE: the fresh run reaches done too, and left its OWN distinct durable
@@ -148,7 +153,10 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
     let pane = sess.capture();
     drop(sess); // kill the TUI tmux session by exact name before the assertions.
 
-    assert_ne!(slug1, slug2, "the rerun must mint a fresh task/worktree slug");
+    assert_ne!(
+        slug1, slug2,
+        "the rerun must mint a fresh task/worktree slug"
+    );
     assert_eq!(
         done2.as_deref(),
         Some(slug2.as_str()),
@@ -160,5 +168,9 @@ fn rerunning_a_finished_card_enqueues_a_fresh_run_and_greens_it_again() {
     );
     let (_, state) = board_card_by_title(pipe.home(), CARD_TITLE)
         .unwrap_or_else(|| panic!("the card vanished from the db"));
-    assert_eq!(state.as_deref(), Some("done"), "the reran card must be green again");
+    assert_eq!(
+        state.as_deref(),
+        Some("done"),
+        "the reran card must be green again"
+    );
 }

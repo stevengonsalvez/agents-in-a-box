@@ -123,10 +123,8 @@ fn fold_event(state: &BannerState, event: HangarEvent) -> BannerReduction {
         }
         HangarEvent::TaskStarted { task_id, .. } => {
             // Name from the prior queue if known, else a neutral default.
-            let agent_label = next
-                .pending_agent_label
-                .take()
-                .unwrap_or_else(|| "agent".to_string());
+            let agent_label =
+                next.pending_agent_label.take().unwrap_or_else(|| "agent".to_string());
             next.banner = Some(ActiveTaskBanner {
                 task_id,
                 agent_label,

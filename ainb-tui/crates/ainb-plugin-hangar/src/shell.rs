@@ -84,10 +84,7 @@ impl Opener for SystemOpener {
             ));
         };
 
-        std::process::Command::new(cmd)
-            .arg(url)
-            .spawn()
-            .map(|_child| ())
+        std::process::Command::new(cmd).arg(url).spawn().map(|_child| ())
     }
 }
 
@@ -165,10 +162,7 @@ pub struct SystemDaemonStarter;
 impl DaemonStarter for SystemDaemonStarter {
     fn start(&self) -> io::Result<()> {
         let bin = resolve_ainb_bin();
-        std::process::Command::new(bin)
-            .args(DAEMON_START_ARGS)
-            .spawn()
-            .map(|_child| ())
+        std::process::Command::new(bin).args(DAEMON_START_ARGS).spawn().map(|_child| ())
     }
 }
 
@@ -260,9 +254,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let probe = dir.path().join("probe.txt");
         let opener = RecordingOpener::new(&probe);
-        opener
-            .open("https://example.com/pr/1")
-            .expect("record open");
+        opener.open("https://example.com/pr/1").expect("record open");
         let written = std::fs::read_to_string(&probe).expect("read probe");
         assert_eq!(written, "https://example.com/pr/1");
     }

@@ -1498,10 +1498,8 @@ mod tests {
             attention_row("s-board", ChannelSet::NONE),
             // s-unknown has NO attention row → kept (never silently dropped).
         ];
-        let kept: Vec<String> = filter_atc_channel(rows, &attention)
-            .into_iter()
-            .map(|r| r.session.id)
-            .collect();
+        let kept: Vec<String> =
+            filter_atc_channel(rows, &attention).into_iter().map(|r| r.session.id).collect();
         assert_eq!(
             kept,
             vec!["s-atc".to_string(), "s-unknown".to_string()],
@@ -1516,10 +1514,17 @@ mod tests {
         let rows = vec![needs_row("s-multi")];
         let attention = vec![
             attention_row("s-multi", ChannelSet::NONE),
-            attention_row("s-multi", ChannelSet::from_channels([Channel::Os, Channel::Atc])),
+            attention_row(
+                "s-multi",
+                ChannelSet::from_channels([Channel::Os, Channel::Atc]),
+            ),
         ];
         let kept = filter_atc_channel(rows, &attention);
-        assert_eq!(kept.len(), 1, "any Atc-routed row keeps the session nudging");
+        assert_eq!(
+            kept.len(),
+            1,
+            "any Atc-routed row keeps the session nudging"
+        );
     }
 
     #[test]

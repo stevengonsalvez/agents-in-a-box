@@ -42,12 +42,10 @@ const BLOCKING_FAKE_AGENT: &str = "#!/bin/sh\ni=0\nwhile [ ! -f \"$HOME/interact
 
 fn main() {
     let mut args = std::env::args().skip(1);
-    let home = PathBuf::from(
-        args.next().expect("usage: seed_t4b_card_deps_journey <HOME> <DAEMON_BIN>"),
-    );
-    let daemon_bin = PathBuf::from(
-        args.next().expect("usage: seed_t4b_card_deps_journey <HOME> <DAEMON_BIN>"),
-    );
+    let home =
+        PathBuf::from(args.next().expect("usage: seed_t4b_card_deps_journey <HOME> <DAEMON_BIN>"));
+    let daemon_bin =
+        PathBuf::from(args.next().expect("usage: seed_t4b_card_deps_journey <HOME> <DAEMON_BIN>"));
 
     let hangar_dir = home.join(".agents-in-a-box");
     std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
@@ -103,7 +101,10 @@ fn main() {
     cmd.env("HOME", &home)
         .env_remove("AINB_HANGAR_HOME")
         .env("HANGAR_DAEMON_RUNTIME_ID", "runtime-1")
-        .env("HANGAR_CLAUDE_PATH", fake_claude.to_str().expect("utf8 fake-claude path"))
+        .env(
+            "HANGAR_CLAUDE_PATH",
+            fake_claude.to_str().expect("utf8 fake-claude path"),
+        )
         .env("HANGAR_DAEMON_POLL_MS", "200")
         .env("HANGAR_DAEMON_DISABLE_SANDBOX", "1")
         .stdin(std::process::Stdio::null())
@@ -113,7 +114,11 @@ fn main() {
 
     let socket = hangar_dir.join("hangar.sock");
     wait_for(Duration::from_secs(15), || socket.exists());
-    assert!(socket.exists(), "daemon never bound its socket under {}", hangar_dir.display());
+    assert!(
+        socket.exists(),
+        "daemon never bound its socket under {}",
+        hangar_dir.display()
+    );
 
     println!("HOME={}", home.display());
     println!("DAEMON_PID={}", child.id());
@@ -123,7 +128,14 @@ fn main() {
     // Intentionally do NOT wait on `child` — leave the daemon running.
 }
 
-async fn seed_card_issue(pool: &sqlx::SqlitePool, ws: &WorkspaceId, id: &str, title: &str, repo_ref: &str, now: i64) {
+async fn seed_card_issue(
+    pool: &sqlx::SqlitePool,
+    ws: &WorkspaceId,
+    id: &str,
+    title: &str,
+    repo_ref: &str,
+    now: i64,
+) {
     sqlx::query(
         "INSERT INTO issue (id, workspace_id, title, creator_type, creator_id, created_at) \
          VALUES (?, ?, ?, 'member', 'user-1', ?)",
@@ -138,9 +150,15 @@ async fn seed_card_issue(pool: &sqlx::SqlitePool, ws: &WorkspaceId, id: &str, ti
     BoardRepo::card_add(pool, ws, BOARD_ID, id, Some(TODO_COL), now)
         .await
         .unwrap_or_else(|e| panic!("place card {id}: {e}"));
-    CardParityRepo::set_issue_repo_agent(pool, ainb_hangar_daemon::seed::WS_ID, id, Some(repo_ref), None)
-        .await
-        .unwrap_or_else(|e| panic!("set repo on card {id}: {e}"));
+    CardParityRepo::set_issue_repo_agent(
+        pool,
+        ainb_hangar_daemon::seed::WS_ID,
+        id,
+        Some(repo_ref),
+        None,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("set repo on card {id}: {e}"));
 }
 
 fn wait_for(timeout: Duration, mut cond: impl FnMut() -> bool) {
@@ -161,12 +179,18 @@ fn seed_scanned_repo(home: &Path, name: &str) {
         &["config", "user.name", "t"],
     ] {
         let ok = Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+        assert!(
+            ok.is_ok_and(|s| s.success()),
+            "git {args:?} in the scanned repo"
+        );
     }
     std::fs::write(repo.join("README.md"), "seed").expect("write scanned repo README");
     for args in [&["add", "."][..], &["commit", "--quiet", "-m", "seed"]] {
         let ok = Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+        assert!(
+            ok.is_ok_and(|s| s.success()),
+            "git {args:?} in the scanned repo"
+        );
     }
 
     let cache_dir = home.join(".agents-in-a-box").join("cache");

@@ -260,7 +260,10 @@ async fn finalized_task_appends_run_history_row() {
     // The run recorded a start + finish, so a positive duration is derivable.
     let started = row.get::<Option<i64>, _>("started_at").expect("started_at set");
     let finished = row.get::<i64, _>("finished_at");
-    assert!(finished >= started, "finished_at must not precede started_at");
+    assert!(
+        finished >= started,
+        "finished_at must not precede started_at"
+    );
 }
 
 /// Open a `SQLite` WAL pool at `db_path` (creating the file if absent).

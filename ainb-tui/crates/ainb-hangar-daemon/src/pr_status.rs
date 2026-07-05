@@ -501,7 +501,11 @@ mod tests {
         let got = provider.fetch("https://github.com/o/r/pull/1").await;
         let elapsed = started.elapsed();
 
-        assert_eq!(got, PrStatus::default(), "a wedged gh degrades to all-Unknown");
+        assert_eq!(
+            got,
+            PrStatus::default(),
+            "a wedged gh degrades to all-Unknown"
+        );
         assert!(
             elapsed < Duration::from_secs(2),
             "the fetch abandons the wedged gh promptly (took {elapsed:?})"

@@ -158,12 +158,7 @@ mod tests {
         );
         // no last-used → board default wins.
         assert_eq!(
-            resolve_agent_cascade(
-                None,
-                Some(AgentKind::Codex),
-                Some(AgentKind::Claude),
-                None,
-            ),
+            resolve_agent_cascade(None, Some(AgentKind::Codex), Some(AgentKind::Claude), None,),
             AgentKind::Codex,
         );
         // only workspace default set.

@@ -16,7 +16,7 @@
 
 use ainb_hangar_proto::events::{SkillFile, SkillRow};
 use ainb_plugin_hangar::screen::skill_manager::{
-    reduce_skill_manager, render_skill_manager, SkillManagerEvent, SkillManagerState,
+    SkillManagerEvent, SkillManagerState, reduce_skill_manager, render_skill_manager,
 };
 use ainb_plugin_sdk::{Color, WireBuffer};
 
@@ -89,10 +89,8 @@ fn test_skill_list_renders_imported_skills() {
     assert!(list.contains('╭'), "rounded card borders:\n{list}");
 
     // NON-VACUOUS COLOUR CHECK: the selected card carries the heavy clay border.
-    let heavy_in_clay = buf
-        .cells
-        .iter()
-        .any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
+    let heavy_in_clay =
+        buf.cells.iter().any(|(_, cell)| cell.symbol == "┏" && cell.fg == Some(CLAY));
     assert!(
         heavy_in_clay,
         "the selected skill card must carry the heavy clay highlight border"

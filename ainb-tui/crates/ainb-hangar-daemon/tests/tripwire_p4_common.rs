@@ -563,12 +563,18 @@ pub fn seed_scanned_repo(home: &Path, name: &str) {
         &["config", "user.name", "t"],
     ] {
         let ok = Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+        assert!(
+            ok.is_ok_and(|s| s.success()),
+            "git {args:?} in the scanned repo"
+        );
     }
     std::fs::write(repo.join("README.md"), "seed").expect("write scanned repo README");
     for args in [&["add", "."][..], &["commit", "--quiet", "-m", "seed"]] {
         let ok = Command::new("git").args(args).current_dir(&repo).status();
-        assert!(ok.is_ok_and(|s| s.success()), "git {args:?} in the scanned repo");
+        assert!(
+            ok.is_ok_and(|s| s.success()),
+            "git {args:?} in the scanned repo"
+        );
     }
 
     let cache_dir = home.join(".agents-in-a-box").join("cache");
@@ -632,7 +638,10 @@ pub fn prepare_pipeline_worktree_pr() -> Pipeline {
             let gh = write_stub_gh(home);
             vec![
                 disable_sandbox(),
-                ("HANGAR_GH_PATH".to_string(), gh.to_string_lossy().into_owned()),
+                (
+                    "HANGAR_GH_PATH".to_string(),
+                    gh.to_string_lossy().into_owned(),
+                ),
             ]
         },
     )
@@ -792,21 +801,36 @@ async fn seed_card_issue(pool: &sqlx::SqlitePool, id: &str, title: &str, repo_re
     .execute(pool)
     .await
     .unwrap_or_else(|e| panic!("seed card issue {id}: {e}"));
-    BoardRepo::card_add(pool, &ws, BOARD_RUN_BOARD, id, Some(BOARD_RUN_TODO_COL), now)
-        .await
-        .unwrap_or_else(|e| panic!("place card {id}: {e}"));
-    CardParityRepo::set_issue_repo_agent(pool, ainb_hangar_daemon::seed::WS_ID, id, Some(repo_ref), None)
-        .await
-        .unwrap_or_else(|e| panic!("set repo on card {id}: {e}"));
+    BoardRepo::card_add(
+        pool,
+        &ws,
+        BOARD_RUN_BOARD,
+        id,
+        Some(BOARD_RUN_TODO_COL),
+        now,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("place card {id}: {e}"));
+    CardParityRepo::set_issue_repo_agent(
+        pool,
+        ainb_hangar_daemon::seed::WS_ID,
+        id,
+        Some(repo_ref),
+        None,
+    )
+    .await
+    .unwrap_or_else(|e| panic!("set repo on card {id}: {e}"));
 }
 
 /// Free the fixture's seeded `running` `task-1` so its agent (`agent-1`, the squad
 /// leader / the dep-chain runner) is under its concurrency cap and claimable.
 async fn free_fixture_running_task(pool: &sqlx::SqlitePool) {
-    sqlx::query("UPDATE agent_task_queue SET status = 'done', finished_at = created_at WHERE id = 'task-1'")
-        .execute(pool)
-        .await
-        .expect("free fixture running task-1");
+    sqlx::query(
+        "UPDATE agent_task_queue SET status = 'done', finished_at = created_at WHERE id = 'task-1'",
+    )
+    .execute(pool)
+    .await
+    .expect("free fixture running task-1");
 }
 
 /// Spawn a CLAIM-ENABLED daemon over a fixture seeded for the SQUAD-CARD fan-out
@@ -832,19 +856,38 @@ pub fn prepare_pipeline_squad_card() -> Pipeline {
                 use ainb_hangar_store::repo::card_parity::CardParityRepo;
                 use ainb_hangar_store::repo::squad::SquadRepo;
 
-                let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open squad store");
+                let store =
+                    ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open squad store");
                 let pool = store.pool();
                 let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
 
                 seed_extra_agent_on_runtime_1(pool, "agent-m1", "member-one").await;
                 seed_extra_agent_on_runtime_1(pool, "agent-m2", "member-two").await;
-                SquadRepo::create(pool, &ws, T4_SQUAD_ID, "shippers", &t4_agent_ref("agent-1"), now)
+                SquadRepo::create(
+                    pool,
+                    &ws,
+                    T4_SQUAD_ID,
+                    "shippers",
+                    &t4_agent_ref("agent-1"),
+                    now,
+                )
+                .await
+                .expect("create squad");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1"))
                     .await
-                    .expect("create squad");
-                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1")).await.expect("add m1");
-                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2")).await.expect("add m2");
+                    .expect("add m1");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2"))
+                    .await
+                    .expect("add m2");
 
-                seed_card_issue(pool, T4_SQUAD_CARD_ISSUE, "SquadFanoutCard", &repo_path, now).await;
+                seed_card_issue(
+                    pool,
+                    T4_SQUAD_CARD_ISSUE,
+                    "SquadFanoutCard",
+                    &repo_path,
+                    now,
+                )
+                .await;
                 CardParityRepo::set_issue_squad(pool, &ws, T4_SQUAD_CARD_ISSUE, Some(T4_SQUAD_ID))
                     .await
                     .expect("assign squad to card");
@@ -876,15 +919,29 @@ pub fn prepare_pipeline_dep_chain() -> Pipeline {
                 use ainb_hangar_core::ids::WorkspaceId;
                 use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
 
-                let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open dep store");
+                let store =
+                    ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open dep store");
                 let pool = store.pool();
                 let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
 
                 seed_card_issue(pool, T4_DEP_BLOCKER_ISSUE, "DepBlockerA", &repo_path, now).await;
-                seed_card_issue(pool, T4_DEP_DEPENDENT_ISSUE, "DepDependentB", &repo_path, now + 1).await;
-                CardDependencyRepo::add_edge(pool, &ws, T4_DEP_DEPENDENT_ISSUE, T4_DEP_BLOCKER_ISSUE, now)
-                    .await
-                    .expect("B depends-on A");
+                seed_card_issue(
+                    pool,
+                    T4_DEP_DEPENDENT_ISSUE,
+                    "DepDependentB",
+                    &repo_path,
+                    now + 1,
+                )
+                .await;
+                CardDependencyRepo::add_edge(
+                    pool,
+                    &ws,
+                    T4_DEP_DEPENDENT_ISSUE,
+                    T4_DEP_BLOCKER_ISSUE,
+                    now,
+                )
+                .await
+                .expect("B depends-on A");
                 CardDependencyRepo::set_auto_run(pool, &ws, T4_DEP_DEPENDENT_ISSUE, true)
                     .await
                     .expect("B auto-run on");
@@ -1008,27 +1065,53 @@ pub fn prepare_pipeline_squad_dep_chain() -> Pipeline {
                 use ainb_hangar_store::repo::card_parity::CardParityRepo;
                 use ainb_hangar_store::repo::squad::SquadRepo;
 
-                let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open squad-dep store");
+                let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+                    .await
+                    .expect("open squad-dep store");
                 let pool = store.pool();
                 let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
 
                 seed_extra_agent_on_runtime_1(pool, "agent-m1", "member-one").await;
                 seed_extra_agent_on_runtime_1(pool, "agent-m2", "member-two").await;
-                SquadRepo::create(pool, &ws, T4_SQUAD_ID, "shippers", &t4_agent_ref("agent-1"), now)
+                SquadRepo::create(
+                    pool,
+                    &ws,
+                    T4_SQUAD_ID,
+                    "shippers",
+                    &t4_agent_ref("agent-1"),
+                    now,
+                )
+                .await
+                .expect("create squad");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1"))
                     .await
-                    .expect("create squad");
-                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1")).await.expect("add m1");
-                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2")).await.expect("add m2");
+                    .expect("add m1");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2"))
+                    .await
+                    .expect("add m2");
 
                 // Blocker A is the squad card; dependent B depends-on A, auto-run on.
                 seed_card_issue(pool, T4_DEP_BLOCKER_ISSUE, "SquadBlockerA", &repo_path, now).await;
-                seed_card_issue(pool, T4_DEP_DEPENDENT_ISSUE, "DepDependentB", &repo_path, now + 1).await;
+                seed_card_issue(
+                    pool,
+                    T4_DEP_DEPENDENT_ISSUE,
+                    "DepDependentB",
+                    &repo_path,
+                    now + 1,
+                )
+                .await;
                 CardParityRepo::set_issue_squad(pool, &ws, T4_DEP_BLOCKER_ISSUE, Some(T4_SQUAD_ID))
                     .await
                     .expect("assign squad to blocker A");
-                CardDependencyRepo::add_edge(pool, &ws, T4_DEP_DEPENDENT_ISSUE, T4_DEP_BLOCKER_ISSUE, now)
-                    .await
-                    .expect("B depends-on A");
+                CardDependencyRepo::add_edge(
+                    pool,
+                    &ws,
+                    T4_DEP_DEPENDENT_ISSUE,
+                    T4_DEP_BLOCKER_ISSUE,
+                    now,
+                )
+                .await
+                .expect("B depends-on A");
                 CardDependencyRepo::set_auto_run(pool, &ws, T4_DEP_DEPENDENT_ISSUE, true)
                     .await
                     .expect("B auto-run on");
@@ -1113,7 +1196,8 @@ impl DaemonRpc {
                     if t.is_empty() {
                         let mut buf = vec![0u8; len.expect("Content-Length header")];
                         reader.read_exact(&mut buf).await.expect("read body");
-                        break serde_json::from_slice::<serde_json::Value>(&buf).expect("decode frame");
+                        break serde_json::from_slice::<serde_json::Value>(&buf)
+                            .expect("decode frame");
                     }
                     if let Some((name, v)) = t.split_once(':') {
                         if name.trim().eq_ignore_ascii_case("Content-Length") {
@@ -1314,7 +1398,8 @@ pub fn board_card_by_title(home: &Path, title: &str) -> Option<(Option<String>, 
     rt.block_on(async {
         let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
         let ws = ainb_hangar_daemon::seed::WS_ID;
-        let boards = ainb_hangar_daemon::rpc::snapshots::boards_list(store.pool(), ws).await.ok()?;
+        let boards =
+            ainb_hangar_daemon::rpc::snapshots::boards_list(store.pool(), ws).await.ok()?;
         // Match by substring so a rare retry-dropped keystroke that prepends a
         // stray char to the typed title never breaks the lookup (there is only
         // one card in play).
@@ -1406,9 +1491,17 @@ fn seed_board_and_profile(hangar_dir: &Path) {
         BoardRepo::create(pool, &ws, BOARD_RUN_BOARD, "Delivery", now)
             .await
             .expect("seed board");
-        BoardRepo::column_add(pool, &ws, BOARD_RUN_BOARD, BOARD_RUN_TODO_COL, "Todo", None, false)
-            .await
-            .expect("seed Todo column");
+        BoardRepo::column_add(
+            pool,
+            &ws,
+            BOARD_RUN_BOARD,
+            BOARD_RUN_TODO_COL,
+            "Todo",
+            None,
+            false,
+        )
+        .await
+        .expect("seed Todo column");
         BoardRepo::column_add(
             pool,
             &ws,
@@ -2455,7 +2548,9 @@ pub fn drive_card_create_to_profile(
         }
         sess.send_key("@");
         if sess
-            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| c.contains("[scratch]"))
+            .poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+                c.contains("[scratch]")
+            })
             .is_some()
         {
             break;
@@ -2477,7 +2572,10 @@ pub fn drive_card_create_to_profile(
             sess.send_key("Down");
             std::thread::sleep(Duration::from_millis(250));
             if Instant::now() >= move_deadline {
-                panic!("repo highlight never moved off scratch:\n{}", sess.capture());
+                panic!(
+                    "repo highlight never moved off scratch:\n{}",
+                    sess.capture()
+                );
             }
         }
         // Any further steps (repo_down > 1) move deeper into the roster.

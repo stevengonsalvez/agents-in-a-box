@@ -11,8 +11,8 @@ use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, Workspace
 use ainb_hangar_proto::snapshots::NotifyRuleWireRow;
 use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_hangar::screen::settings::{
-    reduce_settings, ConnectionStatus, KeyMaterial, NotifyScope, SettingsEvent, SettingsIntent,
-    SettingsSection, SettingsState,
+    ConnectionStatus, KeyMaterial, NotifyScope, SettingsEvent, SettingsIntent, SettingsSection,
+    SettingsState, reduce_settings,
 };
 
 /// The seeded routing grid: ask → web+os, error → os, waiting → board-only.
@@ -188,7 +188,7 @@ fn s_sets_selected_workspace_active() {
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces
-                                                            // Select the non-current workspace (ws2) then press `s`.
+    // Select the non-current workspace (ws2) then press `s`.
     s = reduce_settings(&s, SettingsEvent::Key('J')).state;
     let out = reduce_settings(&s, SettingsEvent::Key('s'));
     match out.intent {
@@ -230,15 +230,9 @@ fn d_n_r_emit_workspace_intents() {
 #[test]
 fn workspace_keys_inert_outside_workspace_pane() {
     let s = state(); // Daemon section
-    assert!(reduce_settings(&s, SettingsEvent::Key('s'))
-        .intent
-        .is_none());
-    assert!(reduce_settings(&s, SettingsEvent::Key('d'))
-        .intent
-        .is_none());
-    assert!(reduce_settings(&s, SettingsEvent::Key('r'))
-        .intent
-        .is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('s')).intent.is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('d')).intent.is_none());
+    assert!(reduce_settings(&s, SettingsEvent::Key('r')).intent.is_none());
 }
 
 /// A daemon-disconnected event flips the connection section status to red.
@@ -266,7 +260,11 @@ fn notify_grid_cursor_navigates_kinds_and_channels() {
     let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
     assert_eq!(s.notify_cursor(), (2, 0));
     let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
-    assert_eq!(s.notify_cursor(), (2, 0), "kind cursor clamps at the last row");
+    assert_eq!(
+        s.notify_cursor(),
+        (2, 0),
+        "kind cursor clamps at the last row"
+    );
 
     // l moves right across the four channels; h back; clamps at 0..3.
     let s = reduce_settings(&s, SettingsEvent::Key('l')).state;
@@ -335,11 +333,22 @@ fn notify_keys_are_section_scoped_and_j_k_still_navigate() {
 #[test]
 fn notify_grid_g_toggles_scope_and_requests_refresh() {
     let s = notify_state();
-    assert_eq!(s.notify_scope(), NotifyScope::Global, "grid defaults to global scope");
-    assert!(!s.notify_rules().is_empty(), "precondition: the grid is loaded");
+    assert_eq!(
+        s.notify_scope(),
+        NotifyScope::Global,
+        "grid defaults to global scope"
+    );
+    assert!(
+        !s.notify_rules().is_empty(),
+        "precondition: the grid is loaded"
+    );
 
     let out = reduce_settings(&s, SettingsEvent::Key('g'));
-    assert_eq!(out.state.notify_scope(), NotifyScope::Workspace, "g flips to workspace");
+    assert_eq!(
+        out.state.notify_scope(),
+        NotifyScope::Workspace,
+        "g flips to workspace"
+    );
     assert!(
         out.state.notify_rules().is_empty(),
         "rows cleared until the scoped re-list lands (no stale-scope toggle)"
@@ -373,7 +382,11 @@ fn stale_scope_notify_reply_is_dropped() {
     );
 
     // Workspace scope answers its own workspace reply, drops the global one.
-    assert!(notify_reply_matches_scope(NotifyScope::Workspace, ws, Some(ws)));
+    assert!(notify_reply_matches_scope(
+        NotifyScope::Workspace,
+        ws,
+        Some(ws)
+    ));
     assert!(
         !notify_reply_matches_scope(NotifyScope::Workspace, ws, None),
         "a global reply is stale once the grid flipped to workspace"

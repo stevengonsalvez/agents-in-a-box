@@ -128,11 +128,7 @@ impl OtlpOpts {
                 continue;
             };
             // Strip surrounding single/double quotes the onboarding writer adds.
-            let endpoint = rest
-                .trim()
-                .trim_matches(|c| c == '\'' || c == '"')
-                .trim()
-                .to_string();
+            let endpoint = rest.trim().trim_matches(|c| c == '\'' || c == '"').trim().to_string();
             if !endpoint.is_empty() {
                 return Some(Self { endpoint });
             }

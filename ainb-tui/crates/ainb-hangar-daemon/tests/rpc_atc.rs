@@ -100,7 +100,10 @@ impl Client {
         let token_path = ainb_hangar_proto::auth::token_file_in(dir);
         let token = std::fs::read_to_string(&token_path).expect("read daemon.token");
         let resp = self
-            .call(methods::AUTH_HELLO, serde_json::json!({ "token": token.trim() }))
+            .call(
+                methods::AUTH_HELLO,
+                serde_json::json!({ "token": token.trim() }),
+            )
             .await;
         assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
     }
@@ -110,7 +113,9 @@ impl Client {
 /// one broker so escalation nudges could be observed if a subscriber attached.
 async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     let store = Store::open_in(dir).await.unwrap();
-    rpc::auth::ensure_socket_token(store.pool(), dir).await.expect("ensure socket token");
+    rpc::auth::ensure_socket_token(store.pool(), dir)
+        .await
+        .expect("ensure socket token");
     let socket_path = rpc::socket_path_in(dir);
     let listener = rpc::bind(&socket_path).expect("bind socket");
     let broker = EventBroker::new();
@@ -168,7 +173,10 @@ async fn atc_register_list_and_escalate_over_the_socket() {
     let instances = list["result"]["instances"].as_array().unwrap();
     assert_eq!(instances.len(), 1, "re-register did not duplicate: {list}");
     assert_eq!(instances[0]["name"], "main");
-    assert_eq!(instances[0]["heartbeat_cron"], "*/5 * * * *", "cron refreshed");
+    assert_eq!(
+        instances[0]["heartbeat_cron"], "*/5 * * * *",
+        "cron refreshed"
+    );
     assert_eq!(instances[0]["err_retry_cap"], 7, "cap refreshed");
     assert_eq!(instances[0]["enabled"], true);
 
@@ -186,11 +194,17 @@ async fn atc_register_list_and_escalate_over_the_socket() {
         .await;
     assert!(esc["error"].is_null(), "atc/escalate must ack: {esc}");
     let attention_id = esc["result"]["attention_id"].as_str().unwrap();
-    assert!(attention_id.starts_with("escalation:main:sess-99"), "id shape: {esc}");
+    assert!(
+        attention_id.starts_with("escalation:main:sess-99"),
+        "id shape: {esc}"
+    );
 
     // The escalation surfaces on the fleet-wide attention feed as kind=escalation.
     let att = client
-        .call(methods::ATTENTION_LIST, serde_json::json!({ "fleet": true }))
+        .call(
+            methods::ATTENTION_LIST,
+            serde_json::json!({ "fleet": true }),
+        )
         .await;
     assert!(att["error"].is_null(), "attention/list must ack: {att}");
     let rows = att["result"]["attention"].as_array().unwrap();
@@ -219,17 +233,27 @@ async fn atc_unregister_disables_the_heartbeat_cron_over_the_socket() {
     assert!(reg["error"].is_null(), "atc/register must ack: {reg}");
 
     let unreg = client
-        .call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "main" }))
+        .call(
+            methods::ATC_UNREGISTER,
+            serde_json::json!({ "name": "main" }),
+        )
         .await;
     assert!(unreg["error"].is_null(), "atc/unregister must ack: {unreg}");
     assert_eq!(unreg["result"]["name"], "main");
-    assert_eq!(unreg["result"]["disabled"], true, "a registered instance is disabled");
+    assert_eq!(
+        unreg["result"]["disabled"], true,
+        "a registered instance is disabled"
+    );
 
     // The instance row survives (audit) but is now disabled + unscheduled, so the
     // heartbeat cron no longer considers it.
     let list = client.call(methods::ATC_LIST, serde_json::json!({})).await;
     let instances = list["result"]["instances"].as_array().unwrap();
-    assert_eq!(instances.len(), 1, "unregister disables, it does not delete: {list}");
+    assert_eq!(
+        instances.len(),
+        1,
+        "unregister disables, it does not delete: {list}"
+    );
     assert_eq!(instances[0]["enabled"], false, "heartbeat cron is disabled");
     assert!(
         instances[0]["next_tick_at"].is_null(),
@@ -238,9 +262,15 @@ async fn atc_unregister_disables_the_heartbeat_cron_over_the_socket() {
 
     // Idempotent: unregistering an unknown name is a clean no-op.
     let noop = client
-        .call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "ghost" }))
+        .call(
+            methods::ATC_UNREGISTER,
+            serde_json::json!({ "name": "ghost" }),
+        )
         .await;
-    assert!(noop["error"].is_null(), "unknown-name unregister must ack: {noop}");
+    assert!(
+        noop["error"].is_null(),
+        "unknown-name unregister must ack: {noop}"
+    );
     assert_eq!(noop["result"]["disabled"], false, "unknown name is a no-op");
 }
 
@@ -251,9 +281,7 @@ async fn atc_unregister_rejects_a_blank_name() {
     let mut client = Client::connect(&socket).await;
     client.auth_from_file(dir.path()).await;
 
-    let resp = client
-        .call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "  " }))
-        .await;
+    let resp = client.call(methods::ATC_UNREGISTER, serde_json::json!({ "name": "  " })).await;
     assert!(
         resp["error"].is_object(),
         "a blank instance name is a client error: {resp}"
@@ -267,9 +295,7 @@ async fn atc_register_rejects_a_blank_name() {
     let mut client = Client::connect(&socket).await;
     client.auth_from_file(dir.path()).await;
 
-    let resp = client
-        .call(methods::ATC_REGISTER, serde_json::json!({ "name": "   " }))
-        .await;
+    let resp = client.call(methods::ATC_REGISTER, serde_json::json!({ "name": "   " })).await;
     assert!(
         resp["error"].is_object(),
         "a blank instance name is a client error, not a silent empty row: {resp}"
