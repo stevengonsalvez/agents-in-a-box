@@ -2972,6 +2972,9 @@ impl HangarPlugin {
             // badge the card does — the branch line then reads UNDER the badge
             // (agents-in-a-box-ch3), never a lone branch with a dropped PR.
             pr_url: card.pr_url.clone(),
+            // The card's run branch (ch3) — mirrored onto the row so the issue
+            // carries it too; the detail below is seeded from the same value.
+            branch: card.branch.clone(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -3313,11 +3316,13 @@ impl HangarPlugin {
                     if issue.pr_url.is_some() {
                         self.pending_pr_status_refresh = Some(issue.id.as_str().to_string());
                     }
-                    // The issue-list open carries no single per-run branch (an
-                    // issue can have many task runs); the branch is a per-run
-                    // artifact surfaced when opening a specific run from the board
-                    // (agents-in-a-box-ch3).
-                    self.screens.open_task_detail(task_id.clone(), issue, None);
+                    // ch3: the issue-list open is a synthetic task with no per-run
+                    // branch of its own, so seed the detail from the issue row's
+                    // `branch` — the daemon derives it from the issue's latest
+                    // completed task (mirroring `pr_url`), so the branch line reads
+                    // on the issue-list-opened detail exactly as on the Kanban path.
+                    let branch = issue.branch.clone();
+                    self.screens.open_task_detail(task_id.clone(), issue, branch);
                     let mut next = app.clone();
                     next.screen = Screen::TaskDetail(task_id.clone());
                     next.selected_task = Some(task_id);
@@ -4188,6 +4193,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }]);
         p
     }
@@ -4328,6 +4334,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -4343,6 +4350,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
         ]);
 
@@ -4486,6 +4494,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -4561,6 +4570,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -4628,6 +4638,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             })
             .collect();
         p.screens.set_issues(rows);
@@ -4699,6 +4710,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -4714,6 +4726,7 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 pr_url: None,
+                branch: None,
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -4980,6 +4993,7 @@ mod tests {
             due_date: None,
             labels: Vec::new(),
             pr_url: None,
+            branch: None,
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);

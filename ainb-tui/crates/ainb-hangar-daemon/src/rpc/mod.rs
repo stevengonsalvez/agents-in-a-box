@@ -4925,6 +4925,40 @@ mod tests {
         assert_eq!(card.pr_status, None, "no PR → no status fetched");
     }
 
+    /// An issue row surfaces its latest completed task's `branch` (ch3), mirroring
+    /// the `pr_url` derivation — so the task-detail opened FROM THE ISSUE LIST (a
+    /// synthetic task with no per-run branch) can render the run-branch line.
+    #[tokio::test]
+    async fn issue_row_surfaces_latest_task_branch() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        // task-1 belongs to issue-1; record the branch its run committed on.
+        sqlx::query("UPDATE agent_task_queue SET branch = ? WHERE id = 'task-1'")
+            .bind("ainb/task-1")
+            .execute(store.pool())
+            .await
+            .unwrap();
+
+        let row = snapshots::issue_row(store.pool(), crate::seed::WS_ID, "issue-1")
+            .await
+            .unwrap()
+            .expect("issue-1 exists");
+        assert_eq!(
+            row.branch.as_deref(),
+            Some("ainb/task-1"),
+            "the issue row carries its latest task's branch for the issue-list detail"
+        );
+
+        // An issue whose tasks committed no branch surfaces `None`, never an empty
+        // string (issue-2 has no task with a branch in the fixture).
+        let no_branch = snapshots::issue_row(store.pool(), crate::seed::WS_ID, "issue-2")
+            .await
+            .unwrap()
+            .expect("issue-2 exists");
+        assert_eq!(no_branch.branch, None, "no committed branch → None, not empty");
+    }
+
     /// A foreign workspace yields an empty task list (tenant isolation).
     #[tokio::test]
     async fn tasks_list_foreign_workspace_is_empty() {

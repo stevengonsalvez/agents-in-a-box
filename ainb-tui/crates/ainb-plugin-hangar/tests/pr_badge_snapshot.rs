@@ -36,6 +36,7 @@ fn issue_with_pr(pr_url: Option<&str>) -> IssueRow {
         due_date: None,
         labels: Vec::new(),
         pr_url: pr_url.map(String::from),
+        branch: None,
     }
 }
 

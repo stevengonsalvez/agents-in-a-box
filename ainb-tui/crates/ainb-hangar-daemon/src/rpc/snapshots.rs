@@ -97,6 +97,9 @@ pub async fn issues_list(
             // P9.2: surface the PR URL captured by P9.1 from this issue's latest
             // completed task's `result.pr_url`, or `None` when no task opened a PR.
             let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+            // ch3: the latest completed task's branch, so the task-detail opened
+            // from the issue list renders the run-branch line.
+            let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
             out.push(IssueRow {
                 id,
                 display_id,
@@ -111,6 +114,7 @@ pub async fn issues_list(
                 due_date: issue.due_date,
                 labels: issue.labels,
                 pr_url,
+                branch,
             });
         }
     }
@@ -167,6 +171,7 @@ pub async fn issues_search(
         let display_id =
             issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
         let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+        let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         out.push(IssueRow {
             id,
             display_id,
@@ -181,6 +186,7 @@ pub async fn issues_search(
             due_date: issue.due_date,
             labels: issue.labels,
             pr_url,
+            branch,
         });
     }
     Ok(out)
@@ -263,6 +269,41 @@ async fn latest_pr_url_for_issue(
     .await?
     .flatten();
     Ok(url)
+}
+
+/// The `ainb/<slug>` worktree branch of the latest completed task for `issue_id`
+/// in `workspace_id`, or `None` when no task on the issue committed a branch
+/// (tcp ch3).
+///
+/// Mirrors [`latest_pr_url_for_issue`]: reads the `branch` column of the
+/// `agent_task_queue` rows for the issue, taking the most recently finished task
+/// that carries a non-empty branch. The `WHERE` clause skips rows with no branch
+/// (a run that made no commits), so a branchless issue yields `None`, never an
+/// empty string. Surfaces the branch on the task-detail view opened from the
+/// ISSUE LIST — a synthetic task that carries no single per-run branch of its own.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+async fn latest_branch_for_issue(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let branch: Option<String> = sqlx::query_scalar(
+        "SELECT branch \
+         FROM agent_task_queue \
+         WHERE workspace_id = ?1 AND issue_id = ?2 \
+           AND branch IS NOT NULL AND branch <> '' \
+         ORDER BY COALESCE(finished_at, created_at) DESC, id DESC \
+         LIMIT 1",
+    )
+    .bind(workspace_id)
+    .bind(issue_id)
+    .fetch_optional(pool)
+    .await?
+    .flatten();
+    Ok(branch)
 }
 
 /// Snapshot the assignable actors of `workspace_id` — human members and agents
@@ -1337,6 +1378,7 @@ pub async fn issue_row(
     let prefix = workspace_issue_prefix(pool, workspace_id).await?;
     let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+    let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1351,6 +1393,7 @@ pub async fn issue_row(
         due_date: issue.due_date,
         labels: issue.labels,
         pr_url,
+        branch,
     }))
 }
 
@@ -1428,6 +1471,7 @@ async fn read_issue_row(
     let prefix = workspace_issue_prefix(pool, workspace_id).await?;
     let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
+    let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1442,6 +1486,7 @@ async fn read_issue_row(
         due_date: issue.due_date,
         labels: issue.labels,
         pr_url,
+        branch,
     }))
 }
 
@@ -1577,6 +1622,8 @@ pub async fn issue_create(
         due_date: None,
         labels: Vec::new(),
         pr_url: None,
+        // A freshly-created issue has no tasks yet, so no committed branch.
+        branch: None,
     })
 }
 
