@@ -15,6 +15,12 @@ name = "ainb-notifyd"
 path = "src/bin/ainb-notifyd.rs"
 
 [dependencies]
+# Wire types + the notify-rule RPC contract the OS-channel resolver dials (tcp T5,
+# agents-in-a-box-fyq). Both are leaf type/wire crates — notifyd stays independent
+# of the hangar STORE; it only speaks the daemon's PUBLIC RPC surface, and honours
+# the OS channel only when a daemon answers (fail-open otherwise).
+ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
+ainb-hangar-proto = { path = "../ainb-hangar-proto", version = "0.1.0" }
 anyhow = { workspace = true }
 chrono = { workspace = true }
 clap = { workspace = true }

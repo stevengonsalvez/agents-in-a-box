@@ -23,7 +23,7 @@ use tracing::{debug, error, info, warn};
 
 use crate::envelope::Envelope;
 use crate::fallback::FallbackFile;
-use crate::osnotify::{Debouncer, notify};
+use crate::osnotify::{Debouncer, NativeTransport, notify};
 use crate::paths::Paths;
 use crate::pid::PidFile;
 use crate::store::{RetentionPolicy, Store};
@@ -472,7 +472,17 @@ async fn handle_connection(
                         match result {
                             Ok(Ok(_id)) => {
                                 if os_notifications {
-                                    notify(&env, &debouncer);
+                                    // Honour the daemon's OS-channel routing (tcp T5): a
+                                    // board-only / Os-excluded attention suppresses the OS
+                                    // notification; an absent daemon fails open (notifies).
+                                    // Zero-size resolver/transport — built per fire, no state.
+                                    notify(
+                                        &env,
+                                        &debouncer,
+                                        &crate::resolver::HangarRuleResolver::new(),
+                                        &NativeTransport,
+                                    )
+                                    .await;
                                 }
                             }
                             Ok(Err(e)) => {
