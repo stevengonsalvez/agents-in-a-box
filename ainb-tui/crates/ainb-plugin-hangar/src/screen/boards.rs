@@ -810,7 +810,38 @@ impl BoardsState {
         // Keep the edit side-flag paired with the overlay it belongs to, so a
         // background refresh mid-edit never turns an edit commit into a create.
         self.edit_issue_id.clone_from(&prev.edit_issue_id);
+        // Carry the focus cursor across the refresh so a background `boards_list`
+        // reply — or a REFUSED mutation that re-fetches the board (a blocked
+        // card's Run) — never yanks the human off the card they were acting on
+        // (agents-in-a-box-1ah). Follow the focused card by ISSUE ID where it
+        // still exists (even if it auto-moved column); fall back to the raw
+        // indices, which `clamp` keeps valid, when the card is gone.
+        let prev_focus_issue = prev.focused_card().map(|c| c.issue_id.clone());
+        self.focused_board = prev.focused_board;
+        self.focused_col = prev.focused_col;
+        self.focused_card = prev.focused_card;
+        if let Some(issue_id) = prev_focus_issue {
+            if let Some((board, col, card)) = self.locate_card(&issue_id) {
+                self.focused_board = board;
+                self.focused_col = col;
+                self.focused_card = card;
+            }
+        }
         self.clamp();
+    }
+
+    /// The `(board, column, card)` indices of the card carrying `issue_id`,
+    /// scanning every board's columns in order (not the unmapped pool — the focus
+    /// cursor only addresses column cards). `None` when no column card carries it.
+    fn locate_card(&self, issue_id: &str) -> Option<(usize, usize, usize)> {
+        for (bi, board) in self.boards.iter().enumerate() {
+            for (ci, col) in board.columns.iter().enumerate() {
+                if let Some(ki) = col.cards.iter().position(|c| c.issue_id == issue_id) {
+                    return Some((bi, ci, ki));
+                }
+            }
+        }
+        None
     }
 
     /// The current load status (loading / loaded / error) the render branches on.
@@ -3152,6 +3183,30 @@ mod tests {
         refreshed.adopt_context(&typing);
         assert_eq!(refreshed.profiles(), ["claude-agent"]);
         assert!(refreshed.overlay().is_some(), "the open title input survives a refresh");
+    }
+
+    /// agents-in-a-box-1ah: a refused Run on a blocked card re-fetches the board;
+    /// the refresh must keep focus on the ACTED-ON card, never revert it to the
+    /// previously-focused (first) card. Focus is followed by issue id across the
+    /// refresh, so the human stays on the card their action targeted.
+    #[test]
+    fn refresh_keeps_focus_on_the_acted_on_card_after_a_refused_run() {
+        // Focus the SECOND card (issue-2) — the one the user acts on.
+        let state = BoardsState::from_snapshot(&two_card_board());
+        assert_eq!(state.focused_card().unwrap().issue_id, "issue-1", "starts on card A");
+        let acted = reduce_boards(&state, BoardsEvent::FocusDown).state;
+        assert_eq!(acted.focused_card().unwrap().issue_id, "issue-2", "moved to card B");
+
+        // A refused Run re-fetches the board — the same snapshot lands unchanged.
+        let mut refreshed = BoardsState::from_snapshot(&two_card_board());
+        refreshed.adopt_context(&acted);
+
+        // Focus stayed on the acted-on card B, NOT reverted to the first card A.
+        assert_eq!(
+            refreshed.focused_card().map(|c| c.issue_id.as_str()),
+            Some("issue-2"),
+            "focus must stay on the card the refused Run targeted"
+        );
     }
 
     /// Toggling auto-move emits the flipped value for the focused board.
