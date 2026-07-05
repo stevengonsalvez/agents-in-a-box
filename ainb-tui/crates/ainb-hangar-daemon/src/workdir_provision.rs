@@ -26,11 +26,14 @@
 //! worktrees on two DISTINCT `ainb/<slug>` branches — they never collide (the F5
 //! "N tasks on one repo never collide" guarantee).
 //!
-//! Scratch is different: it is the CARD's durable scratch space (F2 intent), so it
-//! is keyed on the caller's `scratch_slug` — a per-CARD key (the issue short-id),
-//! STABLE across reruns. A per-run slug would hand every rerun a fresh empty dir,
-//! silently losing the prior run's scratch work; the per-card slug reuses the same
-//! `scratch/<scratch_slug>` dir so a rerun continues where the last run left off.
+//! Scratch is different: it is the card's durable scratch space (F2 intent), so it
+//! is keyed on the caller's `scratch_slug` — a per-(card, agent) key, STABLE across
+//! reruns and DISTINCT per concurrent squad member. A per-run slug would hand every
+//! rerun a fresh empty dir, silently losing the prior run's scratch work; the
+//! (card, agent) slug reuses the same `scratch/<scratch_slug>` dir so a rerun
+//! continues where the last run left off, while a squad fan-out — whose members
+//! share the issue but hold distinct agents — still gets a dir per member and never
+//! races two runs in one working tree.
 //!
 //! # Teardown (keep-if-dirty)
 //!
@@ -342,6 +345,18 @@ mod tests {
             "prior scratch work",
             "the prior run's scratch work survives into the rerun"
         );
+    }
+
+    /// DISTINCT scratch slugs (e.g. two squad members on one issue, keyed
+    /// (issue, agent)) provision DISTINCT dirs, so parallel members never race in a
+    /// shared working tree — the isolation half of the reuse guarantee.
+    #[test]
+    fn scratch_isolates_distinct_slugs() {
+        let home = tempfile::tempdir().unwrap();
+        let fallback = home.path().join("fallback");
+        let a = provision(Some("scratch"), "run-a", "card-x-agentA", home.path(), &fallback).unwrap();
+        let b = provision(Some("scratch"), "run-b", "card-x-agentB", home.path(), &fallback).unwrap();
+        assert_ne!(a.path(), b.path(), "distinct scratch slugs get distinct dirs");
     }
 
     /// A real repo provisions a worktree on branch `ainb/<slug>`.
