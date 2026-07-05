@@ -736,6 +736,294 @@ pub fn enqueue_task_with_repo(home: &Path, suffix: &str, repo_ref: &str) -> Stri
     id
 }
 
+// ---------------------------------------------------------------------------
+// tcp T4 (F7) fixtures: squad-from-card fan-out + card dependencies.
+// ---------------------------------------------------------------------------
+
+/// The squad the squad-card fixture creates (leader `agent-1` + two members).
+pub const T4_SQUAD_ID: &str = "squad-t4";
+/// The squad card's issue id (assigned to [`T4_SQUAD_ID`], placed on the board).
+pub const T4_SQUAD_CARD_ISSUE: &str = "issue-squad-card";
+/// The dependency-chain BLOCKER card's issue id (card A).
+pub const T4_DEP_BLOCKER_ISSUE: &str = "issue-dep-a";
+/// The dependency-chain DEPENDENT card's issue id (card B, depends-on A, auto-run on).
+pub const T4_DEP_DEPENDENT_ISSUE: &str = "issue-dep-b";
+
+/// An agent actor-ref for the T4 squad seeding.
+fn t4_agent_ref(id: &str) -> ainb_hangar_core::actor::ActorRef {
+    ainb_hangar_core::actor::ActorRef::new(ainb_hangar_core::actor::ActorKind::Agent, id)
+        .expect("valid agent ref")
+}
+
+/// Insert an extra agent bound to the EXISTING fixture `runtime-1` (a distinct
+/// agent on the same runtime, owned by the seeded `user-1`), so the claim loop
+/// runs it concurrently with the other agents on that runtime.
+async fn seed_extra_agent_on_runtime_1(pool: &sqlx::SqlitePool, id: &str, name: &str) {
+    sqlx::query(
+        "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+         VALUES (?, ?, ?, 'runtime-1', 'workspace', 'user-1')",
+    )
+    .bind(id)
+    .bind(ainb_hangar_daemon::seed::WS_ID)
+    .bind(name)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed extra agent {id}: {e}"));
+}
+
+/// Insert a card issue titled `title` in the fixture workspace and place it on the
+/// seeded board's Todo column with `repo_ref` set (so a run provisions a worktree).
+async fn seed_card_issue(pool: &sqlx::SqlitePool, id: &str, title: &str, repo_ref: &str, now: i64) {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::board::BoardRepo;
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
+    let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
+    sqlx::query(
+        "INSERT INTO issue (id, workspace_id, title, creator_type, creator_id, created_at) \
+         VALUES (?, ?, ?, 'member', 'user-1', ?)",
+    )
+    .bind(id)
+    .bind(ainb_hangar_daemon::seed::WS_ID)
+    .bind(title)
+    .bind(now)
+    .execute(pool)
+    .await
+    .unwrap_or_else(|e| panic!("seed card issue {id}: {e}"));
+    BoardRepo::card_add(pool, &ws, BOARD_RUN_BOARD, id, Some(BOARD_RUN_TODO_COL), now)
+        .await
+        .unwrap_or_else(|e| panic!("place card {id}: {e}"));
+    CardParityRepo::set_issue_repo_agent(pool, ainb_hangar_daemon::seed::WS_ID, id, Some(repo_ref), None)
+        .await
+        .unwrap_or_else(|e| panic!("set repo on card {id}: {e}"));
+}
+
+/// Free the fixture's seeded `running` `task-1` so its agent (`agent-1`, the squad
+/// leader / the dep-chain runner) is under its concurrency cap and claimable.
+async fn free_fixture_running_task(pool: &sqlx::SqlitePool) {
+    sqlx::query("UPDATE agent_task_queue SET status = 'done', finished_at = created_at WHERE id = 'task-1'")
+        .execute(pool)
+        .await
+        .expect("free fixture running task-1");
+}
+
+/// Spawn a CLAIM-ENABLED daemon over a fixture seeded for the SQUAD-CARD fan-out
+/// tripwire (tcp T4 / F7): a real git repo in the `@` scan cache, two extra member
+/// agents on `runtime-1`, a squad (`shippers`, leader `agent-1` + the two members),
+/// and a card assigned to that squad with the repo set. The blocking fake-claude
+/// holds every fanned run so the "N live worktrees at once" assertion is race-free;
+/// the sandbox is disabled so the agent can read the release sentinel.
+pub fn prepare_pipeline_squad_card() -> Pipeline {
+    prepare_pipeline_board_run_seeded(
+        BLOCKING_FAKE_AGENT,
+        |home| {
+            seed_scanned_repo(home, WORKTREE_REPO_NAME);
+            let hangar_dir = home.join(".agents-in-a-box");
+            let repo_path = home.join(WORKTREE_REPO_NAME).to_string_lossy().into_owned();
+            let now = 1_700_000_100_000_i64;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("squad-seed runtime");
+            rt.block_on(async {
+                use ainb_hangar_core::ids::WorkspaceId;
+                use ainb_hangar_store::repo::card_parity::CardParityRepo;
+                use ainb_hangar_store::repo::squad::SquadRepo;
+
+                let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open squad store");
+                let pool = store.pool();
+                let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
+
+                seed_extra_agent_on_runtime_1(pool, "agent-m1", "member-one").await;
+                seed_extra_agent_on_runtime_1(pool, "agent-m2", "member-two").await;
+                SquadRepo::create(pool, &ws, T4_SQUAD_ID, "shippers", &t4_agent_ref("agent-1"), now)
+                    .await
+                    .expect("create squad");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1")).await.expect("add m1");
+                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2")).await.expect("add m2");
+
+                seed_card_issue(pool, T4_SQUAD_CARD_ISSUE, "SquadFanoutCard", &repo_path, now).await;
+                CardParityRepo::set_issue_squad(pool, &ws, T4_SQUAD_CARD_ISSUE, Some(T4_SQUAD_ID))
+                    .await
+                    .expect("assign squad to card");
+                free_fixture_running_task(pool).await;
+            });
+        },
+        |_| vec![disable_sandbox()],
+    )
+}
+
+/// Spawn a CLAIM-ENABLED daemon over a fixture seeded for the CARD-DEPENDENCY
+/// chain tripwire (tcp T4 / F7): a real repo in the scan cache, two cards A + B
+/// (each with the repo set) where B depends-on A and B's auto-run flag is on. The
+/// blocking fake-claude holds A's run until the tripwire releases it; the sandbox
+/// is disabled so the agent can read the sentinel.
+pub fn prepare_pipeline_dep_chain() -> Pipeline {
+    prepare_pipeline_board_run_seeded(
+        BLOCKING_FAKE_AGENT,
+        |home| {
+            seed_scanned_repo(home, WORKTREE_REPO_NAME);
+            let hangar_dir = home.join(".agents-in-a-box");
+            let repo_path = home.join(WORKTREE_REPO_NAME).to_string_lossy().into_owned();
+            let now = 1_700_000_100_000_i64;
+            let rt = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("dep-seed runtime");
+            rt.block_on(async {
+                use ainb_hangar_core::ids::WorkspaceId;
+                use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+                let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open dep store");
+                let pool = store.pool();
+                let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
+
+                seed_card_issue(pool, T4_DEP_BLOCKER_ISSUE, "DepBlockerA", &repo_path, now).await;
+                seed_card_issue(pool, T4_DEP_DEPENDENT_ISSUE, "DepDependentB", &repo_path, now + 1).await;
+                CardDependencyRepo::add_edge(pool, &ws, T4_DEP_DEPENDENT_ISSUE, T4_DEP_BLOCKER_ISSUE, now)
+                    .await
+                    .expect("B depends-on A");
+                CardDependencyRepo::set_auto_run(pool, &ws, T4_DEP_DEPENDENT_ISSUE, true)
+                    .await
+                    .expect("B auto-run on");
+                free_fixture_running_task(pool).await;
+            });
+        },
+        |_| vec![disable_sandbox()],
+    )
+}
+
+/// Count the `agent_task_queue` rows for `issue_id` in the fixture store (used by
+/// the dependency-chain tripwire to prove B gains a task only after A completes).
+#[must_use]
+pub fn task_count_for_issue(home: &Path, issue_id: &str) -> i64 {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("task-count runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open count store");
+        sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = ?")
+            .bind(issue_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap_or(0)
+    })
+}
+
+/// Read the latest task status for `issue_id` in the fixture store, or `None` when
+/// the issue has no task yet.
+#[must_use]
+pub fn latest_task_status_for_issue(home: &Path, issue_id: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("status runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        sqlx::query_scalar::<_, String>(
+            "SELECT status FROM agent_task_queue WHERE issue_id = ? ORDER BY created_at DESC, id DESC LIMIT 1",
+        )
+        .bind(issue_id)
+        .fetch_optional(store.pool())
+        .await
+        .ok()
+        .flatten()
+    })
+}
+
+/// A framed JSON-RPC client over the SPAWNED daemon's `hangar.sock` — a synchronous
+/// wrapper (its own current-thread tokio runtime) so a non-async tripwire can drive
+/// `board_card_run` etc. Models the framed `Client` in `rpc_board_management.rs`,
+/// but dials the daemon BINARY's socket rather than an in-process server.
+pub struct DaemonRpc {
+    rt: tokio::runtime::Runtime,
+    reader: tokio::io::BufReader<tokio::net::unix::OwnedReadHalf>,
+    writer: tokio::net::unix::OwnedWriteHalf,
+}
+
+impl DaemonRpc {
+    /// Dial `$HOME/.agents-in-a-box/hangar.sock` (retrying until the daemon binds)
+    /// and authenticate with the daemon token file — the mandatory first frame.
+    pub fn connect_and_auth(home: &Path) -> Self {
+        use tokio::net::UnixStream;
+        let hangar_dir = home.join(".agents-in-a-box");
+        let socket = hangar_dir.join("hangar.sock");
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("daemon-rpc runtime");
+        let (reader, writer) = rt.block_on(async {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let stream = loop {
+                match UnixStream::connect(&socket).await {
+                    Ok(c) => break c,
+                    Err(_) if Instant::now() < deadline => {
+                        tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Err(e) => panic!("never connected to daemon socket {socket:?}: {e}"),
+                }
+            };
+            let (r, w) = stream.into_split();
+            (tokio::io::BufReader::new(r), w)
+        });
+        let mut me = Self { rt, reader, writer };
+        let token_path = ainb_hangar_proto::auth::token_file_in(&hangar_dir);
+        let token = std::fs::read_to_string(&token_path).expect("read daemon.token");
+        let resp = me.call(
+            ainb_hangar_proto::methods::AUTH_HELLO,
+            serde_json::json!({ "token": token.trim() }),
+        );
+        assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
+        me
+    }
+
+    /// Send one request and return the first id-bearing response frame (skipping any
+    /// event push frames the daemon interleaves).
+    pub fn call(&mut self, method: &str, params: serde_json::Value) -> serde_json::Value {
+        use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt};
+        let Self { rt, reader, writer } = self;
+        rt.block_on(async move {
+            let req = ainb_hangar_proto::RpcRequest {
+                jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+                id: ainb_hangar_proto::RpcId::Number(7),
+                method: method.into(),
+                params,
+            };
+            let body = serde_json::to_vec(&req).expect("encode request");
+            let mut out = format!("Content-Length: {}\r\n\r\n", body.len()).into_bytes();
+            out.extend_from_slice(&body);
+            writer.write_all(&out).await.expect("write request");
+            writer.flush().await.expect("flush request");
+
+            loop {
+                let mut len: Option<usize> = None;
+                let frame = loop {
+                    let mut line = String::new();
+                    let n = reader.read_line(&mut line).await.expect("read header line");
+                    assert!(n > 0, "connection closed awaiting a frame for {method}");
+                    let t = line.trim_end_matches("\r\n");
+                    if t.is_empty() {
+                        let mut buf = vec![0u8; len.expect("Content-Length header")];
+                        reader.read_exact(&mut buf).await.expect("read body");
+                        break serde_json::from_slice::<serde_json::Value>(&buf).expect("decode frame");
+                    }
+                    if let Some((name, v)) = t.split_once(':') {
+                        if name.trim().eq_ignore_ascii_case("Content-Length") {
+                            len = v.trim().parse().ok();
+                        }
+                    }
+                };
+                if frame.get("id").is_some() {
+                    return frame;
+                }
+            }
+        })
+    }
+}
+
 /// The daemon's short-id form of a task id (first 8 chars + last 6, collision-
 /// resistant for same-instant ULIDs) — the worktree / scratch dir name and the
 /// `ainb/<slug>` branch suffix. Mirrors `execenv::short_id` exactly; ids of 14
