@@ -16,6 +16,7 @@
 //! That is exactly-once answering enforced at the database, not in application
 //! code that could race two connections.
 
+use ainb_hangar_core::channel::ChannelSet;
 use sqlx::{Row, SqlitePool};
 
 /// The request family an [`AttentionRow`] is about — the `kind` column,
@@ -100,6 +101,11 @@ pub struct NewAttention {
     /// as a session-stable identity token: a cwd-fallback delivery is only made
     /// while this transcript still owns the cwd (see [`AttentionRepo`]).
     pub raise_transcript: Option<String>,
+    /// The PUSH channels this attention was routed to, resolved ONCE from the
+    /// notify rules (0037) at raise time (tcp T5). Stamped here so every consumer
+    /// filters on the SAME decision and a rule edit in flight cannot split-brain
+    /// the fan-out. Empty = board-only.
+    pub channels: ChannelSet,
 }
 
 /// A fully-materialised `attention` row read back from the database.
@@ -132,6 +138,9 @@ pub struct AttentionRow {
     /// The transcript the raising session was writing when the request was raised,
     /// or `None`. The C1 answer guard binds cwd-fallback delivery to it.
     pub raise_transcript: Option<String>,
+    /// The PUSH channels this attention was routed to at raise time (tcp T5).
+    /// Empty = board-only.
+    pub channels: ChannelSet,
 }
 
 /// Stateless typed wrapper over the `attention` table.
@@ -153,8 +162,8 @@ impl AttentionRepo {
         sqlx::query(
             "INSERT INTO attention \
              (id, session_id, cwd, workspace_id, kind, payload, state, degraded, created_at, \
-              raise_transcript) \
-             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)",
+              raise_transcript, channels) \
+             VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?, ?)",
         )
         .bind(&row.id)
         .bind(&row.session_id)
@@ -165,6 +174,7 @@ impl AttentionRepo {
         .bind(i64::from(row.degraded))
         .bind(row.created_at)
         .bind(&row.raise_transcript)
+        .bind(row.channels.to_db())
         .execute(pool)
         .await?;
         Ok(())
@@ -193,7 +203,7 @@ impl AttentionRepo {
             Some(ws) => {
                 sqlx::query(
                     "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                            created_at, answered_by, answer, answered_at, raise_transcript \
+                            created_at, answered_by, answer, answered_at, raise_transcript, channels \
                      FROM attention \
                      WHERE state = 'open' AND workspace_id = ? \
                      ORDER BY created_at ASC, id ASC",
@@ -205,7 +215,7 @@ impl AttentionRepo {
             None => {
                 sqlx::query(
                     "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                            created_at, answered_by, answer, answered_at, raise_transcript \
+                            created_at, answered_by, answer, answered_at, raise_transcript, channels \
                      FROM attention \
                      WHERE state = 'open' AND workspace_id IS NULL \
                      ORDER BY created_at ASC, id ASC",
@@ -229,7 +239,7 @@ impl AttentionRepo {
     pub async fn list_fleet(pool: &SqlitePool) -> Result<Vec<AttentionRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                    created_at, answered_by, answer, answered_at, raise_transcript \
+                    created_at, answered_by, answer, answered_at, raise_transcript, channels \
              FROM attention \
              WHERE state = 'open' \
              ORDER BY created_at ASC, id ASC",
@@ -251,7 +261,7 @@ impl AttentionRepo {
     pub async fn get(pool: &SqlitePool, id: &str) -> Result<Option<AttentionRow>, sqlx::Error> {
         let row = sqlx::query(
             "SELECT id, session_id, cwd, workspace_id, kind, payload, state, degraded, \
-                    created_at, answered_by, answer, answered_at, raise_transcript \
+                    created_at, answered_by, answer, answered_at, raise_transcript, channels \
              FROM attention WHERE id = ?",
         )
         .bind(id)
@@ -387,6 +397,7 @@ fn row_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> Result<AttentionRow, sqlx::
         answer: row.try_get("answer")?,
         answered_at: row.try_get("answered_at")?,
         raise_transcript: row.try_get("raise_transcript")?,
+        channels: ChannelSet::from_db(&row.try_get::<String, _>("channels")?),
     })
 }
 
@@ -418,6 +429,7 @@ mod tests {
             degraded: false,
             created_at: ts,
             raise_transcript: None,
+            channels: ChannelSet::NONE,
         }
     }
 
@@ -636,5 +648,32 @@ mod tests {
             .unwrap();
         let none = AttentionRepo::get(store.pool(), "t2").await.unwrap().unwrap();
         assert!(none.raise_transcript.is_none());
+    }
+
+    #[tokio::test]
+    async fn channels_roundtrip_through_insert_and_list() {
+        use ainb_hangar_core::channel::Channel;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+
+        // A row raised with a resolved channel set reads it back on get + list.
+        let mut row = ask("c1", "sess", None, 1000);
+        row.channels = ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]);
+        AttentionRepo::insert(store.pool(), &row).await.unwrap();
+        let got = AttentionRepo::get(store.pool(), "c1").await.unwrap().unwrap();
+        assert_eq!(
+            got.channels,
+            ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+            "the resolved channel set stamped at raise time round-trips"
+        );
+        let open = AttentionRepo::list_fleet(store.pool()).await.unwrap();
+        assert_eq!(open[0].channels, got.channels, "list carries channels too");
+
+        // A board-only row reads back the empty set (never NULL / a panic).
+        AttentionRepo::insert(store.pool(), &ask("c2", "sess", None, 2000))
+            .await
+            .unwrap();
+        let board_only = AttentionRepo::get(store.pool(), "c2").await.unwrap().unwrap();
+        assert!(board_only.channels.is_empty());
     }
 }

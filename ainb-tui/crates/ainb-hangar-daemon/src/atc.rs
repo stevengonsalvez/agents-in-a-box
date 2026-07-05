@@ -94,6 +94,11 @@ pub async fn raise_escalation(
         "reason": reason,
     })
     .to_string();
+    // Resolve the escalation's routing channels ONCE at raise time (tcp T5), for
+    // this instance's workspace scope. The seeded default routes escalation to
+    // phone+web+os (loudest — a human is being paged).
+    let channels =
+        crate::notify::resolve_channels(pool, AttentionKind::Escalation, workspace_id).await;
     let new = NewAttention {
         id: id.clone(),
         session_id: session_id.to_string(),
@@ -104,6 +109,7 @@ pub async fn raise_escalation(
         degraded: false,
         created_at: now_ms,
         raise_transcript: None,
+        channels,
     };
     AttentionRepo::insert(pool, &new).await?;
     // Mark the ledger so the heartbeat stops presenting this session as
@@ -117,6 +123,7 @@ pub async fn raise_escalation(
         kind: AttentionKind::Escalation.as_str().to_string(),
         degraded: false,
         created_at: now_ms,
+        channels,
     });
     tracing::info!(instance = %instance_name, session = %session_id, %reason, "ATC escalation raised");
     Ok(id)

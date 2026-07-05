@@ -79,6 +79,8 @@ fn main() {
                 degraded: false,
                 created_at: 1_700_000_000_000,
                 raise_transcript: None,
+                // Waiting routes board-only under the seeded default (tcp T5).
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
         )
         .await
@@ -108,6 +110,11 @@ fn main() {
                 degraded: false,
                 created_at: 1_699_999_000_000,
                 raise_transcript: None,
+                // ASK routes to web+os under the seeded default (tcp T5).
+                channels: ainb_hangar_core::channel::ChannelSet::from_channels([
+                    ainb_hangar_core::channel::Channel::Web,
+                    ainb_hangar_core::channel::Channel::Os,
+                ]),
             },
         )
         .await

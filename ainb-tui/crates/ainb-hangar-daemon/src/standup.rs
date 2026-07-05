@@ -484,6 +484,14 @@ impl StandupWatcher {
             "message": "standup ready",
         })
         .to_string();
+        // Resolve routing channels once at raise time (tcp T5); a standup-ready is
+        // a Waiting kind, which the seeded default routes board-only.
+        let channels = crate::notify::resolve_channels(
+            &self.pool,
+            AttentionKind::Waiting,
+            workspace_id.as_deref(),
+        )
+        .await;
         let new = NewAttention {
             id: id.clone(),
             session_id: session_id.to_string(),
@@ -494,6 +502,7 @@ impl StandupWatcher {
             degraded: false,
             created_at: now_ms,
             raise_transcript: None,
+            channels,
         };
         if let Err(e) = AttentionRepo::insert(&self.pool, &new).await {
             tracing::warn!(error = %e, session = %session_id, "auto-standup: raise standup-ready failed");
@@ -506,6 +515,7 @@ impl StandupWatcher {
             kind: AttentionKind::Waiting.as_str().to_string(),
             degraded: false,
             created_at: now_ms,
+            channels,
         });
         tracing::info!(session = %session_id, "auto-standup: standup ready");
     }

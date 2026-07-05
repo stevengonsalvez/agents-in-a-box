@@ -174,6 +174,7 @@ fn ask(id: &str, session: &str, ws: Option<&str>, ts: i64) -> NewAttention {
         degraded: false,
         created_at: ts,
         raise_transcript: None,
+        channels: ainb_hangar_core::channel::ChannelSet::NONE,
     }
 }
 
@@ -255,6 +256,7 @@ async fn attention_subscribe_delivers_a_fleet_wide_raised_delta() {
         kind: "ask_user_question".into(),
         degraded: false,
         created_at: 4242,
+        channels: ainb_hangar_core::channel::ChannelSet::NONE,
     });
 
     let note = client.next_notification().await;

@@ -30,8 +30,12 @@ use super::attention::AttentionKind;
 /// `escalation` is the loudest fallback (a human is being paged); every other
 /// kind falls back to the board only (empty set) — a missing rule must never
 /// spuriously spam a channel, but an escalation must never be silently dropped.
+///
+/// Exposed so the daemon's raise-time resolver can reuse the SAME floor when a
+/// transient DB fault makes [`NotifyRuleRepo::resolve`] itself error (rather than
+/// duplicating the escalation-stays-loud policy at the call site).
 #[must_use]
-fn coded_fallback(kind: AttentionKind) -> ChannelSet {
+pub fn coded_fallback(kind: AttentionKind) -> ChannelSet {
     use ainb_hangar_core::channel::Channel::{Os, Phone, Web};
     match kind {
         AttentionKind::Escalation => ChannelSet::from_channels([Phone, Web, Os]),

@@ -120,6 +120,10 @@ pub mod materialise;
 /// agents and enqueues a task for every match, so a user `@`-mentioning an agent
 /// in a comment spawns that agent's task.
 pub mod mentions;
+/// Raise-time notification-channel resolution (tcp T5): read the notify rules for
+/// a `(kind, workspace)` and return the [`ChannelSet`](ainb_hangar_core::channel::ChannelSet)
+/// the daemon stamps onto the row + event, computed once at emit.
+pub mod notify;
 /// Daemon observability bootstrap (P8.1).
 ///
 /// Installs the `tracing` subscriber with the rolling JSONL sink under

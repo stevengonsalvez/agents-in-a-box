@@ -16,6 +16,7 @@
 //! a `HashMap` (whose iteration order varies per process and would break
 //! byte-deterministic golden tests); every payload is a field-ordered struct.
 
+use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_core::ids::{AgentId, CommentId, IssueId, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -171,6 +172,12 @@ pub enum HangarEvent {
         degraded: bool,
         /// Ingest timestamp (epoch milliseconds).
         created_at: i64,
+        /// The PUSH channels this attention was routed to (tcp T5), resolved once
+        /// at raise time. A live consumer reacting to this nudge filters on this
+        /// set; a reconnecting one re-pulls `attention/list` (which carries the
+        /// same field). Empty = board-only. Additive: omitted by an older daemon.
+        #[serde(default)]
+        channels: ChannelSet,
     },
     /// An open attention row was answered — the first-answer-wins winner flipped
     /// it `answered` and the answer was delivered into the session (spec P2).
@@ -501,6 +508,14 @@ pub struct AttentionRow {
     pub degraded: bool,
     /// Ingest timestamp (epoch milliseconds) — drives ordering + card age.
     pub created_at: i64,
+    /// The PUSH channels this attention was routed to, resolved once at raise
+    /// time from the notify rules (tcp T5). Consumers (bridge/web/os/atc) filter
+    /// on this set rather than re-resolving, so a rule edit in flight can never
+    /// split-brain the fan-out. The EMPTY set is board-only, never a dropped row.
+    /// Defaults to empty on the wire (additive: a legacy row / older daemon that
+    /// omits it reads as board-only).
+    #[serde(default)]
+    pub channels: ChannelSet,
 }
 
 /// A wire-side comment row.

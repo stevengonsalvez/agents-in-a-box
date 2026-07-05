@@ -21,6 +21,12 @@ pub mod pr_status;
 pub mod settings;
 pub mod snapshots;
 
+/// Re-export the notification routing vocabulary (tcp T5) so proto-only consumers
+/// (ainb-web, the hangar plugin) reach [`Channel`] / [`ChannelSet`] without a
+/// direct `ainb-hangar-core` dependency — the same crate the wire `AttentionRow`
+/// and `AttentionRaised` event carry their resolved channels as.
+pub use ainb_hangar_core::channel::{Channel, ChannelSet};
+
 /// The JSON-RPC protocol version string carried by every envelope.
 pub const JSONRPC_VERSION: &str = "2.0";
 

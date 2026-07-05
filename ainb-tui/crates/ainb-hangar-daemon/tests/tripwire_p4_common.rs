@@ -274,6 +274,7 @@ fn seed_attention_pair(home: &Path) {
                 degraded: false,
                 created_at: 1_700_000_000_000,
                 raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
         )
         .await
@@ -303,6 +304,7 @@ fn seed_attention_pair(home: &Path) {
                 degraded: false,
                 created_at: 1_699_999_000_000,
                 raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
         )
         .await
@@ -1327,6 +1329,7 @@ fn seed_deliverable_ask(home: &Path) {
                 degraded: false,
                 created_at: 1_700_000_000_000,
                 raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
         )
         .await
@@ -1355,6 +1358,7 @@ fn seed_deliverable_ask(home: &Path) {
                 degraded: false,
                 created_at: 1_699_999_000_000,
                 raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
         )
         .await

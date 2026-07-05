@@ -247,6 +247,7 @@ mod tests {
                 kind: "ask_user_question".into(),
                 degraded: false,
                 created_at: 0,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
             HangarEvent::AttentionAnswered {
                 attention_id: "att-1".into(),

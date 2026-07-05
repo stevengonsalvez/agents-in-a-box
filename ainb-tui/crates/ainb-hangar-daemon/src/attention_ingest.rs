@@ -235,6 +235,12 @@ impl AttentionIngest {
             }
         }
 
+        // Resolve the routing channels ONCE, here at raise time (tcp T5). Hook
+        // sessions are host-wide (workspace None), so this reads the GLOBAL rule
+        // for the kind. Stamped onto the row + the event so every consumer filters
+        // on the same decision.
+        let channels = crate::notify::resolve_channels(&self.pool, kind, None).await;
+
         let payload = serde_json::to_string(&row.context).unwrap_or_else(|_| "{}".to_string());
         let new = NewAttention {
             id: id.clone(),
@@ -253,6 +259,7 @@ impl AttentionIngest {
             // token the answer router's C1 guard binds cwd-fallback delivery to.
             raise_transcript: (!line.transcript_path.is_empty())
                 .then(|| line.transcript_path.clone()),
+            channels,
         };
         if let Err(e) = AttentionRepo::insert(&self.pool, &new).await {
             tracing::warn!(error = %e, "attention ingest: insert failed");
@@ -265,6 +272,7 @@ impl AttentionIngest {
             kind: kind.as_str().to_string(),
             degraded: false,
             created_at: now_ms,
+            channels,
         });
         true
     }

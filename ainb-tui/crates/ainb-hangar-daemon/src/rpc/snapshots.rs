@@ -1087,6 +1087,9 @@ fn attention_row_to_wire(row: ainb_hangar_store::repo::attention::AttentionRow) 
         payload: row.payload,
         degraded: row.degraded,
         created_at: row.created_at,
+        // The resolved routing channels stamped at raise time (tcp T5) — the
+        // bridge/web/atc consumers reading this feed filter on them.
+        channels: row.channels,
     }
 }
 

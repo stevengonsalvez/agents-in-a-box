@@ -177,6 +177,11 @@ async fn reopen_on_failed_delivery(
             kind: row.kind.as_str().to_string(),
             degraded: row.degraded,
             created_at: row.created_at,
+            // Re-nudge carries the row's ORIGINAL raise-time channels — a reopen
+            // must not re-resolve (that would let a mid-flight rule edit change
+            // where an in-flight attention routes), so the fan-out decision stays
+            // fixed at first raise.
+            channels: row.channels,
         });
     }
     Ok(())
@@ -459,6 +464,7 @@ mod tests {
                 degraded: false,
                 created_at: 1_000,
                 raise_transcript: None,
+                channels: ainb_hangar_core::channel::ChannelSet::NONE,
             },
         )
         .await
