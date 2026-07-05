@@ -105,6 +105,53 @@ impl CardParityRepo {
         Ok(row.map(|(repo, agent)| (repo, agent.as_deref().and_then(AgentKind::parse))))
     }
 
+    /// Assign (or clear, with `None`) a card's SQUAD onto its issue row (tcp T4 /
+    /// F7). Workspace-scoped so the write is self-guarded at the SQL boundary (a
+    /// foreign-tenant issue id matches no row — never a cross-tenant write).
+    ///
+    /// A `Some(squad_id)` makes a card RUN fan out across the whole squad; `None`
+    /// clears the squad, reverting the card to a single-agent run. The squad ref's
+    /// existence in the workspace is checked by the run handler at fan-out time
+    /// (the column carries no FK), so a stale squad id here fails the run cleanly
+    /// rather than corrupting the card.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault. Returns `Ok(false)` when no
+    /// `(issue_id, workspace_id)` row matched (an unknown / foreign issue).
+    pub async fn set_issue_squad(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        issue_id: &str,
+        squad_id: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE issue SET squad_id = ? WHERE id = ? AND workspace_id = ?")
+            .bind(squad_id)
+            .bind(issue_id)
+            .bind(workspace.as_str())
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Read a card's assigned squad id (`None` when unassigned / issue absent) —
+    /// the run handler reads this to decide single-agent vs squad fan-out.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn get_issue_squad(
+        pool: &SqlitePool,
+        issue_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let raw: Option<Option<String>> =
+            sqlx::query_scalar("SELECT squad_id FROM issue WHERE id = ?")
+                .bind(issue_id)
+                .fetch_optional(pool)
+                .await?;
+        Ok(raw.flatten())
+    }
+
     /// Persist the resolved repo + agent onto a task row, WITHIN an existing
     /// transaction (so the card-run enqueue + this write commit atomically and
     /// the claim loop can never observe a task without its dispatch fields).
@@ -514,6 +561,40 @@ mod tests {
             CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), None).await.unwrap(),
             AgentKind::Codex
         );
+    }
+
+    /// A card's squad assignment round-trips, defaults None, clears with None, and
+    /// is workspace-scoped.
+    #[tokio::test]
+    async fn issue_squad_round_trips_and_is_workspace_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        // Unassigned by default; a missing issue reads None.
+        assert_eq!(CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(), None);
+        assert_eq!(CardParityRepo::get_issue_squad(pool, "nope").await.unwrap(), None);
+
+        // Assign a squad.
+        assert!(CardParityRepo::set_issue_squad(pool, &ws("ws-a"), "issue-1", Some("sq-1")).await.unwrap());
+        assert_eq!(
+            CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(),
+            Some("sq-1".to_string())
+        );
+
+        // A cross-tenant write misses (leaves the assignment intact).
+        assert!(!CardParityRepo::set_issue_squad(pool, &ws("ws-b"), "issue-1", Some("sq-x")).await.unwrap());
+        assert_eq!(
+            CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(),
+            Some("sq-1".to_string())
+        );
+
+        // Clear it.
+        assert!(CardParityRepo::set_issue_squad(pool, &ws("ws-a"), "issue-1", None).await.unwrap());
+        assert_eq!(CardParityRepo::get_issue_squad(pool, "issue-1").await.unwrap(), None);
     }
 
     /// Board default is workspace-scoped: a foreign workspace neither reads nor
