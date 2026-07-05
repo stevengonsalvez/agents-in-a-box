@@ -20,6 +20,14 @@
 //! case folds to [`PrStatus::default`] (all-`Unknown`) — the fetch **never** errors
 //! or panics, so the badge renders a muted placeholder rather than a false state
 //! and the auto-Done transition simply does not fire.
+//!
+//! # Bounded fetch
+//!
+//! A snapshot RPC (the board `tasks_list`) awaits these fetches, so a wedged `gh`
+//! (a hung auth prompt, a dead network) must never block it forever. Every fetch
+//! runs under a hard [`GH_FETCH_TIMEOUT`]: past it the subprocess is abandoned
+//! (killed on drop) and degrades to the all-`Unknown` status, exactly like a
+//! non-zero exit — so the snapshot always answers promptly from local state.
 
 use std::collections::HashMap;
 use std::future::Future;
@@ -42,22 +50,32 @@ pub trait PrStatusProvider: Send + Sync {
     fn fetch<'a>(&'a self, pr_url: &'a str) -> Pin<Box<dyn Future<Output = PrStatus> + Send + 'a>>;
 }
 
+/// Hard ceiling on a single `gh pr view` subprocess (the [module][self] "Bounded
+/// fetch" contract). A wedged `gh` past this is abandoned and degrades to
+/// all-`Unknown`, so a snapshot RPC awaiting the fetch is never blocked. Sized to
+/// cover a slow-but-live `gh` round-trip while keeping the board responsive.
+const GH_FETCH_TIMEOUT: Duration = Duration::from_secs(4);
+
 /// The production provider: shells `gh pr view <url> --json
 /// statusCheckRollup,mergeable,state` and folds the JSON into a [`PrStatus`].
 ///
 /// The `gh` binary path defaults to `"gh"` (resolved on `$PATH`); override it for
-/// a pinned install. A non-zero exit, a spawn failure (no `gh` on `$PATH`), or
-/// unparseable output all degrade to the all-`Unknown` status.
+/// a pinned install. A non-zero exit, a spawn failure (no `gh` on `$PATH`), a
+/// fetch that outlives [`GH_FETCH_TIMEOUT`], or unparseable output all degrade to
+/// the all-`Unknown` status.
 #[derive(Debug, Clone)]
 pub struct GhPrStatusProvider {
     /// The `gh` binary to invoke (default `"gh"`).
     bin: String,
+    /// The hard per-fetch timeout (default [`GH_FETCH_TIMEOUT`]).
+    timeout: Duration,
 }
 
 impl Default for GhPrStatusProvider {
     fn default() -> Self {
         Self {
             bin: "gh".to_string(),
+            timeout: GH_FETCH_TIMEOUT,
         }
     }
 }
@@ -91,7 +109,18 @@ impl GhPrStatusProvider {
     /// at a stub script; production uses [`Self::new`]).
     #[must_use]
     pub fn with_bin(bin: impl Into<String>) -> Self {
-        Self { bin: bin.into() }
+        Self {
+            bin: bin.into(),
+            timeout: GH_FETCH_TIMEOUT,
+        }
+    }
+
+    /// Override the per-fetch timeout. Tests point this well below a stub `gh`'s
+    /// sleep to exercise the abandon-and-degrade path without a multi-second wait.
+    #[must_use]
+    pub const fn with_timeout(mut self, timeout: Duration) -> Self {
+        self.timeout = timeout;
+        self
     }
 }
 
@@ -103,7 +132,7 @@ impl PrStatusProvider for GhPrStatusProvider {
             if pr_url.trim().is_empty() {
                 return PrStatus::default();
             }
-            let output = tokio::process::Command::new(&self.bin)
+            let fetch = tokio::process::Command::new(&self.bin)
                 .arg("pr")
                 .arg("view")
                 .arg(pr_url)
@@ -112,14 +141,17 @@ impl PrStatusProvider for GhPrStatusProvider {
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::null())
-                .output()
-                .await;
-            match output {
-                Ok(out) if out.status.success() => {
+                // Reap the child when the fetch is abandoned on timeout, so a
+                // wedged `gh` never lingers as an orphan.
+                .kill_on_drop(true)
+                .output();
+            match tokio::time::timeout(self.timeout, fetch).await {
+                Ok(Ok(out)) if out.status.success() => {
                     parse_gh_pr_view(&String::from_utf8_lossy(&out.stdout))
                 }
-                // A non-zero exit (no auth, no such PR) or a spawn failure (no
-                // `gh`) both degrade — never a panic, never a false state.
+                // A timeout (wedged `gh`), a non-zero exit (no auth, no such PR),
+                // or a spawn failure (no `gh`) all degrade — never a panic, never
+                // a false state, never a blocked snapshot.
                 _ => PrStatus::default(),
             }
         })
@@ -442,6 +474,38 @@ mod tests {
     async fn real_provider_degrades_on_blank_url() {
         let provider = GhPrStatusProvider::new();
         assert_eq!(provider.fetch("   ").await, PrStatus::default());
+    }
+
+    /// A wedged `gh` (a stub that hangs well past the timeout) is abandoned and
+    /// degrades to all-`Unknown` PROMPTLY — the snapshot RPC awaiting the fetch is
+    /// never blocked forever (the "Bounded fetch" contract).
+    #[tokio::test]
+    async fn fetch_times_out_and_degrades_on_a_wedged_gh() {
+        use std::io::Write;
+        use std::os::unix::fs::PermissionsExt;
+        use std::time::Instant;
+
+        // A stub `gh` that hangs far past the timeout, ignoring its args — a
+        // stand-in for a hung auth prompt / dead network.
+        let dir = tempfile::tempdir().unwrap();
+        let stub = dir.path().join("gh-hang");
+        {
+            let mut f = std::fs::File::create(&stub).unwrap();
+            writeln!(f, "#!/bin/sh\nsleep 30\n").unwrap();
+        }
+        std::fs::set_permissions(&stub, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        let provider = GhPrStatusProvider::with_bin(stub.to_str().unwrap())
+            .with_timeout(Duration::from_millis(150));
+        let started = Instant::now();
+        let got = provider.fetch("https://github.com/o/r/pull/1").await;
+        let elapsed = started.elapsed();
+
+        assert_eq!(got, PrStatus::default(), "a wedged gh degrades to all-Unknown");
+        assert!(
+            elapsed < Duration::from_secs(2),
+            "the fetch abandons the wedged gh promptly (took {elapsed:?})"
+        );
     }
 
     /// The caching wrapper coalesces repeated fetches of the SAME url within the
