@@ -716,10 +716,12 @@ impl HangarPlugin {
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // tcp T5: the notification routing grid snapshot.
             RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
-            // A rule set reply re-fetches the grid so the pane reflects the write.
+            // A rule set reply re-fetches the grid so the pane reflects the write,
+            // in the SAME scope the write targeted (agents-in-a-box-cqh).
             RpcId::Number(NOTIFY_RULE_SET_REQ_ID) => {
+                let scope = self.screens.notify_scope();
                 self.screens.pending_notify_action =
-                    Some(crate::screen::app_screens::NotifyAction::Refresh);
+                    Some(crate::screen::app_screens::NotifyAction::Refresh { scope });
                 self.conn.on_event();
             }
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
@@ -811,30 +813,57 @@ impl HangarPlugin {
     }
 
     /// Fire a deferred notify-rule RPC (tcp T5) over the daemon socket, scoped to
-    /// the active workspace: a `Refresh` fetches the grid, a `Set` upserts one
-    /// rule (whose reply re-fetches the grid). Best-effort — a send failure is
-    /// logged, never fatal (the grid simply keeps its prior rows).
+    /// the grid's current GLOBAL/WORKSPACE scope (agents-in-a-box-cqh): a `Refresh`
+    /// fetches the grid, a `Set` upserts one rule (whose reply re-fetches the
+    /// grid). In GLOBAL scope the RPC omits `workspace_id` so it targets the
+    /// host-wide default rule — the one HOOK-raised attentions resolve; in
+    /// WORKSPACE scope it sends the active workspace so it writes that workspace's
+    /// override. Best-effort — a send failure is logged, never fatal (the grid
+    /// simply keeps its prior rows).
     async fn apply_notify_action(
         &mut self,
         host: &HostClient,
         action: crate::screen::app_screens::NotifyAction,
     ) {
         use crate::screen::app_screens::NotifyAction;
+        use crate::screen::settings::NotifyScope;
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
+        // Only the WORKSPACE scope threads a `workspace_id`; GLOBAL omits it so the
+        // daemon resolves the host-wide rule (`workspace_id IS NULL`).
+        let scope_of = |scope: NotifyScope| -> Option<&str> {
+            match scope {
+                NotifyScope::Global => None,
+                NotifyScope::Workspace => Some(ws.as_str()),
+            }
+        };
         let (id, method, params) = match action {
-            NotifyAction::Refresh => (
-                NOTIFY_RULES_REQ_ID,
-                daemon_methods::HANGAR_NOTIFY_RULES_LIST,
-                serde_json::json!({ "workspace_id": ws }),
-            ),
-            NotifyAction::Set { kind, channels } => (
-                NOTIFY_RULE_SET_REQ_ID,
-                daemon_methods::HANGAR_NOTIFY_RULE_SET,
-                serde_json::json!({ "workspace_id": ws, "kind": kind, "channels": channels }),
-            ),
+            NotifyAction::Refresh { scope } => {
+                let mut params = serde_json::Map::new();
+                if let Some(w) = scope_of(scope) {
+                    params.insert("workspace_id".into(), serde_json::json!(w));
+                }
+                (
+                    NOTIFY_RULES_REQ_ID,
+                    daemon_methods::HANGAR_NOTIFY_RULES_LIST,
+                    serde_json::Value::Object(params),
+                )
+            }
+            NotifyAction::Set { scope, kind, channels } => {
+                let mut params = serde_json::Map::new();
+                if let Some(w) = scope_of(scope) {
+                    params.insert("workspace_id".into(), serde_json::json!(w));
+                }
+                params.insert("kind".into(), serde_json::json!(kind));
+                params.insert("channels".into(), serde_json::json!(channels));
+                (
+                    NOTIFY_RULE_SET_REQ_ID,
+                    daemon_methods::HANGAR_NOTIFY_RULE_SET,
+                    serde_json::Value::Object(params),
+                )
+            }
         };
         let Ok(body) = encode_request(id, method, params) else {
             return;

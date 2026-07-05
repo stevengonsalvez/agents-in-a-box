@@ -70,11 +70,18 @@ pub enum WorkspaceAction {
 /// socket, scoped to the active workspace.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum NotifyAction {
-    /// Fetch the routing grid — raised when the user navigates into the
-    /// Notifications section (`hangar/notify_rules_list`).
-    Refresh,
+    /// Fetch the routing grid for `scope` — raised on entry to the Notifications
+    /// section, after a rule write, and when `g` flips the scope
+    /// (`hangar/notify_rules_list`). `scope` decides whether the RPC carries a
+    /// `workspace_id` (agents-in-a-box-cqh).
+    Refresh {
+        /// The scope to list (global omits `workspace_id`; workspace sends it).
+        scope: super::settings::NotifyScope,
+    },
     /// Upsert one rule (`space` toggled a cell) — `hangar/notify_rule_set`.
     Set {
+        /// The scope to write (global omits `workspace_id`; workspace sends it).
+        scope: super::settings::NotifyScope,
         /// The attention kind wire token the rule governs.
         kind: String,
         /// The full new push-channel set for that kind.
@@ -837,6 +844,17 @@ impl ScreenStates {
         self.pending_notify_action.take()
     }
 
+    /// The Notifications grid's current edit scope (global/workspace,
+    /// agents-in-a-box-cqh), or `Global` when the settings screen has never been
+    /// opened. The post-write re-fetch reads it so the grid re-lists the SAME
+    /// scope the user just wrote to.
+    #[must_use]
+    pub fn notify_scope(&self) -> super::settings::NotifyScope {
+        self.settings
+            .as_ref()
+            .map_or(super::settings::NotifyScope::Global, |s| s.notify_scope())
+    }
+
     /// Take the pending skill RPC raised by the skill-manager screen, if any.
     pub const fn take_pending_skill_action(&mut self) -> Option<SkillAction> {
         self.pending_skill_action.take()
@@ -1182,6 +1200,9 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     section == super::settings::SettingsSection::Workspaces;
                 let now_on_notifications =
                     section == super::settings::SettingsSection::Notifications;
+                // Capture the grid's edit scope before the state is moved back —
+                // every notify RPC is scoped to it (agents-in-a-box-cqh).
+                let notify_scope = out.state.notify_scope();
                 states.settings = Some(out.state);
                 // Lift the workspace switch/default intents into a deferred host
                 // action; the async key handler drains it and calls the cap.
@@ -1192,10 +1213,21 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SettingsIntent::ToggleDefault(id)) => {
                         states.pending_ws_action = Some(WorkspaceAction::SetDefault(id));
                     }
-                    // A toggled routing cell fires a `hangar/notify_rule_set` for
-                    // the active workspace (tcp T5).
+                    // A toggled routing cell fires a `hangar/notify_rule_set`
+                    // scoped to the grid's current global/workspace scope (tcp T5,
+                    // agents-in-a-box-cqh).
                     Some(SettingsIntent::SetNotifyRule { kind, channels }) => {
-                        states.pending_notify_action = Some(NotifyAction::Set { kind, channels });
+                        states.pending_notify_action = Some(NotifyAction::Set {
+                            scope: notify_scope,
+                            kind,
+                            channels,
+                        });
+                    }
+                    // `g` flipped the scope: re-list the rules for the new scope so
+                    // the grid shows what the human is now editing.
+                    Some(SettingsIntent::RefreshNotifyRules) => {
+                        states.pending_notify_action =
+                            Some(NotifyAction::Refresh { scope: notify_scope });
                     }
                     // KeychainWrite / New / Rename land in their own beads.
                     _ => {
@@ -1205,9 +1237,11 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                             states.pending_ws_action = Some(WorkspaceAction::Refresh);
                         }
                         // Likewise, fetch the routing grid on first entry to the
-                        // Notifications section (tcp T5).
+                        // Notifications section (tcp T5), scoped to the default
+                        // (global) scope.
                         if now_on_notifications && states.notify_rule_rows.is_empty() {
-                            states.pending_notify_action = Some(NotifyAction::Refresh);
+                            states.pending_notify_action =
+                                Some(NotifyAction::Refresh { scope: notify_scope });
                         }
                     }
                 }

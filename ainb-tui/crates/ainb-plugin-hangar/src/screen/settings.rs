@@ -77,10 +77,12 @@ pub enum SettingsSection {
     /// CLI-first (`ainb hangar member set-role|remove`) — the pane lists each
     /// member with their role so the operator can see who can do what.
     Members,
-    /// Per-attention-kind notification routing rules (tcp T5): a workspace-scoped
-    /// grid of kind × channel toggles. `J`/`K` move the kind row, `h`/`l` move the
-    /// channel column, `space` toggles the selected cell (emitting a
-    /// `SetNotifyRule` intent → `hangar/notify_rule_set`).
+    /// Per-attention-kind notification routing rules (tcp T5): a grid of kind ×
+    /// channel toggles. `J`/`K` move the kind row, `h`/`l` move the channel column,
+    /// `space` toggles the selected cell (emitting a `SetNotifyRule` intent →
+    /// `hangar/notify_rule_set`), and `g` flips the edit scope between the
+    /// host-wide GLOBAL rule and the active workspace override
+    /// (agents-in-a-box-cqh).
     Notifications,
 }
 
@@ -132,6 +134,45 @@ pub enum ConnectionStatus {
     Disconnected,
 }
 
+/// The scope the Notifications routing grid edits (agents-in-a-box-cqh).
+///
+/// GLOBAL edits the host-wide default rule (`workspace_id IS NULL`) — the rule a
+/// HOOK-raised attention resolves, because hook sessions are workspace-less
+/// (`attention_ingest` resolves `workspace=None`). So editing in `Global` scope
+/// is what actually re-routes the live ASK / error notifications a user sees.
+/// WORKSPACE edits the active workspace's OVERRIDE, which only governs attentions
+/// raised WITH that workspace attached (escalations, standups). The grid defaults
+/// to [`Self::Global`] so the common edit lands on the rule the fleet-wide
+/// attentions honour — "what you edit is what applies".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NotifyScope {
+    /// The host-wide default rule (`workspace_id IS NULL`) — what hook-raised
+    /// attentions resolve.
+    Global,
+    /// The active workspace's override rule.
+    Workspace,
+}
+
+impl NotifyScope {
+    /// Flip to the other scope.
+    #[must_use]
+    const fn toggled(self) -> Self {
+        match self {
+            Self::Global => Self::Workspace,
+            Self::Workspace => Self::Global,
+        }
+    }
+
+    /// The scope label rendered in the grid header + hint.
+    #[must_use]
+    const fn label(self) -> &'static str {
+        match self {
+            Self::Global => "global",
+            Self::Workspace => "workspace",
+        }
+    }
+}
+
 /// The render-state cache for the settings screen.
 ///
 /// Holds the four daemon snapshots, the active section, the in-section list
@@ -152,6 +193,9 @@ pub struct SettingsState {
     notify_kind_sel: usize,
     /// The selected channel column (0..[`Channel::all`]) in the Notifications grid.
     notify_channel_sel: usize,
+    /// The scope the grid edits — GLOBAL (host-wide default, what hook-raised
+    /// attentions honour) or the active WORKSPACE override (agents-in-a-box-cqh).
+    notify_scope: NotifyScope,
     section: SettingsSection,
     /// Selection within the active section's list (workspaces / keys).
     list_selected: usize,
@@ -184,6 +228,7 @@ impl SettingsState {
             notify_rules: Vec::new(),
             notify_kind_sel: 0,
             notify_channel_sel: 0,
+            notify_scope: NotifyScope::Global,
             section: SettingsSection::Daemon,
             list_selected: 0,
             connection,
@@ -248,6 +293,13 @@ impl SettingsState {
         (self.notify_kind_sel, self.notify_channel_sel)
     }
 
+    /// The scope the Notifications grid currently edits (global/workspace,
+    /// agents-in-a-box-cqh) — the glue reads it to scope the `notify_*` RPCs.
+    #[must_use]
+    pub const fn notify_scope(&self) -> NotifyScope {
+        self.notify_scope
+    }
+
     /// The daemon-connection status.
     #[must_use]
     pub const fn connection_status(&self) -> ConnectionStatus {
@@ -298,13 +350,19 @@ pub enum SettingsIntent {
     RenameWorkspace(String),
     /// Toggle one notification routing cell (`space` on the Notifications grid,
     /// tcp T5). Carries the attention kind wire token and the FULL new channel set
-    /// for that kind; the glue maps it to `hangar/notify_rule_set`.
+    /// for that kind; the glue maps it to `hangar/notify_rule_set` scoped to the
+    /// state's current [`SettingsState::notify_scope`].
     SetNotifyRule {
         /// The attention kind wire token the rule governs.
         kind: String,
         /// The new push-channel set after the toggle.
         channels: ChannelSet,
     },
+    /// Re-fetch the Notifications grid for the current scope (`g` flipped the
+    /// grid's global/workspace scope, agents-in-a-box-cqh). The glue maps it to a
+    /// `hangar/notify_rules_list` scoped to the state's [`SettingsState::notify_scope`]
+    /// so the rows the human now edits match the scope indicator.
+    RefreshNotifyRules,
 }
 
 /// The result of folding one [`SettingsEvent`] into a [`SettingsState`].
@@ -390,7 +448,24 @@ fn reduce_notify_key(state: &SettingsState, c: char) -> SettingsReduction {
         'h' => move_notify_channel(state, -1),
         'l' => move_notify_channel(state, 1),
         ' ' | 't' => toggle_notify_cell(state),
+        'g' => toggle_notify_scope(state),
         _ => unchanged(state),
+    }
+}
+
+/// Flip the grid's global/workspace scope (`g`, agents-in-a-box-cqh) and clear the
+/// loaded rows + reset the kind cursor, so a stale-scope cell can't be toggled
+/// before the re-fetch lands (`toggle_notify_cell` no-ops on an empty grid).
+/// Emits a [`SettingsIntent::RefreshNotifyRules`] so the glue re-lists the rules
+/// for the NEW scope — what the human now edits matches the scope they see.
+fn toggle_notify_scope(state: &SettingsState) -> SettingsReduction {
+    let mut next = state.clone();
+    next.notify_scope = next.notify_scope.toggled();
+    next.notify_rules.clear();
+    next.notify_kind_sel = 0;
+    SettingsReduction {
+        state: next,
+        intent: Some(SettingsIntent::RefreshNotifyRules),
     }
 }
 
@@ -624,6 +699,9 @@ fn render_notify_grid(
     const ON: Color = Color::rgb(100, 200, 100);
     const DIM: Color = Color::rgb(120, 120, 130);
     const CURSOR: Color = Color::rgb(255, 215, 0);
+    // Cornflower-blue scope indicator — distinct from the gold cursor accent so
+    // the two never read as the same control (agents-in-a-box-cqh).
+    const SCOPE: Color = Color::rgb(100, 149, 237);
 
     let put = |buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color| {
         for (ch, cx) in s.chars().zip(x..area_w) {
@@ -638,6 +716,21 @@ fn render_notify_grid(
     const KIND_COL: u16 = 4;
     const CELL_W: u16 = 8;
     let channels = Channel::all();
+
+    // Scope indicator + toggle hint (agents-in-a-box-cqh): the grid edits either
+    // the host-wide GLOBAL rule (what HOOK-raised attentions honour) or the active
+    // workspace's override; `g` flips between them so what you edit is what
+    // applies. Rendered above the grid with its key hint right beside it.
+    if row < bottom {
+        put(
+            buf,
+            KIND_COL,
+            row,
+            &format!("scope: {} · [g] toggle", state.notify_scope.label()),
+            SCOPE,
+        );
+        row += 1;
+    }
 
     // Header: channel names above their columns.
     if row < bottom {

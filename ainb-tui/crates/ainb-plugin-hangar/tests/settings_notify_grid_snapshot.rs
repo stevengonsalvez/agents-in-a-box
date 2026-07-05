@@ -110,11 +110,13 @@ fn tui_cursor_accent_follows_the_2d_cursor() {
     let mut buf = WireBuffer::new(60, 20);
     render_settings(&mut buf, 60, 20, 0, 20, &s);
 
-    // The bracketed cursor glyph `[` appears exactly once (the single active cell).
+    // The CURSOR-accented bracket glyph `[` appears exactly once (the single active
+    // cell). Filter by the accent colour so the scope line's muted `[g]` hint
+    // (agents-in-a-box-cqh) is never miscounted as a second cursor.
     let brackets = buf
         .cells
         .iter()
-        .filter(|(_, cell)| cell.symbol == "[")
+        .filter(|(_, cell)| cell.symbol == "[" && cell.fg == Some(CURSOR))
         .count();
     assert_eq!(brackets, 1, "exactly one cell is the bracketed cursor");
 }

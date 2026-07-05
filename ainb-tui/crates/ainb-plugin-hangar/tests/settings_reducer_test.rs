@@ -11,8 +11,8 @@ use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, Workspace
 use ainb_hangar_proto::snapshots::NotifyRuleWireRow;
 use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_hangar::screen::settings::{
-    reduce_settings, ConnectionStatus, KeyMaterial, SettingsEvent, SettingsIntent, SettingsSection,
-    SettingsState,
+    reduce_settings, ConnectionStatus, KeyMaterial, NotifyScope, SettingsEvent, SettingsIntent,
+    SettingsSection, SettingsState,
 };
 
 /// The seeded routing grid: ask → web+os, error → os, waiting → board-only.
@@ -325,6 +325,35 @@ fn notify_keys_are_section_scoped_and_j_k_still_navigate() {
         empty = reduce_settings(&empty, SettingsEvent::Key('j')).state;
     }
     assert!(reduce_settings(&empty, SettingsEvent::Key(' ')).intent.is_none());
+}
+
+/// agents-in-a-box-cqh: `g` flips the grid scope global⇄workspace, clears the
+/// loaded rows (so a stale-scope cell can't be toggled before the re-list lands),
+/// and emits a RefreshNotifyRules intent so the glue re-fetches the new scope. The
+/// grid defaults to GLOBAL — the scope hook-raised attentions actually resolve, so
+/// "what you edit is what applies" for the common ASK/error routing.
+#[test]
+fn notify_grid_g_toggles_scope_and_requests_refresh() {
+    let s = notify_state();
+    assert_eq!(s.notify_scope(), NotifyScope::Global, "grid defaults to global scope");
+    assert!(!s.notify_rules().is_empty(), "precondition: the grid is loaded");
+
+    let out = reduce_settings(&s, SettingsEvent::Key('g'));
+    assert_eq!(out.state.notify_scope(), NotifyScope::Workspace, "g flips to workspace");
+    assert!(
+        out.state.notify_rules().is_empty(),
+        "rows cleared until the scoped re-list lands (no stale-scope toggle)"
+    );
+    assert_eq!(
+        out.intent,
+        Some(SettingsIntent::RefreshNotifyRules),
+        "the flip requests a re-list for the new scope"
+    );
+
+    // Flipping back returns to global and re-requests a refresh.
+    let back = reduce_settings(&out.state, SettingsEvent::Key('g'));
+    assert_eq!(back.state.notify_scope(), NotifyScope::Global);
+    assert_eq!(back.intent, Some(SettingsIntent::RefreshNotifyRules));
 }
 
 /// Esc aborts the key-entry modal without emitting an intent.

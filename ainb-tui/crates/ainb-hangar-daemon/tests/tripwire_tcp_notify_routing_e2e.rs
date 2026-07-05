@@ -197,3 +197,151 @@ async fn flipping_ask_to_phone_routes_to_phone_and_suppresses_os() {
         other => panic!("expected AttentionRaised, got {other:?}"),
     }
 }
+
+/// Seed a workspace row so a per-workspace notify-rule override can be set + FK'd
+/// by an attention raised WITH that workspace (mirrors the store repo fixture).
+async fn seed_workspace(pool: &sqlx::SqlitePool, ws: &str) {
+    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+        .bind(ws)
+        .bind(ws)
+        .bind(ws)
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .expect("seed workspace");
+}
+
+/// Seed a minimal ATC instance so `raise_escalation`'s retry-ledger write
+/// (`atc_retry.instance_name` FKs `atc_instance(name)`) succeeds — the real
+/// escalation raise path needs a registered instance.
+async fn seed_atc_instance(pool: &sqlx::SqlitePool, name: &str) {
+    sqlx::query("INSERT INTO atc_instance (name, heartbeat_cron, created_at) VALUES (?, ?, ?)")
+        .bind(name)
+        .bind("*/5 * * * *")
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .expect("seed atc instance");
+}
+
+/// tcp T5 (agents-in-a-box-cqh) — the WORKSPACE-scoped routing path, end to end.
+///
+/// The global test above proves a hook-raised (workspace-less) attention honours
+/// the GLOBAL rule. This one closes the workspace half the settings grid's new
+/// `g`-toggle "Workspace" scope drives: set a per-workspace OVERRIDE through the
+/// SAME `notify_rule_set` RPC (now carrying a `workspace_id`), then raise an
+/// attention WITH that workspace attached (an ATC escalation — the real
+/// workspace-scoped raise path) and prove the row resolves the OVERRIDE, while a
+/// simultaneous workspace-less raise still resolves the untouched GLOBAL default.
+///
+/// ```text
+///  notify_rule_set(escalation → os, workspace_id=ws-a)   (grid Workspace scope)
+///         │
+///  atc::raise_escalation(ws-a)  ─▶ resolve at emit ─▶ row.channels = {os}   (override wins)
+///  atc::raise_escalation(None)  ─▶ resolve at emit ─▶ row.channels = {phone,web,os} (global)
+/// ```
+///
+/// A genuine regression guard: BEFORE the workspace override is written, ws-a
+/// resolves the global escalation default (phone+web+os), so the `{os}`-only
+/// assertion would fail; and if the override leaked to the global scope, the
+/// workspace-less raise's phone/web assertions would fail.
+#[tokio::test]
+async fn workspace_override_routes_a_workspace_scoped_raise_and_leaves_global_intact() {
+    use ainb_hangar_daemon::atc;
+    use ainb_hangar_store::repo::attention::AttentionKind;
+    use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
+
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    let broker = EventBroker::new();
+    let sink = broker.sink();
+    let health = health();
+    seed_workspace(store.pool(), "ws-a").await;
+    seed_atc_instance(store.pool(), "inst-ws").await;
+    seed_atc_instance(store.pool(), "inst-global").await;
+
+    // Baseline: with no override, ws-a resolves the GLOBAL escalation default.
+    let default = NotifyRuleRepo::resolve(store.pool(), AttentionKind::Escalation, Some("ws-a"))
+        .await
+        .unwrap();
+    assert_eq!(
+        default,
+        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+        "precondition: ws-a inherits the global escalation default (phone+web+os)"
+    );
+
+    // Write a WORKSPACE override through the grid's RPC WITH a workspace_id: ws-a
+    // escalation → os only (drops phone + web). This is exactly what the settings
+    // grid now sends in "Workspace" scope.
+    let flip = RpcRequest {
+        jsonrpc: ainb_hangar_proto::jsonrpc_version(),
+        id: RpcId::Number(3),
+        method: methods::HANGAR_NOTIFY_RULE_SET.into(),
+        params: serde_json::json!({
+            "workspace_id": "ws-a",
+            "kind": "escalation",
+            "channels": ["os"],
+        }),
+    };
+    let flip_resp = dispatch(store.pool(), &flip, &health, &sink).await;
+    assert!(flip_resp.error.is_none(), "the workspace rule flip succeeds: {flip_resp:?}");
+
+    // Raise an escalation FOR ws-a (a real workspace-scoped raise path) and one
+    // with NO workspace (host-wide), both resolved once at emit time.
+    atc::raise_escalation(
+        store.pool(),
+        &sink,
+        "inst-ws",
+        "sid-esc-ws",
+        "/tmp/ws",
+        Some("ws-a"),
+        "stuck",
+        7_000,
+    )
+    .await
+    .expect("workspace-scoped escalation raises");
+    atc::raise_escalation(
+        store.pool(),
+        &sink,
+        "inst-global",
+        "sid-esc-global",
+        "/tmp/global",
+        None,
+        "stuck",
+        8_000,
+    )
+    .await
+    .expect("host-wide escalation raises");
+
+    let feed = attention_feed(&store, &health, &sink).await;
+    let ws_row = feed
+        .iter()
+        .find(|r| r.workspace_id.as_deref() == Some("ws-a"))
+        .expect("the workspace escalation is in the feed");
+    let global_row = feed
+        .iter()
+        .find(|r| r.session_id == "sid-esc-global")
+        .expect("the host-wide escalation is in the feed");
+
+    // POSITIVE: the workspace-scoped raise honours the OVERRIDE (os only).
+    assert_eq!(ws_row.kind, "escalation");
+    assert_eq!(
+        ws_row.channels,
+        ChannelSet::from_channels([Channel::Os]),
+        "the workspace-scoped raise resolves the workspace override (os only)"
+    );
+    // The flipped channel decision is what the consumers filter on.
+    assert!(deliver_to(&feed, Channel::Os).contains(&ws_row.id), "os fired for ws-a");
+    assert!(
+        !deliver_to(&feed, Channel::Phone).contains(&ws_row.id),
+        "phone was DROPPED by the ws-a override"
+    );
+
+    // NEGATIVE: the workspace override did NOT leak to the global scope — a
+    // workspace-less raise still resolves the untouched global default.
+    assert_eq!(
+        global_row.channels,
+        ChannelSet::from_channels([Channel::Phone, Channel::Web, Channel::Os]),
+        "the host-wide raise resolves the untouched global escalation default"
+    );
+}

@@ -91,6 +91,7 @@ fn tui_renders_members_with_roles() {
         amy@x.io · owner
         bob@x.io · admin
       Notifications
+        scope: global · [g] toggle
                       phone   web     os      atc
         J/K kind · h/l channel · space toggle
     "###);

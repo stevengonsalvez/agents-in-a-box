@@ -84,7 +84,7 @@ fn tui_renders_active_indicator() {
     let map = glyph_map(&buf, 60);
     // POSITIVE: the active row carries `▶ default` and the [default] tag;
     // the inactive acme row renders without a `▶`.
-    insta::assert_snapshot!(map, @r###"
+    insta::assert_snapshot!(map, @"
       Daemon
         /tmp/hangar.sock · ● connected
       Providers
@@ -93,7 +93,11 @@ fn tui_renders_active_indicator() {
         ›▶ default · Default [default]
            acme · Acme
       Members
-    "###);
+      Notifications
+        scope: global · [g] toggle
+                      phone   web     os      atc
+        J/K kind · h/l channel · space toggle
+    ");
 
     // NON-VACUOUS COLOUR CHECK: the active workspace row's `▶` indicator is
     // painted in `SELECTION_GREEN`. The Workspaces *section header* also uses a
