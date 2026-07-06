@@ -53,7 +53,19 @@ pub async fn auto_move_after_transition(pool: &SqlitePool, task: &Task, new_stat
                 );
             }
         }
-        Ok(_) => {} // no board maps this state for this issue — a no-op.
+        // No board maps this state for this issue: either no card carries the
+        // issue, the target column is already where the card sits, or the move
+        // UPDATE matched 0 rows. Logged (not silent) so a card that FAILS to
+        // auto-move on CI is diagnosable — the earlier silent no-op hid exactly
+        // the linux-only "card stranded in Todo" failure this guards.
+        Ok(_) => {
+            tracing::info!(
+                task_id = %task.id,
+                issue_id = %issue_id,
+                state = new_state,
+                "board auto-move: no card moved (no matching auto-move column, or already there)"
+            );
+        }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "board auto-move failed; proceeding");
         }
@@ -87,8 +99,17 @@ pub async fn auto_move_after_terminal(pool: &SqlitePool, task: &Task) {
     };
     let state = match TaskRepo::issue_aggregate_terminal_state(pool, ws.as_str(), issue_id).await {
         // The active set has not drained yet — a sibling still runs, so the card
-        // must not terminal-move. A silent no-op.
-        Ok(None) => return,
+        // must not terminal-move. Logged (not silent) so a card that never moves
+        // because the aggregate read the issue as still-active is diagnosable on
+        // CI (distinguishes an un-drained gate from a failed move UPDATE).
+        Ok(None) => {
+            tracing::info!(
+                task_id = %task.id,
+                issue_id = %issue_id,
+                "board terminal auto-move: issue active set not drained; card stays put"
+            );
+            return;
+        }
         Ok(Some(s)) => s,
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "board terminal auto-move: aggregate read failed");
