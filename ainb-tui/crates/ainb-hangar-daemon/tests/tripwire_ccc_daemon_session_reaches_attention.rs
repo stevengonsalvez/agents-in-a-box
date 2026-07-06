@@ -89,6 +89,19 @@ async fn headless_card_run_hook_raises_an_attention_row() {
             ("HANGAR_DAEMON_RUNTIME_ID", &ids.runtime_id),
             ("HANGAR_CLAUDE_PATH", fake.to_str().unwrap()),
             ("HANGAR_DAEMON_POLL_MS", "200"),
+            // Disable the OS FS sandbox for this fixture. The fake `claude` fires
+            // the lifecycle hook by EXEC'ing the test-built `ainb` binary, which
+            // lives in the cargo target dir — outside the sandbox's read/exec
+            // roots (system dirs + the per-task root). On Linux, Landlock blocks
+            // that exec (the shell has no `set -e`, so the run still finishes to
+            // `done` — the hook simply never appends `events.jsonl`, and no
+            // attention row is raised); macOS Seatbelt is permissive enough that
+            // it slips through, which is why this only reddened the Linux leg.
+            // Mirrors the worktree fixtures' `disable_sandbox()` — a test-harness
+            // artifact, not a product gap: a real deployment's `ainb` sits in a
+            // system read-root (`/usr/...`), so the production hook exec is
+            // allowed and this pipeline works confined.
+            ("HANGAR_DAEMON_DISABLE_SANDBOX", "1"),
         ],
     );
 
