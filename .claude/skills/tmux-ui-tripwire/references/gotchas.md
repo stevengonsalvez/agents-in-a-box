@@ -144,3 +144,48 @@ Field-discovered on the embed width tripwire: first run read a 58-col
 saved sidebar and asserted 60 != 78. The same trap applies to any
 config-backed state — snapshot/pin it, don't trust the constructor's
 "default" to be the documented default on every machine.
+
+## Traps from the ccc/tcp campaign (2026-07)
+
+**notifyd consent dialog eats the first keypress** on a fresh isolated HOME —
+the tripwire times out ~20s waiting for a screen the swallowed key never
+opened. Seed the dismissed install record before launching:
+
+```rust
+let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+fs::write(home.join(".agents-in-a-box").join("install.json"), install_record)?;
+```
+
+(`tripwire_new_session_common.rs::seed_isolated_home` does this for the whole
+new-session family.)
+
+**gh-auth wall**: pressing Enter on a GitHub favorite runs
+`gh auth status --hostname github.com`; an isolated HOME on a keychain-authed
+box fails closed and an auth modal blocks the flow. Stub a signed-in `gh` on
+PATH — `launch_cmd_gh_authed` in `tripwire_new_session_common.rs`.
+
+**TTY stdin wedge**: a test driving a real hook/CLI that `read_to_string`s
+stdin blocks FOREVER under a terminal (tmux gives a tty) but passes under
+`/dev/null` (CI, tool shells) — the suite "hangs in full runs" but every test
+passes solo. Guard product stdin reads with `IsTerminal`; run suites
+stdin-closed (`cargo test ... < /dev/null`). Diagnose wedges with
+`sample <pid>` — the blocked frame names the read.
+
+**Stale plugin under a shared CARGO_TARGET_DIR**: daemon tripwires resolve
+`plugin_root()` relative to the target dir, but `scripts/build-plugins.sh`
+stages into `ainb-tui/dist/plugins`. With `CARGO_TARGET_DIR` overridden you
+can test a stale binary for hours. Restage after every build (the script now
+also stages into the shared-target dist) and re-check when a "fixed" behaviour
+doesn't appear.
+
+**macOS CI runs a smoke subset**: the mac hangar-e2e leg sets
+`HANGAR_TRIPWIRE_SMOKE=1` (3 tests). "Mac CI green" ≠ full-suite green — only
+the ubuntu leg runs all 56. Ubuntu-only reds are real; two documented causes:
+SQLite WAL `synchronous=FULL` write-lock contention swallowing best-effort
+writes (fix: `synchronous=NORMAL` + `busy_timeout(10s)`), and Linux Landlock
+denying exec of target-dir binaries that macOS Seatbelt permits (disable the
+sandbox for that fixture).
+
+**Unix socket 104-char path limit (macOS)**: a deep fixture HOME makes the
+daemon silently fail to bind `hangar.sock` — everything then times out with
+no error. Seed fixture HOMEs under a short `mktemp -d /tmp/xx.XXXXXX`.
