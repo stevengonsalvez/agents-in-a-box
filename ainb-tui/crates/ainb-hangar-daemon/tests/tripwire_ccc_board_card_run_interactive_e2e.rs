@@ -37,7 +37,8 @@ mod common;
 use common::{
     BOARD_RUN_DONE_COL, BOARD_RUN_PROFILE, BOARD_RUN_TODO_COL, INTERACTIVE_RELEASE_SENTINEL,
     TuiSession, board_card_by_title, budget_scale, can_run_tripwire, drive_card_create_to_profile,
-    interactive_session_for_title, prepare_pipeline_board_run_interactive, skip, tmux_session_live,
+    dump_daemon_logs, interactive_session_for_title, prepare_pipeline_board_run_interactive, skip,
+    tmux_session_live,
 };
 
 /// The distinctive card title the tripwire types — greppable on the pane and in
@@ -196,10 +197,12 @@ fn running_a_card_interactively_spawns_a_real_tmux_session_then_reaps_and_greens
     let (col, state) = landed.unwrap_or_else(|| {
         panic!("the created card never appeared in the db under `{CARD_TITLE}`")
     });
+    let daemon_logs = dump_daemon_logs(pipe.home());
     assert_eq!(
         col.as_deref(),
         Some(BOARD_RUN_DONE_COL),
-        "the interactive run must auto-move the card into the Done column (was {col:?})"
+        "the interactive run must auto-move the card into the Done column (was {col:?})\n\
+         daemon logs:\n{daemon_logs}"
     );
     assert_eq!(
         state.as_deref(),

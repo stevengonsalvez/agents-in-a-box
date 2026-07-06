@@ -2594,6 +2594,54 @@ pub fn drive_card_create_to_profile(
         .unwrap_or_else(|| panic!("profile stage never opened:\n{}", sess.capture()))
 }
 
+/// Read the daemon's structured JSONL logs under
+/// `<home>/.agents-in-a-box/hangar/logs/` and return the tail of every `daemon.*`
+/// file (newest file last, last 200 lines each). The daemon logs at `info` by
+/// default (finalize outcomes, `board card auto-moved`, `board auto-move failed`,
+/// attention-ingest), so folding this into a FAILING tripwire's panic makes a
+/// CI-only failure diagnosable without a local Linux repro. Empty-safe: returns a
+/// marker string when the dir/files are absent (the daemon never booted, or a
+/// buffered line has not flushed yet).
+#[must_use]
+pub fn dump_daemon_logs(home: &Path) -> String {
+    let logs = home.join(".agents-in-a-box").join("hangar").join("logs");
+    let Ok(entries) = std::fs::read_dir(&logs) else {
+        return format!("(no daemon logs at {})", logs.display());
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("daemon."))
+        })
+        .collect();
+    files.sort();
+    let mut out = String::new();
+    for f in &files {
+        let Ok(s) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        let lines: Vec<&str> = s.lines().collect();
+        let start = lines.len().saturating_sub(200);
+        let _ = writeln!(
+            out,
+            "--- {} (last {} lines) ---",
+            f.display(),
+            lines.len() - start
+        );
+        for line in &lines[start..] {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+    if out.is_empty() {
+        out = format!(
+            "(daemon log dir {} present but no daemon.* content)",
+            logs.display()
+        );
+    }
+    out
+}
+
 /// Print the canonical SKIP line and return — keeps every tripwire's skip path
 /// identical and greppable.
 pub fn skip(reason: &str) {

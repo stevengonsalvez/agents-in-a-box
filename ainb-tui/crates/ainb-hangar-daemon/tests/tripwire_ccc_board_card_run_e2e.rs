@@ -33,8 +33,8 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_DONE_COL, BOARD_RUN_PROFILE, BOARD_RUN_TODO_COL, TuiSession, board_card_by_title,
-    budget_scale, can_run_tripwire, drive_card_create_to_profile, prepare_pipeline_board_run,
-    scratch_dir, scratch_slug_by_title, skip,
+    budget_scale, can_run_tripwire, drive_card_create_to_profile, dump_daemon_logs,
+    prepare_pipeline_board_run, scratch_dir, scratch_slug_by_title, skip,
 };
 
 /// The distinctive card title the tripwire types — greppable on the pane and in
@@ -140,10 +140,12 @@ fn creating_a_card_and_running_it_auto_moves_and_greens() {
     let (col, state) = landed.unwrap_or_else(|| {
         panic!("the created card never appeared in the db under `{CARD_TITLE}`")
     });
+    let daemon_logs = dump_daemon_logs(pipe.home());
     assert_eq!(
         col.as_deref(),
         Some(BOARD_RUN_DONE_COL),
-        "the run must auto-move the card into the Done column (was {col:?})"
+        "the run must auto-move the card into the Done column (was {col:?})\n\
+         daemon logs:\n{daemon_logs}"
     );
     assert_eq!(
         state.as_deref(),

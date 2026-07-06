@@ -33,9 +33,9 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_DONE_COL, BOARD_RUN_PROFILE, TuiSession, WORKTREE_REPO_NAME, board_card_by_title,
-    budget_scale, can_run_tripwire, drive_card_create_to_profile, git_branch_exists,
-    prepare_pipeline_worktree_pr, skip, task_branch_by_title, task_short_id_by_title,
-    worktree_branch, worktree_dir,
+    budget_scale, can_run_tripwire, drive_card_create_to_profile, dump_daemon_logs,
+    git_branch_exists, prepare_pipeline_worktree_pr, skip, task_branch_by_title,
+    task_short_id_by_title, worktree_branch, worktree_dir,
 };
 
 /// The distinctive card title the tripwire types — greppable, never aliases a
@@ -186,9 +186,11 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
     // PR read on a finished card, not a phantom render.
     let (col, _) = board_card_by_title(pipe.home(), CARD_TITLE)
         .unwrap_or_else(|| panic!("the card vanished from the db"));
+    let daemon_logs = dump_daemon_logs(pipe.home());
     assert_eq!(
         col.as_deref(),
         Some(BOARD_RUN_DONE_COL),
-        "the finished card must be in the Done column (was {col:?})"
+        "the finished card must be in the Done column (was {col:?})\n\
+         daemon logs:\n{daemon_logs}"
     );
 }
