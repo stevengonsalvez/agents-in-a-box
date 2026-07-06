@@ -5,9 +5,10 @@
 //! single pool a `Store` hands out via [`Store::pool`].
 
 use std::path::{Path, PathBuf};
+use std::time::Duration;
 
 use sqlx::SqlitePool;
-use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
+use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions, SqliteSynchronous};
 
 use crate::apply_migrations;
 
@@ -65,7 +66,19 @@ impl Store {
         let opts = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
-            .journal_mode(SqliteJournalMode::Wal);
+            .journal_mode(SqliteJournalMode::Wal)
+            // WAL + `NORMAL` fsync is the standard durable-enough tuning: the
+            // default `FULL` fsyncs on EVERY commit, so under the daemon's many
+            // concurrent writer loops (claim FSM, sweepers, attention ingest,
+            // event-outbox drain, RPC mutations) the write lock is held across a
+            // disk flush per commit — long enough on a slow/loaded CI host that a
+            // best-effort secondary write (the board card auto-move, an attention
+            // insert) can exhaust its `busy_timeout` and get swallowed. `NORMAL`
+            // only fsyncs at checkpoint, cutting lock-hold time sharply. Pair it
+            // with an explicit, generous `busy_timeout` so a contended writer
+            // WAITS for the lock instead of erroring `SQLITE_BUSY`.
+            .synchronous(SqliteSynchronous::Normal)
+            .busy_timeout(Duration::from_secs(10));
         let pool = SqlitePoolOptions::new().connect_with(opts).await?;
         apply_migrations(&pool).await?;
         Ok(Self { pool })
