@@ -370,6 +370,65 @@ pub fn read_sessions_json(home: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// Read the daemon's structured JSONL logs under
+/// `<home>/.agents-in-a-box/hangar/logs/` and return the tail of every `daemon.*`
+/// file (newest file last, last 200 lines each). The daemon logs at `info` by
+/// default (finalize outcomes, attention-ingest classify/insert), so folding this
+/// into a FAILING tripwire's panic makes a CI-only failure diagnosable without a
+/// local Linux repro. Empty-safe when the dir/files are absent.
+#[must_use]
+pub fn dump_daemon_logs(home: &Path) -> String {
+    let logs = home.join(".agents-in-a-box").join("hangar").join("logs");
+    let Ok(entries) = std::fs::read_dir(&logs) else {
+        return format!("(no daemon logs at {})", logs.display());
+    };
+    let mut files: Vec<PathBuf> = entries
+        .flatten()
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("daemon."))
+        })
+        .collect();
+    files.sort();
+    let mut out = String::new();
+    for f in &files {
+        let Ok(s) = std::fs::read_to_string(f) else {
+            continue;
+        };
+        let lines: Vec<&str> = s.lines().collect();
+        let start = lines.len().saturating_sub(200);
+        let _ = writeln!(
+            out,
+            "--- {} (last {} lines) ---",
+            f.display(),
+            lines.len() - start
+        );
+        for line in &lines[start..] {
+            let _ = writeln!(out, "{line}");
+        }
+    }
+    if out.is_empty() {
+        out = format!(
+            "(daemon log dir {} present but no daemon.* content)",
+            logs.display()
+        );
+    }
+    // The hook's durable event log — decisive for the attention tripwire: it
+    // distinguishes "the hook never appended" (file absent/empty → membership gate
+    // or env fault) from "appended but the ingest never raised a row" (classify /
+    // insert fault). The ingest cursor shows whether the tail advanced past it.
+    let hangar = home.join(".agents-in-a-box");
+    match std::fs::read_to_string(hangar.join("events.jsonl")) {
+        Ok(s) => {
+            let _ = writeln!(out, "--- events.jsonl ({} bytes) ---\n{s}", s.len());
+        }
+        Err(e) => {
+            let _ = writeln!(out, "--- events.jsonl: unreadable ({e}) ---");
+        }
+    }
+    out
+}
+
 /// Write `body` to `dir/name` and mark it executable (0755).
 fn write_executable(dir: &Path, name: &str, body: &str) -> PathBuf {
     let path = dir.join(name);

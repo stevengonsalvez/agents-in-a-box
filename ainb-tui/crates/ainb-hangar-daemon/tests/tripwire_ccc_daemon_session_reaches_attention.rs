@@ -38,9 +38,21 @@ use std::time::Duration;
 use sqlx::SqlitePool;
 use sqlx::sqlite::SqlitePoolOptions;
 use tripwire_support::{
-    DaemonProcess, ainb_bin, fake_claude_fires_hook, now_ms, plant_ask_transcript, seed_world,
-    tmux_available, wait_for_attention_kind, wait_for_db,
+    DaemonProcess, ainb_bin, dump_daemon_logs, fake_claude_fires_hook, now_ms,
+    plant_ask_transcript, seed_world, tmux_available, wait_for_attention_kind, wait_for_db,
 };
+
+/// CI-runner budget multiplier (`HANGAR_TRIPWIRE_BUDGET_SCALE`, default 1). The
+/// slower/loaded Linux CI leg runs the full serial tripwire suite, so the
+/// hook→events.jsonl→ingest→attention pipeline can lag past a dev-tuned ceiling;
+/// scale the poll budgets the same way the P4 tmux tripwires do.
+fn budget_scale() -> u64 {
+    std::env::var("HANGAR_TRIPWIRE_BUDGET_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .filter(|&n| n >= 1)
+        .unwrap_or(1)
+}
 
 /// The session id the stub fires the hook under — the attention row's session id.
 const HOOK_SID: &str = "ccc-headless-sid";
@@ -96,17 +108,20 @@ async fn headless_card_run_hook_raises_an_attention_row() {
     .expect("enqueue task");
 
     // The run reaches done (the stub exits 0 after firing the hook).
-    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(30)).await;
+    let scale = budget_scale();
+    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(30 * scale)).await;
 
     // POSITIVE: the hook's events.jsonl append — resolvable ONLY because the fix
     // stamps AINB_PARENT_SESSION onto the child env — reached the daemon's
     // attention ingest, which classified it ASK and raised a row for the session.
-    let kind = wait_for_attention_kind(&pool, HOOK_SID, Duration::from_secs(30)).await;
+    let kind = wait_for_attention_kind(&pool, HOOK_SID, Duration::from_secs(30 * scale)).await;
 
     let kind = kind.unwrap_or_else(|| {
+        let daemon_logs = dump_daemon_logs(home.path());
         panic!(
             "a daemon-spawned headless card run's AskUserQuestion never reached the attention \
-             inbox — the hook's fleet-membership gate did not resolve (AINB_PARENT_SESSION missing)"
+             inbox — the hook's fleet-membership gate did not resolve (AINB_PARENT_SESSION \
+             missing)\ndaemon logs:\n{daemon_logs}"
         )
     });
     assert_eq!(
