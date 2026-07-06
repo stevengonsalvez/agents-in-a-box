@@ -1,0 +1,29 @@
+-- Hangar v1 schema, migration 0026: bind an attention row to the raising
+-- session's transcript (architecture §4.3, spec P2 — the C1 misroute guard).
+--
+-- The answer router resolves an attention row back to a live session for
+-- last-mile delivery. An exact session-id match is unambiguous; when it misses
+-- (the hook's session id often differs from a discovered Session::id) the
+-- router falls back to correlating by `cwd`. But attention rows are DURABLE and
+-- outlive the raising agent, so a purely-cwd fallback has a temporal hole: if
+-- the original session has EXITED and a DIFFERENT new agent now occupies the
+-- same cwd, the fallback would deliver the answer to an agent that never asked
+-- the question (a C1 violation — "an answer must reach the EXACT agent that
+-- asked").
+--
+--   - `raise_transcript` the absolute path of the transcript the raising session
+--                        was writing when the request was raised (from the hook
+--                        line's `transcript_path`), or NULL when the producer had
+--                        none. It is the session-stable identity token the answer
+--                        router requires to still own the cwd before it will
+--                        deliver via the cwd fallback: if the newest transcript
+--                        in the cwd is no longer this one, the occupant changed
+--                        and the router refuses rather than misroute. NULL rows
+--                        (legacy, or a hook line without a transcript) keep the
+--                        prior cwd-fallback behaviour.
+--
+-- ADD COLUMN with no backfill is an O(1) catalog change in SQLite, safe on a
+-- populated database: existing rows read back NULL. Re-applying is a no-op via
+-- the migrator ledger.
+
+ALTER TABLE attention ADD COLUMN raise_transcript TEXT;

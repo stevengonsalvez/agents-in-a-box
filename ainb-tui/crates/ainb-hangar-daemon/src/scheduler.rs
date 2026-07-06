@@ -35,14 +35,25 @@
 //! one catch-up tick and then resumes the schedule rather than replaying a burst
 //! of missed slots (the open-question #2 resolution in P7.md).
 //!
-//! # Skip-when-in-flight (the concurrency policy)
+//! # Concurrency policy at the in-flight limit (e38.19)
 //!
 //! Before firing, the loop counts the autopilot's in-flight runs
 //! (`autopilot_run WHERE autopilot_id = ? AND completed_at IS NULL`). When that
-//! count has reached `max_concurrent_runs` the tick is **skipped**: no
-//! `autopilot_run` / `agent_task_queue` row is created, a `tracing::warn!` is
-//! emitted, an [`SchedulerEvent::TickSkipped`] is published to the optional event
-//! sink, and `next_tick_at` is still advanced so the autopilot rejoins the
+//! count has reached `max_concurrent_runs`, the autopilot's
+//! [`ConcurrencyPolicy`] decides what happens — and the three policies genuinely
+//! change what the scheduler DOES, not just a stored flag:
+//!
+//! - `skip` (the v1 default): drop the tick. No `autopilot_run` /
+//!   `agent_task_queue` row is created, a `tracing::warn!` is emitted, an
+//!   [`SchedulerEvent::TickSkipped`] is published.
+//! - `queue`: fire the tick ANYWAY (create the run + task). The shared
+//!   claim/dispatch queue then drains the enqueued tasks in order, so the second
+//!   tick RUNS AFTER the in-flight one rather than being dropped.
+//! - `replace`: supersede the in-flight run(s) — cancel each open run + its task
+//!   ([`supersede_in_flight`]) — then fire a fresh run + task. The latest tick
+//!   wins; the stale in-flight work is abandoned.
+//!
+//! In every case `next_tick_at` is still advanced so the autopilot rejoins the
 //! schedule at its next slot.
 //!
 //! # The wake handle — re-evaluating when injected time jumps (the e2e seam)
@@ -84,8 +95,8 @@ use ainb_hangar_core::autopilot::cron::{
     millis_to_utc, next_tick_after, parse_cron, utc_to_millis,
 };
 use ainb_hangar_core::clock::HangarClock;
-use ainb_hangar_store::repo::autopilot::Autopilot;
-use ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick;
+use ainb_hangar_store::repo::autopilot::{Autopilot, ConcurrencyPolicy};
+use ainb_hangar_store::repo::autopilot_run::{fire_autopilot_tick, supersede_in_flight};
 use sqlx::SqlitePool;
 use tokio::sync::Notify;
 use tokio::sync::mpsc::UnboundedSender;
@@ -243,6 +254,7 @@ pub struct AutopilotScheduler {
     clock: Arc<dyn HangarClock>,
     shutdown: CancellationToken,
     events: Option<UnboundedSender<SchedulerEvent>>,
+    hangar_events: Option<crate::events::EventSink>,
     wake: Option<WakeHandle>,
 }
 
@@ -255,6 +267,7 @@ impl AutopilotScheduler {
             clock,
             shutdown,
             events: None,
+            hangar_events: None,
             wake: None,
         }
     }
@@ -275,6 +288,17 @@ impl AutopilotScheduler {
     #[must_use]
     pub fn with_event_sink(mut self, tx: UnboundedSender<SchedulerEvent>) -> Self {
         self.events = Some(tx);
+        self
+    }
+
+    /// Attach the daemon's wire-event sink (e38.2): each fire / skip decision
+    /// additionally publishes a workspace-scoped
+    /// [`HangarEvent::AutopilotRunChanged`](ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged)
+    /// so the autopilot manager's run-history pane updates live. Production
+    /// (`boot`) wires the broker sink; tests may leave it off.
+    #[must_use]
+    pub fn with_hangar_events(mut self, sink: crate::events::EventSink) -> Self {
+        self.hangar_events = Some(sink);
         self
     }
 
@@ -340,7 +364,8 @@ impl AutopilotScheduler {
     async fn load_enabled(&self) -> Result<Vec<Autopilot>, sqlx::Error> {
         sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, \
+                    next_tick_at, enabled, created_at \
              FROM autopilot \
              WHERE enabled = 1 AND next_tick_at IS NOT NULL \
              ORDER BY next_tick_at ASC",
@@ -365,40 +390,95 @@ impl AutopilotScheduler {
             }
         };
 
-        if in_flight >= ap.max_concurrent_runs {
-            tracing::warn!(
-                autopilot_id = %ap.id,
-                in_flight,
-                max = ap.max_concurrent_runs,
-                "autopilot.tick_skipped — concurrency limit"
-            );
-            self.emit(SchedulerEvent::TickSkipped {
-                autopilot_id: ap.id.clone(),
-                reason: "concurrency",
-                in_flight,
-            });
-        } else {
-            match fire_autopilot_tick(&self.pool, &*self.clock, ap).await {
-                Ok((run_id, task_id)) => {
-                    tracing::info!(
-                        autopilot_id = %ap.id,
-                        run_id = %run_id,
-                        task_id = %task_id,
-                        "autopilot fired"
-                    );
-                    self.emit(SchedulerEvent::Fired {
-                        autopilot_id: ap.id.clone(),
-                        run_id: run_id.to_string(),
-                        task_id: task_id.to_string(),
-                    });
-                }
-                Err(e) => {
-                    tracing::error!(autopilot_id = %ap.id, error = %e, "autopilot fire failed");
+        let at_limit = in_flight >= ap.max_concurrent_runs;
+        // The concurrency policy only matters AT the limit. Under the limit, every
+        // policy simply fires.
+        match (at_limit, ap.concurrency_policy) {
+            // Under the limit: fire normally regardless of policy.
+            (false, _) => self.fire(ap).await,
+
+            // At the limit + skip: drop the tick (the v1 behaviour).
+            (true, ConcurrencyPolicy::Skip) => {
+                tracing::warn!(
+                    autopilot_id = %ap.id,
+                    in_flight,
+                    max = ap.max_concurrent_runs,
+                    "autopilot.tick_skipped — concurrency limit"
+                );
+                self.emit(SchedulerEvent::TickSkipped {
+                    autopilot_id: ap.id.clone(),
+                    reason: "concurrency",
+                    in_flight,
+                });
+                self.emit_run_changed(ap, "skipped");
+            }
+
+            // At the limit + queue: fire ANYWAY. The shared claim/dispatch queue
+            // drains the enqueued tasks in order, so the second tick runs AFTER
+            // the in-flight one rather than being dropped.
+            (true, ConcurrencyPolicy::Queue) => {
+                tracing::info!(
+                    autopilot_id = %ap.id,
+                    in_flight,
+                    "autopilot.tick_queued — firing despite the concurrency limit"
+                );
+                self.fire(ap).await;
+            }
+
+            // At the limit + replace: supersede the in-flight run(s) — cancel each
+            // open run + its task — then fire a fresh one. The latest tick wins.
+            (true, ConcurrencyPolicy::Replace) => {
+                match supersede_in_flight(&self.pool, &*self.clock, &ap.id).await {
+                    Ok(superseded) => {
+                        tracing::info!(
+                            autopilot_id = %ap.id,
+                            superseded,
+                            "autopilot.tick_replaced — superseded in-flight runs, firing fresh"
+                        );
+                        // The cancelled run(s) changed state; announce it so the
+                        // run-history pane updates before the fresh fire.
+                        if superseded > 0 {
+                            self.emit_run_changed(ap, "cancelled");
+                        }
+                        self.fire(ap).await;
+                    }
+                    Err(e) => {
+                        tracing::error!(
+                            autopilot_id = %ap.id,
+                            error = %e,
+                            "autopilot replace: supersede failed; not firing"
+                        );
+                    }
                 }
             }
         }
 
         self.reschedule(ap).await;
+    }
+
+    /// Fire one autopilot tick through the P7.4 enqueue path, emitting the
+    /// `Fired` event + a `running` run-change on success. Errors are logged and
+    /// swallowed (one bad fire must not down the loop).
+    async fn fire(&self, ap: &Autopilot) {
+        match fire_autopilot_tick(&self.pool, &*self.clock, ap).await {
+            Ok((run_id, task_id)) => {
+                tracing::info!(
+                    autopilot_id = %ap.id,
+                    run_id = %run_id,
+                    task_id = %task_id,
+                    "autopilot fired"
+                );
+                self.emit(SchedulerEvent::Fired {
+                    autopilot_id: ap.id.clone(),
+                    run_id: run_id.to_string(),
+                    task_id: task_id.to_string(),
+                });
+                self.emit_run_changed(ap, "running");
+            }
+            Err(e) => {
+                tracing::error!(autopilot_id = %ap.id, error = %e, "autopilot fire failed");
+            }
+        }
     }
 
     /// Count the autopilot's in-flight (not-yet-completed) runs — the
@@ -433,6 +513,24 @@ impl AutopilotScheduler {
     fn emit(&self, event: SchedulerEvent) {
         if let Some(tx) = &self.events {
             let _ = tx.send(event);
+        }
+    }
+
+    /// Publish a workspace-scoped
+    /// [`AutopilotRunChanged`](ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged)
+    /// onto the daemon's wire-event sink when one is attached (e38.2). The
+    /// scheduler is daemon-global, so each event is scoped to the firing
+    /// autopilot's own workspace — a foreign tenant's subscription never sees
+    /// it.
+    fn emit_run_changed(&self, ap: &Autopilot, status: &str) {
+        if let Some(sink) = &self.hangar_events {
+            sink.emit(
+                &ap.workspace_id,
+                ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                    autopilot_id: ap.id.clone(),
+                    status: status.to_string(),
+                },
+            );
         }
     }
 }
@@ -526,6 +624,8 @@ mod tests {
             instructions: None,
             cron_expr: cron.to_string(),
             max_concurrent_runs: max,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
             next_tick_at,
             enabled: true,
             created_at: 0,

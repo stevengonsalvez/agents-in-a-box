@@ -1,0 +1,28 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_profiles.rs
+expression: full
+---
+Profiles                                                                                  3 profiles
+▶ author          balanced│author · loading…
+  code-reviewer    premium│
+  docs-writer         fast│
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+                          │
+[j/k] move   [t] cycle tier

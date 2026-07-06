@@ -3,16 +3,17 @@
 //! Issue-driven tasks execute inside a dedicated `git worktree` so the agent's
 //! checkout, branch, and dirty state are isolated from every other task and from
 //! the shared repo cache. Hangar shells out to the real `git` binary (simpler
-//! and truer to Multica's behaviour than a `git2` re-implementation, and the CI
+//! and truer to the reference's behaviour than a `git2` re-implementation, and the CI
 //! matrix + ainb-tui already require `git`).
 //!
-//! The branch is `hangar/task/{shortID}` so a human (or `git worktree list`) can
-//! map a checkout back to its task at a glance.
+//! The branch is `hangar/task/{task_id}` — keyed on the FULL task id (tcp vpm) so a
+//! human (or `git worktree list`) can map a checkout back to its task at a glance,
+//! with no truncated-slug collision risk.
 //!
 //! # Chat tasks
 //!
-//! A task with **no** `issue_id` is a chat / autopilot task. Multica leaves its
-//! `workdir/` empty until the agent explicitly calls `multica repo checkout`, so
+//! A task with **no** `issue_id` is a chat / autopilot task. The reference leaves its
+//! `workdir/` empty until the agent explicitly calls its `repo checkout`, so
 //! [`prepare_worktree`] performs no git invocation and returns [`None`]. The
 //! [`crate::execenv::prepare_env`] step has already created the empty `workdir/`.
 //!
@@ -29,27 +30,28 @@ use std::process::Command;
 
 use ainb_hangar_store::repo::task::Task;
 
-use crate::execenv::{ExecEnv, short_id};
+use crate::execenv::ExecEnv;
 
 /// A registered git worktree for one task.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Worktree {
     /// The checkout directory (equals [`ExecEnv::workdir`]).
     pub workdir: PathBuf,
-    /// The branch checked out in the worktree (`hangar/task/{shortID}`).
+    /// The branch checked out in the worktree (`hangar/task/{task_id}`).
     pub branch: String,
 }
 
-/// The branch name a task's worktree checks out.
+/// The branch name a task's worktree checks out — `hangar/task/{task_id}`, keyed on
+/// the FULL task id (tcp vpm) so no truncated slug can hand two runs one branch.
 #[must_use]
 fn task_branch(task: &Task) -> String {
-    format!("hangar/task/{}", short_id(&task.id))
+    format!("hangar/task/{}", task.id)
 }
 
 /// Prepare the git worktree for a task, or `None` for chat tasks.
 ///
 /// For an issue-driven task this runs `git worktree add {workdir} -b
-/// hangar/task/{shortID}` against `repo_cache`, creating the per-task branch and
+/// hangar/task/{task_id}` against `repo_cache`, creating the per-task branch and
 /// registering the checkout. For a chat task (no `issue_id`) it performs no git
 /// invocation and returns [`None`], leaving `env.workdir` empty.
 ///
@@ -67,7 +69,7 @@ pub fn prepare_worktree(
     repo_cache: &Path,
 ) -> io::Result<Option<Worktree>> {
     // Chat tasks never get a worktree; their workdir stays empty until the agent
-    // checks something out itself (Multica `multica repo checkout`).
+    // checks something out itself (the reference's `repo checkout`).
     if task.issue_id.is_none() {
         return Ok(None);
     }

@@ -5,8 +5,12 @@
 //! full request path — routing, auth, JSON serialization — without binding a
 //! socket or spawning the `ainb` binary.
 
-use std::sync::Arc;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::{Arc, Mutex};
 
+use ainb_hangar_proto::snapshots::{AnswerParams, AnswerResult};
+use ainb_web::daemon::{Answerer, DaemonError};
 use ainb_web::data::{
     CoreFuture, CoreSnapshot, CostFuture, DataError, DataSource, FleetSnapshot, SnapshotFuture,
 };
@@ -64,6 +68,77 @@ fn app(token: Option<&str>) -> axum::Router {
     };
     let state = AppState::new(config, Arc::new(FakeSource));
     router(state)
+}
+
+/// A deterministic [`Answerer`] that records the params it received and returns
+/// a canned outcome — the seam that lets a route test drive `POST /api/answer`
+/// without a live daemon socket.
+struct FakeAnswerer {
+    last: Arc<Mutex<Option<AnswerParams>>>,
+    outcome: AnswerResult,
+}
+
+impl FakeAnswerer {
+    fn new(outcome: AnswerResult) -> (Arc<Self>, Arc<Mutex<Option<AnswerParams>>>) {
+        let last = Arc::new(Mutex::new(None));
+        (
+            Arc::new(Self {
+                last: Arc::clone(&last),
+                outcome,
+            }),
+            last,
+        )
+    }
+}
+
+impl Answerer for FakeAnswerer {
+    fn answer(
+        &self,
+        params: AnswerParams,
+    ) -> Pin<Box<dyn Future<Output = Result<AnswerResult, DaemonError>> + Send + '_>> {
+        *self.last.lock().unwrap() = Some(params);
+        let outcome = self.outcome.clone();
+        Box::pin(async move { Ok(outcome) })
+    }
+}
+
+fn app_with_answerer(
+    token: Option<&str>,
+    answerer: Arc<dyn Answerer>,
+    read_only: bool,
+) -> axum::Router {
+    let config = WebConfig {
+        listen: "127.0.0.1:0".parse().unwrap(),
+        token: token.map(str::to_string),
+        insecure_bind: false,
+        read_only,
+    };
+    let state = AppState::with_answerer(config, Arc::new(FakeSource), answerer);
+    router(state)
+}
+
+async fn post(
+    app: &axum::Router,
+    path: &str,
+    bearer: Option<&str>,
+    body: Value,
+) -> (StatusCode, Value) {
+    let mut req = Request::builder()
+        .method("POST")
+        .uri(path)
+        .header("content-type", "application/json");
+    if let Some(t) = bearer {
+        req = req.header(header::AUTHORIZATION, format!("Bearer {t}"));
+    }
+    let resp = app
+        .clone()
+        .oneshot(req.body(Body::from(serde_json::to_vec(&body).unwrap())).unwrap())
+        .await
+        .unwrap();
+    let status = resp.status();
+    let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
+    let value = serde_json::from_slice(&bytes).unwrap_or(Value::Null);
+    (status, value)
 }
 
 async fn get(app: &axum::Router, path: &str, bearer: Option<&str>) -> (StatusCode, Value) {
@@ -214,4 +289,137 @@ async fn index_served_without_auth() {
     let bytes = axum::body::to_bytes(resp.into_body(), 1 << 20).await.unwrap();
     let html = String::from_utf8_lossy(&bytes);
     assert!(html.contains("ainb"), "index.html should be the SPA shell");
+}
+
+// ── POST /api/answer routes an ASK answer through the daemon seam (D18). ──
+
+#[tokio::test]
+async fn answer_delivers_through_daemon_seam() {
+    let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered {
+        via: "tmux (demo)".to_string(),
+    });
+    // Control mode (not --read-only): the write surface is live.
+    let app = app_with_answerer(None, answerer, false);
+
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "att-1", "answer": "2" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    // The tagged outcome is returned verbatim so the frontend renders feedback.
+    assert_eq!(body["outcome"], "delivered");
+    assert_eq!(body["via"], "tmux (demo)");
+
+    // The route forwarded the exact target + defaults to the daemon.
+    let params = last.lock().unwrap().clone().expect("answerer was called");
+    assert_eq!(params.attention_id, "att-1");
+    assert_eq!(params.answer, "2");
+    assert_eq!(params.answered_by, "web", "answeredBy defaults to web");
+    assert!(params.is_answer, "isAnswer defaults to true (C1 safety)");
+}
+
+#[tokio::test]
+async fn answer_reports_already_answered_outcome() {
+    // A second surface answering the same row loses the first-answer-wins race;
+    // the daemon's tagged outcome flows straight back to the caller.
+    let (answerer, _last) = FakeAnswerer::new(AnswerResult::AlreadyAnswered {
+        by: "atc".to_string(),
+    });
+    let app = app_with_answerer(None, answerer, false);
+
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "att-1", "answer": "1", "answeredBy": "web" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "already_answered");
+    assert_eq!(body["by"], "atc");
+}
+
+#[tokio::test]
+async fn answer_rejects_empty_attention_id() {
+    let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered { via: "x".into() });
+    let app = app_with_answerer(None, answerer, false);
+
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "", "answer": "2" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(body["error"]["code"], "INVALID_BODY");
+    assert!(
+        last.lock().unwrap().is_none(),
+        "a malformed request must not reach the daemon"
+    );
+}
+
+#[tokio::test]
+async fn answer_requires_bearer_when_token_configured() {
+    let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered { via: "x".into() });
+    let app = app_with_answerer(Some("s3cret"), answerer, false);
+
+    // No bearer → 401, and the answer never reaches the daemon seam.
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "att-1", "answer": "2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNAUTHORIZED);
+    assert_eq!(body["error"]["code"], "UNAUTHORIZED");
+    assert!(
+        last.lock().unwrap().is_none(),
+        "unauth answer must not dispatch"
+    );
+
+    // Correct bearer → delivered.
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        Some("s3cret"),
+        json!({ "attentionId": "att-1", "answer": "2" }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["outcome"], "delivered");
+}
+
+#[tokio::test]
+async fn answer_refused_in_read_only_mode() {
+    // `/api/answer` is a fleet-state write surface (it drives the daemon's
+    // verified last-mile send into a live session), so `--read-only` must refuse
+    // it exactly like the WS terminal — `403 READ_ONLY`, and the daemon seam is
+    // never touched. This is the invariant that keeps the `--insecure-bind +
+    // --read-only` bind exemption sound: in read-only mode NO write surface is
+    // reachable, so an unauthenticated public bind cannot inject answers.
+    let (answerer, last) = FakeAnswerer::new(AnswerResult::Delivered { via: "x".into() });
+    let app = app_with_answerer(None, answerer, true);
+
+    let (status, body) = post(
+        &app,
+        "/api/answer",
+        None,
+        json!({ "attentionId": "att-1", "answer": "2" }),
+    )
+    .await;
+
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    assert_eq!(body["error"]["code"], "READ_ONLY");
+    assert!(
+        last.lock().unwrap().is_none(),
+        "read-only mode must refuse the answer before it reaches the daemon"
+    );
 }

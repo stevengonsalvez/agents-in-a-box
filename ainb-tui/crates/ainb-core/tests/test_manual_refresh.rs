@@ -5,12 +5,21 @@ use ainb::app::screens::ids as screen_ids;
 use ainb::app::{App, state::AsyncAction};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
+// The default screen is now HOME, where `f` opens the Fleet panel. Manual
+// refresh via `f` lives on the SESSION_LIST screen, so these tests navigate
+// there first before exercising the refresh keybinding.
+fn go_to_session_list(app: &mut App) {
+    EventHandler::process_event(AppEvent::GoToSessionList, &mut app.state);
+    assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
+}
+
 #[tokio::test]
 async fn test_manual_refresh_key() {
     let mut app = App::new();
 
     // Load initial mock data
     app.state.load_mock_data();
+    go_to_session_list(&mut app);
     let initial_workspace_count = app.state.workspaces.len();
     assert!(
         initial_workspace_count > 0,
@@ -59,9 +68,10 @@ async fn test_manual_refresh_key() {
 async fn test_refresh_from_session_list_view() {
     let mut app = App::new();
     app.state.load_mock_data();
-    let initial_workspace_count = app.state.workspaces.len();
+    let _initial_workspace_count = app.state.workspaces.len();
 
-    // Ensure we're in SessionList view
+    // Navigate to the SessionList view (manual refresh lives here).
+    go_to_session_list(&mut app);
     assert_eq!(app.state.current_screen, screen_ids::SESSION_LIST);
 
     // Press 'f' to refresh
@@ -112,6 +122,7 @@ async fn test_refresh_event_handling() {
 async fn test_multiple_refreshes() {
     let mut app = App::new();
     app.state.load_mock_data();
+    go_to_session_list(&mut app);
 
     // Perform multiple refreshes to ensure it's stable
     for i in 0..3 {
@@ -151,6 +162,7 @@ async fn test_multiple_refreshes() {
 async fn test_refresh_doesnt_interfere_with_help() {
     let mut app = App::new();
     app.state.load_mock_data();
+    go_to_session_list(&mut app);
 
     // Show help first
     let help_key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);

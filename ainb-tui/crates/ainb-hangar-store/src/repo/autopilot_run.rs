@@ -8,20 +8,25 @@
 //!    clock.now_ms()`),
 //! 2. resolves the autopilot agent's `runtime_id` (an autopilot binds an agent,
 //!    and every agent binds a runtime),
-//! 3. inserts an `agent_task_queue` row via [`TaskRepo::insert_in_tx`] with
-//!    `issue_id = NULL` and `autopilot_run_id = <the new run>`,
+//! 3. in `create_issue` execution mode, inserts a fresh `issue` (authored by the
+//!    autopilot's agent) so the run has a tracked work item; in the default
+//!    `run_only` mode this step is skipped,
+//! 4. inserts an `agent_task_queue` row via [`TaskRepo::insert_in_tx`] with
+//!    `autopilot_run_id = <the new run>` and `issue_id` set to the new issue
+//!    (`create_issue`) or `NULL` (`run_only`),
 //!
-//! then commits. Because both inserts share the one transaction, a failure of
-//! either (most importantly the task insert's FK check on a bad `agent_id`)
-//! rolls *both* back — there is never a stranded `autopilot_run` row with no
-//! task, nor a task with no run.
+//! then commits. Because every insert shares the one transaction, a failure of
+//! any (most importantly the task insert's FK check on a bad `agent_id`) rolls
+//! *all* back — there is never a stranded `autopilot_run` row with no task, nor a
+//! task with no run, nor an orphan issue.
 //!
 //! # The autopilot-task discriminator
 //!
-//! An autopilot queue row carries `autopilot_run_id IS NOT NULL` (paired with
-//! `issue_id IS NULL`). That link column is both the "this is an autopilot task"
-//! marker and the back-reference the finalize cascade follows. There is no
-//! separate `kind` column.
+//! An autopilot queue row carries `autopilot_run_id IS NOT NULL`. That link
+//! column is both the "this is an autopilot task" marker and the back-reference
+//! the finalize cascade follows. There is no separate `kind` column. In
+//! `run_only` mode it is additionally `issue_id IS NULL`; in `create_issue` mode
+//! it carries the id of the freshly created issue.
 //!
 //! # Run completion cascades through the finalize primitive
 //!
@@ -37,7 +42,7 @@ use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AutopilotRunId, IdError, TaskId};
 use sqlx::{Row, SqlitePool};
 
-use super::autopilot::Autopilot;
+use super::autopilot::{Autopilot, ExecutionMode};
 use super::task::{NewTask, TaskRepo};
 
 /// Error surface for [`fire_autopilot_tick`].
@@ -121,8 +126,40 @@ pub async fn fire_autopilot_tick(
         });
     };
 
-    // 3. The task row: no issue, linked to the run. A bad agent_id FK here fails
-    //    the whole transaction (rolling back the run insert above).
+    // 3. In `create_issue` mode, materialise a tracked issue (authored by the
+    //    autopilot's agent) inside the same transaction so the run has a work
+    //    item; the task then links to it. In `run_only` mode (the default) the
+    //    task is issue-less (`issue_id = NULL`) — the v1 background-run path. Any
+    //    failure here rolls back the run insert above.
+    let issue_id = match autopilot.execution_mode {
+        ExecutionMode::RunOnly => None,
+        ExecutionMode::CreateIssue => {
+            let issue_id = SystemIdGen.new_ulid();
+            let title = autopilot
+                .instructions
+                .clone()
+                .unwrap_or_else(|| format!("Autopilot run: {}", autopilot.name));
+            sqlx::query(
+                "INSERT INTO issue \
+                 (id, workspace_id, title, description, state, \
+                  creator_type, creator_id, created_at) \
+                 VALUES (?, ?, ?, ?, 'open', 'agent', ?, ?)",
+            )
+            .bind(&issue_id)
+            .bind(&autopilot.workspace_id)
+            .bind(&title)
+            .bind(&autopilot.instructions)
+            .bind(&autopilot.agent_id)
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+            Some(issue_id)
+        }
+    };
+
+    // 4. The task row: linked to the run, and (in create_issue mode) to the new
+    //    issue. A bad agent_id FK here fails the whole transaction (rolling back
+    //    the run + issue inserts above).
     TaskRepo::insert_in_tx(
         &mut tx,
         &NewTask {
@@ -130,10 +167,14 @@ pub async fn fire_autopilot_tick(
             workspace_id: autopilot.workspace_id.clone(),
             runtime_id,
             agent_id: autopilot.agent_id.clone(),
-            issue_id: None,
+            issue_id,
             work_dir: None,
+            // Autopilot ticks are routine background work: default urgency
+            // (priority 0 = P3), drained FIFO among equals at claim time.
+            priority: 0,
             created_at: now,
             autopilot_run_id: Some(run_id.clone()),
+            generation: 0,
         },
     )
     .await?;
@@ -144,4 +185,69 @@ pub async fn fire_autopilot_tick(
         AutopilotRunId::from_str(run_id)?,
         TaskId::from_str(task_id)?,
     ))
+}
+
+/// Supersede every in-flight run of an autopilot — the `replace` concurrency
+/// policy's "cancel the stale work before firing fresh" step (e38.19).
+///
+/// In one transaction it:
+///
+/// 1. cancels each in-flight task (`autopilot_run_id IN (open runs) AND status
+///    NOT terminal`): `status = 'cancelled'`, `finished_at = now`,
+/// 2. cancels each open run (`completed_at IS NULL`): `status = 'cancelled'`,
+///    `completed_at = now`.
+///
+/// The order matters only for clarity (both are correlated by `autopilot_id`).
+/// Returns the number of runs superseded. A no-op (returns `0`) when nothing is
+/// in flight.
+///
+/// This is NOT routed through the FSM finalize cascade: the cascade stamps a
+/// run from its task's terminal state, but here the SCHEDULER is the authority
+/// declaring the run abandoned, so it cancels the run directly. The result is
+/// the same terminal shape (run `cancelled` + `completed_at` set, task
+/// `cancelled` + `finished_at` set) the finalize path would have produced.
+///
+/// # Errors
+///
+/// Returns [`FireError::Db`] on any SQL failure; the transaction rolls back so a
+/// partial supersede never persists.
+pub async fn supersede_in_flight(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    autopilot_id: &str,
+) -> Result<u64, FireError> {
+    let now = clock.now_ms();
+    let mut tx = pool.begin().await?;
+
+    // 1. Cancel the tasks of the open runs (abandon the in-flight work). Scoped
+    //    to the autopilot's own open runs, so a foreign autopilot's tasks are
+    //    untouched.
+    sqlx::query(
+        "UPDATE agent_task_queue \
+         SET status = 'cancelled', finished_at = ? \
+         WHERE autopilot_run_id IN ( \
+                 SELECT id FROM autopilot_run \
+                 WHERE autopilot_id = ? AND completed_at IS NULL \
+             ) \
+           AND status NOT IN ('done', 'failed', 'cancelled')",
+    )
+    .bind(now)
+    .bind(autopilot_id)
+    .execute(&mut *tx)
+    .await?;
+
+    // 2. Cancel the open runs themselves.
+    let runs = sqlx::query(
+        "UPDATE autopilot_run \
+         SET status = 'cancelled', completed_at = ? \
+         WHERE autopilot_id = ? AND completed_at IS NULL",
+    )
+    .bind(now)
+    .bind(autopilot_id)
+    .execute(&mut *tx)
+    .await?
+    .rows_affected();
+
+    tx.commit().await?;
+    Ok(runs)
 }

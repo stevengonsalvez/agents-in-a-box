@@ -1,6 +1,6 @@
 //! The task lifecycle finite-state machine ([`TaskState`]).
 //!
-//! Mirrors the Multica `agent_task_queue.status` column verbatim:
+//! Mirrors the reference `agent_task_queue.status` column verbatim:
 //! `queued -> dispatched -> running -> done | failed | cancelled`
 //! (`001_init.up.sql:132`). The serde and database string forms are both the
 //! lowercase token so the JSON wire representation is byte-identical to the
@@ -17,8 +17,8 @@ use serde::{Deserialize, Serialize};
 ///
 /// The terminal set is `{Done, Failed, Cancelled}`; the pending (non-terminal,
 /// not-yet-running) set is `{Queued, Dispatched}` — the partition the
-/// `idx_one_pending_task_per_issue` partial unique index coalesces on
-/// (migration 022).
+/// `idx_one_pending_task_per_issue_agent` partial unique index coalesces on
+/// (migration 0012, per (issue, agent)).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TaskState {
@@ -38,7 +38,7 @@ pub enum TaskState {
 
 /// The legal directed edges of the lifecycle FSM.
 ///
-/// Seven edges per the Multica model:
+/// Seven edges per the reference model:
 /// 1. `queued -> dispatched` — claim by a runtime
 /// 2. `dispatched -> running` — runtime confirmed start
 /// 3. `dispatched -> queued` — reclaim of a stale dispatch (90s window)
@@ -138,7 +138,7 @@ impl TaskState {
     }
 
     /// Whether this state is pending (`Queued` / `Dispatched`) — the set the
-    /// `idx_one_pending_task_per_issue` partial unique index coalesces on.
+    /// `idx_one_pending_task_per_issue_agent` partial unique index coalesces on.
     #[must_use]
     pub const fn is_pending(self) -> bool {
         matches!(self, Self::Queued | Self::Dispatched)

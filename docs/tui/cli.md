@@ -1688,6 +1688,12 @@ Options:
       --insecure-bind    Allow a non-loopback bind with no token. DANGEROUS: an unauthenticated bind exposes a control surface — the live WS terminal is interactive shell access to every fleet session. Only honored with --read-only (terminal disabled); otherwise refused. Use --token instead to expose the write surface safely
       --read-only        Viewer-only: disable the live terminal write surface (the WS terminal is refused with 403)
   -h, --help             Print help
+
+EXAMPLES:
+  ainb web                                       Serve on 127.0.0.1:8420 (loopback)
+  ainb web --listen 0.0.0.0:8420 --token s3cr3t  Expose to the LAN behind a bearer token
+  ainb web --read-only                           Viewer-only (live terminal disabled)
+  ainb web --insecure-bind --read-only           Non-loopback viewer with no token (DANGEROUS)
 ```
 
 ## `ainb witr`
@@ -2821,7 +2827,11 @@ Commands:
   config     Configure Hangar (env allowlist, …)
   skills     Import + list workspace-scoped skills
   templates  List, inspect, and apply curated agent templates
+  agent      Edit, archive, and list workspace agents
+  member     List, re-role, and remove workspace members
+  squad      Create squads, manage membership, and view squad status + leader
   autopilot  Create and control cron-scheduled autopilots
+  workspace  View + set per-workspace config (context prompt, issue prefix, repo whitelist)
   logs       Read the daemon's structured logs
   help       Print this message or the help of the given subcommand(s)
 
@@ -2849,7 +2859,10 @@ Usage: ainb hangar issue [OPTIONS] <COMMAND>
 Commands:
   create  Create a new issue (bootstraps a default workspace on first use)
   list    List issues in the default workspace
+  search  Search issues by title, description, or comment body (ranked)
   show    Show one issue by id
+  update  Edit an existing issue's state, assignee, priority, or due date
+  label   Attach or detach a label on an issue
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2890,6 +2903,23 @@ Options:
           
           When set, the issue's assignee is the agent and a `queued` task is enqueued for the agent's runtime, so the daemon's claim loop picks it up, materialises the agent's attached skills (P6.4), and dispatches the provider. The created task id is printed alongside the issue id.
 
+      --priority <PRIORITY>
+          Urgency: 0..3 mapping P3..P0 — HIGHER = MORE URGENT (default 0).
+          
+          Stamped onto BOTH the created issue and (when `--assign` enqueues one) the task: the daemon's claim loop drains `priority DESC, created_at, id` (reference ordering parity), so a higher value jumps the queue while equal priorities stay FIFO.
+          
+          [default: 0]
+
+      --due <DUE>
+          Optional due date as `YYYY-MM-DD` (interpreted at UTC midnight).
+          
+          Persisted onto the issue as an epoch-millisecond deadline; omitted leaves the issue with no due date.
+
+      --label <LABELS>
+          A label to attach to the issue (repeatable: `--label bug --label p0`).
+          
+          Persisted as the issue's label list. The full labels table + attach/detach is a separate concern; create just records the labels it is handed.
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -2910,6 +2940,25 @@ Options:
   -h, --help             Print help
 ```
 
+#### `ainb hangar issue search`
+
+Search issues by title, description, or comment body (ranked)
+
+```console
+$ ainb hangar issue search --help
+Search issues by title, description, or comment body (ranked)
+
+Usage: ainb hangar issue search [OPTIONS] <QUERY>
+
+Arguments:
+  <QUERY>  The text to search for (matched across title / description / comments)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to search within. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
 #### `ainb hangar issue show`
 
 Show one issue by id
@@ -2922,6 +2971,76 @@ Usage: ainb hangar issue show [OPTIONS] <ID>
 
 Arguments:
   <ID>  Issue id (ULID)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue update`
+
+Edit an existing issue's state, assignee, priority, or due date
+
+```console
+$ ainb hangar issue update --help
+Edit an existing issue's state, assignee, priority, or due date
+
+Usage: ainb hangar issue update [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          Issue id (ULID) to edit
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --state <STATE>
+          New lifecycle state (e.g. `in_progress`, `done`); omitted leaves it
+
+      --assign <ASSIGN>
+          Reassign the issue to an agent (`agent.id`); omitted leaves the assignee.
+          
+          Mutually exclusive with `--unassign`.
+
+      --unassign
+          Clear the assignee (unassign the issue); omitted leaves it
+
+      --priority <PRIORITY>
+          New urgency 0..3 (P3..P0, HIGHER = MORE URGENT); omitted leaves it
+
+      --due <DUE>
+          New due date as `YYYY-MM-DD` (UTC midnight); omitted leaves it.
+          
+          Mutually exclusive with `--clear-due`.
+
+      --clear-due
+          Clear the due date (remove the deadline); omitted leaves it
+
+      --workspace <WORKSPACE>
+          Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar issue label`
+
+Attach or detach a label on an issue
+
+```console
+$ ainb hangar issue label --help
+Attach or detach a label on an issue
+
+Usage: ainb hangar issue label [OPTIONS] <COMMAND>
+
+Commands:
+  attach  Attach a label to an issue (resolve-or-creates the label; idempotent)
+  detach  Detach a label from an issue (idempotent; the definition is kept)
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3049,8 +3168,13 @@ Inspect the Hangar control-plane daemon
 Usage: ainb hangar daemon [OPTIONS] <COMMAND>
 
 Commands:
-  status  Report whether the Hangar database is reachable and migrated
-  help    Print this message or the help of the given subcommand(s)
+  status   Report whether the daemon is running (PID file + socket) and the database is reachable
+  run      Run the daemon in the FOREGROUND (boot + claim loop until interrupted)
+  start    Start the daemon as a BACKGROUND child, recording its PID
+  stop     Stop the running daemon: signal the exact recorded PID, then remove the PID file
+  restart  Restart the daemon: `stop` (if running) then `start`
+  setup    One-command bring-up: ensure the store + socket-auth token, then `start`
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3059,13 +3183,104 @@ Options:
 
 #### `ainb hangar daemon status`
 
-Report whether the Hangar database is reachable and migrated
+Report whether the daemon is running (PID file + socket) and the database is reachable
 
 ```console
 $ ainb hangar daemon status --help
-Report whether the Hangar database is reachable and migrated
+Report whether the daemon is running (PID file + socket) and the database is reachable
 
 Usage: ainb hangar daemon status [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon run`
+
+Run the daemon in the FOREGROUND (boot + claim loop until interrupted).
+
+```console
+$ ainb hangar daemon run --help
+Run the daemon in the FOREGROUND (boot + claim loop until interrupted).
+
+This blocks; `start` is the background variant. Equivalent to launching the `ainb-hangar-daemon` binary directly.
+
+Usage: ainb hangar daemon run [OPTIONS]
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar daemon start`
+
+Start the daemon as a BACKGROUND child, recording its PID.
+
+```console
+$ ainb hangar daemon start --help
+Start the daemon as a BACKGROUND child, recording its PID.
+
+Spawns the `ainb-hangar-daemon` binary detached and writes its exact pid to `<hangar_home>/hangar/daemon.pid`. A no-op (with a notice) if a live daemon is already recorded.
+
+Usage: ainb hangar daemon start [OPTIONS]
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar daemon stop`
+
+Stop the running daemon: signal the exact recorded PID, then remove the PID file
+
+```console
+$ ainb hangar daemon stop --help
+Stop the running daemon: signal the exact recorded PID, then remove the PID file
+
+Usage: ainb hangar daemon stop [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon restart`
+
+Restart the daemon: `stop` (if running) then `start`
+
+```console
+$ ainb hangar daemon restart --help
+Restart the daemon: `stop` (if running) then `start`
+
+Usage: ainb hangar daemon restart [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon setup`
+
+One-command bring-up: ensure the store + socket-auth token, then `start`
+
+```console
+$ ainb hangar daemon setup --help
+One-command bring-up: ensure the store + socket-auth token, then `start`
+
+Usage: ainb hangar daemon setup [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3300,6 +3515,326 @@ Options:
   -h, --help                     Print help
 ```
 
+### `ainb hangar agent`
+
+Edit, archive, and list workspace agents
+
+```console
+$ ainb hangar agent --help
+Edit, archive, and list workspace agents
+
+Usage: ainb hangar agent [OPTIONS] <COMMAND>
+
+Commands:
+  list       List the workspace's agents (active by default; `--all` includes archived)
+  edit       Edit an agent's config knobs (model / args / MCP / thinking / env / name)
+  archive    Archive an agent (hide it from the active picker)
+  unarchive  Un-archive an agent (restore it to the active picker)
+  help       Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar agent list`
+
+List the workspace's agents (active by default; `--all` includes archived)
+
+```console
+$ ainb hangar agent list --help
+List the workspace's agents (active by default; `--all` includes archived)
+
+Usage: ainb hangar agent list [OPTIONS]
+
+Options:
+      --all                    Include archived agents in the listing (default: active only)
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar agent edit`
+
+Edit an agent's config knobs (model / args / MCP / thinking / env / name)
+
+```console
+$ ainb hangar agent edit --help
+Edit an agent's config knobs (model / args / MCP / thinking / env / name)
+
+Usage: ainb hangar agent edit [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to edit
+
+Options:
+      --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
+      --name <NAME>                  Rename the agent; omitted leaves the name
+      --instructions <INSTRUCTIONS>  New instructions; omitted leaves them. Mutually exclusive with `--clear-instructions`
+      --clear-instructions           Clear the instructions; omitted leaves them
+      --model <MODEL>                New model override (e.g. `claude-opus-4`); omitted leaves it. Mutually exclusive with `--clear-model`
+      --clear-model                  Clear the model override (back to the provider default); omitted leaves it
+      --arg <ARGS>                   A CLI arg to pass the provider (repeatable: `--arg --verbose --arg -x`). When ANY `--arg` is given the whole arg list is REPLACED with the values
+      --mcp <MCP>                    New MCP config as a raw JSON-object string; omitted leaves it. Mutually exclusive with `--clear-mcp`
+      --clear-mcp                    Clear the MCP config; omitted leaves it
+      --thinking <THINKING>          New thinking level (e.g. `low`/`medium`/`high`); omitted leaves it. Mutually exclusive with `--clear-thinking`
+      --clear-thinking               Clear the thinking level; omitted leaves it
+      --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is given the whole env map is REPLACED with the values
+      --workspace <WORKSPACE>        Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                         Print help
+```
+
+#### `ainb hangar agent archive`
+
+Archive an agent (hide it from the active picker)
+
+```console
+$ ainb hangar agent archive --help
+Archive an agent (hide it from the active picker)
+
+Usage: ainb hangar agent archive [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to (un)archive
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar agent unarchive`
+
+Un-archive an agent (restore it to the active picker)
+
+```console
+$ ainb hangar agent unarchive --help
+Un-archive an agent (restore it to the active picker)
+
+Usage: ainb hangar agent unarchive [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to (un)archive
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar member`
+
+List, re-role, and remove workspace members
+
+```console
+$ ainb hangar member --help
+List, re-role, and remove workspace members
+
+Usage: ainb hangar member [OPTIONS] <COMMAND>
+
+Commands:
+  list      List the workspace's members (email + role)
+  set-role  Change a member's role (`owner` / `admin` / `member`)
+  remove    Remove a member from the workspace (the user row survives)
+  help      Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar member list`
+
+List the workspace's members (email + role)
+
+```console
+$ ainb hangar member list --help
+List the workspace's members (email + role)
+
+Usage: ainb hangar member list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar member set-role`
+
+Change a member's role (`owner` / `admin` / `member`)
+
+```console
+$ ainb hangar member set-role --help
+Change a member's role (`owner` / `admin` / `member`)
+
+Usage: ainb hangar member set-role [OPTIONS] <USER_ID> <ROLE>
+
+Arguments:
+  <USER_ID>
+          The member's user id (`user.id`)
+
+  <ROLE>
+          The new role: `owner`, `admin`, or `member`
+
+          Possible values:
+          - owner:  Full administrative control; a workspace must always keep one
+          - admin:  Elevated management, short of ownership
+          - member: A regular member
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --workspace <WORKSPACE>
+          Workspace slug the member belongs to. Defaults to the bootstrapped `default` workspace
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar member remove`
+
+Remove a member from the workspace (the user row survives)
+
+```console
+$ ainb hangar member remove --help
+Remove a member from the workspace (the user row survives)
+
+Usage: ainb hangar member remove [OPTIONS] <USER_ID>
+
+Arguments:
+  <USER_ID>  The member's user id (`user.id`) to remove
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the member belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar squad`
+
+Create squads, manage membership, and view squad status + leader
+
+```console
+$ ainb hangar squad --help
+Create squads, manage membership, and view squad status + leader
+
+Usage: ainb hangar squad [OPTIONS] <COMMAND>
+
+Commands:
+  list           List the workspace's squads (name, leader, members) — the status view
+  create         Create a squad with a leader actor-ref (`agent:<id>` / `member:<id>`)
+  add-member     Add a member actor to a squad (`agent:<id>` / `member:<id>`)
+  remove-member  Remove a member actor from a squad (`agent:<id>` / `member:<id>`)
+  assign         Route a task to the squad's LEADER (leader routing taking effect)
+  help           Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar squad list`
+
+List the workspace's squads (name, leader, members) — the status view
+
+```console
+$ ainb hangar squad list --help
+List the workspace's squads (name, leader, members) — the status view
+
+Usage: ainb hangar squad list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad create`
+
+Create a squad with a leader actor-ref (`agent:<id>` / `member:<id>`)
+
+```console
+$ ainb hangar squad create --help
+Create a squad with a leader actor-ref (`agent:<id>` / `member:<id>`)
+
+Usage: ainb hangar squad create [OPTIONS] --leader <LEADER> <NAME>
+
+Arguments:
+  <NAME>  The squad name (unique within the workspace)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --leader <LEADER>        The squad leader as an actor-ref (`agent:<id>` / `member:<id>`). An `agent` leader is the actor a squad-assigned task is routed to
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad add-member`
+
+Add a member actor to a squad (`agent:<id>` / `member:<id>`)
+
+```console
+$ ainb hangar squad add-member --help
+Add a member actor to a squad (`agent:<id>` / `member:<id>`)
+
+Usage: ainb hangar squad add-member [OPTIONS] --member <MEMBER> <SQUAD_ID>
+
+Arguments:
+  <SQUAD_ID>  The squad id (`squad.id`) to mutate
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --member <MEMBER>        The member actor-ref (`agent:<id>` / `member:<id>`)
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad remove-member`
+
+Remove a member actor from a squad (`agent:<id>` / `member:<id>`)
+
+```console
+$ ainb hangar squad remove-member --help
+Remove a member actor from a squad (`agent:<id>` / `member:<id>`)
+
+Usage: ainb hangar squad remove-member [OPTIONS] --member <MEMBER> <SQUAD_ID>
+
+Arguments:
+  <SQUAD_ID>  The squad id (`squad.id`) to mutate
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --member <MEMBER>        The member actor-ref (`agent:<id>` / `member:<id>`)
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad assign`
+
+Route a task to the squad's LEADER (leader routing taking effect)
+
+```console
+$ ainb hangar squad assign --help
+Route a task to the squad's LEADER (leader routing taking effect)
+
+Usage: ainb hangar squad assign [OPTIONS] <SQUAD_ID>
+
+Arguments:
+  <SQUAD_ID>  The squad id (`squad.id`) whose leader the task routes to
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --issue <ISSUE>          The issue the routed task carries (`issue.id`), or omit for an ad-hoc task
+      --work-dir <WORK_DIR>    The run's working directory, or omit
+      --priority <PRIORITY>    Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine) [default: 0]
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
 ### `ainb hangar autopilot`
 
 Create and control cron-scheduled autopilots
@@ -3311,12 +3846,14 @@ Create and control cron-scheduled autopilots
 Usage: ainb hangar autopilot [OPTIONS] <COMMAND>
 
 Commands:
-  create   Create a cron-scheduled autopilot (rejects an invalid cron expression)
-  list     List the workspace's autopilots (cron, next tick, last run, enabled)
-  disable  Disable an autopilot so the scheduler stops firing it
-  enable   Re-enable an autopilot, recomputing its next tick from now
-  run      Fire one tick immediately (manual run), bypassing the schedule
-  help     Print this message or the help of the given subcommand(s)
+  create      Create a cron-scheduled autopilot (rejects an invalid cron expression)
+  list        List the workspace's autopilots (cron, next tick, last run, enabled)
+  disable     Disable an autopilot so the scheduler stops firing it
+  enable      Re-enable an autopilot, recomputing its next tick from now
+  run         Fire one tick immediately (manual run), bypassing the schedule
+  webhook     Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
+  deliveries  List the autopilot's recent webhook deliveries (audit log)
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3335,21 +3872,52 @@ Usage: ainb hangar autopilot create [OPTIONS] --name <NAME> --cron <CRON> --agen
 
 Options:
       --format <format>
-          Output format [default: text] [possible values: text, json, csv, markdown]
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
       --name <NAME>
           Name, unique within the workspace
+
       --cron <CRON>
           Cron expression (UTC, 5-field) — validated before insert
+
       --agent <AGENT>
           Agent id to dispatch to at each tick (`agent.id`)
+
       --instructions <INSTRUCTIONS>
           Optional instructions handed to the agent on every tick
+
       --max-concurrent-runs <MAX_CONCURRENT_RUNS>
-          Maximum simultaneous in-flight runs before a tick is skipped [default: 1]
+          Maximum simultaneous in-flight runs before the concurrency policy applies
+          
+          [default: 1]
+
+      --execution-mode <EXECUTION_MODE>
+          What a fired tick materialises: `run-only` (a task with no issue, the default) or `create-issue` (an issue plus a task against it)
+
+          Possible values:
+          - run-only:     Enqueue a task with no issue (the v1 default)
+          - create-issue: Create an issue, then enqueue a task against it
+          
+          [default: run-only]
+
+      --concurrency-policy <CONCURRENCY_POLICY>
+          What the scheduler does when a tick comes due at the in-flight limit: `skip` (drop it, the default), `queue` (fire it anyway to run after the in-flight one), or `replace` (supersede the in-flight run and fire fresh)
+
+          Possible values:
+          - skip:    Drop a tick that comes due at the in-flight limit (the v1 default)
+          - queue:   Fire the tick anyway; the queue runs it after the in-flight one
+          - replace: Supersede the in-flight run and fire fresh
+          
+          [default: skip]
+
       --workspace <WORKSPACE>
           Workspace slug to create in. Defaults to the bootstrapped `default`
+
   -h, --help
-          Print help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb hangar autopilot list`
@@ -3422,6 +3990,117 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot webhook`
+
+Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
+
+```console
+$ ainb hangar autopilot webhook --help
+Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
+
+Usage: ainb hangar autopilot webhook [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --disable                Disable the webhook (clears the secret); mutually exclusive with `--rotate`
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --rotate                 Mint a fresh signing secret for an already-enabled webhook (prints the new secret once)
+      --event <EVENT>          Set the exact-match event filter (only this event name fires). Mutually exclusive with `--clear-event`
+      --clear-event            Clear the event filter (fire on every signed request)
+      --url-host <URL_HOST>    The host:port the webhook ingress listens on, used only to render the URL hint (defaults to `127.0.0.1:8718`). The daemon's actual bind is set by `AINB_HANGAR_WEBHOOK_PORT` [default: 127.0.0.1:8718]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot deliveries`
+
+List the autopilot's recent webhook deliveries (audit log)
+
+```console
+$ ainb hangar autopilot deliveries --help
+List the autopilot's recent webhook deliveries (audit log)
+
+Usage: ainb hangar autopilot deliveries [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          Maximum number of deliveries to show (latest-first) [default: 20]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+### `ainb hangar workspace`
+
+View + set per-workspace config (context prompt, issue prefix, repo whitelist)
+
+```console
+$ ainb hangar workspace --help
+View + set per-workspace config (context prompt, issue prefix, repo whitelist)
+
+Usage: ainb hangar workspace [OPTIONS] <COMMAND>
+
+Commands:
+  config  Set one or more of the workspace's config knobs
+  show    Show the workspace's current config
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar workspace config`
+
+Set one or more of the workspace's config knobs
+
+```console
+$ ainb hangar workspace config --help
+Set one or more of the workspace's config knobs
+
+Usage: ainb hangar workspace config [OPTIONS]
+
+Options:
+      --context-prompt <CONTEXT_PROMPT>
+          Set the context prompt injected into every agent run as a `CLAUDE.md`
+      --format <format>
+          Output format [default: text] [possible values: text, json, csv, markdown]
+      --clear-context-prompt
+          Unset the context prompt (back to no per-workspace context)
+      --issue-prefix <ISSUE_PREFIX>
+          Set the prefix prepended to a newly-created issue's title (e.g. `[OPS] `)
+      --clear-issue-prefix
+          Unset the issue prefix (titles used verbatim)
+      --repo-whitelist <REPO_WHITELIST>
+          Set the repo whitelist as a comma-separated list of `owner/name` slugs (e.g. `org/api,org/web`). The empty string sets a configured-but-empty whitelist (allows nothing); use `--clear-repo-whitelist` to remove the gate
+      --clear-repo-whitelist
+          Unset the repo whitelist (no gate — every repo allowed)
+      --workspace <WORKSPACE>
+          Workspace slug to configure. Defaults to the bootstrapped `default` workspace
+  -h, --help
+          Print help
+```
+
+#### `ainb hangar workspace show`
+
+Show the workspace's current config
+
+```console
+$ ainb hangar workspace show --help
+Show the workspace's current config
+
+Usage: ainb hangar workspace show [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to show. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 

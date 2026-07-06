@@ -2,19 +2,23 @@
 //!
 //! Every dispatched task gets an isolated on-disk sandbox so its working tree,
 //! emitted artifacts, and provider logs never collide with another task's. The
-//! layout mirrors Multica's (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
+//! layout mirrors the reference's (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
 //!
 //! ```text
-//! {home}/.ainb/hangar/workspaces/{ws_slug}/{shortID}/
+//! {home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/
 //! ├── workdir/        # the agent's CWD (a git worktree for issue tasks)
 //! ├── output/         # emitted artifacts (patches, diffs)
 //! ├── logs/           # provider JSONL streams (claude.jsonl, …)
 //! └── .gc_meta.json   # GC marker: who owns this dir + when it was seen
 //! ```
 //!
-//! `shortID` is the first 8 characters of the task ULID (Multica's short form).
-//! Because the ULID is injected via [`crate`]'s id-generation seam in tests, the
-//! path is deterministic across runs.
+//! The `{shortID}` path segment is the task's FULL ULID (tcp vpm): keying the
+//! per-task tree on the whole id makes a path collision impossible, where any
+//! truncated slug (the pre-T4 first-8-chars, or the T4 first-8-plus-last-6) could
+//! in principle collide and cross-wire two runs' worktree / logs / output. Readers
+//! ([`logs_dir_candidates`]) still fall back through the two legacy slug schemes so
+//! a run written before this change resolves. Because the ULID is injected via
+//! [`crate`]'s id-generation seam in tests, the path is deterministic across runs.
 //!
 //! # GC marker
 //!
@@ -35,8 +39,26 @@ use ainb_hangar_store::repo::task::Task;
 use serde::{Deserialize, Serialize};
 
 /// Age (in milliseconds) past which an orphan dir (no `.gc_meta.json`) is
-/// removed by the orphan scanner. Matches Multica's 72h GC grace window.
-const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
+/// removed by the orphan scanner. Matches the reference's 72h GC grace window.
+pub const ORPHAN_GRACE_MS: i64 = 72 * 3_600 * 1_000;
+
+/// The name of the per-task GC marker file. A `{shortID}` root carrying this
+/// file is a *live* (tracked) task dir; one missing it is an orphan candidate.
+const GC_META_FILE: &str = ".gc_meta.json";
+
+/// The relative path from the Hangar home to the per-workspace task-dir tree:
+/// `{home}/.agents-in-a-box/hangar/workspaces/`. The scheduled GC sweep
+/// ([`sweep_workspaces_gc`]) walks `<this>/{ws_slug}/{shortID}/`.
+const WORKSPACES_SUBPATH: [&str; 3] = [".agents-in-a-box", "hangar", "workspaces"];
+
+/// The per-task context file written into [`ExecEnv::workdir`] from the
+/// workspace's `context_prompt` (e38.21).
+///
+/// `claude` (and the home-style providers) read `CLAUDE.md` from their working
+/// directory, so a workspace's context prompt lands here — in the agent's CWD —
+/// rather than only living in the database. The file is the dispatch-time
+/// injection point that makes the per-workspace context actually reach the run.
+pub const CONTEXT_PROMPT_FILE: &str = "CLAUDE.md";
 
 /// The materialised per-task directory set.
 ///
@@ -73,7 +95,7 @@ pub struct GcParent {
     pub id: String,
 }
 
-/// Contents of `.gc_meta.json` (Multica shape, `CLI_AND_DAEMON.md:185-193`).
+/// Contents of `.gc_meta.json` (reference shape, `CLI_AND_DAEMON.md:185-193`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct GcMeta {
     /// The owning task id.
@@ -108,20 +130,107 @@ pub enum CleanupKind {
     },
 }
 
-/// The Multica short form of a task id: its first 8 characters.
+/// The short-id form of a task id: its first 8 characters PLUS its last 6.
 ///
-/// Ids shorter than 8 chars are returned whole (defensive; real ULIDs are 26).
-/// ULIDs are ASCII (Crockford base32), so byte-slicing is safe here.
+/// A ULID's first 8 chars are pure (coarse, ~1s-granularity) timestamp — alone
+/// they COLLIDE for any two ids minted within the same second, and a squad
+/// fan-out (tcp T4) mints several in one millisecond. Since this slug names the
+/// per-task worktree dir AND its `ainb/<slug>` branch, a collision hands two
+/// concurrent runs the same checkout. Appending the last 6 chars (the tail of
+/// the ULID's 80-bit random part) keeps the slug sortable + human-scannable
+/// while making same-instant ids distinct (monotonic ULIDs differ in the tail;
+/// independent mints collide at ~2^-30 per pair).
+///
+/// Ids of 14 chars or fewer are returned whole (defensive; real ULIDs are 26 —
+/// this also keeps hand-minted test ids like `wt-a` byte-identical). ULIDs are
+/// ASCII (Crockford base32); the checked `get` slicing never panics on an
+/// unexpected multibyte id.
 #[must_use]
-pub fn short_id(id: &str) -> &str {
+pub fn short_id(id: &str) -> String {
+    let tail_start = id.len().saturating_sub(6);
+    match (id.get(..8), id.get(tail_start..)) {
+        (Some(head), Some(tail)) if id.len() > 14 => format!("{head}{tail}"),
+        _ => id.to_string(),
+    }
+}
+
+/// The PRE-T4 short-id scheme: a task id's first 8 characters (or the whole id
+/// when 8 or fewer).
+///
+/// Superseded by [`short_id`] (which appends the random tail for
+/// collision-resistance), but retained for READERS: a task dispatched before the
+/// T4 slug change wrote its `logs/` + task tree under THIS slug, so a timeline
+/// read must be able to fall back to it. Without the fallback every pre-upgrade
+/// run's transcript would be stranded — the new slug names a dir that never
+/// existed for it.
+#[must_use]
+pub fn legacy_short_id(id: &str) -> &str {
     id.get(..8).unwrap_or(id)
+}
+
+/// The per-task root directory —
+/// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{task_id}/` — keyed on the
+/// FULL task id (tcp vpm), the single source of truth for the layout
+/// [`prepare_env`] provisions. Pure path derivation (creates nothing), so a read
+/// path (e.g. the board-card timeline RPC locating a run's `logs/*.jsonl`) can
+/// address the exact tree a run wrote without re-deriving — and can never drift
+/// from it. A run written under a legacy truncated slug is reached by
+/// [`logs_dir_candidates`]'s fallbacks.
+#[must_use]
+pub fn task_root(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
+    task_root_for_slug(home, ws_slug, task_id)
+}
+
+/// The per-workspace task root for an already-computed `slug` (the shared shape
+/// behind both the current [`task_root`] and the legacy-slug read fallback).
+fn task_root_for_slug(home: &Path, ws_slug: &str, slug: &str) -> PathBuf {
+    home.join(".agents-in-a-box")
+        .join("hangar")
+        .join("workspaces")
+        .join(ws_slug)
+        .join(slug)
+}
+
+/// The per-task `logs/` directory (`{task_root}/logs/`), where a run tees its
+/// provider stream-json (`claude.jsonl` / `codex.jsonl`). Pure path derivation.
+#[must_use]
+pub fn logs_dir(home: &Path, ws_slug: &str, task_id: &str) -> PathBuf {
+    task_root(home, ws_slug, task_id).join("logs")
+}
+
+/// The candidate `logs/` directories for a task, newest-scheme first: the current
+/// FULL-id path ([`task_root`]), then the T4 [`short_id`] (first-8-plus-last-6)
+/// path, then the pre-T4 [`legacy_short_id`] (first-8) path — each included only
+/// when its slug DIFFERS from a scheme already listed.
+///
+/// A reader tries these in order so a run written under ANY of the three slug
+/// schemes resolves: a fresh run (tcp vpm) matches the full-id path, while a run
+/// written under either older, truncated slug is still found instead of being
+/// stranded. Pure path derivation (touches no disk); the caller probes each for the
+/// file it wants.
+#[must_use]
+pub fn logs_dir_candidates(home: &Path, ws_slug: &str, task_id: &str) -> Vec<PathBuf> {
+    let short = short_id(task_id);
+    let legacy = legacy_short_id(task_id);
+    // Full id first (the current write scheme), then each legacy slug that differs.
+    let mut slugs: Vec<&str> = vec![task_id];
+    if short != task_id {
+        slugs.push(&short);
+    }
+    if legacy != task_id && legacy != short {
+        slugs.push(legacy);
+    }
+    slugs
+        .into_iter()
+        .map(|slug| task_root_for_slug(home, ws_slug, slug).join("logs"))
+        .collect()
 }
 
 /// Create (or reuse) the per-task directory layout under `home`, writing the
 /// `.gc_meta.json` marker.
 ///
 /// The layout root is
-/// `{home}/.ainb/hangar/workspaces/{ws_slug}/{short_id(task.id)}/`. The call is
+/// `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{short_id(task.id)}/`. The call is
 /// **idempotent**: a second `prepare_env` on the same task reuses every dir
 /// (never wiping an existing `workdir/`) and only refreshes the marker's
 /// `last_seen_at` to `clock.now_ms()`, preserving the original `created_at`.
@@ -136,12 +245,7 @@ pub fn prepare_env(
     home: &Path,
     clock: &dyn HangarClock,
 ) -> io::Result<ExecEnv> {
-    let root = home
-        .join(".ainb")
-        .join("hangar")
-        .join("workspaces")
-        .join(ws_slug)
-        .join(short_id(&task.id));
+    let root = task_root(home, ws_slug, &task.id);
 
     let env = ExecEnv {
         workdir: root.join("workdir"),
@@ -157,6 +261,34 @@ pub fn prepare_env(
     write_marker(task, clock, &env.gc_meta)?;
 
     Ok(env)
+}
+
+/// Write the workspace `context_prompt` into the task's [`ExecEnv::workdir`] as a
+/// `CLAUDE.md`, so the agent run actually sees the per-workspace context (e38.21).
+///
+/// This is the dispatch-time injection that makes a workspace's stored context
+/// prompt *take effect*: the file lands in the provider's CWD (the agent reads
+/// `CLAUDE.md` from there), not just in the database. Returns the path written,
+/// or `None` when there is no prompt to inject (an unconfigured workspace —
+/// no file is written, the v1 behaviour).
+///
+/// A blank / whitespace-only prompt is treated as unset (no file): an operator
+/// who clears the prompt gets the v1 behaviour back, not an empty `CLAUDE.md`.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] if the file cannot be written (the workdir is
+/// created by [`prepare_env`], so a missing parent is a caller-ordering bug).
+pub fn write_context_prompt(
+    env: &ExecEnv,
+    context_prompt: Option<&str>,
+) -> io::Result<Option<PathBuf>> {
+    let Some(prompt) = context_prompt.filter(|p| !p.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let path = env.workdir.join(CONTEXT_PROMPT_FILE);
+    fs::write(&path, prompt)?;
+    Ok(Some(path))
 }
 
 /// Write or refresh the `.gc_meta.json` marker.
@@ -227,6 +359,94 @@ pub fn cleanup(env: &ExecEnv, kind: CleanupKind) -> io::Result<()> {
     }
 }
 
+/// The tally of one [`sweep_workspaces_gc`] pass.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct GcSweepReport {
+    /// Per-task `{shortID}` dirs reclaimed this pass (orphan: no marker, mtime
+    /// past the 72h grace).
+    pub reclaimed: u64,
+    /// Per-task `{shortID}` dirs left in place this pass (live/marked, or a young
+    /// orphan still inside the grace window).
+    pub retained: u64,
+}
+
+/// Walk the live workspace tree under `home` and reclaim every orphaned per-task
+/// dir, returning the reclaim/retain tally.
+///
+/// This is the **scheduled** counterpart to [`cleanup`] with
+/// [`CleanupKind::OrphanScan`]: rather than acting on a single known
+/// [`ExecEnv`], it enumerates `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID}/`
+/// and applies the same orphan rule to each `{shortID}` root —
+///
+/// - **reclaim** (`rm -rf`) a root that has **no** `.gc_meta.json` marker AND
+///   whose mtime is older than [`ORPHAN_GRACE_MS`] (72h) relative to `now_ms`;
+/// - **retain** a live (marked) root, and a young orphan still inside the grace
+///   window (a freshly-leaked dir gets the grace before it is treated as a
+///   permanent leak).
+///
+/// `now_ms` is injected (epoch milliseconds) so the 72h comparison is
+/// deterministic under test; production passes the daemon clock's `now_ms()`.
+///
+/// The walk is tolerant of a missing tree (a daemon that never dispatched a task
+/// has no `workspaces/` dir → a clean no-op) and of non-directory or unreadable
+/// entries (skipped, never fatal): a GC pass must never down the daemon.
+///
+/// # Errors
+///
+/// Returns an [`io::Error`] only if a present, readable orphan root cannot be
+/// removed or its mtime cannot be read — the same failure surface as [`cleanup`].
+pub fn sweep_workspaces_gc(home: &Path, now_ms: i64) -> io::Result<GcSweepReport> {
+    let mut root = home.to_path_buf();
+    for seg in WORKSPACES_SUBPATH {
+        root.push(seg);
+    }
+
+    let mut report = GcSweepReport::default();
+    // `workspaces/{ws_slug}/{shortID}/` — two levels deep. A missing tree (no
+    // task ever dispatched) yields an empty report rather than an error.
+    for ws_dir in subdirs(&root)? {
+        for task_root in subdirs(&ws_dir)? {
+            if is_orphan_root(&task_root, now_ms)? {
+                remove_tree(&task_root)?;
+                report.reclaimed += 1;
+            } else {
+                report.retained += 1;
+            }
+        }
+    }
+    Ok(report)
+}
+
+/// Whether a per-task `{shortID}` root is a reclaimable orphan: it carries **no**
+/// `.gc_meta.json` marker AND its mtime is older than the 72h grace relative to
+/// `now_ms`. A marked (live) root or a young orphan returns `false`.
+fn is_orphan_root(task_root: &Path, now_ms: i64) -> io::Result<bool> {
+    if task_root.join(GC_META_FILE).exists() {
+        return Ok(false); // marked → live, leave it.
+    }
+    is_older_than(task_root, now_ms, ORPHAN_GRACE_MS)
+}
+
+/// List the immediate sub*directories* of `dir`, sorted for deterministic
+/// iteration. A missing `dir` yields an empty list (the caller treats an absent
+/// workspace tree as "nothing to sweep"); non-directory entries are skipped.
+fn subdirs(dir: &Path) -> io::Result<Vec<PathBuf>> {
+    let entries = match fs::read_dir(dir) {
+        Ok(rd) => rd,
+        Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(Vec::new()),
+        Err(e) => return Err(e),
+    };
+    let mut out = Vec::new();
+    for entry in entries {
+        let entry = entry?;
+        if entry.file_type()?.is_dir() {
+            out.push(entry.path());
+        }
+    }
+    out.sort();
+    Ok(out)
+}
+
 /// `rm -rf` a directory, treating "already gone" as success.
 fn remove_tree(dir: &Path) -> io::Result<()> {
     match fs::remove_dir_all(dir) {
@@ -254,4 +474,127 @@ fn is_older_than(dir: &Path, now_ms: i64, grace_ms: i64) -> io::Result<bool> {
 #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
 fn system_time_to_ms(t: SystemTime) -> i64 {
     t.duration_since(SystemTime::UNIX_EPOCH).map_or(0, |d| d.as_millis() as i64)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{legacy_short_id, logs_dir, logs_dir_candidates, short_id, task_root};
+    use std::path::Path;
+
+    /// Two ULIDs minted in the same instant share their (coarse-timestamp) first
+    /// 8 chars but differ in the random tail — the slug must keep them DISTINCT,
+    /// since it names the per-task worktree dir + `ainb/<slug>` branch (a squad
+    /// fan-out mints several ids per millisecond; tcp T4 regression).
+    #[test]
+    fn same_instant_ulids_get_distinct_slugs() {
+        // Same 10-char timestamp prefix, different random parts (real ULID shape).
+        let a = "01JB2K3W4APQRSTUVWXYZ23456";
+        let b = "01JB2K3W4APQRSTUVWXYZ23457";
+        assert_eq!(
+            &a[..8],
+            &b[..8],
+            "the fixture ids share the coarse-ts prefix"
+        );
+        assert_ne!(
+            short_id(a),
+            short_id(b),
+            "same-instant ids must map to distinct slugs"
+        );
+        assert_eq!(short_id(a), "01JB2K3WZ23456");
+    }
+
+    /// Short hand-minted ids (test fixtures like `wt-a`) pass through whole, so
+    /// pre-existing tripwires that hand-insert task rows keep their slugs.
+    #[test]
+    fn short_ids_pass_through_whole() {
+        assert_eq!(short_id("wt-a"), "wt-a");
+        assert_eq!(short_id("task-lead"), "task-lead");
+        assert_eq!(short_id("exactly14chars"), "exactly14chars");
+    }
+
+    /// The legacy slug is the pre-T4 first-8-chars scheme (the whole id when
+    /// shorter) — the path a pre-upgrade run's tree was written under.
+    #[test]
+    fn legacy_short_id_is_the_pre_t4_first_eight() {
+        assert_eq!(legacy_short_id("01JB2K3W4APQRSTUVWXYZ23456"), "01JB2K3W");
+        assert_eq!(legacy_short_id("wt-a"), "wt-a");
+    }
+
+    /// A reader probes the FULL-id dir first (the current write scheme, tcp vpm),
+    /// then falls back through the T4 short_id slug and the pre-T4 legacy first-8
+    /// slug — a real ULID yields all three, so a run written under ANY scheme is
+    /// found. A short id (whole under every scheme) yields a single candidate.
+    #[test]
+    fn logs_dir_candidates_prefers_full_then_short_then_legacy() {
+        let home = Path::new("/home");
+        let ulid = "01JB2K3W4APQRSTUVWXYZ23456";
+        let cands = logs_dir_candidates(home, "ws", ulid);
+        assert_eq!(
+            cands.len(),
+            3,
+            "a ULID yields full + short + legacy candidates"
+        );
+        assert!(
+            cands[0].ends_with("workspaces/ws/01JB2K3W4APQRSTUVWXYZ23456/logs"),
+            "the FULL-id dir is tried first: {:?}",
+            cands[0]
+        );
+        assert!(
+            cands[1].ends_with("workspaces/ws/01JB2K3WZ23456/logs"),
+            "the T4 short_id slug is the second candidate: {:?}",
+            cands[1]
+        );
+        assert!(
+            cands[2].ends_with("workspaces/ws/01JB2K3W/logs"),
+            "the pre-T4 legacy first-8 slug is the last fallback: {:?}",
+            cands[2]
+        );
+
+        // A short id is identical under every scheme → one candidate only.
+        let short = logs_dir_candidates(home, "ws", "wt-a");
+        assert_eq!(
+            short.len(),
+            1,
+            "no duplicate candidate when the schemes agree"
+        );
+    }
+
+    /// Collision proof (tcp vpm): two distinct task ids that COLLIDE under BOTH
+    /// legacy slug schemes — identical first-8 (pre-T4) AND identical first-8+last-6
+    /// (T4) — still get DISTINCT `task_root` / `logs_dir` paths under the full-id
+    /// write scheme, so their worktree / logs / output never cross-wire.
+    #[test]
+    fn full_id_paths_do_not_collide_when_legacy_slugs_would() {
+        let home = Path::new("/home");
+        // Same first 8 AND same last 6 → identical `short_id` and `legacy_short_id`,
+        // differing only in the middle of the random part.
+        let a = "01JB2K3W4AAAAAAAAAAAAAABCDEF".to_string();
+        let b = "01JB2K3W4ABBBBBBBBBBBBBABCDEF".to_string();
+        assert_eq!(
+            short_id(&a),
+            short_id(&b),
+            "the two ids alias under the T4 slug"
+        );
+        assert_eq!(
+            legacy_short_id(&a),
+            legacy_short_id(&b),
+            "and alias under the pre-T4 slug too"
+        );
+
+        // Yet the full-id write paths are distinct — no cross-wiring.
+        assert_ne!(
+            task_root(home, "ws", &a),
+            task_root(home, "ws", &b),
+            "full-id task roots must be distinct"
+        );
+        assert_ne!(
+            logs_dir(home, "ws", &a),
+            logs_dir(home, "ws", &b),
+            "full-id logs dirs must be distinct"
+        );
+        assert!(
+            task_root(home, "ws", &a).ends_with(&a),
+            "the task root is keyed on the whole id"
+        );
+    }
 }

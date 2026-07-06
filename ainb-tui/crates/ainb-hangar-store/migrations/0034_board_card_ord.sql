@@ -1,0 +1,28 @@
+-- Hangar v1 schema, migration 0034: card ordering within a board column
+-- (tcp T3 / F6 — reorder cards).
+--
+-- P4's `board_card` carried no explicit order: `cards_of` read placements by
+-- `(added_at, issue_id)`, so a card's position within its column was fixed at
+-- insertion time and the user could not reorder them. F6 adds a
+-- REORDER-CARDS-WITHIN-A-COLUMN verb, which needs a mutable per-card position.
+--
+-- `ord` is that position. The repo keeps it meaningful WITHIN a column: a card
+-- added or moved into a column is appended at `MAX(ord) + 1` among that column's
+-- cards, and a reorder rewrites one column's cards to a contiguous `0..n`. `ord`
+-- is stored board-wide but only ever COMPARED within a column — the
+-- `hangar/boards_list` snapshot buckets cards by `column_id` and each bucket's
+-- relative order is what the board renders, so a cross-column `ord` collision is
+-- harmless (two columns may each hold an `ord = 0` card; each bucket sorts
+-- independently by `ord, added_at, issue_id`).
+--
+-- The stable card identity a reorder keys off is the `issue_id`: the
+-- `(board_id, issue_id)` PK already makes it unique per board, so NO surrogate id
+-- is needed — unlike `board_column`, whose reorder keys off a surrogate `id`
+-- because a column has no other per-board-unique handle (migration 0027's
+-- "why a surrogate id" note).
+--
+-- `ALTER TABLE ADD COLUMN` is a catalog-only change (no table rewrite), so this is
+-- safe + O(1) on a populated database: every existing card defaults to `ord = 0`,
+-- preserving the pre-0034 `(added_at, issue_id)` order until the user reorders.
+
+ALTER TABLE board_card ADD COLUMN ord INTEGER NOT NULL DEFAULT 0;

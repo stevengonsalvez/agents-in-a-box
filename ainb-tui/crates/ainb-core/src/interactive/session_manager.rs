@@ -104,6 +104,17 @@ pub struct SessionStore {
     pub sessions: HashMap<String, SessionMetadata>, // keyed by tmux_session_name
 }
 
+/// RAII guard holding the cross-process advisory lock over `sessions.json`.
+///
+/// Returned by [`SessionStore::lock`]. The lock is released when this drops, so
+/// keep the guard alive for the entire load-mutate-save window and let it fall
+/// out of scope afterwards. The wrapped file handle is intentionally opaque —
+/// its only role is to own the `flock`.
+#[must_use = "the sessions.json lock is released as soon as the guard is dropped"]
+pub struct SessionStoreGuard {
+    _file: std::fs::File,
+}
+
 impl SessionStore {
     /// Load session store from disk
     pub fn load() -> Self {
@@ -135,6 +146,54 @@ impl SessionStore {
                 Self::default()
             }
         }
+    }
+
+    /// Acquire the cross-process advisory lock guarding `sessions.json` and
+    /// hold it across a load-mutate-save.
+    ///
+    /// This is the SAME lock the hangar daemon takes in
+    /// `ainb_fleet_core::session_registry::register_session_at`, so an
+    /// interactive `ainb run` / `ainb kill` / recovery mutation and a daemon
+    /// task registration serialise against each other instead of racing a
+    /// naked read-modify-write. Hold the returned guard for the WHOLE window —
+    /// load, inspect, mutate, save — then drop it (the lock releases on drop).
+    /// Prefer [`SessionStore::mutate`] for the common upsert/remove sites; reach
+    /// for the raw guard only when the mutation is interleaved with decisions
+    /// the closure can't express (e.g. emitting host notifications on an
+    /// early-return path).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the store directory can't be created or the lock
+    /// can't be acquired.
+    pub fn lock() -> Result<SessionStoreGuard, std::io::Error> {
+        let path = Self::storage_path();
+        let dir = path.parent().unwrap_or_else(|| Path::new("."));
+        let file = ainb_fleet_core::session_registry::lock_sessions_store_at(dir)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+        Ok(SessionStoreGuard { _file: file })
+    }
+
+    /// Locked read-modify-write: take the [`lock`](Self::lock), load the store
+    /// FRESH under it, apply `f`, and save — atomically with respect to every
+    /// other locked writer. The load happens inside the lock, so `f` always
+    /// observes the latest on-disk state (no lost update).
+    ///
+    /// Use this for the upsert/remove lifecycle sites. When the mutation needs
+    /// to short-circuit and do host-side work (notifications) on some paths,
+    /// hold [`lock`](Self::lock) directly instead.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the lock can't be acquired or the save fails.
+    pub fn mutate<F>(f: F) -> Result<(), std::io::Error>
+    where
+        F: FnOnce(&mut Self),
+    {
+        let _guard = Self::lock()?;
+        let mut store = Self::load();
+        f(&mut store);
+        store.save()
     }
 
     /// Save session store to disk
@@ -392,9 +451,9 @@ impl InteractiveSessionManager {
             model,
             codex_model,
         };
-        let mut store = SessionStore::load();
-        store.upsert(metadata);
-        if let Err(e) = store.save() {
+        // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
+        // can't lost-update this upsert (pu4).
+        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
             warn!("Failed to persist session metadata: {}", e);
             // Continue anyway - session is still usable, just won't survive restarts gracefully
         }
@@ -562,9 +621,8 @@ impl InteractiveSessionManager {
             model,
             codex_model,
         };
-        let mut store = SessionStore::load();
-        store.upsert(metadata);
-        if let Err(e) = store.save() {
+        // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
+        if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
             warn!("Failed to persist session metadata: {}", e);
         }
 
@@ -1002,7 +1060,16 @@ impl InteractiveSessionManager {
             }
         }
 
-        // Step 3: Remove from sessions.json
+        // Step 3: Remove from sessions.json under the cross-process lock (pu4)
+        // so a concurrent create/register can't resurrect the entry we delete.
+        // Best-effort lock: if it can't be taken we still clean up (unlocked)
+        // rather than leak the metadata — the guard is held across load+save and
+        // dropped before the reap read below.
+        let lock_guard = SessionStore::lock()
+            .map_err(|e| {
+                warn!("Failed to lock sessions.json for removal: {e}; proceeding unlocked");
+            })
+            .ok();
         let mut store = SessionStore::load();
         if let Some(ref name) = tmux_session_name {
             store.remove_by_tmux_name(name);
@@ -1012,6 +1079,7 @@ impl InteractiveSessionManager {
             warn!("Failed to update sessions.json after removal: {}", e);
             // Continue anyway - removal was successful
         }
+        drop(lock_guard);
 
         // Idle-reap: if no Headroom-enabled sessions remain, stop the shared
         // proxy so it doesn't linger after the last consumer is gone.
@@ -1790,6 +1858,43 @@ mod tests {
         }
     }
 
+    /// ccc / D11 schema-compat guard: a session the hangar daemon registers
+    /// through the `ainb-fleet-core` seam must round-trip back through THIS
+    /// crate's `SessionStore` — the same `sessions.json` file, the same schema —
+    /// so `ainb list` (and thus fleet discover / standup / broadcast) sees a
+    /// daemon-spawned interactive session. The daemon writes only the REQUIRED
+    /// fields; the `#[serde(default)]` fields (`agent_type` / `headroom_enabled` /
+    /// `rtk_enabled`) it omits must default cleanly on read. If a future field
+    /// becomes non-default, this test fails — the drift alarm.
+    #[test]
+    fn daemon_registered_session_round_trips_through_session_store() {
+        use ainb_fleet_core::session_registry::{AinbSessionRecord, register_session_at};
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sessions.json");
+        let rec = AinbSessionRecord::new(
+            "tmux_hangar-01HZ",
+            PathBuf::from("/work/ws/01HZ/workdir"),
+            "myproj",
+        );
+        register_session_at(&path, &rec).unwrap();
+
+        // Read the file back through the CLI's store type — the exact `ainb list` path.
+        let content = std::fs::read_to_string(&path).unwrap();
+        let store: SessionStore = serde_json::from_str(&content).unwrap();
+        let meta = store
+            .find_by_tmux_name("tmux_hangar-01HZ")
+            .expect("daemon-registered session must be readable by SessionStore");
+
+        assert_eq!(meta.session_id, rec.session_id);
+        assert_eq!(meta.tmux_session_name, "tmux_hangar-01HZ");
+        assert_eq!(meta.worktree_path, PathBuf::from("/work/ws/01HZ/workdir"));
+        assert_eq!(meta.workspace_name, "myproj");
+        // The omitted optionals default cleanly (no drift).
+        assert!(!meta.headroom_enabled);
+        assert!(!meta.rtk_enabled);
+    }
+
     #[test]
     fn test_derive_workspace_name() {
         // Legacy worktree layout: <repo>--<hash>--<session-id>
@@ -1907,6 +2012,11 @@ mod tests {
         use std::path::PathBuf;
         use tempfile::TempDir;
 
+        // AINB_HOME is process-global; serialise with every other env-mutating
+        // test in the crate (including `concurrent_mutate_does_not_lose_updates`)
+        // via the shared lock so parallel runs don't clobber each other's home.
+        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+
         let dir = TempDir::new().expect("tempdir");
         // Point AINB_HOME at our temp dir so SessionStore::storage_path() uses it.
         std::env::set_var("AINB_HOME", dir.path());
@@ -1947,6 +2057,72 @@ mod tests {
         );
 
         // Cleanup env
+        std::env::remove_var("AINB_HOME");
+    }
+
+    /// pu4: `SessionStore::mutate` must serialise concurrent load-modify-save
+    /// through the cross-process lock so racing writers never lost-update the
+    /// store. Two thread pools each upsert a disjoint set of keys into the SAME
+    /// `sessions.json`; with the naked (pre-fix) RMW the interleaving where both
+    /// threads load the same base and write back only their own entry would drop
+    /// updates. Under the lock every key survives.
+    ///
+    /// Env-guarded (`AINB_HOME` is process-global) via the shared test env lock.
+    #[test]
+    fn concurrent_mutate_does_not_lose_updates() {
+        use crate::models::session::SessionAgentType;
+        use chrono::Utc;
+        use std::sync::{Arc, Barrier};
+        use tempfile::TempDir;
+
+        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+
+        let dir = TempDir::new().expect("tempdir");
+        std::env::set_var("AINB_HOME", dir.path());
+
+        let mk = |i: usize| SessionMetadata {
+            session_id: uuid::Uuid::new_v4(),
+            tmux_session_name: format!("tmux_pu4_{i}"),
+            worktree_path: PathBuf::from(format!("/work/{i}")),
+            workspace_name: format!("ws{i}"),
+            created_at: Utc::now(),
+            agent_type: SessionAgentType::Claude,
+            headroom_enabled: false,
+            rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            codex_model: None,
+        };
+
+        const WRITERS: usize = 12;
+        let barrier = Arc::new(Barrier::new(WRITERS));
+        let handles: Vec<_> = (0..WRITERS)
+            .map(|i| {
+                let barrier = Arc::clone(&barrier);
+                std::thread::spawn(move || {
+                    barrier.wait();
+                    SessionStore::mutate(|store| store.upsert(mk(i)))
+                        .expect("locked mutate must succeed");
+                })
+            })
+            .collect();
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let store = SessionStore::load();
+        assert_eq!(
+            store.sessions.len(),
+            WRITERS,
+            "every concurrent mutate must survive — no lost update"
+        );
+        for i in 0..WRITERS {
+            assert!(
+                store.sessions.contains_key(&format!("tmux_pu4_{i}")),
+                "writer {i}'s entry was lost to a racing mutate"
+            );
+        }
+
         std::env::remove_var("AINB_HOME");
     }
 

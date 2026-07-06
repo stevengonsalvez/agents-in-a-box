@@ -77,10 +77,35 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
             .context("seeding task-log.md")?;
     }
 
-    // Install the heartbeat timer (idempotent).
+    // D12: provision the heartbeat as a DAEMON cron by registering the instance
+    // in the daemon store — the daemon-native replacement for the launchd/systemd
+    // timer. We register FIRST so the local timer can be a true FALLBACK, never a
+    // concurrent second scheduler: with the daemon up (the P9 world) two active
+    // schedulers would fire two nudges per interval into the same ATC session and
+    // keep two split-brain retry-cap ledgers (the CLI heartbeat's JSON cap vs the
+    // daemon cron's `atc_retry` cap) — the exact one-send-path / daemon-owns-state
+    // violation. Best-effort: a down daemon warns and returns false (external-dep
+    // rule — never hard-fail on a missing daemon). The UX is unchanged.
+    let daemon_registered = if meta.heartbeat_enabled {
+        register_heartbeat_with_daemon(&meta, &paths).await
+    } else {
+        false
+    };
+
+    // Install the launchd/systemd timer ONLY as the fallback the daemon cron
+    // supersedes: when the daemon owns the heartbeat we skip the local timer (and
+    // tear down any timer a prior daemon-down `setup` left behind) so exactly one
+    // mechanism fires. When the daemon is unreachable the local timer keeps the
+    // heartbeat alive. `timer::install` is idempotent.
     let mut timer_paths = Vec::new();
     if meta.heartbeat_enabled {
-        timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
+        if daemon_registered {
+            // A prior daemon-down run may have installed a local timer; remove it
+            // now that the daemon cron is the single active scheduler.
+            let _ = timer::teardown(&meta.name);
+        } else {
+            timer_paths = timer::install(&meta).context("installing heartbeat timer")?;
+        }
     }
 
     // Install the event-driven lifecycle hooks into Claude's settings.json
@@ -122,6 +147,7 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         "timer_units": timer_paths.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
         "session_spawned": spawned,
         "lifecycle_hooks_installed": hooks_installed,
+        "daemon_registered": daemon_registered,
     });
 
     if matches!(format, OutputFormat::Text) {
@@ -131,10 +157,14 @@ async fn setup(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
         println!("  session:   {} (spawned: {spawned})", meta.tmux_session());
         println!("  hooks:     lifecycle hooks installed: {hooks_installed}");
         if meta.heartbeat_enabled {
+            let via = if daemon_registered {
+                "daemon cron".to_string()
+            } else {
+                format!("{} local timer unit(s)", timer_paths.len())
+            };
             println!(
-                "  heartbeat: every {}m via {} unit(s)",
-                meta.heartbeat_interval_min,
-                timer_paths.len()
+                "  heartbeat: every {}m via {via}",
+                meta.heartbeat_interval_min
             );
         } else {
             println!("  heartbeat: disabled");
@@ -187,6 +217,98 @@ task-log.md. Stand by for [HEARTBEAT] messages and act per the policy.",
     Ok(true)
 }
 
+/// Register the ATC instance's heartbeat as a daemon cron (D12), returning
+/// whether the daemon accepted the registration.
+///
+/// Best-effort by design: a missing / unreachable daemon (no token file, dial
+/// refused, timeout) is warned and returns `false`, and the caller keeps the
+/// local launchd/systemd timer as the fallback. This is the external-dep rule —
+/// `atc setup` must never hard-fail just because the daemon is not up.
+async fn register_heartbeat_with_daemon(meta: &AtcMeta, paths: &AtcPaths) -> bool {
+    use crate::fleet::bridge::daemon::DaemonClient;
+    use ainb_hangar_proto::snapshots::AtcRegisterParams;
+
+    let client = match DaemonClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon registration skipped (daemon not reachable: {e}); \
+heartbeat falls back to the local timer"
+            );
+            return false;
+        }
+    };
+    let params = AtcRegisterParams {
+        name: meta.name.clone(),
+        cwd: paths.dir.display().to_string(),
+        tmux_session: Some(meta.tmux_session()),
+        heartbeat_cron: Some(heartbeat_cron_for_interval(meta.heartbeat_interval_min)),
+        err_retry_cap: None,
+        idle_pause_min: Some(i64::from(meta.idle_pause_min)),
+    };
+    match client.atc_register(params).await {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon registration failed ({e}); heartbeat falls back to the local timer"
+            );
+            false
+        }
+    }
+}
+
+/// Unregister the ATC instance's heartbeat from the daemon (D12), returning
+/// whether the daemon reported it disabled a registered instance.
+///
+/// Best-effort by design (mirrors [`register_heartbeat_with_daemon`]): a missing
+/// / unreachable daemon is warned and returns `false`. This clears `enabled` +
+/// `next_tick_at` in daemon-owned state so a torn-down instance's `atc_instance`
+/// row is no longer schedulable — the daemon-native counterpart to removing the
+/// local launchd/systemd timer.
+async fn unregister_heartbeat_with_daemon(name: &str) -> bool {
+    use crate::fleet::bridge::daemon::DaemonClient;
+    use ainb_hangar_proto::snapshots::AtcUnregisterParams;
+
+    let client = match DaemonClient::from_env() {
+        Ok(c) => c,
+        Err(e) => {
+            tracing::warn!(
+                "ATC daemon unregister skipped (daemon not reachable: {e}); \
+the instance row is left as-is"
+            );
+            return false;
+        }
+    };
+    match client
+        .atc_unregister(AtcUnregisterParams {
+            name: name.to_string(),
+        })
+        .await
+    {
+        Ok(res) => res.disabled,
+        Err(e) => {
+            tracing::warn!("ATC daemon unregister failed ({e}); the instance row is left as-is");
+            false
+        }
+    }
+}
+
+/// Convert a heartbeat interval in minutes to a UTC 5-field cron expression the
+/// daemon heartbeat scheduler fires on.
+///
+/// An interval under an hour maps to `*/N * * * *` (every N minutes); an interval
+/// of 60+ minutes maps to hourly `0 * * * *` (a `*/N` minute field only spans
+/// 0–59). `0` is clamped to 1 so a degenerate config still yields a valid cron.
+#[must_use]
+fn heartbeat_cron_for_interval(interval_min: u32) -> String {
+    let n = interval_min.max(1);
+    if n >= 60 {
+        "0 * * * *".to_string()
+    } else {
+        format!("*/{n} * * * *")
+    }
+}
+
 // --- teardown ---------------------------------------------------------------
 
 async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> {
@@ -195,6 +317,12 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
 
     // Remove the timer first (idempotent, safe when absent).
     let removed = timer::teardown(&name).context("removing heartbeat timer")?;
+
+    // Unregister from the daemon so its heartbeat cron stops scheduling this
+    // instance (clears enabled + next_tick_at in daemon-owned state). Best-effort:
+    // a down daemon is warned, not fatal. Mirrors setup's register call — teardown
+    // must tear down BOTH schedulers, not just the local timer.
+    let daemon_unregistered = unregister_heartbeat_with_daemon(&name).await;
 
     // Best-effort kill the running session. Use the same sanitization the
     // spawner applies so we target the right session for unsafe names.
@@ -242,6 +370,7 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
         "action": "teardown",
         "name": name,
         "timer_units_removed": removed.iter().map(|p| p.display().to_string()).collect::<Vec<_>>(),
+        "daemon_unregistered": daemon_unregistered,
         "session_killed": killed,
         "dir_purged": purged,
         "lifecycle_hooks_uninstalled": hooks_uninstalled,
@@ -250,6 +379,7 @@ async fn teardown(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()
     if matches!(format, OutputFormat::Text) {
         println!("ATC '{name}' torn down.");
         println!("  timer units removed: {}", removed.len());
+        println!("  daemon unregistered: {daemon_unregistered}");
         println!("  session killed:      {killed}");
         println!("  dir purged:          {purged}");
         if !purge {
@@ -427,6 +557,20 @@ async fn heartbeat(matches: &clap::ArgMatches, format: OutputFormat) -> Result<(
     // coarse session state is now `current_state`-backed without any direct
     // SQLite access here — and the exactly-once inbox drain below is UNCHANGED.
     let rows = fetch_needs().await.unwrap_or_default();
+    // ATC channel gate (agents-in-a-box-cdd): drop needs rows the notify rules kept
+    // off the Atc channel, so a board-only `waiting` (or a kind routed away from
+    // ATC) stops nudging the ATC brain. Fail-open when the daemon inbox is
+    // unreachable — a transient socket fault must never silence ATC.
+    let rows = match fetch_fleet_attention().await {
+        Ok(attention) => filter_atc_channel(rows, &attention),
+        Err(e) => {
+            tracing::debug!(
+                error = %e,
+                "atc heartbeat: attention inbox unavailable; nudging the full needs snapshot"
+            );
+            rows
+        }
+    };
     let now_ms = chrono::Utc::now().timestamp_millis();
 
     // Load the heartbeat process's OWN bookkeeping file. This is a single-writer
@@ -622,6 +766,49 @@ async fn fetch_needs() -> Result<Vec<NeedsRow>> {
     let rows: Vec<NeedsRow> =
         serde_json::from_slice(&out.stdout).context("parsing `fleet needs` JSON")?;
     Ok(rows)
+}
+
+/// Snapshot the daemon's fleet-wide OPEN attention inbox, whose rows carry the
+/// resolved routing channels (tcp T5, agents-in-a-box-cdd). Best-effort: a daemon
+/// that is down / unreachable errors, and the caller then nudges the FULL needs
+/// snapshot (fail-open — the Atc gate must never silence ATC on a transient socket
+/// fault). The wire rows already carry channels resolved-at-read by the daemon
+/// (`attention_row_to_wire`), so a legacy pre-channel row resolves to its rule's
+/// set without any re-resolution at this seam.
+async fn fetch_fleet_attention() -> Result<Vec<ainb_hangar_proto::events::AttentionRow>> {
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()?;
+    Ok(client.attention_list_fleet().await?)
+}
+
+/// Drop the needs rows the notify rules kept OFF the ATC channel (agents-in-a-box-cdd).
+///
+/// A session the attention inbox KNOWS but whose resolved `ChannelSet` excludes
+/// [`Channel::Atc`] — a board-only `waiting`, or a kind the rules routed away from
+/// ATC — stops nudging the ATC brain. A session ABSENT from the inbox (a tmux-only
+/// / non-Claude row the daemon never raised an attention for) is KEPT: the Atc
+/// gate only applies to rows the daemon actually routed, so wiring the channel in
+/// never silently drops an un-routed session. A session with SEVERAL open rows
+/// nudges ATC when ANY of them is Atc-routed.
+fn filter_atc_channel(
+    rows: Vec<NeedsRow>,
+    attention: &[ainb_hangar_proto::events::AttentionRow],
+) -> Vec<NeedsRow> {
+    use ainb_hangar_proto::Channel;
+    use std::collections::HashSet;
+    let mut known: HashSet<&str> = HashSet::new();
+    let mut atc_on: HashSet<&str> = HashSet::new();
+    for a in attention {
+        known.insert(a.session_id.as_str());
+        if a.channels.contains(Channel::Atc) {
+            atc_on.insert(a.session_id.as_str());
+        }
+    }
+    rows.into_iter()
+        .filter(|r| {
+            let sid = r.session.id.as_str();
+            !known.contains(sid) || atc_on.contains(sid)
+        })
+        .collect()
 }
 
 // --- hook (internal, called by the installed hook script) -------------------
@@ -1034,11 +1221,18 @@ fn inbox_commit(matches: &clap::ArgMatches, format: OutputFormat) -> Result<()> 
 }
 
 /// Read all of stdin to a string (best-effort; empty on any error). The hook
-/// payload is piped in by `notify.sh`.
+/// payload is piped in by `notify.sh` — it never arrives on a terminal, so a
+/// TTY stdin (a human ran the verb by hand, or a test binary inherited the
+/// shell's terminal) is skipped rather than blocking forever on `read_to_string`
+/// waiting for input that will never come.
 fn read_stdin_to_string() -> String {
-    use std::io::Read;
+    use std::io::{IsTerminal, Read};
+    let stdin = std::io::stdin();
+    if stdin.is_terminal() {
+        return String::new();
+    }
     let mut buf = String::new();
-    let _ = std::io::stdin().read_to_string(&mut buf);
+    let _ = stdin.lock().read_to_string(&mut buf);
     buf
 }
 
@@ -1238,6 +1432,112 @@ This is ATC's durable, human-readable memory. Append one dated line per action\n
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    /// A minimal idle needs row for the given session id.
+    fn needs_row(session_id: &str) -> NeedsRow {
+        use crate::fleet::read::{IdleContext, NeedsContext, RouteHint};
+        use crate::fleet::types::{Session, SessionSource};
+        NeedsRow {
+            session: Session {
+                id: session_id.into(),
+                cwd: format!("/tmp/{session_id}"),
+                pid: None,
+                git_root: None,
+                tmux_session: None,
+                workspace_name: None,
+                worktree_path: None,
+                peer_id: None,
+                bg_job_id: None,
+                transcript_path: None,
+                sources: vec![SessionSource::Ainb],
+                summary: None,
+                last_seen_ms: None,
+            },
+            context: NeedsContext::Idle(IdleContext {
+                idle_minutes: 9,
+                last_assistant_text: None,
+            }),
+            route_hint: RouteHint::Tmux,
+            enrich_key: String::new(),
+            enriched: None,
+            need_enrich: false,
+            source: None,
+        }
+    }
+
+    /// A minimal open attention row for `session_id` routed to `channels`.
+    fn attention_row(
+        session_id: &str,
+        channels: ainb_hangar_proto::ChannelSet,
+    ) -> ainb_hangar_proto::events::AttentionRow {
+        ainb_hangar_proto::events::AttentionRow {
+            id: format!("att:{session_id}:0"),
+            session_id: session_id.into(),
+            cwd: format!("/tmp/{session_id}"),
+            workspace_id: None,
+            kind: "waiting".into(),
+            payload: "{}".into(),
+            degraded: false,
+            created_at: 0,
+            channels,
+        }
+    }
+
+    #[test]
+    fn atc_channel_gate_drops_atc_excluded_but_keeps_routed_and_unrouted() {
+        use ainb_hangar_proto::{Channel, ChannelSet};
+        let rows = vec![
+            needs_row("s-atc"),
+            needs_row("s-board"),
+            needs_row("s-unknown"),
+        ];
+        let attention = vec![
+            // Routed to ATC → keeps nudging.
+            attention_row("s-atc", ChannelSet::from_channels([Channel::Atc])),
+            // Board-only (waiting) → excludes Atc → stops nudging ATC.
+            attention_row("s-board", ChannelSet::NONE),
+            // s-unknown has NO attention row → kept (never silently dropped).
+        ];
+        let kept: Vec<String> =
+            filter_atc_channel(rows, &attention).into_iter().map(|r| r.session.id).collect();
+        assert_eq!(
+            kept,
+            vec!["s-atc".to_string(), "s-unknown".to_string()],
+            "atc-excluded board-only row dropped; atc-routed + un-routed rows kept"
+        );
+    }
+
+    #[test]
+    fn atc_channel_gate_keeps_a_session_with_any_atc_routed_row() {
+        use ainb_hangar_proto::{Channel, ChannelSet};
+        // A session with one board-only row AND one Atc-routed row still nudges.
+        let rows = vec![needs_row("s-multi")];
+        let attention = vec![
+            attention_row("s-multi", ChannelSet::NONE),
+            attention_row(
+                "s-multi",
+                ChannelSet::from_channels([Channel::Os, Channel::Atc]),
+            ),
+        ];
+        let kept = filter_atc_channel(rows, &attention);
+        assert_eq!(
+            kept.len(),
+            1,
+            "any Atc-routed row keeps the session nudging"
+        );
+    }
+
+    #[test]
+    fn heartbeat_cron_maps_interval_to_a_valid_cron() {
+        // Sub-hour intervals map to an every-N-minute cron.
+        assert_eq!(heartbeat_cron_for_interval(2), "*/2 * * * *");
+        assert_eq!(heartbeat_cron_for_interval(15), "*/15 * * * *");
+        // 0 is clamped to 1 (still a valid cron, never a panic / empty field).
+        assert_eq!(heartbeat_cron_for_interval(0), "*/1 * * * *");
+        // 60+ minutes maps to hourly (a `*/N` minute field only spans 0-59).
+        assert_eq!(heartbeat_cron_for_interval(60), "0 * * * *");
+        assert_eq!(heartbeat_cron_for_interval(120), "0 * * * *");
+    }
 
     /// Provision a minimal ATC instance dir (just meta.json) under
     /// `<home>/atc/<name>` and return its path — the cwd an ATC session runs in.

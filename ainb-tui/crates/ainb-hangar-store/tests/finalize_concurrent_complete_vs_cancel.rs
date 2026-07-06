@@ -74,8 +74,10 @@ async fn seed(store: &Store) {
             agent_id: "agent-1".to_string(),
             issue_id: None,
             work_dir: None,
+            priority: 0,
             created_at: 1,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

@@ -59,6 +59,9 @@ async fn seed_issue(
         assignee,
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T0_MS,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     IssueRepo::get_by_id(store.pool(), id)

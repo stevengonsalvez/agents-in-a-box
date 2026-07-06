@@ -50,22 +50,26 @@ fn issue_list_renders_seeded_issues() {
     // it would fire before `,` took effect and capture the issue list. Gate on a
     // Settings-body-only section header (`Providers`, which is not a tab) AND the
     // section word so we only proceed once the body actually switched.
-    sess.send_key(",");
+    // Re-send the nav key until the screen switches: a lone keypress can be
+    // dropped on a loaded CI runner.
     let settings = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains("Daemon") && c.contains("Providers")
-        })
+        .switch_tab_until(
+            ",",
+            Instant::now() + Duration::from_secs(10 * common::budget_scale()),
+            |c| c.contains("Daemon") && c.contains("Providers"),
+        )
         .expect("settings never rendered on forward nav");
     assert!(
         !settings.contains("Refactor API"),
         "issue list bled into settings:\n{settings}"
     );
 
-    sess.send_key("1");
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains("Refactor API")
-        })
+        .switch_tab_until(
+            "1",
+            Instant::now() + Duration::from_secs(10 * common::budget_scale()),
+            |c| c.contains("Refactor API"),
+        )
         .expect("issue list never returned");
     assert!(
         back.contains("Todo (3)"),

@@ -10,7 +10,7 @@ use std::path::Path;
 use std::process::Command;
 
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::execenv::{prepare_env, short_id};
+use ainb_hangar_daemon::execenv::prepare_env;
 use ainb_hangar_daemon::worktree::{cleanup_worktree, prepare_worktree};
 use ainb_hangar_store::repo::task::Task;
 use tempfile::TempDir;
@@ -55,11 +55,18 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         max_attempts: 3,
         parent_task_id: None,
         failure_reason: None,
+        priority: 0,
         created_at: BASE_MS,
         dispatched_at: Some(BASE_MS),
         started_at: None,
         finished_at: None,
         autopilot_run_id: None,
+        generation: 0,
+        mode: "headless".to_string(),
+        session_name: None,
+        repo_ref: None,
+        agent_kind: "claude".to_string(),
+        branch: None,
     }
 }
 
@@ -80,7 +87,7 @@ fn worktree_add_creates_branch_for_task() {
         .expect("prepare_worktree")
         .expect("worktree created for issue task");
 
-    let branch = format!("hangar/task/{}", short_id(&task.id));
+    let branch = format!("hangar/task/{}", &task.id);
     assert_eq!(wt.branch, branch);
     assert!(
         wt.workdir.join(".git").exists(),
@@ -148,7 +155,7 @@ fn worktree_init_skipped_for_chat_task() {
     let result = prepare_worktree(&task, &env, cache.path()).expect("prepare_worktree");
 
     assert!(result.is_none(), "chat task (no issue) → no worktree");
-    // workdir stays empty (no .git), matching Multica's lazy `repo checkout`.
+    // workdir stays empty (no .git), matching the reference's lazy `repo checkout`.
     assert!(env.workdir.is_dir());
     assert!(
         !env.workdir.join(".git").exists(),

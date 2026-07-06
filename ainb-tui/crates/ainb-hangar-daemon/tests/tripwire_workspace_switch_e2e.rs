@@ -8,6 +8,9 @@
 //! 4. press `s` to set it active,
 //! 5. assert the pane re-renders with the second workspace marked active
 //!    (its `▶` slug indicator) and the daemon-side switch state followed.
+//! 6. (e38.26) switch back to the Issues tab (`1`) and assert the issue list
+//!    now shows the SECOND workspace's issue and never the first's — proving
+//!    the switch re-scopes the DATA plane, not just the active `▶` marker.
 //!
 //! Honours the `tmux-ui-tripwire` HARD RULES via the shared P4 harness
 //! ([`tripwire_p4_common`]): exact-name `tmux kill-session` only, `poll_capture`
@@ -16,8 +19,13 @@
 //! plugin are missing.
 //!
 //! The seed is the P4 fixture PLUS a second workspace inserted here (the shared
-//! fixture seeds one workspace; switching needs two). The second workspace's
-//! slug is the on-screen marker the switch is asserted against.
+//! fixture seeds one workspace; switching needs two). Workspace A (the fixture's
+//! `default`) carries `Refactor API`; workspace B (`acme`) carries
+//! `Acme Login Bug` — distinct issues so the post-switch data assertion can tell
+//! the two tenants' issue lists apart. The second workspace's slug is the
+//! on-screen marker the active switch is asserted against; with `id != slug`
+//! (mirroring real workspaces) the assertion can't be masked by an `id == slug`
+//! fixture.
 
 use std::time::{Duration, Instant};
 
@@ -28,10 +36,28 @@ use common::{TuiSession, can_run_tripwire, prepare_pipeline, skip};
 /// The second workspace's slug — the marker the switch is asserted against.
 const SECOND_SLUG: &str = "acme";
 
-/// Insert a second workspace into the seeded hangar.db so the Workspace pane has
-/// something to switch to. Runs after `prepare_pipeline` seeded the P4 fixture.
+/// The second workspace's row id — deliberately distinct from its slug, so the
+/// switch + data-scoping exercise the real slug→id resolution (an `id == slug`
+/// fixture would mask a slug-keyed query bug).
+const SECOND_WS_ID: &str = "01JWSACME0000000000000000";
+
+/// The first workspace's issue title (from the P4 fixture) — must DISAPPEAR from
+/// the issue list once the active workspace switches to the second one.
+const FIRST_WS_ISSUE: &str = "Refactor API";
+
+/// The second workspace's issue title — must APPEAR in the issue list once the
+/// active workspace switches to it.
+const SECOND_WS_ISSUE: &str = "Acme Login Bug";
+
+/// Insert a second workspace (with its own `open` issue) into the seeded
+/// hangar.db so the Workspace pane has something to switch to AND the post-switch
+/// issue list has distinct data to prove the switch re-scopes the data plane.
+/// Runs after `prepare_pipeline` seeded the P4 fixture.
 fn seed_second_workspace(home: &std::path::Path) {
-    let hangar_dir = home.join(".ainb");
+    use ainb_hangar_core::actor::{ActorKind, ActorRef};
+    use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+    let hangar_dir = home.join(".agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -41,13 +67,38 @@ fn seed_second_workspace(home: &std::path::Path) {
         // A distinct ULID-style id + the `acme` slug (id != slug, mirroring real
         // workspaces and the slug/id resolution contract).
         sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
-            .bind("01JWSACME0000000000000000")
+            .bind(SECOND_WS_ID)
             .bind(SECOND_SLUG)
             .bind("Acme")
             .bind(1_700_000_000_000_i64)
             .execute(store.pool())
             .await
             .expect("insert second workspace");
+
+        // The second workspace's own `open` issue. The creator is a member ref
+        // (no agent/runtime needed for an issue-list row); `open` is one of the
+        // states the issue-list snapshot surfaces. This is the row the
+        // post-switch data assertion proves is now visible (and the first
+        // workspace's `Refactor API` is gone).
+        let creator = ActorRef::new(ActorKind::Member, "user-1").expect("member creator ref");
+        IssueRepo::insert(
+            store.pool(),
+            &NewIssue {
+                id: "issue-acme-1".into(),
+                workspace_id: SECOND_WS_ID.into(),
+                title: SECOND_WS_ISSUE.into(),
+                description: Some("Login fails on the Acme tenant".into()),
+                state: "open".into(),
+                assignee: None,
+                creator,
+                created_at: 1_700_000_000_000,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .expect("insert second-workspace issue");
     });
 }
 
@@ -67,18 +118,23 @@ fn workspace_switch_e2e() {
     // long-resolved P4.9 render blocker), which silently masked the notifyd
     // first-run dialog swallowing the `g` nav on CI. Fail loud instead.
     let sess = TuiSession::spawn(&bin, pipe.home());
-    if sess.open_hangar_and_wait_ready().is_none() {
-        panic!(
-            "hangar issue list never rendered (precondition):\n{}",
-            sess.capture()
-        );
-    }
+    assert!(
+        sess.open_hangar_and_wait_ready().is_some(),
+        "hangar issue list never rendered (precondition):\n{}",
+        sess.capture()
+    );
 
     // 1. Open Settings.
     sess.send_key(",");
+    // Match on section titles that ONLY the Settings screen renders
+    // (`Providers` + `LLM Keys`). The earlier `Daemon`+`Workspaces` predicate
+    // was not Settings-unique: `Daemon` is a permanent tab-strip label present
+    // on every screen, and the host's transient `✓ Workspaces loaded` toast
+    // paints `Workspaces` over the issue list — so the poll could return the
+    // pre-switch issue-list frame and the negative assert below would fire.
     let settings = sess
         .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
-            c.contains("Daemon") && c.contains("Workspaces")
+            c.contains("Providers") && c.contains("LLM Keys")
         })
         .expect("settings never rendered");
     // NEGATIVE: not on the issue list anymore.
@@ -153,6 +209,34 @@ fn workspace_switch_e2e() {
     assert!(
         active_marker_on_slug(&switched, SECOND_SLUG),
         "active `▶` indicator not on `{SECOND_SLUG}`:\n{switched}"
+    );
+
+    // 6. (e38.26) The switch must re-scope the DATA plane, not just the active
+    //    marker. Return to the Issues tab (`1`) and prove the issue list now
+    //    reflects the SECOND workspace: it shows `Acme Login Bug` (POSITIVE) and
+    //    no longer shows the first workspace's `Refactor API` (NEGATIVE). The tab
+    //    key can race the snapshot re-fetch, so re-send `1` until the second
+    //    workspace's issue appears, bounded by a deadline.
+    let issues = sess
+        .switch_tab_until("1", Instant::now() + Duration::from_secs(20), |c| {
+            c.contains(SECOND_WS_ISSUE)
+        })
+        .unwrap_or_else(|| {
+            panic!(
+                "issue list never re-scoped to `{SECOND_SLUG}` (no `{SECOND_WS_ISSUE}`):\n{}",
+                sess.capture()
+            )
+        });
+    // POSITIVE: the second workspace's issue is visible.
+    assert!(
+        issues.contains(SECOND_WS_ISSUE),
+        "issue list missing the second workspace's `{SECOND_WS_ISSUE}`:\n{issues}"
+    );
+    // NEGATIVE: the first workspace's issue must NOT leak across the switch.
+    assert!(
+        !issues.contains(FIRST_WS_ISSUE),
+        "cross-tenant leak: first workspace's `{FIRST_WS_ISSUE}` still on screen \
+         after switching to `{SECOND_SLUG}`:\n{issues}"
     );
 }
 

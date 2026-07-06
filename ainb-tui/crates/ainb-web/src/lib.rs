@@ -37,6 +37,7 @@
 pub mod assets;
 pub mod auth;
 pub mod config;
+pub mod daemon;
 pub mod data;
 pub mod push;
 pub mod routes;
@@ -46,6 +47,7 @@ pub mod terminal;
 use std::sync::Arc;
 
 pub use config::{BindError, WebConfig};
+pub use daemon::{Answerer, DaemonAnswerer, DaemonClient, DaemonError};
 pub use data::{AinbCliSource, DataError, DataSource, FleetSnapshot};
 pub use routes::{AppState, router};
 

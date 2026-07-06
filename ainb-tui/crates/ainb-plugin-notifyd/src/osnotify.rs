@@ -13,9 +13,13 @@
 //! must never break the persist path.
 
 use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
 use std::process::Command;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
+
+use ainb_hangar_core::channel::{Channel, ChannelSet};
 
 use crate::envelope::Envelope;
 
@@ -170,18 +174,83 @@ fn sanitize_notification_text(s: &str) -> String {
     s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect()
 }
 
-/// Emit a native OS notification if [`is_user_facing`] is true and
-/// the [`Debouncer`] allows it.
-pub fn notify(env: &Envelope, debouncer: &Debouncer) -> bool {
+/// The concrete surface an OS notification is delivered through. Abstracted so
+/// the delivery DECISION ([`notify`]) is unit-testable with a recording stub —
+/// no `osascript` / `notify-send` spawns in tests. Production wires
+/// [`NativeTransport`]; tests wire a fake that records the calls.
+pub trait Transport: Send + Sync {
+    /// Deliver one notification. Best-effort — a failure is the surface's own
+    /// concern and must never break the daemon's persist path (mirrors
+    /// [`emit_native`], which swallows its error).
+    fn emit(&self, title: &str, body: &str);
+}
+
+/// The production transport: the native OS notification ([`emit_native`]).
+#[derive(Debug, Default, Clone, Copy)]
+pub struct NativeTransport;
+
+impl Transport for NativeTransport {
+    fn emit(&self, title: &str, body: &str) {
+        let _ = emit_native(title, body);
+    }
+}
+
+/// The routing decision for one envelope, as far as notifyd can learn it (tcp T5,
+/// agents-in-a-box-fyq).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ChannelResolution {
+    /// A daemon answered with the resolved [`ChannelSet`] for this event's kind.
+    /// The Os gate applies: an OS notification fires only if the set contains
+    /// [`Channel::Os`].
+    Known(ChannelSet),
+    /// No routing could be learned (no hangar daemon, no matching rule, an
+    /// unmapped event, or any transport fault). The caller FAILS OPEN and notifies
+    /// exactly as a plain notifyd-only install always has.
+    Unknown,
+}
+
+/// Resolves the [`ChannelResolution`] for one envelope. The seam that lets
+/// notifyd honour the daemon's OS-channel routing without depending on the hangar
+/// STORE: production dials the daemon's public `notify_rules_list` RPC (see
+/// `crate::resolver`), while tests supply a stub that returns a fixed decision.
+pub trait ChannelResolver: Send + Sync {
+    /// Resolve the routing decision for `env`. Async because the production
+    /// resolver dials a socket; fail-open (`Unknown`) on any fault.
+    fn resolve<'a>(
+        &'a self,
+        env: &'a Envelope,
+    ) -> Pin<Box<dyn Future<Output = ChannelResolution> + Send + 'a>>;
+}
+
+/// Emit a native OS notification if [`is_user_facing`] is true, the resolved
+/// routing does not EXCLUDE the [`Channel::Os`] channel (tcp T5), and the
+/// [`Debouncer`] allows it.
+///
+/// Gate order matters: the Os-exclusion check runs BEFORE the debounce so a
+/// suppressed (board-only) event never consumes a debounce slot — a later,
+/// genuinely Os-routed event for the same `(session, raw_event)` still fires. An
+/// [`ChannelResolution::Unknown`] fails OPEN (notifies), so a plain notifyd-only
+/// install with no hangar daemon behaves exactly as before.
+pub async fn notify(
+    env: &Envelope,
+    debouncer: &Debouncer,
+    resolver: &dyn ChannelResolver,
+    transport: &dyn Transport,
+) -> bool {
     if !is_user_facing(env) {
         return false;
+    }
+    // OS-channel gate: honour the daemon's routing only when it is KNOWN to
+    // exclude Os. Unknown → notify (fail-open). Before the debounce (above).
+    if let ChannelResolution::Known(set) = resolver.resolve(env).await {
+        if !set.contains(Channel::Os) {
+            return false;
+        }
     }
     if !debouncer.should_emit(&env.session_id, &env.raw_event) {
         return false;
     }
-    let title = render_title(env);
-    let body = render_body(env);
-    let _ = emit_native(&title, &body);
+    transport.emit(&render_title(env), &render_body(env));
     true
 }
 
@@ -381,6 +450,147 @@ mod tests {
         assert!(!body.contains('\r'), "carriage return survived: {body:?}");
         assert!(!body.contains('\t'), "tab survived: {body:?}");
         assert_eq!(body, "line one line two  indented");
+    }
+
+    /// Records every delivered notification so a test can assert whether the OS
+    /// surface was hit — no `osascript` / `notify-send` spawned.
+    #[derive(Default)]
+    struct StubTransport {
+        calls: Mutex<Vec<(String, String)>>,
+    }
+    impl Transport for StubTransport {
+        fn emit(&self, title: &str, body: &str) {
+            self.calls.lock().unwrap().push((title.to_string(), body.to_string()));
+        }
+    }
+    impl StubTransport {
+        fn count(&self) -> usize {
+            self.calls.lock().unwrap().len()
+        }
+    }
+
+    /// Returns a fixed [`ChannelResolution`] for every envelope.
+    struct StubResolver(ChannelResolution);
+    impl ChannelResolver for StubResolver {
+        fn resolve<'a>(
+            &'a self,
+            _env: &'a Envelope,
+        ) -> Pin<Box<dyn Future<Output = ChannelResolution> + Send + 'a>> {
+            let r = self.0.clone();
+            Box::pin(async move { r })
+        }
+    }
+
+    #[tokio::test]
+    async fn os_excluded_channel_set_suppresses_notification() {
+        // A resolved set that does NOT contain Os (e.g. a board-only `waiting`
+        // row, or phone+web only) suppresses the OS notification entirely.
+        let transport = StubTransport::default();
+        let resolver = StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+            Channel::Phone,
+            Channel::Web,
+        ])));
+        let fired = notify(
+            &env("Stop", "claude"),
+            &Debouncer::new(),
+            &resolver,
+            &transport,
+        )
+        .await;
+        assert!(!fired, "Os-excluded routing must suppress the notification");
+        assert_eq!(transport.count(), 0, "transport must not be hit");
+    }
+
+    #[tokio::test]
+    async fn os_included_channel_set_delivers() {
+        let transport = StubTransport::default();
+        let resolver = StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+            Channel::Web,
+            Channel::Os,
+        ])));
+        let fired = notify(
+            &env("Stop", "claude"),
+            &Debouncer::new(),
+            &resolver,
+            &transport,
+        )
+        .await;
+        assert!(fired, "an Os-included set must deliver");
+        assert_eq!(transport.count(), 1, "transport hit exactly once");
+    }
+
+    #[tokio::test]
+    async fn unknown_resolution_fails_open_and_delivers() {
+        // No daemon / no rule / unmapped event → Unknown → notify as before.
+        let transport = StubTransport::default();
+        let resolver = StubResolver(ChannelResolution::Unknown);
+        let fired = notify(
+            &env("Notification:idle_prompt", "claude"),
+            &Debouncer::new(),
+            &resolver,
+            &transport,
+        )
+        .await;
+        assert!(
+            fired,
+            "Unknown routing fails open (plain-install behaviour)"
+        );
+        assert_eq!(transport.count(), 1);
+    }
+
+    #[tokio::test]
+    async fn telemetry_event_never_delivers_even_with_os() {
+        // The is_user_facing gate still wins: a telemetry event never notifies,
+        // regardless of a (nonsensical) Os-routed resolution.
+        let transport = StubTransport::default();
+        let resolver = StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+            Channel::Os,
+        ])));
+        let fired = notify(
+            &env("PostToolUse", "claude"),
+            &Debouncer::new(),
+            &resolver,
+            &transport,
+        )
+        .await;
+        assert!(!fired);
+        assert_eq!(transport.count(), 0);
+    }
+
+    #[tokio::test]
+    async fn os_gate_runs_before_debounce_so_suppression_frees_a_later_send() {
+        // A suppressed (Os-excluded) event must NOT consume the debounce slot for
+        // its (session, raw_event) key: a subsequent Os-routed event for the same
+        // key still fires. This proves the Os gate is evaluated before the debounce.
+        let transport = StubTransport::default();
+        let debouncer = Debouncer::new(); // 60s window
+        let e = env("Stop", "claude");
+
+        let suppressed = notify(
+            &e,
+            &debouncer,
+            &StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+                Channel::Web,
+            ]))),
+            &transport,
+        )
+        .await;
+        assert!(!suppressed, "Os-excluded → suppressed");
+
+        let delivered = notify(
+            &e,
+            &debouncer,
+            &StubResolver(ChannelResolution::Known(ChannelSet::from_channels([
+                Channel::Os,
+            ]))),
+            &transport,
+        )
+        .await;
+        assert!(
+            delivered,
+            "the suppressed event freed the debounce slot for the later Os send"
+        );
+        assert_eq!(transport.count(), 1);
     }
 
     #[cfg(target_os = "macos")]

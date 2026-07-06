@@ -16,6 +16,7 @@
 //! a `HashMap` (whose iteration order varies per process and would break
 //! byte-deterministic golden tests); every payload is a field-ordered struct.
 
+use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_core::ids::{AgentId, CommentId, IssueId, TaskId};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -145,9 +146,53 @@ pub enum HangarEvent {
         /// The newly active workspace id.
         to: String,
     },
+    /// A session raised an input request — a fresh `open` [`AttentionRow`] now
+    /// exists in the control-plane inbox (spec P2, store migration 0025).
+    ///
+    /// This is the FLEET-WIDE nudge every surface (control centre / web / bridge
+    /// / ATC) reacts to by shuffling the raising session's card to the top and,
+    /// if needed, re-pulling `attention/list`. Unlike the workspace-domain events
+    /// this rides beside a `workspace_id` that is `None` for a hand-started host
+    /// session that belongs to no ainb workspace — so it is delivered on the
+    /// daemon's dedicated fleet-wide attention stream, not the workspace-scoped
+    /// forwarder. The attention TABLE (not the event-log outbox) is its durable
+    /// source: a reconnecting surface catches up via `attention/list`.
+    AttentionRaised {
+        /// The raised attention row's id (the answer RPC targets this).
+        attention_id: String,
+        /// The session that raised the request.
+        session_id: String,
+        /// The owning workspace, or `None` for a non-workspace host session.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workspace_id: Option<String>,
+        /// The request family wire token (`ask_user_question` / `approval` / …).
+        kind: String,
+        /// `true` when sourced from the degraded pane-classifier fallback.
+        #[serde(default)]
+        degraded: bool,
+        /// Ingest timestamp (epoch milliseconds).
+        created_at: i64,
+        /// The PUSH channels this attention was routed to (tcp T5), resolved once
+        /// at raise time. A live consumer reacting to this nudge filters on this
+        /// set; a reconnecting one re-pulls `attention/list` (which carries the
+        /// same field). Empty = board-only. Additive: omitted by an older daemon.
+        #[serde(default)]
+        channels: ChannelSet,
+    },
+    /// An open attention row was answered — the first-answer-wins winner flipped
+    /// it `answered` and the answer was delivered into the session (spec P2).
+    ///
+    /// Surfaces fold this to move the card to `answered(by=…)`; a surface that
+    /// was mid-answer on the same row learns it lost the race.
+    AttentionAnswered {
+        /// The answered attention row's id.
+        attention_id: String,
+        /// The surface/actor that won the answer race (`tui` / `web` / `atc` / …).
+        by: String,
+    },
 }
 
-/// The 5-colour transcript taxonomy (Multica UX §7 verbatim).
+/// The 5-colour transcript taxonomy (reference UX §7 verbatim).
 ///
 /// Each variant maps to one colour + glyph lane in the task-detail transcript
 /// renderer (P4.4). The wire form is `snake_case`.
@@ -178,7 +223,7 @@ pub enum TaskResult {
     Cancelled,
 }
 
-/// Three-state agent presence (Multica UX §12.2).
+/// Three-state agent presence (reference UX §12.2).
 ///
 /// `Unstable` (amber dot) means the runtime is *degraded* — not merely that the
 /// agent is queueing work; see the daemon-side presence derivation.
@@ -203,6 +248,15 @@ pub enum PresenceState {
 pub struct IssueRow {
     /// Primary key.
     pub id: IssueId,
+    /// The human-facing display id (`HGR-<n>`): the issue's 1-based per-workspace
+    /// creation ordinal, prefixed with the workspace's configured `issue_prefix`
+    /// or the `HGR` default (63l.3). The daemon derives this read-side via
+    /// `IssueRepo::workspace_seq` + `issue_display_id`; the plugin renders it
+    /// beside the title. `None` only on a pre-63l.3 snapshot — omitted from the
+    /// wire when absent (`skip_serializing_if`) so the shape only grows for a
+    /// reader that supplies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<String>,
     /// Owning workspace.
     pub workspace_id: String,
     /// Issue title.
@@ -217,6 +271,19 @@ pub struct IssueRow {
     pub creator: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// Urgency: `0..3` mapping `P3..P0` (HIGHER = MORE URGENT; default `0` =
+    /// P3, routine) — the same scale as `TaskCardRow::priority` (migration
+    /// 0014). `#[serde(default)]` keeps a pre-e38.9 snapshot decodable.
+    #[serde(default)]
+    pub priority: i64,
+    /// Optional deadline as epoch milliseconds; `None` (the default) when unset.
+    /// Omitted from the wire when absent (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<i64>,
+    /// Free-form labels (e.g. `["bug", "p0"]`). Empty by default; omitted from
+    /// the wire when empty (additive) so a pre-e38.9 snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
     /// The PR URL captured from this issue's latest completed task's
     /// `result.pr_url` (P9.1 capture, P9.2 surface), or `None` when no task on
     /// the issue opened a PR. Omitted from the JSON entirely when `None`
@@ -224,12 +291,22 @@ pub struct IssueRow {
     /// produced a PR — a pre-P9.2 reader never sees a new `"pr_url": null` key.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pr_url: Option<String>,
+    /// The `ainb/<slug>` worktree branch of this issue's latest completed task
+    /// (tcp ch3), mirroring [`Self::pr_url`]'s derivation, or `None` when no task
+    /// on the issue committed a branch. The task-detail view opened FROM THE ISSUE
+    /// LIST (a synthetic task with no single per-run branch) renders this branch
+    /// line, matching the Kanban path that seeds the branch from the task card.
+    /// Omitted from the JSON when `None` (`skip_serializing_if`) so the wire shape
+    /// only grows for a reader that supplies it — a pre-ch3 snapshot decodes to
+    /// `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
 ///
 /// Polymorphic: a member (human) and an agent share this one shape so the picker
-/// renders them in a single flat list (Multica UX §12.1 polymorphic-actor
+/// renders them in a single flat list (reference UX §12.1 polymorphic-actor
 /// model). The `kind` discriminates the two; `presence` is only meaningful for
 /// agents (a member is rendered as plainly available / offline), but the daemon
 /// supplies it uniformly so the plugin never branches on kind to read a field.
@@ -348,8 +425,107 @@ pub struct TaskCardRow {
     /// Raw lifecycle status — one of the six `TaskStatus` wire tokens. The board
     /// buckets these into its four columns client-side.
     pub status: String,
+    /// Claim urgency: 0..3 mapping P3..P0 — higher = more urgent (store
+    /// migration 0013). The claim loop drains `priority DESC, created_at, id`;
+    /// `0` (P3) is the routine default. `#[serde(default)]` keeps snapshots
+    /// from a pre-priority daemon decodable.
+    #[serde(default)]
+    pub priority: i64,
     /// Creation (queued-at) timestamp (epoch milliseconds) — drives the card age.
     pub created_at: i64,
+    /// The worktree branch (`ainb/<slug>`) the run committed on (tcp T2), or
+    /// `None` when the run made no commits / was not a worktree run. Recorded at
+    /// finalize (store migration 0033); the durable artifact surviving teardown.
+    /// Omitted from the wire when absent (`skip_serializing_if`) so the shape only
+    /// grows for a run that produced a branch — a pre-T2 reader is unaffected.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub branch: Option<String>,
+    /// The PR URL captured from the run's `result.pr_url` (P9.1), or `None` when
+    /// the run opened no PR. Surfaces the same PR the backing issue shows, on the
+    /// card (tcp T2). Omitted from the wire when absent (additive).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_url: Option<String>,
+    /// The PR's CI + merge status (tcp T2), fetched daemon-side via the injectable
+    /// `gh` seam only for a card that HAS a `pr_url`; `None` otherwise. Carries the
+    /// same three axes the issue task-detail badge renders. Omitted from the wire
+    /// when absent (additive) so a pre-T2 reader never sees the new key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pr_status: Option<crate::pr_status::PrStatus>,
+}
+
+/// A wire-side aggregated inbox row for the notification inbox
+/// (`hangar/inbox_list`, e38.14).
+///
+/// One `inbox_entry` row (store migration 0021) flattened for the inbox screen.
+/// The daemon's aggregator folds live issue / comment / task events into these
+/// durable rows; the plugin renders the list + an unread badge. `read_at` is the
+/// whole unread model: `None` = unread, `Some(ms)` = read. The plugin owns zero
+/// domain data — the daemon's `SQLite` store is the source of truth; this is only
+/// the render shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxEntryRow {
+    /// The inbox entry id (ULID string, the stable id the row carries).
+    pub id: String,
+    /// The entity family the entry is about (`issue` / `comment` / `task`).
+    pub kind: String,
+    /// The wire event discriminant that produced the entry (e.g. `issue_created`,
+    /// `comment_added`, `task_queued`).
+    pub event: String,
+    /// The id of the issue / comment / task the entry addresses (deep-link target).
+    pub subject_id: String,
+    /// A short pre-rendered human line for the list row.
+    pub summary: String,
+    /// Creation timestamp (epoch milliseconds) — drives ordering + age.
+    pub created_at: i64,
+    /// When the entry was marked read (epoch milliseconds), or `None` when UNREAD.
+    /// Omitted from the wire when unread (additive) so an unread entry is just an
+    /// absent key, not a `"read_at": null`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub read_at: Option<i64>,
+}
+
+/// A wire-side attention row for the control-centre inbox
+/// (`attention/list` / `attention/subscribe`, spec P2).
+///
+/// One `attention` row (store migration 0025) flattened for the surfaces. The
+/// daemon's ingest producer folds every session's input request into a durable
+/// row; the surfaces render an answerable card and route the answer back through
+/// the one `answer` RPC. Carries no answered fields — the list/subscribe feeds
+/// are the OPEN set only; a row leaves the feed the instant it is answered. The
+/// plugin owns zero domain data — the daemon's `SQLite` store is the source of
+/// truth; this is only the render shape.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AttentionRow {
+    /// The attention id (ULID string) — the answer RPC's target.
+    pub id: String,
+    /// The session that raised the request.
+    pub session_id: String,
+    /// The raising session's working directory (empty when unknown).
+    pub cwd: String,
+    /// The owning workspace, or `None` for a non-workspace host session. Omitted
+    /// from the wire when absent (additive) so a fleet row is just a missing key.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The request family wire token (`ask_user_question` / `approval` /
+    /// `codex_request_user` / `error` / `waiting` / `escalation`).
+    pub kind: String,
+    /// The full serialised request-context JSON the card renders.
+    pub payload: String,
+    /// `true` when sourced from the degraded pane-classifier fallback (unhooked
+    /// session) — the surfaces badge it so the human knows the source is a
+    /// heuristic. Omitted from the wire when `false` (additive).
+    #[serde(default)]
+    pub degraded: bool,
+    /// Ingest timestamp (epoch milliseconds) — drives ordering + card age.
+    pub created_at: i64,
+    /// The PUSH channels this attention was routed to, resolved once at raise
+    /// time from the notify rules (tcp T5). Consumers (bridge/web/os/atc) filter
+    /// on this set rather than re-resolving, so a rule edit in flight can never
+    /// split-brain the fan-out. The EMPTY set is board-only, never a dropped row.
+    /// Defaults to empty on the wire (additive: a legacy row / older daemon that
+    /// omits it reads as board-only).
+    #[serde(default)]
+    pub channels: ChannelSet,
 }
 
 /// A wire-side comment row.

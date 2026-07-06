@@ -31,5 +31,7 @@ pub mod complete;
 pub mod fail;
 /// Spawn a `parent_task_id`-chained child row for a retryable failed task.
 pub mod retry;
+/// Route a squad assignment to its leader by enqueueing a leader-keyed task.
+pub mod squad_assign;
 /// `dispatched -> running`.
 pub mod start;

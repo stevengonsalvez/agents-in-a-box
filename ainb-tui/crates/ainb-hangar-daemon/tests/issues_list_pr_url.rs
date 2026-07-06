@@ -122,3 +122,100 @@ async fn issues_list_takes_the_latest_finished_task_pr_url() {
         "the latest finished task's PR URL should win"
     );
 }
+
+#[tokio::test]
+async fn issues_list_scopes_pr_url_and_branch_to_the_latest_generation() {
+    // Regression guard (migration 0039 x the branch/pr surface): a rerun mints a
+    // fresh run generation. When the LATEST generation opened no PR and committed
+    // no branch, the issue row must surface None — never the superseded prior
+    // generation's stale PR/branch, which recency-ordering alone would leak
+    // because the newer, value-less row is skipped by the `IS NOT NULL` filter.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+
+    // Generation 0 (a prior run) produced a PR AND a branch on issue-1.
+    let g0 = serde_json::json!({ "content": "done", "exit_code": 0, "pr_url": "https://example.com/pr/OLD" });
+    sqlx::query(
+        "UPDATE agent_task_queue \
+         SET status = 'done', result = ?, branch = 'ainb/old', finished_at = ?, generation = 0 \
+         WHERE id = 'task-1'",
+    )
+    .bind(g0.to_string())
+    .bind(1_700_000_100_000i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    // Generation 1 (the rerun, the LATEST) finished later but opened no PR and
+    // committed no branch — the current run produced neither.
+    let g1 = serde_json::json!({ "content": "done", "exit_code": 0 });
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, result, created_at, finished_at, generation) \
+         VALUES ('task-1-g1', ?, 'runtime-1', 'agent-1', 'issue-1', 'done', ?, ?, ?, 1)",
+    )
+    .bind(WS_ID)
+    .bind(g1.to_string())
+    .bind(1_700_000_200_000i64)
+    .bind(1_700_000_300_000i64)
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    let issues = issues_list(store.pool(), WS_ID).await.unwrap();
+    let issue_1 = issues.iter().find(|i| i.id.as_str() == "issue-1").expect("issue-1 present");
+    assert_eq!(
+        issue_1.pr_url, None,
+        "the superseded generation-0 PR must not leak onto the latest run"
+    );
+    assert_eq!(
+        issue_1.branch, None,
+        "the superseded generation-0 branch must not leak onto the latest run"
+    );
+}
+
+#[tokio::test]
+async fn issues_list_surfaces_issue_priority_due_date_and_labels() {
+    // e38.9 guard: the snapshot mapper must thread the issue's priority,
+    // due_date, and labels onto the wire IssueRow. A regression that emitted the
+    // schema defaults (priority 0 / None / empty) would otherwise stay green —
+    // the other tests here only assert pr_url.
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+
+    // Set the three e38.9 fields on issue-1 (the fixture seeds them at default).
+    sqlx::query("UPDATE issue SET priority = 3, due_date = ?, labels = ? WHERE id = 'issue-1'")
+        .bind(1_782_777_600_000i64)
+        .bind(r#"["bug","p0"]"#)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let issues = issues_list(store.pool(), WS_ID).await.unwrap();
+
+    // POSITIVE: the per-row values reach the wire IssueRow.
+    let issue_1 = issues.iter().find(|i| i.id.as_str() == "issue-1").expect("issue-1 present");
+    assert_eq!(
+        issue_1.priority, 3,
+        "issues_list must surface issue priority"
+    );
+    assert_eq!(
+        issue_1.due_date,
+        Some(1_782_777_600_000),
+        "issues_list must surface the due_date"
+    );
+    assert_eq!(
+        issue_1.labels,
+        vec!["bug".to_string(), "p0".to_string()],
+        "issues_list must surface labels"
+    );
+
+    // NEGATIVE: an untouched issue keeps the schema defaults — proving the
+    // mapper reads each row, not a constant.
+    let issue_2 = issues.iter().find(|i| i.id.as_str() == "issue-2").expect("issue-2 present");
+    assert_eq!(issue_2.priority, 0, "issue-2 keeps the default priority");
+    assert_eq!(issue_2.due_date, None, "issue-2 has no due date");
+    assert!(issue_2.labels.is_empty(), "issue-2 has no labels");
+}

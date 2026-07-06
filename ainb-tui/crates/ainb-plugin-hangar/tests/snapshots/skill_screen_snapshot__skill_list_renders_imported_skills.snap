@@ -1,0 +1,27 @@
+---
+source: "../plugins/hangar-tui/tests/skill_screen_snapshot.rs"
+expression: list_pane(&buf)
+---
+[All] [Used] [Unused] [Mine]
+◆ Skills (3)            ⋯ +
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━┓
+┃commit                    ┃
+┃used                      ┃
+┃                          ┃
+┃◇ None                  ◔c┃
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━┛
+
+╭──────────────────────────╮
+│find-missing-tests        │
+│used                      │
+│                          │
+│◇ None                  ◔f│
+╰──────────────────────────╯
+
+╭──────────────────────────╮
+│brainstorm                │
+│unused                    │
+│                          │
+│◇ None                  ◔b│
+╰──────────────────────────╯

@@ -2,6 +2,7 @@
 resolver = "2"
 members = [
     "crates/ainb-core",
+    "crates/ainb-fleet-core",
     "crates/ainb-web",
     "crates/ainb-plugin-burndown",
     "crates/ainb-plugin-learnings",
@@ -26,8 +27,9 @@ members = [
     "crates/ainb-hangar-secrets",
     "crates/ainb-hangar-store",
     "crates/ainb-hangar-proto",
+    "crates/ainb-hangar-sandbox",
     "crates/ainb-hangar-daemon",
-    "../plugins/hangar-tui",
+    "crates/ainb-plugin-hangar",
     "xtask",
 ]
 default-members = ["crates/ainb-core"]
@@ -111,6 +113,11 @@ regex = "1.10"
 lazy_static = "1.4"
 which = "6.0"
 url = "2.5"
+# Task lifecycle FSM (T8): typed compile-time hierarchical state machine for the
+# `agent_task_queue` in-process transitions the hangar daemon drives
+# (dispatched -> running -> done|failed). Types the transition *ordering* in
+# process; the migration-0012 SQL claim guard stays the DB-level enforcer.
+statig = "0.4"
 
 # Markdown and syntax highlighting
 pulldown-cmark = "0.9"

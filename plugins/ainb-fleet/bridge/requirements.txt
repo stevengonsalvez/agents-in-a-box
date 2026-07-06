@@ -1,5 +1,0 @@
-# Runtime dependency for the ainb Telegram phone bridge daemon.
-# Config parsing uses the stdlib `tomllib` (Python 3.11+) — no extra dep.
-aiogram>=3.4,<4
-# Optional: only needed when [fleet.telegram] proxy_url points at a SOCKS proxy.
-# aiohttp-socks>=0.8

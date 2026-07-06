@@ -58,6 +58,12 @@ git_directories = []
         ver = env!("CARGO_PKG_VERSION"),
     );
     std::fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    std::fs::write(
+        layout.root.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 }
 
 fn capture_pane(session: &str) -> String {

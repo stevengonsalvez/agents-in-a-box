@@ -45,6 +45,7 @@ pub enum SidebarItem {
     Abtop,         // top-for-agents — live agent monitor (abtop plugin)
     Skills,        // Browse per-agent skills
     SkillManager,  // Skill / unit manager (spec §10.1)
+    Hangar,        // Autopilot control plane (hangar-tui plugin)
     Memory,        // Knowledge-base browser (learnings plugin)
     Changelog,     // Version history
     Setup,         // Setup wizard & factory reset
@@ -69,6 +70,7 @@ impl SidebarItem {
             Self::Abtop => "📡",
             Self::Skills => "🧠",
             Self::SkillManager => "🧰",
+            Self::Hangar => "🛩️",
             Self::Memory => "📚",
             Self::Changelog => "📝",
             Self::Setup => "🛠️",
@@ -93,6 +95,7 @@ impl SidebarItem {
             Self::Abtop => "abtop",
             Self::Skills => "Skills Catalogue",
             Self::SkillManager => "Skills (manager)",
+            Self::Hangar => "Hangar",
             Self::Memory => "Memory",
             Self::Changelog => "Changelog",
             Self::Setup => "Setup",
@@ -117,6 +120,7 @@ impl SidebarItem {
             Self::Abtop => "top-for-agents",
             Self::Skills => "Per-Agent Skills",
             Self::SkillManager => "Install / sync / doctor",
+            Self::Hangar => "Autopilot Control Plane",
             Self::Memory => "Knowledge & Recall",
             Self::Changelog => "Version History",
             Self::Setup => "Setup & Reset",
@@ -144,6 +148,7 @@ impl SidebarItem {
             Self::DaemonOverlay => "d",
             Self::Logs => "l",
             Self::Recovery => "r",
+            Self::Hangar => "g",
             Self::Changelog => "v",
             Self::Help => "?",
         }
@@ -171,6 +176,7 @@ impl SidebarItem {
             Self::DaemonOverlay,
             Self::Logs,
             Self::Recovery,
+            Self::Hangar,
             Self::Changelog,
             Self::Help,
         ]
@@ -418,7 +424,7 @@ impl SidebarComponent {
                 )
             };
 
-        // Split the item area for 2-line content (compact to fit 10 items)
+        // Split the item area for 2-line content (compact to fit 16 items)
         let item_layout = Layout::default()
             .direction(Direction::Vertical)
             .constraints([
@@ -718,6 +724,69 @@ mod tests {
         let mut state = SidebarState::new();
         state.select(SidebarItem::Config);
         assert_eq!(state.selected_item(), SidebarItem::Config);
+    }
+
+    #[test]
+    fn hangar_tile_registered_with_discoverable_shortcut() {
+        // Hangar was previously reachable only via the undiscoverable 'g'
+        // hotkey — it had no home-screen tile, so a user who didn't know
+        // the key couldn't find it. Lock in the tile shape + a position
+        // after the first item so a refactor can't quietly drop it again.
+        let all = SidebarItem::all();
+        let hangar_pos = all
+            .iter()
+            .position(|i| *i == SidebarItem::Hangar)
+            .expect("SidebarItem::Hangar missing from all()");
+        assert!(hangar_pos > 0, "Hangar shouldn't be first sidebar item");
+        assert_eq!(SidebarItem::Hangar.label(), "Hangar");
+        assert_eq!(SidebarItem::Hangar.shortcut(), "g");
+        // 'g' mirrors the existing GoToHangar hotkey (events.rs) and must
+        // not collide with any other tile shortcut.
+        let collisions =
+            all.iter().filter(|i| **i != SidebarItem::Hangar && i.shortcut() == "g").count();
+        assert_eq!(collisions, 0, "sidebar shortcut 'g' collides");
+    }
+
+    #[test]
+    fn renders_hangar_label_and_key_in_sidebar() {
+        // USER-VISIBLE proof: the rendered home sidebar must show the
+        // "Hangar" label and its 'g' key hint so the destination is
+        // discoverable without prior knowledge. Removing the Hangar
+        // entry from SidebarItem::all() (or its label/shortcut) breaks
+        // this assertion.
+        use ratatui::Terminal;
+        use ratatui::backend::TestBackend;
+
+        let backend = TestBackend::new(40, 40);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let state = SidebarState::new();
+        let component = SidebarComponent::new();
+        terminal
+            .draw(|f| {
+                let area = f.size();
+                component.render(f, area, &state);
+            })
+            .unwrap();
+
+        let buffer = terminal.backend().buffer().clone();
+        let text = (0..buffer.area.height)
+            .map(|y| {
+                (0..buffer.area.width)
+                    .map(|x| buffer.get(x, y).symbol().chars().next().unwrap_or(' '))
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(
+            text.contains("Hangar"),
+            "Hangar label missing from sidebar render:\n{text}"
+        );
+        // The 'g' key hint is rendered as "[g]" next to the label.
+        assert!(
+            text.contains("[g]"),
+            "Hangar 'g' key hint missing from sidebar render:\n{text}"
+        );
     }
 
     #[test]

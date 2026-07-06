@@ -5,7 +5,7 @@
 //!  seed P4 fixture + spawn daemon ──▶ daemon writes daemon.<date> JSONL
 //!         │                                   ▲ (file read, not an RPC)
 //!         ▼ append known marker lines         │
-//!  {home}/.ainb/hangar/logs/daemon.<date>  ◀──┘
+//!  {home}/.agents-in-a-box/hangar/logs/daemon.<date>  ◀──┘
 //!         ▲
 //!  ainb tui (tmux) ──`g`──▶ Hangar ──`L`──▶ Logs pane
 //!                                            │
@@ -13,7 +13,7 @@
 //! ```
 //!
 //! The Logs screen (`screen/logs.rs`) is a **file read**, not a daemon RPC: it
-//! resolves `{home}/.ainb/hangar/logs` via
+//! resolves `{home}/.agents-in-a-box/hangar/logs` via
 //! [`ainb_hangar_core::logs::default_log_dir`] and tails the newest `daemon.*`
 //! file. So this tripwire seeds the daemon's own log artefact directly —
 //! [`seed_logs`] appends three known JSON lines (one `INFO` carrying

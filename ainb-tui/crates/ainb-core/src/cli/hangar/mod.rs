@@ -19,14 +19,19 @@
 //! | `hangar task cancel`          | `ainb_hangar_store::service::cancel::CancelTaskService`  |
 //! | `hangar task retry`           | `ainb_hangar_store::service::retry::RetryService`        |
 //! | `hangar beads reconcile`      | `ainb_hangar_daemon::beads_sync::reconcile`              |
-//! | `hangar daemon status`        | [`ainb_hangar_store::Store::open_default`] reachability  |
+//! | `hangar daemon status`        | PID-file + socket liveness + db reachability             |
+//! | `hangar daemon run`           | [`ainb_hangar_daemon::boot`] (foreground)                |
+//! | `hangar daemon start`         | spawn the daemon binary as a background child + PID file |
+//! | `hangar daemon stop`          | signal the exact recorded PID via `nix` + remove PID file|
+//! | `hangar daemon restart`       | `stop` then `start`                                      |
+//! | `hangar daemon setup`         | ensure db + socket token, then `start`                   |
 //!
 //! # Deliberately NOT wired
 //!
-//! `skill`, `autopilot`, `config`, `init`, `tui`, and `daemon start|stop` land
-//! in later phases. The [`HangarCommand`](crate::cli::registry) subtree is built
-//! with derive `Subcommand`s, so a later phase slots a new verb in by adding a
-//! variant — no stubs are shipped for unimplemented verbs today.
+//! `init` and `tui` land in later phases. The
+//! [`HangarCommand`](crate::cli::registry) subtree is built with derive
+//! `Subcommand`s, so a later phase slots a new verb in by adding a variant — no
+//! stubs are shipped for unimplemented verbs today.
 
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
@@ -92,12 +97,88 @@ pub enum HangarCommand {
     /// List, inspect, and apply curated agent templates.
     #[command(subcommand)]
     Templates(TemplatesCommand),
+    /// Edit, archive, and list workspace agents.
+    #[command(subcommand)]
+    Agent(AgentCommand),
+    /// List, re-role, and remove workspace members.
+    #[command(subcommand)]
+    Member(MemberCommand),
+    /// Create squads, manage membership, and view squad status + leader.
+    #[command(subcommand)]
+    Squad(SquadCommand),
     /// Create and control cron-scheduled autopilots.
     #[command(subcommand)]
     Autopilot(AutopilotCommand),
+    /// View + set per-workspace config (context prompt, issue prefix, repo
+    /// whitelist).
+    #[command(subcommand)]
+    Workspace(WorkspaceCommand),
     /// Read the daemon's structured logs.
     #[command(subcommand)]
     Logs(LogsCommand),
+}
+
+/// `hangar workspace <verb>`.
+///
+/// The per-workspace config surface (e38.21): `config` sets one or more of the
+/// workspace's agent-run config knobs, `show` renders the current config. Every
+/// verb is workspace-scoped (`--workspace`, else the bootstrapped `default`).
+///
+/// The three knobs each take effect at dispatch / create time:
+/// - `context_prompt` is injected into every agent run in the workspace as a
+///   `CLAUDE.md` in the task's working dir,
+/// - `issue_prefix` is prepended to the title of every issue created in the
+///   workspace,
+/// - `repo_whitelist` gates which repositories a workspace task may check out
+///   (persisted + validated; the checkout flow that consumes it lands later).
+#[derive(Subcommand, Debug)]
+pub enum WorkspaceCommand {
+    /// Set one or more of the workspace's config knobs.
+    Config(WorkspaceConfigArgs),
+    /// Show the workspace's current config.
+    Show(WorkspaceShowArgs),
+}
+
+/// Arguments for `hangar workspace config`.
+///
+/// Each `--…` flag overwrites that knob; the matching `--clear-…` flag unsets it
+/// (writes NULL — back to the v1 "not configured" behaviour). A flag that is not
+/// given leaves the stored value untouched. `--clear-…` and the value flag for
+/// the same knob are mutually exclusive.
+#[derive(Args, Debug)]
+pub struct WorkspaceConfigArgs {
+    /// Set the context prompt injected into every agent run as a `CLAUDE.md`.
+    #[arg(long, conflicts_with = "clear_context_prompt")]
+    pub context_prompt: Option<String>,
+    /// Unset the context prompt (back to no per-workspace context).
+    #[arg(long)]
+    pub clear_context_prompt: bool,
+    /// Set the prefix prepended to a newly-created issue's title (e.g. `[OPS] `).
+    #[arg(long, conflicts_with = "clear_issue_prefix")]
+    pub issue_prefix: Option<String>,
+    /// Unset the issue prefix (titles used verbatim).
+    #[arg(long)]
+    pub clear_issue_prefix: bool,
+    /// Set the repo whitelist as a comma-separated list of `owner/name` slugs
+    /// (e.g. `org/api,org/web`). The empty string sets a configured-but-empty
+    /// whitelist (allows nothing); use `--clear-repo-whitelist` to remove the gate.
+    #[arg(long, conflicts_with = "clear_repo_whitelist", value_delimiter = ',')]
+    pub repo_whitelist: Option<Vec<String>>,
+    /// Unset the repo whitelist (no gate — every repo allowed).
+    #[arg(long)]
+    pub clear_repo_whitelist: bool,
+    /// Workspace slug to configure. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar workspace show`.
+#[derive(Args, Debug)]
+pub struct WorkspaceShowArgs {
+    /// Workspace slug to show. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar logs <verb>`.
@@ -152,6 +233,60 @@ pub enum AutopilotCommand {
     Enable(AutopilotIdArgs),
     /// Fire one tick immediately (manual run), bypassing the schedule.
     Run(AutopilotIdArgs),
+    /// Configure the HTTP webhook trigger (enable/disable, rotate secret, filter).
+    Webhook(AutopilotWebhookArgs),
+    /// List the autopilot's recent webhook deliveries (audit log).
+    Deliveries(AutopilotDeliveriesArgs),
+}
+
+/// Arguments for `hangar autopilot webhook <id>`.
+///
+/// Configures the per-autopilot HTTP webhook trigger. By default it ENABLES the
+/// webhook and mints a fresh HMAC signing secret, printing the webhook URL + the
+/// secret ONCE (the secret is never shown again). `--rotate` mints a new secret
+/// for an already-enabled webhook; `--disable` turns the webhook off (the secret
+/// is cleared). `--event` sets the optional exact-match event filter;
+/// `--clear-event` removes it. Workspace-scoped.
+#[derive(Args, Debug)]
+pub struct AutopilotWebhookArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Disable the webhook (clears the secret); mutually exclusive with
+    /// `--rotate`.
+    #[arg(long, conflicts_with = "rotate")]
+    pub disable: bool,
+    /// Mint a fresh signing secret for an already-enabled webhook (prints the new
+    /// secret once).
+    #[arg(long)]
+    pub rotate: bool,
+    /// Set the exact-match event filter (only this event name fires). Mutually
+    /// exclusive with `--clear-event`.
+    #[arg(long, conflicts_with = "clear_event")]
+    pub event: Option<String>,
+    /// Clear the event filter (fire on every signed request).
+    #[arg(long = "clear-event")]
+    pub clear_event: bool,
+    /// The host:port the webhook ingress listens on, used only to render the URL
+    /// hint (defaults to `127.0.0.1:8718`). The daemon's actual bind is set by
+    /// `AINB_HANGAR_WEBHOOK_PORT`.
+    #[arg(long = "url-host", default_value = "127.0.0.1:8718")]
+    pub url_host: String,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot deliveries <id>`.
+#[derive(Args, Debug)]
+pub struct AutopilotDeliveriesArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Maximum number of deliveries to show (latest-first).
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar autopilot create`.
@@ -169,12 +304,67 @@ pub struct AutopilotCreateArgs {
     /// Optional instructions handed to the agent on every tick.
     #[arg(long)]
     pub instructions: Option<String>,
-    /// Maximum simultaneous in-flight runs before a tick is skipped.
+    /// Maximum simultaneous in-flight runs before the concurrency policy applies.
     #[arg(long = "max-concurrent-runs", default_value_t = 1)]
     pub max_concurrent_runs: i64,
+    /// What a fired tick materialises: `run-only` (a task with no issue, the
+    /// default) or `create-issue` (an issue plus a task against it).
+    #[arg(long = "execution-mode", value_enum, default_value_t = ExecutionModeArg::RunOnly)]
+    pub execution_mode: ExecutionModeArg,
+    /// What the scheduler does when a tick comes due at the in-flight limit:
+    /// `skip` (drop it, the default), `queue` (fire it anyway to run after the
+    /// in-flight one), or `replace` (supersede the in-flight run and fire fresh).
+    #[arg(long = "concurrency-policy", value_enum, default_value_t = ConcurrencyPolicyArg::Skip)]
+    pub concurrency_policy: ConcurrencyPolicyArg,
     /// Workspace slug to create in. Defaults to the bootstrapped `default`.
     #[arg(long)]
     pub workspace: Option<String>,
+}
+
+/// CLI surface of [`ExecutionMode`](ainb_hangar_store::repo::autopilot::ExecutionMode).
+///
+/// A thin clap [`ValueEnum`] mirror so the flag accepts the kebab-case
+/// `run-only` / `create-issue` values and maps onto the store enum at dispatch.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ExecutionModeArg {
+    /// Enqueue a task with no issue (the v1 default).
+    RunOnly,
+    /// Create an issue, then enqueue a task against it.
+    CreateIssue,
+}
+
+impl From<ExecutionModeArg> for ainb_hangar_store::repo::autopilot::ExecutionMode {
+    fn from(a: ExecutionModeArg) -> Self {
+        match a {
+            ExecutionModeArg::RunOnly => Self::RunOnly,
+            ExecutionModeArg::CreateIssue => Self::CreateIssue,
+        }
+    }
+}
+
+/// CLI surface of
+/// [`ConcurrencyPolicy`](ainb_hangar_store::repo::autopilot::ConcurrencyPolicy).
+///
+/// A thin clap [`ValueEnum`] mirror so the flag accepts the lower-case
+/// `skip` / `queue` / `replace` values and maps onto the store enum at dispatch.
+#[derive(Copy, Clone, Debug, PartialEq, Eq, clap::ValueEnum)]
+pub enum ConcurrencyPolicyArg {
+    /// Drop a tick that comes due at the in-flight limit (the v1 default).
+    Skip,
+    /// Fire the tick anyway; the queue runs it after the in-flight one.
+    Queue,
+    /// Supersede the in-flight run and fire fresh.
+    Replace,
+}
+
+impl From<ConcurrencyPolicyArg> for ainb_hangar_store::repo::autopilot::ConcurrencyPolicy {
+    fn from(a: ConcurrencyPolicyArg) -> Self {
+        match a {
+            ConcurrencyPolicyArg::Skip => Self::Skip,
+            ConcurrencyPolicyArg::Queue => Self::Queue,
+            ConcurrencyPolicyArg::Replace => Self::Replace,
+        }
+    }
 }
 
 /// Arguments for `hangar autopilot list`.
@@ -193,6 +383,294 @@ pub struct AutopilotIdArgs {
     /// Workspace slug the autopilot belongs to. Defaults to `default`.
     #[arg(long)]
     pub workspace: Option<String>,
+}
+
+/// `hangar agent <verb>`.
+///
+/// The general agent edit/archive surface (e38.15): `templates use` is the only
+/// way to *create* an agent, but this group lets the operator EDIT one's config
+/// knobs (model / CLI args / MCP / thinking / per-agent env), ARCHIVE it (hide it
+/// from the active picker without a hard delete), un-archive it, and LIST the
+/// workspace's agents (active by default, `--all` includes archived). Every verb
+/// is workspace-scoped (`--workspace`, else the bootstrapped `default`).
+///
+/// Persists + exposes the config only; the provider EXEC consumption of
+/// `model`/`args` is a separate concern (e38.16).
+#[derive(Subcommand, Debug)]
+pub enum AgentCommand {
+    /// List the workspace's agents (active by default; `--all` includes archived).
+    List(AgentListArgs),
+    /// Edit an agent's config knobs (model / args / MCP / thinking / env / name).
+    Edit(AgentEditArgs),
+    /// Archive an agent (hide it from the active picker).
+    Archive(AgentArchiveArgs),
+    /// Un-archive an agent (restore it to the active picker).
+    Unarchive(AgentArchiveArgs),
+}
+
+/// Arguments for `hangar agent list`.
+#[derive(Args, Debug)]
+pub struct AgentListArgs {
+    /// Include archived agents in the listing (default: active only).
+    #[arg(long)]
+    pub all: bool,
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar agent edit`.
+///
+/// Edits a subset of one agent's mutable config; every field is optional and an
+/// omitted field is left unchanged. The four nullable text fields each have an
+/// explicit "clear" flag (`--clear-model`, `--clear-mcp`, `--clear-thinking`,
+/// `--clear-instructions`) so the caller can distinguish "leave as-is" from "set
+/// back to none". `--arg` and `--env` are repeatable and REPLACE the whole list
+/// when any is given (they are not append-to-existing). The edit is
+/// workspace-scoped: an agent id outside `--workspace` touches no row.
+// The four `--clear-*` flags are the deliberate CLI shape (one per nullable
+// field), not an over-boolean design smell.
+#[allow(clippy::struct_excessive_bools)]
+#[derive(Args, Debug)]
+pub struct AgentEditArgs {
+    /// Agent id (ULID) to edit.
+    pub id: String,
+    /// Rename the agent; omitted leaves the name.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New instructions; omitted leaves them. Mutually exclusive with
+    /// `--clear-instructions`.
+    #[arg(long, conflicts_with = "clear_instructions")]
+    pub instructions: Option<String>,
+    /// Clear the instructions; omitted leaves them.
+    #[arg(long = "clear-instructions")]
+    pub clear_instructions: bool,
+    /// New model override (e.g. `claude-opus-4`); omitted leaves it. Mutually
+    /// exclusive with `--clear-model`.
+    #[arg(long, conflicts_with = "clear_model")]
+    pub model: Option<String>,
+    /// Clear the model override (back to the provider default); omitted leaves it.
+    #[arg(long = "clear-model")]
+    pub clear_model: bool,
+    /// A CLI arg to pass the provider (repeatable: `--arg --verbose --arg -x`).
+    /// When ANY `--arg` is given the whole arg list is REPLACED with the values.
+    #[arg(long = "arg", action = clap::ArgAction::Append)]
+    pub args: Vec<String>,
+    /// New MCP config as a raw JSON-object string; omitted leaves it. Mutually
+    /// exclusive with `--clear-mcp`.
+    #[arg(long = "mcp", conflicts_with = "clear_mcp")]
+    pub mcp: Option<String>,
+    /// Clear the MCP config; omitted leaves it.
+    #[arg(long = "clear-mcp")]
+    pub clear_mcp: bool,
+    /// New thinking level (e.g. `low`/`medium`/`high`); omitted leaves it.
+    /// Mutually exclusive with `--clear-thinking`.
+    #[arg(long, conflicts_with = "clear_thinking")]
+    pub thinking: Option<String>,
+    /// Clear the thinking level; omitted leaves it.
+    #[arg(long = "clear-thinking")]
+    pub clear_thinking: bool,
+    /// A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is
+    /// given the whole env map is REPLACED with the values.
+    #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append)]
+    pub env: Vec<(String, String)>,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar agent archive` / `hangar agent unarchive`.
+#[derive(Args, Debug)]
+pub struct AgentArchiveArgs {
+    /// Agent id (ULID) to (un)archive.
+    pub id: String,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// `hangar member <verb>`.
+///
+/// The workspace-membership surface (e38.11): `list` shows the workspace's
+/// members with their roles; `set-role` changes one member's role
+/// (`owner`/`admin`/`member`); `remove` drops a member's membership (the `user`
+/// row survives). Every verb is workspace-scoped (`--workspace`, else the
+/// bootstrapped `default`). Both mutations guard the last-owner invariant — a
+/// workspace must always keep at least one owner, so demoting or removing the sole
+/// owner is rejected.
+#[derive(Subcommand, Debug)]
+pub enum MemberCommand {
+    /// List the workspace's members (email + role).
+    List(MemberListArgs),
+    /// Change a member's role (`owner` / `admin` / `member`).
+    #[command(name = "set-role")]
+    SetRole(MemberSetRoleArgs),
+    /// Remove a member from the workspace (the user row survives).
+    Remove(MemberRemoveArgs),
+}
+
+/// Arguments for `hangar member list`.
+#[derive(Args, Debug)]
+pub struct MemberListArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member set-role`.
+#[derive(Args, Debug)]
+pub struct MemberSetRoleArgs {
+    /// The member's user id (`user.id`).
+    pub user_id: String,
+    /// The new role: `owner`, `admin`, or `member`.
+    #[arg(value_enum)]
+    pub role: MemberRoleArg,
+    /// Workspace slug the member belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member remove`.
+#[derive(Args, Debug)]
+pub struct MemberRemoveArgs {
+    /// The member's user id (`user.id`) to remove.
+    pub user_id: String,
+    /// Workspace slug the member belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// The closed role set for `hangar member set-role`, mirroring the store's
+/// [`MemberRole`](ainb_hangar_store::repo::member::MemberRole) and migration
+/// 0001's `CHECK`. Constraining it at the CLI surface rejects a junk role before
+/// it ever reaches the store.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MemberRoleArg {
+    /// Full administrative control; a workspace must always keep one.
+    Owner,
+    /// Elevated management, short of ownership.
+    Admin,
+    /// A regular member.
+    Member,
+}
+
+impl MemberRoleArg {
+    /// Map the CLI role onto the store's [`MemberRole`].
+    ///
+    /// [`MemberRole`]: ainb_hangar_store::repo::member::MemberRole
+    const fn to_repo(self) -> ainb_hangar_store::repo::member::MemberRole {
+        use ainb_hangar_store::repo::member::MemberRole;
+        match self {
+            Self::Owner => MemberRole::Owner,
+            Self::Admin => MemberRole::Admin,
+            Self::Member => MemberRole::Member,
+        }
+    }
+}
+
+/// `hangar squad <verb>`.
+///
+/// The squads surface (e38.17): a squad is a workspace-scoped group of actors with
+/// a designated LEADER. `list` is the status view — each squad with its leader and
+/// members; `create` makes a squad with a leader actor-ref; `add-member` /
+/// `remove-member` mutate membership. Every verb is workspace-scoped (`--workspace`,
+/// else the bootstrapped `default`).
+///
+/// # Leader routing
+///
+/// A squad does NOT introduce a new actor kind. Work assigned to a squad routes
+/// through its LEADER actor-ref: when the leader is an `agent`, a squad-assigned
+/// task carries the leader's `agent_id` and the existing claim/dispatch path
+/// reaches the leader — so the leader is the actor a squad's work lands on.
+#[derive(Subcommand, Debug)]
+pub enum SquadCommand {
+    /// List the workspace's squads (name, leader, members) — the status view.
+    List(SquadListArgs),
+    /// Create a squad with a leader actor-ref (`agent:<id>` / `member:<id>`).
+    Create(SquadCreateArgs),
+    /// Add a member actor to a squad (`agent:<id>` / `member:<id>`).
+    #[command(name = "add-member")]
+    AddMember(SquadMemberArgs),
+    /// Remove a member actor from a squad (`agent:<id>` / `member:<id>`).
+    #[command(name = "remove-member")]
+    RemoveMember(SquadMemberArgs),
+    /// Route a task to the squad's LEADER (leader routing taking effect).
+    Assign(SquadAssignArgs),
+}
+
+/// Arguments for `hangar squad list`.
+#[derive(Args, Debug)]
+pub struct SquadListArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad create`.
+#[derive(Args, Debug)]
+pub struct SquadCreateArgs {
+    /// The squad name (unique within the workspace).
+    pub name: String,
+    /// The squad leader as an actor-ref (`agent:<id>` / `member:<id>`). An `agent`
+    /// leader is the actor a squad-assigned task is routed to.
+    #[arg(long)]
+    pub leader: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad add-member` / `hangar squad remove-member`.
+#[derive(Args, Debug)]
+pub struct SquadMemberArgs {
+    /// The squad id (`squad.id`) to mutate.
+    pub squad_id: String,
+    /// The member actor-ref (`agent:<id>` / `member:<id>`).
+    #[arg(long)]
+    pub member: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad assign`: route a task to the squad's leader.
+#[derive(Args, Debug)]
+pub struct SquadAssignArgs {
+    /// The squad id (`squad.id`) whose leader the task routes to.
+    pub squad_id: String,
+    /// The issue the routed task carries (`issue.id`), or omit for an ad-hoc task.
+    #[arg(long)]
+    pub issue: Option<String>,
+    /// The run's working directory, or omit.
+    #[arg(long)]
+    pub work_dir: Option<String>,
+    /// Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine).
+    #[arg(long, default_value_t = 0)]
+    pub priority: i64,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Parse a `--env KEY=VALUE` argument into a `(key, value)` pair.
+///
+/// # Errors
+///
+/// Returns a human-readable message if the input has no `=` or an empty key.
+fn parse_env_kv(raw: &str) -> Result<(String, String), String> {
+    let (key, value) =
+        raw.split_once('=').ok_or_else(|| format!("expected KEY=VALUE, got {raw:?}"))?;
+    if key.is_empty() {
+        return Err(format!("env var name must not be empty in {raw:?}"));
+    }
+    Ok((key.to_string(), value.to_string()))
 }
 
 /// `hangar templates <verb>`.
@@ -418,8 +896,92 @@ pub enum IssueCommand {
     Create(IssueCreateArgs),
     /// List issues in the default workspace.
     List(IssueListArgs),
+    /// Search issues by title, description, or comment body (ranked).
+    Search(IssueSearchArgs),
     /// Show one issue by id.
     Show(IssueShowArgs),
+    /// Edit an existing issue's state, assignee, priority, or due date.
+    Update(IssueUpdateArgs),
+    /// Attach or detach a label on an issue.
+    #[command(subcommand)]
+    Label(IssueLabelCommand),
+}
+
+/// `hangar issue label <verb>`.
+///
+/// Attach or detach a label on one issue, workspace-scoped. Mirrors the
+/// `hangar/issue_label_attach` / `hangar/issue_label_detach` daemon RPCs over the
+/// CLI: attach resolve-or-creates a label by `(workspace, name)`; detach removes
+/// the link (idempotent), leaving the label definition intact.
+#[derive(Subcommand, Debug)]
+pub enum IssueLabelCommand {
+    /// Attach a label to an issue (resolve-or-creates the label; idempotent).
+    Attach(IssueLabelArgs),
+    /// Detach a label from an issue (idempotent; the definition is kept).
+    Detach(IssueLabelArgs),
+}
+
+/// Arguments for `hangar issue label attach|detach`.
+///
+/// `id` is the issue; `name` is the label. `--color` is an optional presentation
+/// hint applied only when an attach mints a fresh label (ignored on detach and
+/// when an existing label is reused). The mutation is workspace-scoped: a
+/// `--workspace` selects the tenant (default: the bootstrapped `default`), and an
+/// issue id outside it touches no row.
+#[derive(Args, Debug)]
+pub struct IssueLabelArgs {
+    /// Issue id (ULID) to (de)label.
+    pub id: String,
+    /// Label name to attach / detach.
+    pub name: String,
+    /// Optional presentation colour (hex, e.g. `#ff0000`) for a freshly-created
+    /// label; ignored on detach / when an existing label is reused.
+    #[arg(long)]
+    pub color: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue update`.
+///
+/// Edits a subset of one issue's mutable fields; every field is optional and an
+/// omitted field is left unchanged. The two nullable fields have an explicit
+/// "clear" flag (`--unassign`, `--clear-due`) so the caller can distinguish
+/// "leave as-is" from "set back to none". The edit is workspace-scoped: a
+/// `--workspace` selects the tenant (default: the bootstrapped `default`), and
+/// an issue id outside it touches no row.
+#[derive(Args, Debug)]
+pub struct IssueUpdateArgs {
+    /// Issue id (ULID) to edit.
+    pub id: String,
+    /// New lifecycle state (e.g. `in_progress`, `done`); omitted leaves it.
+    #[arg(long)]
+    pub state: Option<String>,
+    /// Reassign the issue to an agent (`agent.id`); omitted leaves the assignee.
+    ///
+    /// Mutually exclusive with `--unassign`.
+    #[arg(long, conflicts_with = "unassign")]
+    pub assign: Option<String>,
+    /// Clear the assignee (unassign the issue); omitted leaves it.
+    #[arg(long)]
+    pub unassign: bool,
+    /// New urgency 0..3 (P3..P0, HIGHER = MORE URGENT); omitted leaves it.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(0..=3))]
+    pub priority: Option<i64>,
+    /// New due date as `YYYY-MM-DD` (UTC midnight); omitted leaves it.
+    ///
+    /// Mutually exclusive with `--clear-due`.
+    #[arg(long, value_parser = parse_due_date, conflicts_with = "clear_due")]
+    pub due: Option<i64>,
+    /// Clear the due date (remove the deadline); omitted leaves it.
+    #[arg(long = "clear-due")]
+    pub clear_due: bool,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue create`.
@@ -442,6 +1004,43 @@ pub struct IssueCreateArgs {
     /// provider. The created task id is printed alongside the issue id.
     #[arg(long)]
     pub assign: Option<String>,
+    /// Urgency: 0..3 mapping P3..P0 — HIGHER = MORE URGENT (default 0).
+    ///
+    /// Stamped onto BOTH the created issue and (when `--assign` enqueues one) the
+    /// task: the daemon's claim loop drains `priority DESC, created_at, id`
+    /// (reference ordering parity), so a higher value jumps the queue while equal
+    /// priorities stay FIFO.
+    #[arg(long, default_value_t = 0, value_parser = clap::value_parser!(i64).range(0..=3))]
+    pub priority: i64,
+    /// Optional due date as `YYYY-MM-DD` (interpreted at UTC midnight).
+    ///
+    /// Persisted onto the issue as an epoch-millisecond deadline; omitted leaves
+    /// the issue with no due date.
+    #[arg(long, value_parser = parse_due_date)]
+    pub due: Option<i64>,
+    /// A label to attach to the issue (repeatable: `--label bug --label p0`).
+    ///
+    /// Persisted as the issue's label list. The full labels table + attach/detach
+    /// is a separate concern; create just records the labels it is handed.
+    #[arg(long = "label", action = clap::ArgAction::Append)]
+    pub labels: Vec<String>,
+}
+
+/// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
+/// UTC midnight.
+///
+/// # Errors
+///
+/// Returns a human-readable message if the input is not a valid `YYYY-MM-DD`
+/// date (surfaced by clap as the flag's value error).
+fn parse_due_date(raw: &str) -> Result<i64, String> {
+    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+        .map_err(|_| format!("expected a YYYY-MM-DD date, got {raw:?}"))?;
+    let dt = date
+        .and_hms_opt(0, 0, 0)
+        .ok_or_else(|| format!("invalid time-of-day for date {raw:?}"))?
+        .and_utc();
+    Ok(dt.timestamp_millis())
 }
 
 /// Arguments for `hangar issue list`.
@@ -450,6 +1049,24 @@ pub struct IssueListArgs {
     /// Restrict to issues in this lifecycle state.
     #[arg(long, default_value = DEFAULT_ISSUE_STATE)]
     pub state: String,
+}
+
+/// Arguments for `hangar issue search`.
+///
+/// `query` is the case-insensitive substring to match across the issue title,
+/// description, and comment bodies; results are ranked title > description >
+/// comment. Unlike the plugin's client-side `/` title-only filter, this reaches
+/// into description + comment bodies and across the whole workspace (not just a
+/// loaded page). A `--workspace` selects the tenant (default: the bootstrapped
+/// `default` workspace); a blank query matches nothing.
+#[derive(Args, Debug)]
+pub struct IssueSearchArgs {
+    /// The text to search for (matched across title / description / comments).
+    pub query: String,
+    /// Workspace slug to search within. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue show`.
@@ -516,8 +1133,27 @@ pub struct BeadsReconcileArgs {
 /// `hangar daemon <verb>`.
 #[derive(Subcommand, Debug)]
 pub enum DaemonCommand {
-    /// Report whether the Hangar database is reachable and migrated.
+    /// Report whether the daemon is running (PID file + socket) and the
+    /// database is reachable.
     Status,
+    /// Run the daemon in the FOREGROUND (boot + claim loop until interrupted).
+    ///
+    /// This blocks; `start` is the background variant. Equivalent to launching
+    /// the `ainb-hangar-daemon` binary directly.
+    Run,
+    /// Start the daemon as a BACKGROUND child, recording its PID.
+    ///
+    /// Spawns the `ainb-hangar-daemon` binary detached and writes its exact pid
+    /// to `<hangar_home>/hangar/daemon.pid`. A no-op (with a notice) if a live
+    /// daemon is already recorded.
+    Start,
+    /// Stop the running daemon: signal the exact recorded PID, then remove the
+    /// PID file.
+    Stop,
+    /// Restart the daemon: `stop` (if running) then `start`.
+    Restart,
+    /// One-command bring-up: ensure the store + socket-auth token, then `start`.
+    Setup,
 }
 
 /// Dispatch a parsed [`HangarCommand`] to its backing service.
@@ -536,12 +1172,16 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Issue(c) => dispatch_issue(c, format).await,
         HangarCommand::Task(c) => dispatch_task(c, format).await,
         HangarCommand::Beads(BeadsCommand::Reconcile(args)) => run_beads_reconcile(args).await,
-        HangarCommand::Daemon(DaemonCommand::Status) => run_daemon_status().await,
+        HangarCommand::Daemon(c) => dispatch_daemon(c).await,
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
         HangarCommand::Templates(c) => dispatch_templates(c, format).await,
+        HangarCommand::Agent(c) => dispatch_agent(c, format).await,
+        HangarCommand::Member(c) => dispatch_member(c, format).await,
+        HangarCommand::Squad(c) => dispatch_squad(c, format).await,
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
+        HangarCommand::Workspace(c) => dispatch_workspace(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
     }
 }
@@ -692,6 +1332,8 @@ async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Resu
         AutopilotCommand::Disable(args) => run_autopilot_set_enabled(&store, args, false).await,
         AutopilotCommand::Enable(args) => run_autopilot_set_enabled(&store, args, true).await,
         AutopilotCommand::Run(args) => run_autopilot_run_now(&store, args).await,
+        AutopilotCommand::Webhook(args) => run_autopilot_webhook(&store, args).await,
+        AutopilotCommand::Deliveries(args) => run_autopilot_deliveries(&store, args, format).await,
     }
 }
 
@@ -712,6 +1354,8 @@ async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Resul
         instructions: args.instructions,
         cron_expr: args.cron.clone(),
         max_concurrent_runs: args.max_concurrent_runs,
+        execution_mode: args.execution_mode.into(),
+        concurrency_policy: args.concurrency_policy.into(),
     };
 
     let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
@@ -822,6 +1466,108 @@ async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<(
     Ok(())
 }
 
+/// `hangar autopilot webhook <id>`: configure the HTTP webhook trigger.
+///
+/// Default (no `--disable`/`--rotate`) ENABLES the webhook and mints a fresh HMAC
+/// secret; `--rotate` mints a new secret for an already-enabled webhook;
+/// `--disable` turns it off and clears the secret. `--event`/`--clear-event` set
+/// the optional exact-match event filter. The secret plaintext is printed ONCE
+/// (it is never recoverable from the stored digest) and written to the daemon's
+/// 0600 secret file so the ingress can recompute the body HMAC.
+async fn run_autopilot_webhook(store: &Store, args: AutopilotWebhookArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot_webhook::{AutopilotWebhookRepo, WebhookSecretStore};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    // The autopilot must exist in this workspace.
+    let mut config = AutopilotWebhookRepo::get_config(store.pool(), &ws, &id)
+        .await
+        .context("read webhook config")?
+        .with_context(|| format!("no autopilot `{}` in this workspace", args.id))?;
+
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    let secrets = WebhookSecretStore::in_home(&home);
+
+    // Apply the event-filter edit (independent of enable/disable/rotate).
+    if args.clear_event {
+        config.event_filter = None;
+    } else if let Some(ev) = args.event.clone() {
+        config.event_filter = Some(ev);
+    }
+
+    if args.disable {
+        config.enabled = false;
+        config.secret_sha256 = None;
+        AutopilotWebhookRepo::set_config(store.pool(), &ws, &id, &config)
+            .await
+            .context("disable webhook")?;
+        secrets.remove(&args.id).context("clear webhook secret")?;
+        println!("disabled webhook for autopilot {}", args.id);
+        return Ok(());
+    }
+
+    // Enable (default) or rotate: mint a fresh secret unless we are only editing
+    // the filter on an already-secret-bearing webhook (no `--rotate` and a secret
+    // already exists keeps the current secret).
+    let needs_new_secret = args.rotate || config.secret_sha256.is_none();
+    if needs_new_secret {
+        let minted = ainb_hangar_core::webhook::mint_secret(&mut rand::rngs::OsRng);
+        config.secret_sha256 = Some(minted.sha256_hex);
+        config.enabled = true;
+        AutopilotWebhookRepo::set_config(store.pool(), &ws, &id, &config)
+            .await
+            .context("set webhook config")?;
+        // Persist the recoverable plaintext to the 0600 file the ingress reads.
+        secrets.set(&args.id, &minted.plaintext).context("write webhook secret")?;
+        println!("enabled webhook for autopilot {}", args.id);
+        println!(
+            "  url:    http://{}/hangar/webhook/{}",
+            args.url_host, args.id
+        );
+        // The secret is shown ONCE — it is unrecoverable from the stored digest.
+        println!("  secret: {} (shown once — store it now)", minted.plaintext);
+        println!("  sign requests: X-Hangar-Signature: <hex HMAC-SHA256(secret, body)>");
+    } else {
+        config.enabled = true;
+        AutopilotWebhookRepo::set_config(store.pool(), &ws, &id, &config)
+            .await
+            .context("set webhook config")?;
+        println!(
+            "updated webhook for autopilot {} (secret unchanged)",
+            args.id
+        );
+        println!("  url: http://{}/hangar/webhook/{}", args.url_host, args.id);
+    }
+    if let Some(ev) = &config.event_filter {
+        println!("  event filter: {ev}");
+    }
+    Ok(())
+}
+
+/// `hangar autopilot deliveries <id>`: list the recent webhook deliveries (the
+/// audit log), latest-first, workspace-scoped.
+async fn run_autopilot_deliveries(
+    store: &Store,
+    args: AutopilotDeliveriesArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot_webhook::AutopilotWebhookRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let deliveries = AutopilotWebhookRepo::list_deliveries(store.pool(), &ws, &id, args.limit)
+        .await
+        .context("list webhook deliveries")?;
+    render_webhook_deliveries(&deliveries, format);
+    Ok(())
+}
+
 /// Dispatch the `hangar templates` verbs.
 ///
 /// `list` and `show` are pure reads of the embedded registry (no database).
@@ -895,6 +1641,515 @@ async fn run_templates_use(store: &Store, args: TemplatesUseArgs) -> Result<()> 
         );
     }
     Ok(())
+}
+
+/// Dispatch the `hangar agent` verbs (e38.15).
+///
+/// Opens the store, resolves the workspace the same way the skills/templates
+/// verbs do, and drives the workspace-scoped [`AgentRepo`]. `edit` maps the
+/// present flags onto an [`AgentConfigUpdate`] (rejecting an empty edit);
+/// `archive`/`unarchive` flip the archived flag; `list` shows the workspace's
+/// agents (active by default, `--all` includes archived).
+async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        AgentCommand::List(args) => run_agent_list(&store, args, format).await,
+        AgentCommand::Edit(args) => run_agent_edit(&store, args).await,
+        AgentCommand::Archive(args) => run_agent_set_archived(&store, args, true).await,
+        AgentCommand::Unarchive(args) => run_agent_set_archived(&store, args, false).await,
+    }
+}
+
+/// `hangar agent list`: list the workspace's agents (active, or all with `--all`).
+async fn run_agent_list(store: &Store, args: AgentListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    // A missing/empty workspace lists as no agents, not an error (mirrors skills).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_agent_list(&[], format);
+        return Ok(());
+    };
+    let agents = if args.all {
+        AgentRepo::list_by_workspace_including_archived(store.pool(), &workspace_id).await
+    } else {
+        AgentRepo::list_by_workspace(store.pool(), &workspace_id).await
+    }
+    .context("list agents")?;
+    render_agent_list(&agents, format);
+    Ok(())
+}
+
+/// `hangar agent edit`: map the present flags onto an [`AgentConfigUpdate`] and
+/// drive the workspace-scoped edit. An empty edit (no field flag) is rejected;
+/// an agent id outside the workspace is reported as a not-found error.
+async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
+    use ainb_hangar_store::repo::agent::{AgentConfigUpdate, AgentRepo};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // Each nullable text field uses its clear-flag to distinguish "clear to none"
+    // from "leave unchanged" (a clap conflict already bars setting both).
+    let instructions = clear_or_set(args.clear_instructions, args.instructions);
+    let model = clear_or_set(args.clear_model, args.model);
+    let mcp_config = clear_or_set(args.clear_mcp, args.mcp);
+    let thinking = clear_or_set(args.clear_thinking, args.thinking);
+    // `--arg` / `--env` REPLACE the list when any value is given (an empty Vec
+    // means "no flag passed" → leave unchanged).
+    let cli_args = (!args.args.is_empty()).then_some(args.args);
+    let agent_env = (!args.env.is_empty()).then_some(args.env);
+
+    let update = AgentConfigUpdate {
+        name: args.name,
+        instructions,
+        model,
+        cli_args,
+        mcp_config,
+        thinking,
+        agent_env,
+    };
+
+    if update.is_empty() {
+        anyhow::bail!(
+            "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
+             / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
+             / --env"
+        );
+    }
+
+    let touched = AgentRepo::update_config(store.pool(), &workspace_id, &args.id, &update)
+        .await
+        .with_context(|| format!("update agent {}", args.id))?;
+    if touched {
+        println!("updated agent {}", args.id);
+    } else {
+        anyhow::bail!("no agent with id {} in this workspace", args.id);
+    }
+    Ok(())
+}
+
+/// `hangar agent archive|unarchive`: flip the archived flag, workspace-scoped.
+async fn run_agent_set_archived(
+    store: &Store,
+    args: AgentArchiveArgs,
+    archived: bool,
+) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let touched = AgentRepo::set_archived(store.pool(), &workspace_id, &args.id, archived)
+        .await
+        .with_context(|| format!("archive agent {}", args.id))?;
+    if touched {
+        let verb = if archived { "archived" } else { "un-archived" };
+        println!("{verb} agent {}", args.id);
+    } else {
+        anyhow::bail!("no agent with id {} in this workspace", args.id);
+    }
+    Ok(())
+}
+
+/// Collapse a `(clear_flag, optional_value)` pair into the store's nested-`Option`
+/// three-state: the clear flag wins (`Some(None)`), else a present value sets
+/// (`Some(Some(v))`), else leave unchanged (`None`). The clap `conflicts_with`
+/// already bars both at once.
+#[allow(clippy::option_option)] // the nested Option IS the store's 3-state encoding
+fn clear_or_set(clear: bool, value: Option<String>) -> Option<Option<String>> {
+    if clear { Some(None) } else { value.map(Some) }
+}
+
+/// Dispatch the `hangar member` verbs (e38.11).
+///
+/// Opens the store, resolves the workspace the same way the skills/agent verbs do,
+/// and drives the workspace-scoped [`MemberRepo`]. `list` shows the members;
+/// `set-role` changes a role; `remove` drops a membership. Both mutations surface
+/// the store's last-owner guard as a CLI error (a workspace must keep an owner).
+///
+/// [`MemberRepo`]: ainb_hangar_store::repo::member::MemberRepo
+async fn dispatch_member(cmd: MemberCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        MemberCommand::List(args) => run_member_list(&store, args, format).await,
+        MemberCommand::SetRole(args) => run_member_set_role(&store, args).await,
+        MemberCommand::Remove(args) => run_member_remove(&store, args).await,
+    }
+}
+
+/// `hangar member list`: list the workspace's members (email + role).
+async fn run_member_list(store: &Store, args: MemberListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    // A missing/empty workspace lists as no members, not an error (mirrors agents).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_member_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let members = MemberRepo::list(store.pool(), &ws).await.context("list members")?;
+    render_member_list(&members, format);
+    Ok(())
+}
+
+/// `hangar member set-role`: change a member's role, workspace-scoped. The
+/// store's last-owner guard rejects demoting the workspace's sole owner; a member
+/// id outside the workspace is reported as a not-found error.
+async fn run_member_set_role(store: &Store, args: MemberSetRoleArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    MemberRepo::set_role(store.pool(), &ws, &args.user_id, args.role.to_repo())
+        .await
+        .map_err(member_cli_err)?;
+    println!(
+        "set role of member {} to {}",
+        args.user_id,
+        args.role.to_repo().as_str()
+    );
+    Ok(())
+}
+
+/// `hangar member remove`: drop a member's membership, workspace-scoped. The
+/// store's last-owner guard rejects removing the workspace's sole owner.
+async fn run_member_remove(store: &Store, args: MemberRemoveArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    MemberRepo::remove(store.pool(), &ws, &args.user_id)
+        .await
+        .map_err(member_cli_err)?;
+    println!("removed member {}", args.user_id);
+    Ok(())
+}
+
+/// Map a [`MemberRepoError`] onto a human CLI error, surfacing the not-found and
+/// last-owner rejections with their own clear messages.
+///
+/// [`MemberRepoError`]: ainb_hangar_store::repo::member::MemberRepoError
+fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow::Error {
+    use ainb_hangar_store::repo::member::MemberRepoError;
+    match e {
+        MemberRepoError::NotFound => {
+            anyhow::anyhow!("no member with that user id in this workspace")
+        }
+        MemberRepoError::LastOwner => {
+            anyhow::anyhow!("a workspace must always keep at least one owner")
+        }
+        other => anyhow::Error::new(other).context("member mutation failed"),
+    }
+}
+
+/// Dispatch the `hangar workspace` verbs against a local store (e38.21).
+///
+/// `config` sets one or more of the workspace's agent-run config knobs (context
+/// prompt, issue prefix, repo whitelist); `show` renders the current config.
+/// Both resolve the workspace the same way the skills/member verbs do.
+async fn dispatch_workspace(cmd: WorkspaceCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        WorkspaceCommand::Config(args) => run_workspace_config(&store, args).await,
+        WorkspaceCommand::Show(args) => run_workspace_show(&store, args, format).await,
+    }
+}
+
+/// `hangar workspace config`: overwrite one or more of the workspace's config
+/// knobs. A value flag sets the knob; a `--clear-…` flag unsets it; a knob whose
+/// flags are both absent keeps its stored value (a read-modify-write merge).
+async fn run_workspace_config(store: &Store, args: WorkspaceConfigArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::workspace::WorkspaceRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    // Read-modify-write: start from the stored config so an unspecified knob is
+    // preserved, then apply each flag.
+    let mut config = WorkspaceRepo::get_config(store.pool(), &ws)
+        .await
+        .map_err(workspace_cli_err)?
+        .context("workspace vanished")?;
+    if args.clear_context_prompt {
+        config.context_prompt = None;
+    } else if let Some(prompt) = args.context_prompt {
+        config.context_prompt = Some(prompt);
+    }
+    if args.clear_issue_prefix {
+        config.issue_prefix = None;
+    } else if let Some(prefix) = args.issue_prefix {
+        config.issue_prefix = Some(prefix);
+    }
+    if args.clear_repo_whitelist {
+        config.repo_whitelist = None;
+    } else if let Some(repos) = args.repo_whitelist {
+        config.repo_whitelist = Some(repos);
+    }
+
+    WorkspaceRepo::set_config(store.pool(), &ws, &config)
+        .await
+        .map_err(workspace_cli_err)?;
+    println!("updated workspace config");
+    Ok(())
+}
+
+/// `hangar workspace show`: render the workspace's current config. An
+/// unconfigured workspace shows `(not set)` for each knob.
+async fn run_workspace_show(
+    store: &Store,
+    args: WorkspaceShowArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::workspace::WorkspaceRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let config = WorkspaceRepo::get_config(store.pool(), &ws)
+        .await
+        .map_err(workspace_cli_err)?
+        .context("workspace vanished")?;
+
+    match format {
+        OutputFormat::Json => {
+            let v = serde_json::json!({
+                "context_prompt": config.context_prompt,
+                "issue_prefix": config.issue_prefix,
+                "repo_whitelist": config.repo_whitelist,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).context("render config json")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            let not_set = "(not set)".to_string();
+            println!(
+                "context_prompt: {}",
+                config.context_prompt.as_deref().unwrap_or(&not_set)
+            );
+            println!(
+                "issue_prefix:   {}",
+                config.issue_prefix.as_deref().unwrap_or(&not_set)
+            );
+            let whitelist = config
+                .repo_whitelist
+                .as_ref()
+                .map_or_else(|| not_set.clone(), |list| list.join(", "));
+            println!("repo_whitelist: {whitelist}");
+        }
+    }
+    Ok(())
+}
+
+/// Map a [`WorkspaceRepoError`] onto a human CLI error.
+///
+/// [`WorkspaceRepoError`]: ainb_hangar_store::repo::workspace::WorkspaceRepoError
+fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) -> anyhow::Error {
+    use ainb_hangar_store::repo::workspace::WorkspaceRepoError;
+    match e {
+        WorkspaceRepoError::NotFound => anyhow::anyhow!("no such workspace"),
+        WorkspaceRepoError::BadWhitelist { detail } => {
+            anyhow::anyhow!("invalid repo whitelist: {detail}")
+        }
+        db @ WorkspaceRepoError::Db(_) => {
+            anyhow::Error::new(db).context("workspace config mutation failed")
+        }
+    }
+}
+
+/// Dispatch the `hangar squad` verbs against a local store (e38.17).
+///
+/// `list` renders the squad status view (each squad's leader + members); `create`
+/// makes a squad with a leader actor-ref (resolve-or-reject on a duplicate name);
+/// `add-member` / `remove-member` mutate membership, workspace-scoped. The leader
+/// actor-ref is how a squad's work routes to a concrete actor — an `agent` leader
+/// is the actor a squad-assigned task lands on.
+async fn dispatch_squad(cmd: SquadCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        SquadCommand::List(args) => run_squad_list(&store, args, format).await,
+        SquadCommand::Create(args) => run_squad_create(&store, args).await,
+        SquadCommand::AddMember(args) => run_squad_member(&store, args, true).await,
+        SquadCommand::RemoveMember(args) => run_squad_member(&store, args, false).await,
+        SquadCommand::Assign(args) => run_squad_assign(&store, args).await,
+    }
+}
+
+/// `hangar squad list`: render the workspace's squads (name, leader, members).
+async fn run_squad_list(store: &Store, args: SquadListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    // A missing/empty workspace lists as no squads, not an error (mirrors members).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => sqlx::query_scalar::<_, String>("SELECT id FROM workspace WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(store.pool())
+            .await
+            .context("look up workspace by slug")?,
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_squad_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let squads = SquadRepo::list(store.pool(), &ws).await.context("list squads")?;
+    render_squad_list(&squads, format);
+    Ok(())
+}
+
+/// `hangar squad create`: create a squad with a leader actor-ref, workspace-scoped.
+/// A duplicate squad name in the workspace is rejected (resolve-or-reject).
+async fn run_squad_create(store: &Store, args: SquadCreateArgs) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::idgen::IdGen;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let leader: ActorRef = args.leader.parse().with_context(|| {
+        format!(
+            "leader must be `agent:<id>` or `member:<id>`: {}",
+            args.leader
+        )
+    })?;
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = SystemIdGen.new_ulid();
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    SquadRepo::create(store.pool(), &ws, &id, &args.name, &leader, now)
+        .await
+        .map_err(squad_cli_err)?;
+    println!("created squad {} ({}) led by {}", args.name, id, leader);
+    Ok(())
+}
+
+/// `hangar squad add-member` / `remove-member`: mutate one squad's membership,
+/// workspace-scoped. A squad id outside the workspace is a not-found error.
+async fn run_squad_member(store: &Store, args: SquadMemberArgs, add: bool) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let member: ActorRef = args.member.parse().with_context(|| {
+        format!(
+            "member must be `agent:<id>` or `member:<id>`: {}",
+            args.member
+        )
+    })?;
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    if add {
+        SquadRepo::add_member(store.pool(), &ws, &args.squad_id, &member)
+            .await
+            .map_err(squad_cli_err)?;
+        println!("added {member} to squad {}", args.squad_id);
+    } else {
+        SquadRepo::remove_member(store.pool(), &ws, &args.squad_id, &member)
+            .await
+            .map_err(squad_cli_err)?;
+        println!("removed {member} from squad {}", args.squad_id);
+    }
+    Ok(())
+}
+
+/// `hangar squad assign`: route a task to the squad's LEADER — leader routing
+/// taking effect. The daemon-free path the daemon RPC mirrors: resolve the
+/// squad's leader agent, derive the leader's runtime, and enqueue the task keyed
+/// to the leader so the claim path dispatches it to the leader. A human-member or
+/// unknown-squad leader (no agent to dispatch to) is rejected.
+async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let request = SquadAssignRequest {
+        issue_id: args.issue.as_deref(),
+        work_dir: args.work_dir.as_deref(),
+        priority: args.priority,
+        // The CLI assign carries no card repo/agent (tcp T4): the task runs in-tree,
+        // exactly the pre-T4 behaviour.
+        ..SquadAssignRequest::default()
+    };
+    let assignment = SquadAssignService::assign_to_leader(
+        store.pool(),
+        &ws,
+        &args.squad_id,
+        &request,
+        &SystemIdGen,
+        &SystemClock,
+    )
+    .await
+    .map_err(squad_assign_cli_err)?;
+    println!(
+        "assigned task {} to squad {} leader {} (runtime {})",
+        assignment.task_id, args.squad_id, assignment.leader_agent_id, assignment.runtime_id
+    );
+    Ok(())
+}
+
+/// Map a [`SquadAssignError`] onto a human CLI error: a no-agent-leader /
+/// missing-leader rejection gets a clear message, a store fault is contextualised.
+///
+/// [`SquadAssignError`]: ainb_hangar_store::service::squad_assign::SquadAssignError
+fn squad_assign_cli_err(
+    e: ainb_hangar_store::service::squad_assign::SquadAssignError,
+) -> anyhow::Error {
+    use ainb_hangar_store::service::squad_assign::SquadAssignError;
+    match e {
+        SquadAssignError::NoAgentLeader => anyhow::anyhow!(
+            "squad has no agent leader to route to (unknown squad or a human leader)"
+        ),
+        SquadAssignError::LeaderAgentMissing(id) => {
+            anyhow::anyhow!("squad leader agent `{id}` not found")
+        }
+        SquadAssignError::MemberAgentMissing(id) => {
+            anyhow::anyhow!("squad member agent `{id}` not found")
+        }
+        db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),
+    }
+}
+
+/// Map a [`SquadRepoError`] onto a human CLI error, surfacing the duplicate-name
+/// and not-found rejections with their own clear messages.
+///
+/// [`SquadRepoError`]: ainb_hangar_store::repo::squad::SquadRepoError
+fn squad_cli_err(e: ainb_hangar_store::repo::squad::SquadRepoError) -> anyhow::Error {
+    use ainb_hangar_store::repo::squad::SquadRepoError;
+    match e {
+        SquadRepoError::DuplicateName => {
+            anyhow::anyhow!("a squad with that name already exists in this workspace")
+        }
+        SquadRepoError::NotFound => {
+            anyhow::anyhow!("no squad with that id in this workspace")
+        }
+        db @ SquadRepoError::Db(_) => anyhow::Error::new(db).context("squad mutation failed"),
+    }
 }
 
 /// Dispatch the `hangar skills` verbs.
@@ -1213,8 +2468,133 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
     match cmd {
         IssueCommand::Create(args) => run_issue_create(&store, args).await,
         IssueCommand::List(args) => run_issue_list(&store, args, format).await,
+        IssueCommand::Search(args) => run_issue_search(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
+        IssueCommand::Update(args) => run_issue_update(&store, args).await,
+        IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
     }
+}
+
+/// `hangar issue label attach|detach`: mutate one issue's labels,
+/// workspace-scoped.
+///
+/// Resolves the workspace the same way the other verbs do (`--workspace`, else
+/// the bootstrapped `default`), then drives the workspace-scoped
+/// [`LabelRepo`](ainb_hangar_store::repo::label::LabelRepo) mutation. An issue id
+/// that resolves to no row in the workspace (an unknown id or a foreign tenant's
+/// issue) is reported as an error — never a silent no-op, mirroring the daemon
+/// RPC. The label name is validated non-empty. The current label set is printed
+/// after the mutation so the caller sees the result.
+async fn run_issue_label(store: &Store, cmd: IssueLabelCommand) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
+
+    let (args, attach) = match cmd {
+        IssueLabelCommand::Attach(args) => (args, true),
+        IssueLabelCommand::Detach(args) => (args, false),
+    };
+    if args.name.trim().is_empty() {
+        anyhow::bail!("label name must not be empty");
+    }
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    let result = if attach {
+        LabelRepo::attach(
+            store.pool(),
+            &ws,
+            &args.id,
+            args.name.trim(),
+            args.color.as_deref(),
+        )
+        .await
+    } else {
+        LabelRepo::detach(store.pool(), &ws, &args.id, args.name.trim()).await
+    };
+    // A foreign / unknown issue id is a not-found error, never a silent no-op.
+    match result {
+        Ok(()) => {}
+        Err(LabelRepoError::IssueNotFound) => {
+            anyhow::bail!("no issue with id {} in this workspace", args.id)
+        }
+        Err(e) => {
+            return Err(e).with_context(|| format!("update labels on issue {}", args.id));
+        }
+    }
+
+    let labels = LabelRepo::labels_for_issue(store.pool(), &ws, &args.id)
+        .await
+        .with_context(|| format!("read labels for issue {}", args.id))?;
+    let verb = if attach { "attached" } else { "detached" };
+    println!(
+        "{verb} `{}` on issue {} (labels: {})",
+        args.name.trim(),
+        args.id,
+        if labels.is_empty() {
+            "none".to_string()
+        } else {
+            labels.join(", ")
+        }
+    );
+    Ok(())
+}
+
+/// `hangar issue update`: edit a subset of an issue's mutable fields,
+/// workspace-scoped.
+///
+/// Resolves the workspace the same way the other verbs do (`--workspace`, else
+/// the bootstrapped `default`), maps the present flags onto an
+/// [`IssueFieldUpdate`], and drives the workspace-scoped store edit. An issue id
+/// that resolves to no row in the workspace (an unknown id or a foreign tenant's
+/// issue) is reported as an error — never a silent no-op. The mutually-exclusive
+/// `--assign`/`--unassign` and `--due`/`--clear-due` pairs are enforced by clap.
+async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
+    use ainb_hangar_store::repo::issue::IssueFieldUpdate;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // Map the present flags onto the partial edit. The two nullable fields use
+    // the clear-flag to distinguish "clear to none" from "leave unchanged".
+    let assignee = if args.unassign {
+        Some(None)
+    } else {
+        args.assign
+            .as_deref()
+            .map(|id| ActorRef::new(ActorKind::Agent, id).context("assignee agent id was empty"))
+            .transpose()?
+            .map(Some)
+    };
+    let due_date = if args.clear_due {
+        Some(None)
+    } else {
+        args.due.map(Some)
+    };
+    let update = IssueFieldUpdate {
+        // Title editing is a board card-edit affordance (F6, TUI); the CLI
+        // `issue update` keeps its existing state/assignee/priority/due surface.
+        title: None,
+        state: args.state,
+        assignee,
+        priority: args.priority,
+        due_date,
+    };
+
+    if update.is_empty() {
+        anyhow::bail!(
+            "nothing to update: pass at least one of --state / --assign / --unassign / \
+             --priority / --due / --clear-due"
+        );
+    }
+
+    let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
+        .await
+        .with_context(|| format!("update issue {}", args.id))?;
+    if touched {
+        println!("updated issue {}", args.id);
+    } else {
+        anyhow::bail!("no issue with id {} in this workspace", args.id);
+    }
+    Ok(())
 }
 
 /// `hangar issue create`: bootstrap a workspace if absent, then insert.
@@ -1241,10 +2621,20 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     };
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&clock);
 
+    // e38.21: apply the workspace's issue_prefix to the new title so the prefix
+    // actually takes effect on a created issue. An unconfigured workspace leaves
+    // the title verbatim (the v1 behaviour). Read after the assignee resolve so a
+    // bad agent id still fails first.
+    let issue_prefix = workspace_issue_prefix(pool, &workspace_id).await?;
+    let title = ainb_hangar_store::repo::workspace::apply_issue_prefix(
+        issue_prefix.as_deref(),
+        &args.title,
+    );
+
     let new = NewIssue {
         id: id.clone(),
         workspace_id: workspace_id.clone(),
-        title: args.title,
+        title,
         description: args.description,
         state: args.state,
         assignee: assignment
@@ -1252,6 +2642,9 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
             .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty")),
         creator,
         created_at: now,
+        priority: args.priority,
+        due_date: args.due,
+        labels: args.labels.clone(),
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 
@@ -1259,6 +2652,12 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     // + dispatches it (materialising the agent's skills first).
     if let Some(a) = assignment {
         let task_id = idgen.new_ulid();
+        // Scope the task to the issue's next run generation (migration 0039). A
+        // freshly created issue has no prior tasks, so this is 0; computing it
+        // keeps this path consistent with the daemon's assign seam.
+        let generation = TaskRepo::next_generation_for_issue(pool, &id)
+            .await
+            .context("compute run generation for assigned task")?;
         TaskRepo::insert(
             pool,
             &ainb_hangar_store::repo::task::NewTask {
@@ -1268,8 +2667,10 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
                 agent_id: a.agent_id,
                 issue_id: Some(id.clone()),
                 work_dir: None,
+                priority: args.priority,
                 created_at: now,
                 autopilot_run_id: None,
+                generation,
             },
         )
         .await
@@ -1293,6 +2694,49 @@ async fn run_issue_list(store: &Store, args: IssueListArgs, format: OutputFormat
     let issues = IssueRepo::list_by_workspace_state(pool, &workspace_id, &args.state)
         .await
         .context("list issues")?;
+    render_issue_list(&issues, format);
+    Ok(())
+}
+
+/// `hangar issue search`: ranked title + description + comment substring search,
+/// workspace-scoped.
+///
+/// Mirrors the `hangar/issues_search` daemon RPC over the CLI: a row matches when
+/// the case-insensitive `query` substring appears in the issue title,
+/// description, OR any comment body, ranked title > description > comment. A read
+/// only — when no `--workspace` is given and no workspace exists yet, the result
+/// is empty (no bootstrap side effect, unlike the create/update verbs). Results
+/// are rendered in rank order through the same `render_issue_list` formatter the
+/// `list` verb uses, so every output format is consistent.
+async fn run_issue_search(
+    store: &Store,
+    args: IssueSearchArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let pool = store.pool();
+    // Read-only workspace resolution: an explicit `--workspace` resolves by slug
+    // (a typo is an error); without it, fall back to the default workspace if one
+    // exists. Searching must never bootstrap a workspace, so the no-workspace case
+    // is an empty result, not a side effect.
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(pool)
+                .await
+                .context("look up workspace by slug")?;
+            Some(id.with_context(|| format!("no workspace with slug `{slug}`"))?)
+        }
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        // No workspace yet -> no issues. Empty result, not an error.
+        render_issue_list(&[], format);
+        return Ok(());
+    };
+    let issues = IssueRepo::search_ranked(pool, &workspace_id, &args.query)
+        .await
+        .context("search issues")?;
     render_issue_list(&issues, format);
     Ok(())
 }
@@ -1415,23 +2859,223 @@ async fn run_beads_reconcile(args: BeadsReconcileArgs) -> Result<()> {
     reconcile::dispatch(&daemon_args).await
 }
 
-/// `hangar daemon status`: probe the database reachability.
+// ──────────────────────────────────────────────────────────────────────────
+// Daemon lifecycle (e38.20): run / start / stop / restart / setup / status.
+//
+// `start` spawns the `ainb-hangar-daemon` binary as a detached background child
+// and records its EXACT pid in `<hangar_home>/hangar/daemon.pid`; `stop` reads
+// that pid back and signals it directly (never by name). The pid file is the
+// single source of truth for liveness, cross-checked against the bound socket.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Env override pointing at the `ainb-hangar-daemon` binary to spawn.
 ///
-/// The daemon owns no pidfile yet, so "status" is the database-reachability
-/// check (`Store::open_default` runs every migration). A reachable, migrated
-/// database is the precondition the daemon needs to boot; this is the real,
-/// backed signal available today (`daemon start|stop` land in a later phase).
-async fn run_daemon_status() -> Result<()> {
-    match Store::open_default().await {
-        Ok(_) => {
-            println!("hangar daemon: database reachable (migrations applied)");
-            Ok(())
-        }
-        Err(e) => {
-            println!("hangar daemon: database unreachable: {e}");
-            Err(e.context("open hangar database"))
+/// Production resolves the binary as a sibling of the running `ainb` executable
+/// (then falls back to `$PATH`); the integration test sets this to the
+/// cargo-built daemon binary so `start` spawns the test artifact, not whatever
+/// `ainb-hangar-daemon` happens to be installed.
+const DAEMON_BIN_ENV: &str = "AINB_HANGAR_DAEMON_BIN";
+
+/// Resolve the path to the daemon's PID file: `<hangar_home>/hangar/daemon.pid`.
+fn daemon_pid_path() -> Result<std::path::PathBuf> {
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    Ok(home.join("hangar").join("daemon.pid"))
+}
+
+/// Read the recorded daemon pid, or `None` if the file is absent/empty/garbage.
+fn read_daemon_pid(path: &std::path::Path) -> Option<u32> {
+    let text = std::fs::read_to_string(path).ok()?;
+    text.trim().parse().ok()
+}
+
+/// Is `pid` a live process? `kill(pid, 0)` succeeds iff it exists (and we may
+/// signal it), so this is a non-destructive liveness probe.
+fn pid_is_running(pid: u32) -> bool {
+    use nix::sys::signal::kill;
+    use nix::unistd::Pid;
+    matches!(kill(Pid::from_raw(pid as i32), None), Ok(()))
+}
+
+/// Resolve the `ainb-hangar-daemon` binary to spawn for `start`.
+///
+/// Order: the [`DAEMON_BIN_ENV`] override → a sibling of the current `ainb`
+/// executable (the normal install layout) → the bare name on `$PATH`.
+fn resolve_daemon_bin() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os(DAEMON_BIN_ENV).filter(|p| !p.is_empty()) {
+        return std::path::PathBuf::from(p);
+    }
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            let sibling = dir.join("ainb-hangar-daemon");
+            if sibling.exists() {
+                return sibling;
+            }
         }
     }
+    std::path::PathBuf::from("ainb-hangar-daemon")
+}
+
+/// Dispatch a `hangar daemon <verb>`.
+async fn dispatch_daemon(cmd: DaemonCommand) -> Result<()> {
+    match cmd {
+        DaemonCommand::Status => run_daemon_status().await,
+        DaemonCommand::Run => run_daemon_run().await,
+        DaemonCommand::Start => run_daemon_start(),
+        DaemonCommand::Stop => run_daemon_stop(),
+        DaemonCommand::Restart => run_daemon_restart(),
+        DaemonCommand::Setup => run_daemon_setup().await,
+    }
+}
+
+/// `hangar daemon status`: report the daemon's run state from the PID file +
+/// socket, and the database reachability.
+///
+/// "running" requires the recorded pid to be alive; a pid file naming a dead
+/// process is reported as a stale "stopped". The control socket's presence is
+/// surfaced alongside as the second liveness signal.
+async fn run_daemon_status() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+    let socket = ainb_hangar_daemon::hangar_dir()
+        .context("resolve hangar home")?
+        .join("hangar.sock");
+
+    match read_daemon_pid(&pid_path) {
+        Some(pid) if pid_is_running(pid) => {
+            let sock = if socket.exists() {
+                "socket bound"
+            } else {
+                "socket not yet bound"
+            };
+            println!("hangar daemon: running (pid {pid}, {sock})");
+        }
+        Some(pid) => {
+            println!("hangar daemon: stopped (stale pid {pid}, process gone)");
+        }
+        None => {
+            println!("hangar daemon: stopped (no pid file)");
+        }
+    }
+
+    // The database-reachability line stays as a secondary signal: a stopped
+    // daemon with a migrated db is still a healthy, bootable install.
+    match Store::open_default().await {
+        Ok(_) => println!("  database: reachable (migrations applied)"),
+        Err(e) => println!("  database: unreachable: {e}"),
+    }
+    Ok(())
+}
+
+/// `hangar daemon run`: boot the daemon in the FOREGROUND.
+///
+/// Equivalent to launching the `ainb-hangar-daemon` binary directly — boots,
+/// binds the socket, self-registers the runtime, and runs the claim loop until
+/// interrupted. Blocks; use `start` for the background variant.
+async fn run_daemon_run() -> Result<()> {
+    ainb_hangar_daemon::boot(false).await.context("run hangar daemon (foreground)")
+}
+
+/// `hangar daemon start`: spawn the daemon as a detached background child and
+/// record its EXACT pid.
+///
+/// Idempotent: if the recorded pid is already alive, this is a no-op with a
+/// notice (never a second daemon). The child is spawned with the same
+/// `$AINB_HANGAR_HOME` this process resolved, so it shares one home; its stdout/
+/// stderr go to the daemon's own rolling log, not this terminal.
+fn run_daemon_start() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+
+    // Already running? Bail out cleanly rather than spawning a duplicate.
+    if let Some(pid) = read_daemon_pid(&pid_path) {
+        if pid_is_running(pid) {
+            println!("hangar daemon: already running (pid {pid})");
+            return Ok(());
+        }
+        // Stale pid file from a crashed daemon: drop it before re-spawning.
+        std::fs::remove_file(&pid_path).ok();
+    }
+
+    if let Some(parent) = pid_path.parent() {
+        std::fs::create_dir_all(parent).context("create hangar home dir")?;
+    }
+
+    let bin = resolve_daemon_bin();
+    let child = std::process::Command::new(&bin)
+        // The child must not inherit this process's controlling terminal's
+        // stdio; the daemon writes its own rolling JSONL log under the hangar
+        // home, so discard the std streams.
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .with_context(|| format!("spawn daemon binary `{}`", bin.display()))?;
+
+    let pid = child.id();
+    // Write the EXACT child pid (the one we just spawned) so `stop` signals this
+    // process and no other. `child` is intentionally dropped without `wait` —
+    // the daemon is meant to outlive this CLI invocation.
+    std::fs::write(&pid_path, format!("{pid}\n"))
+        .with_context(|| format!("write pid file {}", pid_path.display()))?;
+
+    println!("hangar daemon: started (pid {pid})");
+    Ok(())
+}
+
+/// `hangar daemon stop`: signal the EXACT recorded pid, then remove the file.
+///
+/// Reads the pid back from the PID file and sends `SIGTERM` to that exact
+/// process (never a name-based `pkill`). A stale pid file (process already gone)
+/// is cleaned up; an absent file is reported as "not running".
+fn run_daemon_stop() -> Result<()> {
+    let pid_path = daemon_pid_path()?;
+    match read_daemon_pid(&pid_path) {
+        Some(pid) if pid_is_running(pid) => {
+            use nix::sys::signal::{Signal, kill};
+            use nix::unistd::Pid;
+            kill(Pid::from_raw(pid as i32), Signal::SIGTERM)
+                .with_context(|| format!("send SIGTERM to pid {pid}"))?;
+            std::fs::remove_file(&pid_path).ok();
+            println!("hangar daemon: stopped (signalled pid {pid})");
+        }
+        Some(pid) => {
+            std::fs::remove_file(&pid_path).ok();
+            println!("hangar daemon: not running (cleaned up stale pid {pid})");
+        }
+        None => {
+            println!("hangar daemon: not running");
+        }
+    }
+    Ok(())
+}
+
+/// `hangar daemon restart`: `stop` (if running) then `start`.
+fn run_daemon_restart() -> Result<()> {
+    run_daemon_stop()?;
+    run_daemon_start()
+}
+
+/// `hangar daemon setup`: one-command bring-up.
+///
+/// Ensures the store exists + is migrated (`Store::open_default`), mints/ensures
+/// the socket-auth token (e38.1 `ensure_socket_token`) so the control plane
+/// comes up authenticated, then `start`s the daemon. Idempotent: a second
+/// `setup` reuses the existing token + db and is a no-op start if the daemon is
+/// already up.
+async fn run_daemon_setup() -> Result<()> {
+    // Ensure the database + migrations, and resolve the home the token lives in.
+    let store = Store::open_default().await.context("open hangar database")?;
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+
+    // Mint (or reuse) the socket-auth credential before the daemon binds, so a
+    // client can present it on first frame. Reuses e38.1's ensure path.
+    let token_path = ainb_hangar_daemon::rpc::auth::ensure_socket_token(store.pool(), &home)
+        .await
+        .context("ensure socket auth token")?;
+    println!(
+        "hangar setup: database ready, socket token at {}",
+        token_path.display()
+    );
+
+    run_daemon_start()
 }
 
 // ──────────────────────────────────────────────────────────────────────────
@@ -1497,6 +3141,10 @@ async fn ensure_default_workspace(store: &Store) -> Result<String> {
     let workspace_id = idgen.new_ulid();
     let user_id = idgen.new_ulid();
 
+    // The workspace's `issue_prefix` is left NULL ("no explicit prefix"): the
+    // HGR default issue id (63l.3) lives at the display layer
+    // (`issue_display_id`), not the stored column, so a fresh issue's TITLE stays
+    // verbatim while its display id still reads HGR-1, HGR-2, ….
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
         .bind(&workspace_id)
         .bind(DEFAULT_WORKSPACE_SLUG)
@@ -1519,6 +3167,25 @@ async fn ensure_default_workspace(store: &Store) -> Result<String> {
         .await
         .context("bootstrap default member")?;
     Ok(workspace_id)
+}
+
+/// Read a workspace's configured `issue_prefix` by id (e38.21).
+///
+/// `None` when the workspace has no prefix configured (the migration-0020 NULL
+/// default) — the issue title is then used verbatim. Mirrors the daemon's
+/// RPC-side `workspace_issue_prefix` so the CLI and RPC create paths agree.
+async fn workspace_issue_prefix(
+    pool: &sqlx::SqlitePool,
+    workspace_id: &str,
+) -> Result<Option<String>> {
+    let prefix: Option<String> =
+        sqlx::query_scalar("SELECT issue_prefix FROM workspace WHERE id = ?")
+            .bind(workspace_id)
+            .fetch_optional(pool)
+            .await
+            .context("read workspace issue prefix")?
+            .flatten();
+    Ok(prefix)
 }
 
 /// Return the default owner user id (the first user, oldest first), or `None`
@@ -1662,23 +3329,37 @@ fn render_issue_list(issues: &[Issue], format: OutputFormat) {
     }
 }
 
-/// One-line text summary of an issue.
+/// One-line text summary of an issue. `priority` is 0..3 = P3..P0 (higher =
+/// more urgent); the due date and labels are shown only when set.
 fn issue_line(i: &Issue) -> String {
-    format!("{}  [{}]  {}", i.id, i.state, i.title)
+    let due = i.due_date.map_or_else(String::new, |d| format!("  due={d}"));
+    let labels = if i.labels.is_empty() {
+        String::new()
+    } else {
+        format!("  labels={}", i.labels.join(","))
+    };
+    format!(
+        "{}  [{}]  priority={}  {}{due}{labels}",
+        i.id, i.state, i.priority, i.title
+    )
 }
 
 /// Minimal stable JSON object for one issue (hand-rolled to avoid pulling a
 /// serde derive onto the store's `Issue` type from this crate).
 fn issue_to_json(i: &Issue) -> String {
     let desc = i.description.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let due = i.due_date.map_or_else(|| "null".to_string(), |d| d.to_string());
     format!(
-        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{}}}",
+        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{},\"priority\":{},\"due_date\":{},\"labels\":{}}}",
         json_string(&i.id),
         json_string(&i.workspace_id),
         json_string(&i.title),
         desc,
         json_string(&i.state),
         i.created_at,
+        i.priority,
+        due,
+        json_string_array(i.labels.iter().map(String::as_str)),
     )
 }
 
@@ -1728,13 +3409,88 @@ const fn autopilot_badge(enabled: bool) -> &'static str {
     if enabled { "enabled" } else { "disabled" }
 }
 
+/// Render the webhook delivery audit log (`hangar autopilot deliveries <id>`).
+fn render_webhook_deliveries(
+    rows: &[ainb_hangar_store::repo::autopilot_webhook::WebhookDelivery],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows.iter().map(webhook_delivery_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("received_at,outcome,event,http_status,run_id");
+            for d in rows {
+                println!(
+                    "{},{},{},{},{}",
+                    d.received_at,
+                    csv_field(&d.outcome),
+                    csv_field(d.event.as_deref().unwrap_or("")),
+                    d.http_status,
+                    csv_field(d.run_id.as_deref().unwrap_or("")),
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| received_at | outcome | event | status | run |");
+            println!("| --- | --- | --- | --- | --- |");
+            for d in rows {
+                println!(
+                    "| {} | {} | {} | {} | {} |",
+                    d.received_at,
+                    d.outcome,
+                    d.event.as_deref().unwrap_or("-"),
+                    d.http_status,
+                    d.run_id.as_deref().unwrap_or("-"),
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no webhook deliveries");
+            } else {
+                for d in rows {
+                    println!(
+                        "{}  {}  event={}  status={}  run={}",
+                        d.received_at,
+                        d.outcome,
+                        d.event.as_deref().unwrap_or("-"),
+                        d.http_status,
+                        d.run_id.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One webhook delivery as a JSON object (for the `--format json` surface).
+fn webhook_delivery_to_json(
+    d: &ainb_hangar_store::repo::autopilot_webhook::WebhookDelivery,
+) -> String {
+    serde_json::json!({
+        "id": d.id,
+        "autopilot_id": d.autopilot_id,
+        "received_at": d.received_at,
+        "outcome": d.outcome,
+        "event": d.event,
+        "http_status": d.http_status,
+        "run_id": d.run_id,
+        "detail": d.detail,
+    })
+    .to_string()
+}
+
 /// One-line text summary of an autopilot.
 fn autopilot_line(a: &Autopilot, last_run: Option<&str>) -> String {
     format!(
-        "{}  {}  cron={}  next_tick={}  last_run={}  [{}]",
+        "{}  {}  cron={}  mode={}  policy={}  next_tick={}  last_run={}  [{}]",
         a.id,
         a.name,
         a.cron_expr,
+        a.execution_mode.as_str(),
+        a.concurrency_policy.as_str(),
         a.next_tick_at.map_or_else(|| "-".to_string(), |v| v.to_string()),
         last_run.unwrap_or("-"),
         autopilot_badge(a.enabled),
@@ -1778,7 +3534,8 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
     let last = last_run.map_or_else(|| "null".to_string(), json_string);
     format!(
         "{{\"id\":{},\"workspace_id\":{},\"agent_id\":{},\"name\":{},\"instructions\":{},\
-          \"cron_expr\":{},\"max_concurrent_runs\":{},\"next_tick_at\":{},\"enabled\":{},\
+          \"cron_expr\":{},\"max_concurrent_runs\":{},\"execution_mode\":{},\
+          \"concurrency_policy\":{},\"next_tick_at\":{},\"enabled\":{},\
           \"last_run\":{}}}",
         json_string(&a.id),
         json_string(&a.workspace_id),
@@ -1787,6 +3544,8 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
         instructions,
         json_string(&a.cron_expr),
         a.max_concurrent_runs,
+        json_string(a.execution_mode.as_str()),
+        json_string(a.concurrency_policy.as_str()),
         next_tick,
         a.enabled,
         last,
@@ -1898,6 +3657,262 @@ fn skill_to_json(s: &ainb_hangar_core::skill::SkillWithFiles) -> String {
 }
 
 // ──────────────────────────────────────────────────────────────────────────
+// Agent render helpers (e38.15) — over the store row model.
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a list of agents in the requested format (id, name, archived, model,
+/// thinking, arg count, env count).
+fn render_agent_list(agents: &[ainb_hangar_store::repo::agent::Agent], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = agents.iter().map(agent_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", agent_csv_header());
+            for a in agents {
+                println!("{}", agent_csv_row(a));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", agent_md_header());
+            for a in agents {
+                println!("{}", agent_md_row(a));
+            }
+        }
+        OutputFormat::Text => {
+            if agents.is_empty() {
+                println!("no agents");
+            } else {
+                for a in agents {
+                    println!("{}", agent_line(a));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of an agent (id, name, archived badge, model).
+fn agent_line(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    format!(
+        "{}  {}{}  model={}  args={}  env={}",
+        a.id,
+        a.name,
+        if a.archived { "  [archived]" } else { "" },
+        a.model.as_deref().unwrap_or("-"),
+        a.cli_args.len(),
+        a.agent_env.len(),
+    )
+}
+const fn agent_csv_header() -> &'static str {
+    "id,name,archived,model,thinking,args,env"
+}
+fn agent_csv_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    format!(
+        "{},{},{},{},{},{},{}",
+        csv_field(a.id.as_str()),
+        csv_field(a.name.as_str()),
+        a.archived,
+        csv_field(a.model.as_deref().unwrap_or("")),
+        csv_field(a.thinking.as_deref().unwrap_or("")),
+        a.cli_args.len(),
+        a.agent_env.len(),
+    )
+}
+const fn agent_md_header() -> &'static str {
+    "| id | name | archived | model | thinking | args | env |\n\
+     | --- | --- | --- | --- | --- | --- | --- |\n"
+}
+fn agent_md_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    format!(
+        "| {} | {} | {} | {} | {} | {} | {} |",
+        md_cell(a.id.as_str()),
+        md_cell(a.name.as_str()),
+        a.archived,
+        md_cell(a.model.as_deref().unwrap_or("-")),
+        md_cell(a.thinking.as_deref().unwrap_or("-")),
+        a.cli_args.len(),
+        a.agent_env.len(),
+    )
+}
+/// Minimal stable JSON object for one agent (id, name, archived + config knobs).
+fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    let model = a.model.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let thinking = a.thinking.as_deref().map_or_else(|| "null".to_string(), json_string);
+    let args = json_string_array(a.cli_args.iter().map(String::as_str));
+    let env = a
+        .agent_env
+        .iter()
+        .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+        .collect::<Vec<_>>()
+        .join(",");
+    format!(
+        "{{\"id\":{},\"name\":{},\"archived\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}}}}",
+        json_string(a.id.as_str()),
+        json_string(a.name.as_str()),
+        a.archived,
+        model,
+        thinking,
+        args,
+        env,
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Member render helpers (pure, over the store's Member row — e38.11).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a slice of members as a list in the chosen format (user id, email, role).
+fn render_member_list(members: &[ainb_hangar_store::repo::member::Member], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = members.iter().map(member_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", member_csv_header());
+            for m in members {
+                println!("{}", member_csv_row(m));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", member_md_header());
+            for m in members {
+                println!("{}", member_md_row(m));
+            }
+        }
+        OutputFormat::Text => {
+            if members.is_empty() {
+                println!("no members");
+            } else {
+                for m in members {
+                    println!("{}", member_line(m));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a member (user id, email, role).
+fn member_line(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!("{}  {}  role={}", m.user_id, m.email, m.role)
+}
+const fn member_csv_header() -> &'static str {
+    "user_id,email,role"
+}
+fn member_csv_row(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!(
+        "{},{},{}",
+        csv_field(&m.user_id),
+        csv_field(&m.email),
+        csv_field(&m.role),
+    )
+}
+const fn member_md_header() -> &'static str {
+    "| user_id | email | role |\n| --- | --- | --- |\n"
+}
+fn member_md_row(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!(
+        "| {} | {} | {} |",
+        md_cell(&m.user_id),
+        md_cell(&m.email),
+        md_cell(&m.role),
+    )
+}
+/// Minimal stable JSON object for one member (user id, email, role).
+fn member_to_json(m: &ainb_hangar_store::repo::member::Member) -> String {
+    format!(
+        "{{\"user_id\":{},\"email\":{},\"role\":{}}}",
+        json_string(&m.user_id),
+        json_string(&m.email),
+        json_string(&m.role),
+    )
+}
+
+/// Render the squad status view in the chosen format (e38.17). Each row carries
+/// the squad's id, name, leader actor-ref, and its members (joined with `,` in the
+/// flat text/csv/markdown surfaces, a JSON array in the JSON surface).
+fn render_squad_list(squads: &[ainb_hangar_store::repo::squad::Squad], format: OutputFormat) {
+    match format {
+        OutputFormat::Json => {
+            let body = squads.iter().map(squad_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("id,name,leader,members");
+            for s in squads {
+                println!("{}", squad_csv_row(s));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("| id | name | leader | members |\n| --- | --- | --- | --- |\n");
+            for s in squads {
+                println!("{}", squad_md_row(s));
+            }
+        }
+        OutputFormat::Text => {
+            if squads.is_empty() {
+                println!("no squads");
+            } else {
+                for s in squads {
+                    println!("{}", squad_line(s));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of a squad (id, name, leader, member actor-refs).
+fn squad_line(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "{}  {}  leader={}  members=[{}]",
+        s.id,
+        s.name,
+        s.leader,
+        squad_members_joined(s)
+    )
+}
+fn squad_csv_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "{},{},{},{}",
+        csv_field(&s.id),
+        csv_field(&s.name),
+        csv_field(&s.leader.to_string()),
+        csv_field(&squad_members_joined(s)),
+    )
+}
+fn squad_md_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "| {} | {} | {} | {} |",
+        md_cell(&s.id),
+        md_cell(&s.name),
+        md_cell(&s.leader.to_string()),
+        md_cell(&squad_members_joined(s)),
+    )
+}
+/// Minimal stable JSON object for one squad (id, name, leader, members array).
+fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    format!(
+        "{{\"id\":{},\"name\":{},\"leader\":{},\"members\":{}}}",
+        json_string(&s.id),
+        json_string(&s.name),
+        json_string(&s.leader.to_string()),
+        json_string_array(
+            s.members
+                .iter()
+                .map(|m| m.to_string())
+                .collect::<Vec<_>>()
+                .iter()
+                .map(String::as_str)
+        ),
+    )
+}
+/// Join a squad's member actor-refs with `, ` for the flat text surfaces.
+fn squad_members_joined(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    s.members.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+}
+
+// ──────────────────────────────────────────────────────────────────────────
 // Template render helpers (pure, over the IO-free embedded registry type).
 // ──────────────────────────────────────────────────────────────────────────
 
@@ -2006,46 +4021,57 @@ fn md_cell(s: &str) -> String {
 }
 
 const fn issue_csv_header() -> &'static str {
-    "id,state,title,description,created_at"
+    "id,state,title,description,created_at,priority,due_date,labels"
 }
 fn issue_csv_row(i: &Issue) -> String {
+    let due = i.due_date.map_or_else(String::new, |d| d.to_string());
     format!(
-        "{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{}",
         csv_field(&i.id),
         csv_field(&i.state),
         csv_field(&i.title),
         csv_field(i.description.as_deref().unwrap_or("")),
         i.created_at,
+        i.priority,
+        csv_field(&due),
+        csv_field(&i.labels.join(" ")),
     )
 }
 const fn issue_md_header() -> &'static str {
-    "| id | state | title | description |\n| --- | --- | --- | --- |\n"
+    "| id | state | title | description | priority | due_date | labels |\n\
+     | --- | --- | --- | --- | --- | --- | --- |\n"
 }
 fn issue_md_row(i: &Issue) -> String {
+    let due = i.due_date.map_or_else(String::new, |d| d.to_string());
     format!(
-        "| {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} |",
         md_cell(&i.id),
         md_cell(&i.state),
         md_cell(&i.title),
         md_cell(i.description.as_deref().unwrap_or("")),
+        i.priority,
+        md_cell(&due),
+        md_cell(&i.labels.join(" ")),
     )
 }
 
-/// One-line text summary of a task.
+/// One-line text summary of a task. `priority` is 0..3 = P3..P0 (higher =
+/// more urgent; the claim ordering key).
 fn task_line(t: &Task) -> String {
     format!(
-        "{}  [{}]  runtime={} agent={}",
-        t.id, t.status, t.runtime_id, t.agent_id
+        "{}  [{}]  priority={} runtime={} agent={}",
+        t.id, t.status, t.priority, t.runtime_id, t.agent_id
     )
 }
 const fn task_csv_header() -> &'static str {
-    "id,status,runtime_id,agent_id,attempt,max_attempts"
+    "id,status,priority,runtime_id,agent_id,attempt,max_attempts"
 }
 fn task_csv_row(t: &Task) -> String {
     format!(
-        "{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{}",
         csv_field(&t.id),
         csv_field(&t.status),
+        t.priority,
         csv_field(&t.runtime_id),
         csv_field(&t.agent_id),
         t.attempt,
@@ -2053,13 +4079,14 @@ fn task_csv_row(t: &Task) -> String {
     )
 }
 const fn task_md_header() -> &'static str {
-    "| id | status | runtime | agent | attempt |\n| --- | --- | --- | --- | --- |\n"
+    "| id | status | priority | runtime | agent | attempt |\n| --- | --- | --- | --- | --- | --- |\n"
 }
 fn task_md_row(t: &Task) -> String {
     format!(
-        "| {} | {} | {} | {} | {}/{} |",
+        "| {} | {} | {} | {} | {} | {}/{} |",
         md_cell(&t.id),
         md_cell(&t.status),
+        t.priority,
         md_cell(&t.runtime_id),
         md_cell(&t.agent_id),
         t.attempt,
@@ -2070,9 +4097,10 @@ fn task_md_row(t: &Task) -> String {
 /// Minimal stable JSON object for one task.
 fn task_to_json(t: &Task) -> String {
     format!(
-        "{{\"id\":{},\"status\":{},\"runtime_id\":{},\"agent_id\":{},\"attempt\":{},\"max_attempts\":{}}}",
+        "{{\"id\":{},\"status\":{},\"priority\":{},\"runtime_id\":{},\"agent_id\":{},\"attempt\":{},\"max_attempts\":{}}}",
         json_string(&t.id),
         json_string(&t.status),
+        t.priority,
         json_string(&t.runtime_id),
         json_string(&t.agent_id),
         t.attempt,
@@ -2140,6 +4168,184 @@ mod tests {
         assert_eq!(args.title, "Fix bug");
         assert_eq!(args.description.as_deref(), Some("details"));
         assert_eq!(args.state, DEFAULT_ISSUE_STATE);
+    }
+
+    #[test]
+    fn parses_issue_create_priority() {
+        // Explicit value parses through.
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Urgent",
+            "--priority",
+            "3",
+        ]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.priority, 3, "--priority 3 = P0, most urgent");
+
+        // Omitted -> routine default 0 (P3).
+        let cmd = parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "Routine"]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.priority, 0, "priority defaults to 0 (P3)");
+    }
+
+    #[test]
+    fn issue_create_priority_rejects_out_of_range() {
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let err = app.try_get_matches_from([
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Bad",
+            "--priority",
+            "4",
+        ]);
+        assert!(err.is_err(), "--priority is clamped to 0..=3 (P3..P0)");
+    }
+
+    #[test]
+    fn parses_issue_create_due_date_and_labels() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Urgent",
+            "--priority",
+            "2",
+            "--due",
+            "2026-06-30",
+            "--label",
+            "bug",
+            "--label",
+            "p0",
+        ]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.priority, 2, "--priority 2 = P1");
+        // 2026-06-30 00:00:00 UTC in epoch millis.
+        assert_eq!(
+            args.due,
+            Some(1_782_777_600_000),
+            "--due parses YYYY-MM-DD to UTC-midnight epoch millis"
+        );
+        assert_eq!(
+            args.labels,
+            vec!["bug".to_string(), "p0".to_string()],
+            "--label is repeatable and order-preserving"
+        );
+
+        // Omitted -> no due date, no labels.
+        let cmd = parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "Plain"]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(args.due, None, "no --due means no due date");
+        assert!(args.labels.is_empty(), "no --label means no labels");
+    }
+
+    #[test]
+    fn issue_create_rejects_malformed_due_date() {
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let err = app.try_get_matches_from([
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Bad",
+            "--due",
+            "next-tuesday",
+        ]);
+        assert!(err.is_err(), "--due must be a YYYY-MM-DD date");
+    }
+
+    /// User-visible proof: `hangar issue create --priority --due --label`
+    /// persists all three attributes onto the created issue, read back through
+    /// the store the way `issue list` / `issue show` would surface them.
+    #[tokio::test]
+    async fn issue_create_persists_priority_due_date_and_labels_end_to_end() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Ship it",
+            "--priority",
+            "3",
+            "--due",
+            "2026-06-30",
+            "--label",
+            "bug",
+            "--label",
+            "p0",
+        ]) else {
+            panic!("expected issue create");
+        };
+
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let workspace_id = find_default_workspace(&store)
+            .await
+            .expect("find workspace")
+            .expect("workspace bootstrapped by create");
+        let issues =
+            IssueRepo::list_by_workspace_state(store.pool(), &workspace_id, DEFAULT_ISSUE_STATE)
+                .await
+                .expect("list issues");
+        let issue = issues
+            .iter()
+            .find(|i| i.title == "Ship it")
+            .expect("created issue present in the open list");
+
+        assert_eq!(issue.priority, 3, "create persisted --priority 3 (P0)");
+        assert_eq!(
+            issue.due_date,
+            Some(1_782_777_600_000),
+            "create persisted --due as UTC-midnight epoch millis"
+        );
+        assert_eq!(
+            issue.labels,
+            vec!["bug".to_string(), "p0".to_string()],
+            "create persisted both --label values"
+        );
+
+        // And the CLI render surfaces them so `issue show` is not lossy.
+        let line = issue_line(issue);
+        assert!(
+            line.contains("priority=3"),
+            "text line shows priority: {line}"
+        );
+        assert!(
+            line.contains("labels=bug,p0"),
+            "text line shows labels: {line}"
+        );
+        let json = issue_to_json(issue);
+        assert!(
+            json.contains("\"priority\":3"),
+            "json shows priority: {json}"
+        );
+        assert!(
+            json.contains("\"labels\":[\"bug\",\"p0\"]"),
+            "json shows labels array: {json}"
+        );
     }
 
     #[test]
@@ -2216,6 +4422,28 @@ mod tests {
     fn parses_daemon_status() {
         let cmd = parse_hangar(&["ainb", "hangar", "daemon", "status"]);
         assert!(matches!(cmd, HangarCommand::Daemon(DaemonCommand::Status)));
+    }
+
+    #[test]
+    fn parses_daemon_lifecycle_verbs() {
+        for (verb, want) in [
+            ("run", DaemonCommand::Run),
+            ("start", DaemonCommand::Start),
+            ("stop", DaemonCommand::Stop),
+            ("restart", DaemonCommand::Restart),
+            ("setup", DaemonCommand::Setup),
+        ] {
+            let cmd = parse_hangar(&["ainb", "hangar", "daemon", verb]);
+            let HangarCommand::Daemon(got) = cmd else {
+                panic!("`daemon {verb}` did not parse to a Daemon command");
+            };
+            // Compare via the debug repr — DaemonCommand has no PartialEq.
+            assert_eq!(
+                format!("{got:?}"),
+                format!("{want:?}"),
+                "`daemon {verb}` parsed to the wrong verb"
+            );
+        }
     }
 
     #[test]
@@ -2675,6 +4903,8 @@ mod tests {
             instructions: Some("triage".into()),
             cron_expr: "0 9 * * *".into(),
             max_concurrent_runs: 1,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
             next_tick_at: Some(1_767_258_000_000),
             enabled,
             created_at: 0,

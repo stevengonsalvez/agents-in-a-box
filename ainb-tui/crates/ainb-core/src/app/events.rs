@@ -500,6 +500,8 @@ pub enum AppEvent {
     OnboardingAuthCancel,         // Auth step: leave a sub-pane (Esc) back one level
     OnboardingEditorUp,           // Move editor selection up
     OnboardingEditorDown,         // Move editor selection down
+    OnboardingQuestionUp,         // Move questionnaire selection up (Source/Role/UseCase)
+    OnboardingQuestionDown,       // Move questionnaire selection down (Source/Role/UseCase)
     OnboardingFinish,             // Complete onboarding
     OnboardingInstallConfig,      // Install recommended tmux config (t key)
     OnboardingDepCursorUp,        // Move the focused-dep cursor up
@@ -1212,14 +1214,17 @@ impl EventHandler {
                 .map(|s| matches!(s.step, NewSessionStep::PickRepo | NewSessionStep::Configure))
                 .unwrap_or(false);
 
-        // Analytics is plugin-owned post-Phase 7; the host can't
-        // introspect the burndown plugin's input modes (zoom search,
-        // custom-period input). The plugin's own handle_key path
-        // consumes character keystrokes before they reach this
-        // helper, so we treat the analytics screen as always-non-text
-        // here. If a plugin ever needs the host to suppress global
-        // shortcuts while it's in text-entry mode, add a wire signal
-        // (e.g. publish on `host.input_mode`) and read it here.
+        // Plugin-owned screens (Analytics/burndown, Hangar, …) now DO signal
+        // their text-entry modes to the host: each frame's
+        // `RenderResult.captures_text` is stashed per screen in
+        // `plugin_captures_text` (refreshed by `tick_plugin_renders`), and
+        // `focused_plugin_captures_text` reads it for the focused screen. When
+        // it's true the plugin's input owns every printable key, so this helper
+        // reports text-input and the global `H`/`?`/`W` shortcuts below are
+        // suppressed — the general fix for host shortcuts swallowing keystrokes
+        // typed into a plugin overlay (8hx), not just the boards card title.
+        let plugin_capturing_text =
+            crate::app::screens::builtin::focused_plugin_captures_text(state);
         let skills_text_active =
             state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
         // SkillManager add-source / search prompt — when its input
@@ -1267,6 +1272,7 @@ impl EventHandler {
             });
 
         new_session_text_active
+            || plugin_capturing_text
             || onboarding_text_active
             || matches!(
                 state.current_screen.as_str(),
@@ -1507,14 +1513,15 @@ impl EventHandler {
             // `handle_key_event` (confirmation dialog, OtherTmux/SshSession
             // rename, onboarding/setup menus, quick-commit) don't reach
             // this block, so they don't need entries here.
-            // Analytics is plugin-owned now; host can't introspect the
-            // burndown plugin's input modes. The plugin must handle its
-            // own W-suppression by intercepting key events before they
-            // reach this global handler. Until plugin key forwarding is
-            // wired (Phase 4+), `W` on the analytics screen does fire the
-            // host install path — the plugin's input modes don't conflict
-            // with it because they're modal and consume Escape/Enter, not
-            // capital W.
+            // Plugin text-entry modes (burndown zoom search / custom period,
+            // Hangar's card-title / compose / API-key inputs, …) are now covered
+            // generically: the plugin reports `captures_text` on every frame and
+            // `is_text_input_context` folds it into `in_text_input` via
+            // `plugin_capturing_text`. That gates this ENTIRE `!in_text_input`
+            // block — including the `W` handler below — so a `W` typed into a
+            // plugin input is suppressed here and forwarded to the plugin
+            // instead. No per-plugin W-suppression list is needed (8hx). This
+            // local stays `false` because the generic gate already handles it.
             let analytics_text_active = false;
             let skills_text_active =
                 state.current_screen == screen_ids::SKILLS && state.skills_state.search_active;
@@ -2455,6 +2462,18 @@ impl EventHandler {
                         KeyCode::Home => Some(AppEvent::OnboardingCursorHome),
                         KeyCode::End => Some(AppEvent::OnboardingCursorEnd),
                         KeyCode::Char(ch) => Some(AppEvent::OnboardingInputChar(ch)),
+                        _ => None,
+                    }
+                }
+                OnboardingStep::Source | OnboardingStep::Role | OnboardingStep::UseCase => {
+                    match key_event.code {
+                        KeyCode::Enter | KeyCode::Right => Some(AppEvent::OnboardingNext),
+                        KeyCode::Esc => Some(AppEvent::OnboardingToMenu),
+                        KeyCode::Left | KeyCode::Backspace => Some(AppEvent::OnboardingBack),
+                        KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::OnboardingQuestionUp),
+                        KeyCode::Down | KeyCode::Char('j') => {
+                            Some(AppEvent::OnboardingQuestionDown)
+                        }
                         _ => None,
                     }
                 }
@@ -4526,6 +4545,14 @@ impl EventHandler {
                         // Canonical event saves `previous_screen` so the
                         // panel's Esc-close returns here, not to a stale origin.
                         Self::process_event(AppEvent::GoToLearnings, state);
+                    }
+                    SidebarItem::Hangar => {
+                        tracing::info!("Navigating to Hangar from sidebar");
+                        // Mirror AppEvent::GoToHangar: the plugin-owned
+                        // `hangar-tui` screen renders itself and owns its
+                        // own data load (snapshot RPCs over the daemon
+                        // socket).
+                        state.current_screen = screen_ids::HANGAR.to_string();
                     }
                     SidebarItem::SkillManager => {
                         tracing::info!("Navigating to SkillManager from sidebar (spec §10.1)");
@@ -6966,6 +6993,24 @@ impl EventHandler {
             AppEvent::OnboardingNext => {
                 use crate::components::onboarding::OnboardingStep;
                 tracing::debug!("Onboarding next step");
+                // Guard: on the OTel step, refuse to advance with partial creds
+                // (1 or 2 of 3 fields) — otherwise complete_onboarding() skips
+                // OTel setup silently and the entered creds are lost. Snapshot
+                // the bool under an immutable borrow, then warn under a mutable
+                // one (borrow dance).
+                let otel_partial = state
+                    .onboarding_state
+                    .as_ref()
+                    .map(|o| o.current_step == OnboardingStep::OtelSetup && o.otel_creds_partial())
+                    .unwrap_or(false);
+                if otel_partial {
+                    state.add_warning_notification(
+                        "OpenTelemetry needs all three fields (endpoint, instance ID, token) \
+                         — telemetry not configured. Fill all three or clear them to skip."
+                            .to_string(),
+                    );
+                    return;
+                }
                 // Save git directories as soon as the user leaves the step,
                 // not only on wizard finish.
                 if state.onboarding_state.as_ref().map(|o| o.current_step)
@@ -7231,7 +7276,18 @@ impl EventHandler {
                     },
                     // Save the typed API key for the agent, then return to the list.
                     Some(AuthPane::KeyEntry { agent, buf }) => {
-                        let key = buf.trim().to_string();
+                        // The entry buffer is pre-seeded with the agent's key prefix as a
+                        // hint (e.g. "sk-ant-"). A pasted full key also starts with that
+                        // prefix, producing a doubled seed ("sk-ant-sk-ant-…"); collapse
+                        // any repeated leading seed so storage is idempotent.
+                        let mut key = buf.trim().to_string();
+                        let seed = agent.key_seed();
+                        if !seed.is_empty() {
+                            let doubled = format!("{seed}{seed}");
+                            while let Some(rest) = key.strip_prefix(&doubled) {
+                                key = format!("{seed}{rest}");
+                            }
+                        }
                         if key.is_empty() || key == agent.key_seed() {
                             state.add_warning_notification(
                                 "Enter an API key first (or Esc to cancel)".to_string(),
@@ -7279,6 +7335,22 @@ impl EventHandler {
                     let max_idx = onboarding_state.available_editors.len().saturating_sub(1);
                     if onboarding_state.selected_editor_index < max_idx {
                         onboarding_state.selected_editor_index += 1;
+                    }
+                }
+            }
+            AppEvent::OnboardingQuestionUp => {
+                use crate::components::onboarding::QuestionnaireKind;
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
+                        onboarding_state.questionnaire_select_up(kind);
+                    }
+                }
+            }
+            AppEvent::OnboardingQuestionDown => {
+                use crate::components::onboarding::QuestionnaireKind;
+                if let Some(ref mut onboarding_state) = state.onboarding_state {
+                    if let Some(kind) = QuestionnaireKind::for_step(onboarding_state.current_step) {
+                        onboarding_state.questionnaire_select_down(kind);
                     }
                 }
             }
@@ -8947,6 +9019,61 @@ mod text_input_guard_tests {
         );
     }
 
+    /// 8hx: a plugin-owned screen that declares text-capture on its last frame
+    /// (stashed in `plugin_captures_text`) must be treated as a text-input
+    /// context, so the host's global single-character shortcuts (`H`/`?`/`W`)
+    /// are suppressed and the keystrokes reach the plugin's input verbatim
+    /// instead of toggling help / wiring the statusline. This is the general
+    /// fix — it applies to every plugin screen (the boards card-title overlay
+    /// that motivated it, plus burndown's zoom search, etc.), not a
+    /// boards-specific special case.
+    #[test]
+    fn plugin_text_capture_flag_flips_text_input_context() {
+        // Baseline: a focused plugin screen with NO capture flag is navigable —
+        // `H`/`?` still toggle help (this is the pre-fix behaviour that swallowed
+        // characters typed into a plugin overlay).
+        let mut state = AppState::default();
+        state.current_screen = screen_ids::HANGAR.to_string();
+        assert!(
+            !EventHandler::is_text_input_context(&state),
+            "plugin screen without the capture flag must NOT be text-input"
+        );
+        // The host would eat `H` as the help toggle here — the 8hx bug.
+        assert!(
+            matches!(
+                EventHandler::handle_key_event(char_key('H'), &mut state),
+                Some(AppEvent::ToggleHelp)
+            ),
+            "precondition: without capture, H toggles help on a plugin screen"
+        );
+
+        // Declare text-capture (as the plugin's frame would via
+        // `RenderResult.captures_text`): now the host must treat it as
+        // text-input and NOT convert `H` into a help toggle.
+        state.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        assert!(
+            EventHandler::is_text_input_context(&state),
+            "plugin screen WITH the capture flag must be treated as text-input"
+        );
+        assert!(
+            !matches!(
+                EventHandler::handle_key_event(char_key('H'), &mut state),
+                Some(AppEvent::ToggleHelp)
+            ),
+            "H must not toggle help while the plugin captures text (8hx)"
+        );
+
+        // The flag is scoped to the focused plugin screen: an unrelated
+        // non-plugin screen with a stale entry is unaffected.
+        let mut other = AppState::default();
+        other.current_screen = screen_ids::HOME.to_string();
+        other.plugin_captures_text.insert(screen_ids::HANGAR.to_string(), true);
+        assert!(
+            !EventHandler::is_text_input_context(&other),
+            "capture flag for a background screen must not leak into HOME"
+        );
+    }
+
     /// `is_text_input_context` must return true for every text-entry
     /// step of the NewSession screen. Phase 6 (new-session redesign):
     /// the legacy 13-step flow was retired — only PickRepo (smart-parse
@@ -9010,10 +9137,13 @@ mod skill_manager_sync_keybind_tests {
     /// few code paths that has to read the on-disk manifest, so we
     /// pin the env to a tempdir to keep the test hermetic.
     fn with_ainb_home<R>(dir: &std::path::Path, body: impl FnOnce() -> R) -> R {
-        // The lock keeps parallel-running tests in the same process
-        // from clobbering each other's AINB_HOME.
-        static LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _g = LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        // The lock keeps parallel-running tests in the same process from
+        // clobbering each other's AINB_HOME. Use the crate-wide env lock (not a
+        // private one) so this serialises against EVERY AINB_HOME-mutating test —
+        // e.g. the session-store concurrent/headroom tests in
+        // `interactive::session_manager` — not just other `with_ainb_home`
+        // callers.
+        let _g = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let prev = std::env::var("AINB_HOME").ok();
         std::env::set_var("AINB_HOME", dir);
         let r = body();

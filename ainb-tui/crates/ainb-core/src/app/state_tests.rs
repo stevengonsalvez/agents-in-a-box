@@ -1251,6 +1251,68 @@ mod tests {
             "an already-queued action must not be overwritten by the refresh hand-off"
         );
     }
+
+    // ========================================================================
+    // Onboarding completion: State -> Config mapping
+    // ========================================================================
+
+    /// The take-effect seam for the first-run questionnaire: the
+    /// source/role/use-case selections held in `OnboardingState` must land in
+    /// the `OnboardingConfig` that `complete_onboarding` persists. This drives
+    /// the mapping through the same `save_to`/`load_from` round-trip the real
+    /// `save` uses, but against a tempdir so no real `~/.agents-in-a-box` is
+    /// touched. Dropping any of the three assignments (e.g. `config.source =
+    /// None`) at the seam makes the read-back assertions fail.
+    #[test]
+    fn complete_onboarding_persists_questionnaire_answers() {
+        use crate::components::onboarding::OnboardingState;
+        use crate::config::OnboardingConfig;
+
+        // Build a finished wizard state with explicit, non-default selections
+        // so a mapping that silently drops a field can't accidentally pass.
+        let mut state = OnboardingState::new();
+        state.selected_source_index = 2; // "Friend or colleague"
+        state.selected_role_index = 3; // "Researcher"
+        state.selected_use_case_index = 1; // "Automate repetitive tasks"
+
+        // Sanity: confirm the indices resolve to the answers we expect, so the
+        // assertions below pin real content rather than whatever index 0 is.
+        assert_eq!(
+            state.selected_source().as_deref(),
+            Some("Friend or colleague")
+        );
+        assert_eq!(state.selected_role().as_deref(), Some("Researcher"));
+        assert_eq!(
+            state.selected_use_case().as_deref(),
+            Some("Automate repetitive tasks")
+        );
+
+        // Map State -> Config via the exact seam `complete_onboarding` uses,
+        // then persist + reload through an injected tempdir path.
+        let config = AppState::onboarding_config_from_state(&state);
+
+        let dir = tempfile::tempdir().expect("tmpdir");
+        let path = dir.path().join("config/onboarding.toml");
+        config.save_to(&path).expect("save onboarding config to tempdir");
+
+        let loaded = OnboardingConfig::load_from(&path).expect("reload onboarding config");
+        assert!(loaded.completed, "onboarding must be marked completed");
+        assert_eq!(
+            loaded.source.as_deref(),
+            Some("Friend or colleague"),
+            "source selection must survive the State -> Config -> disk mapping"
+        );
+        assert_eq!(
+            loaded.role.as_deref(),
+            Some("Researcher"),
+            "role selection must survive the State -> Config -> disk mapping"
+        );
+        assert_eq!(
+            loaded.use_case.as_deref(),
+            Some("Automate repetitive tasks"),
+            "use_case selection must survive the State -> Config -> disk mapping"
+        );
+    }
 }
 
 #[cfg(test)]

@@ -1,8 +1,9 @@
 //! The `ClaimTask` service: atomic `queued -> dispatched` claim.
 //!
 //! [`ClaimTaskService::claim_for_runtime`] is the head of the daemon's work
-//! loop: a runtime polls for the oldest `queued` task it owns, atomically flips
-//! it to `dispatched`, and stamps `dispatched_at`. The whole transition is one
+//! loop: a runtime polls for the most urgent (then oldest) `queued` task it
+//! owns, atomically flips it to `dispatched`, and stamps `dispatched_at`. The
+//! whole transition is one
 //! `UPDATE ... WHERE id = (SELECT ... LIMIT 1) RETURNING *` statement so two
 //! daemons (or two poll iterations) can never claim the same row — `SQLite`
 //! serialises the write and `RETURNING` reports exactly the row this statement
@@ -12,12 +13,37 @@
 //! # Per-agent concurrency cap
 //!
 //! The candidate `SELECT` excludes any task whose agent already has
-//! `max_concurrent_tasks` rows in `running` — Multica's `CountRunningTasks`
-//! guard (`task.go:761`). This keeps a single agent from being dispatched more
+//! `max_concurrent_tasks` rows **in flight** — i.e. already `dispatched` or
+//! `running` (the reference's `CountRunningTasks` guard, `task.go:761`, widened to
+//! the post-claim set). This keeps a single agent from being dispatched more
 //! concurrent work than its runtime can handle. The count and the claim happen
 //! in one statement, so the cap holds even under concurrent claims.
 //!
-//! Mirrors Multica's `task.go` claim path.
+//! The in-flight set **must** include `dispatched`, not just `running`: a
+//! claim flips a row `queued -> dispatched`, and only later does
+//! [`StartTaskService::start`](crate::service::start) flip it
+//! `dispatched -> running`. If the cap counted only `running`, then between a
+//! claim and its start the just-claimed slot would be invisible — so several
+//! daemons polling the same runtime could each see `running` below the cap and
+//! each claim a row, over-dispatching the agent past `max_concurrent_tasks`
+//! once those `dispatched` rows all reach `running` (e38.27). Counting
+//! `dispatched` closes that race: the claim that stamps `dispatched`
+//! immediately consumes a slot a concurrent claim can see.
+//!
+//! # Per-(issue, agent) active-set guard
+//!
+//! The candidate `SELECT` also excludes any issue task whose agent already has
+//! another *active* (`queued` / `dispatched` / `running`) task for the same
+//! issue — the `NOT EXISTS` guard from the reference's `ClaimAgentTask`
+//! (`pkg/db/queries/agent.sql`). Work on one issue serialises per **agent**,
+//! not globally: a different agent's task on the same issue stays claimable, so
+//! several agents can work one issue in parallel. Pairs with the
+//! `idx_one_pending_task_per_issue_agent` partial unique index (migration
+//! 0012), which already forbids two *pending* rows per (issue, agent); the
+//! guard extends that exclusion to the `running` set at claim time. Tasks with
+//! `issue_id IS NULL` (chat / autopilot) bypass the guard entirely.
+//!
+//! Mirrors the reference control plane's `task.go` claim path.
 
 use ainb_hangar_core::clock::HangarClock;
 use sqlx::{Row, SqlitePool};
@@ -46,14 +72,19 @@ pub struct ClaimedTask {
 pub struct ClaimTaskService;
 
 impl ClaimTaskService {
-    /// Atomically claim the oldest claimable `queued` task for `runtime_id`,
-    /// flipping it to `dispatched` and stamping `dispatched_at = clock.now_ms()`.
+    /// Atomically claim the most urgent claimable `queued` task for
+    /// `runtime_id` (`priority DESC`, then FIFO by `created_at, id`), flipping
+    /// it to `dispatched` and stamping `dispatched_at = clock.now_ms()`.
     ///
-    /// A task is *claimable* when it is `queued`, bound to `runtime_id`, and its
-    /// agent has fewer than `max_concurrent_tasks` rows currently `running`.
+    /// A task is *claimable* when it is `queued`, bound to `runtime_id`, its
+    /// agent has fewer than `max_concurrent_tasks` rows currently in flight
+    /// (`dispatched` or `running`), and — for issue tasks — its agent has no
+    /// other active (`queued` /
+    /// `dispatched` / `running`) task for the same issue (the per-(issue,
+    /// agent) guard; a *different* agent's task on the issue does not block).
     /// Returns the claimed projection, or `Ok(None)` when nothing is claimable
-    /// (empty queue, no work for this runtime, or every candidate agent is at
-    /// its concurrency cap).
+    /// (empty queue, no work for this runtime, or every candidate is excluded
+    /// by a guard).
     ///
     /// The select-and-update is a single statement, so concurrent callers never
     /// claim the same row: `SQLite` serialises the write and `RETURNING` yields
@@ -92,10 +123,19 @@ impl ClaimTaskService {
 
 /// Atomic claim statement.
 ///
-/// The candidate sub-select picks the oldest `queued` task for the runtime
-/// whose agent is under its `max_concurrent_tasks` cap (a correlated COUNT of
-/// the agent's `running` rows). The outer `UPDATE ... RETURNING` then flips
-/// exactly that row and returns the projection [`claimed_from_row`] decodes.
+/// The candidate sub-select picks the most urgent `queued` task for the
+/// runtime — `ORDER BY priority DESC, created_at, id` (reference ordering
+/// parity: higher `priority` jumps the queue, 0..3 = P3..P0 per migration
+/// 0013; equal priorities drain FIFO) — whose agent is under its
+/// `max_concurrent_tasks` cap (a correlated COUNT of the agent's in-flight
+/// `dispatched` + `running` rows, so a just-claimed-but-not-yet-started slot
+/// is already counted and concurrent daemons cannot over-dispatch) AND has no
+/// other active (`queued` /
+/// `dispatched` / `running`) task for the same issue (the `NOT EXISTS`
+/// per-(issue, agent) guard — reference `ClaimAgentTask` parity; `NULL`
+/// `issue_id` candidates never match the correlated equality and so bypass
+/// it). The outer `UPDATE ... RETURNING` then flips exactly that row and
+/// returns the projection [`claimed_from_row`] decodes.
 /// `?1` = `dispatched_at` (now), `?2` = `runtime_id`.
 const CLAIM_SQL: &str = "\
 UPDATE agent_task_queue \
@@ -106,9 +146,16 @@ WHERE id = ( \
     WHERE q.status = 'queued' AND q.runtime_id = ?2 \
       AND ( \
         SELECT COUNT(*) FROM agent_task_queue AS r \
-        WHERE r.agent_id = q.agent_id AND r.status = 'running' \
+        WHERE r.agent_id = q.agent_id AND r.status IN ('dispatched','running') \
       ) < a.max_concurrent_tasks \
-    ORDER BY q.created_at, q.id \
+      AND NOT EXISTS ( \
+        SELECT 1 FROM agent_task_queue AS s \
+        WHERE s.issue_id = q.issue_id \
+          AND s.agent_id = q.agent_id \
+          AND s.id <> q.id \
+          AND s.status IN ('queued','dispatched','running') \
+      ) \
+    ORDER BY q.priority DESC, q.created_at, q.id \
     LIMIT 1 \
 ) \
 RETURNING id, workspace_id, agent_id, runtime_id, issue_id, session_id, work_dir, dispatched_at";

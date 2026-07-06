@@ -1,8 +1,12 @@
 //! Axum router, API handlers, and the SSE live-update stream.
 //!
-//! All routes are read-only. The data layer ([`crate::data::DataSource`])
-//! proxies the existing `ainb --format json` commands, so the dashboard never
-//! duplicates data access. Live updates are delivered via Server-Sent Events:
+//! The read surfaces proxy the existing `ainb --format json` commands via the
+//! data layer ([`crate::data::DataSource`]), so the dashboard never duplicates
+//! data access. The two write surfaces — the WS terminal and `POST /api/answer`
+//! (the daemon send seam) — are each gated by
+//! [`crate::terminal::read_only_gate`], so `--read-only` refuses them with
+//! `403 READ_ONLY` and the dashboard is viewer-only. Live updates are delivered
+//! via Server-Sent Events:
 //! a background poller refreshes the snapshot and pushes to subscribers only
 //! when the content fingerprint changes.
 
@@ -10,12 +14,13 @@ use std::convert::Infallible;
 use std::sync::Arc;
 use std::time::Duration;
 
+use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::StatusCode;
 use axum::middleware;
 use axum::response::sse::{Event, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::get;
+use axum::routing::{get, post};
 use axum::{Json, Router};
 use serde_json::json;
 use tokio::sync::watch;
@@ -24,6 +29,7 @@ use tokio_stream::wrappers::WatchStream;
 
 use crate::auth;
 use crate::config::WebConfig;
+use crate::daemon::{Answerer, DaemonAnswerer};
 use crate::data::{DataSource, FleetSnapshot};
 
 /// Number of [`POLL_INTERVAL`] ticks between cost re-fetches. At least 1, so the
@@ -73,6 +79,10 @@ pub struct AppState {
     /// `/api/push/*` route (they answer `503 PUSH_NOT_CONFIGURED`) and the
     /// delivery loop. Shared so handlers and the delivery task see one store.
     pub push: Option<crate::push::PushState>,
+    /// The `attention/answer` seam (D18): `POST /api/answer` routes an ASK-card
+    /// answer through the daemon's ONE verified send path. A `dyn Answerer` so
+    /// route tests inject a deterministic fake instead of dialling a socket.
+    pub answer: Arc<dyn Answerer>,
     /// A receiver kept alive for the whole server lifetime so the channel never
     /// reports zero receivers. Without this, `watch::Sender::is_closed()` would
     /// be `true` at startup (the SSE handler creates the only other receiver
@@ -89,11 +99,31 @@ impl AppState {
     }
 
     /// Build app state with an optional web-push backend, then spawn the
-    /// background snapshot poller.
+    /// background snapshot poller. Uses the production [`DaemonAnswerer`] for
+    /// `POST /api/answer`.
     pub fn with_push(
         config: WebConfig,
         data: Arc<dyn DataSource>,
         push: Option<crate::push::PushState>,
+    ) -> Self {
+        Self::build(config, data, push, Arc::new(DaemonAnswerer))
+    }
+
+    /// Build app state with an explicit [`Answerer`] (the test seam), then spawn
+    /// the background snapshot poller.
+    pub fn with_answerer(
+        config: WebConfig,
+        data: Arc<dyn DataSource>,
+        answer: Arc<dyn Answerer>,
+    ) -> Self {
+        Self::build(config, data, None, answer)
+    }
+
+    fn build(
+        config: WebConfig,
+        data: Arc<dyn DataSource>,
+        push: Option<crate::push::PushState>,
+        answer: Arc<dyn Answerer>,
     ) -> Self {
         let (tx, rx) = watch::channel(None);
         let state = Self {
@@ -101,6 +131,7 @@ impl AppState {
             data,
             cache: tx,
             push,
+            answer,
             _cache_rx: rx,
         };
         state.spawn_poller();
@@ -205,6 +236,24 @@ pub fn router(state: AppState) -> Router {
         middleware::from_fn_with_state(state.clone(), crate::terminal::read_only_gate),
     );
 
+    // `POST /api/answer` is the *second* fleet-state write surface: it drives the
+    // daemon's verified last-mile send into a live session (approvals, ASK
+    // answers, free-text into the picker). It must carry the SAME posture gate as
+    // the WS terminal — `read_only_gate` refuses it with `403 READ_ONLY` in
+    // `--read-only` mode — so the read-only dashboard truly never mutates fleet
+    // state and the `--insecure-bind + --read-only` bind exemption
+    // ([`WebConfig::check_bind_security`]) stays sound (it exists only because no
+    // write surface is reachable in that posture). Both write surfaces sit under
+    // the shared bearer auth below, so the refusal order matches the terminal:
+    // auth first (401), then read-only (403).
+    let answer_route =
+        Router::new()
+            .route("/api/answer", post(answer))
+            .layer(middleware::from_fn_with_state(
+                state.clone(),
+                crate::terminal::read_only_gate,
+            ));
+
     let api = Router::new()
         .route("/healthz", get(healthz))
         .route("/api/snapshot", get(snapshot))
@@ -212,6 +261,7 @@ pub fn router(state: AppState) -> Router {
         .route("/api/needs", get(needs))
         .route("/api/cost", get(cost))
         .route("/api/events", get(events))
+        .merge(answer_route)
         .merge(terminal)
         .merge(crate::push::router())
         .layer(middleware::from_fn_with_state(
@@ -269,6 +319,69 @@ async fn sessions(State(state): State<AppState>) -> Response {
 /// `GET /api/needs` — fleet needs (ASK/ERR/IDLE/WAIT).
 async fn needs(State(state): State<AppState>) -> Response {
     project(&state, |s| &s.needs).await
+}
+
+/// `POST /api/answer` — answer one open ASK card through the daemon (D18).
+///
+/// Body: `{ attentionId, answer, answeredBy?, isAnswer? }`. `answeredBy`
+/// defaults to `"web"` so the surface that won the race is recorded; `isAnswer`
+/// defaults to `true` (a safety-critical interview answer — the daemon refuses
+/// an ambiguous target rather than mis-route). The daemon runs the
+/// first-answer-wins + C1 guards and performs the ONE verified last-mile send;
+/// this route never touches tmux. The tagged [`AnswerResult`] is returned
+/// verbatim as JSON so the frontend renders the right feedback
+/// (`delivered` / `already_answered` / `ambiguous` / …).
+async fn answer(State(state): State<AppState>, body: Bytes) -> Response {
+    use ainb_hangar_proto::snapshots::AnswerParams;
+
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct AnswerBody {
+        attention_id: String,
+        answer: String,
+        #[serde(default)]
+        answered_by: Option<String>,
+        #[serde(default)]
+        is_answer: Option<bool>,
+    }
+
+    let req: AnswerBody = match serde_json::from_slice(&body) {
+        Ok(r) => r,
+        Err(e) => {
+            let msg = format!("invalid answer body: {e}");
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(json!({ "error": { "code": "INVALID_BODY", "message": msg } })),
+            )
+                .into_response();
+        }
+    };
+    if req.attention_id.trim().is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(json!({
+                "error": { "code": "INVALID_BODY", "message": "attentionId is required" }
+            })),
+        )
+            .into_response();
+    }
+
+    let params = AnswerParams {
+        attention_id: req.attention_id,
+        answer: req.answer,
+        answered_by: req.answered_by.unwrap_or_else(|| "web".to_string()),
+        is_answer: req.is_answer.unwrap_or(true),
+    };
+
+    match state.answer.answer(params).await {
+        Ok(result) => Json(result).into_response(),
+        Err(e) => {
+            let body = Json(json!({
+                "error": { "code": "DAEMON_UNAVAILABLE", "message": e.to_string() }
+            }));
+            (StatusCode::BAD_GATEWAY, body).into_response()
+        }
+    }
 }
 
 /// `GET /api/cost` — cost rollups (`null` when the verb is absent).

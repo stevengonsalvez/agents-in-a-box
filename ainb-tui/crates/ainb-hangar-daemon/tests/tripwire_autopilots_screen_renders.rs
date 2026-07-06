@@ -1,4 +1,4 @@
-//! P9.x e2e tripwire — the Autopilots manager screen (`5`) renders a real
+//! P9.x e2e tripwire — the Autopilots manager screen (`4`) renders a real
 //! seeded autopilot row when the user presses the hotkey in `ainb tui`.
 //!
 //! ```text
@@ -7,7 +7,7 @@
 //!         ▼
 //!  ainb-hangar-daemon (RPC only) ◀── hangar/autopilots_list snapshot
 //!         ▲                                   │
-//!  ainb tui (tmux) ──`g`──▶ Hangar ──`5`──▶ Autopilots manager
+//!  ainb tui (tmux) ──`g`──▶ Hangar ──`4`──▶ Autopilots manager
 //!                                            │
 //!         poll_capture: name `daily-triage` + cron `0 9 * * *` + table header
 //! ```
@@ -39,8 +39,8 @@ mod common;
 use std::time::{Duration, Instant};
 
 use common::{
-    READY_MARKER, TuiSession, ainb_bin, can_run_tripwire, hangar_chrome_visible, prepare_pipeline,
-    seed_autopilot, skip,
+    READY_MARKER, TuiSession, ainb_bin, can_run_tripwire, hangar_chrome_visible,
+    prepare_pipeline_with_autopilot, skip,
 };
 
 /// The seeded autopilot's name + cron, exactly as the screen renders them.
@@ -54,10 +54,12 @@ fn autopilots_screen_renders_seeded_autopilot() {
         return;
     }
 
-    // Seed the P4 fixture + spawn the RPC-only daemon, then add one autopilot so
-    // the manager has a live row to render.
-    let pipeline = prepare_pipeline();
-    seed_autopilot(pipeline.home());
+    // Seed the P4 fixture + one autopilot into the database BEFORE the RPC-only
+    // daemon spawns, so the manager has a row to render. Seeding the autopilot
+    // pre-spawn (not via a second live connection after the daemon is up) keeps
+    // the daemon's first issue snapshot off a concurrency race that wedges it on
+    // slow CI runners.
+    let pipeline = prepare_pipeline_with_autopilot();
 
     let bin = ainb_bin().expect("gated by can_run_tripwire");
     let (session, landing) = TuiSession::launch_to_hangar(&bin, pipeline.home());
@@ -66,18 +68,18 @@ fn autopilots_screen_renders_seeded_autopilot() {
     // NOT already show the autopilot row (so a later match proves a switch).
     assert!(
         landing.contains(READY_MARKER),
-        "expected the Hangar issue-list landing before pressing 5:\n{landing}"
+        "expected the Hangar issue-list landing before pressing 4:\n{landing}"
     );
     assert!(
         !landing.contains(AUTOPILOT_NAME),
         "the issue list must not already show the seeded autopilot name:\n{landing}"
     );
 
-    // Press `5` (single-char nav, no Enter) until the manager shows the seeded
+    // Press `4` (single-char nav, no Enter) until the manager shows the seeded
     // autopilot's name AND cron. 45s budget covers the snapshot round-trip.
     let deadline = Instant::now() + Duration::from_secs(45);
     let pane = session
-        .switch_tab_until("5", deadline, |c| {
+        .switch_tab_until("4", deadline, |c| {
             hangar_chrome_visible(c) && c.contains(AUTOPILOT_NAME) && c.contains(AUTOPILOT_CRON)
         })
         .unwrap_or_else(|| {
@@ -97,17 +99,20 @@ fn autopilots_screen_renders_seeded_autopilot() {
         "seeded autopilot cron {AUTOPILOT_CRON:?} missing from the manager:\n{pane}"
     );
 
-    // POSITIVE: the table header rendered (the manager chrome, not just a stray
-    // row), so a match is a real autopilot table and not incidental text.
+    // POSITIVE: the manager body chrome rendered (not just a stray row), so a
+    // match is the real Autopilots manager and not incidental text. 63l.6
+    // replaced the NAME/CRON table with the card-board + a per-autopilot
+    // run-history pane (`─ Recent runs (<name>) ─`); that pane header is
+    // autopilots-body-specific (absent from the persistent tab strip).
     assert!(
-        pane.contains("NAME") && pane.contains("CRON"),
-        "the autopilot table header (NAME / CRON) is missing:\n{pane}"
+        pane.contains("Recent runs"),
+        "the autopilots manager body chrome (run-history pane) is missing:\n{pane}"
     );
 
     // NEGATIVE: no longer on the issue-list landing (the `5` switch happened).
     assert!(
         !pane.contains(READY_MARKER),
-        "still on the issue list after pressing 5 (no screen switch):\n{pane}"
+        "still on the issue list after pressing 4 (no screen switch):\n{pane}"
     );
 
     drop(session);

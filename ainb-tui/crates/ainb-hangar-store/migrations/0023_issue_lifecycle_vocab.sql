@@ -1,0 +1,36 @@
+-- Hangar v1 schema, migration 0023: five-status issue lifecycle vocabulary
+-- (63l.3).
+--
+-- The board redesign establishes FIVE canonical issue statuses as the
+-- lifecycle: `backlog`, `todo`, `in_progress`, `in_review`, `done`. The pre-
+-- redesign vocabulary used `open` (not-started) and `closed` (terminal), which
+-- bucket into the new board as `todo` and `done` respectively. This migration
+-- MAPS those legacy values forward IN PLACE so every existing row lands in a
+-- real canonical column rather than relying on the display-layer's legacy
+-- tolerance forever:
+--
+--   open   -> todo   (the canonical "not started" column)
+--   closed -> done   (the canonical terminal column)
+--
+-- `in_progress` already matches the canonical token, so it is untouched. Any
+-- other (unknown) string is intentionally LEFT AS-IS: the canonical state-to-
+-- column helper (`IssueLifecycle::for_state`) still buckets an unknown token
+-- under Todo (fail-visible), so an out-of-vocabulary row is never dropped — and
+-- this migration does not invent a remap for values it cannot reason about.
+--
+-- These are plain UPDATEs on the small `issue` table (no schema change, no table
+-- rewrite). They are IDEMPOTENT: a second apply finds no `open`/`closed` rows
+-- left to rewrite, so it changes nothing. `state` has no CHECK constraint
+-- (migration 0003 left it a free TEXT), so the rewrite needs no constraint
+-- juggling.
+--
+-- HGR default issue id (the other half of 63l.3): NOT a schema change. The
+-- `issue_prefix` column added by migration 0020 is overloaded — `apply_issue_
+-- prefix` prepends it to a new issue's TITLE (`[OPS] fix the build`). Defaulting
+-- the stored column to `HGR` would mangle every fresh issue's title into
+-- `HGRfix the build`. Instead the `HGR` default lives at the DISPLAY-ID layer
+-- (`issue_display_id`): a NULL `issue_prefix` ("no explicit prefix") renders as
+-- `HGR-<n>`. So the column stays NULL here and no workspace row is touched by
+-- this migration — only the issue `state` values are remapped.
+UPDATE issue SET state = 'todo' WHERE state = 'open';
+UPDATE issue SET state = 'done' WHERE state = 'closed';

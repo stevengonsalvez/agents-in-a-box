@@ -1,0 +1,58 @@
+[package]
+name = "ainb-fleet-core"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Fleet orchestration core: session discovery, needs classification, and the verified tmux/broker send path. Extracted from ainb-core so BOTH the TUI/CLI and the hangar daemon can drive the one send path without a crate cycle (ainb-core already depends on ainb-hangar-daemon, so the daemon cannot depend back on ainb-core)."
+categories = ["command-line-utilities"]
+keywords = ["ainb", "fleet", "sessions", "tmux"]
+
+[lib]
+name = "ainb_fleet_core"
+path = "src/lib.rs"
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+# Deserialize the New-Session favorites store (`~/.agents-in-a-box/favorites.yaml`,
+# YAML) for the card-create repo roster (spec F3) — read as-is, no scan.
+serde_yaml = { workspace = true }
+anyhow = { workspace = true }
+# Async process spawning (tmux send-keys / has-session, `ainb list`) + timers
+# for the multi-line submit-verify backoff. Workspace `tokio` ships full
+# features, so `process` + `time` are already on.
+tokio = { workspace = true }
+# ISO-8601 → epoch-ms for discovered session `last_seen` + transcript
+# timestamps; the needs classifier's idle-age math.
+chrono = { workspace = true }
+# Home-directory resolution for the enrich cache, the JSONL transcript root,
+# the claude-peers db, and the background-jobs dir.
+dirs = { workspace = true }
+# Content-addressed enrich-cache key (blake3(ctx) → drafted suggestion).
+blake3 = { workspace = true }
+# Direct read-only SQLite of `~/.claude-peers.db` for broker-peer discovery.
+rusqlite = { workspace = true }
+# `kill(pid, 0)` liveness probe when reaping stale broker peers.
+nix = { workspace = true }
+# API-error signal detection over captured pane text.
+regex = { workspace = true }
+# Compile the API-error regex set once (the `API_ERROR_PATTERNS` table).
+lazy_static = { workspace = true }
+# Filesystem watch backing `wait_for_turn_end` (JSONL transcript tail).
+notify = { workspace = true }
+# HTTP client for the (opt-in / fallback) claude-peers broker send path.
+reqwest = { workspace = true }
+# Session-registry (`sessions.json`) identity + the advisory lock guarding its
+# read-modify-write, so the daemon can register a spawned session into the SAME
+# store `ainb list` reads without a crate cycle back into ainb-core.
+uuid = { workspace = true }
+fs2 = { workspace = true }
+
+[dev-dependencies]
+# Isolated tempdir for the session-registry writer's round-trip tests.
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

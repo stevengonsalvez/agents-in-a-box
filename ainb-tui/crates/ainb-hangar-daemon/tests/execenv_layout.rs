@@ -7,7 +7,7 @@
 //! state, no env mutation), so the suite is parallel-safe without `ENV_LOCK`.
 //!
 //! Layout under test (`build-plan.md:40`, `CLI_AND_DAEMON.md:185-193`):
-//! `{home}/.ainb/hangar/workspaces/{ws_slug}/{shortID(task.id)}/`
+//! `{home}/.agents-in-a-box/hangar/workspaces/{ws_slug}/{shortID(task.id)}/`
 //! with `workdir/`, `output/`, `logs/`, `.gc_meta.json` siblings.
 
 // The epoch-ms arithmetic below casts `Duration::as_millis()` (u128) to `i64`;
@@ -17,7 +17,9 @@
 use std::path::Path;
 
 use ainb_hangar_core::clock::FixedClock;
-use ainb_hangar_daemon::execenv::{CleanupKind, GcMeta, cleanup, prepare_env, short_id};
+use ainb_hangar_daemon::execenv::{
+    CONTEXT_PROMPT_FILE, CleanupKind, GcMeta, cleanup, prepare_env, short_id, write_context_prompt,
+};
 use ainb_hangar_store::repo::task::Task;
 use tempfile::TempDir;
 
@@ -43,21 +45,28 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         max_attempts: 3,
         parent_task_id: None,
         failure_reason: None,
+        priority: 0,
         created_at: BASE_MS,
         dispatched_at: Some(BASE_MS),
         started_at: None,
         finished_at: None,
         autopilot_run_id: None,
+        generation: 0,
+        mode: "headless".to_string(),
+        session_name: None,
+        repo_ref: None,
+        agent_kind: "claude".to_string(),
+        branch: None,
     }
 }
 
 /// The expected per-task root under an isolated home.
 fn expected_root(home: &Path, slug: &str, task_id: &str) -> std::path::PathBuf {
-    home.join(".ainb")
+    home.join(".agents-in-a-box")
         .join("hangar")
         .join("workspaces")
         .join(slug)
-        .join(short_id(task_id))
+        .join(task_id)
 }
 
 #[test]
@@ -101,8 +110,9 @@ fn gc_meta_json_contents() {
 
 #[test]
 fn short_id_is_ulid_short_form() {
-    // First 8 chars, deterministic (Multica shortID).
-    assert_eq!(short_id("01HZX0000000000000000ABCDE"), "01HZX000");
+    // First 8 chars PLUS the last 6 (the T4 collision-resistant slug form), so
+    // same-instant ULIDs stay distinct. Deterministic.
+    assert_eq!(short_id("01HZX0000000000000000ABCDE"), "01HZX0000ABCDE");
     assert_eq!(
         short_id("01HZX0000000000000000ABCDE"),
         short_id("01HZX0000000000000000ABCDE")
@@ -140,6 +150,55 @@ fn prepare_idempotent_on_existing_dir() {
         meta.last_seen_at,
         Some(later),
         "last_seen_at updated on re-prepare"
+    );
+}
+
+#[test]
+fn context_prompt_is_written_into_the_workdir_as_claude_md() {
+    // e38.21: the per-workspace context prompt must land in the agent's CWD (the
+    // execenv workdir) as a `CLAUDE.md`, so the agent run actually sees it — not
+    // just live in the database.
+    let home = TempDir::new().expect("tempdir home");
+    let task = task_fixture("01HZX0000000000000000ABCDE", Some("iss-1"));
+    let env = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(BASE_MS)).expect("prepare");
+
+    let written = write_context_prompt(&env, Some("Always run cargo fmt before committing."))
+        .expect("write context prompt");
+
+    let claude_md = env.workdir.join(CONTEXT_PROMPT_FILE);
+    assert_eq!(
+        written.as_deref(),
+        Some(claude_md.as_path()),
+        "returns the written path"
+    );
+    assert!(
+        claude_md.is_file(),
+        "CLAUDE.md must exist in the agent's workdir"
+    );
+    let body = std::fs::read_to_string(&claude_md).expect("read CLAUDE.md");
+    assert_eq!(
+        body, "Always run cargo fmt before committing.",
+        "the agent's CLAUDE.md carries the workspace context prompt verbatim"
+    );
+}
+
+#[test]
+fn no_context_prompt_writes_no_claude_md() {
+    // An unconfigured workspace (None / blank prompt) writes no file — the v1
+    // behaviour (the agent runs with no per-workspace context).
+    let home = TempDir::new().expect("tempdir home");
+    let task = task_fixture("01HZX0000000000000000ABCDE", Some("iss-1"));
+    let env = prepare_env(&task, WS_SLUG, home.path(), &FixedClock(BASE_MS)).expect("prepare");
+
+    assert_eq!(write_context_prompt(&env, None).expect("none prompt"), None);
+    assert_eq!(
+        write_context_prompt(&env, Some("   \n  ")).expect("blank prompt"),
+        None,
+        "a whitespace-only prompt is treated as unset"
+    );
+    assert!(
+        !env.workdir.join(CONTEXT_PROMPT_FILE).exists(),
+        "no CLAUDE.md is written when there is no prompt"
     );
 }
 

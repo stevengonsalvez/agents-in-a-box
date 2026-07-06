@@ -215,6 +215,19 @@ points `~/.codex/config.toml` / `~/.copilot/mcp-config.json` at the pool
 shim (with `.bak` backups) so Codex and Copilot sessions share the same
 backend processes as Claude.
 
+## Conventions (paths & plugins)
+
+- **All ainb state lives under `~/.agents-in-a-box/`** — config, plus the Hangar
+  SQLite DB, control socket, daemon token, state and logs
+  (`~/.agents-in-a-box/hangar.db`, `~/.agents-in-a-box/hangar.sock`,
+  `~/.agents-in-a-box/hangar/…`). **Never `~/.ainb/`.** New persistence resolves
+  from `dirs::home_dir()?.join(".agents-in-a-box")` (or `$AINB_HANGAR_HOME`).
+- **TUI plugins live in `ainb-tui/crates/ainb-plugin-<name>/`** as workspace
+  members — folder name == package name (`ainb-plugin-hangar`, `ainb-plugin-witr`,
+  …). The repo-root `plugins/` directory is **only** for Claude Code harness
+  plugins (`ainb-fleet`, `ainb-hooks`, `reflect`); never put a TUI/subprocess
+  plugin there.
+
 ## Monorepo Context
 
 The curated skills/agents/installer/catalog live in the standalone

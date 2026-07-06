@@ -22,7 +22,9 @@ use ainb_hangar_core::autopilot::cron::{
 use ainb_hangar_core::clock::FixedClock;
 use ainb_hangar_core::ids::{AgentId, WorkspaceId};
 use ainb_hangar_store::Store;
-use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError, NewAutopilot};
+use ainb_hangar_store::repo::autopilot::{
+    AutopilotRepo, AutopilotRepoError, ConcurrencyPolicy, ExecutionMode, NewAutopilot,
+};
 
 /// 2026-01-01T00:00:00Z in epoch-ms — the frozen `now` for these tests.
 const T0: i64 = 1_767_225_600_000;
@@ -97,6 +99,8 @@ fn new_req(ws_id: &str, agent: &str, name: &str, cron: &str) -> NewAutopilot {
         instructions: Some("say hi".to_string()),
         cron_expr: cron.to_string(),
         max_concurrent_runs: 1,
+        execution_mode: ExecutionMode::default(),
+        concurrency_policy: ConcurrencyPolicy::default(),
     }
 }
 

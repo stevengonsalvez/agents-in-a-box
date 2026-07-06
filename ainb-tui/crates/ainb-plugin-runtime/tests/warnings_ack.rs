@@ -16,7 +16,7 @@ use ainb_plugin_runtime::warnings::{
     should_warn_first_run, should_warn_provider,
 };
 
-/// A `state.toml` path inside a fresh tempdir (never the real `~/.ainb`).
+/// A `state.toml` path inside a fresh tempdir (never the real `~/.agents-in-a-box`).
 fn temp_state() -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().expect("tempdir");
     let path = dir.path().join("hangar").join("state.toml");

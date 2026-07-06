@@ -25,6 +25,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ainb_hangar_proto::{Channel, ChannelSet};
 use axum::extract::{DefaultBodyLimit, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
@@ -256,38 +257,63 @@ pub fn spawn_delivery(state: AppState, push: PushState) {
             let Ok(snap) = state.resolve_snapshot().await else {
                 continue;
             };
-            let current = attention_by_key(&snap.needs);
-
-            if baseline_done {
-                for (key, kind) in &current {
-                    let changed = last.get(key) != Some(kind);
-                    if changed && is_attention(kind) {
-                        let payload = build_payload(key, kind, &snap);
-                        let n = push.broadcast(&payload).await;
-                        tracing::debug!(key, kind, delivered = n, "attention push sent");
-                    }
-                }
-            }
-            last = current;
+            // The first tick only records a baseline (no flood on startup); every
+            // later tick delivers the transitions.
+            last = deliver_web_transitions(&push, &snap, &last, baseline_done).await;
             baseline_done = true;
         }
     });
 }
 
-/// True for the actionable attention kinds (the ones worth a push). `IDLE` and
-/// `FINISHED` are informational and don't buzz.
+/// Deliver one tick's web pushes and return the next `last`-seen kind map.
+///
+/// For each session key, buzz a device iff (a) `deliver` is true (never on the
+/// startup baseline tick), (b) the attention transitioned INTO a new kind since
+/// `last`, (c) it is an actionable kind, and (d) the notify rules routed it to
+/// the `web` channel (tcp T5) — a decision resolved once at raise time and
+/// carried on the card. Extracted from the loop so the routing gate is testable
+/// against a stub [`PushSender`].
+async fn deliver_web_transitions(
+    push: &PushState,
+    snap: &crate::data::FleetSnapshot,
+    last: &std::collections::HashMap<String, String>,
+    deliver: bool,
+) -> std::collections::HashMap<String, String> {
+    let current = attention_by_key(&snap.needs);
+    if deliver {
+        for (key, (kind, channels)) in &current {
+            let changed = last.get(key).map(String::as_str) != Some(kind.as_str());
+            if changed && is_attention(kind) && channels.contains(Channel::Web) {
+                let payload = build_payload(key, kind, snap);
+                let n = push.broadcast(&payload).await;
+                tracing::debug!(key, kind, delivered = n, "attention push sent");
+            }
+        }
+    }
+    current.into_iter().map(|(k, (kind, _))| (k, kind)).collect()
+}
+
+/// True for the actionable attention kinds (the ones worth considering for a
+/// push). `IDLE` and `FINISHED` are informational and never buzz.
 fn is_attention(kind: &str) -> bool {
-    // `ainb fleet needs` only ever emits ASK / ERR / IDLE / WAIT (the
-    // `NeedsContext` variants). A permission prompt surfaces as ASK, so there
-    // is no separate NEEDS_PERMISSION kind to handle here.
     matches!(kind, "ASK" | "ERR" | "WAIT")
 }
 
-/// Reduce the `needs` JSON array to a map of session key → highest-priority
-/// attention kind. The key prefers the session cwd (stable across renders),
-/// falling back to a workspace name or tmux session.
-fn attention_by_key(needs: &Value) -> std::collections::HashMap<String, String> {
-    let mut out: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+/// Reduce the `needs` JSON array to a map of session key → the highest-priority
+/// attention's `(kind, channels)`. `channels` is the push routing resolved at
+/// raise time (tcp T5), carried per card — the delivery loop filters on the `web`
+/// channel. A card that omits `channels` (a legacy row) reads as board-only and
+/// never buzzes.
+///
+/// The key is the raising session's cwd (stable across renders). The daemon's
+/// `attention_to_needs` cards carry `cwd` / `sessionId` at the TOP LEVEL, so those
+/// are read first; a nested `session.{cwd,workspace_name,tmux_session}` is the
+/// fallback for the legacy `ainb fleet needs` shape. Reading only the nested form
+/// (the pre-fix bug) collapsed every daemon-backed card onto one `"session"` key,
+/// which would fan a single push out per host instead of per session.
+fn attention_by_key(needs: &Value) -> std::collections::HashMap<String, (String, ChannelSet)> {
+    let mut out: std::collections::HashMap<String, (String, ChannelSet)> =
+        std::collections::HashMap::new();
     let Some(rows) = needs.as_array() else {
         return out;
     };
@@ -297,20 +323,30 @@ fn attention_by_key(needs: &Value) -> std::collections::HashMap<String, String> 
         "WAIT" => 2,
         _ => 3,
     };
+    // A nested `fn` (not a closure) so the borrow lifetime ties input to output.
+    fn non_empty(v: Option<&str>) -> Option<&str> {
+        v.filter(|s| !s.is_empty())
+    }
     for row in rows {
         let kind = row.get("kind").and_then(Value::as_str).unwrap_or("IDLE").to_uppercase();
+        let channels = row
+            .get("channels")
+            .and_then(|c| serde_json::from_value::<ChannelSet>(c.clone()).ok())
+            .unwrap_or(ChannelSet::NONE);
         let session = row.get("session").cloned().unwrap_or(Value::Null);
-        let key = session
-            .get("cwd")
-            .and_then(Value::as_str)
-            .or_else(|| session.get("workspace_name").and_then(Value::as_str))
-            .or_else(|| session.get("tmux_session").and_then(Value::as_str))
+        // Top-level card fields first (the real daemon `attention/list` shape),
+        // then the legacy nested `session` fallback.
+        let key = non_empty(row.get("cwd").and_then(Value::as_str))
+            .or_else(|| non_empty(row.get("sessionId").and_then(Value::as_str)))
+            .or_else(|| non_empty(session.get("cwd").and_then(Value::as_str)))
+            .or_else(|| non_empty(session.get("workspace_name").and_then(Value::as_str)))
+            .or_else(|| non_empty(session.get("tmux_session").and_then(Value::as_str)))
             .unwrap_or("session")
             .to_string();
         match out.get(&key) {
-            Some(existing) if rank(existing) <= rank(&kind) => {}
+            Some((existing, _)) if rank(existing) <= rank(&kind) => {}
             _ => {
-                out.insert(key, kind);
+                out.insert(key, (kind, channels));
             }
         }
     }
@@ -695,9 +731,139 @@ mod tests {
             { "kind": "IDLE", "session": { "cwd": "/c" } },
         ]);
         let map = attention_by_key(&needs);
-        assert_eq!(map.get("/a").map(String::as_str), Some("ASK"));
-        assert_eq!(map.get("/b").map(String::as_str), Some("ERR"));
-        assert_eq!(map.get("/c").map(String::as_str), Some("IDLE"));
+        assert_eq!(map.get("/a").map(|(k, _)| k.as_str()), Some("ASK"));
+        assert_eq!(map.get("/b").map(|(k, _)| k.as_str()), Some("ERR"));
+        assert_eq!(map.get("/c").map(|(k, _)| k.as_str()), Some("IDLE"));
+    }
+
+    /// Regression: the daemon's `attention_to_needs` cards carry `cwd` at the TOP
+    /// LEVEL (not nested under `session`). Each card must key on its OWN cwd so a
+    /// per-session push routes per session — the pre-fix nested-only read collapsed
+    /// every daemon card onto one `"session"` key.
+    #[test]
+    fn attention_by_key_reads_top_level_daemon_card_cwd() {
+        // The real card shape from the daemon `attention/list` mapping.
+        let needs = json!([
+            { "kind": "ASK", "cwd": "/work/one", "sessionId": "s1", "channels": ["web"] },
+            { "kind": "ERR", "cwd": "/work/two", "sessionId": "s2", "channels": ["os"] },
+        ]);
+        let map = attention_by_key(&needs);
+        assert_eq!(
+            map.len(),
+            2,
+            "each card keys on its own cwd, not one shared key"
+        );
+        assert_eq!(map.get("/work/one").map(|(k, _)| k.as_str()), Some("ASK"));
+        assert_eq!(map.get("/work/two").map(|(k, _)| k.as_str()), Some("ERR"));
+        assert!(
+            !map.contains_key("session"),
+            "cards must not collapse onto the fallback key"
+        );
+
+        // A card with an empty top-level cwd falls back to sessionId, still distinct.
+        let by_id = json!([{ "kind": "ASK", "cwd": "", "sessionId": "s9", "channels": ["web"] }]);
+        assert!(attention_by_key(&by_id).contains_key("s9"));
+    }
+
+    /// The web-push channel filter (tcp T5): a card carries its raise-time
+    /// `channels`, and only a card routed to the `web` channel is eligible to
+    /// buzz a device. A board-only card (empty set) is suppressed even though it
+    /// is an actionable kind.
+    #[test]
+    fn attention_by_key_carries_web_routing_channels() {
+        let needs = json!([
+            // ASK routed to web+os → web-eligible.
+            { "kind": "ASK",  "session": { "cwd": "/ask" },  "channels": ["web", "os"] },
+            // WAIT board-only (no channels) → not web-eligible.
+            { "kind": "WAIT", "session": { "cwd": "/wait" }, "channels": [] },
+            // ERR routed os-only → not web-eligible.
+            { "kind": "ERR",  "session": { "cwd": "/err" },  "channels": ["os"] },
+        ]);
+        let map = attention_by_key(&needs);
+        assert!(
+            map.get("/ask").unwrap().1.contains(Channel::Web),
+            "ASK is web-routed"
+        );
+        assert!(
+            !map.get("/wait").unwrap().1.contains(Channel::Web),
+            "board-only WAIT is not"
+        );
+        assert!(
+            !map.get("/err").unwrap().1.contains(Channel::Web),
+            "os-only ERR is not"
+        );
+        // A card that omits `channels` reads as board-only (no web buzz).
+        let legacy = json!([{ "kind": "ASK", "session": { "cwd": "/x" } }]);
+        assert!(!attention_by_key(&legacy).get("/x").unwrap().1.contains(Channel::Web));
+    }
+
+    /// End-to-end web filter (tcp T5) through the stub [`PushSender`]: a tick with
+    /// a web-routed ASK, a board-only WAIT, and an os-only ERR buzzes the device
+    /// exactly once — the web-routed card. The suppressed channels never fire.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn web_transition_delivers_only_web_routed_attentions() {
+        let sender = Arc::new(FakeSender::new());
+        let (push, _dir) = push_state(sender.clone());
+        push.upsert(sub("https://dev", Some(false))).await.unwrap();
+
+        let snap = crate::data::FleetSnapshot::from_parts(
+            crate::data::CoreSnapshot {
+                sessions: json!([]),
+                needs: json!([
+                    { "kind": "ASK",  "session": { "cwd": "/ask" },  "channels": ["web", "os"] },
+                    { "kind": "WAIT", "session": { "cwd": "/wait" }, "channels": [] },
+                    { "kind": "ERR",  "session": { "cwd": "/err" },  "channels": ["os"] },
+                ]),
+            },
+            Value::Null,
+        );
+
+        // deliver = true, empty `last` → each card is a fresh transition.
+        let last =
+            deliver_web_transitions(&push, &snap, &std::collections::HashMap::new(), true).await;
+
+        // Exactly ONE device buzz — the web-routed ASK. The board-only WAIT and
+        // the os-only ERR are suppressed on web.
+        assert_eq!(
+            sender.sent.load(Ordering::SeqCst),
+            1,
+            "only the web-routed ASK buzzes the device"
+        );
+        // Every key's kind is tracked for the next tick's transition detection,
+        // even the suppressed ones.
+        assert_eq!(last.get("/ask").map(String::as_str), Some("ASK"));
+        assert_eq!(last.get("/wait").map(String::as_str), Some("WAIT"));
+    }
+
+    /// The baseline tick (`deliver = false`) records state but never buzzes — no
+    /// startup flood even for a web-routed card.
+    #[tokio::test(flavor = "multi_thread")]
+    async fn web_baseline_tick_records_without_delivering() {
+        let sender = Arc::new(FakeSender::new());
+        let (push, _dir) = push_state(sender.clone());
+        push.upsert(sub("https://dev", Some(false))).await.unwrap();
+
+        let snap = crate::data::FleetSnapshot::from_parts(
+            crate::data::CoreSnapshot {
+                sessions: json!([]),
+                needs: json!([
+                    { "kind": "ASK", "session": { "cwd": "/ask" }, "channels": ["web", "os"] },
+                ]),
+            },
+            Value::Null,
+        );
+        let last =
+            deliver_web_transitions(&push, &snap, &std::collections::HashMap::new(), false).await;
+        assert_eq!(
+            sender.sent.load(Ordering::SeqCst),
+            0,
+            "baseline never buzzes"
+        );
+        assert_eq!(
+            last.get("/ask").map(String::as_str),
+            Some("ASK"),
+            "but records state"
+        );
     }
 
     #[test]

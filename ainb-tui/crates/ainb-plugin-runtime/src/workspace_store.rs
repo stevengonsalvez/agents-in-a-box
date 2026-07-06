@@ -1,7 +1,7 @@
 //! Host-side logic for the `host/workspace_*` caps (P5.5).
 //!
 //! Workspace *switching* is host-only state: the active and default workspace
-//! ids (plus the danger-warning acks) live in `~/.ainb/hangar/state.toml`, NOT
+//! ids (plus the danger-warning acks) live in `~/.agents-in-a-box/hangar/state.toml`, NOT
 //! in the daemon's `SQLite` store. The daemon owns the *catalogue* of workspaces
 //! (their ULID `id` + `slug` + `name`); the host owns *which one is active*.
 //! The plugin reads the catalogue + the active/default flags via these caps and
@@ -90,7 +90,7 @@ impl SwitchState {
 
 /// The injected host workspace store.
 ///
-/// Production reads/writes `~/.ainb/hangar/state.toml` and pushes
+/// Production reads/writes `~/.agents-in-a-box/hangar/state.toml` and pushes
 /// `WorkspaceChanged` on a broadcast channel; tests use an in-memory double.
 /// All methods are infallible at the trait boundary except the IO-touching
 /// setters, which surface an [`RpcError`] the handler returns verbatim.
@@ -254,23 +254,19 @@ const DEFAULT_KEY: &str = "default_workspace";
 
 /// Resolve the default state-file path: `{hangar_home}/hangar/state.toml`.
 ///
-/// Mirrors the daemon's home resolution (`$AINB_HANGAR_HOME`, else `~/.ainb`),
-/// so the file lives beside `hangar.db` / `env.allow.toml`.
+/// Delegates to the shared [`ainb_hangar_core::hangar_home`] resolver
+/// (`$AINB_HANGAR_HOME` verbatim when set, else `~/.agents-in-a-box`), so the
+/// file lives beside `hangar.db` / `env.allow.toml`.
 ///
 /// # Errors
 /// Returns an error if the home directory cannot be resolved.
 pub fn default_state_path() -> std::io::Result<PathBuf> {
-    let dir = match std::env::var_os("AINB_HANGAR_HOME").filter(|p| !p.is_empty()) {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()
-            .ok_or_else(|| {
-                std::io::Error::new(
-                    std::io::ErrorKind::NotFound,
-                    "could not resolve home directory",
-                )
-            })?
-            .join(".ainb"),
-    };
+    let dir = ainb_hangar_core::hangar_home().ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::NotFound,
+            "could not resolve home directory",
+        )
+    })?;
     Ok(dir.join("hangar").join("state.toml"))
 }
 
@@ -426,7 +422,7 @@ impl WorkspaceStore for StateTomlWorkspaceStore {
 #[must_use]
 pub fn default_store() -> SharedWorkspaceStore {
     let path = default_state_path()
-        .unwrap_or_else(|_| PathBuf::from(".ainb").join("hangar").join("state.toml"));
+        .unwrap_or_else(|_| PathBuf::from(".agents-in-a-box").join("hangar").join("state.toml"));
     Arc::new(StateTomlWorkspaceStore::new(path, Vec::new()))
 }
 

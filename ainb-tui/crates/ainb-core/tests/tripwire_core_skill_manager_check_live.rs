@@ -48,6 +48,12 @@ fn seed_onboarding(layout: &SandboxLayout) {
         env!("CARGO_PKG_VERSION")
     );
     std::fs::write(cfg.join("onboarding.toml"), onboarding).expect("onboarding");
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    std::fs::write(
+        layout.root.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 }
 
 fn capture(session: &str) -> String {

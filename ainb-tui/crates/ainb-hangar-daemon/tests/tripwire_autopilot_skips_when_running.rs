@@ -73,6 +73,10 @@ async fn next_event(
     tokio::time::timeout(timeout, rx.recv()).await.ok().flatten()
 }
 
+// One linear scheduler scenario (seed → first fire → saturated skip → drain);
+// splitting it would separate the in-flight-run setup from the skip assertion
+// it exists to explain.
+#[allow(clippy::too_many_lines)]
 #[tokio::test]
 async fn autopilot_skips_tick_when_prior_run_in_flight() {
     let dir = tempfile::tempdir().expect("tempdir");
@@ -87,6 +91,9 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         instructions: None,
         cron_expr: "*/5 * * * *".to_string(),
         max_concurrent_runs: 1,
+        execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+        // The default policy: a tick at the in-flight limit is dropped.
+        concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
     };
     let create_clock = FixedClock(T0);
     let autopilot_id = AutopilotRepo::create(&pool, &create_clock, &req)

@@ -22,7 +22,7 @@ fn default_allowlist_passes_through_home_path_term() {
         ("PATH", "/usr/bin"),
         ("TERM", "xterm-256color"),
         // Not on the allowlist — must be dropped.
-        ("MULTICA_SECRET", "leak"),
+        ("FOREIGN_SECRET", "leak"),
         ("RUST_LOG", "debug"),
     ]);
 
@@ -32,8 +32,8 @@ fn default_allowlist_passes_through_home_path_term() {
     assert_eq!(out.get("PATH").map(String::as_str), Some("/usr/bin"));
     assert_eq!(out.get("TERM").map(String::as_str), Some("xterm-256color"));
     assert!(
-        !out.contains_key("MULTICA_SECRET"),
-        "non-allowlisted MULTICA_* must not survive"
+        !out.contains_key("FOREIGN_SECRET"),
+        "non-allowlisted FOREIGN_* must not survive"
     );
     assert!(
         !out.contains_key("RUST_LOG"),

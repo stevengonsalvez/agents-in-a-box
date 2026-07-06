@@ -26,7 +26,7 @@
 //! ```
 //!
 //! All thresholds key off an injected [`HangarClock`] and a [`SweeperConfig`]:
-//! production uses the Multica defaults, tests inject a frozen clock and tight
+//! production uses the reference defaults, tests inject a frozen clock and tight
 //! config so the suite is deterministic (no `tokio::time::sleep`).
 //!
 //! # Idempotency
@@ -35,7 +35,7 @@
 //! terminal (`done` / `failed` / `cancelled`) row is never touched and a second
 //! pass over the same backlog is a no-op once the rows have moved.
 //!
-//! Multica source-line references:
+//! Reference control-plane source-line references:
 //! - queued TTL = 2h    (`runtime_sweeper.go:52`)
 //! - running TTL = 2.5h  (`runtime_sweeper.go:40`)
 //! - dispatched reclaim window = 90s (`task.go:85`)
@@ -43,7 +43,7 @@
 // The TTL constants below are intentionally expressed in seconds: every
 // threshold is a "minutes / hours" quantity but `Duration::from_mins` /
 // `from_hours` are still unstable, and a raw second count is the clearest stable
-// spelling for a timeout (and matches the Multica source values cited beside
+// spelling for a timeout (and matches the reference source values cited beside
 // each one).
 #![allow(clippy::duration_suboptimal_units)]
 
@@ -52,7 +52,7 @@ use std::time::Duration;
 use ainb_hangar_core::clock::HangarClock;
 use sqlx::SqlitePool;
 
-/// How long a `queued` task may wait before it is failed. Multica:
+/// How long a `queued` task may wait before it is failed. Reference:
 /// `runtime_sweeper.go:52` (2 hours).
 pub const QUEUED_TTL: Duration = Duration::from_secs(7_200);
 
@@ -61,18 +61,18 @@ pub const QUEUED_TTL: Duration = Duration::from_secs(7_200);
 pub const DISPATCHED_TTL: Duration = Duration::from_secs(300);
 
 /// The window after dispatch in which a stale dispatch is *reclaimed* (returned
-/// to `queued`) rather than failed, to tolerate a lost claim response. Multica:
+/// to `queued`) rather than failed, to tolerate a lost claim response. Reference:
 /// `task.go:85` (90 seconds).
 pub const RECLAIM_WINDOW: Duration = Duration::from_secs(90);
 
-/// How long a `running` task may execute before it is failed. Multica:
+/// How long a `running` task may execute before it is failed. Reference:
 /// `runtime_sweeper.go:40` (2.5 hours).
 pub const RUNNING_TTL: Duration = Duration::from_secs(9_000);
 
 /// Default per-pass row cap.
 ///
 /// Bounds the size of each sweep's write transaction so a large backlog does not
-/// hold one long-running `UPDATE` (matches the Multica batch behaviour; for
+/// hold one long-running `UPDATE` (matches the reference batch behaviour; for
 /// `SQLite` WAL it keeps writer latency low).
 pub const DEFAULT_BATCH_SIZE: i64 = 500;
 
@@ -80,9 +80,18 @@ pub const DEFAULT_BATCH_SIZE: i64 = 500;
 /// individual sweep functions).
 pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 
+/// Default interval between workspace-GC passes (the on-disk orphan/Full reclaim
+/// driven by [`crate::execenv::sweep_workspaces_gc`]).
+///
+/// Far longer than the row-sweep cadence: the 72h grace window means a leaked
+/// dir is never near reclaim before hours have passed, so scanning the disk
+/// hourly is ample (and keeps the IO cost negligible). Overridable via
+/// `HANGAR_GC_INTERVAL_MS` for deterministic / tight-budget tests.
+pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(3_600);
+
 /// Tunable thresholds for the sweepers.
 ///
-/// Production constructs [`SweeperConfig::default`] (the Multica defaults);
+/// Production constructs [`SweeperConfig::default`] (the reference defaults);
 /// tests override individual fields to drive deterministic time-based cases and
 /// to exercise the batch cap with a small backlog.
 #[derive(Debug, Clone, Copy)]
@@ -97,6 +106,8 @@ pub struct SweeperConfig {
     pub running_ttl: Duration,
     /// Interval between sweep passes (consumed by the daemon scheduler).
     pub sweep_interval: Duration,
+    /// Interval between workspace-GC passes (on-disk orphan/Full reclaim).
+    pub gc_interval: Duration,
     /// Maximum rows mutated per pass.
     pub batch_size: i64,
 }
@@ -109,6 +120,7 @@ impl Default for SweeperConfig {
             reclaim_window: RECLAIM_WINDOW,
             running_ttl: RUNNING_TTL,
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
+            gc_interval: DEFAULT_GC_INTERVAL,
             batch_size: DEFAULT_BATCH_SIZE,
         }
     }
@@ -197,8 +209,8 @@ pub async fn sweep_stale_running(
 /// `dispatched_at` cleared (a re-claim re-stamps it) and the `attempt` counter
 /// **unchanged** (a reclaim is a redelivery, not a retry). A task that has
 /// already started is skipped — it is racing a live run. Past the dispatch TTL a
-/// stuck dispatch is failed by [`sweep_stale_dispatched`]. Mirrors Multica
-/// `agent.sql.go:1979 ReclaimStaleDispatchedTaskForRuntime`.
+/// stuck dispatch is failed by [`sweep_stale_dispatched`]. Mirrors the reference
+/// control plane `agent.sql.go:1979 ReclaimStaleDispatchedTaskForRuntime`.
 ///
 /// Returns the number of rows reclaimed in this pass.
 ///
@@ -217,7 +229,7 @@ pub async fn reclaim_stale_dispatched(
     // reclaim_window`. Past the TTL the dispatch is a hard failure, not a
     // redelivery, so the fail step ([`sweep_stale_dispatched`]) owns it; the
     // upper bound here keeps the two steps disjoint regardless of order.
-    // (Mirrors Multica `agent.sql.go:1979`
+    // (Mirrors the reference `agent.sql.go:1979`
     // `ReclaimStaleDispatchedTaskForRuntime`.)
     let window_cutoff = now - ms(cfg.reclaim_window);
     let ttl_cutoff = now - ms(cfg.dispatched_ttl);
@@ -292,6 +304,57 @@ pub async fn sweep_stale_dispatched(
         );
     }
     Ok(DispatchSweepOutcome { reclaimed, failed })
+}
+
+/// Reclaim a crashed daemon's orphaned in-flight tasks back to `queued` at
+/// startup (e38.25 crash recovery).
+///
+/// When a daemon dies uncleanly (`kill -9`, OOM, panic) mid-task its claimed
+/// rows are left frozen in `dispatched` or `running` — the FSM step that would
+/// have finalised them never ran. The time-based sweepers eventually move them
+/// (a `running` row only past the 2.5h running TTL; a `dispatched` row past the
+/// 90s reclaim window), but on a fresh boot there is no need to wait: the
+/// process that *was* executing those tasks is, by definition, gone. So at
+/// startup the newly-booted daemon reclaims every non-terminal in-flight row it
+/// owns — scoped to **its own** `runtime_id` so a sibling daemon's live runs in
+/// a multi-runtime deployment are never disturbed — back to `queued`, clearing
+/// `started_at` / `dispatched_at` so a fresh claim re-dispatches the work. The
+/// `attempt` counter is left **unchanged** (a crash redelivery is not a retry,
+/// mirroring [`reclaim_stale_dispatched`]).
+///
+/// This is the redelivery the daemon-restart path needs: the orphan leaves its
+/// `running`/`dispatched` limbo immediately on restart rather than stranding the
+/// work for hours. Mirrors the reference's runtime-scoped reclaim-on-boot.
+///
+/// Returns the number of rows reclaimed.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the statement fails.
+pub async fn reclaim_orphaned_on_startup(
+    pool: &SqlitePool,
+    runtime_id: &str,
+) -> Result<u64, sqlx::Error> {
+    let reclaimed = sqlx::query(
+        "UPDATE agent_task_queue \
+         SET status = 'queued', started_at = NULL, dispatched_at = NULL \
+         WHERE runtime_id = ?1 \
+           AND status IN ('dispatched', 'running')",
+    )
+    .bind(runtime_id)
+    .execute(pool)
+    .await?
+    .rows_affected();
+    if reclaimed > 0 {
+        tracing::info!(
+            kind = "startup",
+            outcome = "reclaimed",
+            count = reclaimed,
+            runtime_id,
+            "sweeper_startup_reclaim"
+        );
+    }
+    Ok(reclaimed)
 }
 
 /// Fail up to `batch_size` rows in `from_status` whose `age_column` is older

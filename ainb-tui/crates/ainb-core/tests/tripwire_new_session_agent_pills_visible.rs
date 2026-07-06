@@ -34,11 +34,7 @@ fn agent_row_renders_inline_pills_in_custom() {
         .expect("tmux new-session");
     assert!(status.success());
 
-    let cmd = format!(
-        "HOME={} AINB_DISABLE_PLUGINS=1 exec {} tui",
-        home_path.display(),
-        ainb.display()
-    );
+    let cmd = launch_cmd_gh_authed(&home_path, &ainb);
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
         .status()

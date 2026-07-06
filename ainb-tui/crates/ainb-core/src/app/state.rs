@@ -3020,6 +3020,19 @@ pub struct AppState {
     pub plugin_last_render_viewport:
         std::collections::HashMap<crate::app::screens::ScreenId, (u16, u16)>,
 
+    /// Whether each plugin-owned screen's focused surface is currently capturing
+    /// free text (a title/filter/compose/search/API-key input), as reported by
+    /// its last frame's `RenderResult.captures_text`. Refreshed every tick by
+    /// `tick_plugin_renders` from `RuntimeHandle::captures_text`.
+    ///
+    /// While the entry for `current_screen` is `true`, the host key dispatch
+    /// (`is_text_input_context` + the plugin key-forwarder) suppresses its own
+    /// global single-character shortcuts (`H`/`?`/`W`) and forwards `?`/`H` to
+    /// the plugin so keystrokes land in the input verbatim instead of toggling
+    /// help / wiring the statusline (8hx). Absent entry (never painted, or not a
+    /// plugin screen) reads as `false`.
+    pub plugin_captures_text: std::collections::HashMap<crate::app::screens::ScreenId, bool>,
+
     /// Cheap Send + Clone façade onto the plugin runtime, populated by
     /// `App::init`. `None` when running plugin-free (e.g. tests, or
     /// installs that haven't completed bundled-plugin discovery yet).
@@ -3546,6 +3559,7 @@ impl Default for AppState {
             plugin_render_areas: std::collections::HashMap::new(),
             plugin_render_origins: std::collections::HashMap::new(),
             plugin_last_render_viewport: std::collections::HashMap::new(),
+            plugin_captures_text: std::collections::HashMap::new(),
             plugin_runtime: None,
 
             statusline_status_cache: None,
@@ -4038,6 +4052,29 @@ impl AppState {
         self.current_screen = screen_ids::ONBOARDING.to_string();
     }
 
+    /// Map a finished wizard `OnboardingState` onto the persisted
+    /// `OnboardingConfig`.
+    ///
+    /// This is the take-effect seam for the first-run questionnaire: it copies
+    /// the user's source/role/use-case selections (plus git directories and
+    /// skipped dependencies) into the config that `complete_onboarding` writes
+    /// to disk. Kept as a pure function so the mapping can be exercised in
+    /// isolation without touching the real `~/.agents-in-a-box` directory.
+    fn onboarding_config_from_state(
+        state: &crate::components::onboarding::OnboardingState,
+    ) -> crate::config::OnboardingConfig {
+        use crate::config::OnboardingConfig;
+
+        let mut config = OnboardingConfig::default();
+        config.mark_completed();
+        config.git_directories = state.get_valid_directories();
+        config.skipped_dependencies = state.skipped_dependencies.clone();
+        config.source = state.selected_source();
+        config.role = state.selected_role();
+        config.use_case = state.selected_use_case();
+        config
+    }
+
     /// Persist the onboarding git directories immediately — called when leaving
     /// the Git Directories step in any direction (Next / Back / to menu) so the
     /// user's edit is saved without having to finish the whole wizard.
@@ -4071,14 +4108,9 @@ impl AppState {
 
     /// Complete the onboarding process
     pub fn complete_onboarding(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
-        use crate::config::OnboardingConfig;
-
         if let Some(state) = &self.onboarding_state {
             // Save onboarding config
-            let mut config = OnboardingConfig::default();
-            config.mark_completed();
-            config.git_directories = state.get_valid_directories();
-            config.skipped_dependencies = state.skipped_dependencies.clone();
+            let config = Self::onboarding_config_from_state(state);
             config.save().map_err(|e| format!("Failed to save onboarding config: {}", e))?;
 
             // Update app config with git directories
@@ -10916,33 +10948,46 @@ impl AppState {
             }
         };
 
-        // --- 2. Check and flip headroom_enabled in SessionStore ---
-        let mut store = crate::interactive::SessionStore::load();
-        match store.sessions.get(&tmux_session_name) {
-            None => {
-                self.add_warning_notification(
-                    "Session not found in store — Headroom state unknown".to_string(),
-                );
-                return Ok(());
+        // --- 2 + 3. Check and flip headroom_enabled in SessionStore ---
+        //
+        // Scoped block so the cross-process lock (pu4) is held ONLY across the
+        // load-inspect-mutate-save window and released before the slow tmux
+        // respawn below — never hold the sessions.json lock across async IO.
+        // The lock is best-effort: on failure we proceed unlocked rather than
+        // abort the downgrade. The early-return paths drop the guard (unlock)
+        // as they leave the block.
+        {
+            let _lock = crate::interactive::SessionStore::lock()
+                .map_err(|e| warn!("Failed to lock sessions.json for Headroom flip: {e}"))
+                .ok();
+            let mut store = crate::interactive::SessionStore::load();
+            match store.sessions.get(&tmux_session_name) {
+                None => {
+                    self.add_warning_notification(
+                        "Session not found in store — Headroom state unknown".to_string(),
+                    );
+                    return Ok(());
+                }
+                Some(meta) if !meta.headroom_enabled => {
+                    self.add_info_notification(
+                        "Session is already direct (Headroom off)".to_string(),
+                    );
+                    return Ok(());
+                }
+                _ => {}
             }
-            Some(meta) if !meta.headroom_enabled => {
-                self.add_info_notification("Session is already direct (Headroom off)".to_string());
-                return Ok(());
-            }
-            _ => {}
-        }
 
-        // --- 3. Persist headroom_enabled = false ---
-        if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
-            meta.headroom_enabled = false;
-        }
-        if let Err(e) = store.save() {
-            // Non-fatal: we still attempt the respawn; the flag will be
-            // re-read from a stale store on the next restart, so log clearly.
-            warn!(
-                "Failed to persist headroom_enabled=false for {}: {}",
-                tmux_session_name, e
-            );
+            if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
+                meta.headroom_enabled = false;
+            }
+            if let Err(e) = store.save() {
+                // Non-fatal: we still attempt the respawn; the flag will be
+                // re-read from a stale store on the next restart, so log clearly.
+                warn!(
+                    "Failed to persist headroom_enabled=false for {}: {}",
+                    tmux_session_name, e
+                );
+            }
         }
 
         // --- 4. Build the resume command (no env prefix — headroom is off) ---
@@ -11000,12 +11045,12 @@ impl AppState {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             // Restore the headroom flag in the store so the next manual
-            // restart picks it back up (best-effort).
-            let mut store2 = crate::interactive::SessionStore::load();
-            if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
-                meta.headroom_enabled = true;
-            }
-            let _ = store2.save();
+            // restart picks it back up (best-effort, locked RMW — pu4).
+            let _ = crate::interactive::SessionStore::mutate(|store2| {
+                if let Some(meta) = store2.sessions.get_mut(&tmux_session_name) {
+                    meta.headroom_enabled = true;
+                }
+            });
             anyhow::bail!(
                 "tmux respawn-pane failed for {}: {}",
                 tmux_session_name,
@@ -11207,6 +11252,16 @@ impl App {
 
         for (screen_id, plugin_id) in PLUGIN_SCREENS {
             let pid = ainb_plugin_runtime::PluginId::from(*plugin_id);
+
+            // Refresh the text-capture flag from the plugin's last frame every
+            // tick (one atomic load; `false` for an unregistered plugin). The
+            // host key dispatch reads this for the focused screen to suppress
+            // its global single-char shortcuts while a plugin input is focused
+            // (8hx). Done before the lifecycle skip so an unregistered plugin's
+            // stale flag is cleared to false rather than lingering true.
+            self.state
+                .plugin_captures_text
+                .insert((*screen_id).to_string(), handle.captures_text(&pid));
 
             // Skip plugins the runtime doesn't know about — keeps the
             // loop cheap and resilient when discovery comes up empty.

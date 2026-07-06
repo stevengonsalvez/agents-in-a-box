@@ -2,7 +2,7 @@
 //!
 //! Owns the `SQLite` schema (via embedded [`sqlx`] migrations) and the
 //! repository wrappers that the daemon and services build on. This crate is the
-//! single source of truth for the on-disk shape of `~/.ainb/hangar.db`.
+//! single source of truth for the on-disk shape of `~/.agents-in-a-box/hangar.db`.
 //!
 //! # Migrations
 //!
@@ -33,8 +33,8 @@ pub mod service;
 ///
 /// Promoted out of [`service::finalize`] so the P1.4 retry sweeper (and any
 /// future finalizer) can reuse the exact same 0-row-UPDATE → re-read →
-/// success-or-mismatch algorithm the four P1.3 services share. Mirrors Multica
-/// `task.go:1010`.
+/// success-or-mismatch algorithm the four P1.3 services share. Mirrors the
+/// reference control plane `task.go:1010`.
 pub use service::finalize::{
     FinalizeError, FinalizeOutcome, finalize_idempotent as idempotent_finalize,
 };

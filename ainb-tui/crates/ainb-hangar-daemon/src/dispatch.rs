@@ -4,7 +4,7 @@
 //! lives in [`ainb_hangar_core::env_policy`]):
 //!
 //! - [`load_allow_at`] / [`save_allow_at`] read and write
-//!   `~/.ainb/hangar/env.allow.toml`, reading only the `[env].allow` array while
+//!   `~/.agents-in-a-box/hangar/env.allow.toml`, reading only the `[env].allow` array while
 //!   **preserving every foreign section** of the document (per
 //!   `reference_toml_value_roundtrip_plugin_config`): the original
 //!   [`toml::Value`] is round-tripped untouched and only the `env.allow` array
@@ -61,21 +61,15 @@ impl EnvAllowConfig {
 
 /// Resolve the default config path: `{hangar_home}/hangar/env.allow.toml`.
 ///
-/// Mirrors the daemon's home resolution (`$AINB_HANGAR_HOME`, else `~/.ainb`),
-/// so the config lives beside `hangar.db`.
+/// Delegates to [`crate::hangar_dir`] (and thus the shared
+/// [`ainb_hangar_core::hangar_home`]) so the config lives beside `hangar.db`
+/// under the one home contract.
 ///
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be resolved.
 pub fn default_allow_path() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty())
-    {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".ainb"),
-    };
-    Ok(dir.join("hangar").join("env.allow.toml"))
+    Ok(crate::hangar_dir()?.join("hangar").join("env.allow.toml"))
 }
 
 /// Load the allow config from `path`.

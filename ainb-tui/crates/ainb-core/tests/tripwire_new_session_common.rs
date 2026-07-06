@@ -33,6 +33,52 @@ pub fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
 }
 
+/// Write a fake `gh` onto an isolated bin dir that behaves like a
+/// signed-in CLI: `gh auth status …` exits 0. Returns the bin dir to
+/// prepend onto PATH.
+///
+/// Entering the seeded GitHub-shorthand favorite triggers the
+/// `gh auth status` pre-check (`StartClone` → `CheckGitAuth`). Under an
+/// isolated `$HOME` the box's real `gh` has no usable credentials there, so
+/// the probe fails closed and parks the flow on the "GitHub auth required"
+/// modal instead of advancing to Configure. A stub that exits 0 lets the
+/// pre-check pass so the flow reaches the state each tripwire exercises.
+/// Mirrors the logged-out `seed_logged_out_gh` in
+/// `tripwire_new_session_github_auth_no_gh.rs`.
+pub fn seed_logged_in_gh(home: &Path) -> PathBuf {
+    let bin = home.join("fakebin");
+    fs::create_dir_all(&bin).unwrap();
+    let gh = bin.join("gh");
+    fs::write(
+        &gh,
+        "#!/bin/sh\n\
+         # Stub: simulates `gh` installed and signed in.\n\
+         echo 'Logged in to github.com account trip (keyring)' 1>&2\n\
+         exit 0\n",
+    )
+    .unwrap();
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&gh, fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    bin
+}
+
+/// Standard TUI launch command for the isolated-HOME tripwires, with a
+/// signed-in `gh` stub prepended onto PATH so the GitHub auth pre-check
+/// passes (see [`seed_logged_in_gh`]). `$PATH` expands in the launch shell
+/// before `exec` replaces it, so keystrokes still hit `ainb` directly.
+pub fn launch_cmd_gh_authed(home: &Path, bin: &Path) -> String {
+    let fakebin = seed_logged_in_gh(home);
+    format!(
+        "HOME={home} PATH={fake}:$PATH AINB_DISABLE_PLUGINS=1 exec {bin} tui",
+        home = home.display(),
+        fake = fakebin.display(),
+        bin = bin.display(),
+    )
+}
+
 /// True when `tmux` is on PATH and responsive — gates the PTY tripwires
 /// so CI hosts without tmux skip rather than fail.
 pub fn tmux_available() -> bool {
@@ -60,6 +106,12 @@ git_directories = []
         env!("CARGO_PKG_VERSION")
     );
     fs::write(cfg.join("onboarding.toml"), onboarding).unwrap();
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    fs::write(
+        home.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 }
 
 /// Seed `favorites.yaml` with a single `ainb-tui` GithubShorthand entry so
@@ -229,26 +281,49 @@ pub fn seed_local_git_repo(home: &Path) -> PathBuf {
     repo
 }
 
-/// Write a `favorites.yaml` whose single entry points at the on-disk
-/// `seeded-repo`. Replaces the GithubShorthand default used by
-/// `seed_new_session_fixtures` for tripwires that need a real LocalPath.
-pub fn seed_favorites_pointing_at(home: &Path, repo: &Path) {
+/// Write an empty `favorites.yaml` (no starred repos). Local repos surface via
+/// the WorkspaceScanner cache (📁 rows), not favorites — a local-path favorite
+/// no longer exists as a concept: the startup `migrate_local_to_remote` pass
+/// rewrites any local-path star to its `origin` remote, or DROPS it when the
+/// repo has no remote. Tripwires exercising the local-launch path therefore
+/// pre-warm the repo cache (see [`seed_repo_cache`]) instead of seeding a star.
+pub fn seed_empty_favorites(home: &Path) {
     let root = home.join(".agents-in-a-box");
     fs::create_dir_all(&root).unwrap();
-    let yaml = format!(
-        r#"version: 1
-favorites:
-  - alias: seeded-repo
-    source_type: local_path
-    source: {}
-    stats:
-      created_at: 2026-05-01T00:00:00Z
-      last_used: 2026-05-01T00:00:00Z
-      use_count: 0
-settings:
-  auto_promote_threshold: 5
-"#,
-        repo.display()
+    fs::write(
+        root.join("favorites.yaml"),
+        "version: 1\nfavorites: []\nsettings:\n  auto_promote_threshold: 5\n",
+    )
+    .unwrap();
+}
+
+/// Pre-warm the `WorkspaceScanner` repository cache
+/// (`~/.agents-in-a-box/cache/repositories.json`) so the given local repos
+/// surface as 📁 local-scan rows on the FIRST PickRepo open.
+///
+/// The live scan runs in a background `spawn_blocking` AFTER the picker is
+/// constructed from the cache, so on a cold cache the 📁 rows only appear on a
+/// second open. Deterministic tripwires seed the cache directly, mirroring the
+/// on-disk shape of `RepositoryCache` (a warm cache = "the scanner already ran").
+pub fn seed_repo_cache(home: &Path, repos: &[&Path]) {
+    let cache_dir = home.join(".agents-in-a-box").join("cache");
+    fs::create_dir_all(&cache_dir).unwrap();
+    let entries: Vec<String> = repos
+        .iter()
+        .map(|r| {
+            let name = r.file_name().and_then(|n| n.to_str()).unwrap_or("repo");
+            // `{:?}` on a &str emits a valid, escaped JSON string literal.
+            format!(
+                "{{\"path\":{:?},\"name\":{:?}}}",
+                r.display().to_string(),
+                name
+            )
+        })
+        .collect();
+    let json = format!(
+        "{{\"version\":1,\"last_scan\":\"2026-05-01T00:00:00Z\",\
+         \"scan_paths\":[],\"scan_paths_mtime\":{{}},\"repositories\":[{}]}}",
+        entries.join(",")
     );
-    fs::write(root.join("favorites.yaml"), yaml).unwrap();
+    fs::write(cache_dir.join("repositories.json"), json).unwrap();
 }

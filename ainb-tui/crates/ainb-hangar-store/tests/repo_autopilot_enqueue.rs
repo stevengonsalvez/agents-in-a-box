@@ -90,6 +90,8 @@ async fn seed_autopilot(store: &Store) -> ainb_hangar_store::repo::autopilot::Au
             instructions: Some("do the thing".to_string()),
             cron_expr: "0 9 * * *".to_string(),
             max_concurrent_runs: 1,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
         },
     )
     .await
@@ -149,6 +151,120 @@ async fn fire_creates_run_and_task_atomically() {
         link.as_deref(),
         Some(run_id.as_str()),
         "task.autopilot_run_id must equal the created run id"
+    );
+}
+
+#[tokio::test]
+async fn run_only_mode_fires_an_issueless_task() {
+    // The default execution mode: the fired tick enqueues a task with
+    // issue_id = NULL (no tracked work item) — the v1 hard-coded behaviour.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let autopilot = seed_autopilot(&store).await;
+    assert_eq!(
+        autopilot.execution_mode,
+        ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
+        "the seed autopilot is run_only"
+    );
+    let clock = FixedClock(T0);
+
+    let (_run_id, task_id) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &clock,
+        &autopilot,
+    )
+    .await
+    .expect("fire tick");
+
+    let task = TaskRepo::get_by_id(store.pool(), task_id.as_str())
+        .await
+        .expect("get task")
+        .expect("task present");
+    assert_eq!(
+        task.issue_id, None,
+        "run_only mode must enqueue an issue-less task"
+    );
+    // No issue row was created.
+    let issue_count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .expect("count issues");
+    assert_eq!(issue_count, 0, "run_only mode creates no issue");
+}
+
+#[tokio::test]
+async fn create_issue_mode_fires_an_issue_then_a_task_against_it() {
+    // The create_issue execution mode: the fired tick first creates a fresh
+    // issue (authored by the autopilot's agent) and then enqueues the task
+    // AGAINST that issue, so the run has a tracked work item.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let mut autopilot = seed_autopilot(&store).await;
+    autopilot.execution_mode = ainb_hangar_store::repo::autopilot::ExecutionMode::CreateIssue;
+    let clock = FixedClock(T0);
+
+    let (run_id, task_id) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &clock,
+        &autopilot,
+    )
+    .await
+    .expect("fire tick");
+
+    // Exactly one issue was created, in the autopilot's workspace, authored by
+    // the autopilot's agent.
+    let issue_count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .expect("count issues");
+    assert_eq!(
+        issue_count, 1,
+        "create_issue mode creates exactly one issue"
+    );
+    let issue_row =
+        sqlx::query("SELECT workspace_id, creator_type, creator_id, state FROM issue LIMIT 1")
+            .fetch_one(store.pool())
+            .await
+            .expect("read created issue");
+    assert_eq!(
+        issue_row.get::<String, _>("workspace_id"),
+        autopilot.workspace_id
+    );
+    assert_eq!(
+        issue_row.get::<String, _>("creator_type"),
+        "agent",
+        "the issue is authored by the autopilot's agent"
+    );
+    assert_eq!(issue_row.get::<String, _>("creator_id"), autopilot.agent_id);
+    assert_eq!(issue_row.get::<String, _>("state"), "open");
+    let issue_id: String = sqlx::query_scalar("SELECT id FROM issue LIMIT 1")
+        .fetch_one(store.pool())
+        .await
+        .expect("read issue id");
+
+    // The task links to BOTH the new issue and the new run (a tracked autopilot
+    // run, vs run_only's issue_id = NULL).
+    let task = TaskRepo::get_by_id(store.pool(), task_id.as_str())
+        .await
+        .expect("get task")
+        .expect("task present");
+    assert_eq!(
+        task.issue_id.as_deref(),
+        Some(issue_id.as_str()),
+        "create_issue mode links the task to the new issue"
+    );
+    let link: Option<String> =
+        sqlx::query_scalar("SELECT autopilot_run_id FROM agent_task_queue WHERE id = ?")
+            .bind(task_id.as_str())
+            .fetch_one(store.pool())
+            .await
+            .expect("read run link");
+    assert_eq!(
+        link.as_deref(),
+        Some(run_id.as_str()),
+        "the task still links to the fired run"
     );
 }
 
@@ -256,8 +372,10 @@ async fn task_kind_is_autopilot() {
             agent_id: "agent-1".to_string(),
             issue_id: Some("issue-1".to_string()),
             work_dir: None,
+            priority: 0,
             created_at: T0,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await
@@ -373,4 +491,94 @@ async fn run_fails_when_task_fails() {
         Some(T0 + 30_000)
     );
     assert_eq!(run_row.get::<String, _>("status"), "failed");
+}
+
+#[tokio::test]
+async fn supersede_cancels_open_runs_and_their_tasks() {
+    // The `replace` policy's supersede step: every in-flight run is cancelled
+    // (with completed_at stamped) and its task cancelled (with finished_at
+    // stamped); a no-op leaves zero affected.
+    use ainb_hangar_store::repo::autopilot_run::supersede_in_flight;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let autopilot = seed_autopilot(&store).await;
+    let fire_clock = FixedClock(T0);
+
+    // Fire two runs (raise max_concurrent so both land), leaving both in flight.
+    let mut ap2 = autopilot.clone();
+    ap2.max_concurrent_runs = 5;
+    let (run1, task1) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &fire_clock,
+        &ap2,
+    )
+    .await
+    .expect("fire tick #1");
+    let (run2, task2) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &fire_clock,
+        &ap2,
+    )
+    .await
+    .expect("fire tick #2");
+    assert_eq!(
+        count_runs_in_flight(&store).await,
+        2,
+        "both runs are in flight before supersede"
+    );
+
+    // Supersede: both open runs + their tasks are cancelled.
+    let supersede_clock = FixedClock(T0 + 90_000);
+    let n = supersede_in_flight(store.pool(), &supersede_clock, &autopilot.id)
+        .await
+        .expect("supersede");
+    assert_eq!(n, 2, "two in-flight runs were superseded");
+
+    for run in [run1.as_str(), run2.as_str()] {
+        let row = sqlx::query("SELECT status, completed_at FROM autopilot_run WHERE id = ?")
+            .bind(run)
+            .fetch_one(store.pool())
+            .await
+            .expect("run row");
+        assert_eq!(row.get::<String, _>("status"), "cancelled");
+        assert_eq!(
+            row.get::<Option<i64>, _>("completed_at"),
+            Some(T0 + 90_000),
+            "completed_at stamped at supersede time"
+        );
+    }
+    for task in [task1.as_str(), task2.as_str()] {
+        let row = sqlx::query("SELECT status, finished_at FROM agent_task_queue WHERE id = ?")
+            .bind(task)
+            .fetch_one(store.pool())
+            .await
+            .expect("task row");
+        assert_eq!(row.get::<String, _>("status"), "cancelled");
+        assert_eq!(
+            row.get::<Option<i64>, _>("finished_at"),
+            Some(T0 + 90_000),
+            "task finished_at stamped at supersede time"
+        );
+    }
+    assert_eq!(
+        count_runs_in_flight(&store).await,
+        0,
+        "no runs remain in flight after supersede"
+    );
+
+    // A second supersede is a no-op (nothing in flight).
+    let n2 = supersede_in_flight(store.pool(), &supersede_clock, &autopilot.id)
+        .await
+        .expect("second supersede");
+    assert_eq!(n2, 0, "supersede with nothing in flight affects zero runs");
+}
+
+/// Count an autopilot's in-flight (not-yet-completed) runs.
+async fn count_runs_in_flight(store: &Store) -> i64 {
+    sqlx::query_scalar("SELECT count(*) FROM autopilot_run WHERE completed_at IS NULL")
+        .fetch_one(store.pool())
+        .await
+        .expect("count in-flight runs")
 }

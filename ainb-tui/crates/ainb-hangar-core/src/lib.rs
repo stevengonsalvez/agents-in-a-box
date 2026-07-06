@@ -10,10 +10,16 @@
 
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
+/// The card provider-agent kind (`claude`/`codex`/`copilot`) + the task-create
+/// default cascade (spec F4).
+pub mod agent_kind;
 /// Polymorphic assignee crosswalk between Hangar actors and `bd` strings (P2.3).
 pub mod assignee_crosswalk;
 /// Cron-scheduled autopilots (P7): the IO-free cron parser + next-tick math.
 pub mod autopilot;
+/// Notification channels + the per-kind channel SET a routed attention lands on
+/// (tcp T5 — notification routing rules).
+pub mod channel;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).
 pub mod clock;
 /// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded
@@ -27,8 +33,18 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// The single source of truth for the Hangar home directory
+/// ([`paths::hangar_home`], re-exported at the crate root). Every Hangar
+/// resolver delegates here so the `$AINB_HANGAR_HOME`-else-`~/.agents-in-a-box`
+/// contract lives in one place.
+pub mod paths;
 /// Parse the canonical `gh pr create` PR-URL line from agent stdout (P9.1).
 pub mod pr_url;
+/// Agent-profile domain (P5): the canonical Claude-subagent `.md` master format,
+/// the logical [`profile::ModelTier`], and the lossless-Claude / lossy-Codex
+/// down-compilers. Pure + IO-free — the daemon adds disk/DB/watch, the plugin
+/// borrows it for live preview.
+pub mod profile;
 /// The structured `agent_task_queue.result` JSON shape ([`result::TaskResult`]).
 pub mod result;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the
@@ -52,3 +68,14 @@ pub mod template;
 pub mod token;
 /// Danger-full-access warning ack keys + pure show/skip decision logic.
 pub mod warnings;
+/// Webhook signing primitives for webhook-triggered autopilots (e38.18).
+///
+/// HMAC-SHA256-of-body signature compute + constant-time verify, secret minting
+/// (digest stored, plaintext returned once), and the optional event filter — all
+/// IO-free. The HTTP ingress + secret-file storage live in the daemon / store.
+pub mod webhook;
+
+/// The Hangar home resolver, re-exported at the crate root so every consumer
+/// can call `ainb_hangar_core::hangar_home()` without naming the `paths`
+/// module. This is the single source of truth for the home contract.
+pub use paths::hangar_home;

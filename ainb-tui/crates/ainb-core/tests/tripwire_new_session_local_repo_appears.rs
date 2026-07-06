@@ -43,17 +43,16 @@ fn local_scan_path_surfaces_repo_as_folder_row() {
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
     // Empty favorites so the only candidate is a 📁 local row.
-    let root = home_tmp.path().join(".agents-in-a-box");
-    fs::create_dir_all(&root).unwrap();
-    fs::write(
-        root.join("favorites.yaml"),
-        "version: 1\nfavorites: []\nsettings:\n  auto_promote_threshold: 5\n",
-    )
-    .unwrap();
+    seed_empty_favorites(home_tmp.path());
     // Seed a real git repo under a workspace-scan path.
     let scan_dir = home_tmp.path().join("scanned");
     let repo = seed_local_git_repo_at(&scan_dir, "scanned-repo");
     seed_config_with_scan_path(home_tmp.path(), &scan_dir);
+    // Pre-warm the scanner cache so the repo surfaces on the FIRST open. The
+    // live rescan of `workspace_scan_paths` runs in the background *after* the
+    // picker is built, so a cold cache would only surface the 📁 row on a second
+    // open — the warm cache models "the scan of the scan-path already ran".
+    seed_repo_cache(home_tmp.path(), &[&repo]);
 
     let session = format!("tripwire-local-folder-{}", std::process::id());
     let ainb = ainb_bin();

@@ -197,7 +197,7 @@ fn help_overlay_documents_panels_section() {
         "Inbox (Esc closes)",
         "Stats / usage analytics (Esc closes)",
         "Witr process browser (quit witr to return)",
-        "Skills browser (Esc closes)",
+        "Skills catalogue (Esc closes)",
         "Memory / learnings browser (Esc closes)",
         "Abtop agent monitor (quit abtop to return)",
     ] {

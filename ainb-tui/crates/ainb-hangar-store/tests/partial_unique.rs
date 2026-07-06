@@ -1,13 +1,16 @@
 //! Partial-unique-index behaviour for `agent_task_queue`.
 //!
-//! The index `idx_one_pending_task_per_issue` enforces *at most one* non-terminal
-//! (`queued` or `dispatched`) task per `issue_id`, coalescing duplicate fires
-//! (per Multica `022_task_lifecycle_guards.up.sql`). These tests prove the three
-//! invariants the index must hold:
+//! The index `idx_one_pending_task_per_issue_agent` (migration 0012) enforces
+//! *at most one* non-terminal (`queued` or `dispatched`) task per
+//! `(issue_id, agent_id)` pair, coalescing duplicate fires per agent while
+//! letting DIFFERENT agents queue work on one issue in parallel (the reference's
+//! per-(issue, agent) model, `pkg/db/queries/agent.sql` `ClaimAgentTask`).
+//! These tests prove the four invariants the index must hold:
 //!
-//! 1. a second pending task for the same issue is rejected,
+//! 1. a second pending task for the same issue AND agent is rejected,
 //! 2. once the first task leaves the pending set, a fresh pending task is allowed,
-//! 3. tasks with a `NULL` `issue_id` (chat / autopilot placeholders at v1) never
+//! 3. a second pending task for the same issue but a DIFFERENT agent is allowed,
+//! 4. tasks with a `NULL` `issue_id` (chat / autopilot placeholders at v1) never
 //!    collide.
 
 use ainb_hangar_store::Store;
@@ -93,8 +96,10 @@ fn new_task(id: &str, issue_id: Option<&str>) -> NewTask {
         agent_id: "agent-1".to_string(),
         issue_id: issue_id.map(str::to_string),
         work_dir: None,
+        priority: 0,
         created_at: 1_700_000_000_000,
         autopilot_run_id: None,
+        generation: 0,
     }
 }
 
@@ -145,6 +150,39 @@ async fn transitioning_first_to_done_then_inserting_second_pending_succeeds() {
     TaskRepo::insert(store.pool(), &new_task("task-2", Some("issue-1")))
         .await
         .expect("second pending task allowed once the first is terminal");
+}
+
+#[tokio::test]
+async fn second_pending_task_same_issue_different_agent_is_allowed() {
+    // Per-(issue, agent) scope (migration 0012, reference ClaimAgentTask parity):
+    // a DIFFERENT agent may hold its own pending task on the same issue.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    seed_issue(&store, "issue-1").await;
+    sqlx::query(
+        "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind("agent-2")
+    .bind("ws-1")
+    .bind("Agent Two")
+    .bind("rt-1")
+    .bind("workspace")
+    .bind("user-1")
+    .execute(store.pool())
+    .await
+    .expect("insert second agent");
+
+    TaskRepo::insert(store.pool(), &new_task("task-1", Some("issue-1")))
+        .await
+        .expect("agent-1 pending task inserts");
+
+    let mut other = new_task("task-2", Some("issue-1"));
+    other.agent_id = "agent-2".to_string();
+    TaskRepo::insert(store.pool(), &other)
+        .await
+        .expect("a different agent's pending task on the same issue must not collide");
 }
 
 #[tokio::test]

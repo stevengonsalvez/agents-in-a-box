@@ -7,8 +7,8 @@
 //!
 //! Asserts:
 //!   1. Branch line shows `agents/<8-hex>` immediately on Configure open.
-//!   2. After switching to Custom + Boss and typing a multi-word prompt, the
-//!      branch suffix is UNCHANGED (no slug-from-prompt regression).
+//!   2. After selecting the `opusplan` Boss preset and typing a multi-word
+//!      prompt, the branch suffix is UNCHANGED (no slug-from-prompt regression).
 //!
 //! Phase 5 of `plans/new-session-redesign-spec.md` (revised).
 
@@ -40,11 +40,7 @@ fn branch_line_is_random_hex_and_stable_across_prompt_edits() {
         .expect("tmux new-session");
     assert!(status.success());
 
-    let cmd = format!(
-        "HOME={} AINB_DISABLE_PLUGINS=1 exec {} tui",
-        home_tmp.path().display(),
-        ainb.display()
-    );
+    let cmd = launch_cmd_gh_authed(home_tmp.path(), &ainb);
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
         .status()
@@ -97,26 +93,32 @@ fn branch_line_is_random_hex_and_stable_across_prompt_edits() {
         .as_str()
         .to_string();
 
-    // Step 2: switch to Custom + Boss + type a prompt. Branch must stay
-    // EQUAL to the initial random suffix (no slug-from-prompt regression).
-    send_key(&session, "Left"); // Preset row: Named(0) → Custom (wrap)
-    send_key(&session, "Tab"); // Preset → Agent
-    send_key(&session, "Tab"); // Agent → Model
-    send_key(&session, "Tab"); // Model → Mode
-    send_key(&session, "Right"); // Interactive → Boss
+    // Step 2: select the `opusplan` Boss preset + type a prompt. Branch must
+    // stay EQUAL to the initial random suffix (no slug-from-prompt regression).
+    //
+    // The Boss/Mode toggle was removed (commit fabdd92a) — Mode now hard-locks
+    // to Interactive on the Custom path. A Boss-mode configuration (which
+    // reveals the Prompt textarea) is still reachable by *selecting* the shipped
+    // `opusplan` preset, whose `mode = "boss"`. Presets are sorted by name, so
+    // from the claude-interactive-yolo default (Named(0)) two Right presses
+    // land on `opusplan` (Named(2)). Focus stays on the Preset row.
+    send_key(&session, "Right"); // Named(0) → Named(1) codex-interactive-yolo
+    send_key(&session, "Right"); // Named(1) → Named(2) opusplan (Boss preset)
     let boss_deadline = Instant::now() + Duration::from_secs(5);
     if poll_capture(&session, boss_deadline, |c| {
-        c.contains("Prompt:") && c.contains("Boss")
+        c.contains("[opusplan]") && c.contains("Prompt:")
     })
     .is_none()
     {
         let last = capture(&session);
         kill_session(&session);
-        panic!("Custom→Boss did not reveal Prompt textarea; last:\n---\n{last}\n---");
+        panic!("Selecting opusplan did not reveal Prompt textarea; last:\n---\n{last}\n---");
     }
-    send_key(&session, "Tab"); // Mode → Yolo
-    send_key(&session, "Tab"); // Yolo → Branch
-    send_key(&session, "Tab"); // Branch → Prompt
+    // Prompt is always the second-to-last row (Launch is last). Two Shift+Tabs
+    // from the Preset row wrap backwards onto it, independent of how many middle
+    // rows (Mode/Yolo/Headroom/RTK) the preset exposes.
+    send_key(&session, "BTab"); // Preset → Launch (wrap to last)
+    send_key(&session, "BTab"); // Launch → Prompt (second-to-last)
     send_text(&session, "fix the bug now");
 
     // Settle, then capture and assert.

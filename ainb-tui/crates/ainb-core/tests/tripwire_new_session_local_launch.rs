@@ -13,8 +13,6 @@
 mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
 
-use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::time::{Duration, Instant};
 
@@ -32,7 +30,12 @@ fn launching_local_repo_hits_create_session_dispatch_not_stub() {
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
     let repo = seed_local_git_repo(home_tmp.path());
-    seed_favorites_pointing_at(home_tmp.path(), &repo);
+    // Local repos launch through the 📁 scan-cache row, not a favorite: a
+    // local-path star is migrated to its remote (or dropped) at startup, so a
+    // seeded local-path favorite would vanish before the picker opens. Pre-warm
+    // the scanner cache so the repo surfaces as a selectable 📁 row instead.
+    seed_empty_favorites(home_tmp.path());
+    seed_repo_cache(home_tmp.path(), &[&repo]);
 
     let session = format!("tripwire-local-launch-{}", std::process::id());
     let ainb = ainb_bin();
@@ -67,22 +70,28 @@ fn launching_local_repo_hits_create_session_dispatch_not_stub() {
         panic!("HomeScreen never rendered; last:\n---\n{last}\n---");
     }
 
-    // 2. Press `n` → PickRepo, retry once if the keystroke is dropped.
+    // 2. Press `n` → PickRepo. Require the 📁 local-scan row (U+1F4C1) so Enter
+    //    lands on the seeded repo, not an empty list. Retry once on a dropped
+    //    keystroke.
     send_key(&session, "n");
     let pick_deadline = Instant::now() + Duration::from_secs(5);
-    let mut on_pick = poll_capture(&session, pick_deadline, |c| c.contains("Enter=Select"));
+    let mut on_pick = poll_capture(&session, pick_deadline, |c| {
+        c.contains("Enter=Select") && c.contains('\u{1f4c1}')
+    });
     if on_pick.is_none() {
         send_key(&session, "n");
         let retry_deadline = Instant::now() + Duration::from_secs(8);
-        on_pick = poll_capture(&session, retry_deadline, |c| c.contains("Enter=Select"));
+        on_pick = poll_capture(&session, retry_deadline, |c| {
+            c.contains("Enter=Select") && c.contains('\u{1f4c1}')
+        });
     }
     if on_pick.is_none() {
         let last = capture(&session);
         kill_session(&session);
-        panic!("PickRepo never opened; last:\n---\n{last}\n---");
+        panic!("PickRepo never surfaced the 📁 local row; last:\n---\n{last}\n---");
     }
 
-    // 3. Enter on the auto-highlighted favorite → Configure.
+    // 3. Enter on the auto-highlighted 📁 local row → Configure.
     send_key(&session, "Enter");
     let cfg_deadline = Instant::now() + Duration::from_secs(10);
     if poll_capture(&session, cfg_deadline, |c| {
@@ -97,12 +106,10 @@ fn launching_local_repo_hits_create_session_dispatch_not_stub() {
 
     // 4. Stevie 2026-05-27 added an explicit `[ Launch ]` row that is the
     //    canonical commit affordance (Enter elsewhere is no longer Launch).
-    //    Navigate down past the visible rows — for a default Interactive
-    //    preset on a local repo: Preset → Mode → Yolo → Branch → Launch (4
-    //    ↓ presses). Then Enter to fire.
-    for _ in 0..4 {
-        send_key(&session, "Down");
-    }
+    //    Launch is ALWAYS the last row, so a single Shift+Tab from the opening
+    //    Preset focus wraps backwards straight onto it — robust to however many
+    //    middle rows (Mode/Yolo/Headroom/RTK) the preset exposes. Then Enter.
+    send_key(&session, "BTab");
     // Confirm the Launch row is focused — the `▸ [ Launch ]` indicator
     // should be visible. This guards against future row-order changes.
     let launch_focus_deadline = Instant::now() + Duration::from_secs(3);

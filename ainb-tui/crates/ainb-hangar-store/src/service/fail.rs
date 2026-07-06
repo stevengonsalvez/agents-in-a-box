@@ -19,10 +19,21 @@ use super::finalize::{FinalizeError, FinalizeOutcome, finalize_idempotent};
 
 /// Why a task failed.
 ///
-/// Serializes to the `snake_case` tokens Multica's `failure_reason` column uses,
+/// Serializes to the `snake_case` tokens the reference's `failure_reason` column uses,
 /// so the stored value is wire-compatible. The initial set is the six P1.3
 /// reasons; new code paths in P5+ may extend it (forbid wildcard match arms per
 /// `reference_gated_by_variant_propagation`).
+///
+/// # Retry disposition
+///
+/// The reason drives the retry/resume taxonomy
+/// ([`RetryService::retry_disposition`](crate::service::retry::RetryService::retry_disposition)):
+/// infra failures ([`Self::RuntimeOffline`] / [`Self::RuntimeRecovery`]) resume
+/// the session on retry, the conversation-poisoning terminals
+/// ([`Self::IterationLimit`] / [`Self::ApiInvalidRequest`] /
+/// [`Self::SemanticInactivity`]) retry FRESH (a new session — resuming a wedged
+/// conversation would only re-fail, mirroring the reference's `GetLastTaskSession`
+/// exclusion set), and the rest do not retry.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum FailureReason {
@@ -36,6 +47,17 @@ pub enum FailureReason {
     RuntimeRecovery,
     /// A human cancelled the run (terminal by intent; not retried).
     UserCancel,
+    /// The agent exhausted its per-run iteration budget without finishing — a
+    /// conversation-poisoning terminal: the model wedged on the same context, so
+    /// resuming it would only re-fail. Retried only as a *fresh* session.
+    IterationLimit,
+    /// The provider rejected the request as malformed (e.g. an Anthropic 400 /
+    /// `invalid_request_error`), typically a context the conversation drove into
+    /// an unrecoverable shape — conversation-poisoning, retried *fresh*.
+    ApiInvalidRequest,
+    /// The run stalled with no semantic progress (no new tool calls / output) —
+    /// conversation-poisoning, retried *fresh* rather than resuming the stall.
+    SemanticInactivity,
     /// An unclassified failure.
     Unknown,
 }
@@ -55,6 +77,9 @@ impl FailureReason {
             Self::RuntimeOffline => "runtime_offline",
             Self::RuntimeRecovery => "runtime_recovery",
             Self::UserCancel => "user_cancel",
+            Self::IterationLimit => "iteration_limit",
+            Self::ApiInvalidRequest => "api_invalid_request",
+            Self::SemanticInactivity => "semantic_inactivity",
             Self::Unknown => "unknown",
         }
     }
@@ -115,6 +140,9 @@ mod tests {
             FailureReason::RuntimeOffline,
             FailureReason::RuntimeRecovery,
             FailureReason::UserCancel,
+            FailureReason::IterationLimit,
+            FailureReason::ApiInvalidRequest,
+            FailureReason::SemanticInactivity,
             FailureReason::Unknown,
         ] {
             let serde_token = serde_json::to_value(reason)

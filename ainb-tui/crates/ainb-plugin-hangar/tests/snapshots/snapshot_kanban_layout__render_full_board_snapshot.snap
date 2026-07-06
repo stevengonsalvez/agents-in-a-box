@@ -1,0 +1,19 @@
+---
+source: "../plugins/hangar-tui/tests/snapshot_kanban_layout.rs"
+expression: full
+---
+○ queued (2)              ⋯ + ◔ running (1)             ⋯ + ● done (1)                ⋯ + ✕ failed (2)              ⋯ +
+
+┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓╭────────────────────────────╮╭────────────────────────────╮╭────────────────────────────╮
+┃#EUED01                     ┃│#NING03                     ││#NE0004                     ││#ILED05                     │
+┃claude-agent · 5m · queued  ┃│claude-agent · 1m · running ││claude-agent · 3d · done    ││gpt-agent · 10m · failed    │
+┃                            ┃│                            ││                            ││                            │
+┃◇ None                    ◔c┃│◇ None                    ◔c││◇ None                    ◔c││◇ None                    ◔g│
+┗━━━━━━━━━━━━━━━━━━━━━━━━━━━━┛╰────────────────────────────╯╰────────────────────────────╯╰────────────────────────────╯
+
+╭────────────────────────────╮                                                            ╭────────────────────────────╮
+│#PTCH02                     │                                                            │#NCEL06                     │
+│gpt-agent · 2h · dispatched │                                                            │claude-agent · 1h · cancelle│
+│                            │                                                            │d                           │
+│◇ None                    ◔g│                                                            │◇ None                    ◔c│
+╰────────────────────────────╯                                                            ╰────────────────────────────╯

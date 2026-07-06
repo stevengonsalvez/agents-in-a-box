@@ -49,6 +49,12 @@ fn seed_onboarding(layout: &SandboxLayout) {
         env!("CARGO_PKG_VERSION")
     );
     std::fs::write(cfg.join("onboarding.toml"), onboarding).expect("onboarding");
+    let install_record = r#"{"agents":[],"hook_script":"","prompt_dismissed":true}"#;
+    std::fs::write(
+        layout.root.join(".agents-in-a-box").join("install.json"),
+        install_record,
+    )
+    .expect("seed install.json");
 }
 
 fn capture(session: &str) -> String {
@@ -165,10 +171,18 @@ fn remove_key_uninstalls_unit_and_surfaces_notification_in_live_binary() {
         panic!("units table with initial-skill never rendered:\n{d}");
     }
 
-    // [r] → remove the selected unit. The handler runs `skill remove
-    // --yes`, reloads the screen from disk (dropping the row), and emits a
-    // success notification. Poll fast (200ms) so we catch the 3s-TTL toast.
+    // [r] remove is a two-step confirm so a stray keypress can't uninstall:
+    // the FIRST `r` arms a one-shot confirm for the selected row and shows a
+    // "press r again to confirm" warning; the SECOND `r` runs `skill remove
+    // --yes`, drops the unit from the manifest, reloads the screen from disk
+    // (dropping the row), and emits the success notification.
     thread::sleep(Duration::from_millis(200));
+    send(&session, "r");
+    // The first `r` armed the one-shot confirm (its "press r again to
+    // confirm" warning is often truncated in the toast, so we don't assert
+    // it). Give the arm a beat to register, then the SECOND `r` — cursor
+    // unmoved, so the same row stays armed — confirms and uninstalls.
+    thread::sleep(Duration::from_millis(500));
     send(&session, "r");
 
     // Assertion 1: the "removed:" success toast surfaces top-right. This is

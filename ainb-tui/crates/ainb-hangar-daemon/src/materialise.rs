@@ -12,7 +12,7 @@
 //! # Where skills land — and the no-pollute-git invariant
 //!
 //! The per-task tree is
-//! `~/.ainb/hangar/workspaces/{ws}/{shortID}/` with `workdir/` (the git
+//! `~/.agents-in-a-box/hangar/workspaces/{ws}/{shortID}/` with `workdir/` (the git
 //! worktree) as one child. Provider "home" layouts (Claude/Codex/Cursor) write
 //! their skills under the *task root* — a **sibling** of `workdir/` — so the
 //! agent's git status stays clean: nothing is written inside the checked-out
@@ -23,7 +23,7 @@
 //!
 //! # Copy, never symlink
 //!
-//! Files are **copied**, matching Multica. Symlinks would point back into the
+//! Files are **copied**, matching the reference. Symlinks would point back into the
 //! database-owned tree (or be dangling on cleanup) and break the provider
 //! sandbox's path checks.
 //!
@@ -46,7 +46,7 @@ const SKILLS_DIR: &str = "skills";
 /// The conventional `SKILL.md` filename a skill's top-level body lands in.
 const SKILL_BODY_FILE: &str = "SKILL.md";
 /// The relative-path prefix marking a skill file as an executable script. Files
-/// under this directory get the unix executable bit (Multica parity).
+/// under this directory get the unix executable bit (reference parity).
 const SCRIPTS_PREFIX: &str = "scripts/";
 
 /// Where a provider expects an agent's skills to live, plus the env var (if

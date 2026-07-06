@@ -84,8 +84,13 @@ fn deps_installer_cursor_docs_and_install_affordance() {
         panic!("wizard welcome never rendered:\n{last}");
     }
 
-    // Advance Welcome -> DependencyCheck and wait for the catalog to render.
-    send(&session, "Enter");
+    // Advance Welcome -> Source -> Role -> UseCase -> DependencyCheck: the
+    // wizard has three questionnaire steps between Welcome and the dependency
+    // step, each accepting its default selection on Enter.
+    for _ in 0..4 {
+        send(&session, "Enter");
+        sleep(Duration::from_millis(400));
+    }
     let loaded = poll_capture(&session, Instant::now() + Duration::from_secs(40), |c| {
         c.contains("Plugin binaries") && !c.contains("Checking dependencies")
     })

@@ -140,7 +140,7 @@ pub const HOST_UNIX_SOCKET_CLOSE: &str = "host/unix_socket_close";
 pub const HOST_SECRET_STORE_GET: &str = "host/secret_store_get";
 
 /// Plugin asks the host for the list of workspaces, with each row's
-/// active/default flags resolved from `~/.ainb/hangar/state.toml`.
+/// active/default flags resolved from `~/.agents-in-a-box/hangar/state.toml`.
 ///
 /// Ungated read. Result: `{ workspaces: [WorkspaceEntry, ...] }`, each entry
 /// carrying the ULID `id`, the display `slug`, the `name`, and the resolved

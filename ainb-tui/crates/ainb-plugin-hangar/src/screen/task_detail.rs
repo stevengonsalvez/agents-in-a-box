@@ -1,0 +1,823 @@
+//! P4.4 — Task detail + transcript screen: the pure reducer + width-aware render.
+//!
+//! The task-detail screen (hotkey `2`, or `enter` on an issue-list row) shows a
+//! single task: a header (issue title + status), the streaming transcript in the
+//! main region, and a progressive-disclosure sidebar (assignee / project / dates
+//! / PRs). As with every Hangar screen, the reducer ([`reduce_task_detail`]) is
+//! **pure** — it folds a key press or a host [`HangarEvent`] into a new
+//! [`TaskDetailState`] plus an optional [`TaskDetailIntent`] for the plugin glue
+//! to act on (retry / cancel the task). No IO, no `tokio`, no socket, so every
+//! transition is exhaustively unit-testable (the P4.4 RED tests in
+//! `tests/transcript_reducer_test.rs`).
+//!
+//! The plugin holds **zero domain data of its own**
+//! (`project_ainb_plugin_owns_data_plane`): the transcript is the daemon's
+//! task event stream, folded into a render-state cache. [`TaskDetailState`] is
+//! that cache and nothing more.
+//!
+//! ## Streaming append + sticky-bottom auto-scroll
+//!
+//! Each [`HangarEvent::TaskMessage`] (and interleaved [`HangarEvent::CommentAdded`])
+//! addressed to the bound task lands at the *bottom* of the transcript in arrival
+//! order. While the viewport is *stuck to the bottom* the scroll offset tracks the
+//! tail so the newest line stays visible; the moment the user scrolls up (`k`)
+//! sticky releases and new messages no longer move the viewport off the user's
+//! position — they re-stick only by scrolling back to the bottom (`G` / `j` past
+//! the end).
+//!
+//! ## Retry / cancel lifecycle gating
+//!
+//! `R` (retry) is only meaningful once the task reached a terminal state
+//! (succeeded / failed); `X` (cancel) is only meaningful while it is running, and
+//! opens a confirm modal (Esc aborts, Enter confirms → [`TaskDetailIntent::CancelTask`]).
+//! The reducer tracks lifecycle from the task events themselves so these keys are
+//! total no-ops when not applicable.
+//!
+//! ## Collapsible thinking runs
+//!
+//! A long consecutive run of [`MessageKind::Thinking`] lines is a UX-§7 grouping
+//! candidate: the raw transcript keeps every line, but the *visible* view folds a
+//! run of [`THINKING_COLLAPSE_THRESHOLD`] or more into a single collapsed-group
+//! entry so reasoning doesn't bury the prose + tool flow.
+
+use ainb_hangar_core::ids::TaskId;
+use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
+use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
+use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
+
+use crate::widgets::transcript::{render_transcript, transcript_color, transcript_glyph};
+
+/// A consecutive run of this many [`MessageKind::Thinking`] lines (or more)
+/// folds into a single collapsed-group entry in the visible view (UX §7).
+pub const THINKING_COLLAPSE_THRESHOLD: usize = 4;
+
+/// Gold accent for the PR badge (matches the ainb-tui chrome CTA gold).
+const BADGE_GOLD: Color = Color::rgb(255, 215, 0);
+/// Muted gray for the `[o] open` keybinding hint next to the badge.
+const HINT_MUTED: Color = Color::rgb(120, 120, 140);
+/// The leading badge glyph + label painted before the URL (`▶ PR `).
+const BADGE_PREFIX: &str = "▶ PR ";
+/// The keybinding hint painted next to the URL (two-space gap + `[o] open`).
+const BADGE_HINT: &str = "  [o] open";
+/// Green for a passing CI rollup / a clean mergeable PR (e38.34).
+const STATUS_GREEN: Color = Color::rgb(120, 220, 120);
+/// Red for a failing CI rollup / a merge conflict (e38.34) — visually distinct
+/// from the green pass + the muted unknown so a glance reads the state.
+const STATUS_RED: Color = Color::rgb(240, 100, 100);
+/// Amber for a pending (still-running) CI rollup (e38.34).
+const STATUS_AMBER: Color = Color::rgb(230, 190, 90);
+/// Cornflower-blue for the run's branch line (tcp T2, agents-in-a-box-ch3) —
+/// distinct from the gold PR badge so the two artifacts never read as one.
+const BRANCH_COLOR: Color = Color::rgb(100, 149, 237);
+/// The leading glyph + label painted before the branch name (`⎇ branch `).
+const BRANCH_PREFIX: &str = "⎇ branch ";
+/// Accent for the comment-compose input bar (a calm emerald, distinct from the
+/// gold PR badge so the two bars never read as the same control).
+const COMPOSE_ACCENT: Color = Color::rgb(120, 220, 160);
+/// The leading glyph + label painted before the typed comment body (`💬 `).
+const COMPOSE_PREFIX: &str = "💬 ";
+/// The keybinding hint painted after the caret on the compose bar.
+const COMPOSE_HINT: &str = "  [enter] post  [esc] cancel";
+
+/// Where the task is in its lifecycle, derived from the task event stream.
+///
+/// Drives the retry / cancel key gating: retry needs a terminal state, cancel
+/// needs [`TaskLifecycle::Running`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum TaskLifecycle {
+    /// Enqueued, not yet started (the default before any task event).
+    Queued,
+    /// Actively running (`TaskStarted` seen, no terminal event yet).
+    Running,
+    /// Finished successfully.
+    Succeeded,
+    /// Finished with a failure.
+    Failed,
+    /// Cancelled before completion.
+    Cancelled,
+}
+
+impl TaskLifecycle {
+    /// `true` when the task reached a terminal state and a retry is meaningful.
+    #[must_use]
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Succeeded | Self::Failed | Self::Cancelled)
+    }
+}
+
+/// One line in the transcript: a typed transcript message or an interleaved
+/// comment.
+///
+/// Both carry a body and a [`MessageKind`] lane so the renderer can colour them
+/// uniformly; comments render in the slate "tool result" lane as a neutral
+/// interleave (the reference renders human comments distinctly from agent prose
+/// without their own taxonomy colour).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TranscriptEntry {
+    kind: MessageKind,
+    body: String,
+    /// `true` when this entry is a human comment rather than an agent message.
+    is_comment: bool,
+}
+
+impl TranscriptEntry {
+    /// Build a transcript line in `kind`'s lane with `body` text. `is_comment`
+    /// marks an interleaved human comment (the collapse grouping skips it). The
+    /// live task stream builds these internally; the JSONL timeline parser
+    /// ([`crate::widgets::jsonl_timeline`]) uses this to turn a disk transcript into
+    /// the same [`ViewEntry`]s the streamed transcript renders through.
+    #[must_use]
+    pub const fn new(kind: MessageKind, body: String, is_comment: bool) -> Self {
+        Self {
+            kind,
+            body,
+            is_comment,
+        }
+    }
+
+    /// The taxonomy lane this entry renders in.
+    #[must_use]
+    pub const fn kind(&self) -> MessageKind {
+        self.kind
+    }
+
+    /// The line text.
+    #[must_use]
+    pub fn body(&self) -> &str {
+        &self.body
+    }
+
+    /// `true` when this entry originated as an issue comment, not a task message.
+    #[must_use]
+    pub const fn is_comment(&self) -> bool {
+        self.is_comment
+    }
+}
+
+/// A view entry the renderer paints: either a single [`TranscriptEntry`] or a
+/// collapsed run of consecutive thinking lines.
+///
+/// Built on demand from the raw transcript by [`TaskDetailState::visible_entries`]
+/// so the raw event log is never mutated by display grouping.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ViewEntry {
+    /// A single transcript line rendered verbatim.
+    Line(TranscriptEntry),
+    /// A folded run of `count` consecutive thinking lines (UX §7 collapse).
+    CollapsedThinking {
+        /// How many thinking lines this group folds.
+        count: usize,
+    },
+}
+
+impl ViewEntry {
+    /// A single rendered line in `kind`'s lane with `body` text — the shape the
+    /// JSONL timeline parser emits ([`crate::widgets::jsonl_timeline`]).
+    #[must_use]
+    pub fn line(kind: MessageKind, body: impl Into<String>) -> Self {
+        Self::Line(TranscriptEntry::new(kind, body.into(), false))
+    }
+
+    /// `true` when this is a [`ViewEntry::CollapsedThinking`] fold marker.
+    #[must_use]
+    pub const fn is_collapsed_group(&self) -> bool {
+        matches!(self, Self::CollapsedThinking { .. })
+    }
+}
+
+/// The render-state cache for the task-detail screen.
+///
+/// Holds the bound task id + its issue row (the header source), the lifecycle
+/// derived from task events, the raw transcript in arrival order, the scroll
+/// offset + sticky-bottom flag, and whether the cancel-confirm modal is open.
+/// All fields are private; the renderer and tests read through accessors so the
+/// "offset is always a valid transcript index" invariant stays internal.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetailState {
+    task_id: TaskId,
+    issue: IssueRow,
+    lifecycle: TaskLifecycle,
+    transcript: Vec<TranscriptEntry>,
+    /// Index of the transcript line pinned to the bottom of the viewport.
+    scroll_offset: usize,
+    /// While `true`, appending a message advances [`Self::scroll_offset`] to the
+    /// tail so the newest line stays visible.
+    stuck_to_bottom: bool,
+    /// Whether the cancel-confirm modal is open.
+    cancel_modal_open: bool,
+    /// The comment-compose modal buffer (e38.5). `Some(buf)` while the modal is
+    /// open (`buf` is the in-progress comment text, possibly empty); `None` when
+    /// closed. While open the modal captures every key as text input, so it is
+    /// mutually exclusive with the scroll / retry / cancel keys.
+    compose: Option<String>,
+    /// The last fetched PR check + merge status (e38.34), shown on the badge next
+    /// to the URL. Defaults to all-`Unknown` (rendered as a muted `…`) until a
+    /// `hangar/pr_status_refresh` answers; only meaningful when [`Self::pr_url`]
+    /// is `Some`. A merged status is reflected by the daemon's auto-Done move, so
+    /// the plugin never transitions on its own.
+    pr_status: PrStatus,
+    /// The run's worktree branch (`ainb/<slug>`) the task committed on (tcp T2,
+    /// agents-in-a-box-ch3), or `None` when the run made no commits / the detail
+    /// was opened without a per-run branch (e.g. from the issue list). Seeded from
+    /// the opening task card's [`TaskCardRow::branch`](ainb_hangar_proto::events::TaskCardRow);
+    /// rendered as a branch line under the PR badge (progressive disclosure).
+    branch: Option<String>,
+}
+
+/// The all-`Unknown` PR status, const-constructible so [`TaskDetailState::new`]
+/// stays a `const fn`. (`PrStatus::default()` is not `const`.)
+const UNKNOWN_PR_STATUS: PrStatus = PrStatus {
+    ci: CiRollup::Unknown,
+    mergeable: Mergeable::Unknown,
+    state: MergeState::Unknown,
+};
+
+impl TaskDetailState {
+    /// A fresh task-detail state bound to `task_id` for `issue`, empty transcript,
+    /// stuck to the bottom, no modal, lifecycle [`TaskLifecycle::Queued`].
+    #[must_use]
+    pub const fn new(task_id: TaskId, issue: IssueRow) -> Self {
+        Self {
+            task_id,
+            issue,
+            lifecycle: TaskLifecycle::Queued,
+            transcript: Vec::new(),
+            scroll_offset: 0,
+            stuck_to_bottom: true,
+            cancel_modal_open: false,
+            compose: None,
+            pr_status: UNKNOWN_PR_STATUS,
+            branch: None,
+        }
+    }
+
+    /// The bound task id.
+    #[must_use]
+    pub const fn task_id(&self) -> &TaskId {
+        &self.task_id
+    }
+
+    /// The issue row backing the header.
+    #[must_use]
+    pub const fn issue(&self) -> &IssueRow {
+        &self.issue
+    }
+
+    /// The PR URL captured for this task's issue (P9.1 capture, P9.2 surface), or
+    /// `None` when no task on the issue opened a PR. Drives the gold PR badge and
+    /// gates the `o` (open-in-browser) key — when this is `None` the badge is
+    /// absent and `o` is a no-op (no silent open of nothing).
+    #[must_use]
+    pub fn pr_url(&self) -> Option<&str> {
+        self.issue.pr_url.as_deref()
+    }
+
+    /// The last fetched PR check + merge status (e38.34). All-`Unknown` until a
+    /// `hangar/pr_status_refresh` answers; the badge renders it next to the URL.
+    #[must_use]
+    pub const fn pr_status(&self) -> PrStatus {
+        self.pr_status
+    }
+
+    /// The run's `ainb/<slug>` worktree branch (tcp T2, agents-in-a-box-ch3), or
+    /// `None` when the run made no commits / the detail carries no per-run branch.
+    /// The detail view renders it as a branch line under the PR badge.
+    #[must_use]
+    pub fn branch(&self) -> Option<&str> {
+        self.branch.as_deref()
+    }
+
+    /// Seed the run's branch when opening the detail from a task card carrying one
+    /// (agents-in-a-box-ch3). `None` clears it (a run with no committed branch).
+    pub fn set_branch(&mut self, branch: Option<String>) {
+        self.branch = branch;
+    }
+
+    /// Apply a freshly fetched PR status (e38.34) — the reducer calls this when a
+    /// `hangar/pr_status_refresh` reply lands so the badge re-renders the CI +
+    /// merge state on the next paint.
+    pub const fn set_pr_status(&mut self, status: PrStatus) {
+        self.pr_status = status;
+    }
+
+    /// The current lifecycle.
+    #[must_use]
+    pub const fn lifecycle(&self) -> TaskLifecycle {
+        self.lifecycle
+    }
+
+    /// Iterate the raw transcript in arrival order.
+    pub fn transcript(&self) -> impl Iterator<Item = &TranscriptEntry> {
+        self.transcript.iter()
+    }
+
+    /// Number of raw transcript lines (collapsing does not shrink this).
+    #[must_use]
+    pub const fn transcript_len(&self) -> usize {
+        self.transcript.len()
+    }
+
+    /// The scroll offset (index of the line pinned to the viewport bottom).
+    #[must_use]
+    pub const fn scroll_offset(&self) -> usize {
+        self.scroll_offset
+    }
+
+    /// Whether the viewport is stuck to the transcript bottom (auto-scroll on).
+    #[must_use]
+    pub const fn is_stuck_to_bottom(&self) -> bool {
+        self.stuck_to_bottom
+    }
+
+    /// Whether the cancel-confirm modal is open.
+    #[must_use]
+    pub const fn cancel_modal_open(&self) -> bool {
+        self.cancel_modal_open
+    }
+
+    /// The comment-compose buffer when the compose modal is open (e38.5), or
+    /// `None` when it is closed. `Some("")` is an open-but-empty modal.
+    #[must_use]
+    pub fn compose_buffer(&self) -> Option<&str> {
+        self.compose.as_deref()
+    }
+
+    /// The display view: raw entries with long consecutive thinking runs folded
+    /// into [`ViewEntry::CollapsedThinking`] markers (UX §7). Pure — derived from
+    /// the raw transcript, never mutating it.
+    #[must_use]
+    pub fn visible_entries(&self) -> Vec<ViewEntry> {
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i < self.transcript.len() {
+            let entry = &self.transcript[i];
+            if entry.kind == MessageKind::Thinking && !entry.is_comment {
+                // Measure the consecutive thinking run starting at `i`.
+                let run_start = i;
+                while i < self.transcript.len()
+                    && self.transcript[i].kind == MessageKind::Thinking
+                    && !self.transcript[i].is_comment
+                {
+                    i += 1;
+                }
+                let count = i - run_start;
+                if count >= THINKING_COLLAPSE_THRESHOLD {
+                    out.push(ViewEntry::CollapsedThinking { count });
+                } else {
+                    for e in &self.transcript[run_start..i] {
+                        out.push(ViewEntry::Line(e.clone()));
+                    }
+                }
+            } else {
+                out.push(ViewEntry::Line(entry.clone()));
+                i += 1;
+            }
+        }
+        out
+    }
+}
+
+/// An input the task-detail reducer folds into [`TaskDetailState`].
+///
+/// Key presses arrive as [`TaskDetailEvent::Key`]; `Esc` is modelled separately
+/// because it is not a printable char (it aborts the cancel modal); host stream
+/// events arrive wrapped in [`TaskDetailEvent::Event`].
+// Reduction enum: `Event(HangarEvent)` dominates the size, the rest are scalar
+// key inputs. Short-lived, reducer-folded, not a hot allocation path — left
+// unboxed for consistency with the other screen reducers.
+#[allow(clippy::large_enum_variant)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskDetailEvent {
+    /// A printable key was pressed (`'j'`, `'R'`, `'X'`, `'\n'`, …).
+    Key(char),
+    /// The Escape key was pressed (aborts the cancel-confirm modal).
+    Esc,
+    /// A domain event arrived on the subscribed `task:{id}` stream.
+    Event(HangarEvent),
+}
+
+/// A side-effect the plugin glue performs after a task-detail [`reduce_task_detail`].
+///
+/// The reducer is pure, so it surfaces the *desire* to mutate the task as an
+/// intent and lets the IO layer fire the RPC.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TaskDetailIntent {
+    /// Re-run the (terminal) task (`R`).
+    RetryTask(TaskId),
+    /// Cancel the (running) task, confirmed in the modal (`X` then Enter).
+    CancelTask(TaskId),
+    /// Post a comment on the bound issue (`c`, type, Enter) — the plugin glue
+    /// fires `hangar/comment_add` over the daemon socket (e38.5). Carries the
+    /// issue the comment is for and the (non-empty) typed body.
+    AddComment {
+        /// The issue the comment is posted on (the bound `issue.id`).
+        issue_id: ainb_hangar_core::ids::IssueId,
+        /// The typed comment body (guaranteed non-empty by the reducer).
+        body: String,
+    },
+}
+
+/// The result of folding one [`TaskDetailEvent`] into a [`TaskDetailState`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaskDetailReduction {
+    /// The next task-detail state.
+    pub state: TaskDetailState,
+    /// A side-effect for the plugin glue, if any.
+    pub intent: Option<TaskDetailIntent>,
+}
+
+/// Fold one [`TaskDetailEvent`] into `state`, returning the next state and any
+/// [`TaskDetailIntent`]. Pure: no IO, no mutation of the input `state`.
+#[must_use]
+pub fn reduce_task_detail(state: &TaskDetailState, ev: TaskDetailEvent) -> TaskDetailReduction {
+    match ev {
+        TaskDetailEvent::Key(c) => reduce_key(state, c),
+        TaskDetailEvent::Esc => reduce_esc(state),
+        TaskDetailEvent::Event(event) => fold_event(state, event),
+    }
+}
+
+/// Handle a printable key. When a modal is open it captures input: the
+/// compose modal (e38.5) eats every key as text (Enter submits, Backspace
+/// deletes); the cancel modal captures Enter (confirm) and ignores the rest.
+fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
+    // The compose modal owns input while open: type / delete / submit.
+    if state.compose.is_some() {
+        return reduce_compose_key(state, c);
+    }
+    if state.cancel_modal_open {
+        return match c {
+            '\n' | '\r' => confirm_cancel(state),
+            // Any other key while the modal is open does nothing (Esc aborts via
+            // the dedicated event).
+            _ => unchanged(state),
+        };
+    }
+    match c {
+        'j' => scroll_down(state),
+        'k' => scroll_up(state),
+        // Open the comment-compose modal (`c`); captures input until Enter/Esc.
+        'c' => open_compose(state),
+        // Retry only once terminal; otherwise a no-op.
+        'R' if state.lifecycle.is_terminal() => with_intent(
+            state.clone(),
+            TaskDetailIntent::RetryTask(state.task_id.clone()),
+        ),
+        // Cancel only while running; opens the confirm modal (no intent yet).
+        'X' if state.lifecycle == TaskLifecycle::Running => open_cancel_modal(state),
+        _ => unchanged(state),
+    }
+}
+
+/// Compose-modal key handling (e38.5): Enter submits a non-empty body (closing
+/// the modal + emitting [`TaskDetailIntent::AddComment`]), Backspace deletes the
+/// last char, any other printable char appends. Enter on an empty/whitespace
+/// body is a no-op that keeps the modal open (never an empty comment).
+fn reduce_compose_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
+    let mut buf = state.compose.clone().unwrap_or_default();
+    match c {
+        '\n' | '\r' => {
+            if buf.trim().is_empty() {
+                // Empty body: keep the modal open, submit nothing.
+                return unchanged(state);
+            }
+            let mut next = state.clone();
+            next.compose = None;
+            return with_intent(
+                next,
+                TaskDetailIntent::AddComment {
+                    issue_id: state.issue.id.clone(),
+                    body: buf,
+                },
+            );
+        }
+        '\u{8}' | '\u{7f}' => {
+            buf.pop();
+        }
+        other => buf.push(other),
+    }
+    let mut next = state.clone();
+    next.compose = Some(buf);
+    no_intent(next)
+}
+
+/// Open the comment-compose modal with an empty buffer (`c`).
+fn open_compose(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.compose = Some(String::new());
+    no_intent(next)
+}
+
+/// Handle Esc: close whichever modal is open (compose discards its draft, cancel
+/// aborts); otherwise a no-op (the router owns leaving the screen).
+fn reduce_esc(state: &TaskDetailState) -> TaskDetailReduction {
+    if state.compose.is_some() {
+        let mut next = state.clone();
+        next.compose = None;
+        no_intent(next)
+    } else if state.cancel_modal_open {
+        let mut next = state.clone();
+        next.cancel_modal_open = false;
+        no_intent(next)
+    } else {
+        unchanged(state)
+    }
+}
+
+/// Open the cancel-confirm modal (does not emit an intent yet).
+fn open_cancel_modal(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.cancel_modal_open = true;
+    no_intent(next)
+}
+
+/// Confirm the cancel modal: close it and emit the cancel intent.
+fn confirm_cancel(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.cancel_modal_open = false;
+    with_intent(next, TaskDetailIntent::CancelTask(state.task_id.clone()))
+}
+
+/// Scroll the viewport up one line, releasing sticky-bottom.
+fn scroll_up(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.stuck_to_bottom = false;
+    next.scroll_offset = next.scroll_offset.saturating_sub(1);
+    no_intent(next)
+}
+
+/// Scroll the viewport down one line; re-sticks to the bottom on reaching the
+/// tail.
+fn scroll_down(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    let last = next.transcript.len().saturating_sub(1);
+    if next.scroll_offset >= last {
+        next.scroll_offset = last;
+        next.stuck_to_bottom = true;
+    } else {
+        next.scroll_offset += 1;
+        if next.scroll_offset >= last {
+            next.stuck_to_bottom = true;
+        }
+    }
+    no_intent(next)
+}
+
+/// Fold a host [`HangarEvent`] into the cache. Only events addressed to the bound
+/// task affect the transcript / lifecycle; everything else is ignored (no
+/// cross-talk between task-detail subscriptions).
+fn fold_event(state: &TaskDetailState, event: HangarEvent) -> TaskDetailReduction {
+    let mut next = state.clone();
+    match event {
+        HangarEvent::TaskMessage {
+            task_id,
+            kind,
+            body,
+        } if task_id == state.task_id => {
+            push_entry(
+                &mut next,
+                TranscriptEntry {
+                    kind,
+                    body,
+                    is_comment: false,
+                },
+            );
+        }
+        // Comments interleave chronologically in the slate (tool-result) lane.
+        HangarEvent::CommentAdded(comment) if comment.issue_id == state.issue.id => {
+            push_entry(
+                &mut next,
+                TranscriptEntry {
+                    kind: MessageKind::ToolResult,
+                    body: comment.body,
+                    is_comment: true,
+                },
+            );
+        }
+        HangarEvent::TaskStarted { task_id, .. } if task_id == state.task_id => {
+            next.lifecycle = TaskLifecycle::Running;
+        }
+        HangarEvent::TaskFinished {
+            task_id, result, ..
+        } if task_id == state.task_id => {
+            next.lifecycle = match result {
+                TaskResult::Success => TaskLifecycle::Succeeded,
+                TaskResult::Failure => TaskLifecycle::Failed,
+                TaskResult::Cancelled => TaskLifecycle::Cancelled,
+            };
+        }
+        // Progress, presence, issue events, and events for other tasks don't
+        // change this screen.
+        _ => {}
+    }
+    no_intent(next)
+}
+
+/// Append `entry` to the transcript, advancing the scroll offset to the tail
+/// when stuck to the bottom (auto-scroll).
+fn push_entry(state: &mut TaskDetailState, entry: TranscriptEntry) {
+    state.transcript.push(entry);
+    if state.stuck_to_bottom {
+        state.scroll_offset = state.transcript.len().saturating_sub(1);
+    }
+}
+
+/// A reduction that changes state but emits no intent.
+const fn no_intent(state: TaskDetailState) -> TaskDetailReduction {
+    TaskDetailReduction {
+        state,
+        intent: None,
+    }
+}
+
+/// A reduction carrying `intent` alongside `state`.
+const fn with_intent(state: TaskDetailState, intent: TaskDetailIntent) -> TaskDetailReduction {
+    TaskDetailReduction {
+        state,
+        intent: Some(intent),
+    }
+}
+
+/// A no-op reduction: state cloned unchanged, no intent.
+fn unchanged(state: &TaskDetailState) -> TaskDetailReduction {
+    no_intent(state.clone())
+}
+
+// ---------------------------------------------------------------------------
+// Width-aware rendering
+// ---------------------------------------------------------------------------
+
+/// Render the task-detail screen into `buf` between rows `top` and `bottom`.
+///
+/// Three-region layout (width-aware, derived from `area_w`): a one-row header
+/// (issue title + status), the transcript filling the main region, and a
+/// right-hand sidebar (progressive disclosure — see [`crate::widgets::sidebar`]).
+/// The transcript is the dominant region; the sidebar takes a fixed cap on the
+/// right that collapses away under narrow widths.
+///
+/// At the P4.4 GREEN bar the rendering is linear (no virtualisation): the visible
+/// view ([`TaskDetailState::visible_entries`]) is painted top-down. The
+/// REFACTOR note in `P4.md` defers virtualisation to >500-message buffers.
+pub fn render_task_detail(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    top: u16,
+    bottom: u16,
+    state: &TaskDetailState,
+) {
+    // The PR badge (P9.2) takes the first row of the whole area when present,
+    // pushing the transcript + sidebar down one row. When absent there is NO
+    // badge row at all (the layout shifts up) — never a `PR: none` placeholder.
+    let mut body_top = state.pr_url().map_or(top, |url| {
+        render_pr_badge(buf, area_w, top, url, state.pr_status());
+        top.saturating_add(1)
+    });
+
+    // The run's branch line (tcp T2, agents-in-a-box-ch3) sits right under the PR
+    // badge (or at the top when there is no PR). Progressive disclosure, exactly
+    // like the badge: a run with no committed branch renders NO row (the
+    // transcript shifts up), never a `branch: none` placeholder.
+    if let Some(branch) = state.branch() {
+        if body_top < bottom {
+            render_branch_row(buf, area_w, body_top, branch);
+            body_top = body_top.saturating_add(1);
+        }
+    }
+
+    // The compose modal (e38.5), when open, takes the bottom row as an input bar,
+    // shrinking the transcript region by one row so the two never overlap.
+    let body_bottom = if state.compose.is_some() {
+        let bar_row = bottom.saturating_sub(1);
+        render_compose_bar(buf, area_w, bar_row, state.compose.as_deref().unwrap_or(""));
+        bar_row
+    } else {
+        bottom
+    };
+
+    // Sidebar takes a right-hand cap; it collapses when the area is too narrow
+    // to leave the transcript a usable column.
+    let sidebar_w: u16 = if area_w >= 60 { 24 } else { 0 };
+    let main_w = area_w.saturating_sub(sidebar_w);
+
+    // The transcript paints the visible (collapsed) view linearly.
+    render_transcript(buf, main_w, body_top, body_bottom, &state.visible_entries());
+
+    if sidebar_w > 0 {
+        let sidebar_x = main_w;
+        crate::widgets::sidebar::render_sidebar(
+            buf,
+            sidebar_x,
+            body_top,
+            body_bottom,
+            sidebar_w,
+            &state.issue,
+        );
+    }
+}
+
+/// Paint the single-row comment-compose input bar at `(0, row)` (e38.5):
+/// `💬 <typed body>▏` in the compose accent followed by a muted
+/// `[enter] post  [esc] cancel` keybinding hint (hint-near-control). Clipped by
+/// **chars** at `area_w` (multi-byte safe) so a long draft truncates cleanly.
+fn render_compose_bar(buf: &mut WireBuffer, area_w: u16, row: u16, body: &str) {
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, COMPOSE_PREFIX, COMPOSE_ACCENT, area_w);
+    cx = put_clipped(buf, cx, row, body, COMPOSE_ACCENT, area_w);
+    // A block caret so the cursor position is visible while typing.
+    cx = put_clipped(buf, cx, row, "▏", COMPOSE_ACCENT, area_w);
+    let _ = put_clipped(buf, cx, row, COMPOSE_HINT, HINT_MUTED, area_w);
+}
+
+/// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold, then the
+/// CI rollup and merge status (e38.34), then a muted `[o] open` keybinding hint
+/// (hint-near-control).
+///
+/// The status reads in two colour-coded segments right after the URL:
+/// - **CI**: ` CI ✓` (green pass) / ` CI ✗` (red fail) / ` CI …` (amber pending /
+///   muted unknown) — so a glance distinguishes a green build from a broken one.
+/// - **mergeable**: ` ✓ mergeable` (green) / ` ✗ CONFLICT` (red) — a conflict is
+///   loud + red, never the same colour as a clean merge. An `Unknown` mergeable
+///   (GitHub still computing) paints nothing, never a false token.
+///
+/// The whole row is clipped at `area_w` by **chars** (never bytes —
+/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates without
+/// panicking on a multi-byte boundary; a tight width drops the trailing segments
+/// first (URL → CI → mergeable → hint), keeping the most-load-bearing data left.
+fn render_pr_badge(buf: &mut WireBuffer, area_w: u16, row: u16, url: &str, status: PrStatus) {
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, BADGE_PREFIX, BADGE_GOLD, area_w);
+    cx = put_clipped(buf, cx, row, url, BADGE_GOLD, area_w);
+    let (ci_label, ci_color) = ci_segment(status.ci);
+    cx = put_clipped(buf, cx, row, ci_label, ci_color, area_w);
+    if let Some((label, color)) = mergeable_segment(status.mergeable) {
+        cx = put_clipped(buf, cx, row, label, color, area_w);
+    }
+    let _ = put_clipped(buf, cx, row, BADGE_HINT, HINT_MUTED, area_w);
+}
+
+/// Paint the single-row run-branch line at `(0, row)`: `⎇ branch <name>` in
+/// cornflower-blue (tcp T2, agents-in-a-box-ch3), so a finished run's durable
+/// `ainb/<slug>` branch reads in the detail view exactly as it does on the Kanban
+/// card. Clipped by **chars** at `area_w` (multi-byte safe —
+/// `reference_rust_utf8_truncate_trap`) so a narrow pane truncates without
+/// panicking on a multi-byte boundary.
+fn render_branch_row(buf: &mut WireBuffer, area_w: u16, row: u16, branch: &str) {
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, BRANCH_PREFIX, BRANCH_COLOR, area_w);
+    let _ = put_clipped(buf, cx, row, branch, BRANCH_COLOR, area_w);
+}
+
+/// The CI rollup badge segment: ` CI <glyph>` + its colour (e38.34).
+///
+/// Always painted (the CI axis is the headline status), with `Unknown` /
+/// `Pending` both showing a muted-vs-amber `…` so the badge reads "status
+/// loading" rather than blank.
+const fn ci_segment(ci: CiRollup) -> (&'static str, Color) {
+    match ci {
+        CiRollup::Pass => (" CI ✓", STATUS_GREEN),
+        CiRollup::Fail => (" CI ✗", STATUS_RED),
+        CiRollup::Pending => (" CI …", STATUS_AMBER),
+        CiRollup::Unknown => (" CI …", HINT_MUTED),
+    }
+}
+
+/// The mergeable badge segment: ` ✓ mergeable` / ` ✗ CONFLICT` + colour, or `None`
+/// when GitHub has not finished computing mergeability (`Unknown`) so the badge
+/// never claims a false state (e38.34).
+const fn mergeable_segment(m: Mergeable) -> Option<(&'static str, Color)> {
+    match m {
+        Mergeable::Mergeable => Some((" ✓ mergeable", STATUS_GREEN)),
+        Mergeable::Conflicting => Some((" ✗ CONFLICT", STATUS_RED)),
+        Mergeable::Unknown => None,
+    }
+}
+
+/// Write `s` at `(x, row)` in `color`, clipping by **chars** at column `right`
+/// (exclusive). Returns the next free column. Multi-byte safe.
+fn put_clipped(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right: u16) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= right {
+            break;
+        }
+        let mut cell = Cell::new(ch.to_string());
+        cell.fg = Some(color);
+        buf.push(Coord::new(cx, row), cell);
+        cx = cx.saturating_add(1);
+    }
+    cx
+}
+
+/// Convenience accessor re-exporting the transcript glyph for a [`MessageKind`]
+/// so call sites (and tests) can reach the taxonomy mapping without importing the
+/// widget module directly.
+#[must_use]
+pub const fn glyph_for(kind: MessageKind) -> char {
+    transcript_glyph(kind)
+}
+
+/// Convenience accessor re-exporting the transcript colour for a [`MessageKind`].
+#[must_use]
+pub const fn color_for(kind: MessageKind) -> ainb_plugin_sdk::Color {
+    transcript_color(kind)
+}

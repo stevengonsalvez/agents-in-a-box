@@ -56,6 +56,7 @@ fn main() {
                     let result = serde_json::to_value(RenderResult {
                         buffer: buf,
                         redraw: false,
+                        captures_text: false,
                     })
                     .unwrap();
                     write_response(&mut writer, id, &result);

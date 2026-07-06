@@ -77,17 +77,17 @@ Two loops run continuously and independently: the **dispatch loop** (control pla
 **Dispatch loop (control):**
 
 1. `ainb hangar issue create --assign <agent>` (or an autopilot tick) enqueues an `agent_task_queue` row.
-2. The daemon **claim loop** atomically claims the oldest queued task for an idle runtime (`queued → dispatched`), respecting per-agent `max_concurrent_tasks`.
+2. The daemon **claim loop** atomically claims the most urgent (then oldest) queued task for an idle runtime (`queued → dispatched`) — `ORDER BY priority DESC, created_at, id` — respecting per-agent `max_concurrent_tasks` and the per-(issue, agent) active-set guard.
 3. It **materialises skills** into the task's per-task directory at the provider-native path (`.claude/skills/`, `.codex/skills/`, `.agent_context/skills/` …) — copied, scripts `chmod 0755`, kept outside the worktree git root so `git status` stays clean.
 4. It spawns the provider in an isolated git worktree (`dispatched → running`), streaming the transcript.
 5. On a terminal transition the **FSM finalize** path runs idempotently: it stamps `done/failed/cancelled`, cascades `autopilot_run.completed_at` when the task belongs to an autopilot run, and captures any `gh pr create` URL into `result.pr_url`.
 
 **Render loop (data):**
 
-1. The plugin sends `workspace/subscribe` for the active workspace.
+1. The plugin sends `workspace/subscribe` for the active workspace; the daemon registers the (authenticated) connection as a workspace-scoped event subscriber.
 2. On the ack it fires snapshot RPCs — `hangar/issues_list`, `tasks_list`, `agents_list`, `skills_list`, `autopilots_list`, `daemon_health` — which the daemon answers from the store (resolving slug→id, scoping by workspace).
 3. The plugin folds the wire rows into screen state and renders.
-4. Async events (`TaskStarted`/`TaskFinished`, `autopilot.tick_skipped`, skill updates) stream back over the subscription for instant feedback; the next snapshot reconciles authoritatively, so a dropped event self-heals.
+4. The daemon **pushes** `hangar/event` notifications over the same subscription (this closed parity-review design gap 02 — the channel used to be decode-only with zero emission sites): the claim loop emits `TaskStarted` and the terminal `TaskFinished` as the FSM finalizes, the Kanban `task_transition` RPC emits the matching lifecycle event when a card actually moves, and the autopilot scheduler / fire-now path emits `AutopilotRunChanged` (fired and skipped ticks). Events are scoped to the subscribed workspace's resolved row id — a tenant never sees another tenant's frames — and only authenticated, subscribed connections receive them. Delivery is best-effort instant feedback; the next snapshot reconciles authoritatively, so a dropped event self-heals.
 
 ## Task lifecycle (FSM)
 
@@ -95,6 +95,8 @@ Every unit of agent work is an `agent_task_queue` row walking a strict finite-st
 
 ![Task FSM state machine](./diagrams/arch-task-fsm.svg)
 
+- **Per-(issue, agent) concurrency** — task work on one issue serialises per **agent**, not globally (decision: adopt Multica's `ClaimAgentTask` model, closing parity-review design gap 03). The partial unique index `idx_one_pending_task_per_issue_agent` (migration 0012, replacing 0004's global-per-issue scope) allows at most one *pending* (`queued`/`dispatched`) task per `(issue_id, agent_id)`, and the claim SQL's `NOT EXISTS` active-set guard refuses to dispatch an agent a second `queued`/`dispatched`/`running` task for an issue it is already working — so different agents work one issue in parallel while the same agent's duplicate fires still coalesce.
+- **Priority ordering** — the claim drains `ORDER BY priority DESC, created_at, id` (decision: adopt Multica's `priority DESC, created_at` claim ordering, closing the parity-review "no expedite path" design gap). `agent_task_queue.priority` (migration 0013) is an integer **0..3 mapping P3..P0 — higher = more urgent**: `0` = P3 (the routine default, so untouched enqueue paths stay strict-FIFO), `3` = P0 (claimed first). Equal priorities keep the FIFO `created_at, id` tiebreak. `ainb hangar issue create --priority N --assign <agent>` stamps it onto the enqueued task; a retry child inherits its parent's priority.
 - **Idempotent finalize** — concurrent complete-vs-cancel resolves deterministically (first wins, loser no-ops); a terminal row never re-transitions.
 - **Retry** — a failure with a *retryable* reason (e.g. runtime offline) spawns a child task linked by `parent_task_id`, capped by `max_attempts`; `agent_error` does not retry.
 - **TTL sweepers** — stale `queued` (2h) / `dispatched` (5min) / `running` (2.5h) rows are swept to `failed` in idempotent batches (cap 500).
@@ -110,7 +112,7 @@ A single SQLite database, workspace-tenant from migration 0001. Every row is sco
 |-------|--------|
 | **Tenancy** | `workspace` (slug unique), `user` (email unique), `member` (role) |
 | **Actors** | `agent_runtime` (status), `agent` (runtime, visibility, owner) |
-| **Work** | `issue` + `comment`; `agent_task_queue` (status, attempt, `parent_task_id`, `result` JSON, `autopilot_run_id`) with a partial unique index = one pending task per issue |
+| **Work** | `issue` + `comment`; `agent_task_queue` (status, `priority` 0..3 = P3..P0, attempt, `parent_task_id`, `result` JSON, `autopilot_run_id`) with a partial unique index = one pending task per (issue, agent) |
 | **Skills** | `skill` (unique per workspace/name), `skill_file`, `agent_skill` (M:N junction) |
 | **Auth** | `pat` + `daemon_token` (sha256 only), `beads_mapping` (hangar↔bd) |
 | **Autopilots** | `autopilot` (cron_expr, max_concurrent_runs, next_tick_at, enabled), `autopilot_run` (status, completed_at) |
@@ -269,7 +271,7 @@ Legend: **✅** = acceptance + e2e tripwire · **✅ (acc.)** = acceptance only 
 |---|---|---|---|---|
 | Daemon boot + migrations apply | daemon+store | `tripwire_migrations_apply.rs` (16 tables) | `tripwire_daemon_boots.rs` | ✅ |
 | Unix-socket JSON-RPC + snapshots | daemon+proto | `wire_types` (6) + rpc inline + `rpc_server.rs` | `tripwire_hangar_plugin_connects.rs` | ✅ |
-| workspace/subscribe + event stream | proto+plugin | `event_roundtrip` (6) + `stream_decode` (8) + `daemon_dial` | `tripwire_detects_daemon_drop` | ✅ |
+| workspace/subscribe + event stream | proto+daemon+plugin | `event_roundtrip` (6) + `stream_decode` (8) + `daemon_dial` + `rpc_event_push.rs` (3: push, workspace isolation, no-op silence) | `tripwire_detects_daemon_drop` | ✅ |
 | Cross-screen navigation | TUI | `screen_router_test.rs` (5) | `tripwire_p4_cross_screen_navigation.rs` | ✅ |
 | Beads bidirectional sync | daemon | `beads_adapter`/`reconcile`/`inbound`/`outbound`/`cli` (50+) | `tripwire_beads_roundtrip.rs` | ✅ |
 | Claude runner exec (env/exit/stream/timeout) | daemon | `runner_claude.rs` (6) | — (in happy-path) | ✅ |

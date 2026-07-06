@@ -3,7 +3,7 @@
 -- An `autopilot` is a stored `(cron_expr, agent, instructions)` triple the
 -- daemon scheduler thread (P7.3) fires at each tick, enqueuing an
 -- `agent_task_queue` row tagged with the firing `autopilot_run.id` (P7.4). The
--- Multica `skip|queue|replace` trigger model is collapsed at v1 to a single
+-- the reference `skip|queue|replace` trigger model is collapsed at v1 to a single
 -- `max_concurrent_runs` integer; the separate `autopilot_trigger` table is
 -- deferred (webhook / api triggers are out of scope).
 --

@@ -10,7 +10,7 @@
 //!    dispatch in the same session stays quiet.
 //!
 //! A dismissed warning is recorded as a string key in the `warnings_ack` array
-//! of `~/.ainb/hangar/state.toml` — the same host state file the workspace
+//! of `~/.agents-in-a-box/hangar/state.toml` — the same host state file the workspace
 //! switch state lives in ([`crate::workspace_store`]). The two concerns share
 //! the file but own disjoint keys: workspace owns `active_workspace` /
 //! `default_workspace`, warnings owns `warnings_ack`. Each writer preserves
@@ -156,7 +156,7 @@ pub fn reset_at(path: &Path, pred: impl Fn(&str) -> bool) -> std::io::Result<usi
 
 /// The injected host warning store.
 ///
-/// Production reads/writes `~/.ainb/hangar/state.toml::warnings_ack`; tests use
+/// Production reads/writes `~/.agents-in-a-box/hangar/state.toml::warnings_ack`; tests use
 /// an in-memory double. The trait keeps the *decision* callers (the plugin
 /// first-run flow, the daemon emit seam) free of an `std::io` dependency.
 pub trait WarningStore: Send + Sync {

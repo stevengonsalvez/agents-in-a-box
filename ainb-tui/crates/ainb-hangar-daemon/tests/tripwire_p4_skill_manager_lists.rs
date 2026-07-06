@@ -23,11 +23,14 @@ fn skill_manager_lists_skills() {
     let bin = common::ainb_bin().expect("gated by can_run_tripwire");
     let (sess, _landing) = TuiSession::launch_to_hangar(&bin, pipe.home());
 
-    sess.send_key("4");
+    // Re-send the nav key until the screen switches: a lone keypress can be
+    // dropped on a loaded CI runner (the flake that reddened the Linux leg).
     let skills = sess
-        .poll_capture(Instant::now() + Duration::from_secs(15), |c| {
-            c.contains("commit") && c.contains("Used")
-        })
+        .switch_tab_until(
+            "3",
+            Instant::now() + Duration::from_secs(15 * common::budget_scale()),
+            |c| c.contains("commit") && c.contains("Used"),
+        )
         .expect("skill manager never rendered");
 
     // POSITIVE: seeded skill name + filter chip. NEGATIVE: not the issue list.
@@ -38,12 +41,13 @@ fn skill_manager_lists_skills() {
         "still on the issue list:\n{skills}"
     );
 
-    // Return navigation.
-    sess.send_key("1");
+    // Return navigation (re-send until the issue list re-renders).
     let back = sess
-        .poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-            c.contains("Refactor API")
-        })
+        .switch_tab_until(
+            "1",
+            Instant::now() + Duration::from_secs(10 * common::budget_scale()),
+            |c| c.contains("Refactor API"),
+        )
         .expect("issue list never returned from skills");
     assert!(
         !back.contains("Used"),

@@ -45,9 +45,19 @@ path = "src/lib.rs"
 [dependencies]
 ainb-hangar-store = { path = "../ainb-hangar-store" }
 ainb-hangar-core = { path = "../ainb-hangar-core" }
+# Fleet orchestration libs (the ONE send path + the needs classifier + session
+# discovery), extracted below both this crate and ainb-core so the daemon can
+# drive the SAME verified tmux send and the SAME ASK>ERR>IDLE>WAIT classifier the
+# TUI/CLI use — without a crate cycle (ainb depends on this daemon). The P2
+# attention ingest producer classifies with it; the answer router delivers with it.
+ainb-fleet-core = { path = "../ainb-fleet-core" }
 # Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
 # serialises over the unix socket (P4.10). Pure data — no host deps leak in.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# e38.23 OS-level agent confinement: wraps the provider spawn in a Seatbelt
+# (macOS) / Landlock (Linux) FS sandbox so the agent subprocess can only
+# read/write the task's isolated roots. Gates the non-claude providers (e38.16).
+ainb-hangar-sandbox = { path = "../ainb-hangar-sandbox" }
 sqlx = { version = "0.8", default-features = false, features = [
     "runtime-tokio-rustls",
     "sqlite",
@@ -68,7 +78,7 @@ clap = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 # P8.1 observability: the non-blocking rolling JSONL sink. `rolling` builds the
-# daily-rotated `daemon.<date>` file under `~/.ainb/hangar/logs`; `non_blocking`
+# daily-rotated `daemon.<date>` file under `~/.agents-in-a-box/hangar/logs`; `non_blocking`
 # moves the actual writes onto a background thread and hands back a
 # `WorkerGuard` the daemon `main` must hold for the whole process lifetime
 # (dropping it early flushes and stops the writer, losing buffered lines).
@@ -83,11 +93,19 @@ serde_yaml = { workspace = true }
 # Home-directory resolution for the per-task env tree root (mirrors the store's
 # `$AINB_HANGAR_HOME`-else-`~` resolution so env dirs and the db share a root).
 dirs = { workspace = true }
+# y0f: the advisory file lock (`FileExt::lock_exclusive`) the inbox cap takes on
+# `inbox/hangar-daemon.lock` — the SAME lock the hook's inbox writer holds — so a
+# periodic cap of the daemon's own exhaust inbox never races a concurrent commit.
+fs2 = { workspace = true }
 # Unix process-group signalling: the runner spawns the provider in its own
 # process group so a timeout can SIGKILL the whole tree (the provider plus any
 # `sh -c sleep …` grandchild), closing inherited pipes so the stdout reader
-# EOFs immediately instead of blocking on the orphaned grandchild.
-nix = { workspace = true, features = ["signal"] }
+# EOFs immediately instead of blocking on the orphaned grandchild. The `user`
+# feature backs the RPC server's same-uid peer-credential gate (e38.1).
+nix = { workspace = true, features = ["signal", "user"] }
+# e38.1 socket-auth: the CSPRNG behind the boot-time daemon-token mint
+# (`rpc::auth::ensure_socket_token` passes `OsRng` into the core mint seam).
+rand = "0.8"
 # Resolves the `bd` binary on PATH (or validates an explicit path) so the
 # adapter can fail fast with `BdNotInstalled` instead of an opaque exec error
 # when the issue tracker is absent. Used by `BdClient::new`.
@@ -97,10 +115,21 @@ chrono = { workspace = true }
 # (P2.4): the loop selects on `cancel.cancelled()` so the daemon's supervisor can
 # stop it within one tick.
 tokio-util = { workspace = true }
-# P5.3 env allowlist config: parse/serialise `~/.ainb/hangar/env.allow.toml`
+# P5.3 env allowlist config: parse/serialise `~/.agents-in-a-box/hangar/env.allow.toml`
 # while preserving foreign sections (the daemon reads its `[env]` table but
 # round-trips the rest of the document untouched).
 toml = { workspace = true }
+# T8 task-lifecycle FSM: the `statig` typed compile-time state machine that
+# types the in-process transition ordering the claim loop walks
+# (`dispatched -> running -> done|failed`). See `crate::fsm`. The
+# migration-0012 per-(issue, agent) SQL claim guard remains the DB-level
+# enforcer; this only types the daemon-side transition sequence so an
+# out-of-order finalize is a typed error, not a silent mis-step.
+statig = { workspace = true }
+# P5 profiles: fs-watch on `{hangar_home}/profiles/` so an edit-on-disk of a
+# profile master is reconciled into the DB index without an RPC (T6 fs-watch
+# refresh). The daemon holds the returned watcher for the process lifetime.
+notify = { workspace = true }
 
 # P8.2 OTLP export (ALL optional, only pulled under `--features otlp`). A plain
 # `cargo build` resolves none of these, so the shipped daemon links zero OTEL

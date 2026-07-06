@@ -1635,6 +1635,13 @@ impl CliCommand for WebCommand {
                             "Viewer-only: disable the live terminal write surface \
                              (the WS terminal is refused with 403)",
                         ),
+                )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb web                                       Serve on 127.0.0.1:8420 (loopback)\n  \
+                     ainb web --listen 0.0.0.0:8420 --token s3cr3t  Expose to the LAN behind a bearer token\n  \
+                     ainb web --read-only                           Viewer-only (live terminal disabled)\n  \
+                     ainb web --insecure-bind --read-only           Non-loopback viewer with no token (DANGEROUS)",
                 ),
         )
     }
@@ -2419,9 +2426,10 @@ impl CliCommand for McpCommand {
 /// builder command, mirroring the hybrid derive+builder pattern used elsewhere
 /// in this registry. The dispatch lives in the `cli::hangar` lib module
 /// (`reference_rust_bin_lib_split`); `run` only extracts the parsed enum and
-/// hands it off. Verbs whose backing impl does not yet exist (`skill`,
-/// `autopilot`, `config`, `init`, `tui`, `daemon start|stop`) are intentionally
-/// absent — a later phase adds a variant rather than un-stubbing one here.
+/// hands it off. Verbs whose backing impl does not yet exist (`init`, `tui`)
+/// are intentionally absent — a later phase adds a variant rather than
+/// un-stubbing one here. (`daemon run|start|stop|restart|setup` landed in
+/// e38.20.)
 pub struct HangarCommand;
 impl CliCommand for HangarCommand {
     fn name(&self) -> &'static str {

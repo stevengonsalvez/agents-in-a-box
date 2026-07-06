@@ -10,7 +10,7 @@
 //! ```text
 //!  crates/ainb-hangar-daemon/tests/tripwire_*.rs   (P4/P7/P8/P9 daemon set)
 //!  crates/ainb-hangar-store/tests/tripwire_*.rs    (P0 migration determinism)
-//!  plugins/hangar-tui/tests/tripwire_*.rs          (P3.8/P4.10 plugin roundtrip)
+//!  crates/ainb-plugin-hangar/tests/tripwire_*.rs          (P3.8/P4.10 plugin roundtrip)
 //!         │
 //!         ▼  walk dirs, count tripwire_*.rs (skip *_common.rs helpers)
 //!  assert discovered >= BASELINE
@@ -30,7 +30,13 @@
 //!
 //! `BASELINE_TRIPWIRES` was captured by running the discovery once and reading
 //! the actual count (25 on the P9.3 commit; 28 once the Logs `L` + Autopilots
-//! `5` screen tripwires landed), per `feedback_dont_guess_test_constants`. When
+//! `5` screen tripwires landed; 29 once the daemon crash-recovery tripwire
+//! landed; 31 once the migration-determinism tripwire and the daemon
+//! concurrent-cap tripwire landed; 32 once the retry-chain + timeout e2e
+//! tripwire landed; 33 once the create-flow keystroke→RPC→DB round-trip
+//! tripwire landed; 34 once the plugin-crash / host-reconnect +
+//! parent-death-watcher tripwire landed), per `feedback_dont_guess_test_constants`.
+//! When
 //! you ADD a tripwire, this test keeps passing (count rises) — but bump the
 //! baseline to the new captured count in the same commit. When you INTENTIONALLY
 //! remove one, bump the baseline down so the drop is reviewed, never silent.
@@ -41,17 +47,14 @@ use std::path::{Path, PathBuf};
 
 /// Hangar tripwire binaries present at the captured commit. See module docs for
 /// the capture procedure. Lower-bound assertion: adding tripwires is always fine.
-const BASELINE_TRIPWIRES: usize = 28;
+const BASELINE_TRIPWIRES: usize = 34;
 
 /// `tests/` directories that hold Hangar tripwires, relative to the cargo
 /// workspace root (`ainb-tui/`).
 const TRIPWIRE_DIRS: &[&str] = &[
     "crates/ainb-hangar-daemon/tests",
     "crates/ainb-hangar-store/tests",
-    // The Hangar plugin lives OUTSIDE the cargo workspace, at repo-root
-    // `plugins/hangar-tui/` (sibling of `ainb-tui/`), so it is reached via the
-    // workspace root's parent.
-    "../plugins/hangar-tui/tests",
+    "crates/ainb-plugin-hangar/tests",
 ];
 
 /// Workspace root = the directory containing this daemon crate's parent

@@ -1,7 +1,7 @@
-// Pure builder logic for hangar (verb=needs). SOURCE OF TRUTH.
+// Pure builder logic for jarvis (verb=needs). SOURCE OF TRUTH.
 //
 // The SES workflow sandbox cannot `import` this module at runtime, so
-// hangar.js inlines a VERBATIM copy of `buildPanel` between the
+// jarvis.js inlines a VERBATIM copy of `buildPanel` between the
 // PARITY markers. parity.test.mjs asserts the two copies never drift.
 //
 // Keep `buildPanel` pure: no agent()/phase()/log(), only data transform.

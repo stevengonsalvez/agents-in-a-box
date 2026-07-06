@@ -8,7 +8,7 @@
 //! racing the runner. [`finalize_idempotent`] captures that one behaviour so the
 //! four services share it verbatim.
 //!
-//! # The algorithm (Multica `task.go:1010` idempotent finalize)
+//! # The algorithm (reference control plane `task.go:1010` idempotent finalize)
 //!
 //! 1. Run a conditional UPDATE that only fires when the row is in one of
 //!    `expected_from` and reports `rows_affected`.
@@ -87,7 +87,7 @@ pub enum FinalizeError {
 /// itself, so the service owns the full statement shape and parameter order.
 ///
 /// On a 0-row update the row's current `status` is re-read and classified per
-/// the module-level algorithm (Multica `task.go:1010`).
+/// the module-level algorithm (reference `task.go:1010`).
 ///
 /// `task_id`, `target`, `expected_from`, and the resolved outcome are emitted as
 /// a `tracing` event so every transition is grep-able in the daemon log.
@@ -129,7 +129,7 @@ pub async fn finalize_idempotent<'q>(
     // reflects the *last-committed* state of the row rather than a snapshot
     // atomic with the failed UPDATE. That is exactly what idempotent finalize
     // wants (the loser of a race observes the winner's committed terminal state)
-    // and matches Multica `task.go:1010`.
+    // and matches the reference `task.go:1010`.
     let current = read_state(pool, task_id).await?;
     classify_no_op(task_id, target, expected_from, current)
 }

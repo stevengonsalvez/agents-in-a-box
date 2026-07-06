@@ -48,13 +48,15 @@ pub struct WebConfig {
     pub token: Option<String>,
     /// Explicit override allowing a non-loopback bind with no token. Mirrors
     /// agent-deck's `--insecure-bind`. Refused unless paired with `read_only`
-    /// or a token, because an unauthenticated write surface exposes the live
-    /// WS terminal (shell access to every fleet session) to the network.
+    /// or a token, because an unauthenticated write surface exposes the fleet
+    /// write paths (the live WS terminal — shell access to every session — and
+    /// `POST /api/answer`, the daemon send seam) to the network.
     pub insecure_bind: bool,
-    /// Defaults to the full control mode (the live WS terminal write surface is
-    /// served). Setting `--read-only` flips this on, disabling the terminal
-    /// write surface so the dashboard is viewer-only and never mutates fleet
-    /// state. Surfaced in `/healthz`.
+    /// Defaults to the full control mode (the write surfaces are served).
+    /// Setting `--read-only` flips this on, disabling EVERY write surface — the
+    /// WS terminal and `POST /api/answer` (both gated by
+    /// [`crate::terminal::read_only_gate`]) — so the dashboard is viewer-only and
+    /// never mutates fleet state. Surfaced in `/healthz`.
     pub read_only: bool,
 }
 
@@ -66,8 +68,10 @@ impl WebConfig {
     /// 1. A bearer token is configured → allow (the surface is authenticated).
     /// 2. `--insecure-bind` was passed → allow ONLY when the surface is
     ///    `--read-only`; refuse otherwise, because an unauthenticated write
-    ///    surface exposes the live WS terminal (shell access to every fleet
-    ///    session) to the network.
+    ///    surface exposes the fleet write paths (the live WS terminal — shell
+    ///    access to every session — and `POST /api/answer`, the daemon send
+    ///    seam) to the network. In `--read-only` mode every write surface is
+    ///    gated off, so no such path is reachable.
     /// 3. The host is loopback (`127.0.0.0/8`, `::1`) → allow.
     /// 4. Otherwise → refuse.
     pub fn check_bind_security(&self) -> Result<(), BindError> {

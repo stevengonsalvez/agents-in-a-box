@@ -4,7 +4,7 @@
 //! These spans are the daemon's observability surface: a single run shows up as
 //! `task.claim -> task.start -> task.complete` (or `.fail` / `.cancel`) and an
 //! autopilot firing shows up as `autopilot.tick`, each carrying the ids an
-//! operator filters by. The field key names mirror Multica's structured `slog`
+//! operator filters by. The field key names mirror the reference's structured `slog`
 //! keys (`task_id`, `workspace_id`, `runtime_id`, `outcome`, ...).
 //!
 //! ## Stale-plan → real-method mapping
@@ -216,8 +216,10 @@ async fn enqueue_task(store: &Store, id: &str, created_at: i64) -> String {
             agent_id: "agent-1".to_string(),
             issue_id: None,
             work_dir: None,
+            priority: 0,
             created_at,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await
@@ -246,6 +248,8 @@ async fn store_fsm_and_autopilot_emit_named_spans_with_required_fields() {
             instructions: Some("do the thing".to_string()),
             cron_expr: "0 9 * * *".to_string(),
             max_concurrent_runs: 1,
+            execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
+            concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
         },
     )
     .await

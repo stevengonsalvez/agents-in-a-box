@@ -30,6 +30,18 @@ pub struct OnboardingConfig {
     /// Git directories configured during onboarding
     #[serde(default)]
     pub git_directories: Vec<PathBuf>,
+
+    /// How the user found ainb (questionnaire answer)
+    #[serde(default)]
+    pub source: Option<String>,
+
+    /// The user's role (questionnaire answer)
+    #[serde(default)]
+    pub role: Option<String>,
+
+    /// What the user wants to do with ainb (questionnaire answer)
+    #[serde(default)]
+    pub use_case: Option<String>,
 }
 
 fn default_version() -> String {
@@ -44,6 +56,9 @@ impl Default for OnboardingConfig {
             version: default_version(),
             skipped_dependencies: Vec::new(),
             git_directories: Vec::new(),
+            source: None,
+            role: None,
+            use_case: None,
         }
     }
 }
@@ -63,13 +78,19 @@ impl OnboardingConfig {
 
     /// Load onboarding config from disk
     pub fn load() -> Result<Self> {
-        let path = Self::config_path()?;
+        Self::load_from(&Self::config_path()?)
+    }
 
+    /// Load onboarding config from an explicit path.
+    ///
+    /// Returns the default config if the file does not exist. Used by the
+    /// real loader (`load`) and by tests that need a hermetic path.
+    pub fn load_from(path: &std::path::Path) -> Result<Self> {
         if !path.exists() {
             return Ok(Self::default());
         }
 
-        let content = fs::read_to_string(&path)
+        let content = fs::read_to_string(path)
             .with_context(|| format!("Failed to read onboarding config from {}", path.display()))?;
 
         let config: OnboardingConfig = toml::from_str(&content).with_context(|| {
@@ -81,8 +102,14 @@ impl OnboardingConfig {
 
     /// Save onboarding config to disk
     pub fn save(&self) -> Result<()> {
-        let path = Self::config_path()?;
+        self.save_to(&Self::config_path()?)
+    }
 
+    /// Save onboarding config to an explicit path, creating parent dirs.
+    ///
+    /// Backs the real saver (`save`) and lets tests persist to a temp dir
+    /// without touching the user's home directory.
+    pub fn save_to(&self, path: &std::path::Path) -> Result<()> {
         // Ensure parent directories exist
         if let Some(parent) = path.parent() {
             fs::create_dir_all(parent).with_context(|| {
@@ -93,7 +120,7 @@ impl OnboardingConfig {
         let content =
             toml::to_string_pretty(self).context("Failed to serialize onboarding config")?;
 
-        fs::write(&path, content)
+        fs::write(path, content)
             .with_context(|| format!("Failed to write onboarding config to {}", path.display()))?;
 
         Ok(())
@@ -198,5 +225,55 @@ mod tests {
 
         assert!(!config.completed);
         assert!(config.skipped_dependencies.is_empty());
+    }
+
+    #[test]
+    fn test_questionnaire_answers_round_trip() {
+        // USER-VISIBLE proof: the source/role/use-case answers the wizard
+        // collects survive a save -> load cycle through the on-disk config.
+        // No-op'ing the persist (dropping the field assignments below, or
+        // the fields themselves) breaks the read-back assertions.
+        let dir = TempDir::new().unwrap();
+        let path = dir.path().join("config/onboarding.toml");
+
+        let mut config = OnboardingConfig::default();
+        config.mark_completed();
+        config.source = Some("Friend or colleague".to_string());
+        config.role = Some("Software engineer".to_string());
+        config.use_case = Some("Build features end-to-end".to_string());
+        config.save_to(&path).unwrap();
+
+        let loaded = OnboardingConfig::load_from(&path).unwrap();
+        assert!(loaded.completed);
+        assert_eq!(loaded.source.as_deref(), Some("Friend or colleague"));
+        assert_eq!(loaded.role.as_deref(), Some("Software engineer"));
+        assert_eq!(
+            loaded.use_case.as_deref(),
+            Some("Build features end-to-end")
+        );
+
+        // And confirm the answers are actually present in the persisted TOML
+        // text, not just an in-memory artifact.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(
+            raw.contains("source = \"Friend or colleague\""),
+            "raw toml:\n{raw}"
+        );
+        assert!(
+            raw.contains("role = \"Software engineer\""),
+            "raw toml:\n{raw}"
+        );
+        assert!(
+            raw.contains("use_case = \"Build features end-to-end\""),
+            "raw toml:\n{raw}"
+        );
+    }
+
+    #[test]
+    fn test_questionnaire_defaults_are_none() {
+        let config = OnboardingConfig::default();
+        assert!(config.source.is_none());
+        assert!(config.role.is_none());
+        assert!(config.use_case.is_none());
     }
 }

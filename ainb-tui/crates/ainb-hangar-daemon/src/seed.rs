@@ -124,6 +124,9 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 assignee: (i == 0).then(|| agent_ref.clone()),
                 creator: creator.clone(),
                 created_at: now + i64::try_from(i).unwrap_or(0),
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
             },
         )
         .await?;
@@ -140,8 +143,10 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
             agent_id: "agent-1".into(),
             issue_id: Some("issue-1".into()),
             work_dir: None,
+            priority: 0,
             created_at: now,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await?;
@@ -184,6 +189,12 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
             instructions: None,
             visibility: "workspace".into(),
             owner_id: "user-1".into(),
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
         },
     )
     .await?;

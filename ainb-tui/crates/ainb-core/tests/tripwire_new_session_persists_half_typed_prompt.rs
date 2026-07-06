@@ -9,7 +9,6 @@ mod tripwire_new_session_common;
 use tripwire_new_session_common::*;
 
 use std::fs;
-use std::path::Path;
 use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
@@ -35,11 +34,7 @@ fn half_typed_prompt_persists_across_esc_back() {
         .expect("tmux new-session");
     assert!(status.success());
 
-    let cmd = format!(
-        "HOME={} AINB_DISABLE_PLUGINS=1 exec {} tui",
-        home_path.display(),
-        ainb.display()
-    );
+    let cmd = launch_cmd_gh_authed(&home_path, &ainb);
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
         .status()
@@ -71,8 +66,10 @@ fn half_typed_prompt_persists_across_esc_back() {
     }
 
     send_key(&session, "Enter");
-    // Default preset is Interactive → no prompt textarea. Switch to Custom
-    // and flip Mode to Boss so the textarea exists.
+    // Default preset is Interactive → no prompt textarea. Select the shipped
+    // `opusplan` Boss preset so the textarea exists (the Boss/Mode toggle was
+    // removed in commit fabdd92a; a Boss configuration is now reached by
+    // *selecting* a Boss preset, not by cycling Custom + flipping Mode).
     let cfg_deadline = Instant::now() + Duration::from_secs(10);
     if poll_capture(&session, cfg_deadline, |c| {
         c.contains("Mode:") && c.contains("Enter=Launch")
@@ -83,28 +80,25 @@ fn half_typed_prompt_persists_across_esc_back() {
         kill_session(&session);
         panic!("Configure never rendered; last:\n---\n{last}\n---");
     }
-    // Cycle to Custom by Left-arrow (wraps Named(0) → Custom). Seed for
-    // Custom on a wrap-cycle is the current named preset
-    // (claude-interactive-yolo), so the Custom rows match the codex/claude
-    // shape with a Model row.
-    send_key(&session, "Left");
-    send_key(&session, "Tab"); // Preset → Agent
-    send_key(&session, "Tab"); // Agent → Model (claude has Model row)
-    send_key(&session, "Tab"); // Model → Mode
-    send_key(&session, "Right"); // Interactive → Boss
+    // Presets are sorted by name; from the claude-interactive-yolo default
+    // (Named(0)) two Right presses reach `opusplan` (Named(2), mode = "boss"),
+    // which reveals the Prompt row. Focus stays on the Preset row.
+    send_key(&session, "Right"); // Named(0) → Named(1) codex-interactive-yolo
+    send_key(&session, "Right"); // Named(1) → Named(2) opusplan (Boss preset)
     let boss_deadline = Instant::now() + Duration::from_secs(5);
     if poll_capture(&session, boss_deadline, |c| {
-        c.contains("Prompt:") && c.contains("Boss")
+        c.contains("[opusplan]") && c.contains("Prompt:")
     })
     .is_none()
     {
         let last = capture(&session);
         kill_session(&session);
-        panic!("Custom→Boss did not reveal Prompt textarea; last:\n---\n{last}\n---");
+        panic!("Selecting opusplan did not reveal Prompt textarea; last:\n---\n{last}\n---");
     }
-    send_key(&session, "Tab"); // Mode → Yolo
-    send_key(&session, "Tab"); // Yolo → Branch
-    send_key(&session, "Tab"); // Branch → Prompt
+    // Prompt is always the second-to-last row (Launch is last). Two Shift+Tabs
+    // from the Preset row wrap backwards onto it.
+    send_key(&session, "BTab"); // Preset → Launch (wrap to last)
+    send_key(&session, "BTab"); // Launch → Prompt (second-to-last)
 
     // Type partial prompt.
     send_text(&session, "fix the s");
@@ -147,7 +141,9 @@ fn half_typed_prompt_persists_across_esc_back() {
     );
 
     // Re-enter Configure — partial prompt should be restored. Default preset
-    // is Interactive so the textarea is hidden; toggle to Boss to expose it.
+    // is Interactive so the textarea is hidden; re-select opusplan to expose it.
+    // (Esc persists last_prompt but NOT last_preset, so the re-entry default is
+    // still claude-interactive-yolo — the same two Right presses reach opusplan.)
     send_key(&session, "Enter");
     let reenter_deadline = Instant::now() + Duration::from_secs(10);
     if poll_capture(&session, reenter_deadline, |c| {
@@ -159,14 +155,10 @@ fn half_typed_prompt_persists_across_esc_back() {
         kill_session(&session);
         panic!("Configure did not re-render on re-entry; last:\n---\n{last}\n---");
     }
-    // Cycle to Custom + flip Mode → Boss so the Prompt textarea re-appears.
-    // Left-arrow on Named(0) wraps to Custom with seed = current named
-    // preset (claude-interactive-yolo), giving us a claude-shaped row set.
-    send_key(&session, "Left");
-    send_key(&session, "Tab"); // Preset → Agent
-    send_key(&session, "Tab"); // Agent → Model
-    send_key(&session, "Tab"); // Model → Mode
-    send_key(&session, "Right"); // Interactive → Boss
+    // Select opusplan again so the Prompt textarea (seeded from the persisted
+    // last_prompt) re-appears with the restored partial text.
+    send_key(&session, "Right"); // Named(0) → Named(1) codex-interactive-yolo
+    send_key(&session, "Right"); // Named(1) → Named(2) opusplan (Boss preset)
     let reveal_deadline = Instant::now() + Duration::from_secs(5);
     let restored = poll_capture(&session, reveal_deadline, |c| {
         c.contains("Enter=Launch") && c.contains("fix the s")

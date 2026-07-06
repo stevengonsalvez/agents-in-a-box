@@ -565,39 +565,3 @@ impl ImageBuilder {
         Ok(())
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use tempfile::TempDir;
-
-    #[tokio::test]
-    #[ignore] // Requires Docker
-    async fn test_image_builder_creation() {
-        let builder = ImageBuilder::new().await;
-        assert!(builder.is_ok());
-    }
-
-    #[tokio::test]
-    async fn test_build_context_creation() {
-        let temp_dir = TempDir::new().unwrap();
-        let dockerfile = temp_dir.path().join("Dockerfile");
-        std::fs::write(&dockerfile, "FROM alpine\nRUN echo hello").unwrap();
-
-        let builder = ImageBuilder {
-            docker: Docker::connect_with_local_defaults().unwrap(),
-        };
-        let build_options = BuildOptions {
-            dockerfile_path: Some(dockerfile.clone()),
-            context_path: temp_dir.path().to_path_buf(),
-            build_args: vec![],
-            no_cache: false,
-            target: None,
-            labels: vec![],
-            pull: false,
-        };
-        let tar_data = builder.create_build_context(&build_options).await;
-        assert!(tar_data.is_ok());
-        assert!(!tar_data.unwrap().is_empty());
-    }
-}

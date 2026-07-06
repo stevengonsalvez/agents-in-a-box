@@ -18,7 +18,7 @@
 //!   path is canonicalized (symlinks resolved) and compared against the
 //!   allow-list before any `connect`. This defends a shared dev box
 //!   against arbitrary `AF_UNIX` abuse and against a symlink that resolves
-//!   `~/.ainb/hangar.sock` to, say, `/var/run/docker.sock`.
+//!   `~/.agents-in-a-box/hangar.sock` to, say, `/var/run/docker.sock`.
 //! - **Deterministic teardown.** Connections are keyed by which plugin
 //!   dialled them; on plugin shutdown / crash / quarantine the host drops
 //!   that plugin's sockets (aborting the read task + closing the stream)
@@ -33,7 +33,7 @@
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use ainb_plugin_protocol::params::{UnixSocketEvent, UnixSocketEventKind};
 use bytes::Bytes;
@@ -131,6 +131,15 @@ impl UnixSocketRegistry {
     /// forwards every read into `plugin_inbox` as a
     /// `Command::HandleEvent` under topic `socket:<stream_id>`.
     ///
+    /// `render_dirty` is the dialling plugin's host render-dirty flag. The
+    /// read loop flips it BEFORE every forwarded socket event so the host's
+    /// `tick_plugin_renders` re-paints the plugin once the daemon data lands
+    /// — mirroring `send_key` / `send_mouse` / `publish_snapshot`. Without
+    /// this, a plugin that reads its own dialled socket (the Hangar control
+    /// plane reading daemon snapshots / pushed events) applies the data but
+    /// never gets re-rendered until an unrelated keystroke happens to mark it
+    /// dirty, so an async snapshot could sit unpainted (a blank board).
+    ///
     /// The caller is responsible for the cap gate + path whitelist check
     /// ([`path_allowed`]) — this method only connects an already-vetted
     /// path. Returns the host-minted [`SocketStreamId`].
@@ -144,6 +153,7 @@ impl UnixSocketRegistry {
         plugin: PluginId,
         path: &Path,
         plugin_inbox: Inbox,
+        render_dirty: Arc<AtomicBool>,
     ) -> Result<SocketStreamId, RuntimeError> {
         let stream = UnixStream::connect(path).await.map_err(RuntimeError::Io)?;
         let (mut read_half, write_half) = stream.into_split();
@@ -155,6 +165,10 @@ impl UnixSocketRegistry {
             loop {
                 match read_half.read(&mut buf).await {
                     Ok(0) => {
+                        // Mark dirty BEFORE the inbox send so the host's render
+                        // tick can't drain the flag between this event landing
+                        // and the next render kick.
+                        render_dirty.store(true, Ordering::Release);
                         let _ = plugin_inbox.send(Command::HandleEvent {
                             topic: topic.clone(),
                             payload: encode_event(&UnixSocketEvent {
@@ -167,6 +181,7 @@ impl UnixSocketRegistry {
                     }
                     Ok(n) => {
                         let chunk = Bytes::copy_from_slice(&buf[..n]);
+                        render_dirty.store(true, Ordering::Release);
                         if plugin_inbox
                             .send(Command::HandleEvent {
                                 topic: topic.clone(),
@@ -182,6 +197,7 @@ impl UnixSocketRegistry {
                         }
                     }
                     Err(e) => {
+                        render_dirty.store(true, Ordering::Release);
                         let _ = plugin_inbox.send(Command::HandleEvent {
                             topic: topic.clone(),
                             payload: encode_event(&UnixSocketEvent {
@@ -354,7 +370,7 @@ pub fn canonical_for_compare(path: &Path) -> PathBuf {
 /// resolves symlinks) before an **exact** comparison — there is no
 /// wildcard / prefix semantics for socket dials. This is what defends
 /// against the symlink-redirect attack: a request for
-/// `~/.ainb/hangar.sock` that is a symlink to `/var/run/docker.sock`
+/// `~/.agents-in-a-box/hangar.sock` that is a symlink to `/var/run/docker.sock`
 /// canonicalizes to `/var/run/docker.sock`, which won't match the
 /// canonicalized allow-list entry.
 ///
@@ -385,12 +401,59 @@ mod tests {
         assert!(!a.is_empty());
     }
 
+    /// The dial read loop MUST mark the dialling plugin render-dirty before it
+    /// forwards a daemon socket frame — otherwise a plugin reading its own
+    /// dialled socket (the Hangar control plane consuming daemon snapshots /
+    /// pushed events) applies the data but the host's `tick_plugin_renders`
+    /// skips the repaint (dirty=false), leaving an async snapshot unpainted (a
+    /// blank board) until an unrelated keystroke happens to mark it dirty.
+    #[tokio::test]
+    async fn dial_read_loop_marks_render_dirty_before_forwarding_data() {
+        use tokio::net::UnixListener;
+
+        // A throwaway listener the dial connects to; it writes one frame back.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("d.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut sock, _) = listener.accept().await.unwrap();
+            sock.write_all(b"hello-from-daemon").await.unwrap();
+            // Hold the connection open briefly so the read lands as Data, not Eof.
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        });
+
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Command>();
+        let dirty = Arc::new(AtomicBool::new(false));
+        let reg = UnixSocketRegistry::new();
+        let _id = reg
+            .dial(PluginId::from("test-plugin"), &path, tx, dirty.clone())
+            .await
+            .expect("dial connects to the listener");
+
+        // The forwarded Data frame arrives as a `HandleEvent`, and the dirty
+        // flag is set BEFORE the inbox send, so by the time we observe the
+        // command the flag is already true.
+        let cmd = tokio::time::timeout(std::time::Duration::from_secs(2), rx.recv())
+            .await
+            .expect("a forwarded socket command within 2s")
+            .expect("inbox stays open");
+        assert!(
+            matches!(cmd, Command::HandleEvent { .. }),
+            "the dial read loop forwards daemon reads as a HandleEvent"
+        );
+        assert!(
+            dirty.load(Ordering::Acquire),
+            "the dial read loop must mark the plugin render-dirty when daemon data arrives"
+        );
+        server.await.unwrap();
+    }
+
     #[test]
     fn expand_path_tilde() {
         std::env::set_var("HOME", "/home/cts");
         assert_eq!(
-            expand_path("~/.ainb/hangar.sock"),
-            PathBuf::from("/home/cts/.ainb/hangar.sock")
+            expand_path("~/.agents-in-a-box/hangar.sock"),
+            PathBuf::from("/home/cts/.agents-in-a-box/hangar.sock")
         );
         assert_eq!(expand_path("~"), PathBuf::from("/home/cts"));
     }
@@ -466,5 +529,86 @@ mod tests {
 
         let allow = vec![target.to_string_lossy().to_string()];
         assert!(path_allowed(&allow, &link.to_string_lossy()));
+    }
+
+    /// Process-wide mutex serialising the `$AINB_HANGAR_HOME` mutations the
+    /// override tests below perform; cargo runs tests in-process + parallel,
+    /// and `expand_path` reads the live env, so an unguarded `set_var` races.
+    static HANGAR_HOME_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// The Hangar manifest's `unix_socket_dial` allow-list (mirrors
+    /// `ainb-plugin-hangar/manifest.toml`). The middle entry is the
+    /// `$AINB_HANGAR_HOME`-relative socket added so a non-default home still
+    /// passes the cap gate.
+    const HANGAR_DIAL_ALLOW: [&str; 3] = [
+        "~/.agents-in-a-box/hangar.sock",
+        "${AINB_HANGAR_HOME}/hangar.sock",
+        "${XDG_RUNTIME_DIR}/ainb-hangar.sock",
+    ];
+
+    /// SECURITY (finding #1): when `$AINB_HANGAR_HOME` is set, the daemon binds
+    /// `{AINB_HANGAR_HOME}/hangar.sock`, the plugin dials the UNEXPANDED
+    /// `${AINB_HANGAR_HOME}/hangar.sock` template, and the host's `path_allowed`
+    /// cap gate must PERMIT it via the matching allow-list entry — otherwise a
+    /// non-default home is denied (-32001) and the TUI can never connect.
+    ///
+    /// Mutation-check: deleting the `${AINB_HANGAR_HOME}/hangar.sock` entry from
+    /// the allow-list (or making `daemon_socket_path` return the `~` form under
+    /// an override) makes this `assert!` fail — the override dial no longer
+    /// matches any allow-list entry.
+    #[test]
+    fn hangar_dial_allowed_under_hangar_home_override() {
+        let _guard = HANGAR_HOME_ENV_LOCK.lock().unwrap();
+        let prior = std::env::var_os("AINB_HANGAR_HOME");
+
+        // A real tempdir as the override home, with the socket file present so
+        // both the dial string and the allow-list entry canonicalize to the
+        // same resolved path.
+        let home = tempfile::tempdir().unwrap();
+        std::fs::write(home.path().join("hangar.sock"), b"").unwrap();
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+
+        let allow: Vec<String> = HANGAR_DIAL_ALLOW.iter().map(|s| (*s).to_string()).collect();
+        // The unexpanded template the plugin sends under an override.
+        assert!(
+            path_allowed(&allow, "${AINB_HANGAR_HOME}/hangar.sock"),
+            "the ${{AINB_HANGAR_HOME}}/hangar.sock dial must be permitted by the allow-list \
+             when $AINB_HANGAR_HOME is set"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("AINB_HANGAR_HOME", v),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
+    }
+
+    /// The new `${AINB_HANGAR_HOME}/hangar.sock` allow-list entry is HARMLESS
+    /// when the var is UNSET: `expand_path` of an unset `${VAR}` yields the
+    /// empty string, so the entry collapses to `/hangar.sock`, which must NOT
+    /// match the real default dial (`~/.agents-in-a-box/hangar.sock`). This
+    /// proves adding the entry does not widen the gate on the default path.
+    #[test]
+    fn hangar_home_override_entry_is_inert_when_unset() {
+        let _guard = HANGAR_HOME_ENV_LOCK.lock().unwrap();
+        let prior = std::env::var_os("AINB_HANGAR_HOME");
+        std::env::remove_var("AINB_HANGAR_HOME");
+        std::env::set_var("HOME", "/home/cts");
+
+        // An unset override expands to `/hangar.sock` — never the real default.
+        assert_eq!(
+            expand_path("${AINB_HANGAR_HOME}/hangar.sock"),
+            PathBuf::from("/hangar.sock"),
+            "an unset ${{AINB_HANGAR_HOME}} must expand to the empty string, not panic"
+        );
+        assert_ne!(
+            canonical_for_compare(&expand_path("${AINB_HANGAR_HOME}/hangar.sock")),
+            canonical_for_compare(&expand_path("~/.agents-in-a-box/hangar.sock")),
+            "the inert override entry must NOT collide with the real default dial"
+        );
+
+        match prior {
+            Some(v) => std::env::set_var("AINB_HANGAR_HOME", v),
+            None => std::env::remove_var("AINB_HANGAR_HOME"),
+        }
     }
 }

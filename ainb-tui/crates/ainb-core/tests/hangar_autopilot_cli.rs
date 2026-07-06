@@ -150,6 +150,105 @@ async fn cli_autopilot_create_list_disable_run() {
 }
 
 #[tokio::test]
+async fn cli_autopilot_create_threads_execution_mode_and_concurrency_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open_in(tmp.path()).await.expect("open store");
+        seed_agent(store.pool()).await;
+    }
+
+    // create with the non-default execution mode + concurrency policy: the flags
+    // must be parsed, threaded through NewAutopilot, and persisted.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "autopilot",
+            "create",
+            "--name",
+            "modal",
+            "--cron",
+            "0 9 * * *",
+            "--agent",
+            "ag-1",
+            "--execution-mode",
+            "create-issue",
+            "--concurrency-policy",
+            "replace",
+        ],
+    );
+    assert!(ok, "autopilot create with modes should exit 0; out={out}");
+
+    // list --format json surfaces the stored execution_mode + concurrency_policy.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "list", "--format", "json"],
+    );
+    assert!(ok, "autopilot list --format json should exit 0; out={out}");
+    assert!(
+        out.contains("\"execution_mode\":\"create_issue\""),
+        "list json missing the threaded execution_mode:\n{out}"
+    );
+    assert!(
+        out.contains("\"concurrency_policy\":\"replace\""),
+        "list json missing the threaded concurrency_policy:\n{out}"
+    );
+
+    // The values are genuinely in the database (not just echoed): read them back.
+    let store = Store::open_in(tmp.path()).await.expect("reopen store");
+    let row: (String, String) =
+        sqlx::query_as("SELECT execution_mode, concurrency_policy FROM autopilot WHERE name = ?")
+            .bind("modal")
+            .fetch_one(store.pool())
+            .await
+            .expect("read stored autopilot");
+    assert_eq!(
+        row,
+        ("create_issue".to_string(), "replace".to_string()),
+        "the CLI flags must persist the stored execution_mode + concurrency_policy"
+    );
+}
+
+#[tokio::test]
+async fn cli_autopilot_create_defaults_to_run_only_and_skip() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open_in(tmp.path()).await.expect("open store");
+        seed_agent(store.pool()).await;
+    }
+
+    // create with no mode flags: the v1-preserving defaults must be stored.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "autopilot",
+            "create",
+            "--name",
+            "defaulted",
+            "--cron",
+            "0 9 * * *",
+            "--agent",
+            "ag-1",
+        ],
+    );
+    assert!(ok, "autopilot create should exit 0; out={out}");
+
+    let store = Store::open_in(tmp.path()).await.expect("reopen store");
+    let row: (String, String) =
+        sqlx::query_as("SELECT execution_mode, concurrency_policy FROM autopilot WHERE name = ?")
+            .bind("defaulted")
+            .fetch_one(store.pool())
+            .await
+            .expect("read stored autopilot");
+    assert_eq!(
+        row,
+        ("run_only".to_string(), "skip".to_string()),
+        "omitting the flags must store the v1-preserving run_only + skip defaults"
+    );
+}
+
+#[tokio::test]
 async fn cli_autopilot_create_rejects_invalid_cron_before_insert() {
     let tmp = tempfile::tempdir().unwrap();
     {

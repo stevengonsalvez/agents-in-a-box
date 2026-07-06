@@ -3,7 +3,7 @@
 //! A curated, repo-only set of [`AgentTemplate`]s baked into the binary at
 //! compile time via `include_str!`.
 //!
-//! This is the Multica pattern: templates are reviewed in PRs and shipped in the
+//! This is the reference pattern: templates are reviewed in PRs and shipped in the
 //! binary, never mutable in the database. A template names an agent
 //! (`agent_md_path`), carries that agent's `instructions`, and bundles a list of
 //! skill *names* that the `ainb hangar templates use` flow resolves against the

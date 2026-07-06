@@ -7,7 +7,7 @@
 //! parent's `attempt + 1`. Everything else (workspace / runtime / agent / issue
 //! / `work_dir`) is inherited verbatim.
 //!
-//! Retry eligibility mirrors Multica migration 055: only `runtime_offline` and
+//! Retry eligibility mirrors the reference migration 055: only `runtime_offline` and
 //! `runtime_recovery` failures are retried automatically; `agent_error` (the LLM
 //! mis-tooled / gave up) and `user_cancel` are terminal-by-intent and never spawn
 //! a child. `attempt >= max_attempts` caps the chain regardless of reason.
@@ -113,8 +113,10 @@ async fn seed_failed_task(
             agent_id: "agent-1".to_string(),
             issue_id: issue_id.map(str::to_string),
             work_dir: work_dir.map(str::to_string),
+            priority: 0,
             created_at: 1,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await
@@ -191,6 +193,123 @@ async fn failure_reason_runtime_offline_spawns_child_row() {
 }
 
 #[tokio::test]
+async fn child_inherits_repo_ref_and_agent_kind_but_not_branch() {
+    // tcp 19n: a RuntimeOffline-retried card must re-provision the SAME repo's
+    // worktree under the SAME provider. The child INSERT therefore copies the
+    // parent's `repo_ref` + `agent_kind` verbatim — without this the child fell
+    // back to `repo_ref = NULL` (in-tree dir) and `agent_kind = 'claude'` (column
+    // default), so an infra-retry silently ran outside its worktree / wrong
+    // provider. The per-run `branch` is NOT copied: a fresh child mints a fresh
+    // worktree and records its own branch at finalize.
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t-repo",
+        None,
+        None,
+        1,
+        3,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    // Stamp the card's repo + resolved provider + a produced branch on the parent,
+    // exactly as the card-run dispatch + a committed finalize would have.
+    sqlx::query(
+        "UPDATE agent_task_queue SET repo_ref = ?, agent_kind = ?, branch = ? WHERE id = ?",
+    )
+    .bind("/repos/app")
+    .bind("codex")
+    .bind("ainb/t-repo")
+    .bind(&parent_seed.id)
+    .execute(store.pool())
+    .await
+    .expect("stamp repo/agent/branch on parent");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id)
+        .await
+        .unwrap()
+        .expect("parent re-reads");
+    assert_eq!(parent.repo_ref.as_deref(), Some("/repos/app"));
+    assert_eq!(parent.agent_kind, "codex");
+    assert_eq!(parent.branch.as_deref(), Some("ainb/t-repo"));
+
+    let clock = FixedClock(NOW_MS);
+    let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-repo", &clock)
+        .await
+        .expect("retry ok");
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-repo".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "child-repo")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    // The retry re-runs in the SAME repo under the SAME provider.
+    assert_eq!(
+        child.repo_ref.as_deref(),
+        Some("/repos/app"),
+        "child inherits the parent's repo_ref (re-provisions the same worktree)"
+    );
+    assert_eq!(
+        child.agent_kind, "codex",
+        "child inherits the parent's resolved provider, not the claude column default"
+    );
+    // The branch is per-run: the fresh attempt has produced nothing yet.
+    assert_eq!(
+        child.branch, None,
+        "the child starts with no branch (a fresh worktree records its own)"
+    );
+}
+
+#[tokio::test]
+async fn child_inherits_parent_priority() {
+    // A retried urgent task must stay urgent: the child row inherits the
+    // parent's `priority` (0..3 = P3..P0, higher = more urgent) so it keeps
+    // its place in the claim ordering (`priority DESC, created_at, id`).
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t-urgent",
+        None,
+        None,
+        1,
+        2,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    sqlx::query("UPDATE agent_task_queue SET priority = 3 WHERE id = ?")
+        .bind(&parent_seed.id)
+        .execute(store.pool())
+        .await
+        .expect("escalate parent to P0");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id)
+        .await
+        .unwrap()
+        .expect("parent re-reads");
+    assert_eq!(parent.priority, 3, "parent escalated to P0");
+
+    let clock = FixedClock(NOW_MS);
+    let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-urgent", &clock)
+        .await
+        .expect("retry ok");
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-urgent".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "child-urgent")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    assert_eq!(child.priority, 3, "child inherits the parent's priority");
+}
+
+#[tokio::test]
 async fn child_row_is_created_atomically_with_retry_columns_set() {
     // Regression guard for the non-atomic two-statement child creation: the child
     // row must be inserted with attempt = parent.attempt + 1 and
@@ -253,8 +372,10 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
             agent_id: "agent-1".to_string(),
             issue_id: Some(issue.clone()),
             work_dir: None,
+            priority: 0,
             created_at: 6,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await
@@ -274,7 +395,7 @@ async fn child_row_is_created_atomically_with_retry_columns_set() {
 #[tokio::test]
 async fn failure_reason_agent_error_does_not_retry() {
     // agent_error is a user-facing failure (LLM mis-tooled, gave up). No retry
-    // row. (Multica migration 055 behaviour.)
+    // row. (Reference migration 055 behaviour.)
     let (_dir, store) = open_seeded().await;
     let parent = seed_failed_task(&store, "t1", None, None, 1, 2, FailureReason::AgentError).await;
     let clock = FixedClock(NOW_MS);
@@ -426,9 +547,9 @@ async fn retry_chain_walk_via_parent_task_id() {
 #[tokio::test]
 async fn partial_unique_index_blocks_retry_when_existing_pending() {
     // The failed task carries an issue_id; a *new* manually-enqueued queued task
-    // already exists for the same issue. The retry insert collides with
-    // idx_one_pending_task_per_issue and surfaces the UNIQUE error (Multica
-    // raises + logs; we mirror by propagating the DB error).
+    // already exists for the same issue AND the same agent. The retry insert
+    // collides with idx_one_pending_task_per_issue_agent and surfaces the UNIQUE
+    // error (the reference raises + logs; we mirror by propagating the DB error).
     let (_dir, store) = open_seeded().await;
     let issue = seed_issue(&store, "issue-1").await;
     let parent = seed_failed_task(
@@ -452,8 +573,10 @@ async fn partial_unique_index_blocks_retry_when_existing_pending() {
             agent_id: "agent-1".to_string(),
             issue_id: Some(issue.clone()),
             work_dir: None,
+            priority: 0,
             created_at: 5,
             autopilot_run_id: None,
+            generation: 0,
         },
     )
     .await

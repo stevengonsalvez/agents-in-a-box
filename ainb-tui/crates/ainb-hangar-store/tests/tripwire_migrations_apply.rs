@@ -169,7 +169,7 @@ async fn migration_0002_creates_agent_table() {
     assert!(agent.contains("name TEXT NOT NULL"), "agent.name: {agent}");
     assert!(
         agent.contains("runtime_id TEXT NOT NULL REFERENCES agent_runtime(id)"),
-        "agent.runtime_id FK (required by Multica pattern): {agent}"
+        "agent.runtime_id FK (required by reference pattern): {agent}"
     );
     assert!(
         agent.contains("instructions TEXT"),
@@ -396,18 +396,34 @@ async fn migration_0004_creates_agent_task_queue_with_partial_unique() {
         "agent_task_queue.finished_at: {tq}"
     );
 
-    let idx = index_sql(&pool, "idx_one_pending_task_per_issue").await;
+    // Migration 0012 replaces the 0004 global-per-issue index with the
+    // per-(issue, agent) scope (reference ClaimAgentTask parity), so the final
+    // schema carries `idx_one_pending_task_per_issue_agent` and the old name
+    // must be gone.
+    let old_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM sqlite_master \
+         WHERE type='index' AND name='idx_one_pending_task_per_issue'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("count old index");
+    assert_eq!(
+        old_count, 0,
+        "the 0004 global-per-issue index must be dropped by 0012"
+    );
+
+    let idx = index_sql(&pool, "idx_one_pending_task_per_issue_agent").await;
     assert!(
         idx.contains("UNIQUE"),
-        "idx_one_pending_task_per_issue is UNIQUE: {idx}"
+        "idx_one_pending_task_per_issue_agent is UNIQUE: {idx}"
     );
     assert!(
-        idx.contains("agent_task_queue") && idx.contains("(issue_id)"),
-        "idx_one_pending_task_per_issue on agent_task_queue(issue_id): {idx}"
+        idx.contains("agent_task_queue") && idx.contains("(issue_id, agent_id)"),
+        "idx_one_pending_task_per_issue_agent on agent_task_queue(issue_id, agent_id): {idx}"
     );
     assert!(
         idx.contains("WHERE") && idx.contains("status IN ('queued','dispatched')"),
-        "idx_one_pending_task_per_issue partial predicate: {idx}"
+        "idx_one_pending_task_per_issue_agent partial predicate: {idx}"
     );
 
     pool.close().await;
@@ -595,7 +611,284 @@ async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_sixteen_tables() {
+async fn migration_0013_adds_task_priority_column() {
+    // `priority` (0..3 = P3..P0, higher = more urgent; default 0 = P3) feeds
+    // the claim ordering `ORDER BY priority DESC, created_at, id` (reference
+    // ordering parity). ALTER TABLE ADD COLUMN rewrites the catalog SQL, so
+    // the column shows up in `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let tq = table_sql(&pool, "agent_task_queue").await;
+    assert!(
+        tq.contains("priority INTEGER NOT NULL DEFAULT 0"),
+        "agent_task_queue.priority default 0: {tq}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0014_adds_issue_priority_due_date_labels_columns() {
+    // The issue create flow (parity-review gap: "create-issue partial — no
+    // priority/dates/labels") needs the issue itself to carry urgency, a due
+    // date, and labels. Three columns land on `issue`:
+    //   - `priority INTEGER NOT NULL DEFAULT 0` (0..3 = P3..P0, higher = more
+    //     urgent), mirroring `agent_task_queue.priority` (migration 0013);
+    //   - `due_date INTEGER` (epoch millis, nullable — no due date by default);
+    //   - `labels TEXT NOT NULL DEFAULT '[]'` (a JSON array of label strings;
+    //     the full labels table + attach/detach RPC is a SEPARATE bead).
+    // ALTER TABLE ADD COLUMN rewrites the catalog SQL, so each shows up in
+    // `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(
+        issue.contains("priority INTEGER NOT NULL DEFAULT 0"),
+        "issue.priority default 0: {issue}"
+    );
+    assert!(
+        issue.contains("due_date INTEGER"),
+        "issue.due_date nullable epoch-ms: {issue}"
+    );
+    assert!(
+        issue.contains("labels TEXT NOT NULL DEFAULT '[]'"),
+        "issue.labels default empty JSON array: {issue}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0015_adds_agent_archive_and_config_columns() {
+    // The agent edit/archive surface (parity-review gap: "create/edit/archive
+    // agents + configure runtime/model/args partial") needs the `agent` table to
+    // carry an archive flag and the per-agent runtime config knobs. Six columns
+    // land on `agent`:
+    //   - `archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))`;
+    //   - `model TEXT` (nullable provider model override);
+    //   - `cli_args TEXT NOT NULL DEFAULT '[]'` (JSON array of CLI args);
+    //   - `mcp_config TEXT NOT NULL DEFAULT '{}'` (JSON object MCP config);
+    //   - `thinking TEXT` (nullable reasoning level);
+    //   - `agent_env TEXT NOT NULL DEFAULT '{}'` (JSON object env map).
+    // Wiring these into the provider EXEC is a SEPARATE bead (e38.16); this
+    // migration only lands the columns the edit/archive RPCs write. ALTER TABLE
+    // ADD COLUMN rewrites the catalog SQL, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains("archived INTEGER NOT NULL DEFAULT 0 CHECK (archived IN (0, 1))"),
+        "agent.archived 0/1 flag with CHECK: {agent}"
+    );
+    assert!(
+        agent.contains("model TEXT"),
+        "agent.model nullable: {agent}"
+    );
+    assert!(
+        agent.contains("cli_args TEXT NOT NULL DEFAULT '[]'"),
+        "agent.cli_args default empty JSON array: {agent}"
+    );
+    assert!(
+        agent.contains("mcp_config TEXT NOT NULL DEFAULT '{}'"),
+        "agent.mcp_config default empty JSON object: {agent}"
+    );
+    assert!(
+        agent.contains("thinking TEXT"),
+        "agent.thinking nullable: {agent}"
+    );
+    assert!(
+        agent.contains("agent_env TEXT NOT NULL DEFAULT '{}'"),
+        "agent.agent_env default empty JSON object: {agent}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0016_creates_label_and_issue_label_tables() {
+    // The issue-label surface (parity-review gap: "no label table or issue-label
+    // join") needs a first-class workspace-scoped label entity plus an attach
+    // join. Two tables land:
+    //   - `label` (id PK, workspace_id FK, name, nullable color) with a
+    //     `(workspace_id, name)` UNIQUE index (the resolve-or-reject guard);
+    //   - `issue_label` (issue_id, label_id) composite-PK join (the attach link),
+    //     with a reverse-lookup index on `label_id`.
+    // The `issue.labels` JSON column (migration 0014) is kept as a denormalized
+    // read-cache the attach/detach RPCs sync; the `label` table is the source of
+    // truth. `CREATE TABLE`/`CREATE INDEX` are catalog-only, so each shows up in
+    // `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let label = table_sql(&pool, "label").await;
+    assert!(
+        label.contains("id TEXT PRIMARY KEY"),
+        "label.id is the PK: {label}"
+    );
+    assert!(
+        label.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "label.workspace_id is a non-null workspace FK: {label}"
+    );
+    assert!(
+        label.contains("name TEXT NOT NULL"),
+        "label.name is non-null: {label}"
+    );
+    assert!(
+        label.contains("color TEXT"),
+        "label.color is a nullable hex color: {label}"
+    );
+
+    let issue_label = table_sql(&pool, "issue_label").await;
+    assert!(
+        issue_label.contains("issue_id TEXT NOT NULL REFERENCES issue(id)"),
+        "issue_label.issue_id references issue: {issue_label}"
+    );
+    assert!(
+        issue_label.contains("label_id TEXT NOT NULL REFERENCES label(id)"),
+        "issue_label.label_id references label: {issue_label}"
+    );
+    assert!(
+        issue_label.contains("PRIMARY KEY (issue_id, label_id)"),
+        "issue_label has a composite PK: {issue_label}"
+    );
+
+    // The resolve-or-reject UNIQUE index makes `(workspace_id, name)` map to one
+    // label per tenant.
+    let idx: Option<String> = sqlx::query_scalar(
+        "SELECT sql FROM sqlite_master WHERE type='index' AND name = 'idx_label_workspace_name'",
+    )
+    .fetch_optional(&pool)
+    .await
+    .expect("query index")
+    .flatten();
+    let idx = idx.expect("idx_label_workspace_name present");
+    let idx = idx.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert!(
+        idx.contains("UNIQUE INDEX idx_label_workspace_name ON label(workspace_id, name)"),
+        "label name is unique per workspace: {idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0017_creates_squad_and_squad_member_tables() {
+    // The squads surface (parity-review gap: "no squad construct — ActorKind was
+    // only {Member, Agent}, no squad table") needs a first-class workspace-scoped
+    // squad entity with a designated leader plus a membership join. Two tables
+    // land:
+    //   - `squad` (id PK, workspace_id FK, name, polymorphic leader actor-ref
+    //     `leader_type`/`leader_id` with a `('member','agent')` CHECK, created_at)
+    //     with a `(workspace_id, name)` UNIQUE index (the resolve-or-reject guard);
+    //   - `squad_member` (squad_id FK, polymorphic member actor-ref) with a
+    //     `(squad_id, member_type, member_id)` composite PK (the dedupe guard).
+    // Leader routing reuses the leader actor-ref (no new ActorKind): a
+    // squad-assigned task resolves to the leader's `agent_id` and rides the
+    // existing claim/dispatch path. `CREATE TABLE`/`CREATE INDEX` are catalog-only,
+    // so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let squad = table_sql(&pool, "squad").await;
+    assert!(
+        squad.contains("id TEXT PRIMARY KEY"),
+        "squad.id is the PK: {squad}"
+    );
+    assert!(
+        squad.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "squad.workspace_id is a non-null workspace FK: {squad}"
+    );
+    assert!(
+        squad.contains("name TEXT NOT NULL"),
+        "squad.name is non-null: {squad}"
+    );
+    assert!(
+        squad.contains("leader_type TEXT NOT NULL CHECK (leader_type IN ('member','agent'))"),
+        "squad.leader_type CHECK: {squad}"
+    );
+    assert!(
+        squad.contains("leader_id TEXT NOT NULL"),
+        "squad.leader_id is non-null: {squad}"
+    );
+    assert!(
+        squad.contains("created_at INTEGER NOT NULL"),
+        "squad.created_at epoch millis: {squad}"
+    );
+
+    let name_idx = index_sql(&pool, "idx_squad_workspace_name").await;
+    assert!(
+        name_idx.contains("UNIQUE"),
+        "idx_squad_workspace_name is UNIQUE: {name_idx}"
+    );
+    assert!(
+        name_idx.contains("squad") && name_idx.contains("(workspace_id, name)"),
+        "idx_squad_workspace_name columns: {name_idx}"
+    );
+
+    let squad_member = table_sql(&pool, "squad_member").await;
+    assert!(
+        squad_member.contains("squad_id TEXT NOT NULL REFERENCES squad(id)"),
+        "squad_member.squad_id references squad: {squad_member}"
+    );
+    assert!(
+        squad_member
+            .contains("member_type TEXT NOT NULL CHECK (member_type IN ('member','agent'))"),
+        "squad_member.member_type CHECK: {squad_member}"
+    );
+    assert!(
+        squad_member.contains("member_id TEXT NOT NULL"),
+        "squad_member.member_id is non-null: {squad_member}"
+    );
+    assert!(
+        squad_member.contains("PRIMARY KEY (squad_id, member_type, member_id)"),
+        "squad_member has a composite PK: {squad_member}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_columns() {
+    // The autopilot execution-mode + concurrency-policy surface (parity-review
+    // gap: "only skip-when-running implemented; queue/replace collapsed; fire path
+    // hardcodes issue_id=NULL") needs the `autopilot` table to carry two config
+    // discriminants:
+    //   - `execution_mode TEXT NOT NULL DEFAULT 'run_only'
+    //      CHECK (execution_mode IN ('create_issue', 'run_only'))` — what the fire
+    //     path materialises (run_only = the v1 issue_id=NULL task; create_issue =
+    //     an issue + a task against it);
+    //   - `concurrency_policy TEXT NOT NULL DEFAULT 'skip'
+    //      CHECK (concurrency_policy IN ('skip', 'queue', 'replace'))` — what the
+    //     scheduler does when a tick comes due at the in-flight limit.
+    // Both default to the v1 behaviour (run_only + skip). ALTER TABLE ADD COLUMN
+    // rewrites the catalog SQL, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let ap = table_sql(&pool, "autopilot").await;
+    assert!(
+        ap.contains(
+            "execution_mode TEXT NOT NULL DEFAULT 'run_only' CHECK (execution_mode IN \
+             ('create_issue', 'run_only'))"
+        ),
+        "autopilot.execution_mode default run_only + CHECK: {ap}"
+    );
+    assert!(
+        ap.contains(
+            "concurrency_policy TEXT NOT NULL DEFAULT 'skip' CHECK (concurrency_policy IN \
+             ('skip', 'queue', 'replace'))"
+        ),
+        "autopilot.concurrency_policy default skip + CHECK: {ap}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn all_migrations_create_exactly_thirty_six_tables() {
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -614,26 +907,344 @@ async fn all_migrations_create_exactly_sixteen_tables() {
         "agent_runtime",
         "agent_skill",
         "agent_task_queue",
+        "atc_instance",
+        "atc_retry",
+        "attention",
         "autopilot",
         "autopilot_run",
+        "autopilot_webhook_delivery",
         "beads_mapping",
+        // P4 / D8: user-defined kanban boards (migration 0027).
+        "board",
+        "board_card",
+        "board_column",
+        // tcp T4 / F7: beads-style card dependency edges (migration 0036).
+        "card_dependency",
         "comment",
+        "daemon_config",
+        "daemon_socket_token",
         "daemon_token",
+        "event_log",
+        "inbox_entry",
         "issue",
+        "issue_label",
+        "label",
         "member",
+        // tcp T5: per-attention-kind notification routing rules (migration 0037).
+        "notify_rule",
         "pat",
+        // P5 / D14-D16: the fs-watch-maintained INDEX over the on-disk agent
+        // profile masters (migration 0030). The bodies live on disk; this table
+        // is only the index.
+        "profile",
+        // P10 / D19: durable per-run observability history (migration 0029). The
+        // sibling `cost_rollup` is a VIEW, not a table, so it is not counted here.
+        "run_history",
         "skill",
         "skill_file",
+        "squad",
+        "squad_member",
+        "standup_session",
+        "task_usage",
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 16, "expected 16 v1 tables, got {names:?}");
+    assert_eq!(names.len(), 37, "expected 37 v1 tables, got {names:?}");
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
             "missing table {table} in {names:?}"
         );
     }
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0035_adds_issue_squad_id_column() {
+    // tcp T4 / F7: a card's assignee can be a whole SQUAD, persisted as a nullable
+    // `issue.squad_id` (NULL = single-agent run; set = fan out across the squad).
+    // ALTER TABLE ADD COLUMN with no default rewrites the catalog SQL, so the new
+    // column shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(
+        issue.contains("squad_id TEXT"),
+        "issue.squad_id nullable squad ref: {issue}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0036_creates_card_dependency_and_auto_run() {
+    // tcp T4 / F7: beads-style card dependencies. A `card_dependency` edge table
+    // (dependent -> blocker, composite PK, blocker reverse-lookup index) plus a
+    // per-card `issue.auto_run` flag (default OFF) governing auto-launch when the
+    // last blocker completes. `CREATE TABLE`/`CREATE INDEX` and the defaulted
+    // ALTER are catalog-only, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let dep = table_sql(&pool, "card_dependency").await;
+    assert!(
+        dep.contains("workspace_id TEXT NOT NULL REFERENCES workspace(id)"),
+        "card_dependency.workspace_id FK: {dep}"
+    );
+    assert!(
+        dep.contains("dependent_issue_id TEXT NOT NULL"),
+        "card_dependency.dependent_issue_id: {dep}"
+    );
+    assert!(
+        dep.contains("blocker_issue_id TEXT NOT NULL"),
+        "card_dependency.blocker_issue_id: {dep}"
+    );
+    assert!(
+        dep.contains("PRIMARY KEY (dependent_issue_id, blocker_issue_id)"),
+        "card_dependency composite PK (a card depends on another at most once): {dep}"
+    );
+
+    let idx = index_sql(&pool, "idx_card_dependency_blocker").await;
+    assert!(
+        idx.contains("card_dependency") && idx.contains("(blocker_issue_id)"),
+        "idx_card_dependency_blocker serves the finalize-seam reverse lookup: {idx}"
+    );
+
+    let issue = table_sql(&pool, "issue").await;
+    assert!(
+        issue.contains("auto_run INTEGER NOT NULL DEFAULT 0"),
+        "issue.auto_run default OFF (explicit run stays the default): {issue}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0020_adds_workspace_config_columns() {
+    // The per-workspace config surface (parity-review gap: "per-workspace context
+    // prompt + repo whitelist + issue prefix") needs the `workspace` table to
+    // carry three nullable config columns:
+    //   - `context_prompt TEXT` — injected into a task's execenv as a `CLAUDE.md`;
+    //   - `repo_whitelist TEXT` — a JSON array of allowed repos (the checkout gate);
+    //   - `issue_prefix TEXT`   — prepended to a newly-created issue's title.
+    // All three default to NULL ("not configured"), so an upgrading workspace
+    // keeps the exact pre-0020 behaviour. ALTER TABLE ADD COLUMN rewrites the
+    // catalog SQL, so each shows up in `sqlite_master`.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let ws = table_sql(&pool, "workspace").await;
+    assert!(
+        ws.contains("context_prompt TEXT"),
+        "workspace.context_prompt nullable TEXT: {ws}"
+    );
+    assert!(
+        ws.contains("repo_whitelist TEXT"),
+        "workspace.repo_whitelist nullable TEXT: {ws}"
+    );
+    assert!(
+        ws.contains("issue_prefix TEXT"),
+        "workspace.issue_prefix nullable TEXT: {ws}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0031_adds_task_mode_and_session_name_columns() {
+    // ccc / D6: a board card launches `headless` or `interactive`; the runner
+    // needs the mode on the row and, for interactive, records the exact tmux
+    // session name it spawned. Two columns land on `agent_task_queue`:
+    //   - `mode TEXT NOT NULL DEFAULT 'headless'
+    //      CHECK (mode IN ('headless', 'interactive'))` — defaults to the
+    //     pre-0031 headless behaviour;
+    //   - `session_name TEXT` — the interactive tmux session name (nullable;
+    //     NULL for a headless task or one not yet dispatched).
+    // ALTER TABLE ADD COLUMN rewrites the catalog SQL, so each shows up in
+    // `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let tq = table_sql(&pool, "agent_task_queue").await;
+    assert!(
+        tq.contains(
+            "mode TEXT NOT NULL DEFAULT 'headless' CHECK (mode IN ('headless', 'interactive'))"
+        ),
+        "agent_task_queue.mode default headless + CHECK: {tq}"
+    );
+    assert!(
+        tq.contains("session_name TEXT"),
+        "agent_task_queue.session_name nullable TEXT: {tq}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0025_creates_attention_with_kind_state_checks_and_open_index() {
+    // The control-plane inbox (architecture §4.3, spec P2): every input request
+    // from every session lands in `attention`, answered exactly once via the
+    // first-answer-wins conditional flip. The columns the answer router and the
+    // surfaces depend on must exist with their CHECK guards, and the hot "open"
+    // read must be served by a partial index.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let att = table_sql(&pool, "attention").await;
+    assert!(
+        att.contains("id TEXT PRIMARY KEY"),
+        "attention.id PK: {att}"
+    );
+    assert!(
+        att.contains("session_id TEXT NOT NULL"),
+        "attention.session_id NOT NULL: {att}"
+    );
+    // cwd carries the raising session's dir so the answer router runs the C1
+    // guard without re-discovery.
+    assert!(
+        att.contains("cwd TEXT NOT NULL DEFAULT ''"),
+        "attention.cwd NOT NULL default empty: {att}"
+    );
+    // workspace_id is a NULLABLE FK — fleet (no-workspace) sessions insert freely.
+    assert!(
+        att.contains("workspace_id TEXT REFERENCES workspace(id)"),
+        "attention.workspace_id nullable FK: {att}"
+    );
+    // kind is CHECK-constrained to the six spec families.
+    for k in [
+        "ask_user_question",
+        "approval",
+        "codex_request_user",
+        "error",
+        "waiting",
+        "escalation",
+    ] {
+        assert!(att.contains(k), "attention.kind CHECK includes {k}: {att}");
+    }
+    // state defaults to open + CHECK-guards the two-value set.
+    assert!(
+        att.contains("state        TEXT NOT NULL DEFAULT 'open'")
+            || att.contains("state TEXT NOT NULL DEFAULT 'open'"),
+        "attention.state defaults open: {att}"
+    );
+    assert!(
+        att.contains("state IN ('open', 'answered')"),
+        "attention.state CHECK: {att}"
+    );
+    assert!(
+        att.contains("degraded"),
+        "attention.degraded pane-fallback flag: {att}"
+    );
+
+    // The hot read is exclusively open rows — a PARTIAL index over just that set.
+    let open_idx = index_sql(&pool, "idx_attention_open").await;
+    assert!(
+        open_idx.contains("WHERE") && open_idx.contains("state = 'open'"),
+        "idx_attention_open is partial over open rows: {open_idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0028_creates_atc_standup_and_daemon_config_tables() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    // atc_instance: name PK + heartbeat_cron + the retry cap moved off the JSON.
+    let atc = table_sql(&pool, "atc_instance").await;
+    assert!(
+        atc.contains("name TEXT PRIMARY KEY"),
+        "atc_instance.name PK: {atc}"
+    );
+    assert!(
+        atc.contains("heartbeat_cron TEXT NOT NULL"),
+        "heartbeat_cron: {atc}"
+    );
+    assert!(
+        atc.contains("err_retry_cap INTEGER NOT NULL DEFAULT 3"),
+        "err_retry_cap: {atc}"
+    );
+    assert!(
+        atc.contains("enabled IN (0, 1)"),
+        "atc_instance.enabled CHECK: {atc}"
+    );
+    // The heartbeat cron's hot path is a PARTIAL index over enabled rows.
+    let idx = index_sql(&pool, "idx_atc_instance_next_tick").await;
+    assert!(
+        idx.contains("WHERE") && idx.contains("enabled = 1"),
+        "idx_atc_instance_next_tick is partial over enabled rows: {idx}"
+    );
+
+    // atc_retry: composite (instance, session) PK + escalated CHECK.
+    let retry = table_sql(&pool, "atc_retry").await;
+    assert!(
+        retry.contains("PRIMARY KEY (instance_name, session_id)"),
+        "atc_retry composite PK: {retry}"
+    );
+    assert!(
+        retry.contains("escalated IN (0, 1)"),
+        "atc_retry.escalated CHECK: {retry}"
+    );
+
+    // standup_session: per-session opt-out + cooldown anchor + in-flight marker.
+    let su = table_sql(&pool, "standup_session").await;
+    assert!(
+        su.contains("session_id TEXT PRIMARY KEY"),
+        "standup_session.session_id PK: {su}"
+    );
+    assert!(
+        su.contains("opted_out INTEGER NOT NULL DEFAULT 0"),
+        "opted_out default: {su}"
+    );
+    assert!(
+        su.contains("in_flight INTEGER NOT NULL DEFAULT 0"),
+        "in_flight default: {su}"
+    );
+    // The max-concurrent guardrail counts in-flight rows — a PARTIAL index serves it.
+    let su_idx = index_sql(&pool, "idx_standup_in_flight").await;
+    assert!(
+        su_idx.contains("WHERE") && su_idx.contains("in_flight = 1"),
+        "idx_standup_in_flight is partial over in-flight rows: {su_idx}"
+    );
+
+    // daemon_config: a generic string kv for host-wide daemon knobs.
+    let cfg = table_sql(&pool, "daemon_config").await;
+    assert!(
+        cfg.contains("key TEXT PRIMARY KEY"),
+        "daemon_config.key PK: {cfg}"
+    );
+    assert!(
+        cfg.contains("value TEXT NOT NULL"),
+        "daemon_config.value: {cfg}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0034_adds_board_card_ord_defaulting_zero() {
+    // tcp T3 / F6: cards reorder WITHIN a column, which needs a mutable per-card
+    // position. Migration 0034 adds `board_card.ord` (NOT NULL DEFAULT 0), so an
+    // upgrading board keeps the pre-0034 `(added_at, issue_id)` order until the
+    // user reorders. ALTER TABLE ADD COLUMN rewrites the catalog SQL, so the new
+    // column shows up in `sqlite_master` like the originals.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let bc = table_sql(&pool, "board_card").await;
+    assert!(
+        bc.contains("ord INTEGER NOT NULL DEFAULT 0"),
+        "board_card.ord NOT NULL default 0: {bc}"
+    );
+    // The stable card identity a reorder keys off is still the (board_id, issue_id)
+    // composite PK — no surrogate id was added.
+    assert!(
+        bc.contains("PRIMARY KEY (board_id, issue_id)"),
+        "board_card keeps its (board_id, issue_id) PK: {bc}"
+    );
 
     pool.close().await;
 }

@@ -33,22 +33,15 @@ const WARNINGS_KEY: &str = "warnings_ack";
 
 /// Resolve the daemon's `state.toml` path: `{hangar_home}/hangar/state.toml`.
 ///
-/// Mirrors [`crate::dispatch::default_allow_path`]'s home resolution
-/// (`$AINB_HANGAR_HOME`, else `~/.ainb`) so the daemon, the TUI host, and the
-/// CLI all read/write one file.
+/// Delegates to [`crate::hangar_dir`] (and thus to the shared
+/// [`ainb_hangar_core::hangar_home`]) so the daemon, the TUI host, and the CLI
+/// all resolve one file from the single home contract.
 ///
 /// # Errors
 ///
 /// Returns an error if the home directory cannot be resolved.
 pub fn default_state_path() -> anyhow::Result<PathBuf> {
-    let dir = match std::env::var_os(ainb_hangar_store::Store::home_env()).filter(|p| !p.is_empty())
-    {
-        Some(p) => PathBuf::from(p),
-        None => dirs::home_dir()
-            .ok_or_else(|| anyhow::anyhow!("could not resolve home directory"))?
-            .join(".ainb"),
-    };
-    Ok(dir.join("hangar").join("state.toml"))
+    Ok(crate::hangar_dir()?.join("hangar").join("state.toml"))
 }
 
 /// Read the `warnings_ack` array from `path` (missing file / key → empty).

@@ -146,8 +146,10 @@ fn skills_from_home_returns_home() {
         "pre-key capture already on skills — state leaked:\n{pre}"
     );
 
-    // Open skills from the home menu.
-    send_key(&session, "k");
+    // Open skills from the home menu. The home-screen catalogue key is
+    // `c` (`z` opens the Skills manager); the session list mirrors it on
+    // `k`, exercised by the sibling test below.
+    send_key(&session, "c");
     if poll_capture(
         &session,
         Instant::now() + Duration::from_secs(40),
@@ -198,8 +200,8 @@ fn skills_from_session_list_returns_to_session_list() {
         panic!("session list never rendered after `s`; last:\n---\n{last}\n---");
     }
 
-    // Open skills from the session list (the `k` shortcut is mirrored
-    // here, same as the home menu).
+    // Open skills from the session list. The catalogue is mirrored here
+    // on `k` (the home menu uses `c`).
     send_key(&session, "k");
     if poll_capture(
         &session,

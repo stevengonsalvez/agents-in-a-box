@@ -134,6 +134,56 @@ async fn single_autopilot_fires_at_next_tick() {
     );
 }
 
+/// A fire additionally publishes a workspace-scoped
+/// `HangarEvent::AutopilotRunChanged` onto the daemon's wire-event broker
+/// (e38.2) so a subscribed plugin's run-history pane updates live.
+#[tokio::test]
+async fn fire_publishes_autopilot_run_changed_hangar_event() {
+    use ainb_hangar_daemon::events::EventBroker;
+    use ainb_hangar_proto::events::HangarEvent;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let pool = store.pool().clone();
+    seed_parents(&pool).await;
+    insert_autopilot(&pool, "ap-ev", "*/5 * * * *", Some(T0), 1, true).await;
+
+    let broker = EventBroker::new();
+    let mut events = broker.subscribe();
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let shutdown = CancellationToken::new();
+    let clock: Arc<dyn HangarClock> = Arc::new(FixedClock(T0));
+    let sched = AutopilotScheduler::new(pool.clone(), clock, shutdown.clone())
+        .with_event_sink(tx)
+        .with_hangar_events(broker.sink());
+    let handle = tokio::spawn(sched.run());
+
+    // Wait on the scheduler's own channel for the fire, then read the broker.
+    let fired = recv_event(&mut rx, Duration::from_secs(2)).await;
+    shutdown.cancel();
+    handle.await.expect("loop joins");
+    assert!(
+        matches!(fired, Some(SchedulerEvent::Fired { .. })),
+        "expected Fired, got {fired:?}"
+    );
+
+    let scoped = tokio::time::timeout(Duration::from_secs(2), events.recv())
+        .await
+        .expect("a hangar event within 2s")
+        .expect("broker open");
+    assert_eq!(scoped.workspace_id, "ws-1", "scoped to the firing tenant");
+    match scoped.event {
+        HangarEvent::AutopilotRunChanged {
+            autopilot_id,
+            status,
+        } => {
+            assert_eq!(autopilot_id, "ap-ev");
+            assert_eq!(status, "running");
+        }
+        other => panic!("expected AutopilotRunChanged, got {other:?}"),
+    }
+}
+
 #[tokio::test]
 async fn skip_when_prior_run_in_flight() {
     let dir = tempfile::tempdir().expect("tempdir");

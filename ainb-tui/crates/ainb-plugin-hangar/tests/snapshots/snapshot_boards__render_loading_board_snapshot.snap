@@ -1,0 +1,5 @@
+---
+source: crates/ainb-plugin-hangar/tests/snapshot_boards.rs
+expression: map
+---
+  Loading boards…

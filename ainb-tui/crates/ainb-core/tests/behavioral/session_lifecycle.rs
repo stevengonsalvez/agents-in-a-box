@@ -185,7 +185,7 @@ fn test_claude_model_cli_values() {
     );
     assert_eq!(
         ClaudeModel::Opus.cli_value(),
-        Some("claude-opus-4-7"),
+        Some("claude-opus-4-8"),
         "Opus CLI value should be the full model id"
     );
     assert_eq!(
@@ -196,7 +196,7 @@ fn test_claude_model_cli_values() {
 
     // Assert: Display names are the full model ids with ctx hints.
     assert_eq!(ClaudeModel::Sonnet.display_name(), "claude-sonnet-4-6 [1M]");
-    assert_eq!(ClaudeModel::Opus.display_name(), "claude-opus-4-7 [1M]");
+    assert_eq!(ClaudeModel::Opus.display_name(), "claude-opus-4-8 [1M]");
     assert_eq!(ClaudeModel::Haiku.display_name(), "claude-haiku-4-5 [200K]");
 
     // Assert: All models have descriptions and icons
@@ -218,7 +218,8 @@ fn test_claude_model_cli_values() {
 
     // Assert: all() returns every variant.
     let all_models = ClaudeModel::all();
-    assert_eq!(all_models.len(), 6);
+    // SystemDefault, Fable, Opus, Opus47, Opus46, Sonnet, Haiku, OpusPlan.
+    assert_eq!(all_models.len(), 8);
     assert!(all_models.contains(&ClaudeModel::SystemDefault));
     assert!(all_models.contains(&ClaudeModel::Sonnet));
     assert!(all_models.contains(&ClaudeModel::Opus));

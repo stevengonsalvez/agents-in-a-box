@@ -83,6 +83,9 @@ async fn seed_issue(store: &Store, id: &str, title: &str, state: &str) -> String
         assignee: None,
         creator: ActorRef::new(ActorKind::Member, "stevie").expect("actor"),
         created_at: T1_MS,
+        priority: 0,
+        due_date: None,
+        labels: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     id.to_string()

@@ -4,26 +4,34 @@
 //! [`ExecEnv`], with a **deny-by-default** env (only the 12-var allowlist passes
 //! through — see [`ENV_ALLOWLIST`]), streams its JSONL stdout line-by-line to
 //! `{logs}/claude.jsonl`, pins the first `session_id` it sees, and enforces a
-//! hard runtime deadline (kill on timeout). Mirrors Multica's `daemon.go`
-//! session-pinning + allowlisted-exec pattern.
+//! hard runtime deadline (kill on timeout). Mirrors the reference control plane's
+//! `daemon.go` session-pinning + allowlisted-exec pattern.
 //!
 //! # Provider abstraction
 //!
-//! Only `claude` ships in P1. The orchestration here (env build, JSONL tee,
-//! session pin, timeout) is provider-agnostic; P5 adds codex/copilot as new
-//! `Provider` impls rather than edits to [`Runner`] (see the [`Provider`] trait).
+//! `claude` shipped in P1. The orchestration here (env build, JSONL tee, session
+//! pin, timeout, OS sandbox) is provider-agnostic — captured once in
+//! [`Runner::run_provider`] and parameterised by a [`ProviderSpec`] (the wire
+//! name, the per-provider log file, and the argv to spawn). e38.16 adds the
+//! `codex` exec path ([`Runner::run_codex`]) as a second `ProviderSpec` rather
+//! than a fork of the run loop, so a third provider is one more spec.
 //!
 //! # Outcome classification
 //!
 //! The runner does **not** itself touch the database. It returns a
 //! [`RunOutcome`] the daemon's claim loop maps onto the FSM:
 //! - clean exit (code 0)        → [`RunOutcome::Success`] → daemon `CompleteTask`,
-//! - non-zero exit              → [`RunOutcome::Failed`] with
-//!   [`FailureReason::AgentError`] (the agent itself errored / gave up),
+//! - exit [`EX_TEMPFAIL`] (75)   → [`RunOutcome::Failed`] with
+//!   [`FailureReason::RuntimeOffline`] — a provider's POSIX `sysexits.h`
+//!   "temporary failure, retry later" code, the infra/retryable failure the
+//!   daemon's retry chain (e38.28) re-dispatches as a child task,
+//! - any other non-zero exit    → [`RunOutcome::Failed`] with
+//!   [`FailureReason::AgentError`] (the agent itself errored / gave up — terminal,
+//!   not retried),
 //! - deadline exceeded → kill   → [`RunOutcome::Failed`] with
 //!   [`FailureReason::Timeout`].
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::time::Duration;
 
@@ -33,6 +41,40 @@ use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::Command;
 
 use crate::execenv::ExecEnv;
+
+/// Where a provider run executes (spec F5).
+///
+/// The pre-F5 run always executed in the task's own `ExecEnv::workdir`, which
+/// lives *under* `ExecEnv::root()` — the base the OS sandbox confines writes to.
+/// F5 lets a run execute in a provisioned git worktree / scratch repo that lives
+/// OUTSIDE that tree (`~/.agents-in-a-box/worktrees/<slug>` etc.), so the run's
+/// cwd must be pointed there AND the sandbox must be widened to allow writes into
+/// it — otherwise the confinement would block the very checkout the agent is
+/// supposed to work in.
+///
+/// [`RunLocation::in_task_tree`] is the pre-F5 default (cwd = the task workdir,
+/// no extra root — the workdir is already inside the sandbox base).
+#[derive(Debug, Clone)]
+pub struct RunLocation {
+    /// The provider subprocess's working directory.
+    pub cwd: PathBuf,
+    /// A FS root beyond `ExecEnv::root()` the sandbox must additionally allow the
+    /// provider to read+write — the provisioned worktree / scratch dir — or
+    /// `None` when the cwd is the in-tree fallback workdir (already covered).
+    pub extra_root: Option<PathBuf>,
+}
+
+impl RunLocation {
+    /// The pre-F5 default: run in the task's own `workdir` with no extra sandbox
+    /// root (the workdir is already under the sandbox's write base).
+    #[must_use]
+    pub fn in_task_tree(env: &ExecEnv) -> Self {
+        Self {
+            cwd: env.workdir.clone(),
+            extra_root: None,
+        }
+    }
+}
 
 /// The env vars a provider subprocess is allowed to inherit.
 ///
@@ -62,32 +104,98 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
+    // ccc / D11: the parent-session linkage the daemon stamps onto every task it
+    // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
+    // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
+    // deny-by-default filter, or the lifecycle hook's fleet-membership gate never
+    // resolves and the run's AskUserQuestion never reaches the attention pipeline.
+    ainb_fleet_core::session_registry::PARENT_ENV,
 ];
 
-/// The provider-log file written under [`ExecEnv::logs`].
-const LOG_FILE: &str = "claude.jsonl";
+/// The POSIX `sysexits.h` `EX_TEMPFAIL` (75): "temporary failure, indicating
+/// something that is not really an error … the request can be retried later".
+///
+/// A provider that detects its runtime/API is transiently unreachable exits with
+/// this distinguished code so the daemon classifies the run as
+/// [`FailureReason::RuntimeOffline`] (infra, retryable) rather than
+/// [`FailureReason::AgentError`] (the agent gave up, terminal). This is the seam
+/// that lets a retryable failure flow into the e38.28 retry chain; every OTHER
+/// non-zero exit stays `AgentError`.
+const EX_TEMPFAIL: i32 = 75;
+
+/// The provider-log file written under [`ExecEnv::logs`] for the `claude`
+/// provider.
+const CLAUDE_LOG_FILE: &str = "claude.jsonl";
+/// The provider-log file written under [`ExecEnv::logs`] for the `codex`
+/// provider (e38.16). Each provider streams to its own log so a workspace that
+/// runs both backends keeps their JSONL transcripts separate.
+const CODEX_LOG_FILE: &str = "codex.jsonl";
+/// The codex non-interactive subcommand. The real `codex` CLI runs a headless
+/// task as `codex exec …` (the established non-interactive shape — see the
+/// `coding-agent` skill); the runner always leads codex's argv with it.
+const CODEX_EXEC_SUBCOMMAND: &str = "exec";
+/// The codex model flag (`codex exec -m <model> …`).
+const CODEX_MODEL_FLAG: &str = "-m";
 
 /// Static configuration for a [`Runner`].
 #[derive(Debug, Clone)]
 pub struct RunnerConfig {
     /// Absolute path to the `claude` binary (or a test stand-in script).
     pub claude_path: PathBuf,
+    /// Absolute path to the `codex` binary (or a test stand-in script). Used by
+    /// [`Runner::run_codex`] (e38.16); a daemon that never dispatches a codex
+    /// task simply never spawns it.
+    pub codex_path: PathBuf,
     /// Hard wall-clock deadline; the subprocess is killed past it
-    /// ([`FailureReason::Timeout`]). Multica default: 2.5h.
+    /// ([`FailureReason::Timeout`]). Reference default: 2.5h.
     pub max_runtime: Duration,
     /// How many trailing stdout/stderr lines to retain in [`RunnerResult`] for
     /// the audit/UI tail.
     pub tail_lines: usize,
+    /// e38.23: confine the provider subprocess in an OS-level FS sandbox
+    /// (Seatbelt on macOS / Landlock on Linux) so the agent can only read/write
+    /// the task's isolated roots. **Default ON** (the override seam); the
+    /// existing `claude` provider keeps working confined (it needs only network
+    /// and the workdir, both allowed). On a platform with no sandbox primitive
+    /// the spawn transparently runs unconfined (the sandbox layer reports
+    /// `Enforcement::None`) rather than failing the task.
+    pub sandbox: bool,
+}
+
+/// Token/cost usage parsed from a provider's final `result` JSONL line (e38.35).
+///
+/// The agent CLI (claude / codex) emits a terminal `{"type":"result",…}` line
+/// carrying a `usage` object (input/output tokens) and `total_cost_usd`. The
+/// runner pins it the way it pins `session_id`, so the daemon can persist it at
+/// the finalize seam and the usage dashboard can roll it up. A run that reports
+/// no result-usage leaves [`RunnerResult::usage`] as `None`.
+///
+/// Carries an `f64` cost, so it is `PartialEq` only (no `Eq`).
+#[derive(Debug, Clone, PartialEq)]
+pub struct ProviderUsage {
+    /// Prompt/input tokens the provider reported.
+    pub input_tokens: i64,
+    /// Completion/output tokens the provider reported.
+    pub output_tokens: i64,
+    /// Total cost in US dollars the provider reported (0 when none reported).
+    pub cost_usd: f64,
 }
 
 /// The captured result of one provider run.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Holds an `f64` cost via [`ProviderUsage`], so it is `PartialEq` only. The
+/// `Default` (all fields empty / `None`) is the "no captured output" result a
+/// cancelled run carries — its provider was killed before any JSONL was read.
+#[derive(Debug, Clone, Default, PartialEq)]
 pub struct RunnerResult {
     /// Process exit code, or `None` if the process was killed by signal/timeout.
     pub exit_code: Option<i32>,
     /// The first `session_id` parsed from a `{"type":"system",...}` JSONL line,
     /// or `None` if the provider emitted none.
     pub session_id: Option<String>,
+    /// Token/cost usage parsed from the final `{"type":"result",...}` JSONL line,
+    /// or `None` if the provider reported none (e38.35).
+    pub usage: Option<ProviderUsage>,
     /// Trailing stdout lines (up to [`RunnerConfig::tail_lines`]), newline-joined.
     pub stdout_tail: String,
     /// Trailing stderr lines (up to [`RunnerConfig::tail_lines`]), newline-joined.
@@ -95,7 +203,9 @@ pub struct RunnerResult {
 }
 
 /// How a provider run finished, ready for the daemon to map onto the task FSM.
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// Holds an `f64` cost via [`RunnerResult`], so it is `PartialEq` only.
+#[derive(Debug, Clone, PartialEq)]
 pub enum RunOutcome {
     /// The provider exited cleanly (code 0). The daemon should `CompleteTask`.
     Success(RunnerResult),
@@ -106,14 +216,21 @@ pub enum RunOutcome {
         /// The captured result (exit code, session id, output tails).
         result: RunnerResult,
     },
+    /// The run was cancelled by a human mid-flight (tcp T3 / F6): the claim loop
+    /// caught its kill signal and stopped the provider (a headless process group
+    /// via `kill_on_drop`, or the interactive tmux session by exact name). The
+    /// daemon finalises through the dedicated cancelled seam (`running ->
+    /// cancelled`) — NOT the failure path, so a cancel never auto-moves the card
+    /// to a `failed` column nor spawns a retry child.
+    Cancelled(RunnerResult),
 }
 
 impl RunOutcome {
-    /// Borrow the captured [`RunnerResult`] regardless of success/failure.
+    /// Borrow the captured [`RunnerResult`] regardless of outcome.
     #[must_use]
     pub const fn result(&self) -> &RunnerResult {
         match self {
-            Self::Success(r) | Self::Failed { result: r, .. } => r,
+            Self::Success(r) | Self::Cancelled(r) | Self::Failed { result: r, .. } => r,
         }
     }
 }
@@ -129,11 +246,106 @@ struct SystemLine {
     session_id: Option<String>,
 }
 
+/// A `result`-type JSONL line, decoded to pin token/cost usage (e38.35).
+///
+/// The agent CLI's terminal `{"type":"result",…}` line carries a `usage` object
+/// and `total_cost_usd`. Every field is `#[serde(default)]` so a result line that
+/// omits usage (or a future shape change) decodes to zeros rather than failing
+/// the whole run.
+#[derive(Debug, Deserialize)]
+struct ResultLine {
+    #[serde(rename = "type")]
+    kind: String,
+    #[serde(default)]
+    total_cost_usd: f64,
+    #[serde(default)]
+    usage: Option<UsageBlock>,
+}
+
+/// The `usage` sub-object of a [`ResultLine`]: the token tallies (e38.35).
+#[derive(Debug, Default, Deserialize)]
+struct UsageBlock {
+    #[serde(default)]
+    input_tokens: i64,
+    #[serde(default)]
+    output_tokens: i64,
+}
+
+/// Which provider exec path the daemon routes a task to (e38.16).
+///
+/// Resolved from the task's agent → runtime → `provider` wire name. An
+/// unrecognised provider falls back to [`Self::Claude`] so a misconfigured or
+/// not-yet-implemented backend still dispatches (rather than stranding the
+/// task) — the same default-to-claude convention the rest of the daemon uses.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Backend {
+    /// The `claude` provider — [`Runner::run_claude`]. The default exec path: a
+    /// task whose provider is unrecognised or unresolvable still dispatches here.
+    #[default]
+    Claude,
+    /// The `codex` provider — [`Runner::run_codex`].
+    Codex,
+}
+
+impl Backend {
+    /// Resolve a provider wire name (`"claude"`, `"codex"`, …) to a backend.
+    ///
+    /// Matching is case-insensitive. Any name that is not a wired exec path maps
+    /// to [`Self::Claude`] (the safe default), mirroring
+    /// [`crate::materialise::ProviderSkillLayout::from_provider`]'s catch-all.
+    #[must_use]
+    pub fn from_provider(provider: &str) -> Self {
+        match provider.to_ascii_lowercase().as_str() {
+            "codex" => Self::Codex,
+            _ => Self::Claude,
+        }
+    }
+
+    /// The provider's wire name.
+    #[must_use]
+    pub const fn name(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+        }
+    }
+}
+
+/// The per-agent provider config the runner threads into a provider's argv
+/// (e38.16). Sourced from the agent row's migration-0015 config columns.
+///
+/// `model` and `cli_args` flow onto the provider's command line; the agent's
+/// `agent_env` is threaded separately (it goes into the child env, not the
+/// argv) via the `extra_env` argument of [`Runner::run_codex_with_env`].
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProviderInvocation {
+    /// Optional model override (e.g. `gpt-5-codex`); `None` = provider default.
+    pub model: Option<String>,
+    /// Extra provider CLI arguments appended verbatim after the subcommand
+    /// (e.g. `["--full-auto"]`).
+    pub cli_args: Vec<String>,
+}
+
+/// A provider's per-run identity: its wire name, its log file, and the argv to
+/// append after the program (e38.16).
+///
+/// The orchestration in [`Runner::run_provider`] is identical across providers;
+/// only these three differ. A new provider is one more `ProviderSpec` builder
+/// (see [`Runner::claude_spec`] / [`Runner::codex_spec`]) rather than a new copy
+/// of the run loop.
+struct ProviderSpec {
+    /// The provider's wire name (`"claude"`, `"codex"`), for logs/tracing.
+    name: &'static str,
+    /// The provider-log file under [`ExecEnv::logs`].
+    log_file: &'static str,
+    /// The argv to append after the program path (subcommand + flags + args).
+    argv: Vec<String>,
+}
+
 /// A provider that can be exec'd as an agent CLI subprocess.
 ///
-/// P1 ships only [`Runner`] (claude). The trait exists so P5 providers
-/// (codex/copilot) land as new impls without touching the claim loop. Kept
-/// minimal — the daemon only needs to drive one run to an outcome.
+/// The trait exists so dispatch can name the active provider without reaching
+/// into [`Runner`]'s concrete exec methods. Kept minimal.
 pub trait Provider {
     /// The provider's wire name (`"claude"`, …).
     fn name(&self) -> &'static str;
@@ -158,6 +370,63 @@ impl Runner {
         Self { cfg }
     }
 
+    /// The hard wall-clock deadline each run is bounded by (the interactive tmux
+    /// path — [`crate::interactive`] — reuses the same budget the headless path
+    /// enforces).
+    #[must_use]
+    pub const fn max_runtime(&self) -> Duration {
+        self.cfg.max_runtime
+    }
+
+    /// Build the (tokio) spawn command for `program`, wrapped in the OS-level FS
+    /// sandbox when [`RunnerConfig::sandbox`] is on.
+    ///
+    /// `program` is the provider binary (claude or codex): every provider spawns
+    /// through this one wrapper, so the codex exec path gets exactly the same
+    /// confinement as claude (e38.16). The confinement policy is derived from the
+    /// task's [`ExecEnv`]: writes are confined to the task root
+    /// (`workdir`/`output`/`logs` all live under it) + the process temp dir;
+    /// reads are confined to the system roots a real agent needs + the task root;
+    /// network egress to the model API stays allowed. With the sandbox off, or on
+    /// an unsupported platform, the command is the bare provider binary (the env
+    /// allowlist + process-group kill still apply).
+    ///
+    /// # Errors
+    ///
+    /// Returns an [`std::io::Error`] only if a *supported* sandbox primitive is
+    /// expected but unavailable, or a sandbox setup IO fault occurs. An
+    /// unsupported platform is NOT an error — it degrades to a passthrough.
+    fn build_command(
+        &self,
+        program: &std::path::Path,
+        env: &ExecEnv,
+        extra_root: Option<&Path>,
+    ) -> std::io::Result<Command> {
+        if !self.cfg.sandbox {
+            let cmd = ainb_hangar_sandbox::SandboxedCommand::passthrough(program).into_inner();
+            return Ok(Command::from(cmd));
+        }
+
+        // F5: when the run executes in a provisioned worktree / scratch repo that
+        // lives outside the task tree, widen the confinement to read+write it —
+        // else the sandbox would block the agent from touching its own checkout.
+        let mut policy = ainb_hangar_sandbox::SandboxPolicy::confined_to(env.root());
+        if let Some(root) = extra_root {
+            policy = policy.allow_read(root).allow_write(root);
+        }
+        let sandboxed = ainb_hangar_sandbox::sandboxed_command(program, &policy)
+            .map_err(|e| std::io::Error::other(format!("sandbox setup: {e}")))?;
+        if sandboxed.enforcement() == ainb_hangar_sandbox::Enforcement::None {
+            tracing::warn!("OS sandbox unavailable on this platform; provider runs unconfined");
+        }
+        // Convert the std command (with the inline Seatbelt wrapping on macOS /
+        // the `pre_exec` Landlock hook on Linux already baked in) into a tokio
+        // command. `From` preserves the program, args, and any `pre_exec`
+        // closure, so the FS confinement carries over with the command — no
+        // external profile file or guard to keep alive.
+        Ok(Command::from(sandboxed.into_inner()))
+    }
+
     /// Spawn `claude` in `env.workdir`, stream its JSONL stdout to
     /// `{env.logs}/claude.jsonl`, pin the first `session_id`, and enforce the
     /// configured deadline.
@@ -178,21 +447,226 @@ impl Runner {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
-        let allowed: Vec<(String, String)> =
-            source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
+        self.run_claude_in(env, source_env, &RunLocation::in_task_tree(env)).await
+    }
 
-        let log_path = env.logs.join(LOG_FILE);
+    /// [`Self::run_claude`], but executing in an explicit [`RunLocation`] (F5) —
+    /// a provisioned worktree / scratch repo rather than the in-tree workdir. The
+    /// sandbox is widened to the location's extra root so the agent can write its
+    /// checkout.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_claude_in<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        // claude takes no extra argv at v1 (the task is handed to it via its
+        // materialised home + workdir, not the command line), so the spec argv is
+        // empty and there is no per-agent env beyond the allowlisted source env.
+        let spec = Self::claude_spec();
+        self.run_provider(
+            &self.cfg.claude_path,
+            env,
+            source_env,
+            std::iter::empty(),
+            spec,
+            location,
+        )
+        .await
+    }
+
+    /// Spawn `codex` in `env.workdir` via its non-interactive `exec` subcommand
+    /// (e38.16), stream its JSONL stdout to `{env.logs}/codex.jsonl`, pin the
+    /// first `session_id`, and enforce the configured deadline.
+    ///
+    /// `invocation` threads the agent's migration-0015 config onto the codex
+    /// argv: `codex exec [-m <model>] [<cli_args>…]`. The child env is the
+    /// allowlist-filtered `source_env` (no per-agent env on this overload — use
+    /// [`Self::run_codex_with_env`] to layer `agent_env`).
+    ///
+    /// The spawn goes through the same OS-level FS sandbox as
+    /// [`Self::run_claude`] (e38.23), so codex is confined to the task's isolated
+    /// roots identically.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_codex<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.run_codex_with_env(env, source_env, std::iter::empty(), invocation).await
+    }
+
+    /// [`Self::run_codex`], plus a set of per-agent `extra_env` overrides layered
+    /// onto the child env *after* the allowlist filter (e38.16).
+    ///
+    /// `source_env` is the daemon's ambient env, filtered to [`ENV_ALLOWLIST`]
+    /// (deny-by-default — a leaked daemon secret never reaches codex). `extra_env`
+    /// is the agent's deliberate `agent_env` config: these are operator-set
+    /// per-agent values, not ambient secrets, so — like the keychain keys in
+    /// [`crate::dispatch::build_task_env`] — they bypass the ambient allowlist and
+    /// reach the child verbatim. The secret-leak boundary (the ambient filter)
+    /// is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_codex_with_env<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        self.run_codex_in(
+            env,
+            source_env,
+            extra_env,
+            invocation,
+            &RunLocation::in_task_tree(env),
+        )
+        .await
+    }
+
+    /// [`Self::run_codex_with_env`], but executing in an explicit [`RunLocation`]
+    /// (F5) — the codex counterpart of [`Self::run_claude_in`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_codex_in<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let spec = Self::codex_spec(invocation);
+        self.run_provider(
+            &self.cfg.codex_path,
+            env,
+            source_env,
+            extra_env,
+            spec,
+            location,
+        )
+        .await
+    }
+
+    /// The program path + argv for a provider run, WITHOUT spawning it (ccc / D6).
+    ///
+    /// The interactive tmux path ([`crate::interactive`]) needs the exact program
+    /// and arguments the headless path would exec, but launched inside a tmux
+    /// session instead of a captured subprocess. Returning them from here keeps the
+    /// per-provider argv shape (`codex exec [-m …]`) in one place rather than
+    /// re-deriving it at the call site.
+    #[must_use]
+    pub fn provider_command(
+        &self,
+        backend: Backend,
+        invocation: &ProviderInvocation,
+    ) -> (PathBuf, Vec<String>) {
+        match backend {
+            Backend::Claude => (self.cfg.claude_path.clone(), Self::claude_spec().argv),
+            Backend::Codex => (
+                self.cfg.codex_path.clone(),
+                Self::codex_spec(invocation).argv,
+            ),
+        }
+    }
+
+    /// The `claude` provider spec: claude log file, no argv.
+    const fn claude_spec() -> ProviderSpec {
+        ProviderSpec {
+            name: "claude",
+            log_file: CLAUDE_LOG_FILE,
+            argv: Vec::new(),
+        }
+    }
+
+    /// The `codex` provider spec: codex log file + the non-interactive argv
+    /// `exec [-m <model>] [<cli_args>…]` (e38.16).
+    fn codex_spec(invocation: &ProviderInvocation) -> ProviderSpec {
+        let mut argv = vec![CODEX_EXEC_SUBCOMMAND.to_string()];
+        if let Some(model) = &invocation.model {
+            argv.push(CODEX_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
+        ProviderSpec {
+            name: "codex",
+            log_file: CODEX_LOG_FILE,
+            argv,
+        }
+    }
+
+    /// The provider-agnostic run core shared by every provider (e38.16).
+    ///
+    /// Spawns `program` (through the OS sandbox) with `spec.argv` in
+    /// `env.workdir`, builds the child env from the allowlist-filtered
+    /// `source_env` plus the verbatim `extra_env` overrides, tees stdout to
+    /// `{env.logs}/{spec.log_file}` while pinning the first `session_id`, and
+    /// enforces the deadline — returning the same [`RunOutcome`] shape for any
+    /// provider. Only the program, argv, log file, and the env composition differ
+    /// per provider; the orchestration is identical.
+    async fn run_provider<I, E>(
+        &self,
+        program: &std::path::Path,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        spec: ProviderSpec,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let child_env = compose_child_env(source_env, extra_env);
+
+        let log_path = env.logs.join(spec.log_file);
         let log_file = std::fs::OpenOptions::new()
             .create(true)
             .truncate(true)
             .write(true)
             .open(&log_path)?;
 
-        let mut child = Command::new(&self.cfg.claude_path)
-            .current_dir(&env.workdir)
+        // e38.23: build the spawn command through the OS-level FS sandbox so the
+        // provider can only read/write the task's isolated roots. The sandbox
+        // wraps the program (Seatbelt `sandbox-exec` on macOS / a `pre_exec`
+        // Landlock ruleset on Linux); on an unsupported platform it returns a
+        // transparent passthrough (`Enforcement::None`) so a task still runs.
+        // The env allowlist + process-group kill below are unchanged — the
+        // sandbox is an *additional* FS-confinement layer, not a replacement for
+        // the secret-leak env boundary.
+        let mut command = self.build_command(program, env, location.extra_root.as_deref())?;
+        let mut child = command
+            .args(&spec.argv)
+            .current_dir(&location.cwd)
             .env_clear()
-            .envs(allowed)
+            .envs(child_env)
             .stdin(Stdio::null())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -202,6 +676,19 @@ impl Runner {
             // stdout pipe; killing only the parent would leave the reader
             // blocked on EOF until the grandchild exits.
             .process_group(0)
+            // a54 shutdown: SIGKILL the provider if its owning future is dropped
+            // (the daemon's `runs` JoinSet aborts every in-flight run on Ctrl-C).
+            // WITHOUT this, dropping the aborted future leaves the child alive:
+            // it is its own process-group leader (never saw the terminal SIGINT)
+            // and would be reparented to init, mutating the workspace unsupervised
+            // while its DB row is stuck `running` until the next boot's
+            // crash-recovery reclaim. `kill_on_drop` sends SIGKILL to the immediate
+            // provider pid synchronously in `Child::drop`, so the run stops even
+            // when the drop happens during runtime teardown. It does NOT reach a
+            // shelled-out grandchild in the same group (the group leader dying does
+            // not kill members) — that residual is backstopped by the workspace GC
+            // sweeper, same as any orphaned dir.
+            .kill_on_drop(true)
             .spawn()?;
 
         // The child is its own process-group leader (pgid == its pid), captured
@@ -244,7 +731,7 @@ impl Runner {
             }
         };
 
-        let (session_id, stdout_tail) = stdout_task
+        let (session_id, usage, stdout_tail) = stdout_task
             .await
             .map_err(|e| std::io::Error::other(format!("stdout task join: {e}")))??;
         let stderr_tail = stderr_task
@@ -264,20 +751,35 @@ impl Runner {
         let result = RunnerResult {
             exit_code,
             session_id,
+            usage,
             stdout_tail,
             stderr_tail,
         };
 
         let outcome = if timed_out {
-            tracing::warn!(reason = "timeout", "runner_claude_failed");
+            tracing::warn!(provider = spec.name, reason = "timeout", "runner_failed");
             RunOutcome::Failed {
                 reason: FailureReason::Timeout,
                 result,
             }
         } else if exit_code == Some(0) {
             RunOutcome::Success(result)
+        } else if exit_code == Some(EX_TEMPFAIL) {
+            // `EX_TEMPFAIL` (75): the provider signalled a transient runtime
+            // failure. Classify as infra/retryable so the daemon's retry chain
+            // re-dispatches a child task, rather than treating it as a terminal
+            // agent error.
+            tracing::warn!(
+                provider = spec.name,
+                reason = "runtime_offline",
+                "runner_failed"
+            );
+            RunOutcome::Failed {
+                reason: FailureReason::RuntimeOffline,
+                result,
+            }
         } else {
-            tracing::warn!(reason = "agent_error", exit_code = ?exit_code, "runner_claude_failed");
+            tracing::warn!(provider = spec.name, reason = "agent_error", exit_code = ?exit_code, "runner_failed");
             RunOutcome::Failed {
                 reason: FailureReason::AgentError,
                 result,
@@ -287,19 +789,54 @@ impl Runner {
     }
 }
 
-/// Read the child's stdout line-by-line, appending each line to `log_file`,
-/// pinning the first `system` line's `session_id`, and retaining a bounded tail.
+/// Compose a provider subprocess's child environment: the deny-by-default
+/// [`ENV_ALLOWLIST`] filter over the ambient `source_env`, with the agent's
+/// explicit `extra_env` overrides layered on top.
 ///
-/// Returns `(first_session_id, stdout_tail)`.
+/// Shared by the headless [`Runner::run_provider`] and the interactive tmux path
+/// ([`crate::interactive`]) so both apply the identical secret-leak boundary: a
+/// per-agent value wins over an allowlisted ambient one of the same name, and
+/// arbitrary agent keys still reach the child.
+pub(crate) fn compose_child_env<I, E>(source_env: I, extra_env: E) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (String, String)>,
+    E: IntoIterator<Item = (String, String)>,
+{
+    let allow: std::collections::HashSet<&str> = ENV_ALLOWLIST.iter().copied().collect();
+    let mut child_env: Vec<(String, String)> =
+        source_env.into_iter().filter(|(k, _)| allow.contains(k.as_str())).collect();
+    // ccc / D11: the daemon's AINB_PARENT_SESSION stamp (an allowlisted
+    // `source_env` value) is AUTHORITATIVE fleet-membership config. A per-agent
+    // `agent_env` is layered on top and wins over ambient values by name — so
+    // WITHOUT this filter an agent config carrying AINB_PARENT_SESSION (or a blank
+    // one) would shadow the daemon's stamp, dropping the hook's membership
+    // resolution or misrouting the session's Stop completion. Only the daemon sets
+    // this key, so drop any the agent env carries before layering.
+    child_env.extend(
+        extra_env
+            .into_iter()
+            .filter(|(k, _)| k.as_str() != ainb_fleet_core::session_registry::PARENT_ENV),
+    );
+    child_env
+}
+
+/// Read the child's stdout line-by-line, appending each line to `log_file`,
+/// pinning the first `system` line's `session_id` and the last `result` line's
+/// token/cost `usage` (e38.35), and retaining a bounded tail.
+///
+/// Returns `(first_session_id, last_usage, stdout_tail)`. The usage is taken from
+/// the LAST `result` line (a multi-result stream's final tally wins), mirroring
+/// how `session_id` takes the FIRST `system` line.
 async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
     mut log_file: std::fs::File,
     tail_lines: usize,
-) -> std::io::Result<(Option<String>, String)> {
+) -> std::io::Result<(Option<String>, Option<ProviderUsage>, String)> {
     use std::io::Write;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut session_id: Option<String> = None;
+    let mut usage: Option<ProviderUsage> = None;
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     while let Some(line) = reader.next_line().await? {
@@ -313,10 +850,30 @@ async fn stream_stdout(
                 }
             }
         }
+        // Pin token/cost usage from a `result` line. The last result line wins so
+        // a stream that ends with a corrected tally reflects the final figure. A
+        // result line that reports neither tokens nor cost (e.g. a bare
+        // `{"type":"result","content":"ok"}`) carries nothing to record, so it
+        // leaves `usage` as `None`.
+        if let Ok(parsed) = serde_json::from_str::<ResultLine>(&line) {
+            if parsed.kind == "result" {
+                let block = parsed.usage.unwrap_or_default();
+                let reported = block.input_tokens != 0
+                    || block.output_tokens != 0
+                    || parsed.total_cost_usd != 0.0;
+                if reported {
+                    usage = Some(ProviderUsage {
+                        input_tokens: block.input_tokens,
+                        output_tokens: block.output_tokens,
+                        cost_usd: parsed.total_cost_usd,
+                    });
+                }
+            }
+        }
         push_tail(&mut tail, line, tail_lines);
     }
     log_file.flush()?;
-    Ok((session_id, join_tail(tail)))
+    Ok((session_id, usage, join_tail(tail)))
 }
 
 /// Read a child pipe to EOF, retaining only a bounded trailing tail.
@@ -361,4 +918,63 @@ fn kill_group(pgid: Option<i32>) {
         nix::unistd::Pid::from_raw(pid),
         nix::sys::signal::Signal::SIGKILL,
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pair(k: &str, v: &str) -> (String, String) {
+        (k.to_string(), v.to_string())
+    }
+
+    #[test]
+    fn compose_child_env_filters_source_to_the_allowlist() {
+        // A non-allowlisted ambient var (a leaked secret) is dropped; HOME survives.
+        let child = compose_child_env(
+            vec![pair("HOME", "/h"), pair("SECRET_KEY", "leak")],
+            std::iter::empty(),
+        );
+        assert!(child.contains(&pair("HOME", "/h")));
+        assert!(
+            child.iter().all(|(k, _)| k != "SECRET_KEY"),
+            "secret filtered"
+        );
+    }
+
+    #[test]
+    fn compose_child_env_layers_agent_env_over_ambient() {
+        // A per-agent value overrides an allowlisted ambient one of the same name.
+        let child = compose_child_env(vec![pair("LANG", "C")], vec![pair("LANG", "en_US.UTF-8")]);
+        // The daemon spawn passes the composed Vec to `Command::envs` / `env -i`,
+        // both last-wins — so the agent value is the effective one.
+        assert_eq!(child.last(), Some(&pair("LANG", "en_US.UTF-8")));
+    }
+
+    #[test]
+    fn compose_child_env_agent_env_cannot_shadow_the_daemon_parent_stamp() {
+        // ccc / D11 regression guard: the daemon stamps AINB_PARENT_SESSION into the
+        // allowlisted source env; a per-agent `agent_env` carrying its OWN value must
+        // NOT override it (that would drop the hook's fleet-membership resolution).
+        let child = compose_child_env(
+            vec![pair(
+                ainb_fleet_core::session_registry::PARENT_ENV,
+                "hangar-daemon",
+            )],
+            vec![pair(
+                ainb_fleet_core::session_registry::PARENT_ENV,
+                "agent-hijack",
+            )],
+        );
+        let parent: Vec<&String> = child
+            .iter()
+            .filter(|(k, _)| k == ainb_fleet_core::session_registry::PARENT_ENV)
+            .map(|(_, v)| v)
+            .collect();
+        assert_eq!(
+            parent,
+            vec!["hangar-daemon"],
+            "the daemon parent stamp must be the ONLY AINB_PARENT_SESSION in the child env"
+        );
+    }
 }

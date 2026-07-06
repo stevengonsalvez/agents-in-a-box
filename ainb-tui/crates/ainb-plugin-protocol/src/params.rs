@@ -116,6 +116,22 @@ pub struct RenderResult {
     /// the pre-`redraw` wire shape.
     #[serde(default)]
     pub redraw: bool,
+    /// Text-capture hint: `true` when the plugin's focused surface is currently
+    /// consuming every printable key as typed text (a title/filter/compose/
+    /// search/API-key input), so the host MUST NOT let its own global
+    /// single-character shortcuts (`H`/`?`/`W`) intercept keystrokes bound for
+    /// that input — it has to forward them verbatim instead.
+    ///
+    /// The host reads this off the last frame and gates two things while it is
+    /// `true`: (a) the global `?`/`H`/`W` handlers in `handle_key_event`, and
+    /// (b) the `?`/`H` entries in the plugin key-reservation list, so those keys
+    /// reach the plugin's input. `Ctrl+C` (host quit) is never relaxed.
+    ///
+    /// `#[serde(default)]` (defaults to `false`) so ABI-2 peers that omit it
+    /// keep decoding — a plugin with no text-entry surface is byte-compatible
+    /// with the pre-`captures_text` wire shape.
+    #[serde(default)]
+    pub captures_text: bool,
 }
 
 // =====================================================================
@@ -789,7 +805,7 @@ pub struct SecretStoreGetResult {
 /// The `id` is the workspace's stable ULID (what `state.toml` is keyed by and
 /// what `set_active`/`set_default` switch on); `slug` is the short display
 /// handle (e.g. `default`); `name` is the human-readable label. `active` and
-/// `default` are resolved against `~/.ainb/hangar/state.toml` at list time —
+/// `default` are resolved against `~/.agents-in-a-box/hangar/state.toml` at list time —
 /// `active` reflects the effective active workspace (explicit active, else
 /// default, else first), so exactly one row is `active` in a non-empty list.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -975,10 +991,12 @@ mod tests {
         rt(&RenderResult {
             buffer: buf.clone(),
             redraw: false,
+            captures_text: false,
         });
         rt(&RenderResult {
             buffer: buf,
             redraw: true,
+            captures_text: true,
         });
 
         rt(&HandleEventParams {
@@ -1355,6 +1373,27 @@ mod tests {
         let legacy = serde_json::json!({ "buffer": buf });
         let back: RenderResult = serde_json::from_value(legacy).unwrap();
         assert!(!back.redraw, "absent redraw must default to false");
+        assert!(
+            !back.captures_text,
+            "absent captures_text must default to false"
+        );
+    }
+
+    #[test]
+    fn render_result_captures_text_round_trips_when_present() {
+        // A plugin declaring text-capture must round-trip the flag so the host
+        // can read it off the frame and suppress its global shortcuts (8hx).
+        let mut buf = WireBuffer::new(1, 1);
+        buf.push(Coord::new(0, 0), Cell::new("x"));
+        let rr = RenderResult {
+            buffer: buf,
+            redraw: false,
+            captures_text: true,
+        };
+        let json = serde_json::to_value(&rr).unwrap();
+        assert_eq!(json["captures_text"], true);
+        let back: RenderResult = serde_json::from_value(json).unwrap();
+        assert!(back.captures_text, "captures_text must survive round-trip");
     }
 
     #[test]

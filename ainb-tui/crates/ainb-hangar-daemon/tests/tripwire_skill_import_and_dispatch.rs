@@ -6,7 +6,7 @@
 //! proves the whole skill data-plane lands on disk at dispatch time:
 //!
 //! ```text
-//! seed $HOME/.ainb/hangar.db (workspace + claude runtime)
+//! seed $HOME/.agents-in-a-box/hangar.db (workspace + claude runtime)
 //!   + $AINB_TOOLKIT_SKILLS_DIR (3 fake skills)
 //!          │
 //!   ainb hangar skills sync            → imports the 3 skills
@@ -17,7 +17,7 @@
 //!          │
 //!   daemon claim loop  → materialise (P6.4)  → run_claude (FAILS — no binary)
 //!          │
-//!   $HOME/.ainb/hangar/workspaces/default/<task>/.claude/skills/commit/SKILL.md
+//!   $HOME/.agents-in-a-box/hangar/workspaces/default/<task>/.claude/skills/commit/SKILL.md
 //! ```
 //!
 //! The `claude` binary is absent in CI, so `run_claude` fails — that is FINE:
@@ -114,12 +114,12 @@ fn write_fake_skill(root: &Path, name: &str, body: &str) {
     std::fs::write(dir.join("SKILL.md"), md).expect("write SKILL.md");
 }
 
-/// Seed `$HOME/.ainb/hangar.db` with a workspace + owner + a claude runtime
+/// Seed `$HOME/.agents-in-a-box/hangar.db` with a workspace + owner + a claude runtime
 /// bound to `runtime_id`. `templates use` requires a runtime to bind agents to,
 /// and the daemon claims tasks for this runtime.
 fn seed_database(home: &Path, runtime_id: &str) {
-    let hangar_dir = home.join(".ainb");
-    std::fs::create_dir_all(&hangar_dir).expect("create ~/.ainb");
+    let hangar_dir = home.join(".agents-in-a-box");
+    std::fs::create_dir_all(&hangar_dir).expect("create ~/.agents-in-a-box");
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -219,7 +219,7 @@ fn setup_pipeline(home: &Path, daemon: &Path) -> (DaemonProc, PathBuf) {
     };
 
     // Wait for the daemon socket so the claim loop is up.
-    let socket = home.join(".ainb").join("hangar.sock");
+    let socket = home.join(".agents-in-a-box").join("hangar.sock");
     assert!(
         poll_until(Instant::now() + Duration::from_secs(10), || socket.exists()),
         "daemon never bound its socket"
@@ -295,7 +295,12 @@ fn tripwire_skill_import_and_dispatch_materialises_skill_md() {
     // 4. Poll for the materialised SKILL.md under the per-task env. The on-disk
     //    layout uses a short id of the task, so we glob the workspaces dir rather
     //    than computing it.
-    let workspaces = home.path().join(".ainb").join("hangar").join("workspaces").join("default");
+    let workspaces = home
+        .path()
+        .join(".agents-in-a-box")
+        .join("hangar")
+        .join("workspaces")
+        .join("default");
     let materialised = poll_for_skill_md(&workspaces, ASSERT_SKILL, Duration::from_secs(30));
 
     let path = materialised.unwrap_or_else(|| {

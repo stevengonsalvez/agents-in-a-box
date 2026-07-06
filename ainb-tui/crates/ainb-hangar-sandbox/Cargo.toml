@@ -1,0 +1,54 @@
+[package]
+name = "ainb-hangar-sandbox"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Hangar OS-level agent confinement: an FS-confined spawn wrapper (Seatbelt/sandbox-exec on macOS, Landlock on Linux) so a spawned provider subprocess can only read/write the task's isolated roots, gating non-claude providers behind a real sandbox"
+categories = ["os", "command-line-utilities"]
+keywords = ["ainb", "hangar", "sandbox", "seatbelt", "landlock"]
+
+[lib]
+name = "ainb_hangar_sandbox"
+path = "src/lib.rs"
+
+[dependencies]
+thiserror = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+# Real FS confinement on Linux: the high-level safe Landlock ruleset builder.
+# Applied to the spawned child via a `pre_exec` hook (the only `unsafe` seam in
+# this crate) so confinement lands in the forked child *before* exec, never on
+# the daemon itself. Kernel >= 5.13 with Landlock enabled enforces; older
+# kernels degrade to `Enforcement::None` (the test SKIPs, never silently
+# "sandboxes" nothing).
+landlock = "0.4"
+
+[dev-dependencies]
+# Tempdirs for the confinement integration test (allowed workdir vs. a secret
+# placed outside the allowed roots).
+tempfile = { workspace = true }
+
+# Local lint config rather than `workspace = true`: mirrors the sibling hangar
+# crates. NOTE: `unsafe_code` is "warn" (NOT "forbid") here — unlike the rest of
+# the workspace — because the Linux Landlock path needs exactly one `pre_exec`
+# `unsafe` block to apply the ruleset in the forked child. It is isolated to
+# `imp_linux.rs`, documented inline, and async-signal-safe. Keeping
+# `cargo clippy -p ainb-hangar-sandbox --all-targets -- -D warnings` clean.
+[lints.rust]
+unsafe_code = "warn"
+missing_docs = "warn"
+unused_imports = "warn"
+unused_variables = "warn"
+dead_code = "warn"
+
+[lints.clippy]
+all = { level = "warn", priority = -1 }
+pedantic = { level = "warn", priority = -1 }
+nursery = { level = "warn", priority = -1 }
+module_name_repetitions = "allow"
+similar_names = "allow"
+must_use_candidate = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"

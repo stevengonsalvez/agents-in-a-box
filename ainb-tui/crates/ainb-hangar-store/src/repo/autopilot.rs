@@ -39,6 +39,93 @@ use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, AutopilotRunId, WorkspaceId};
 use sqlx::SqlitePool;
 
+/// What the FIRE path materialises for each autopilot tick (the `execution_mode`
+/// column, migration 0019).
+///
+/// Orthogonal to [`ConcurrencyPolicy`]: this decides what one *fired* tick
+/// produces, not whether it fires under contention.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExecutionMode {
+    /// The fired tick enqueues a task with `issue_id = NULL` — a background run
+    /// that produces no tracked issue. The v1 hard-coded path and the DEFAULT.
+    #[default]
+    RunOnly,
+    /// The fired tick first creates a fresh `issue` (authored by the autopilot's
+    /// agent), then enqueues the task AGAINST that issue, so the run has a
+    /// tracked work item.
+    CreateIssue,
+}
+
+impl ExecutionMode {
+    /// The literal stored in the `execution_mode` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::RunOnly => "run_only",
+            Self::CreateIssue => "create_issue",
+        }
+    }
+
+    /// Parse a stored `execution_mode` value. An unrecognised string falls back
+    /// to the [`RunOnly`](Self::RunOnly) default rather than erroring — a forward
+    /// compatibility guard, since the column `CHECK` already rejects junk on
+    /// write.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "create_issue" => Self::CreateIssue,
+            _ => Self::RunOnly,
+        }
+    }
+}
+
+/// What the SCHEDULER does when a tick comes due while the autopilot is already
+/// at `max_concurrent_runs` in-flight runs (the `concurrency_policy` column,
+/// migration 0019).
+///
+/// Orthogonal to [`ExecutionMode`]: this decides whether/how a tick fires under
+/// contention, not what a fired tick produces.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ConcurrencyPolicy {
+    /// Drop the tick — no run, no task; warn + emit `tick_skipped`; reschedule to
+    /// the next slot. The v1 behaviour and the DEFAULT.
+    #[default]
+    Skip,
+    /// Fire the tick ANYWAY — create the run + task. The shared claim/dispatch
+    /// queue then drains the enqueued tasks in order, so the second tick RUNS
+    /// AFTER the in-flight one rather than being dropped.
+    Queue,
+    /// Supersede the in-flight run(s) — mark each open `autopilot_run` cancelled
+    /// (stamping `completed_at`) and cancel its task — then fire a fresh run +
+    /// task. The latest tick wins; stale in-flight work is abandoned.
+    Replace,
+}
+
+impl ConcurrencyPolicy {
+    /// The literal stored in the `concurrency_policy` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Skip => "skip",
+            Self::Queue => "queue",
+            Self::Replace => "replace",
+        }
+    }
+
+    /// Parse a stored `concurrency_policy` value. An unrecognised string falls
+    /// back to the [`Skip`](Self::Skip) default rather than erroring — a forward
+    /// compatibility guard, since the column `CHECK` already rejects junk on
+    /// write.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "queue" => Self::Queue,
+            "replace" => Self::Replace,
+            _ => Self::Skip,
+        }
+    }
+}
+
 /// A stored, cron-scheduled autopilot (one `autopilot` row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Autopilot {
@@ -54,8 +141,13 @@ pub struct Autopilot {
     pub instructions: Option<String>,
     /// Validated cron expression (UTC).
     pub cron_expr: String,
-    /// Maximum simultaneous in-flight runs before a tick is skipped.
+    /// Maximum simultaneous in-flight runs before the concurrency policy applies.
     pub max_concurrent_runs: i64,
+    /// What the fire path materialises per tick (migration 0019).
+    pub execution_mode: ExecutionMode,
+    /// What the scheduler does when a tick comes due at the in-flight limit
+    /// (migration 0019).
+    pub concurrency_policy: ConcurrencyPolicy,
     /// Cached next-firing instant (epoch-ms); `None` when no future match.
     pub next_tick_at: Option<i64>,
     /// Whether the scheduler considers this autopilot (the `0/1` column).
@@ -94,6 +186,11 @@ pub struct NewAutopilot {
     pub cron_expr: String,
     /// Maximum simultaneous in-flight runs.
     pub max_concurrent_runs: i64,
+    /// What the fire path materialises per tick (migration 0019).
+    pub execution_mode: ExecutionMode,
+    /// What the scheduler does when a tick comes due at the in-flight limit
+    /// (migration 0019).
+    pub concurrency_policy: ConcurrencyPolicy,
 }
 
 /// Stateless typed wrapper over the autopilot tables.
@@ -127,8 +224,9 @@ impl AutopilotRepo {
         sqlx::query(
             "INSERT INTO autopilot \
              (id, workspace_id, agent_id, name, instructions, cron_expr, \
-              max_concurrent_runs, next_tick_at, enabled, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+              max_concurrent_runs, execution_mode, concurrency_policy, \
+              next_tick_at, enabled, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
         )
         .bind(&id)
         .bind(req.workspace_id.as_str())
@@ -137,6 +235,8 @@ impl AutopilotRepo {
         .bind(&req.instructions)
         .bind(&req.cron_expr)
         .bind(req.max_concurrent_runs)
+        .bind(req.execution_mode.as_str())
+        .bind(req.concurrency_policy.as_str())
         .bind(next_tick_at)
         .bind(now_ms)
         .execute(pool)
@@ -159,7 +259,7 @@ impl AutopilotRepo {
     ) -> Result<Vec<Autopilot>, AutopilotRepoError> {
         let rows = sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, created_at \
              FROM autopilot WHERE workspace_id = ? ORDER BY name",
         )
         .bind(workspace.as_str())
@@ -180,11 +280,36 @@ impl AutopilotRepo {
     ) -> Result<Option<Autopilot>, AutopilotRepoError> {
         let row = sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, created_at \
              FROM autopilot WHERE id = ? AND workspace_id = ?",
         )
         .bind(id.as_str())
         .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await?;
+        Ok(row)
+    }
+
+    /// Fetch one autopilot by id alone (workspace-agnostic).
+    ///
+    /// This is the deliberate exception to the workspace-scoping rule, used only
+    /// by the webhook ingress: the webhook URL carries a ULID autopilot id (not a
+    /// workspace), and the row's owning workspace is intrinsic to it. Every other
+    /// by-id read MUST use [`AutopilotRepo::get`] with an explicit workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AutopilotRepoError::Db`] on a SQL failure.
+    pub async fn get_by_id(
+        pool: &SqlitePool,
+        id: &AutopilotId,
+    ) -> Result<Option<Autopilot>, AutopilotRepoError> {
+        let row = sqlx::query_as::<_, Autopilot>(
+            "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
+                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, created_at \
+             FROM autopilot WHERE id = ?",
+        )
+        .bind(id.as_str())
         .fetch_optional(pool)
         .await?;
         Ok(row)
@@ -356,6 +481,12 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Autopilot {
             instructions: row.try_get("instructions")?,
             cron_expr: row.try_get("cron_expr")?,
             max_concurrent_runs: row.try_get("max_concurrent_runs")?,
+            execution_mode: ExecutionMode::from_db_str(
+                &row.try_get::<String, _>("execution_mode")?,
+            ),
+            concurrency_policy: ConcurrencyPolicy::from_db_str(
+                &row.try_get::<String, _>("concurrency_policy")?,
+            ),
             next_tick_at: row.try_get("next_tick_at")?,
             // SQLite stores the boolean as INTEGER 0/1.
             enabled: row.try_get::<i64, _>("enabled")? != 0,

@@ -1,4 +1,4 @@
-// L2 — parity guard. The SES sandbox can't import the lib, so hangar.js
+// L2 — parity guard. The SES sandbox can't import the lib, so jarvis.js
 // inlines a verbatim copy of buildPanel. This asserts the two never drift.
 //   node --test parity.test.mjs
 import { test } from 'node:test'
@@ -26,20 +26,20 @@ function extractParityBlock(path) {
 
 test('buildPanel is byte-identical in lib and workflow', () => {
   const lib = extractParityBlock('hangar.logic.mjs')
-  const wf = extractParityBlock('hangar.js')
+  const wf = extractParityBlock('jarvis.js')
   assert.equal(
     wf,
     lib,
-    'hangar.js inline buildPanel drifted from hangar.logic.mjs — re-sync the PARITY block in both files',
+    'jarvis.js inline buildPanel drifted from hangar.logic.mjs — re-sync the PARITY block in both files',
   )
 })
 
-test('hangar starts with the required meta export', () => {
-  const wf = readFileSync(join(here, 'hangar.js'), 'utf8')
+test('jarvis starts with the required meta export', () => {
+  const wf = readFileSync(join(here, 'jarvis.js'), 'utf8')
   assert.match(wf.trimStart(), /^export const meta = \{/)
 })
 
-test('hangar.meta.name is "hangar"', () => {
-  const wf = readFileSync(join(here, 'hangar.js'), 'utf8')
-  assert.match(wf, /name:\s*'hangar'/)
+test('jarvis.meta.name is "jarvis"', () => {
+  const wf = readFileSync(join(here, 'jarvis.js'), 'utf8')
+  assert.match(wf, /name:\s*'jarvis'/)
 })

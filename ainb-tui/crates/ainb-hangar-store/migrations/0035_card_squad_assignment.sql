@@ -1,0 +1,32 @@
+-- Hangar v1 schema, migration 0035: assign a SQUAD to a card (tcp T4 / F7).
+--
+-- T4 makes a card's assignee a whole SQUAD (leader + members), not just a single
+-- profile. Card = issue (§4.5), so the squad assignment hangs off the durable
+-- card — a nullable `issue.squad_id`:
+--
+--   - NULL   → the card runs as a single agent (the pre-T4 assignee axis: the
+--              issue's `assignee` agent, else the workspace fallback). Unchanged.
+--   - set    → a card RUN fans the card's issue out across the whole squad
+--              (`SquadAssignService::assign_fanout`): the LEADER brief plus one
+--              task per distinct `agent` member, each on the SAME issue and each
+--              in its OWN worktree. The board renders one member chip per task.
+--
+-- There is deliberately NO foreign key on `issue.squad_id`: `PRAGMA foreign_keys`
+-- is off in this crate (see 0002/0003), and a squad lives in the `squad` table
+-- under the same workspace. Referential integrity of the squad ref is a
+-- service-layer concern (the run handler resolves the squad WITHIN the card's
+-- workspace before fanning out; an unknown / foreign squad rejects the run rather
+-- than dispatching), exactly as the `issue`/`board_card` actor + issue refs are.
+--
+-- The squad axis is ORTHOGONAL to the F4 provider agent (`issue.agent_kind`) and
+-- the F2 repo (`issue.repo_ref`): the fanned-out member tasks inherit the card's
+-- repo (so each provisions its own `ainb/<slug>` worktree) and the resolved
+-- provider kind, exactly as a single-agent card run does.
+--
+-- ALTER TABLE ... ADD COLUMN with no default is an O(1) catalog change in SQLite
+-- (no table rewrite), so this is safe on populated databases (mirrors 0031/0032/
+-- 0033). Every pre-existing issue reads back `squad_id = NULL` — byte-identical
+-- prior behaviour (single-agent runs).
+
+ALTER TABLE issue
+    ADD COLUMN squad_id TEXT;

@@ -1,5 +1,11 @@
 # GOAL: verify-hangar — full autonomous product verification
 
+> **Superseded by `verify-converged-goal.md`** (P11). This file's F01–F44 feature walk and
+> R01–R08 resilience legs are carried into the converged harness verbatim (its Phase B / C);
+> the converged doc adds the P1–P10 control-plane legs (attention answer-flip, boards,
+> squads, ATC, history) and the J1–J5 × C1–C5 traceability table. Prefer the converged doc
+> for new runs; this one remains as the hangar-parity baseline.
+
 Drop this file into a fresh Claude Code / Codex session at the repo root and run it
 end-to-end without hand-holding. The outcome is a per-feature PASS/SKIP/FAIL table
 covering every user-facing Hangar feature (F01–F44) plus eight resilience legs
@@ -78,13 +84,13 @@ The checklist (ui key / CLI from `docs/hangar/architecture.md`, verified 2026-06
 | F12 | agents_list snapshot | covered inside F11 leg |
 | F13 | Skill CRUD scoping/cascade | CLI skills + sqlite3 cascade assert |
 | F14 | Skills sync idempotent | CLI `skills sync` twice; row count stable |
-| F15 | Skill manager screen | TUI `4`, `s/i/d`, chips |
+| F15 | Skill manager screen | TUI `3`, `s/i/d`, chips |
 | F16 | Dispatch-time skill materialisation | daemon dispatch; byte-assert materialised SKILL.md |
 | F17/F18 | Templates list/show/use | CLI `templates ...` |
 | F19 | Autopilot CRUD + invalid-cron reject | CLI create (good + bad cron) |
 | F20 | Scheduler fires on schedule | daemon, near-future cron, poll autopilot_run row |
 | F21 | Scheduler skips when running | daemon, in-flight seeded run |
-| F22 | Autopilots screen | TUI `5`; seeded `daily-triage` marker |
+| F22 | Autopilots screen | TUI `4`; seeded `daily-triage` marker |
 | F23 | Autopilot CLI run-now | CLI `autopilot run` |
 | F24 | Keychain roundtrip | mac-only; SKIP on CI/linux |
 | F25 | secret_store_get cap gating | ungranted manifest → expect -32001 in plugin log |
@@ -102,7 +108,7 @@ The checklist (ui key / CLI from `docs/hangar/architecture.md`, verified 2026-06
 | F38 | Daemon boot + migrations | run daemon on fresh dir; 16 tables assert |
 | F39 | Socket RPC + snapshots | plugin connects to real socket |
 | F40 | subscribe + daemon-drop detection | kill daemon (exact PID); plugin shows disconnect state |
-| F41 | Cross-screen nav | TUI `1/2/4/5/K/D/L/,` + `?` + `q` |
+| F41 | Cross-screen nav | TUI `1/2/3/4/K/D/U/L/I/,` + `?` + `q` (Skills=3, Autopilots=4 since e38.38; Usage=U, Inbox=I) |
 | F42 | Beads sync reconcile | CLI `beads reconcile --dry-run` against seeded bd |
 | F43 | Runner env/exit/stream/timeout | inside F05 leg + a short-timeout task |
 | F44 | Meta-guard | run `tripwire_full_e2e` once as the static-suite sanity anchor |
