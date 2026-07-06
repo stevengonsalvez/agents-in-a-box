@@ -7,6 +7,436 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.13.0] - 2026-07-06
+### Added
+- Merge origin/main into feat/hangar-parity
+- Merge pull request #250 from stevengonsalvez/feat/hangar-parity
+- Merge pull request #388 from stevengonsalvez/feat/configure-remote-repo-preflight
+- Merge pull request #389: skill manager library epic (picker, sync, two-way library)
+- ci(hangar): gate the framed-socket + CLI acceptance tests
+- docs(hangar): explainer gains End-to-end + vs-Multica tabs
+- **ainb**: gate bridge outbound on the resolved phone channel (tcp T5)
+- **ainb-web**: answer buttons on ASK cards
+- **ainb-web**: gate web push on the resolved web channel (tcp T5)
+- **ainb-web**: read needs from the daemon + answer ASKs on the bus
+- **bridge**: daemon attention client + proactive outbound + reply routing
+- **cli**: add EXAMPLES block to 'ainb web' help
+- **cli**: hangar issue create --priority flag + task list priority column
+- **cli**: hangar issue create --priority/--due/--label persist onto the issue
+- **cli**: hangar issue update edits state/assignee/priority/due-date
+- **fleet**: provision the ATC heartbeat as a daemon cron on `atc setup`
+- **fleet-core**: card-create repo roster reader (F3 source)
+- **fleet-core**: expose the sessions.json advisory lock helper
+- **fleet-core**: session registry writer + shared AINB_PARENT_SESSION const
+- **hangar**: add generic list-screen right-click context menu
+- **hangar**: add lifecycle-free board mouse reducer for list screens
+- **hangar**: autopilot execution_mode + concurrency_policy config enums, threaded through repo + CLI
+- **hangar**: clone-on-pick for remote-only favorites in the @ roster
+- **hangar**: declare text-capture so the host forwards H/?/W into card inputs
+- **hangar**: edit a card's title, repo, and agent from the board (tcp T3, F6)
+- **hangar**: render the Autopilots upper region through the card-board
+- **hangar**: render the Kanban board through the shared card-board
+- **hangar**: render the Skills list pane through the card-board
+- **hangar**: surface issue's latest-task branch on issue-list detail
+- **hangar**: surface run branch + PR status on board cards (T2)
+- **hangar**: wire the mouse path onto the Kanban, Autopilots and Skills screens
+- **hangar-cli**: add 'ainb hangar member list|set-role|remove' surface
+- **hangar-cli**: add 'ainb hangar squad assign' to route a task to the leader
+- **hangar-cli**: add 'ainb hangar squad list|create|add-member|remove-member' surface
+- **hangar-cli**: add 'hangar issue search <query>' surface
+- **hangar-cli**: add issue label attach/detach subcommands
+- **hangar-cli**: ainb hangar agent edit/archive/unarchive/list
+- **hangar-cli**: autopilot webhook config + deliveries verbs
+- **hangar-cli**: daemon run/start/stop/restart/setup lifecycle verbs
+- **hangar-cli**: workspace config surface + issue_prefix at create
+- **hangar-core**: AgentKind + task-create default cascade (F4)
+- **hangar-core**: HMAC-SHA256 webhook signing primitives
+- **hangar-core**: agent-profile format + Claude/Codex compilers (P5)
+- **hangar-core**: notification Channel + ChannelSet vocabulary (tcp T5)
+- **hangar-daemon**: ATC on the daemon — registry RPCs, heartbeat cron, escalation to attention
+- **hangar-daemon**: F5 per-run workdir provisioning module (worktree/scratch)
+- **hangar-daemon**: F5 provision per-run workdir at dispatch + teardown
+- **hangar-daemon**: GC-sweep orphaned task worktrees on the scheduler tick
+- **hangar-daemon**: add codex provider exec path + backend-routed dispatch
+- **hangar-daemon**: add workspace-tree GC orphan sweep helper
+- **hangar-daemon**: aggregate live events into the durable inbox
+- **hangar-daemon**: append run_history at finalize + task.run OTLP span
+- **hangar-daemon**: apply workspace issue_prefix on RPC issue_create
+- **hangar-daemon**: attention answer router + list/subscribe/answer RPCs
+- **hangar-daemon**: attention ingest producer (hook events.jsonl -> inbox)
+- **hangar-daemon**: authenticate the unix-socket RPC server
+- **hangar-daemon**: auto-move issue to Done on PR merge via pr_status_refresh
+- **hangar-daemon**: auto-standup watcher with the full D13 guardrail gate
+- **hangar-daemon**: board RPC handlers + boards_list snapshot
+- **hangar-daemon**: board auto-move dispatch hook on FSM transitions
+- **hangar-daemon**: board_card_reorder + board_card_remove RPCs (tcp T3 F6)
+- **hangar-daemon**: board_card_timeline RPC serving a run's transcript (tcp T3 F6)
+- **hangar-daemon**: cap the daemon's own parent inbox on the sweeper tick
+- **hangar-daemon**: capture provider token/cost usage in the runner
+- **hangar-daemon**: confine the provider spawn in the OS sandbox
+- **hangar-daemon**: discover OTLP endpoint from onboarding creds file
+- **hangar-daemon**: durable event-outbox drain persists every emitted event
+- **hangar-daemon**: durable issue-comment seam for run-loop checkpoints
+- **hangar-daemon**: emit durable progress/blocker comments at FSM checkpoints
+- **hangar-daemon**: gh-backed PR status provider behind an injectable seam
+- **hangar-daemon**: handle board_card_create + board_card_run RPCs
+- **hangar-daemon**: handle hangar/issue_create + emit IssueCreated
+- **hangar-daemon**: hangar/agent_update + hangar/agent_archive RPCs
+- **hangar-daemon**: hangar/board_card_cancel RPC handler (tcp T3, F6)
+- **hangar-daemon**: hangar/run_history RPC read path
+- **hangar-daemon**: inbox_list + inbox_mark_read RPCs
+- **hangar-daemon**: inject workspace context prompt into the task execenv
+- **hangar-daemon**: kill an in-flight run on cancel + finalize cancelled (tcp T3, F6)
+- **hangar-daemon**: localhost HTTP webhook ingress with HMAC verify + fire
+- **hangar-daemon**: log board auto-move no-op and un-drained outcomes
+- **hangar-daemon**: notify_rules_list + notify_rule_set RPCs (tcp T5)
+- **hangar-daemon**: parse @agent mentions in a comment body
+- **hangar-daemon**: persist run usage at the finalize seam
+- **hangar-daemon**: populate the HGR-<n> display id on every wire issue row
+- **hangar-daemon**: profile store, index watch, RPCs + compile-on-dispatch (P5)
+- **hangar-daemon**: provision from claimed Task + record run branch (19n, T2)
+- **hangar-daemon**: push hangar/event frames to subscribed connections
+- **hangar-daemon**: query the five canonical issue states in the snapshot
+- **hangar-daemon**: real subscribe cursor + resume-from-seq replay
+- **hangar-daemon**: reclaim orphaned in-flight tasks on daemon startup
+- **hangar-daemon**: repo_list RPC + card repo/agent persist, cascade, F8 gate
+- **hangar-daemon**: resolve + stamp notify channels once at attention raise (tcp T5)
+- **hangar-daemon**: run interactive board-card launches as real tmux sessions
+- **hangar-daemon**: schedule the workspace GC on the live daemon loop
+- **hangar-daemon**: scheduler honors concurrency_policy (skip/queue/replace)
+- **hangar-daemon**: self-register the daemon runtime on boot
+- **hangar-daemon**: spawn an agent task from a comment @mention
+- **hangar-daemon**: spawn retry child on retryable failure + configurable provider deadline
+- **hangar-daemon**: type the task lifecycle with a statig FSM (T8)
+- **hangar-daemon**: wire hangar/comment_add RPC handler + store bridge
+- **hangar-daemon**: wire hangar/issue_update RPC handler
+- **hangar-daemon**: wire hangar/issues_search RPC over the socket
+- **hangar-daemon**: wire hangar/search handler + dispatch
+- **hangar-daemon**: wire hangar/squad_assign RPC so leader routing takes effect
+- **hangar-daemon**: wire hangar/squad_fanout RPC to the fan-out service
+- **hangar-daemon**: wire hangar/usage_rollup RPC handler + query
+- **hangar-daemon**: wire issue_label_attach/detach RPCs
+- **hangar-daemon**: wire members_list + member_set_role + member_remove RPCs
+- **hangar-daemon**: wire squad fan-out + card dependencies onto the board (tcp T4, F7)
+- **hangar-daemon**: wire squads_list + squad_create + squad_member_add|remove RPCs
+- **hangar-plugin**: Ctrl+P command palette / cross-entity search overlay
+- **hangar-plugin**: JSONL transcript timeline parser (P10 4.9, tcp T3 F6)
+- **hangar-plugin**: Squads screen (D17) — leader + members, live status, verbs
+- **hangar-plugin**: add DaemonStarter seam for offline start action
+- **hangar-plugin**: add render-only Members pane to the Settings screen
+- **hangar-plugin**: add usage dashboard screen (U)
+- **hangar-plugin**: agentpeek control-center screen (P2)
+- **hangar-plugin**: auto-load the initial profile detail on roster load (P5)
+- **hangar-plugin**: cancel a card + rerun hint on the board (tcp T3, F6)
+- **hangar-plugin**: card-board mouse framework — hit-map, MouseState FSM, intents
+- **hangar-plugin**: consume plugin/handle_mouse via the card-board mouse layer
+- **hangar-plugin**: default card-create to the scratch repo (F2)
+- **hangar-plugin**: fetch + apply the usage rollup snapshot
+- **hangar-plugin**: fetch PR status on task-detail open + fold the reply
+- **hangar-plugin**: fetch hangar/members_list to populate the Members pane
+- **hangar-plugin**: flatten issue rows into card-board columns for hit-testing
+- **hangar-plugin**: full card-create parity overlay — repo @-picker + agent chips (F1-F4)
+- **hangar-plugin**: live-tail the card timeline while its run streams (tcp T3, F6)
+- **hangar-plugin**: notification routing grid in Settings (tcp T5)
+- **hangar-plugin**: offline empty-state panel widget
+- **hangar-plugin**: prettied JSONL timeline overlay on a card (tcp T3 F6, P10 4.9)
+- **hangar-plugin**: profile-editor screen + Profiles chrome tab (P5)
+- **hangar-plugin**: recent-runs timeline on the usage screen
+- **hangar-plugin**: render PR CI + merge status on the task-detail badge
+- **hangar-plugin**: render label chips on the issue list + detail sidebar
+- **hangar-plugin**: render offline empty-state + wire [s] start action
+- **hangar-plugin**: render the HGR-<n> display id leading each issue row
+- **hangar-plugin**: render the five canonical issue lifecycle columns
+- **hangar-plugin**: reorder + remove cards on the board (tcp T3 F6)
+- **hangar-plugin**: route the control-center screen into the chrome
+- **hangar-plugin**: squad-from-card + card dependencies on the board (tcp T4, F7)
+- **hangar-plugin**: surface interactive session attach command on board cards
+- **hangar-plugin**: user-defined Boards screen (reducer + render + snapshots)
+- **hangar-plugin**: wire Boards card create/run/attach/rename to daemon RPCs
+- **hangar-plugin**: wire profile editor to profile/{list,get,upsert} (P5)
+- **hangar-plugin**: wire squad RPCs into the plugin glue
+- **hangar-plugin**: wire the Boards screen into the TUI (tab B, live data)
+- **hangar-plugin**: wire the control center to the attention RPCs
+- **hangar-proto**: PR status wire types + pr_status_refresh RPC envelope
+- **hangar-proto**: T4 wire surface for squad-from-card + card deps (F7)
+- **hangar-proto**: add board_card_create + board_card_run methods
+- **hangar-proto**: add hangar/board_card_cancel wire method (tcp T3, F6)
+- **hangar-proto**: add hangar/issue_create method + IssueCreateParams
+- **hangar-proto**: add hangar/issue_update method + IssueUpdateParams
+- **hangar-proto**: add hangar/issues_search method + IssueSearchParams
+- **hangar-proto**: add hangar/members_list + member_set_role + member_remove methods
+- **hangar-proto**: add hangar/search cross-entity search wire types
+- **hangar-proto**: add hangar/squad_assign method + assign envelopes
+- **hangar-proto**: add hangar/usage_rollup method + wire types
+- **hangar-proto**: add issue_label_attach/detach methods + params
+- **hangar-proto**: add squad RPC methods + wire envelopes
+- **hangar-proto**: attention RPC catalogue + wire types
+- **hangar-proto**: auth/hello first-frame shape + daemon token file path
+- **hangar-proto**: board RPC methods + wire envelopes
+- **hangar-proto**: canonical five-status issue lifecycle + column ordering
+- **hangar-proto**: carry an optional display_id on the wire IssueRow
+- **hangar-proto**: carry interactive session_name on the board card wire row
+- **hangar-proto**: carry issue priority, due date, labels on the IssueRow wire type
+- **hangar-proto**: carry task priority on the TaskCardRow wire type
+- **hangar-proto**: hangar/agent_update + hangar/agent_archive methods
+- **hangar-proto**: hangar/squad_fanout method + SquadFanoutResult wire types
+- **hangar-proto**: profile/{list,get,upsert} RPC methods + wire types (P5)
+- **hangar-proto**: register hangar/comment_add method + CommentAddParams
+- **hangar-proto**: repo_list RPC + append-only card repo/agent params (F1-F5)
+- **hangar-proto**: run_history RPC method + wire types
+- **hangar-proto**: subscribe resume cursor + since_seq wire types
+- **hangar-sandbox**: OS-level FS confinement for the agent provider spawn
+- **hangar-store**: HGR default issue display id (HGR-<n>)
+- **hangar-store**: InboxRepo over the aggregated inbox_entry table
+- **hangar-store**: WorkspaceRepo for per-workspace config
+- **hangar-store**: add CommentRepo insert + list scoped by issue/workspace
+- **hangar-store**: add LabelRepo over the label + issue_label tables
+- **hangar-store**: add MemberRepo list/set-role/remove with last-owner guard
+- **hangar-store**: add SquadAssignService that routes a squad task to its leader
+- **hangar-store**: add SquadRepo over the squad + squad_member tables
+- **hangar-store**: add UsageRepo rollup over task_usage
+- **hangar-store**: add conversation-poisoning FailureReason variants
+- **hangar-store**: add issue active-set and aggregate-terminal task queries
+- **hangar-store**: add issue priority, due date, labels columns (migration 0014)
+- **hangar-store**: add label + issue_label tables (migration 0016)
+- **hangar-store**: add migration 0017 for the squad + squad_member tables
+- **hangar-store**: add migration 0022 task_usage table
+- **hangar-store**: add ranked title+desc+comment issue search query
+- **hangar-store**: add task launch mode + tmux session_name (migration 0031)
+- **hangar-store**: add task priority column (migration 0013)
+- **hangar-store**: add workspace-scoped IssueRepo::update_fields
+- **hangar-store**: atc_instance, standup, and daemon_config schema (migration 0027)
+- **hangar-store**: attention table + repo (the answerable control-plane inbox)
+- **hangar-store**: beads-style card dependency edges with cycle rejection (tcp T4, F7)
+- **hangar-store**: board_card ord + card_reorder (migration 0034, tcp T3 F6)
+- **hangar-store**: claim orders by priority DESC with FIFO tiebreak
+- **hangar-store**: cross-entity workspace search query
+- **hangar-store**: durable event outbox table + replay repo
+- **hangar-store**: fire path honors execution_mode (create_issue vs run_only)
+- **hangar-store**: fold atc into the actionable notify defaults (0040)
+- **hangar-store**: migration 0015 — agent archive flag + config columns
+- **hangar-store**: migration 0018 — webhook autopilot columns + delivery log
+- **hangar-store**: migration 0019 autopilot execution_mode + concurrency_policy columns
+- **hangar-store**: migration 0020 per-workspace config columns
+- **hangar-store**: migration 0021 — aggregated notification inbox table
+- **hangar-store**: migration 0023 maps legacy issue states to the canonical vocabulary
+- **hangar-store**: migration 0032 card-parity fields + cascade repo (F1-F5)
+- **hangar-store**: notify_rule table + resolver with seeded defaults (tcp T5)
+- **hangar-store**: per-(issue, agent) active-set guard in claim SQL
+- **hangar-store**: persist a squad assignment on a card (tcp T4, F7)
+- **hangar-store**: plumb issue priority, due date, labels through NewIssue/Issue + IssueRepo
+- **hangar-store**: plumb task priority through NewTask, Task, and retry
+- **hangar-store**: poisoned-terminal retry/resume taxonomy
+- **hangar-store**: profile index table + repo (P5)
+- **hangar-store**: query a session's open AskUserQuestion row ids
+- **hangar-store**: resolve a card's active task by issue (tcp T3, F6)
+- **hangar-store**: resolve an autopilot by id alone for the webhook ingress
+- **hangar-store**: run_history table + repo + cost_rollup view
+- **hangar-store**: scope card-state folds to the latest run generation
+- **hangar-store**: scope pending-task uniqueness to (issue, agent)
+- **hangar-store**: single-row daemon_socket_token table + repo
+- **hangar-store**: squad fan-out service — leader brief + per-agent-member tasks
+- **hangar-store**: stamp the card repo on every fanned-out squad task (tcp T4, F7)
+- **hangar-store**: supersede_in_flight cancels open runs+tasks for the replace policy
+- **hangar-store**: thread agent config + archive through Agent/AgentRepo
+- **hangar-store**: user-defined board tables + repo
+- **hangar-store**: webhook config repo + 0600 secret store + delivery log
+- **hangar-tui**: Inbox screen with unread badge + mark-read
+- **hangar-tui**: add Linear-style card-board widget
+- **hangar-tui**: add comment-compose key to task-detail screen
+- **hangar-tui**: card context-menu overlay component
+- **hangar-tui**: distribute landing status sections to fill body height
+- **hangar-tui**: present the daemon token on connect
+- **hangar-tui**: surface the run branch in the issue task-detail view
+- **hangar-tui**: wire inline issue-create + fix event-push link teardown
+- **hangar-tui**: wire the card context menu to issue_update RPCs
+- **home**: surface Hangar as a discoverable sidebar destination
+- **new-session**: [i] initializes an empty remote in place
+- **new-session**: validate remote repo on Configure open, block Launch
+- **notifyd**: honour the OS notification channel (tcp T5)
+- **onboarding**: add source/role/use-case questionnaire to first-run wizard
+- **onboarding**: persist source/role/use-case answers in onboarding config
+- **plugin-hangar**: bind the Issues board mouse intents to real actions
+- **plugin-hangar**: render the Issues screen through the card-board widget
+- **plugin-protocol**: add a RenderResult.captures_text text-capture signal
+- **skill**: track which sources are your own library
+- **skill-cli**: library copy, mark-source, and git-native two-way sync
+- **skill-tui**: installed-aware picker, assess-then-apply sync, library actions
+- **skill-tui**: open a unit's deployed skill in $EDITOR with [o]
+
+### Fixed
+- Merge pull request #386 from stevengonsalvez/f/skillmgr-remove-filtered-source
+- Merge pull request #387: install skills into the tool's real home
+- docs(hangar): T4b GIF — card-dependency chain, refuse then auto-run
+- **ainb-cli**: default the new fan-out fields in hangar squad assign
+- **ainb-core**: route SessionStore mutations through the sessions.json lock
+- **ainb-core**: stop global shortcuts swallowing keys typed into plugin overlays
+- **ainb-web**: flatten nested attention payload so ASK cards render options
+- **ainb-web**: gate POST /api/answer behind the read-only posture
+- **ainb-web**: key web push on the top-level card cwd, not nested session (tcp T5)
+- **atc**: dedupe heartbeat escalations behind the escalated ledger flag
+- **atc**: heartbeat filters needs rows on the stamped ATC channel (tcp T5)
+- **atc**: reclaim a stale auto-standup in-flight slot
+- **atc**: single-scheduler heartbeat lifecycle on setup and teardown
+- **atc**: skip the hook stdin read on a TTY
+- **fleet-core**: classify from the session's exact transcript
+- **fleet-needs**: canonicalize cwd so /tmp matches Claude's /private/tmp transcripts
+- **fleet-needs**: stop an answered AskUserQuestion sticking ASK forever
+- **git**: make empty-remote init safe against stale cache and races
+- **hangar**: close card remove TOCTOU + scope card reorder to its column (T3 review)
+- **hangar**: finish the ~/.agents-in-a-box reparent in the host runtime + protocol
+- **hangar**: guard card membership, atomic create, one-shot overlay repaint
+- **hangar**: partial + workspace-scoped card repo/agent write (tcp T3 review)
+- **hangar**: plugin socket dial + allow-list honour $AINB_HANGAR_HOME
+- **hangar-boards**: clip column headers clear of the ⋯ + affordances
+- **hangar-boards**: distinguish empty boards from loading and error
+- **hangar-cli**: map the new squad MemberAgentMissing assign error
+- **hangar-cli**: stamp run generation on the issue-assign task enqueue
+- **hangar-daemon**: bind cwd-fallback delivery to the raising session
+- **hangar-daemon**: bound gh pr status fetch with a hard timeout
+- **hangar-daemon**: classify provider exit 75 as retryable runtime_offline
+- **hangar-daemon**: close a stale ASK card when its session stops asking
+- **hangar-daemon**: close cancel-before-start worktree leak (T3 review)
+- **hangar-daemon**: cover RunOutcome::Cancelled in the runner tests
+- **hangar-daemon**: drain full resume backlog instead of truncating at one batch
+- **hangar-daemon**: drain-gated aggregate card auto-move and any-terminal unblock
+- **hangar-daemon**: fall back to the legacy short-id path for pre-upgrade transcripts
+- **hangar-daemon**: guard card run against an active run + idempotent double-cancel (T3 review)
+- **hangar-daemon**: guard the worktree GC against live-registered runs
+- **hangar-daemon**: harden the P5 profile store
+- **hangar-daemon**: index profiles by filename stem, not the name: field (P5)
+- **hangar-daemon**: keep an attention row answerable when its send fails
+- **hangar-daemon**: key attention idempotency on the hook line offset
+- **hangar-daemon**: key scratch on (issue, agent) so squad members do not race
+- **hangar-daemon**: key workdir/logs/worktree paths on the full task id
+- **hangar-daemon**: kill in-flight runs on Ctrl-C instead of orphaning them
+- **hangar-daemon**: make card-run RPC handlers fan-out-aware
+- **hangar-daemon**: make daemon-spawned task sessions fleet-visible
+- **hangar-daemon**: make the per-task worktree slug collision-resistant (tcp T4 review)
+- **hangar-daemon**: resolve notify channels at read for unstamped attention rows
+- **hangar-daemon**: reuse a scratch card's dir across reruns
+- **hangar-daemon**: run claimed tasks concurrently, reap interactive sessions on shutdown
+- **hangar-daemon**: scope issue PR/branch to latest generation + bound PR fan-out
+- **hangar-daemon**: serialize concurrent launches of one card (tcp T4 review)
+- **hangar-daemon**: skip binary assets during skill import walk
+- **hangar-daemon**: stamp + render the run generation on card runs
+- **hangar-notify**: echo scope on notify_rules_list to drop stale-scope grid replies
+- **hangar-plugin**: call roster3 in the profile screen test
+- **hangar-plugin**: cancel via X + confirm overlay (C collides with Control tab)
+- **hangar-plugin**: carry squad roster across board refresh and guard SquadPick clear
+- **hangar-plugin**: never send a partial profile tier upsert
+- **hangar-plugin**: open the timeline overlay on a just-started run (tcp T3 review)
+- **hangar-plugin**: reach and bootstrap the Boards screen
+- **hangar-plugin**: repaint Boards card overlays via a refresh round-trip
+- **hangar-plugin**: route P to the profile editor from any screen
+- **hangar-proto**: append board methods at the catalogue tail
+- **hangar-proto**: keep the method catalogue append-only for profile/*
+- **hangar-proto**: register T3 card reorder/remove/timeline in ALL_METHODS
+- **hangar-sandbox**: Linux Landlock build (E0283 in apply_landlock)
+- **hangar-sandbox**: deny ReadFile on Linux write roots (temp read-leak)
+- **hangar-squads**: distinguish error notes from success + follow selection on overflow
+- **hangar-store**: copy repo_ref/agent_kind to retry child (19n)
+- **hangar-store**: count dispatched rows against per-agent concurrency cap
+- **hangar-store**: cut sqlite write contention with WAL NORMAL sync + busy_timeout
+- **hangar-store**: exclude retry-superseded attempts from the card aggregate
+- **hangar-store**: guard board cards and auto-move targets
+- **hangar-store**: key card-dependency finished on the whole task set
+- **hangar-store**: make board auto-move atomic against concurrent finalizers
+- **hangar-store**: make squad fan-out atomic and workspace-scoped
+- **hangar-store**: seed phone into the ask/approval/codex notify defaults
+- **hangar-store**: tighten 0040 to the 0038 exact-seed predicate
+- **hangar-tests**: derive the timeline log path via execenv::short_id
+- **hangar-tests**: gate the plugin-crash tripwire to macOS
+- **hangar-tui**: anchor and harden the P2 control-center board
+- **hangar-tui**: clamp section band end >= start for degenerate panes
+- **hangar-tui**: close tab-numbering gap by renumbering Skills/Autopilots to 3/4
+- **hangar-tui**: keep P2 tab hotkeys out of text-capture surfaces
+- **hangar-tui**: keep board focus on the acted-on card after a refused run
+- **hangar-tui**: re-fetch snapshots after an active-workspace switch
+- **hangar-tui**: route agent-picker Assign intent to issue_update
+- **hangar-tui**: scope the notify grid to global or workspace rules
+- **hangar-usage**: scope usage dashboard by workspace to stop cross-tenant stale leak
+- **new-session**: apply async verdicts only to forms awaiting them
+- **new-session**: stop hardcoding 'off main' in worktree failure toast
+- **onboarding**: correct API-key prefix, OTel partial creds, dep cursor
+- **plugin-runtime**: mark render-dirty when a dialled socket delivers data
+- **skill**: install into tool's real home so skills are visible to Claude/Codex
+- **skill-cli**: publish library edits, harden git, push to the source ref
+- **skill-tui**: render full sync plan and act on the visible-highlighted unit
+- **skills**: [r] never removes an off-filter unit; empty filter → remove source
+- test(hangar): re-send P4.9 tab-nav keypresses so a dropped key can't flake CI
+
+### Documentation
+- **ainb-tui**: record the path + plugin-location conventions
+- **cli**: drop product name from hangar priority-flag provenance comment
+- **cli**: regenerate CLI reference from the binary
+- **hangar**: CH1 live card-create + CH2/CH7 live-agent frames
+- **hangar**: CH2 live-attach GIF + attention-ingest cursor pre-seed
+- **hangar**: CH3 frame-truth — attention fix live, control-center shows 4 need you
+- **hangar**: CH3 frame-truth — hangar interactive runs miss attention
+- **hangar**: CH4 GIF — ATC human-relay answers a live hangar picker
+- **hangar**: CH5 GIF — ATC's ASK playbook acts on a heartbeat with no human text
+- **hangar**: CH6 GIF — auto-standup fires on idle, never on busy, roster proves it
+- **hangar**: CH6 frame-truth — auto-standup never sees hangar sessions
+- **hangar**: CH7 GIF — real interactive run lands green + in Usage
+- **hangar**: P4 boards vhs frame-truth journey
+- **hangar**: S1 GIF — web ASK-answer journey recorded on film
+- **hangar**: S3 GIF — autopilot fire-now journey recorded
+- **hangar**: T1 GIF — task-create parity, repo-required refusal, worktree lifecycle
+- **hangar**: T4a GIF — squad-card fan-out, three live worktrees at once
+- **hangar**: T4b GIF — card-dependency chain, refuse then auto-run
+- **hangar**: T5 GIF — notification routing, grid flip through to a real ASK
+- **hangar**: add the converged acceptance harness (verify-converged-goal)
+- **hangar**: add the journey catalogue to verify-converged-goal
+- **hangar**: autonomous-run goal for the control-center convergence
+- **hangar**: board-redesign visual proof + mouse-recording harness
+- **hangar**: control-center journey recording + frame-truth stills
+- **hangar**: converged control-center architecture (interview-locked v1)
+- **hangar**: converged control-center specification v1
+- **hangar**: correct comment_add + mention-spawn docstrings
+- **hangar**: explainer gains End-to-end + vs-Multica tabs
+- **hangar**: explainer gains a Status & roadmap tab
+- **hangar**: fix verify-converged harness path + honest matrix gaps
+- **hangar**: flip CC17 to GREEN, resolve P11 matrix blockers
+- **hangar**: journey catalogue — add tcp T4a/T4b/T5 rows
+- **hangar**: live-agent seeder for CH2+ master-journey chapters
+- **hangar**: lock the validation contract into spec and goal
+- **hangar**: mark C2 web ASK-answer leg (CC18) GREEN
+- **hangar**: master-journey seeder + first chapter recordings
+- **hangar**: record per-(issue, agent) concurrency decision
+- **hangar**: record the P7 squads fan-out vhs journey
+- **hangar**: record the task priority scale and claim ordering decision
+- **hangar**: record the verify-hangar walk results (27 PASS / 0 FAIL)
+- **hangar**: task-create parity + board completeness spec
+- **hangar**: the dual-channel event push is now real
+- **hangar**: update verify-walk nav keys for the e38.38 tab renumber
+- **hangar-core**: drop product name from internal provenance comments
+- **hangar-daemon**: correct checkpoint-comment author to agent-authored
+- **hangar-daemon**: drop product name from internal provenance comments
+- **hangar-daemon**: update autopilots tripwire prose to the new tab key 4
+- **hangar-plugin**: update issue-list status-grouping prose for the five-column lifecycle
+- **hangar-proto**: drop product name from transcript/presence provenance comments
+- **hangar-store**: drop product name from internal provenance comments
+- **hangar-store**: drop product name from migration provenance comments
+- **home**: correct stale sidebar item-count comment (10 -> 14)
+- **plugin-hangar**: drop product name from widget/screen UX-parity comments
+
+### Other
+- pin reflect plugin to v5.1.0
+- **hangar**: bound board PR-status gh fetches + simplify branch count (T2)
+- **hangar-daemon**: bound tasks_list PR fetches concurrently
+- **hangar-plugin**: skip the snapshot re-pull on a transcript-line event (tcp T3 review)
+- **ainb-core**: source PARENT_ENV from fleet-core
+- **ainb-fleet**: delete legacy Python phone bridge
+- **ainb-fleet**: rename hangar workflow to jarvis
+- **bridge**: route sends through the one verified send path
+- **fleet**: extract ainb-fleet-core so the daemon can reuse the send path
+- **hangar**: move state dir from ~/.ainb to ~/.agents-in-a-box
+- **hangar**: move the TUI plugin into the workspace at crates/ainb-plugin-hangar
+- **hangar**: one hangar_home() helper, delegate every resolver
+- **skills**: [r] removes the highlighted visible unit, not stale index
+
+
 ## [1.12.0] - 2026-07-04
 ### Added
 - Merge pull request #375 from stevengonsalvez/f/onboarding-auth-per-agent
