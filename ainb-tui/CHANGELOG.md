@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.14.0] - 2026-07-08
+### Documentation
+- **tmux-ui-tripwire**: six traps from the ccc campaign
+
+### Other
+- pin reflect plugin to v5.1.1
+
+
 ## [1.13.0] - 2026-07-06
 ### Added
 - Merge origin/main into feat/hangar-parity
