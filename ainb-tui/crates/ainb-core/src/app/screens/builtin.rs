@@ -398,8 +398,10 @@ fn click_to_viewport(
 fn build_placeholder_for_unloaded_plugin(
     screen_id: &str,
     state: &AppState,
+    area: Rect,
 ) -> ratatui::widgets::Paragraph<'static> {
     use ratatui::{
+        layout::Alignment,
         style::{Color, Modifier, Style},
         text::{Line, Span},
         widgets::{Block, BorderType, Borders, Paragraph},
@@ -415,15 +417,46 @@ fn build_placeholder_for_unloaded_plugin(
     };
 
     if plugin_registered {
-        // Genuine transient render lag.
-        let line = Line::from(vec![
-            Span::styled("  ⏳ ", Style::default().fg(Color::Yellow)),
+        // Genuine transient render lag: the runtime has the plugin (freshly
+        // spawned OR idle-reaped back to `Idle`) but its first `plugin/render`
+        // frame hasn't landed. Paint a full-area, palette-styled "connecting"
+        // panel — backdrop fill + rounded border + centred title — so entering
+        // the screen reads as a deliberate loading beat, NEVER a blank void with
+        // the outer layout dropped.
+        const GOLD: Color = Color::Rgb(255, 215, 0);
+        const CORNFLOWER_BLUE: Color = Color::Rgb(100, 149, 237);
+        const PROGRESS_CYAN: Color = Color::Rgb(100, 200, 230);
+        const MUTED_GRAY: Color = Color::Rgb(120, 120, 140);
+        const DARK_BG: Color = Color::Rgb(25, 25, 35);
+
+        let name = title_case_screen(screen_id);
+        // Vertically centre the two-line message within the framed body.
+        let pad = area.height.saturating_sub(4) / 2;
+        let mut lines: Vec<Line> = (0..pad).map(|_| Line::from("")).collect();
+        lines.push(Line::from(vec![
+            Span::styled("⬡  ", Style::default().fg(GOLD)),
             Span::styled(
-                format!("Loading {}…", screen_id),
-                Style::default().add_modifier(Modifier::BOLD),
+                format!("{name} — connecting…"),
+                Style::default().fg(PROGRESS_CYAN).add_modifier(Modifier::BOLD),
             ),
-        ]);
-        return Paragraph::new(line);
+        ]));
+        lines.push(Line::from(Span::styled(
+            "starting the hangar workspace",
+            Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
+        )));
+        let block = Block::default()
+            .title(Line::from(vec![
+                Span::styled(" ⬡ ", Style::default().fg(GOLD)),
+                Span::styled(
+                    format!("{name} "),
+                    Style::default().fg(GOLD).add_modifier(Modifier::BOLD),
+                ),
+            ]))
+            .borders(Borders::ALL)
+            .border_type(BorderType::Rounded)
+            .border_style(Style::default().fg(CORNFLOWER_BLUE))
+            .style(Style::default().bg(DARK_BG));
+        return Paragraph::new(lines).alignment(Alignment::Center).block(block);
     }
 
     // Plugin not registered — explain why and how to fix.
@@ -502,6 +535,17 @@ fn build_placeholder_for_unloaded_plugin(
     Paragraph::new(lines).block(block)
 }
 
+/// Title-case a plugin screen id for display (`"hangar"` → `"Hangar"`).
+/// ASCII-first-letter uppercase is enough for the current screen ids; a
+/// multi-word id keeps its remaining characters verbatim.
+fn title_case_screen(screen_id: &str) -> String {
+    let mut chars = screen_id.chars();
+    match chars.next() {
+        Some(first) => first.to_uppercase().collect::<String>() + chars.as_str(),
+        None => String::new(),
+    }
+}
+
 impl Screen for PluginScreen {
     fn id(&self) -> &str {
         self.screen_id
@@ -519,7 +563,7 @@ impl Screen for PluginScreen {
         state.plugin_render_origins.insert(self.screen_id.to_string(), (area.x, area.y));
 
         let Some(wire) = state.pending_plugin_renders.get(self.screen_id) else {
-            let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state);
+            let placeholder = build_placeholder_for_unloaded_plugin(self.screen_id, state, area);
             frame.render_widget(placeholder, area);
             return;
         };
