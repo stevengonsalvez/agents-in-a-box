@@ -133,7 +133,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
 - **Multi-provider** — Run Claude Code, Codex CLI, Gemini CLI, or GitHub Copilot in the same workflow, with Sonnet / Opus / Haiku selection per session
 - **Git worktree isolation** — Each session runs in its own branch and working directory. No cross-contamination, no stash dance
 - **tmux persistence** — Sessions survive terminal disconnects, SSH drops, and laptop sleep. Reattach any time
-- **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went
+- **Usage analytics** — Built-in token + session tracking by day, week, provider, and project. Know where your budget went — then cut it with [The Token Optimisation Playbook](https://stevengonsalvez.com/blog/token-optimisation-playbook)
 - **Easy onboarding** — First-run setup wizard checks dependencies, configures auth, and gets you creating sessions in minutes
 - **Live log streaming** — Real-time viewer with level filtering and search across all running sessions
 - **Scriptable CLI** — 30+ commands (every TUI action, plus headless `witr`, `learnings search`, `diff-review --format json`, …) with `--format json` output for every piece of state. **[📘 Full CLI reference →](docs/tui/cli.md)** — a generated, multi-hierarchy man page covering every subcommand.
@@ -169,7 +169,7 @@ A Rust-based terminal application for managing AI coding sessions with git workt
     <td width="50%" valign="top">
       <img src="docs/assets/screenshots/burndown.png" alt="Burndown analytics dashboard — daily activity, per-project, per-model, budget, optimisation" width="100%"><br>
       <strong>📈 Burndown analytics, built in</strong><br>
-      <em>Multi-panel dashboard: daily activity, top sessions, per-project + per-model token attribution, live budget tracking, and inline optimisation hints.</em>
+      <em>Multi-panel dashboard: daily activity, top sessions, per-project + per-model token attribution, live budget tracking, and inline optimisation hints. The observability layer behind <a href="https://stevengonsalvez.com/blog/token-optimisation-playbook">The Token Optimisation Playbook</a> — start with <a href="https://stevengonsalvez.com/tools-tips/token-optimisation-101">Token Optimisation 101</a>.</em>
     </td>
     <td width="50%" valign="top">
       <img src="docs/assets/screenshots/stats-projects.png" alt="Per-project token usage breakdown" width="100%"><br>
@@ -391,6 +391,8 @@ Skills are reusable capabilities that any supported AI tool can invoke.
 <summary><b>Swarm Orchestration</b></summary>
 
 `swarm-create` · `swarm-join` · `swarm-inbox` · `swarm-status` · `swarm-shutdown` · `swarm-orchestration` · `swarm-agent-troubleshooting`
+
+> Sizing guidance: [Progressive subagents](https://stevengonsalvez.com/tools-tips/progressive-subagents) — score the work before you spawn eight agents.
 </details>
 
 <details>
