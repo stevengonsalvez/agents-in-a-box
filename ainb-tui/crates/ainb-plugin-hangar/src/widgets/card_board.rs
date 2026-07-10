@@ -278,9 +278,9 @@ impl PriorityChip {
 // Palette
 // ---------------------------------------------------------------------------
 
-/// Column header accent.
+/// Column header accent fallback (when a column name has no mapped accent).
 const GOLD: Color = Color::rgb(255, 215, 0);
-/// Muted text for ids, unselected borders, and counts.
+/// Muted text for ids and counts.
 const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
 /// Primary card title text.
 const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
@@ -292,6 +292,33 @@ const CLAY: Color = Color::rgb(210, 130, 90);
 /// Empty-placeholder dashed-border colour: dimmer than the muted text so an
 /// empty column recedes without vanishing.
 const PLACEHOLDER_GRAY: Color = Color::rgb(80, 80, 95);
+/// Subtle column plumbing — the header underline and the inter-column
+/// separator. Low-contrast against the dark bg so it reads as structure, not
+/// decoration ("transparent" borders).
+const COLUMN_BORDER: Color = Color::rgb(52, 58, 80);
+/// Resting card border — a dim blue-grey so unselected cards read as tiles.
+const CARD_BORDER: Color = Color::rgb(70, 80, 110);
+/// Card fill behind content: the palette panel background, one step above the
+/// app background so cards sit on a raised surface.
+const CARD_BG: Color = Color::rgb(30, 30, 40);
+/// Selected-card fill (the palette list-highlight background).
+const CARD_BG_SELECTED: Color = Color::rgb(40, 40, 60);
+
+/// Per-status column accent, keyed on the column's display name so every
+/// board (issues, kanban, skills, autopilots) inherits it without an API
+/// change. Unknown names fall back to the gold header accent.
+const fn column_accent(name: &str) -> Color {
+    // `const fn` can't match on &str; compare bytes.
+    match name.as_bytes() {
+        b"Backlog" => Color::rgb(150, 160, 190),
+        b"Todo" | b"Queued" => Color::rgb(100, 149, 237),
+        b"In Progress" | b"Running" => Color::rgb(235, 185, 80),
+        b"In Review" => Color::rgb(185, 140, 235),
+        b"Done" => Color::rgb(110, 200, 130),
+        b"Failed" => Color::rgb(220, 90, 90),
+        _ => GOLD,
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Geometry constants
@@ -365,7 +392,8 @@ pub fn render_card_board(
         };
         let sel_card = selected.and_then(|(sc, ci)| (sc == i).then_some(ci));
         let col_rect = Rect::new(x0, top, this_w, bottom.saturating_sub(top));
-        let col_layout = render_column(buf, col_rect, i, column, sel_card);
+        let is_last = i + 1 == visible_cols.min(columns.len());
+        let col_layout = render_column(buf, col_rect, i, column, sel_card, is_last);
         layout.columns.push(col_layout);
     }
     layout
@@ -380,6 +408,7 @@ fn render_column(
     index: usize,
     column: &BoardColumn,
     selected_card: Option<usize>,
+    is_last: bool,
 ) -> ColumnLayout {
     let x0 = area.x;
     let col_w = area.w;
@@ -387,9 +416,19 @@ fn render_column(
     let bottom = area.bottom();
     let header_y = area.y;
 
-    // Header: `◔ In Progress (12)` in gold, with the context `⋯` and create `+`
-    // affordances right-aligned (rendered now, hit-test wired in P0.2).
-    let header = format!("{} {} ({})", column.glyph, column.name, column.count());
+    // Every column except the last cedes its rightmost cell to a gutter that
+    // carries the subtle inter-column separator, so lanes read as distinct
+    // panels instead of card borders butting flush against each other.
+    let lane_w = if is_last {
+        col_w
+    } else {
+        col_w.saturating_sub(1)
+    };
+
+    // Header: `◔ In Progress (12)` — glyph + name in the column's status
+    // accent, bold; the count recedes in muted grey. The context `⋯` and
+    // create `+` affordances stay right-aligned (hit-test wired in P0.2).
+    let accent = column_accent(&column.name);
     let create_affordance_x = render_header_affordances(buf, x0, header_y, col_w);
     // Clip the title so it never runs into the right-aligned `⋯ +` affordances:
     // when they paint (`⋯` at right-4, `+` at right-2) the title stops before the
@@ -399,14 +438,37 @@ fn render_column(
         Some(_) => right.saturating_sub(HEADER_AFFORDANCE_W).max(x0),
         None => right,
     };
-    put_str(buf, x0, header_y, &header, GOLD, header_right);
+    let name_part = format!("{} {}", column.glyph, column.name);
+    let hx = put_str_bold(buf, x0, header_y, &name_part, accent, header_right);
+    put_str(
+        buf,
+        hx,
+        header_y,
+        &format!(" ({})", column.count()),
+        MUTED_GRAY,
+        header_right,
+    );
+
+    // Subtle underline on the spacer row beneath the header, so each column
+    // reads as a framed lane rather than a floating label.
+    let underline_y = header_y.saturating_add(1);
+    for x in x0..x0.saturating_add(lane_w) {
+        put_char(buf, x, underline_y, '─', COLUMN_BORDER, right);
+    }
+    // Inter-column separator in the ceded gutter cell, header to floor.
+    if !is_last && col_w >= 2 {
+        let sep_x = right.saturating_sub(1);
+        for y in header_y..bottom {
+            put_char(buf, sep_x, y, '│', COLUMN_BORDER, right);
+        }
+    }
 
     let body_top = header_y.saturating_add(HEADER_ROWS);
     let mut cards = Vec::new();
 
     if column.cards.is_empty() {
         // An empty column is a centered dashed placeholder, not a void.
-        render_empty_placeholder(buf, x0, col_w, body_top, bottom);
+        render_empty_placeholder(buf, x0, lane_w, body_top, bottom);
     } else {
         let mut y = body_top;
         for (idx, card) in column.cards.iter().enumerate().skip(column.scroll_offset) {
@@ -416,7 +478,7 @@ fn render_column(
                 break;
             }
             let is_selected = selected_card == Some(idx);
-            let rect = Rect::new(x0, y, col_w, CARD_ROWS);
+            let rect = Rect::new(x0, y, lane_w, CARD_ROWS);
             render_card(buf, rect, card, is_selected);
             cards.push(CardLayout {
                 issue_id: card.issue_id.clone(),
@@ -465,7 +527,7 @@ fn render_header_affordances(buf: &mut WireBuffer, x0: u16, y: u16, col_w: u16) 
 /// - row 4: the footer — priority chip (left) + assignee initial (right)
 /// - row 5: bottom border
 fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: bool) {
-    let border_color = if selected { CLAY } else { MUTED_GRAY };
+    let border_color = if selected { CLAY } else { CARD_BORDER };
     let glyphs = if selected {
         BorderGlyphs::HEAVY
     } else {
@@ -527,6 +589,40 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
         if glyph_x >= inner_x {
             put_char(buf, glyph_x, footer_y, '◔', ID_ACCENT, inner_right);
             put_char(buf, init_x, footer_y, initial, SOFT_WHITE, inner_right);
+        }
+    }
+
+    // Panel fill last: backfill the whole card rect with the raised surface
+    // colour so border + text + blank cells all share one background (the
+    // helpers push bg-less cells, so a pre-fill would be punched through).
+    let fill = if selected { CARD_BG_SELECTED } else { CARD_BG };
+    apply_panel_bg(buf, rect, fill);
+}
+
+/// Give every cell inside `rect` the panel background `bg`: cells already
+/// painted keep their glyph/fg and gain the bg (when they don't carry one),
+/// and unpainted coords get a bg-only space — one raised surface, no holes.
+fn apply_panel_bg(buf: &mut WireBuffer, rect: Rect, bg: Color) {
+    let mut seen = std::collections::HashSet::new();
+    for (coord, cell) in &mut buf.cells {
+        let inside = coord.x >= rect.x
+            && coord.x < rect.right()
+            && coord.y >= rect.y
+            && coord.y < rect.bottom();
+        if inside {
+            if cell.bg.is_none() {
+                cell.bg = Some(bg);
+            }
+            seen.insert((coord.x, coord.y));
+        }
+    }
+    for y in rect.y..rect.bottom() {
+        for x in rect.x..rect.right() {
+            if !seen.contains(&(x, y)) {
+                let mut cell = Cell::new(" ");
+                cell.bg = Some(bg);
+                buf.push(Coord::new(x, y), cell);
+            }
         }
     }
 }
@@ -719,6 +815,23 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right:
             break;
         }
         cx = put_char(buf, cx, row, ch, color, right);
+    }
+    cx
+}
+
+/// [`put_str`] with the BOLD style bit set (wire modifier bit 1 — the
+/// runtime's ratatui interop maps it to `Modifier::BOLD`).
+fn put_str_bold(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right: u16) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= right {
+            break;
+        }
+        let mut cell = Cell::new(ch.to_string());
+        cell.fg = Some(color);
+        cell.modifier = 1;
+        buf.push(Coord::new(cx, row), cell);
+        cx = cx.saturating_add(1);
     }
     cx
 }

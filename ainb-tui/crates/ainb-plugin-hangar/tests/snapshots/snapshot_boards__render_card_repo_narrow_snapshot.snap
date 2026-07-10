@@ -5,10 +5,24 @@ expression: map
 Board: Delivery   [1/1]   auto-move ON
 ↵:run/rerun  a:attach  X:cancel  t:timeline  e:edit  d:remov
 Repo for "Refactor" (@ to search, Enter pick — REQUIRED): +
-@ [scratch]  ★ainb   widget
-┏━━━━━━━━━━━━┓╭────────────╮╭────────────╮╭────────────────╮
-┃#bk01       ┃│#q002       ││#r003       ││#f004           │
-┃Write the sp┃│Wire the RPC││Build the bo││Flaky migration │
-┃ec          ┃│            ││ard         ││                │
-┃◇ None    ◔W┃│◇ None    ◔W││◇ None    ◔B││◇ None        ◔F│
-┗━━━━━━━━━━━━┛╰────────────╯╰────────────╯╰────────────────╯
+@ [scratch]  ★ainb   widget  ────────────│──────────────────
+┏━━━━━━━━━━━┓│╭───────────╮│╭───────────╮│╭────────────────╮
+┃#bk01      ┃││#q002      │││#r003      │││#f004           │
+┃Write the s┃││Wire the RP│││Build the b│││Flaky migration │
+┃pec        ┃││C          │││oard       │││                │
+┃◇ None   ◔W┃││◇ None   ◔W│││◇ None   ◔B│││◇ None        ◔F│
+┗━━━━━━━━━━━┛│╰───────────╯│╰───────────╯│╰────────────────╯
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │
+             │             │             │

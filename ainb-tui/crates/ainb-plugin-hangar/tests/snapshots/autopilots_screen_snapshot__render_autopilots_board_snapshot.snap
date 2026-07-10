@@ -1,10 +1,10 @@
 ---
-source: plugins/hangar-tui/tests/autopilots_screen_snapshot.rs
+source: crates/ainb-plugin-hangar/tests/autopilots_screen_snapshot.rs
 expression: full
 ---
                                                                                             [a]dd [r]un [d]isable [e]dit
 ◷ Autopilots (3)                                                                                                    ⋯ +
-
+────────────────────────────────────────────────────────────────────────────────────────────────────────────────────────
 ┏━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━┓
 ┃daily-triage                                                                                                          ┃
 ┃0 9 * * 1-5 · enabled · last completed                                                                                ┃

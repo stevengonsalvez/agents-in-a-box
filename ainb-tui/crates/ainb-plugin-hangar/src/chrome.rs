@@ -26,6 +26,11 @@ const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
 const ONLINE_GREEN: Color = Color::rgb(100, 200, 120);
 /// Presence dot colour when the daemon link is down.
 const OFFLINE_RED: Color = Color::rgb(220, 80, 80);
+/// Chrome band background (palette panel bg) — the tab bar and footer sit on
+/// this so they read as fixed chrome, not floating text.
+const BAND_BG: Color = Color::rgb(30, 30, 40);
+/// Active-tab background block (palette list-highlight bg).
+const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 
 /// The primary tabs rendered in the top bar, in display order, each with its
 /// switch hotkey. `Task` (hotkey `2`) is intentionally part of the strip even
@@ -89,15 +94,23 @@ pub fn render_top_bar(
     let row = 0;
     let mut x: u16 = 0;
 
+    // The bar sits on a full-width panel band so it reads as fixed chrome.
+    fill_row(buf, row, area_w, BAND_BG);
+
     for (hotkey, label) in PRIMARY_TABS {
         let is_active = tab_is_active(active, hotkey);
-        // `[k]Label` then a trailing space.
-        x = put_str(buf, x, row, "[", MUTED_GRAY, area_w);
-        x = put_str(buf, x, row, &hotkey.to_string(), GOLD, area_w);
-        x = put_str(buf, x, row, "]", MUTED_GRAY, area_w);
-        let label_color = if is_active { GOLD } else { MUTED_GRAY };
-        x = put_str(buf, x, row, label, label_color, area_w);
-        x = put_str(buf, x, row, "  ", MUTED_GRAY, area_w);
+        // `[k]Label` then a trailing space. The active tab gets a raised
+        // highlight block + bold gold; inactive tabs recede in muted grey.
+        let (bracket_c, key_c, label_c, bg) = if is_active {
+            (GOLD, GOLD, GOLD, Some(ACTIVE_TAB_BG))
+        } else {
+            (MUTED_GRAY, GOLD, MUTED_GRAY, Some(BAND_BG))
+        };
+        x = put_str_ink(buf, x, row, "[", bracket_c, bg, is_active, area_w);
+        x = put_str_ink(buf, x, row, &hotkey.to_string(), key_c, bg, true, area_w);
+        x = put_str_ink(buf, x, row, "]", bracket_c, bg, is_active, area_w);
+        x = put_str_ink(buf, x, row, label, label_c, bg, is_active, area_w);
+        x = put_str_ink(buf, x, row, "  ", MUTED_GRAY, Some(BAND_BG), false, area_w);
     }
 
     // Right cluster: `<slug> · <dot> <presence>`. Only drawn if it fits in the
@@ -137,11 +150,13 @@ pub fn render_top_bar(
 pub fn render_footer(buf: &mut WireBuffer, area_w: u16, area_h: u16, active: &Screen) {
     let row = area_h.saturating_sub(1);
     let mut x: u16 = 0;
+    // Same panel band as the top bar, so the chrome frames the body top+bottom.
+    fill_row(buf, row, area_w, BAND_BG);
     for (key, desc) in footer_hints(active) {
-        x = put_str(buf, x, row, key, GOLD, area_w);
-        x = put_str(buf, x, row, ":", MUTED_GRAY, area_w);
-        x = put_str(buf, x, row, desc, MUTED_GRAY, area_w);
-        x = put_str(buf, x, row, "  ", MUTED_GRAY, area_w);
+        x = put_str_ink(buf, x, row, key, GOLD, Some(BAND_BG), true, area_w);
+        x = put_str_ink(buf, x, row, ":", MUTED_GRAY, Some(BAND_BG), false, area_w);
+        x = put_str_ink(buf, x, row, desc, MUTED_GRAY, Some(BAND_BG), false, area_w);
+        x = put_str_ink(buf, x, row, "  ", MUTED_GRAY, Some(BAND_BG), false, area_w);
         if x >= area_w {
             break;
         }
@@ -247,6 +262,23 @@ fn display_w(s: &str) -> u16 {
 /// Write `s` at `(x, row)` in `color`, clipping at `area_w`. Returns the next
 /// free column. Safe on multi-byte chars (iterates `char`s, not bytes).
 fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, area_w: u16) -> u16 {
+    put_str_ink(buf, x, row, s, color, None, false, area_w)
+}
+
+/// [`put_str`] with full ink control: optional background and the BOLD wire
+/// modifier (bit 1 — the runtime's ratatui interop maps it to
+/// `Modifier::BOLD`).
+#[allow(clippy::too_many_arguments)]
+fn put_str_ink(
+    buf: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    s: &str,
+    color: Color,
+    bg: Option<Color>,
+    bold: bool,
+    area_w: u16,
+) -> u16 {
     let mut cx = x;
     for ch in s.chars() {
         if cx >= area_w {
@@ -254,10 +286,24 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, area_w
         }
         let mut cell = Cell::new(ch.to_string());
         cell.fg = Some(color);
+        cell.bg = bg;
+        if bold {
+            cell.modifier = 1;
+        }
         buf.push(Coord::new(cx, row), cell);
         cx = cx.saturating_add(1);
     }
     cx
+}
+
+/// Fill an entire row with background-only spaces — the chrome band the tab
+/// bar / footer text then paints over.
+fn fill_row(buf: &mut WireBuffer, row: u16, area_w: u16, bg: Color) {
+    for x in 0..area_w {
+        let mut cell = Cell::new(" ");
+        cell.bg = Some(bg);
+        buf.push(Coord::new(x, row), cell);
+    }
 }
 
 #[cfg(test)]
