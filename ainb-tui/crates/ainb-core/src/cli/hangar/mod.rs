@@ -2896,23 +2896,41 @@ fn pid_is_running(pid: u32) -> bool {
     matches!(kill(Pid::from_raw(pid as i32), None), Ok(()))
 }
 
-/// Resolve the `ainb-hangar-daemon` binary to spawn for `start`.
-///
-/// Order: the [`DAEMON_BIN_ENV`] override → a sibling of the current `ainb`
-/// executable (the normal install layout) → the bare name on `$PATH`.
-fn resolve_daemon_bin() -> std::path::PathBuf {
+/// Resolve how `start` launches the daemon: the dedicated
+/// `ainb-hangar-daemon` binary when one can be found ([`DAEMON_BIN_ENV`]
+/// override → sibling of the current executable → `$PATH`), else re-exec this
+/// very `ainb` binary with `hangar daemon run`. The daemon library is
+/// compiled into `ainb`, and installed layouts (e.g. Homebrew) ship no
+/// sidecar binary — without the fallback, `start` failed with an error nobody
+/// saw (the TUI plugin spawns this CLI with discarded stdio) and the offline
+/// panel sat there forever.
+fn resolve_daemon_launch() -> (std::path::PathBuf, Vec<&'static str>) {
+    // An explicit override is honoured verbatim — if it points at nothing,
+    // fail loudly rather than silently running something else.
     if let Some(p) = std::env::var_os(DAEMON_BIN_ENV).filter(|p| !p.is_empty()) {
-        return std::path::PathBuf::from(p);
+        return (std::path::PathBuf::from(p), Vec::new());
     }
     if let Ok(exe) = std::env::current_exe() {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join("ainb-hangar-daemon");
             if sibling.exists() {
-                return sibling;
+                return (sibling, Vec::new());
             }
         }
     }
-    std::path::PathBuf::from("ainb-hangar-daemon")
+    if let Some(on_path) = find_on_path("ainb-hangar-daemon") {
+        return (on_path, Vec::new());
+    }
+    // Self-exec fallback. `current_exe` failing is effectively unreachable;
+    // degrade to the bare `ainb` name resolved by the OS if it does.
+    let me = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ainb"));
+    (me, vec!["hangar", "daemon", "run"])
+}
+
+/// First `$PATH` entry containing a file named `name`.
+fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    std::env::split_paths(&path).map(|d| d.join(name)).find(|c| c.is_file())
 }
 
 /// Dispatch a `hangar daemon <verb>`.
@@ -2967,11 +2985,37 @@ async fn run_daemon_status() -> Result<()> {
 
 /// `hangar daemon run`: boot the daemon in the FOREGROUND.
 ///
-/// Equivalent to launching the `ainb-hangar-daemon` binary directly — boots,
-/// binds the socket, self-registers the runtime, and runs the claim loop until
-/// interrupted. Blocks; use `start` for the background variant.
+/// Equivalent to launching the `ainb-hangar-daemon` binary directly — installs
+/// the daemon's own observability sink, boots, binds the socket, self-registers
+/// the runtime, and runs the claim loop until interrupted. Blocks; use `start`
+/// for the background variant.
 async fn run_daemon_run() -> Result<()> {
-    ainb_hangar_daemon::boot(false).await.context("run hangar daemon (foreground)")
+    // Mirror the standalone binary's bootstrap: the rolling `daemon.<date>`
+    // JSONL under `<hangar_home>/hangar/logs` (+ optional OTLP). `main`'s
+    // logging setup deliberately installs nothing for this invocation, but the
+    // install is still guarded on the global dispatcher so an unexpected
+    // pre-installed subscriber downgrades to reuse instead of a double-init
+    // panic.
+    let guard = if tracing::dispatcher::has_been_set() {
+        None
+    } else {
+        let mut opts = ainb_hangar_daemon::observability::ObservabilityOpts::new(
+            ainb_hangar_daemon::log_dir().context("resolve daemon log dir")?,
+        );
+        opts.otlp = ainb_hangar_daemon::observability::OtlpOpts::from_env();
+        Some(
+            ainb_hangar_daemon::observability::install(opts)
+                .context("install daemon observability sink")?,
+        )
+    };
+
+    let result = ainb_hangar_daemon::boot(false).await.context("run hangar daemon (foreground)");
+    // Explicit flush/teardown on both paths (drop inside a live tokio runtime
+    // is the trap the standalone binary documents).
+    if let Some(guard) = guard {
+        guard.shutdown();
+    }
+    result
 }
 
 /// `hangar daemon start`: spawn the daemon as a detached background child and
@@ -2998,8 +3042,14 @@ fn run_daemon_start() -> Result<()> {
         std::fs::create_dir_all(parent).context("create hangar home dir")?;
     }
 
-    let bin = resolve_daemon_bin();
-    let child = std::process::Command::new(&bin)
+    let (bin, args) = resolve_daemon_launch();
+    let launched = if args.is_empty() {
+        bin.display().to_string()
+    } else {
+        format!("{} {}", bin.display(), args.join(" "))
+    };
+    let mut child = std::process::Command::new(&bin)
+        .args(&args)
         // The child must not inherit this process's controlling terminal's
         // stdio; the daemon writes its own rolling JSONL log under the hangar
         // home, so discard the std streams.
@@ -3007,7 +3057,19 @@ fn run_daemon_start() -> Result<()> {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .spawn()
-        .with_context(|| format!("spawn daemon binary `{}`", bin.display()))?;
+        .with_context(|| format!("spawn daemon `{launched}`"))?;
+
+    // A daemon that dies instantly (unbootable db, broken binary) used to look
+    // identical to a clean start — the TUI's `[s]` action reported success and
+    // the offline panel sat there forever. Give the child a beat, then
+    // reap-check: `try_wait` returns the exit status iff it already died.
+    std::thread::sleep(std::time::Duration::from_millis(400));
+    if let Some(status) = child.try_wait().context("probe daemon child")? {
+        anyhow::bail!(
+            "daemon exited immediately ({status}) — launched `{launched}`; \
+             run `ainb hangar daemon run` in a terminal to see why"
+        );
+    }
 
     let pid = child.id();
     // Write the EXACT child pid (the one we just spawned) so `stop` signals this
