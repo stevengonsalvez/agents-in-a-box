@@ -11886,7 +11886,7 @@ mod plugin_render_gate_tests {
     }
 
     #[test]
-    fn dirty_plugin_kicks_on_first_tick_after_screen_switch() {
+    fn dirty_plugin_kick_deferred_until_viewport_known() {
         let (runtime, mut app) = app_with_plugins(&["learnings"]);
         let handle = app.state.plugin_runtime.clone().expect("handle wired");
         let pid = PluginId::from("learnings");
@@ -11895,14 +11895,25 @@ mod plugin_render_gate_tests {
         app.state.current_screen = ids::SESSION_LIST.to_string();
         app.tick_plugin_renders();
 
-        // User opens the learnings screen → first tick kicks the render.
+        // User opens the learnings screen. No allocated area is stashed yet,
+        // so the tick must NOT kick: a (0, 0) seed kick made the plugin paint
+        // its 80×24 fallback across the real (larger) area — the blank-flash
+        // bug on first entry.
         app.state.current_screen = ids::LEARNINGS.to_string();
         app.tick_plugin_renders();
+        assert!(
+            !app.state.plugin_last_render_viewport.contains_key(ids::LEARNINGS),
+            "no render kick before the real viewport is known"
+        );
 
+        // The draw pass stashes the allocated area (what `PluginScreen::render`
+        // does) → the next tick kicks at full size and consumes the flag.
+        app.state.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (120, 40));
+        app.tick_plugin_renders();
         assert_eq!(
             app.state.plugin_last_render_viewport.get(ids::LEARNINGS),
-            Some(&(0, 0)),
-            "first tick after the switch must kick a render at the seed viewport"
+            Some(&(120, 40)),
+            "first tick with a known viewport must kick at the real size"
         );
         assert!(
             !handle.take_render_dirty(&pid),
@@ -11918,6 +11929,8 @@ mod plugin_render_gate_tests {
         let handle = app.state.plugin_runtime.clone().expect("handle wired");
 
         app.state.current_screen = ids::LEARNINGS.to_string();
+        // Focused screen has painted once (area known); the hidden one hasn't.
+        app.state.plugin_render_areas.insert(ids::LEARNINGS.to_string(), (100, 30));
         app.tick_plugin_renders();
 
         assert!(
