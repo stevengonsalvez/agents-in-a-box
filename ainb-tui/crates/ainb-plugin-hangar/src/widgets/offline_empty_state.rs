@@ -67,17 +67,22 @@ pub fn manual_command() -> String {
 ///
 /// `start_error` is `Some(msg)` after a failed `[s]` attempt; it surfaces a red
 /// error line beneath the command so a start failure is visible rather than
-/// silent. A degenerate viewport still paints the title + the start hint + the
-/// literal command so the guidance is never wholly lost.
+/// silent. `start_status` is `Some(msg)` while a `[s]` start is in flight (the
+/// redial window) — a gold progress line so the panel shows the start is being
+/// worked on instead of appearing ignored. A degenerate viewport still paints
+/// the title + the start hint + the literal command so the guidance is never
+/// wholly lost.
 pub fn render_offline_empty_state(
     buf: &mut WireBuffer,
     area_w: u16,
     area_h: u16,
     start_error: Option<&str>,
+    start_status: Option<&str>,
 ) {
     let command = manual_command();
     // Content lines in render order: body, blank, start hint, blank, preamble,
-    // command, then an optional error line. Width drives the frame width.
+    // command, then an optional error / in-flight status line. Width drives the
+    // frame width.
     let mut lines: Vec<(&str, Color)> = Vec::new();
     for b in BODY {
         lines.push((b, TEXT));
@@ -89,6 +94,10 @@ pub fn render_offline_empty_state(
     lines.push((command.as_str(), TEXT));
     if let Some(err) = start_error {
         lines.push((err, ERROR_RED));
+    }
+    if let Some(status) = start_status {
+        lines.push(("", TEXT));
+        lines.push((status, GOLD));
     }
 
     // Inner content width = widest line (incl. title), capped to the viewport.
@@ -214,7 +223,7 @@ mod tests {
     #[test]
     fn renders_guidance_start_hint_and_command() {
         let mut buf = WireBuffer::new(80, 24);
-        render_offline_empty_state(&mut buf, 80, 24, None);
+        render_offline_empty_state(&mut buf, 80, 24, None, None);
         let text = full_text(&buf, 80, 24);
         assert!(text.contains("daemon offline"), "missing title:\n{text}");
         assert!(text.contains("[s]"), "missing start hint:\n{text}");
@@ -232,7 +241,7 @@ mod tests {
     #[test]
     fn renders_error_line_when_present() {
         let mut buf = WireBuffer::new(80, 24);
-        render_offline_empty_state(&mut buf, 80, 24, Some("start failed: not found"));
+        render_offline_empty_state(&mut buf, 80, 24, Some("start failed: not found"), None);
         let text = full_text(&buf, 80, 24);
         assert!(text.contains("start failed"), "missing error line:\n{text}");
         // The error cell is red.
@@ -244,7 +253,7 @@ mod tests {
     #[test]
     fn frame_is_gold() {
         let mut buf = WireBuffer::new(80, 24);
-        render_offline_empty_state(&mut buf, 80, 24, None);
+        render_offline_empty_state(&mut buf, 80, 24, None, None);
         let gold_corner = buf
             .cells
             .iter()
@@ -257,7 +266,7 @@ mod tests {
     #[test]
     fn degenerate_viewport_still_shows_guidance() {
         let mut buf = WireBuffer::new(28, 3);
-        render_offline_empty_state(&mut buf, 28, 3, None);
+        render_offline_empty_state(&mut buf, 28, 3, None, None);
         let text = full_text(&buf, 28, 3);
         assert!(
             text.contains("[s]"),
@@ -277,7 +286,7 @@ mod tests {
         const W: u16 = 80;
         const H: u16 = 24;
         let mut buf = WireBuffer::new(W, H);
-        render_offline_empty_state(&mut buf, W, H, Some("x"));
+        render_offline_empty_state(&mut buf, W, H, Some("x"), None);
         for (coord, _) in &buf.cells {
             assert!(
                 coord.x < W && coord.y < H,

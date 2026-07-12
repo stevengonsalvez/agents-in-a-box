@@ -1789,45 +1789,30 @@ fn setup_logging() {
     // so explicit warns/errors still surface when invoked synchronously
     // from a shell. Long-running commands (TUI, `run`, `attach`,
     // `auth`, `recover`) fall through to the JSONL file path.
-    let first_arg = std::env::args().nth(1);
-    let is_short_lived_cli = matches!(
-        first_arg.as_deref(),
-        Some(
-            "list"
-                | "logs"
-                | "status"
-                | "kill"
-                | "config"
-                | "git"
-                | "favorites"
-                | "init"
-                | "presets"
-                | "usage"
-                | "claudecode"
-                | "codex"
-                | "statusline"
-                | "completion"
-                | "--help"
-                | "-h"
-                | "--version"
-                | "-V"
-                | "help"
-        )
-    );
-    if is_short_lived_cli {
-        tracing_subscriber::registry()
-            .with(
-                tracing_subscriber::fmt::layer()
-                    .with_writer(std::io::stderr)
-                    .with_ansi(false)
-                    .compact(),
-            )
-            .with(
-                tracing_subscriber::EnvFilter::try_from_default_env()
-                    .unwrap_or_else(|_| "ainb=warn".into()),
-            )
-            .init();
-        return;
+    match classify_log_sink(std::env::args().skip(1)) {
+        LogSink::Stderr => {
+            tracing_subscriber::registry()
+                .with(
+                    tracing_subscriber::fmt::layer()
+                        .with_writer(std::io::stderr)
+                        .with_ansi(false)
+                        .compact(),
+                )
+                .with(
+                    tracing_subscriber::EnvFilter::try_from_default_env()
+                        .unwrap_or_else(|_| "ainb=warn".into()),
+                )
+                .init();
+            return;
+        }
+        // `hangar daemon run` installs the daemon's own rolling JSONL sink
+        // (`ainb_hangar_daemon::observability::install`, writing
+        // `<hangar_home>/hangar/logs/daemon.<date>`) from `run_daemon_run`,
+        // exactly like the standalone `ainb-hangar-daemon` binary. Installing
+        // a subscriber here would make that install panic (the global default
+        // would already be set), so leave the slot empty.
+        LogSink::DaemonSelf => return,
+        LogSink::JsonlFile => {}
     }
 
     // Create log directory if it doesn't exist
@@ -1907,6 +1892,130 @@ fn purge_empty_log_files(log_dir: &std::path::Path) {
         if age.is_some_and(|a| a >= STALE_AFTER) {
             let _ = std::fs::remove_file(entry.path());
         }
+    }
+}
+
+/// Which tracing sink a CLI invocation gets (see [`classify_log_sink`]).
+#[derive(Debug, PartialEq, Eq)]
+enum LogSink {
+    /// Short-lived one-shot subcommand: stderr only, never a JSONL file.
+    Stderr,
+    /// Long-running invocation (TUI, `run`, `attach`, `auth`, …): timestamped
+    /// JSONL file under `~/.agents-in-a-box/logs`.
+    JsonlFile,
+    /// `hangar daemon run`: no subscriber installed here — the daemon
+    /// installs its own daily-rotated sink under `<hangar_home>/hangar/logs`.
+    DaemonSelf,
+}
+
+/// Classify an invocation from its raw arguments (`argv[1..]`).
+///
+/// The previous check looked only at `argv[1]`, so a leading global flag
+/// (`ainb --format json fleet needs`) bypassed the short-lived list and fell
+/// into the JSONL-file path — one empty log file per invocation, and pollers
+/// that shell such commands every second accumulated tens of thousands of
+/// them. Skip flag tokens (and the value of value-taking flags like
+/// `--format`) to find the real subcommand before classifying.
+fn classify_log_sink<I>(args: I) -> LogSink
+where
+    I: IntoIterator<Item = String>,
+{
+    // Strip flags: `--help`/`--version` classify immediately (clap prints and
+    // exits — always short-lived); `--format` consumes its value; any other
+    // `-`-prefixed token (including `--format=json`) is dropped alone.
+    // `--format` is the ONLY global value-taking flag today (see the root
+    // command in `cli/mod.rs`) — if another one is ever added there, list it
+    // here too or its value will be misread as the subcommand.
+    let mut positional: Vec<String> = Vec::new();
+    let mut args = args.into_iter();
+    while let Some(a) = args.next() {
+        match a.as_str() {
+            "--help" | "-h" | "--version" | "-V" => return LogSink::Stderr,
+            "--format" => {
+                let _ = args.next();
+            }
+            s if s.starts_with('-') => {}
+            _ => {
+                positional.push(a);
+                // Two verbs after the subcommand are enough to classify
+                // (`hangar daemon run`); no need to collect an entire
+                // `issue create --title …` tail.
+                if positional.len() == 3 {
+                    break;
+                }
+            }
+        }
+    }
+
+    match positional.first().map(String::as_str) {
+        Some(
+            "list" | "logs" | "status" | "kill" | "config" | "git" | "favorites" | "init"
+            | "presets" | "usage" | "claudecode" | "codex" | "statusline" | "completion" | "help"
+            | "fleet" | "doctor" | "reflect" | "tmux" | "otel" | "abtop" | "learnings" | "rtk",
+        ) => LogSink::Stderr,
+        Some("hangar") => {
+            // Every hangar verb is a one-shot CLI except the foreground
+            // daemon, which owns its logging (see `LogSink::DaemonSelf`).
+            if positional.get(1).map(String::as_str) == Some("daemon")
+                && positional.get(2).map(String::as_str) == Some("run")
+            {
+                LogSink::DaemonSelf
+            } else {
+                LogSink::Stderr
+            }
+        }
+        // Bare `ainb` (`None`) boots the TUI; any other subcommand (`run`,
+        // `attach`, `auth`, …) is long-running — both take the JSONL file sink.
+        _ => LogSink::JsonlFile,
+    }
+}
+
+#[cfg(test)]
+mod log_sink_tests {
+    use super::{LogSink, classify_log_sink};
+
+    fn classify(args: &[&str]) -> LogSink {
+        classify_log_sink(args.iter().map(ToString::to_string))
+    }
+
+    /// The regression that produced 77k empty log files: a leading global
+    /// flag must not defeat the short-lived classification.
+    #[test]
+    fn global_flag_before_subcommand_is_short_lived() {
+        assert_eq!(
+            classify(&["--format", "json", "fleet", "needs"]),
+            LogSink::Stderr
+        );
+        assert_eq!(classify(&["--format", "json", "list"]), LogSink::Stderr);
+        assert_eq!(classify(&["--format=json", "list"]), LogSink::Stderr);
+    }
+
+    #[test]
+    fn bare_tui_and_long_lived_commands_get_file_sink() {
+        assert_eq!(classify(&[]), LogSink::JsonlFile);
+        assert_eq!(classify(&["run"]), LogSink::JsonlFile);
+        assert_eq!(classify(&["attach", "foo"]), LogSink::JsonlFile);
+    }
+
+    #[test]
+    fn short_lived_verbs_get_stderr() {
+        assert_eq!(classify(&["list"]), LogSink::Stderr);
+        assert_eq!(classify(&["fleet", "needs"]), LogSink::Stderr);
+        assert_eq!(classify(&["hangar", "daemon", "status"]), LogSink::Stderr);
+        assert_eq!(classify(&["hangar", "issue", "create"]), LogSink::Stderr);
+        assert_eq!(classify(&["--help"]), LogSink::Stderr);
+        assert_eq!(classify(&["-V"]), LogSink::Stderr);
+    }
+
+    /// The foreground daemon installs its own sink; main must stay out of
+    /// the way or `observability::install` panics on double-init.
+    #[test]
+    fn hangar_daemon_run_owns_its_logging() {
+        assert_eq!(classify(&["hangar", "daemon", "run"]), LogSink::DaemonSelf);
+        assert_eq!(
+            classify(&["--format", "json", "hangar", "daemon", "run"]),
+            LogSink::DaemonSelf
+        );
     }
 }
 

@@ -151,18 +151,65 @@ pub trait DaemonStarter: std::fmt::Debug + Send + Sync {
 }
 
 /// The real daemon starter: spawns the resolved `ainb` binary with
-/// `hangar daemon start` as a fire-and-forget background child.
+/// `hangar daemon start` and briefly waits for its verdict.
 ///
-/// The `ainb hangar daemon start` subcommand itself double-forks the daemon and
-/// returns immediately, so this only needs to spawn the foreground `ainb`
-/// process and not wait on it.
+/// Fire-and-forget was how a broken start became invisible: spawning `ainb`
+/// succeeded, the CLI then failed to launch the daemon, and its error went to
+/// an inherited/discarded stderr — the offline panel reported nothing and sat
+/// there forever. The `start` subcommand is designed to exit within ~half a
+/// second (spawn + instant-death probe), so a short poll-wait turns its
+/// failure into OUR failure and the panel's red error line.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SystemDaemonStarter;
+
+/// How long to poll-wait for `ainb hangar daemon start` to exit before
+/// assuming it is fine and letting it finish on its own.
+const START_VERDICT_WINDOW: std::time::Duration = std::time::Duration::from_secs(3);
 
 impl DaemonStarter for SystemDaemonStarter {
     fn start(&self) -> io::Result<()> {
         let bin = resolve_ainb_bin();
-        std::process::Command::new(bin).args(DAEMON_START_ARGS).spawn().map(|_child| ())
+        let mut child = std::process::Command::new(bin)
+            .args(DAEMON_START_ARGS)
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()?;
+
+        let deadline = std::time::Instant::now() + START_VERDICT_WINDOW;
+        loop {
+            match child.try_wait()? {
+                Some(status) if status.success() => return Ok(()),
+                Some(status) => {
+                    let mut msg = String::new();
+                    if let Some(mut err) = child.stderr.take() {
+                        use std::io::Read;
+                        let _ = err.read_to_string(&mut msg);
+                    }
+                    // Last non-empty stderr line is the anyhow error summary.
+                    let tail = msg
+                        .lines()
+                        .rev()
+                        .find(|l| !l.trim().is_empty())
+                        .unwrap_or("(no stderr)")
+                        .trim()
+                        .to_string();
+                    return Err(io::Error::other(format!("{status}: {tail}")));
+                }
+                None if std::time::Instant::now() >= deadline => {
+                    // Still running — assume a slow-but-fine start; reap the
+                    // child off-thread so it never zombifies under us. Drop
+                    // the stderr pipe first so a chatty child can't block on
+                    // a full pipe nobody reads.
+                    drop(child.stderr.take());
+                    std::thread::spawn(move || {
+                        let _ = child.wait();
+                    });
+                    return Ok(());
+                }
+                None => std::thread::sleep(std::time::Duration::from_millis(50)),
+            }
+        }
     }
 }
 

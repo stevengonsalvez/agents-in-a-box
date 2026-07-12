@@ -270,6 +270,15 @@ pub struct HangarPlugin {
     /// the offline empty-state so a start failure is visible rather than silent.
     /// `None` once a start succeeds or while none has been attempted.
     daemon_start_error: Option<String>,
+    /// After a successful offline `[s]` spawn: keep re-dialing the daemon socket
+    /// until this deadline so the link flips online as soon as the daemon binds,
+    /// without another keypress. The daemon needs a moment to boot + bind; the
+    /// old single immediate re-dial always lost that race and the offline panel
+    /// sat there forever. `None` = no start attempt in flight.
+    daemon_start_redial_until: Option<std::time::Instant>,
+    /// Last redial attempt inside the window — throttles dials to ~1/s while
+    /// `wants_redraw` keeps frames coming.
+    daemon_start_last_redial: Option<std::time::Instant>,
     /// The issue id of a task-detail screen with a bound PR that just opened
     /// (e38.34), so `render` can fire `hangar/pr_status_refresh` for it (the
     /// socket send can't run inline in the `apply_nav` key path). `None` when no
@@ -373,6 +382,8 @@ impl Default for HangarPlugin {
             daemon_starter: crate::shell::default_daemon_starter(),
             start_daemon_pending: false,
             daemon_start_error: None,
+            daemon_start_redial_until: None,
+            daemon_start_last_redial: None,
             pending_pr_status_refresh: None,
             mouse_fsm: crate::mouse::MouseFsm::default(),
             hit_map: crate::mouse::HitMap::default(),
@@ -490,9 +501,73 @@ impl HangarPlugin {
     async fn start_daemon_and_redial(&mut self, host: &HostClient) {
         if self.try_start_daemon() {
             let _ = host.log_info("hangar: [s] started daemon, re-dialing").await;
+            // The daemon needs a beat to boot + bind its socket, so one
+            // immediate dial is not enough: arm a bounded redial window the
+            // render loop pumps (via `wants_redraw`) until the link flips
+            // online or the window expires.
+            self.daemon_start_redial_until =
+                Some(std::time::Instant::now() + Self::START_REDIAL_WINDOW);
+            self.daemon_start_last_redial = Some(std::time::Instant::now());
             self.connect(host).await;
         } else if let Some(msg) = &self.daemon_start_error {
             let _ = host.log_info(format!("hangar: {msg}")).await;
+        }
+    }
+
+    /// How long `[s]` keeps re-dialing before declaring the start failed.
+    const START_REDIAL_WINDOW: std::time::Duration = std::time::Duration::from_secs(15);
+    /// Minimum gap between two redial attempts inside the window.
+    const START_REDIAL_GAP: std::time::Duration = std::time::Duration::from_secs(1);
+
+    /// Pump the post-`[s]` redial window (called from `render`, where host IO
+    /// is safe): while the link is still down and the deadline hasn't passed,
+    /// re-dial at most once per [`Self::START_REDIAL_GAP`]. On expiry, surface
+    /// a hard error in the offline panel instead of staying silent forever.
+    async fn pump_start_redial(&mut self, host: &HostClient) {
+        let Some(until) = self.daemon_start_redial_until else {
+            return;
+        };
+        match self.conn.state() {
+            // Fully up: the start worked, stand down.
+            ConnState::Connected => {
+                self.daemon_start_redial_until = None;
+                self.daemon_start_last_redial = None;
+                return;
+            }
+            // Mid-dial / mid-handshake: a link attempt is live — keep the
+            // window ARMED (so a handshake that dies still gets retried /
+            // expires with a visible error) but don't tear the attempt down
+            // by dialing over it. Standing down here was the wedge: a
+            // handshake that then hung left no panel, no retry, no error.
+            ConnState::Dialing | ConnState::Handshake => {
+                if std::time::Instant::now() >= until {
+                    self.daemon_start_redial_until = None;
+                    self.daemon_start_last_redial = None;
+                    self.daemon_start_error = Some(
+                        "daemon started but the link did not come up — run `ainb hangar daemon status`"
+                            .to_string(),
+                    );
+                }
+                return;
+            }
+            ConnState::Disconnected | ConnState::Error(_) => {}
+        }
+        if std::time::Instant::now() >= until {
+            self.daemon_start_redial_until = None;
+            self.daemon_start_last_redial = None;
+            self.daemon_start_error = Some(
+                "daemon did not come up — run `ainb hangar daemon run` in a terminal to see why"
+                    .to_string(),
+            );
+            let _ = host.log_info("hangar: [s] daemon did not come up within window").await;
+            return;
+        }
+        let due = self
+            .daemon_start_last_redial
+            .is_none_or(|last| last.elapsed() >= Self::START_REDIAL_GAP);
+        if due {
+            self.daemon_start_last_redial = Some(std::time::Instant::now());
+            self.connect(host).await;
         }
     }
 
@@ -2419,12 +2494,18 @@ impl HangarPlugin {
         // `ainb hangar daemon start` command, instead of reading as broken. The
         // panel sits ABOVE the body but BELOW the first-run modal (which stays the
         // top-most overlay on a fresh machine).
-        if Self::is_offline(self.conn.state()) {
+        // While a `[s]` start is in flight the conn state flaps through
+        // Dialing on every redial attempt; keep the panel painted for the
+        // whole window (with a "starting…" status) so it doesn't flicker
+        // against the empty board.
+        let starting = self.daemon_start_redial_until.is_some();
+        if Self::is_offline(self.conn.state()) || starting {
             crate::widgets::offline_empty_state::render_offline_empty_state(
                 &mut buf,
                 w,
                 h,
                 self.daemon_start_error.as_deref(),
+                starting.then_some("⟳ starting daemon…"),
             );
         }
         // 63l.5: the right-click context menu floats over the board, anchored at
@@ -3577,6 +3658,11 @@ impl Plugin for HangarPlugin {
             || self.pending_issue_assignee_update.is_some()
             || !self.pending_board_mouse_intents.is_empty()
             || self.list_context_menu.is_some()
+            // Post-`[s]` redial window: level-triggered ON PURPOSE (bounded to
+            // START_REDIAL_WINDOW) so `pump_start_redial` runs without further
+            // input — renders were the only place host IO is safe, and with no
+            // frames the daemon coming up was never noticed.
+            || self.daemon_start_redial_until.is_some()
     }
 
     fn captures_text(&self) -> bool {
@@ -3729,6 +3815,9 @@ impl Plugin for HangarPlugin {
         if std::mem::take(&mut self.start_daemon_pending) {
             self.start_daemon_and_redial(host).await;
         }
+        // Keep re-dialing after a `[s]` start until the daemon binds or the
+        // window expires (`wants_redraw` keeps frames coming meanwhile).
+        self.pump_start_redial(host).await;
         // P5.6: persist the first-run ack here (deferred from `handle_key`). The
         // modal is already `Dismissed` in state; this records it so a relaunch
         // skips the warning. An IO fault is logged, not fatal.
@@ -4182,6 +4271,39 @@ mod tests {
             "failure must be recorded for the empty-state, got {:?}",
             p.daemon_start_error
         );
+    }
+
+    /// A successful `[s]` start arms the bounded redial window (and the
+    /// level-triggered `wants_redraw` that pumps it), so the plugin keeps
+    /// re-dialing while the daemon boots instead of dialing exactly once and
+    /// sitting on the offline panel forever.
+    #[test]
+    fn successful_start_arms_redial_window() {
+        let dir = tempfile::tempdir().unwrap();
+        let probe = dir.path().join("started.txt");
+        let mut p = HangarPlugin::with_daemon_starter(Box::new(
+            crate::shell::RecordingDaemonStarter::new(&probe),
+        ));
+        assert!(p.daemon_start_redial_until.is_none());
+        // Drive the start dispatch directly (the host round-trip of
+        // `start_daemon_and_redial` is covered by the socket tests).
+        assert!(p.try_start_daemon());
+        p.daemon_start_redial_until =
+            Some(std::time::Instant::now() + HangarPlugin::START_REDIAL_WINDOW);
+        assert!(
+            p.wants_redraw(),
+            "the armed redial window must keep frames coming"
+        );
+    }
+
+    /// A failed `[s]` start must NOT arm the redial window — there is nothing
+    /// to wait for, and the error line already tells the user what happened.
+    #[test]
+    fn failed_start_leaves_redial_window_unarmed() {
+        let mut p = HangarPlugin::with_daemon_starter(Box::new(crate::shell::FailingDaemonStarter));
+        assert!(!p.try_start_daemon());
+        assert!(p.daemon_start_redial_until.is_none());
+        assert!(!p.wants_redraw());
     }
 
     // ----- e38.13: command palette / cross-entity search overlay -----
