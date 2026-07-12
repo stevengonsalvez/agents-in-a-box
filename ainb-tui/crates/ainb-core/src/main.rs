@@ -1923,6 +1923,9 @@ where
     // Strip flags: `--help`/`--version` classify immediately (clap prints and
     // exits — always short-lived); `--format` consumes its value; any other
     // `-`-prefixed token (including `--format=json`) is dropped alone.
+    // `--format` is the ONLY global value-taking flag today (see the root
+    // command in `cli/mod.rs`) — if another one is ever added there, list it
+    // here too or its value will be misread as the subcommand.
     let mut positional: Vec<String> = Vec::new();
     let mut args = args.into_iter();
     while let Some(a) = args.next() {
