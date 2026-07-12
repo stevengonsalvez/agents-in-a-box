@@ -533,7 +533,12 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
     } else {
         BorderGlyphs::ROUNDED
     };
-    draw_border(buf, rect, glyphs, border_color);
+    // Panel fill first (bg-only spaces), then every border/text cell carries
+    // the same bg — strictly rect-local, no whole-buffer scan. The host paints
+    // cells in push order, so the later glyph cells win over the fill.
+    let fill = if selected { CARD_BG_SELECTED } else { CARD_BG };
+    fill_rect(buf, rect, fill);
+    draw_border(buf, rect, glyphs, border_color, fill);
 
     // Content runs inside the border: x in `[rect.x+1, rect.right()-1)`.
     let inner_x = rect.x.saturating_add(1);
@@ -541,12 +546,13 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
     let inner_w = inner_right.saturating_sub(inner_x);
 
     // Id line (muted slate-blue).
-    put_str(
+    put_str_bg(
         buf,
         inner_x,
         rect.y.saturating_add(1),
         &clip(&card.display_id, inner_w),
         ID_ACCENT,
+        fill,
         inner_right,
     );
 
@@ -554,32 +560,35 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
     // selection reads off the heavy clay border, so the title keeps the same
     // soft-white in both states (the border, not the text colour, carries it).
     let [line1, line2] = wrap_two_lines(&card.title, inner_w);
-    put_str(
+    put_str_bg(
         buf,
         inner_x,
         rect.y.saturating_add(2),
         &line1,
         SOFT_WHITE,
+        fill,
         inner_right,
     );
-    put_str(
+    put_str_bg(
         buf,
         inner_x,
         rect.y.saturating_add(3),
         &line2,
         SOFT_WHITE,
+        fill,
         inner_right,
     );
 
     // Footer: priority chip on the left, assignee initial flushed right.
     let footer_y = rect.y.saturating_add(4);
     let chip = format!("{} {}", card.priority.glyph(), card.priority.label());
-    put_str(
+    put_str_bg(
         buf,
         inner_x,
         footer_y,
         &clip(&chip, inner_w),
         card.priority.color(),
+        fill,
         inner_right,
     );
     if let Some(initial) = card.assignee_initial {
@@ -587,42 +596,28 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
         let glyph_x = inner_right.saturating_sub(2);
         let init_x = inner_right.saturating_sub(1);
         if glyph_x >= inner_x {
-            put_char(buf, glyph_x, footer_y, '◔', ID_ACCENT, inner_right);
-            put_char(buf, init_x, footer_y, initial, SOFT_WHITE, inner_right);
+            put_char_bg(buf, glyph_x, footer_y, '◔', ID_ACCENT, fill, inner_right);
+            put_char_bg(
+                buf,
+                init_x,
+                footer_y,
+                initial,
+                SOFT_WHITE,
+                fill,
+                inner_right,
+            );
         }
     }
-
-    // Panel fill last: backfill the whole card rect with the raised surface
-    // colour so border + text + blank cells all share one background (the
-    // helpers push bg-less cells, so a pre-fill would be punched through).
-    let fill = if selected { CARD_BG_SELECTED } else { CARD_BG };
-    apply_panel_bg(buf, rect, fill);
 }
 
-/// Give every cell inside `rect` the panel background `bg`: cells already
-/// painted keep their glyph/fg and gain the bg (when they don't carry one),
-/// and unpainted coords get a bg-only space — one raised surface, no holes.
-fn apply_panel_bg(buf: &mut WireBuffer, rect: Rect, bg: Color) {
-    let mut seen = std::collections::HashSet::new();
-    for (coord, cell) in &mut buf.cells {
-        let inside = coord.x >= rect.x
-            && coord.x < rect.right()
-            && coord.y >= rect.y
-            && coord.y < rect.bottom();
-        if inside {
-            if cell.bg.is_none() {
-                cell.bg = Some(bg);
-            }
-            seen.insert((coord.x, coord.y));
-        }
-    }
+/// Fill `rect` with background-only spaces — the raised card surface the
+/// border and text then paint over.
+fn fill_rect(buf: &mut WireBuffer, rect: Rect, bg: Color) {
     for y in rect.y..rect.bottom() {
         for x in rect.x..rect.right() {
-            if !seen.contains(&(x, y)) {
-                let mut cell = Cell::new(" ");
-                cell.bg = Some(bg);
-                buf.push(Coord::new(x, y), cell);
-            }
+            let mut cell = Cell::new(" ");
+            cell.bg = Some(bg);
+            buf.push(Coord::new(x, y), cell);
         }
     }
 }
@@ -663,7 +658,7 @@ impl BorderGlyphs {
 /// Draw a rectangular border around `rect` using `glyphs` in `color`. Clips every
 /// write to the buffer bounds; a degenerate rect (`w < 2` or `h < 2`) paints
 /// nothing rather than overlapping its own corners.
-fn draw_border(buf: &mut WireBuffer, rect: Rect, glyphs: BorderGlyphs, color: Color) {
+fn draw_border(buf: &mut WireBuffer, rect: Rect, glyphs: BorderGlyphs, color: Color, bg: Color) {
     if rect.w < 2 || rect.h < 2 {
         return;
     }
@@ -673,19 +668,19 @@ fn draw_border(buf: &mut WireBuffer, rect: Rect, glyphs: BorderGlyphs, color: Co
     let bottom = rect.bottom().saturating_sub(1);
     let bound = rect.right();
 
-    put_char(buf, left, top, glyphs.top_left, color, bound);
-    put_char(buf, right, top, glyphs.top_right, color, bound);
-    put_char(buf, left, bottom, glyphs.bottom_left, color, bound);
-    put_char(buf, right, bottom, glyphs.bottom_right, color, bound);
+    put_char_bg(buf, left, top, glyphs.top_left, color, bg, bound);
+    put_char_bg(buf, right, top, glyphs.top_right, color, bg, bound);
+    put_char_bg(buf, left, bottom, glyphs.bottom_left, color, bg, bound);
+    put_char_bg(buf, right, bottom, glyphs.bottom_right, color, bg, bound);
     // Top + bottom edges.
     for x in (left.saturating_add(1))..right {
-        put_char(buf, x, top, glyphs.horizontal, color, bound);
-        put_char(buf, x, bottom, glyphs.horizontal, color, bound);
+        put_char_bg(buf, x, top, glyphs.horizontal, color, bg, bound);
+        put_char_bg(buf, x, bottom, glyphs.horizontal, color, bg, bound);
     }
     // Left + right edges.
     for y in (top.saturating_add(1))..bottom {
-        put_char(buf, left, y, glyphs.vertical, color, bound);
-        put_char(buf, right, y, glyphs.vertical, color, bound);
+        put_char_bg(buf, left, y, glyphs.vertical, color, bg, bound);
+        put_char_bg(buf, right, y, glyphs.vertical, color, bg, bound);
     }
 }
 
@@ -815,6 +810,46 @@ fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right:
             break;
         }
         cx = put_char(buf, cx, row, ch, color, right);
+    }
+    cx
+}
+
+/// [`put_char`] carrying the card's panel background.
+fn put_char_bg(
+    buf: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    ch: char,
+    color: Color,
+    bg: Color,
+    right: u16,
+) -> u16 {
+    if x >= right {
+        return x;
+    }
+    let mut cell = Cell::new(ch.to_string());
+    cell.fg = Some(color);
+    cell.bg = Some(bg);
+    buf.push(Coord::new(x, row), cell);
+    x.saturating_add(1)
+}
+
+/// [`put_str`] carrying the card's panel background.
+fn put_str_bg(
+    buf: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    s: &str,
+    color: Color,
+    bg: Color,
+    right: u16,
+) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= right {
+            break;
+        }
+        cx = put_char_bg(buf, cx, row, ch, color, bg, right);
     }
     cx
 }
