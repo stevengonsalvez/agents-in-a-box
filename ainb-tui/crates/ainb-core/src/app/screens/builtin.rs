@@ -440,8 +440,10 @@ fn build_placeholder_for_unloaded_plugin(
                 Style::default().fg(PROGRESS_CYAN).add_modifier(Modifier::BOLD),
             ),
         ]));
+        // Generic wording: this placeholder serves EVERY plugin screen
+        // (hangar, burndown, witr, …), not just the hangar workspace.
         lines.push(Line::from(Span::styled(
-            "starting the hangar workspace",
+            "waiting for the plugin's first frame",
             Style::default().fg(MUTED_GRAY).add_modifier(Modifier::ITALIC),
         )));
         let block = Block::default()
