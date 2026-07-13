@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.15.0] - 2026-07-13
+### Fixed
+- **hangar**: self-exec fallback for daemon start
+- **hangar-plugin**: surface [s] failures and redial until daemon binds
+- **logging**: flag-aware short-lived CLI classification
+- **tui**: generic loading-placeholder subtitle
+- **tui**: no blank flash entering plugin screens
+
+### Documentation
+- **logging**: note --format is the only global value flag
+- link token optimisation guides from README
+
+### Other
+- pin reflect plugin to v5.2.0
+- **hangar**: rect-local card background fill
+
+
 ## [1.14.0] - 2026-07-08
 ### Documentation
 - **tmux-ui-tripwire**: six traps from the ccc campaign
