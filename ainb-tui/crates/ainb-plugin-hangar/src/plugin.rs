@@ -208,6 +208,10 @@ const NOTIFY_RULES_REQ_ID: i64 = 47;
 /// JSON-RPC id for a `hangar/notify_rule_set` upsert raised by a toggled routing
 /// cell (tcp T5). Its reply re-fetches the grid so the pane reflects the write.
 const NOTIFY_RULE_SET_REQ_ID: i64 = 48;
+/// `hangar/daemon_config_get` for the Settings auto-standup toggle (D13).
+const DAEMON_CONFIG_GET_REQ_ID: i64 = 49;
+/// `hangar/daemon_config_set` write from the auto-standup toggle (D13).
+const DAEMON_CONFIG_SET_REQ_ID: i64 = 50;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -802,6 +806,13 @@ impl HangarPlugin {
                     Some(crate::screen::app_screens::NotifyAction::Refresh { scope });
                 self.conn.on_event();
             }
+            // D13: the Settings auto-standup toggle's live value.
+            RpcId::Number(DAEMON_CONFIG_GET_REQ_ID) => self.apply_autostandup(resp),
+            RpcId::Number(DAEMON_CONFIG_SET_REQ_ID) => {
+                // Re-read after the write so the pane reflects the persisted value.
+                self.fetch_pending = true;
+                self.conn.on_event();
+            }
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             // The attention/subscribe ack carries the open-attention snapshot that
             // seeds the control-center board.
@@ -898,6 +909,22 @@ impl HangarPlugin {
                 ) {
                     self.screens.set_notify_rules(r.rules);
                 }
+            }
+        }
+        self.conn.on_event();
+    }
+
+    /// Populate the Settings auto-standup toggle from a `hangar/daemon_config_get`
+    /// result (D13): the daemon's persisted `autostandup.enabled` value.
+    fn apply_autostandup(&mut self, resp: &RpcResponse) {
+        if let Some(result) = &resp.result {
+            if let Ok(r) = serde_json::from_value::<
+                ainb_hangar_proto::snapshots::DaemonConfigGetResult,
+            >(result.clone())
+            {
+                // Absent row / unparseable value => the coded default OFF.
+                let on = r.value.as_deref() == Some("true");
+                self.screens.set_autostandup_enabled(on);
             }
         }
         self.conn.on_event();
@@ -1606,6 +1633,12 @@ impl HangarPlugin {
                 MEMBERS_REQ_ID,
                 daemon_methods::HANGAR_MEMBERS_LIST,
                 scoped.clone(),
+            ),
+            // D13: the Settings auto-standup toggle's live value.
+            (
+                DAEMON_CONFIG_GET_REQ_ID,
+                daemon_methods::HANGAR_DAEMON_CONFIG_GET,
+                serde_json::json!({ "key": "autostandup.enabled" }),
             ),
             (
                 INBOX_LIST_REQ_ID,
@@ -3714,6 +3747,26 @@ impl Plugin for HangarPlugin {
         // or a rule set from a toggled cell) and fire it over the daemon socket.
         if let Some(action) = self.screens.take_pending_notify_action() {
             self.apply_notify_action(host, action).await;
+        }
+        // D13: drain a deferred auto-standup toggle write and fire it over the
+        // daemon socket; the reply re-fetches so the pane reflects the persisted
+        // value.
+        if let Some(on) = self.screens.take_pending_autostandup_set() {
+            if let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) {
+                let body = encode_request(
+                    DAEMON_CONFIG_SET_REQ_ID,
+                    daemon_methods::HANGAR_DAEMON_CONFIG_SET,
+                    serde_json::json!({
+                        "key": "autostandup.enabled",
+                        "value": if on { "true" } else { "false" },
+                    }),
+                );
+                if let Ok(body) = body {
+                    if let Err(e) = host.unix_socket_send(stream_id, body).await {
+                        let _ = host.log_info(format!("hangar: autostandup set failed: {e}")).await;
+                    }
+                }
+            }
         }
         // P6.5: drain any deferred skill RPC (sync / detail / attach / detach)
         // raised by the skill-manager screen and fire it over the daemon socket.

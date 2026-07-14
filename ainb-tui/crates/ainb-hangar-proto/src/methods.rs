@@ -839,6 +839,24 @@ pub const HANGAR_NOTIFY_RULES_LIST: &str = "hangar/notify_rules_list";
 /// `kind` is rejected with `INVALID_PARAMS`.
 pub const HANGAR_NOTIFY_RULE_SET: &str = "hangar/notify_rule_set";
 
+/// `hangar/daemon_config_get` — read one `daemon_config` value by key (D13).
+///
+/// Params: [`crate::snapshots::DaemonConfigGetParams`] (`{ key }`). Result:
+/// [`crate::snapshots::DaemonConfigGetResult`] (`{ key, value }`), where `value`
+/// is `None` when the key has no stored row (the caller applies the coded
+/// default). A read — an unknown key is `value = None`, never an error. The
+/// Settings Daemon-section auto-standup toggle reads `autostandup.enabled` through
+/// this.
+pub const HANGAR_DAEMON_CONFIG_GET: &str = "hangar/daemon_config_get";
+
+/// `hangar/daemon_config_set` — write one `daemon_config` value by key (D13).
+///
+/// Params: [`crate::snapshots::DaemonConfigSetParams`] (`{ key, value }`). Result:
+/// [`crate::snapshots::DaemonConfigSetResult`] (`{ key, value }`, the stored value
+/// echoed). Mutating + idempotent (re-writing the same value is a no-op replace).
+/// The Settings auto-standup toggle persists `autostandup.enabled` through this.
+pub const HANGAR_DAEMON_CONFIG_SET: &str = "hangar/daemon_config_set";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -954,6 +972,10 @@ pub const ALL_METHODS: &[&str] = &[
     // the wire catalogue is append-only.
     HANGAR_NOTIFY_RULES_LIST,
     HANGAR_NOTIFY_RULE_SET,
+    // Daemon-config get/set (D13) is APPENDED at the catalogue tail — the wire
+    // catalogue is append-only.
+    HANGAR_DAEMON_CONFIG_GET,
+    HANGAR_DAEMON_CONFIG_SET,
 ];
 
 #[cfg(test)]
@@ -1145,6 +1167,8 @@ mod tests {
             HANGAR_BOARD_CARD_SET_AUTO_RUN,
             HANGAR_NOTIFY_RULES_LIST,
             HANGAR_NOTIFY_RULE_SET,
+            HANGAR_DAEMON_CONFIG_GET,
+            HANGAR_DAEMON_CONFIG_SET,
         ];
         for m in declared {
             assert!(

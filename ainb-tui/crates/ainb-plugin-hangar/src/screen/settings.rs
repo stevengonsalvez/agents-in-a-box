@@ -228,6 +228,11 @@ pub struct SettingsState {
     connection: ConnectionStatus,
     /// The key-entry modal's in-flight value, present while the modal is open.
     key_entry: Option<KeyMaterial>,
+    /// The live `autostandup.enabled` daemon-config toggle (D13). Read from the
+    /// daemon's `daemon_config` via `hangar/daemon_config_get` and flipped with `a`
+    /// on the Daemon section (writing back via `hangar/daemon_config_set`). Defaults
+    /// OFF until the daemon snapshot lands — matching the coded server default.
+    autostandup_enabled: bool,
 }
 
 impl SettingsState {
@@ -259,6 +264,7 @@ impl SettingsState {
             list_selected: 0,
             connection,
             key_entry: None,
+            autostandup_enabled: false,
         }
     }
 
@@ -337,6 +343,20 @@ impl SettingsState {
     pub const fn key_entry_open(&self) -> bool {
         self.key_entry.is_some()
     }
+
+    /// The live `autostandup.enabled` toggle value (D13). Read from the daemon and
+    /// flipped with `a` on the Daemon section.
+    #[must_use]
+    pub const fn autostandup_enabled(&self) -> bool {
+        self.autostandup_enabled
+    }
+
+    /// Overwrite the `autostandup.enabled` toggle from a `hangar/daemon_config_get`
+    /// snapshot (or a post-write re-read). Keeps the live pane in sync with the
+    /// daemon's stored value.
+    pub const fn set_autostandup_enabled(&mut self, on: bool) {
+        self.autostandup_enabled = on;
+    }
 }
 
 /// An input the settings reducer folds into [`SettingsState`].
@@ -384,6 +404,11 @@ pub enum SettingsIntent {
         /// The new push-channel set after the toggle.
         channels: ChannelSet,
     },
+    /// Toggle the global `autostandup.enabled` daemon-config value (`a` on the
+    /// Daemon section, D13). Carries the NEW value; the glue maps it to a
+    /// `hangar/daemon_config_set` write (key `autostandup.enabled`), whose reply
+    /// re-reads the value so the pane reflects the persisted state.
+    ToggleAutostandup(bool),
     /// Re-fetch the Notifications grid for the current scope (`g` flipped the
     /// grid's global/workspace scope, agents-in-a-box-cqh). The glue maps it to a
     /// `hangar/notify_rules_list` scoped to the state's [`SettingsState::notify_scope`]
@@ -427,6 +452,9 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
         'J' => move_list(state, 1),
         'K' => move_list(state, -1),
         'n' if state.section == SettingsSection::Keys => open_key_entry(state),
+        // `a` on the Daemon section flips the global auto-standup toggle (D13):
+        // optimistic local flip + a `ToggleAutostandup` intent the glue persists.
+        'a' if state.section == SettingsSection::Daemon => toggle_autostandup(state),
         // Workspace pane controls (P5.5): s set-active, d toggle-default,
         // n new, r rename. All scoped to the Workspaces section.
         's' if state.section == SettingsSection::Workspaces => {
@@ -460,6 +488,20 @@ fn workspace_intent(
             intent: Some(make(w.id.clone())),
         },
     )
+}
+
+/// Flip the global `autostandup.enabled` toggle (`a` on the Daemon section, D13):
+/// update the pane optimistically so the row flips immediately, and emit a
+/// [`SettingsIntent::ToggleAutostandup`] carrying the NEW value for the glue to
+/// persist (`hangar/daemon_config_set`). The post-write re-read reconciles.
+fn toggle_autostandup(state: &SettingsState) -> SettingsReduction {
+    let mut next = state.clone();
+    let new_value = !next.autostandup_enabled;
+    next.autostandup_enabled = new_value;
+    SettingsReduction {
+        state: next,
+        intent: Some(SettingsIntent::ToggleAutostandup(new_value)),
+    }
 }
 
 /// Handle a key on the Notifications grid (tcp T5): `j`/`k` leave to the adjacent
@@ -694,6 +736,62 @@ fn render_member_rows(
     row
 }
 
+/// Paint the Daemon section body: the socket-path + connection-status line, then
+/// the global auto-standup toggle (D13). ON paints in `SELECTION_GREEN` with a
+/// `▶` indicator + filled dot; OFF is muted with a hollow dot. `[a] toggle` names
+/// the key right by the control (house rule). Returns the next free row. Split out
+/// of [`render_settings`] to keep that function within the line cap.
+fn render_daemon_body(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    mut row: u16,
+    bottom: u16,
+    state: &SettingsState,
+) -> u16 {
+    use ainb_plugin_sdk::{Cell, Color, Coord};
+    const GREEN: Color = Color::rgb(100, 200, 100);
+    const RED: Color = Color::rgb(220, 100, 100);
+    const TEXT: Color = Color::rgb(220, 220, 230);
+    const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+
+    let put = |buf: &mut WireBuffer, row: u16, s: &str, color: Color| {
+        for (ch, cx) in s.chars().zip(4..area_w) {
+            let mut cell = Cell::new(ch.to_string());
+            cell.fg = Some(color);
+            buf.push(Coord::new(cx, row), cell);
+        }
+    };
+
+    if row < bottom {
+        let (status, color) = match state.connection {
+            ConnectionStatus::Connected => ("● connected", GREEN),
+            ConnectionStatus::Disconnected => ("○ disconnected", RED),
+        };
+        put(
+            buf,
+            row,
+            &format!("{} · {status}", state.health.socket_path),
+            color,
+        );
+        row += 1;
+    }
+    if row < bottom {
+        let (mark, dot, label, tog_color) = if state.autostandup_enabled {
+            ("▶ ", "●", "on", SELECTION_GREEN)
+        } else {
+            ("  ", "○", "off", TEXT)
+        };
+        put(
+            buf,
+            row,
+            &format!("{mark}Auto-standup: {dot} {label}  ·  [a] toggle"),
+            tog_color,
+        );
+        row += 1;
+    }
+    row
+}
+
 /// A compact display label for an attention-kind wire token (the grid's row
 /// header). An unknown token renders verbatim so a future kind is never blank.
 fn notify_kind_label(wire_kind: &str) -> &str {
@@ -832,8 +930,6 @@ pub fn render_settings(
 ) {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const TITLE: Color = Color::rgb(255, 215, 0);
-    const GREEN: Color = Color::rgb(100, 200, 100);
-    const RED: Color = Color::rgb(220, 100, 100);
     const TEXT: Color = Color::rgb(220, 220, 230);
     // Active-workspace indicator colour (TUI palette SELECTION_GREEN).
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
@@ -870,18 +966,7 @@ pub fn render_settings(
         }
         match section {
             SettingsSection::Daemon => {
-                let (status, color) = match state.connection {
-                    ConnectionStatus::Connected => ("● connected", GREEN),
-                    ConnectionStatus::Disconnected => ("○ disconnected", RED),
-                };
-                put(
-                    buf,
-                    4,
-                    row,
-                    &format!("{} · {status}", state.health.socket_path),
-                    color,
-                );
-                row += 1;
+                row = render_daemon_body(buf, area_w, row, bottom, state);
             }
             SettingsSection::Providers => {
                 for p in &state.providers {

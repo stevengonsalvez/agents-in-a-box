@@ -4,6 +4,7 @@ expression: map
 ---
   Daemon
     /tmp/hangar.sock · ● connected
+      Auto-standup: ○ off  ·  [a] toggle
   Providers
   LLM Keys
   Workspaces
