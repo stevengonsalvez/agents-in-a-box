@@ -1,4 +1,4 @@
-//! Auto-standup (D13, Stevie's LOCKED override) — the daemon watcher that WRITES
+//! Auto-standup (D13) — the daemon watcher that WRITES
 //! `/standup` into a stagnant, idle-at-prompt session (architecture §4.8, spec P9).
 //!
 //! The feature is a write-mode override: it types a real `/standup` into another
@@ -56,7 +56,8 @@ use tokio_util::sync::CancellationToken;
 
 use crate::events::EventSink;
 
-/// `daemon_config` key: the global auto-standup toggle (default ON per Stevie).
+/// `daemon_config` key: the global auto-standup toggle (default OFF — opt-in via
+/// the Settings screen or an explicit `daemon_config` write).
 pub const KEY_ENABLED: &str = "autostandup.enabled";
 /// `daemon_config` key: minutes a session must be stagnant before firing.
 pub const KEY_STAGNANT_MIN: &str = "autostandup.stagnant_min";
@@ -65,8 +66,13 @@ pub const KEY_COOLDOWN_MIN: &str = "autostandup.cooldown_min";
 /// `daemon_config` key: max simultaneous in-flight standups.
 pub const KEY_MAX_CONCURRENT: &str = "autostandup.max_concurrent";
 
-/// Coded default: auto-standup is ON (Stevie's override).
-pub const DEFAULT_ENABLED: bool = true;
+/// Coded default: auto-standup is OFF (opt-in).
+///
+/// The write-mode override (it types a real `/standup` into another agent's
+/// session) stays quiet on a fresh daemon, or one with no config row, until the
+/// operator enables it — via the Settings screen toggle or an explicit
+/// `autostandup.enabled` write.
+pub const DEFAULT_ENABLED: bool = false;
 /// Coded default: 15 minutes stagnant.
 pub const DEFAULT_STAGNANT_MIN: i64 = 15;
 /// Coded default: 60-minute per-session cooldown.
@@ -92,10 +98,10 @@ const STANDUP_COMMAND: &str = "/standup";
 /// The resolved global auto-standup configuration.
 ///
 /// Loaded from `daemon_config` with coded defaults, so a fresh daemon (or one
-/// with no config rows) runs with auto-standup ON at the D13 thresholds.
+/// with no config rows) runs with auto-standup OFF (opt-in) at the D13 thresholds.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct StandupConfig {
-    /// The global toggle (default ON).
+    /// The global toggle (default OFF — opt-in).
     pub enabled: bool,
     /// Minutes a session must be stagnant before a standup fires.
     pub stagnant_minutes: i64,
@@ -606,8 +612,17 @@ mod tests {
     const NOW: i64 = 1_767_225_600_000; // 2026-01-01T00:00:00Z
     const MIN_MS: i64 = 60_000;
 
+    /// An ENABLED config for the guardrail tests. The coded default is OFF
+    /// (opt-in), so the gate tests that exercise the downstream guards
+    /// (stagnation / cooldown / opt-out / concurrency) turn the feature on
+    /// explicitly — otherwise every one would short-circuit on `GloballyDisabled`
+    /// and never reach the guard under test. The default value itself is asserted
+    /// separately by `config_load_honours_stored_enable_and_defaults_off`.
     fn cfg() -> StandupConfig {
-        StandupConfig::default()
+        StandupConfig {
+            enabled: true,
+            ..StandupConfig::default()
+        }
     }
 
     fn idle_input() -> SessionGateInput {
@@ -808,12 +823,15 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn config_load_honours_stored_disable_and_defaults_on() {
+    async fn config_load_honours_stored_enable_and_defaults_off() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
-        // Fresh store: auto-standup defaults ON per Stevie.
+        // Fresh store: auto-standup defaults OFF (the write-mode override is opt-in).
+        assert!(!StandupConfig::load(store.pool()).await.unwrap().enabled);
+        // An explicit enable is honoured.
+        DaemonConfigRepo::set(store.pool(), KEY_ENABLED, "true").await.unwrap();
         assert!(StandupConfig::load(store.pool()).await.unwrap().enabled);
-        // Explicit disable is honoured.
+        // …and an explicit disable turns it back off.
         DaemonConfigRepo::set(store.pool(), KEY_ENABLED, "false").await.unwrap();
         assert!(!StandupConfig::load(store.pool()).await.unwrap().enabled);
     }
