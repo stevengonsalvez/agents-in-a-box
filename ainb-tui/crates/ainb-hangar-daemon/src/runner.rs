@@ -136,6 +136,15 @@ const CODEX_LOG_FILE: &str = "codex.jsonl";
 const CODEX_EXEC_SUBCOMMAND: &str = "exec";
 /// The codex model flag (`codex exec -m <model> …`).
 const CODEX_MODEL_FLAG: &str = "-m";
+/// Codex refuses to run outside a git repo ("Not inside a trusted directory and
+/// --skip-git-repo-check was not specified", exit 1) — a guard against turning an
+/// agent loose where its edits cannot be reviewed or reverted. A task's workdir is
+/// only a git worktree on the F5 repo path; a chat / autopilot task runs in the
+/// daemon's own freshly-created in-tree workdir, which is NOT a repo, so codex
+/// would exit instantly there. The daemon supplies its own confinement (per-task
+/// isolated dir + FS sandbox + teardown), which is what codex's check is proxying
+/// for, so skip it rather than strand every non-repo codex task.
+const CODEX_SKIP_GIT_CHECK_FLAG: &str = "--skip-git-repo-check";
 /// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
 /// provider. Its own log keeps a copilot transcript separate from claude/codex.
 const COPILOT_LOG_FILE: &str = "copilot.jsonl";
@@ -759,7 +768,10 @@ impl Runner {
     /// The `codex` provider spec: codex log file + the non-interactive argv
     /// `exec [-m <model>] [<cli_args>…]` (e38.16).
     fn codex_spec(invocation: &ProviderInvocation) -> ProviderSpec {
-        let mut argv = vec![CODEX_EXEC_SUBCOMMAND.to_string()];
+        let mut argv = vec![
+            CODEX_EXEC_SUBCOMMAND.to_string(),
+            CODEX_SKIP_GIT_CHECK_FLAG.to_string(),
+        ];
         if let Some(model) = &invocation.model {
             argv.push(CODEX_MODEL_FLAG.to_string());
             argv.push(model.clone());
