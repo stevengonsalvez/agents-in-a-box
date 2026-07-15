@@ -67,17 +67,25 @@ exit 0"#,
 /// Build a runner whose claude/codex paths are two DISTINCT fake binaries, so a
 /// mis-route would spawn the wrong one (and the log-file assertion would catch
 /// it regardless).
-fn runner_with(claude: PathBuf, codex: PathBuf) -> Runner {
+fn runner_with(claude: PathBuf, codex: PathBuf, copilot: PathBuf) -> Runner {
     Runner::new(RunnerConfig {
         claude_path: claude,
         codex_path: codex,
-        // Not exercised by these two routes; a bogus path proves a mis-route to
-        // copilot would fail loudly rather than silently succeed.
-        copilot_path: PathBuf::from("/nonexistent/copilot"),
+        copilot_path: copilot,
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
     })
+}
+
+/// The three fake providers + a runner wired to them, so every route has a REAL
+/// distinct binary and a mis-route is proven by the wrong log file appearing.
+fn runner_with_all(dir: &Path) -> Runner {
+    runner_with(
+        fake_provider(dir, "fake-claude.sh"),
+        fake_provider(dir, "fake-codex.sh"),
+        fake_provider(dir, "fake-copilot.sh"),
+    )
 }
 
 /// Mirror the daemon's `execute_claimed` routing: backend → exec method.
@@ -99,9 +107,7 @@ async fn dispatch(runner: &Runner, backend: Backend, env: &ExecEnv) -> RunOutcom
 async fn claude_backend_takes_claude_path() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
-    let claude = fake_provider(tmp.path(), "fake-claude.sh");
-    let codex = fake_provider(tmp.path(), "fake-codex.sh");
-    let runner = runner_with(claude, codex);
+    let runner = runner_with_all(tmp.path());
 
     // A claude runtime's provider wire name resolves to the claude backend.
     let backend = Backend::from_provider("claude");
@@ -125,9 +131,7 @@ async fn claude_backend_takes_claude_path() {
 async fn codex_backend_takes_codex_path() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
-    let claude = fake_provider(tmp.path(), "fake-claude.sh");
-    let codex = fake_provider(tmp.path(), "fake-codex.sh");
-    let runner = runner_with(claude, codex);
+    let runner = runner_with_all(tmp.path());
 
     // A codex runtime's provider wire name resolves to the codex backend.
     let backend = Backend::from_provider("codex");
@@ -146,6 +150,74 @@ async fn codex_backend_takes_codex_path() {
     assert!(
         !env.logs.join("claude.jsonl").exists(),
         "codex backend must NOT fall through to run_claude (no claude.jsonl)"
+    );
+}
+
+/// A `copilot`-backend agent takes the `run_copilot` exec path: it spawns the
+/// COPILOT binary (through the same sandbox + env allowlist) and writes
+/// `copilot.jsonl` — never claude's or codex's log. This exercises the real
+/// `run_copilot_in` → `run_provider` path end-to-end against a stand-in binary;
+/// without it the `Backend::Copilot` exec arm would be dead code no test runs.
+#[tokio::test]
+async fn copilot_backend_takes_copilot_path() {
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let runner = runner_with_all(tmp.path());
+
+    // A copilot agent's provider wire name resolves to the copilot backend.
+    let backend = Backend::from_provider("copilot");
+    assert_eq!(backend, Backend::Copilot);
+
+    let outcome = dispatch(&runner, backend, &env).await;
+    assert!(matches!(outcome, RunOutcome::Success(_)));
+
+    // Positive proof the copilot exec path ran…
+    assert!(
+        env.logs.join("copilot.jsonl").exists(),
+        "copilot backend must take run_copilot (writes copilot.jsonl)"
+    );
+    // …and negative proof it did not fall through to either other provider (the
+    // silent claude fallback this branch removed).
+    assert!(
+        !env.logs.join("claude.jsonl").exists(),
+        "copilot backend must NOT fall through to run_claude (no claude.jsonl)"
+    );
+    assert!(
+        !env.logs.join("codex.jsonl").exists(),
+        "copilot backend must NOT take the codex path (no codex.jsonl)"
+    );
+}
+
+/// The copilot argv carries the flags a REAL non-interactive copilot run needs
+/// (verified against GitHub Copilot CLI 1.0.68): `--allow-all-tools` is
+/// documented "required for non-interactive mode", and `--model` is threaded from
+/// the agent's config when set.
+#[test]
+fn copilot_command_carries_verified_non_interactive_flags() {
+    let tmp = TempDir::new().expect("tmp");
+    let runner = runner_with_all(tmp.path());
+
+    let (_program, argv) =
+        runner.provider_command(Backend::Copilot, &ProviderInvocation::default());
+    assert!(
+        argv.contains(&"--allow-all-tools".to_string()),
+        "copilot needs --allow-all-tools for non-interactive mode: {argv:?}"
+    );
+
+    // The agent's configured model is threaded (copilot DOES support --model).
+    let invocation = ProviderInvocation {
+        model: Some("gpt-5.4".to_string()),
+        cli_args: vec!["--add-dir".to_string(), "/tmp/x".to_string()],
+    };
+    let (_program, argv) = runner.provider_command(Backend::Copilot, &invocation);
+    let joined = argv.join(" ");
+    assert!(
+        joined.contains("--model gpt-5.4"),
+        "model must be threaded: {argv:?}"
+    );
+    assert!(
+        joined.contains("--add-dir /tmp/x"),
+        "cli_args must be appended: {argv:?}"
     );
 }
 

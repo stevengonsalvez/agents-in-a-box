@@ -139,6 +139,15 @@ const CODEX_MODEL_FLAG: &str = "-m";
 /// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
 /// provider. Its own log keeps a copilot transcript separate from claude/codex.
 const COPILOT_LOG_FILE: &str = "copilot.jsonl";
+/// The copilot flag that permits tool use without an interactive confirmation
+/// prompt. Verified against GitHub Copilot CLI 1.0.68: `--allow-all-tools` is
+/// documented as "required for non-interactive mode", so a headless run without
+/// it stalls on a permission prompt it can never answer (stdin is null). The FS
+/// sandbox + env allowlist remain the real confinement boundary.
+const COPILOT_ALLOW_ALL_TOOLS_FLAG: &str = "--allow-all-tools";
+/// The copilot model flag (`copilot --model <model>`), verified against Copilot
+/// CLI 1.0.68 (`$ copilot --model gpt-5.4`).
+const COPILOT_MODEL_FLAG: &str = "--model";
 
 /// Static configuration for a [`Runner`].
 #[derive(Debug, Clone)]
@@ -719,22 +728,37 @@ impl Runner {
         }
     }
 
-    /// The `copilot` provider spec: copilot log file + the agent's configured
-    /// `cli_args`.
+    /// The `copilot` provider spec: copilot log file + `--allow-all-tools`
+    /// [+ `--model <model>`] [+ the agent's `cli_args`].
     ///
-    /// Deliberately NO model flag and no invented subcommand. The GitHub Copilot
-    /// CLI is launched by ainb as the bare `copilot` binary (see
-    /// `providers::copilot::CopilotProvider`), and ainb never passes `--model` to
-    /// copilot ("No model flag for these providers (today)" — `cli/run.rs`,
-    /// `interactive/session_manager.rs`), so the runner does not fabricate one.
-    /// Copilot's real permission flag is `--yolo`; it is not hard-coded here
-    /// because permission policy is not the runner's call — set it per agent via
-    /// the agent's `cli_args` config, which flows in through `invocation`.
+    /// Flags verified against GitHub Copilot CLI 1.0.68 (`copilot --help`):
+    /// `--allow-all-tools` is "required for non-interactive mode", and `--model`
+    /// is a real flag (`$ copilot --model gpt-5.4`) — so, unlike the interactive
+    /// session launcher's stale "no model flag for these providers" rule, the
+    /// agent's configured `model` IS threaded here. No subcommand is invented
+    /// (copilot has none).
+    ///
+    /// # Known gap: no `-p` prompt (headless copilot cannot run yet)
+    ///
+    /// Copilot only runs non-interactively with `-p/--prompt <text>`; bare
+    /// `copilot` starts an INTERACTIVE session. The daemon has no prompt→argv
+    /// plumbing for ANY provider — [`ExecEnv`] carries no prompt and the task
+    /// brief reaches the agent only as `CLAUDE.md` in the workdir (the same reason
+    /// [`Self::claude_spec`] passes no `-p`). So this argv routes and confines
+    /// copilot correctly, but a REAL copilot run would still open a session rather
+    /// than execute the brief. Closing that needs a prompt on `ExecEnv` +
+    /// [`ProviderSpec`], which is a separate change (it affects claude too).
     fn copilot_spec(invocation: &ProviderInvocation) -> ProviderSpec {
+        let mut argv = vec![COPILOT_ALLOW_ALL_TOOLS_FLAG.to_string()];
+        if let Some(model) = &invocation.model {
+            argv.push(COPILOT_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
         ProviderSpec {
             name: "copilot",
             log_file: COPILOT_LOG_FILE,
-            argv: invocation.cli_args.clone(),
+            argv,
         }
     }
 
