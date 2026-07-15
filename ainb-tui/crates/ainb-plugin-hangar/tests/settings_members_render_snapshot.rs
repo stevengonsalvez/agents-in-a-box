@@ -90,7 +90,7 @@ fn tui_renders_members_with_roles() {
           Cooldown minutes: 60
           Max concurrent: 1
           Default agent: claude
-        J/K move · enter/space edit · [a] auto-standup
+        ↑/↓ move · enter/space edit · [a] auto-standup
       Providers
       LLM Keys
       Workspaces

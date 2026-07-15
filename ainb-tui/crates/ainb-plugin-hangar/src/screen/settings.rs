@@ -433,6 +433,15 @@ pub enum SettingsEvent {
     /// A printable key. While the key-entry modal is open, printable chars
     /// extend the in-flight key value.
     Key(char),
+    /// Move the in-section cursor up one row (the `↑` arrow).
+    ///
+    /// The cursor is bound to the arrows rather than a printable char because the
+    /// routing layer claims every uppercase tab-switch char (`K` → Kanban, …)
+    /// BEFORE the screen reducer sees it, so a `J`/`K` cursor could only ever move
+    /// one way. Arrows are unclaimed, so both directions reach this reducer.
+    CursorUp,
+    /// Move the in-section cursor down one row (the `↓` arrow).
+    CursorDown,
     /// Escape — aborts whichever modal is open.
     Esc,
     /// The daemon stream dropped (flips the connection status to red).
@@ -506,6 +515,25 @@ pub fn reduce_settings(state: &SettingsState, ev: SettingsEvent) -> SettingsRedu
         SettingsEvent::Esc => reduce_esc(state),
         SettingsEvent::DaemonDisconnected => daemon_disconnected(state),
         SettingsEvent::Key(c) => reduce_key(state, c),
+        SettingsEvent::CursorUp => reduce_cursor(state, -1),
+        SettingsEvent::CursorDown => reduce_cursor(state, 1),
+    }
+}
+
+/// Move the active section's row cursor by `delta`. On the Daemon section that is
+/// the config-knob cursor; on Workspaces/Keys it is the in-section list
+/// selection. A cursor key is inert while a modal owns the keyboard — the
+/// key-entry modal and the numeric overlay both capture the arrows rather than
+/// let them scroll the pane underneath. The Notifications grid keeps its own
+/// 2D cursor keys (`J`/`K` × `h`/`l`) and is left alone here.
+fn reduce_cursor(state: &SettingsState, delta: i32) -> SettingsReduction {
+    if state.key_entry.is_some() || state.config_input.is_some() {
+        return unchanged(state);
+    }
+    match state.section {
+        SettingsSection::Daemon => move_config_sel(state, delta),
+        SettingsSection::Notifications => unchanged(state),
+        _ => move_list(state, delta),
     }
 }
 
@@ -571,15 +599,19 @@ fn workspace_intent(
 }
 
 /// Handle a key on the Daemon section: `j`/`k` leave to the adjacent section,
-/// `J`/`K` move the config-row cursor, Enter/Space edit the selected knob, and
-/// `a` is the auto-standup shortcut (toggles `autostandup.enabled` from anywhere
-/// in the section, regardless of the cursor).
+/// Enter/Space edit the selected knob, and `a` is the auto-standup shortcut
+/// (toggles `autostandup.enabled` from anywhere in the section, regardless of the
+/// cursor).
+///
+/// The config-row cursor is NOT bound here: it is [`SettingsEvent::CursorUp`] /
+/// [`SettingsEvent::CursorDown`] (the arrows). A `J`/`K` pair looks natural but
+/// cannot work — the routing layer maps `K` to the Kanban tab before the key ever
+/// reaches this reducer, so `K` would yank the user off Settings while `J` moved
+/// the cursor: a cursor that only travels one way.
 fn reduce_daemon_key(state: &SettingsState, c: char) -> SettingsReduction {
     match c {
         'j' => move_section(state, SettingsSection::next),
         'k' => move_section(state, SettingsSection::prev),
-        'J' => move_config_sel(state, 1),
-        'K' => move_config_sel(state, -1),
         '\n' | '\r' | ' ' => edit_config_row(state, state.config_sel),
         'a' => edit_autostandup_shortcut(state),
         _ => unchanged(state),
@@ -1024,7 +1056,7 @@ fn render_daemon_body(
             buf,
             4,
             row,
-            "J/K move · enter/space edit · [a] auto-standup",
+            "↑/↓ move · enter/space edit · [a] auto-standup",
             MUTED,
         );
         row += 1;

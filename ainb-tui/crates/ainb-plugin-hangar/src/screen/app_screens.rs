@@ -1229,6 +1229,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                 // (else the settings screen goes dead and stops navigating).
                 let ev = if matches!(key.code, KeyCode::Esc) {
                     SettingsEvent::Esc
+                } else if matches!(key.code, KeyCode::Up) {
+                    SettingsEvent::CursorUp
+                } else if matches!(key.code, KeyCode::Down) {
+                    SettingsEvent::CursorDown
                 } else if let Some(c) = key_char(key) {
                     SettingsEvent::Key(c)
                 } else {

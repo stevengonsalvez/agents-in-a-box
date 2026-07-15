@@ -161,25 +161,59 @@ fn daemon_section_row_count_matches_registry() {
     assert!(!DAEMON_CONFIG_REGISTRY.is_empty());
 }
 
-/// `J`/`K` move the Daemon-section cursor over the config rows, clamped at both
-/// ends.
+/// The arrows move the Daemon-section cursor over the config rows, clamped at
+/// both ends. The cursor is arrow-bound because the routing layer claims `K` for
+/// the Kanban tab before the reducer sees it — see `reduce_daemon_key`.
 #[test]
 fn daemon_cursor_moves_and_clamps() {
     use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
     let s = state();
     assert_eq!(s.config_sel(), 0);
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     assert_eq!(s.config_sel(), 1);
-    // `K` past the top clamps at 0.
-    let s = reduce_settings(&s, SettingsEvent::Key('K')).state;
-    let s = reduce_settings(&s, SettingsEvent::Key('K')).state;
+    // Up past the top clamps at 0.
+    let s = reduce_settings(&s, SettingsEvent::CursorUp).state;
+    let s = reduce_settings(&s, SettingsEvent::CursorUp).state;
     assert_eq!(s.config_sel(), 0);
-    // `J` past the end clamps at the last row.
+    // Down past the end clamps at the last row.
     let mut s = s;
     for _ in 0..DAEMON_CONFIG_REGISTRY.len() + 3 {
-        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+        s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
     assert_eq!(s.config_sel(), DAEMON_CONFIG_REGISTRY.len() - 1);
+}
+
+/// REGRESSION: `K` must NOT move the Daemon cursor. It is claimed by the routing
+/// layer (→ Kanban tab) and can never reach this reducer, so a `K` binding here
+/// would be dead code that the on-screen hint then advertises as working.
+#[test]
+fn daemon_cursor_is_not_bound_to_j_or_k() {
+    let s = reduce_settings(&state(), SettingsEvent::CursorDown).state;
+    assert_eq!(s.config_sel(), 1);
+    let after_k = reduce_settings(&s, SettingsEvent::Key('K')).state;
+    assert_eq!(after_k.config_sel(), 1, "`K` is a routing key, not a cursor key");
+    let after_j = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    assert_eq!(after_j.config_sel(), 1, "`J` is not a cursor key either");
+}
+
+/// The arrows are inert while the numeric overlay owns the keyboard: an arrow
+/// must not scroll the config cursor underneath an open editor.
+#[test]
+fn arrows_do_not_move_the_cursor_under_an_open_overlay() {
+    use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
+    let idx = DAEMON_CONFIG_REGISTRY
+        .iter()
+        .position(|d| d.key == KEY_AUTOSTANDUP_STAGNANT_MIN)
+        .unwrap();
+    let mut s = state();
+    for _ in 0..idx {
+        s = reduce_settings(&s, SettingsEvent::CursorDown).state;
+    }
+    let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
+    assert!(s.config_input_buffer().is_some(), "overlay open");
+    let out = reduce_settings(&s, SettingsEvent::CursorDown);
+    assert_eq!(out.state.config_sel(), idx, "cursor frozen under the overlay");
+    assert!(out.state.config_input_buffer().is_some(), "overlay stays open");
 }
 
 /// Editing the enum knob (card_agent.default) cycles to the next variant and
@@ -194,7 +228,7 @@ fn enter_on_enum_row_cycles_variant_and_emits_intent() {
     // Move the cursor onto the enum row.
     let mut s = state();
     for _ in 0..idx {
-        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+        s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
     // Default is `claude`; one cycle → `codex`.
     let out = reduce_settings(&s, SettingsEvent::Key('\n'));
@@ -219,7 +253,7 @@ fn int_overlay_commits_valid_value() {
         .expect("int knob present");
     let mut s = state();
     for _ in 0..idx {
-        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+        s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
     // Enter opens the overlay seeded with the current value (default "15").
     let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
@@ -254,7 +288,7 @@ fn int_overlay_rejects_out_of_range() {
         .unwrap();
     let mut s = state();
     for _ in 0..idx {
-        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+        s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
     let s = reduce_settings(&s, SettingsEvent::Key('\n')).state; // open, seed "15"
     // Append digits to make "159999" (out of the 1..1440 range).
@@ -280,7 +314,7 @@ fn esc_cancels_int_overlay_in_one_press() {
         .unwrap();
     let mut s = state();
     for _ in 0..idx {
-        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+        s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
     let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
     assert!(s.config_input_buffer().is_some(), "overlay open");
