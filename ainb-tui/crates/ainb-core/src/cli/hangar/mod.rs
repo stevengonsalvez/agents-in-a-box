@@ -3062,8 +3062,11 @@ async fn run_daemon_config_get(
     use ainb_hangar_core::daemon_config::descriptor;
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
-    let desc =
-        descriptor(&args.key).with_context(|| format!("unknown config key `{}`", args.key))?;
+    // Trim the key: `validate` already trims the VALUE, so a shell-quoted
+    // `get " autostandup.enabled"` failing with "unknown config key" while the
+    // matching set succeeded was pure asymmetry.
+    let key = args.key.trim();
+    let desc = descriptor(key).with_context(|| format!("unknown config key `{key}`"))?;
     let stored = DaemonConfigRepo::get(store.pool(), desc.key)
         .await
         .with_context(|| format!("read daemon_config `{}`", desc.key))?;
@@ -3096,8 +3099,9 @@ async fn run_daemon_config_set(store: &Store, args: DaemonConfigSetArgs) -> Resu
     use ainb_hangar_core::daemon_config::descriptor;
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
-    let desc =
-        descriptor(&args.key).with_context(|| format!("unknown config key `{}`", args.key))?;
+    // Trim the key, matching `validate`'s treatment of the value.
+    let key = args.key.trim();
+    let desc = descriptor(key).with_context(|| format!("unknown config key `{key}`"))?;
     // Validation is the registry's single gate — the same one the RPC uses — so
     // the CLI and TUI reject identical bad input and store an identical form.
     let value = desc
@@ -5335,5 +5339,44 @@ mod tests {
         assert!(autopilot_line(&ap, None).contains("last_run=-"));
         assert!(autopilot_to_json(&ap, None).contains("\"enabled\":false"));
         assert!(autopilot_to_json(&ap, None).contains("\"last_run\":null"));
+    }
+
+    /// The key is trimmed like the value is. `validate` trims the VALUE, so a
+    /// padded key failing with "unknown config key" while the same padding on the
+    /// value was silently accepted was pure asymmetry — and easy to hit from a
+    /// shell quoting mistake.
+    #[tokio::test]
+    async fn config_get_and_set_trim_the_key() {
+        use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        run_daemon_config_set(
+            &store,
+            DaemonConfigSetArgs {
+                key: " autostandup.enabled ".to_string(),
+                value: "true".to_string(),
+            },
+        )
+        .await
+        .expect("a padded key must be accepted, not reported unknown");
+        assert_eq!(
+            DaemonConfigRepo::get(store.pool(), "autostandup.enabled")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("true"),
+            "the trimmed key is what gets written"
+        );
+
+        run_daemon_config_get(
+            &store,
+            DaemonConfigGetArgs {
+                key: " autostandup.enabled".to_string(),
+            },
+            OutputFormat::Text,
+        )
+        .await
+        .expect("a padded key must resolve on get too");
     }
 }
