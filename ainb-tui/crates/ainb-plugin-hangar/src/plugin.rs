@@ -208,6 +208,11 @@ const NOTIFY_RULES_REQ_ID: i64 = 47;
 /// JSON-RPC id for a `hangar/notify_rule_set` upsert raised by a toggled routing
 /// cell (tcp T5). Its reply re-fetches the grid so the pane reflects the write.
 const NOTIFY_RULE_SET_REQ_ID: i64 = 48;
+/// JSON-RPC id for a `hangar/agent_create` raised by the Squads screen `n`
+/// create-agent prompt. The reply carries the refreshed `AgentsListResult`, so
+/// it folds through [`Self::apply_agents`] into the cached actors that drive
+/// `first_agent_ref` — clearing the "no agent available to lead a squad" gate live.
+const AGENT_CREATE_REQ_ID: i64 = 49;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -786,6 +791,17 @@ impl HangarPlugin {
             RpcId::Number(BOARD_CARD_CANCEL_REQ_ID) => self.apply_board_card_cancel(resp),
             RpcId::Number(BOARD_CARD_TIMELINE_REQ_ID) => self.apply_board_card_timeline(resp),
             RpcId::Number(SQUADS_LIST_REQ_ID) => self.apply_squads(resp),
+            // The `n` create-agent reply folds the refreshed roster into the cached
+            // actors (clearing the squad gate live) and surfaces a note on the pane.
+            RpcId::Number(AGENT_CREATE_REQ_ID) => {
+                self.apply_agents(resp);
+                if let Some(e) = &resp.error {
+                    self.screens.squads.note_err(format!("agent create failed: {}", e.message));
+                } else {
+                    self.screens.squads.note_ok("agent created");
+                }
+                self.conn.on_event();
+            }
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
@@ -1999,6 +2015,15 @@ impl HangarPlugin {
         self.screens.squads.clear_note();
 
         let (id, method, params) = match action {
+            SquadAction::CreateAgent { name } => {
+                // Fire agent_create with NO ids — the daemon fills workspace/runtime/
+                // owner. The reply's refreshed roster clears the squad gate live.
+                (
+                    AGENT_CREATE_REQ_ID,
+                    daemon_methods::HANGAR_AGENT_CREATE,
+                    serde_json::json!({ "name": name }),
+                )
+            }
             SquadAction::Create { name } => {
                 let Some(agent_id) = self.first_agent_ref() else {
                     self.screens.squads.note_err("no agent available to lead a squad");

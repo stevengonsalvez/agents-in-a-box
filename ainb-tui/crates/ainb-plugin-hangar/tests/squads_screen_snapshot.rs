@@ -86,9 +86,10 @@ fn render_empty_shows_help() {
     let full = glyph_map(&buf, 100);
     insta::assert_snapshot!(full);
     assert!(
-        full.contains("No squads. Press 'c' to create a squad"),
+        full.contains("Press 'n' to create an agent, 'c' to create a squad"),
         "empty help line missing:\n{full}"
     );
+    assert!(full.contains("[n]ew-agent"), "new-agent hint missing:\n{full}");
     assert!(full.contains("[c]reate"), "create hint missing:\n{full}");
 }
 
