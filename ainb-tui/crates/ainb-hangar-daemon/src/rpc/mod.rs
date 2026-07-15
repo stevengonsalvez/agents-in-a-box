@@ -5783,4 +5783,104 @@ mod tests {
         .await;
         assert_eq!(set.error.unwrap().code, INVALID_PARAMS);
     }
+
+    /// `daemon_config_list` returns one entry per registry knob (unset → null),
+    /// and reflects a prior write.
+    #[tokio::test]
+    async fn daemon_config_list_covers_registry_and_reflects_writes() {
+        use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        let listed = dispatch(
+            pool,
+            &req(methods::HANGAR_DAEMON_CONFIG_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(listed.error.is_none(), "{listed:?}");
+        let entries = listed.result.unwrap()["entries"].as_array().unwrap().clone();
+        assert_eq!(
+            entries.len(),
+            DAEMON_CONFIG_REGISTRY.len(),
+            "one list entry per registry knob"
+        );
+
+        // Write one knob, then confirm the list reflects it.
+        dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "autostandup.stagnant_min", "value": "30"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        let relisted = dispatch(
+            pool,
+            &req(methods::HANGAR_DAEMON_CONFIG_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        let entries = relisted.result.unwrap()["entries"].as_array().unwrap().clone();
+        let row = entries
+            .iter()
+            .find(|e| e["key"] == "autostandup.stagnant_min")
+            .expect("stagnant_min listed");
+        assert_eq!(row["value"], serde_json::json!("30"));
+    }
+
+    /// A registry-validated set rejects an out-of-range int / bad enum with
+    /// INVALID_PARAMS, and normalizes a tolerant/mixed-case value it accepts.
+    #[tokio::test]
+    async fn daemon_config_set_validates_registry_knobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // Out-of-range int → rejected.
+        let bad = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "autostandup.stagnant_min", "value": "99999"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(bad.error.unwrap().code, INVALID_PARAMS);
+
+        // Bad enum → rejected.
+        let bad_enum = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "card_agent.default", "value": "gemini"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(bad_enum.error.unwrap().code, INVALID_PARAMS);
+
+        // Mixed-case enum → accepted + normalized to the canonical spelling.
+        let ok = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "card_agent.default", "value": "CODEX"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+        assert_eq!(ok.result.unwrap()["value"], serde_json::json!("codex"));
+    }
 }
