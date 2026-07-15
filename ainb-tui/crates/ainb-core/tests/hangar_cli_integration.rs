@@ -593,22 +593,47 @@ fn agent_create_on_fresh_home_inserts_and_lists() {
 
     let (ok, out) = run(
         tmp.path(),
-        &["hangar", "agent", "create", "--name", "reviewer", "--provider", "codex"],
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "reviewer",
+            "--provider",
+            "codex",
+        ],
     );
     assert!(ok, "agent create should exit 0 on a fresh home; out={out}");
-    assert!(out.contains("created agent reviewer"), "missing create ack (by name):\n{out}");
+    assert!(
+        out.contains("created agent reviewer"),
+        "missing create ack (by name):\n{out}"
+    );
 
     let (ok, out) = run(tmp.path(), &["hangar", "agent", "list"]);
     assert!(ok, "agent list should exit 0; out={out}");
-    assert!(out.contains("reviewer"), "created agent not in list:\n{out}");
+    assert!(
+        out.contains("reviewer"),
+        "created agent not in list:\n{out}"
+    );
 
     // An unsupported provider is rejected, not silently coerced.
     let (ok, out) = run(
         tmp.path(),
-        &["hangar", "agent", "create", "--name", "x", "--provider", "gpt5"],
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "x",
+            "--provider",
+            "gpt5",
+        ],
     );
     assert!(!ok, "an unsupported provider must fail; out={out}");
-    assert!(out.contains("unsupported provider"), "missing provider error:\n{out}");
+    assert!(
+        out.contains("unsupported provider"),
+        "missing provider error:\n{out}"
+    );
 }
 
 /// Create an issue via the CLI and return its id (pulled from the create ack).

@@ -50,6 +50,10 @@ pub mod board;
 /// cancel RPC uses to signal the claim loop to stop a live run (headless process
 /// group / interactive tmux session). See [`cancel::registry`].
 pub mod cancel;
+/// Fresh-home boot seed: lay down the default workspace + runtime + one starter
+/// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
+/// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.
+pub mod default_home;
 /// Env allowlist config + task-env builder (P5.3).
 ///
 /// Loads/saves `~/.agents-in-a-box/hangar/env.allow.toml` (foreign sections preserved,
@@ -57,10 +61,6 @@ pub mod cancel;
 /// the claim loop uses before spawning a provider: ambient env is filtered by
 /// [`ainb_hangar_core::env_policy`] then keychain keys are layered on top.
 pub mod dispatch;
-/// Fresh-home boot seed: lay down the default workspace + runtime + one starter
-/// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
-/// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.
-pub mod default_home;
 /// The durable event outbox drain (T1 / architecture §4.1–§4.2).
 ///
 /// [`event_outbox::spawn`] drains the [`events::EventBroker`]'s lossless outbox

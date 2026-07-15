@@ -109,7 +109,11 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(ws, 1, "restart does not duplicate the workspace");
-        assert_eq!(agent_count(pool).await, 1, "restart does not re-seed the starter agent");
+        assert_eq!(
+            agent_count(pool).await,
+            1,
+            "restart does not re-seed the starter agent"
+        );
         let rt: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime")
             .fetch_one(pool)
             .await
@@ -125,12 +129,18 @@ mod tests {
 
         // A user lays down the workspace + runtime and their own single agent.
         let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
-        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
         let mine = bootstrap::create_agent(pool, &ws, "my-reviewer", "codex", None).await.unwrap();
 
         // A subsequent boot seed must NOT add a second (starter) agent.
         ensure_default_home(pool).await.unwrap();
-        assert_eq!(agent_count(pool).await, 1, "the seed skips when a user agent exists");
+        assert_eq!(
+            agent_count(pool).await,
+            1,
+            "the seed skips when a user agent exists"
+        );
         let still = ainb_hangar_store::repo::agent::AgentRepo::get(pool, &mine.id)
             .await
             .unwrap()

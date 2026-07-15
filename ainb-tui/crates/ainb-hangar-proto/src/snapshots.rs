@@ -2383,7 +2383,10 @@ mod tests {
         assert!(minimal.provider.is_none());
         assert!(minimal.instructions.is_none());
         // The optional fields are omitted from the serialized form when absent.
-        assert_eq!(serde_json::to_string(&minimal).unwrap(), r#"{"name":"claude"}"#);
+        assert_eq!(
+            serde_json::to_string(&minimal).unwrap(),
+            r#"{"name":"claude"}"#
+        );
     }
 
     /// The e38.11 member-management envelopes round-trip through JSON.

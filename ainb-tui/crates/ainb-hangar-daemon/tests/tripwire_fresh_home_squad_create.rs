@@ -99,7 +99,10 @@ impl Client {
         let token_path = ainb_hangar_proto::auth::token_file_in(dir);
         let token = std::fs::read_to_string(&token_path).expect("read daemon.token");
         let resp = self
-            .call(methods::AUTH_HELLO, serde_json::json!({ "token": token.trim() }))
+            .call(
+                methods::AUTH_HELLO,
+                serde_json::json!({ "token": token.trim() }),
+            )
             .await;
         assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
     }
@@ -107,7 +110,10 @@ impl Client {
     /// The active AGENT actor-refs (`agent:<id>`) in `workspace`'s agents_list.
     async fn agent_refs(&mut self, workspace: &str) -> Vec<String> {
         let list = self
-            .call(methods::HANGAR_AGENTS_LIST, serde_json::json!({ "workspace_id": workspace }))
+            .call(
+                methods::HANGAR_AGENTS_LIST,
+                serde_json::json!({ "workspace_id": workspace }),
+            )
             .await;
         list["result"]["actors"]
             .as_array()
@@ -127,7 +133,9 @@ async fn start_fresh_server(dir: &std::path::Path) -> (std::path::PathBuf, Store
     ainb_hangar_daemon::default_home::ensure_default_home(store.pool())
         .await
         .expect("fresh-home seed");
-    rpc::auth::ensure_socket_token(store.pool(), dir).await.expect("ensure socket token");
+    rpc::auth::ensure_socket_token(store.pool(), dir)
+        .await
+        .expect("ensure socket token");
     let socket_path = rpc::socket_path_in(dir);
     let listener = rpc::bind(&socket_path).expect("bind socket");
     let health = DaemonHealth {
@@ -150,7 +158,9 @@ async fn start_fresh_server(dir: &std::path::Path) -> (std::path::PathBuf, Store
 /// prove `agent_create` ensures-then-resolves the default workspace itself.
 async fn start_bare_server(dir: &std::path::Path) -> std::path::PathBuf {
     let store = Store::open_in(dir).await.unwrap();
-    rpc::auth::ensure_socket_token(store.pool(), dir).await.expect("ensure socket token");
+    rpc::auth::ensure_socket_token(store.pool(), dir)
+        .await
+        .expect("ensure socket token");
     let socket_path = rpc::socket_path_in(dir);
     let listener = rpc::bind(&socket_path).expect("bind socket");
     let health = DaemonHealth {
@@ -177,8 +187,16 @@ async fn agent_create_rejects_empty_name() {
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
 
-    let resp = c.call(methods::HANGAR_AGENT_CREATE, serde_json::json!({ "name": "   " })).await;
-    assert!(!resp["error"].is_null(), "an empty name must be rejected: {resp}");
+    let resp = c
+        .call(
+            methods::HANGAR_AGENT_CREATE,
+            serde_json::json!({ "name": "   " }),
+        )
+        .await;
+    assert!(
+        !resp["error"].is_null(),
+        "an empty name must be rejected: {resp}"
+    );
 }
 
 /// `agent_create` on a bare home (no workspace row yet) bootstraps the default
@@ -191,14 +209,21 @@ async fn agent_create_bootstraps_default_workspace_when_absent() {
     c.auth_from_file(dir.path()).await;
 
     let resp = c
-        .call(methods::HANGAR_AGENT_CREATE, serde_json::json!({ "name": "solo" }))
+        .call(
+            methods::HANGAR_AGENT_CREATE,
+            serde_json::json!({ "name": "solo" }),
+        )
         .await;
     assert!(
         resp["error"].is_null(),
         "agent_create must bootstrap the default workspace, not reject: {resp}"
     );
     let refs = c.agent_refs(WS_SLUG).await;
-    assert_eq!(refs.len(), 1, "the created agent is in the default workspace: {refs:?}");
+    assert_eq!(
+        refs.len(),
+        1,
+        "the created agent is in the default workspace: {refs:?}"
+    );
 }
 
 #[tokio::test]
@@ -212,8 +237,10 @@ async fn fresh_home_seeds_then_agent_create_and_squad_create_succeed() {
         .await
         .unwrap();
     assert_eq!(ws_count, 1, "one default workspace seeded");
-    let agent_count: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM agent").fetch_one(store.pool()).await.unwrap();
+    let agent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent")
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
     assert_eq!(agent_count, 1, "exactly one starter agent seeded");
 
     // (2) The seeded agent binds the SAME runtime the daemon claims for.
@@ -226,13 +253,15 @@ async fn fresh_home_seeds_then_agent_create_and_squad_create_succeed() {
         seeded_rt, default_rt,
         "the seeded agent's runtime must equal the daemon's claim runtime id"
     );
-    let rt_online: String =
-        sqlx::query_scalar("SELECT status FROM agent_runtime WHERE id = ?")
-            .bind(&default_rt)
-            .fetch_one(store.pool())
-            .await
-            .unwrap();
-    assert_eq!(rt_online, "online", "the seeded runtime is registered online");
+    let rt_online: String = sqlx::query_scalar("SELECT status FROM agent_runtime WHERE id = ?")
+        .bind(&default_rt)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(
+        rt_online, "online",
+        "the seeded runtime is registered online"
+    );
 
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
@@ -255,7 +284,11 @@ async fn fresh_home_seeds_then_agent_create_and_squad_create_succeed() {
             .fetch_one(store.pool())
             .await
             .unwrap();
-    assert_eq!(codex_provider.as_deref(), Some("codex"), "provider recorded on the row");
+    assert_eq!(
+        codex_provider.as_deref(),
+        Some("codex"),
+        "provider recorded on the row"
+    );
 
     // (4) squad_create with a seeded agent leader SUCCEEDS (the gate is cleared).
     let leader = refs.first().expect("at least one agent to lead").clone();
@@ -272,7 +305,10 @@ async fn fresh_home_seeds_then_agent_create_and_squad_create_succeed() {
 
     // squads_list shows the new squad.
     let squads = c
-        .call(methods::HANGAR_SQUADS_LIST, serde_json::json!({ "workspace_id": WS_SLUG }))
+        .call(
+            methods::HANGAR_SQUADS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
         .await;
     let names: Vec<String> = squads["result"]["squads"]
         .as_array()
@@ -280,5 +316,8 @@ async fn fresh_home_seeds_then_agent_create_and_squad_create_succeed() {
         .iter()
         .map(|s| s["name"].as_str().unwrap().to_string())
         .collect();
-    assert!(names.contains(&"alpha".to_string()), "the created squad is listed: {names:?}");
+    assert!(
+        names.contains(&"alpha".to_string()),
+        "the created squad is listed: {names:?}"
+    );
 }
