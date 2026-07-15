@@ -1815,6 +1815,46 @@ pub struct NotifyRuleSetResult {
     pub channels: ChannelSet,
 }
 
+/// Params for [`crate::methods::HANGAR_DAEMON_CONFIG_GET`] (D13): the
+/// `daemon_config` key to read (e.g. `autostandup.enabled`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfigGetParams {
+    /// The `daemon_config` key to read.
+    pub key: String,
+}
+
+/// Result of [`crate::methods::HANGAR_DAEMON_CONFIG_GET`] (D13): the key and its
+/// stored value, or `None` when the key has no row (the caller applies its coded
+/// default).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfigGetResult {
+    /// The key that was read (echoed).
+    pub key: String,
+    /// The stored value, or `None` when no row exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_DAEMON_CONFIG_SET`] (D13): the
+/// `daemon_config` key + the value to persist.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfigSetParams {
+    /// The `daemon_config` key to write.
+    pub key: String,
+    /// The value to persist under `key`.
+    pub value: String,
+}
+
+/// Result of [`crate::methods::HANGAR_DAEMON_CONFIG_SET`] (D13): the key + stored
+/// value echoed back so the caller can fold it in without a re-read.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfigSetResult {
+    /// The key that was written (echoed).
+    pub key: String,
+    /// The stored value after the write.
+    pub value: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

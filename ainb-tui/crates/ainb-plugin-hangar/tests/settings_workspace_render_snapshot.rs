@@ -87,6 +87,7 @@ fn tui_renders_active_indicator() {
     insta::assert_snapshot!(map, @"
       Daemon
         /tmp/hangar.sock · ● connected
+          Auto-standup: ○ off  ·  [a] toggle
       Providers
       LLM Keys
     ▶ Workspaces
@@ -96,7 +97,6 @@ fn tui_renders_active_indicator() {
       Notifications
         scope: global · [g] toggle
                       phone   web     os      atc
-        J/K kind · h/l channel · space toggle
     ");
 
     // NON-VACUOUS COLOUR CHECK: the active workspace row's `▶` indicator is
