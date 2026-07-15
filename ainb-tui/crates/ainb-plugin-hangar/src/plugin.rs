@@ -2661,8 +2661,18 @@ impl HangarPlugin {
             }
             return;
         }
+        // The Settings screen has TWO text-capture surfaces: the key-entry
+        // (API-key) modal and the Daemon-section numeric-config overlay. Both must
+        // be listed here — the config overlay's realistic values (30, 120, 240,
+        // 1440) all contain a digit the routing layer claims as a tab switch, so
+        // omitting it makes typing a number teleport the user to another tab and
+        // drop the keystroke. Keep this in sync with `is_capturing_text`.
         if matches!(app.screen, Screen::Settings)
-            && self.screens.settings.as_ref().is_some_and(|s| s.key_entry_open())
+            && self
+                .screens
+                .settings
+                .as_ref()
+                .is_some_and(|s| s.key_entry_open() || s.config_input_buffer().is_some())
         {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
@@ -3729,7 +3739,14 @@ impl Plugin for HangarPlugin {
                 .task_detail
                 .as_ref()
                 .is_some_and(|td| td.compose_buffer().is_some()),
-            Screen::Settings => self.screens.settings.as_ref().is_some_and(|s| s.key_entry_open()),
+            // Both Settings capture surfaces: the key-entry modal AND the
+            // Daemon-section numeric-config overlay (kept in sync with the
+            // routing guard in `on_key`).
+            Screen::Settings => self
+                .screens
+                .settings
+                .as_ref()
+                .is_some_and(|s| s.key_entry_open() || s.config_input_buffer().is_some()),
             Screen::Squads => self.screens.squads.is_creating(),
             // Every open Boards overlay (create-title / profile-pick / column
             // rename / `Run ▾`) consumes all keys as input, per its routing guard.
@@ -5291,5 +5308,118 @@ mod tests {
             p.screens.settings.as_ref().is_some_and(|s| s.key_entry_open()),
             "the key-entry modal stays open while typing the key"
         );
+    }
+
+    /// Seed a plugin sitting on the Settings screen's Daemon section.
+    fn plugin_on_daemon_settings() -> HangarPlugin {
+        use crate::screen::settings::SettingsState;
+        use ainb_hangar_proto::settings::HealthSnapshot;
+        let mut p = connected_plugin_with_issue();
+        let health = HealthSnapshot {
+            socket_path: "/tmp/x.sock".into(),
+            pid: 1,
+            uptime_secs: 0,
+            version: "test".into(),
+            connected: true,
+        };
+        p.screens.settings = Some(SettingsState::new(
+            health,
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        ));
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Settings;
+        p.app = Some(app);
+        p
+    }
+
+    /// REGRESSION (routing level, not the pure reducer): the Daemon-section
+    /// numeric-config overlay is a text-capture surface. Every realistic value for
+    /// an int knob (30, 120, 240, 1440) contains a digit `routing_event` claims as
+    /// a tab switch, so without the capture guard typing `3` teleported the user to
+    /// the Skill Manager and dropped the keystroke — the headline editing path did
+    /// not work at all. Drive the real `on_key` (which consults `routing_event`
+    /// BEFORE `route_key`), not `reduce_settings`, or the bug is invisible.
+    #[test]
+    fn digits_type_into_the_daemon_config_overlay_not_tab_switch() {
+        use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
+        let mut p = plugin_on_daemon_settings();
+
+        // Move the cursor onto `autostandup.stagnant_min` (an Int knob) and open
+        // the numeric overlay with Enter.
+        let target = DAEMON_CONFIG_REGISTRY
+            .iter()
+            .position(|d| d.key == KEY_AUTOSTANDUP_STAGNANT_MIN)
+            .expect("stagnant_min is a registry knob");
+        for _ in 0..target {
+            p.on_key(&key_press(KeyCode::Down));
+        }
+        p.on_key(&key_press(KeyCode::Enter));
+        assert_eq!(
+            p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
+            Some(""),
+            "Enter on an int knob opens an empty numeric overlay"
+        );
+
+        // THE REGRESSION: `3` must extend the buffer, not switch to the Skill
+        // Manager tab (`routing_event` maps '3' → Screen::SkillManager).
+        p.on_key(&key_press(KeyCode::Char { ch: '3' }));
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings),
+            "typing `3` in the config overlay must NOT switch tabs, got {:?}",
+            p.app_state().screen
+        );
+        assert_eq!(
+            p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
+            Some("3"),
+            "`3` must land in the overlay buffer"
+        );
+
+        // `0` completes `30`; the overlay is still open on Settings.
+        p.on_key(&key_press(KeyCode::Char { ch: '0' }));
+        assert_eq!(
+            p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()),
+            Some("30"),
+            "digits accumulate in the overlay"
+        );
+        assert!(matches!(p.app_state().screen, Screen::Settings));
+    }
+
+    /// REGRESSION: while the numeric overlay is open the plugin must DECLARE text
+    /// capture to the host, which is what stops the host eating a bare `q` (quit)
+    /// or `?` as its own global shortcut instead of forwarding it.
+    ///
+    /// Asserting on screen state alone would be VACUOUS here: `on_key` discards
+    /// the routing layer's `Intent::Quit`, so a `q` that leaked to the nav layer
+    /// leaves `app.screen` on Settings either way. `captures_text` is the seam the
+    /// host actually reads, so that is what this pins.
+    #[test]
+    fn the_daemon_config_overlay_declares_text_capture_to_the_host() {
+        use ainb_plugin_sdk::Plugin;
+        let mut p = plugin_on_daemon_settings();
+        assert!(
+            !p.captures_text(),
+            "no capture surface open on the bare Daemon section"
+        );
+
+        p.on_key(&key_press(KeyCode::Down));
+        p.on_key(&key_press(KeyCode::Enter));
+        assert!(
+            p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()).is_some(),
+            "the numeric overlay is open"
+        );
+        assert!(
+            p.captures_text(),
+            "an open config overlay must declare capture, else the host eats `q`/`?`"
+        );
+
+        // Esc closes it and capture is released.
+        p.on_key(&key_press(KeyCode::Esc));
+        assert!(
+            p.screens.settings.as_ref().and_then(|s| s.config_input_buffer()).is_none(),
+            "Esc cancels the overlay in a single press"
+        );
+        assert!(!p.captures_text(), "capture is released with the overlay");
     }
 }
