@@ -1326,6 +1326,79 @@ mod tests {
         (k.to_string(), v.to_string())
     }
 
+    /// The Seatbelt profile the daemon actually generates for a confined task
+    /// must grant NOTHING under the operator's `$HOME` and no mach service.
+    ///
+    /// This reads the profile back off the real `sandbox-exec -p <profile>` argv
+    /// [`Runner::build_command`] builds, rather than re-deriving it — so it
+    /// asserts what the provider is actually spawned under.
+    ///
+    /// A per-provider "credential grant" (a securityd `mach-lookup` +
+    /// `~/Library/Keychains/login.keychain-db`) was briefly shipped here to get a
+    /// confined claude authenticated. It handed the child every Chrome-saved
+    /// password: under this exact profile,
+    /// `security find-generic-password -s 'Chrome Safe Storage' -w` returned the
+    /// secret silently. `process-exec*` is allowed, so a confined agent reaches
+    /// `/usr/bin/security` on its own, and securityd does NOT arbitrate per-item
+    /// for ACL-permissive items. It is gone; this pins that it stays gone.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn confined_task_profile_grants_no_home_path_and_no_mach_service() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("task");
+        let env = ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "claude".into(),
+            codex_path: "codex".into(),
+            copilot_path: "copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: true,
+        });
+        let cmd = runner.build_command(Path::new("/bin/sh"), &env, None).unwrap();
+
+        // `sandbox-exec -p <profile> -- <program>`: the profile is the arg after `-p`.
+        let args: Vec<String> =
+            cmd.as_std().get_args().map(|a| a.to_string_lossy().to_string()).collect();
+        let profile = args
+            .iter()
+            .position(|a| a == "-p")
+            .and_then(|i| args.get(i + 1))
+            .expect("the confined command must carry an inline -p profile");
+
+        assert!(
+            !profile.contains("mach-lookup"),
+            "no mach service may be granted — securityd least of all:\n{profile}"
+        );
+        assert!(
+            !profile.contains("SecurityServer"),
+            "the Keychain grant must stay gone:\n{profile}"
+        );
+        assert!(
+            !profile.contains("keychain"),
+            "no keychain file may be granted:\n{profile}"
+        );
+        assert!(
+            !profile.contains(".credentials.json"),
+            "no credential file may be granted:\n{profile}"
+        );
+
+        // Nothing under the operator's real home is reachable. The task root is
+        // a tempdir, so every granted path is a system root or the task itself.
+        if let Some(home) = dirs::home_dir() {
+            let home = home.to_string_lossy().to_string();
+            assert!(
+                !profile.contains(&home),
+                "no path under the operator's $HOME ({home}) may be granted:\n{profile}"
+            );
+        }
+    }
+
     #[test]
     fn compose_child_env_filters_source_to_the_allowlist() {
         // A non-allowlisted ambient var (a leaked secret) is dropped; HOME survives.
