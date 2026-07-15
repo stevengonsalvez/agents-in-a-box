@@ -1154,6 +1154,43 @@ pub enum DaemonCommand {
     Restart,
     /// One-command bring-up: ensure the store + socket-auth token, then `start`.
     Setup,
+    /// View + edit the daemon's user-config knobs (`list`/`get`/`set`).
+    #[command(subcommand)]
+    Config(DaemonConfigCommand),
+}
+
+/// `hangar daemon config <verb>`.
+///
+/// The full user-configurable daemon knob surface — the CLI leg of the same
+/// `daemon_config` registry the TUI Settings → Daemon section edits. Every verb
+/// iterates [`ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY`], so a
+/// knob added to the registry is listed/gettable/settable here with no new code.
+/// Writes land straight in the `daemon_config` table; the watcher reloads its
+/// config each scan tick, so an edit takes effect without a restart.
+#[derive(Subcommand, Debug)]
+pub enum DaemonConfigCommand {
+    /// List every configurable: key, current value (or default), default, type.
+    List,
+    /// Print one knob's current value (or its default when unset).
+    Get(DaemonConfigGetArgs),
+    /// Validate + persist one knob's value (rejects unknown keys / bad values).
+    Set(DaemonConfigSetArgs),
+}
+
+/// Arguments for `hangar daemon config get`.
+#[derive(Args, Debug)]
+pub struct DaemonConfigGetArgs {
+    /// The config key (e.g. `autostandup.stagnant_min`). Must be a known knob.
+    pub key: String,
+}
+
+/// Arguments for `hangar daemon config set`.
+#[derive(Args, Debug)]
+pub struct DaemonConfigSetArgs {
+    /// The config key to write (must be a known knob).
+    pub key: String,
+    /// The new value; validated against the knob's type/range before persisting.
+    pub value: String,
 }
 
 /// Dispatch a parsed [`HangarCommand`] to its backing service.
@@ -1172,7 +1209,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Issue(c) => dispatch_issue(c, format).await,
         HangarCommand::Task(c) => dispatch_task(c, format).await,
         HangarCommand::Beads(BeadsCommand::Reconcile(args)) => run_beads_reconcile(args).await,
-        HangarCommand::Daemon(c) => dispatch_daemon(c).await,
+        HangarCommand::Daemon(c) => dispatch_daemon(c, format).await,
         HangarCommand::Auth(c) => dispatch_auth(c, format).await,
         HangarCommand::Config(c) => dispatch_config(c, format),
         HangarCommand::Skills(c) => dispatch_skills(c, format).await,
@@ -2934,7 +2971,7 @@ fn find_on_path(name: &str) -> Option<std::path::PathBuf> {
 }
 
 /// Dispatch a `hangar daemon <verb>`.
-async fn dispatch_daemon(cmd: DaemonCommand) -> Result<()> {
+async fn dispatch_daemon(cmd: DaemonCommand, format: OutputFormat) -> Result<()> {
     match cmd {
         DaemonCommand::Status => run_daemon_status().await,
         DaemonCommand::Run => run_daemon_run().await,
@@ -2942,7 +2979,136 @@ async fn dispatch_daemon(cmd: DaemonCommand) -> Result<()> {
         DaemonCommand::Stop => run_daemon_stop(),
         DaemonCommand::Restart => run_daemon_restart(),
         DaemonCommand::Setup => run_daemon_setup().await,
+        DaemonCommand::Config(c) => dispatch_daemon_config(c, format).await,
     }
+}
+
+/// Dispatch the `hangar daemon config` verbs against the `daemon_config` table.
+///
+/// Opens the store directly (matching the other store-backed `hangar` verbs) and
+/// drives [`DaemonConfigRepo`] + the registry. Writes take effect on the daemon's
+/// next scan tick (it reloads config each tick), so no restart is needed.
+async fn dispatch_daemon_config(cmd: DaemonConfigCommand, format: OutputFormat) -> Result<()> {
+    let store = Store::open_default().await.context("open hangar database")?;
+    match cmd {
+        DaemonConfigCommand::List => run_daemon_config_list(&store, format).await,
+        DaemonConfigCommand::Get(args) => run_daemon_config_get(&store, args, format).await,
+        DaemonConfigCommand::Set(args) => run_daemon_config_set(&store, args).await,
+    }
+}
+
+/// `hangar daemon config list`: every configurable's key, current value (or
+/// `(default)`), default, and type/range. Iterates the registry so a new knob is
+/// listed automatically. `--format json` emits one object per knob.
+async fn run_daemon_config_list(store: &Store, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    // Read each knob's stored value once, preserving registry order.
+    let mut rows = Vec::with_capacity(DAEMON_CONFIG_REGISTRY.len());
+    for desc in DAEMON_CONFIG_REGISTRY {
+        let stored = DaemonConfigRepo::get(store.pool(), desc.key)
+            .await
+            .with_context(|| format!("read daemon_config `{}`", desc.key))?;
+        rows.push((desc, stored));
+    }
+
+    match format {
+        OutputFormat::Json => {
+            let arr: Vec<_> = rows
+                .iter()
+                .map(|(desc, stored)| {
+                    serde_json::json!({
+                        "key": desc.key,
+                        "value": stored,
+                        "is_default": stored.is_none(),
+                        "default": desc.default,
+                        "type": desc.type_hint(),
+                        "help": desc.help,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&arr).context("render config json")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            for (desc, stored) in &rows {
+                let shown = match stored {
+                    Some(v) => v.clone(),
+                    None => format!("{} (default)", desc.default),
+                };
+                println!(
+                    "{:<28} {:<20} [{}]  {}",
+                    desc.key,
+                    shown,
+                    desc.type_hint(),
+                    desc.help
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `hangar daemon config get <key>`: print one knob's current value, or its
+/// coded default when unset. Rejects an unknown key.
+async fn run_daemon_config_get(
+    store: &Store,
+    args: DaemonConfigGetArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::daemon_config::descriptor;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let desc =
+        descriptor(&args.key).with_context(|| format!("unknown config key `{}`", args.key))?;
+    let stored = DaemonConfigRepo::get(store.pool(), desc.key)
+        .await
+        .with_context(|| format!("read daemon_config `{}`", desc.key))?;
+    let value = stored.clone().unwrap_or_else(|| desc.default.to_string());
+
+    match format {
+        OutputFormat::Json => {
+            let v = serde_json::json!({
+                "key": desc.key,
+                "value": value,
+                "is_default": stored.is_none(),
+                "default": desc.default,
+            });
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).context("render config json")?
+            );
+        }
+        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+            println!("{value}");
+        }
+    }
+    Ok(())
+}
+
+/// `hangar daemon config set <key> <value>`: validate the value against the
+/// knob's descriptor (rejecting an unknown key, out-of-range int, bad bool, or
+/// bad enum with a clear message) and persist the normalized form.
+async fn run_daemon_config_set(store: &Store, args: DaemonConfigSetArgs) -> Result<()> {
+    use ainb_hangar_core::daemon_config::descriptor;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let desc =
+        descriptor(&args.key).with_context(|| format!("unknown config key `{}`", args.key))?;
+    // Validation is the registry's single gate — the same one the RPC uses — so
+    // the CLI and TUI reject identical bad input and store an identical form.
+    let value = desc
+        .validate(&args.value)
+        .map_err(|e| anyhow::anyhow!(e))
+        .context("invalid config value")?;
+    DaemonConfigRepo::set(store.pool(), desc.key, &value)
+        .await
+        .with_context(|| format!("write daemon_config `{}`", desc.key))?;
+    println!("set {} = {value}", desc.key);
+    Ok(())
 }
 
 /// `hangar daemon status`: report the daemon's run state from the PID file +
@@ -4506,6 +4672,162 @@ mod tests {
                 "`daemon {verb}` parsed to the wrong verb"
             );
         }
+    }
+
+    #[test]
+    fn parses_daemon_config_verbs() {
+        // list
+        let cmd = parse_hangar(&["ainb", "hangar", "daemon", "config", "list"]);
+        assert!(matches!(
+            cmd,
+            HangarCommand::Daemon(DaemonCommand::Config(DaemonConfigCommand::List))
+        ));
+        // get <key>
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "daemon",
+            "config",
+            "get",
+            "autostandup.enabled",
+        ]);
+        let HangarCommand::Daemon(DaemonCommand::Config(DaemonConfigCommand::Get(args))) = cmd
+        else {
+            panic!("expected daemon config get");
+        };
+        assert_eq!(args.key, "autostandup.enabled");
+        // set <key> <value>
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "daemon",
+            "config",
+            "set",
+            "autostandup.stagnant_min",
+            "30",
+        ]);
+        let HangarCommand::Daemon(DaemonCommand::Config(DaemonConfigCommand::Set(args))) = cmd
+        else {
+            panic!("expected daemon config set");
+        };
+        assert_eq!(args.key, "autostandup.stagnant_min");
+        assert_eq!(args.value, "30");
+    }
+
+    /// The CLI `list` iterates the registry directly, so its row count is exactly
+    /// the registry length — a knob added to the registry can never silently miss
+    /// the CLI surface. (The TUI has the mirror-image parity test.)
+    #[test]
+    fn cli_list_covers_every_registry_knob() {
+        use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+        assert!(
+            !DAEMON_CONFIG_REGISTRY.is_empty(),
+            "registry must not be empty"
+        );
+        // Every registry key must resolve back through the CLI's lookup gate.
+        for desc in DAEMON_CONFIG_REGISTRY {
+            assert!(
+                ainb_hangar_core::daemon_config::descriptor(desc.key).is_some(),
+                "registry key {} not resolvable",
+                desc.key
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn config_set_get_round_trips_and_rejects_bad_input() {
+        use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        // set autostandup.stagnant_min 30 → persists the normalized value.
+        run_daemon_config_set(
+            &store,
+            DaemonConfigSetArgs {
+                key: "autostandup.stagnant_min".to_string(),
+                value: "30".to_string(),
+            },
+        )
+        .await
+        .expect("set stagnant_min");
+        assert_eq!(
+            DaemonConfigRepo::get(store.pool(), "autostandup.stagnant_min")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("30"),
+            "set then read returns the written value"
+        );
+
+        // An out-of-range int is rejected and leaves the stored value untouched.
+        let err = run_daemon_config_set(
+            &store,
+            DaemonConfigSetArgs {
+                key: "autostandup.stagnant_min".to_string(),
+                value: "99999".to_string(),
+            },
+        )
+        .await
+        .expect_err("out-of-range must be rejected");
+        assert!(format!("{err:#}").contains("between 1 and 1440"));
+        assert_eq!(
+            DaemonConfigRepo::get(store.pool(), "autostandup.stagnant_min")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("30"),
+            "a rejected write must not overwrite the prior value"
+        );
+
+        // An unknown key is rejected before any write.
+        run_daemon_config_set(
+            &store,
+            DaemonConfigSetArgs {
+                key: "autostandup.bogus".to_string(),
+                value: "1".to_string(),
+            },
+        )
+        .await
+        .expect_err("unknown key must be rejected");
+
+        // Enum normalization: `CODEX` stores as `codex`.
+        run_daemon_config_set(
+            &store,
+            DaemonConfigSetArgs {
+                key: "card_agent.default".to_string(),
+                value: "CODEX".to_string(),
+            },
+        )
+        .await
+        .expect("set enum");
+        assert_eq!(
+            DaemonConfigRepo::get(store.pool(), "card_agent.default")
+                .await
+                .unwrap()
+                .as_deref(),
+            Some("codex"),
+        );
+
+        // get on an unset key errors on an unknown key but not on a known-unset one.
+        run_daemon_config_get(
+            &store,
+            DaemonConfigGetArgs {
+                key: "autostandup.cooldown_min".to_string(),
+            },
+            OutputFormat::Text,
+        )
+        .await
+        .expect("get a known but unset key falls back to the default");
+        run_daemon_config_get(
+            &store,
+            DaemonConfigGetArgs {
+                key: "nope.nope".to_string(),
+            },
+            OutputFormat::Text,
+        )
+        .await
+        .expect_err("get on an unknown key is rejected");
     }
 
     #[test]
