@@ -38,15 +38,43 @@ pub const KEY_AUTOSTANDUP_MAX_CONCURRENT: &str = "autostandup.max_concurrent";
 /// `daemon_config` key: the host-wide default card agent (F4 global tier).
 pub const KEY_CARD_AGENT_DEFAULT: &str = "card_agent.default";
 
-/// Coded default: auto-standup is OFF (opt-in).
-pub const DEFAULT_AUTOSTANDUP_ENABLED: bool = false;
-/// Coded default: 15 minutes stagnant before a standup fires.
-pub const DEFAULT_AUTOSTANDUP_STAGNANT_MIN: i64 = 15;
-/// Coded default: 60-minute per-session cooldown.
-pub const DEFAULT_AUTOSTANDUP_COOLDOWN_MIN: i64 = 60;
-/// Coded default: at most one concurrent standup.
-pub const DEFAULT_AUTOSTANDUP_MAX_CONCURRENT: i64 = 1;
-/// Coded default: the host-wide default card agent is `claude`.
+/// Declare a coded default ONCE, emitting both forms it has to exist in: the
+/// typed const the daemon reads, and the canonical stored string the registry
+/// descriptor displays.
+///
+/// The two forms previously duplicated the literal (`default: "false"` next to
+/// `DEFAULT_AUTOSTANDUP_ENABLED = false`), which is a live drift vector: nothing
+/// tied them together, so the registry could advertise a default the daemon does
+/// not run. Deriving the string via `stringify!` makes that unrepresentable —
+/// there is one literal, in one place.
+macro_rules! coded_default {
+    ($(#[$meta:meta])* $konst:ident: $ty:ty = $value:literal => $string:ident) => {
+        $(#[$meta])*
+        pub const $konst: $ty = $value;
+        #[doc = concat!("[`", stringify!($konst), "`] as the canonical stored string,")]
+        #[doc = "derived from the same literal so the two can never disagree."]
+        const $string: &str = stringify!($value);
+    };
+}
+
+coded_default! {
+    /// Coded default: auto-standup is OFF (opt-in).
+    DEFAULT_AUTOSTANDUP_ENABLED: bool = false => DEFAULT_AUTOSTANDUP_ENABLED_STR
+}
+coded_default! {
+    /// Coded default: 15 minutes stagnant before a standup fires.
+    DEFAULT_AUTOSTANDUP_STAGNANT_MIN: i64 = 15 => DEFAULT_AUTOSTANDUP_STAGNANT_MIN_STR
+}
+coded_default! {
+    /// Coded default: 60-minute per-session cooldown.
+    DEFAULT_AUTOSTANDUP_COOLDOWN_MIN: i64 = 60 => DEFAULT_AUTOSTANDUP_COOLDOWN_MIN_STR
+}
+coded_default! {
+    /// Coded default: at most one concurrent standup.
+    DEFAULT_AUTOSTANDUP_MAX_CONCURRENT: i64 = 1 => DEFAULT_AUTOSTANDUP_MAX_CONCURRENT_STR
+}
+/// Coded default: the host-wide default card agent is `claude`. Already a string,
+/// so the registry wires this const through directly.
 pub const DEFAULT_CARD_AGENT_DEFAULT: &str = "claude";
 
 /// The shape of one configurable value — drives both the editor UI and the
@@ -178,7 +206,7 @@ pub const DAEMON_CONFIG_REGISTRY: &[ConfigDescriptor] = &[
         key: KEY_AUTOSTANDUP_ENABLED,
         label: "Auto-standup",
         kind: ConfigKind::Bool,
-        default: "false",
+        default: DEFAULT_AUTOSTANDUP_ENABLED_STR,
         help: "Globally enable the auto-standup watcher (opt-in).",
     },
     ConfigDescriptor {
@@ -189,7 +217,7 @@ pub const DAEMON_CONFIG_REGISTRY: &[ConfigDescriptor] = &[
             max: 1440,
             step: 5,
         },
-        default: "15",
+        default: DEFAULT_AUTOSTANDUP_STAGNANT_MIN_STR,
         help: "Minutes a session must be idle before a standup fires.",
     },
     ConfigDescriptor {
@@ -200,7 +228,7 @@ pub const DAEMON_CONFIG_REGISTRY: &[ConfigDescriptor] = &[
             max: 1440,
             step: 5,
         },
-        default: "60",
+        default: DEFAULT_AUTOSTANDUP_COOLDOWN_MIN_STR,
         help: "Per-session minutes between successive standups.",
     },
     ConfigDescriptor {
@@ -211,7 +239,7 @@ pub const DAEMON_CONFIG_REGISTRY: &[ConfigDescriptor] = &[
             max: 64,
             step: 1,
         },
-        default: "1",
+        default: DEFAULT_AUTOSTANDUP_MAX_CONCURRENT_STR,
         help: "Maximum simultaneous in-flight standups.",
     },
     ConfigDescriptor {
@@ -251,6 +279,44 @@ mod tests {
                 d.key
             );
         }
+    }
+
+    /// The loop the branch left open: `every_default_passes_its_own_validation`
+    /// only checks a default against ITSELF, so it stays green even if the
+    /// registry advertises `"false"` while the daemon runs `true`. Decode each
+    /// descriptor's default string back to the TYPED const the daemon actually
+    /// reads and assert they agree — that is the drift this closes.
+    ///
+    /// Auto-standup is the reason this matters: it writes `/standup` into live
+    /// sessions, a recent change made it opt-in, and a stale registry string would
+    /// silently tell users the opposite of what the daemon does.
+    #[test]
+    fn every_default_string_decodes_to_the_daemons_typed_const() {
+        assert_eq!(
+            parse_bool_token(descriptor(KEY_AUTOSTANDUP_ENABLED).unwrap().default),
+            Some(DEFAULT_AUTOSTANDUP_ENABLED),
+            "autostandup.enabled default must decode to the daemon's const"
+        );
+        assert!(
+            !DEFAULT_AUTOSTANDUP_ENABLED,
+            "auto-standup must stay OFF by default — it writes into live sessions"
+        );
+        assert_eq!(
+            descriptor(KEY_AUTOSTANDUP_STAGNANT_MIN).unwrap().default.parse::<i64>(),
+            Ok(DEFAULT_AUTOSTANDUP_STAGNANT_MIN)
+        );
+        assert_eq!(
+            descriptor(KEY_AUTOSTANDUP_COOLDOWN_MIN).unwrap().default.parse::<i64>(),
+            Ok(DEFAULT_AUTOSTANDUP_COOLDOWN_MIN)
+        );
+        assert_eq!(
+            descriptor(KEY_AUTOSTANDUP_MAX_CONCURRENT).unwrap().default.parse::<i64>(),
+            Ok(DEFAULT_AUTOSTANDUP_MAX_CONCURRENT)
+        );
+        assert_eq!(
+            descriptor(KEY_CARD_AGENT_DEFAULT).unwrap().default,
+            DEFAULT_CARD_AGENT_DEFAULT
+        );
     }
 
     #[test]
