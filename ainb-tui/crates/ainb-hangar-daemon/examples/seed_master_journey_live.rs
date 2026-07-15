@@ -77,6 +77,10 @@ fn main() {
         let ws = WorkspaceId::from_str(ainb_hangar_daemon::seed::WS_ID).expect("ws id");
         let now: i64 = 1_700_000_000_000;
 
+        // Auto-standup defaults OFF (opt-in), so the CH6 demo turns it on explicitly.
+        DaemonConfigRepo::set(pool, ainb_hangar_daemon::standup::KEY_ENABLED, "true")
+            .await
+            .expect("enable autostandup");
         DaemonConfigRepo::set(pool, ainb_hangar_daemon::standup::KEY_STAGNANT_MIN, "1")
             .await
             .expect("lower autostandup.stagnant_min");

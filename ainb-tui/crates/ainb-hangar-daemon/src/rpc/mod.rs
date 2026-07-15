@@ -708,6 +708,8 @@ async fn handle(
         methods::PROFILE_UPSERT => handle_profile_upsert(pool, req).await,
         methods::HANGAR_NOTIFY_RULES_LIST => handle_notify_rules_list(pool, req).await,
         methods::HANGAR_NOTIFY_RULE_SET => handle_notify_rule_set(pool, req).await,
+        methods::HANGAR_DAEMON_CONFIG_GET => handle_daemon_config_get(pool, req).await,
+        methods::HANGAR_DAEMON_CONFIG_SET => handle_daemon_config_set(pool, req).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -3872,6 +3874,52 @@ async fn handle_notify_rule_set(
     })
 }
 
+/// Dispatch `hangar/daemon_config_get` (D13): read one `daemon_config` value by
+/// key. A read — an unknown key returns `value = None` (the caller applies its
+/// coded default) rather than erroring. A blank key is a client error. Split out
+/// of [`handle`] to keep that dispatcher within the line cap.
+async fn handle_daemon_config_get(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let params: ainb_hangar_proto::snapshots::DaemonConfigGetParams =
+        parse_params(req, "{ key }")?;
+    let key = params.key.trim();
+    if key.is_empty() {
+        return Err(invalid_params("daemon_config key must not be empty"));
+    }
+    let value = DaemonConfigRepo::get(pool, key).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::DaemonConfigGetResult {
+        key: key.to_string(),
+        value,
+    })
+}
+
+/// Dispatch `hangar/daemon_config_set` (D13): write one `daemon_config` value by
+/// key. Mutating + idempotent (re-writing the same value is a no-op replace). A
+/// blank key is a client error. Split out of [`handle`] to keep that dispatcher
+/// within the line cap.
+async fn handle_daemon_config_set(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let params: ainb_hangar_proto::snapshots::DaemonConfigSetParams =
+        parse_params(req, "{ key, value }")?;
+    let key = params.key.trim();
+    if key.is_empty() {
+        return Err(invalid_params("daemon_config key must not be empty"));
+    }
+    DaemonConfigRepo::set(pool, key, &params.value).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::DaemonConfigSetResult {
+        key: key.to_string(),
+        value: params.value,
+    })
+}
+
 /// Dispatch `atc/unregister` (spec P9, D12): disable a registered ATC instance's
 /// heartbeat cron. The daemon-native counterpart to `ainb fleet atc teardown`'s
 /// timer removal — flips `enabled = 0` and clears `next_tick_at` (via
@@ -5695,5 +5743,82 @@ mod tests {
         )
         .await;
         assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// daemon_config get/set round-trip (D13): an unknown key reads `None`, a set
+    /// persists, and a follow-up get returns the written value — the wire path the
+    /// Settings auto-standup toggle rides.
+    #[tokio::test]
+    async fn daemon_config_get_set_round_trips() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // Fresh store: `autostandup.enabled` has no row → value is null.
+        let got = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_GET,
+                serde_json::json!({"key": "autostandup.enabled"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(got.error.is_none(), "{got:?}");
+        assert_eq!(got.result.unwrap()["value"], serde_json::Value::Null);
+
+        // Write it on.
+        let set = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "autostandup.enabled", "value": "true"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(set.error.is_none(), "{set:?}");
+        assert_eq!(set.result.unwrap()["value"], serde_json::json!("true"));
+
+        // The follow-up get returns the persisted value.
+        let got2 = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_GET,
+                serde_json::json!({"key": "autostandup.enabled"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(got2.result.unwrap()["value"], serde_json::json!("true"));
+    }
+
+    /// A blank daemon_config key is rejected as INVALID_PARAMS on both get and set.
+    #[tokio::test]
+    async fn daemon_config_rejects_blank_key() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let get = dispatch(
+            store.pool(),
+            &req(methods::HANGAR_DAEMON_CONFIG_GET, serde_json::json!({"key": "  "})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(get.error.unwrap().code, INVALID_PARAMS);
+        let set = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "", "value": "x"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(set.error.unwrap().code, INVALID_PARAMS);
     }
 }

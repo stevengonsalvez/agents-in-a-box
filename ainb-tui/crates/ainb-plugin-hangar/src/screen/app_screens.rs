@@ -538,6 +538,14 @@ pub struct ScreenStates {
     /// A deferred notify-rule RPC raised by the Notifications grid (tcp T5),
     /// drained by the `render` pass. `None` when idle.
     pub pending_notify_action: Option<NotifyAction>,
+    /// Cached live `autostandup.enabled` value from `hangar/daemon_config_get`
+    /// (D13). Seeds the Settings Daemon-section toggle regardless of arrival order,
+    /// and survives a `set_health` rebuild. Defaults OFF (the coded server default).
+    pub autostandup_enabled: bool,
+    /// A deferred `autostandup.enabled` write raised by the Daemon-section toggle
+    /// (`a`, D13): the NEW value awaiting the `render` pass to fire
+    /// `hangar/daemon_config_set` over the daemon socket. `None` when idle.
+    pub pending_autostandup_set: Option<bool>,
     /// Set when the logs screen's level filter changed (P8.6), asking the glue
     /// to re-read the structured-log file under the new `--level` floor. Drained
     /// by the `render` pass. `false` when idle.
@@ -807,6 +815,9 @@ impl ScreenStates {
         state.set_members(self.member_rows.clone());
         // Carry any cached notification grid too (tcp T5), same rebuild survival.
         state.set_notify_rules(self.notify_rule_rows.clone());
+        // Carry the cached auto-standup toggle (D13) so a `set_health` rebuild keeps
+        // the live value rather than snapping the row back to OFF.
+        state.set_autostandup_enabled(self.autostandup_enabled);
         self.settings = Some(state);
     }
 
@@ -851,6 +862,23 @@ impl ScreenStates {
     /// Take the pending notify-rule RPC raised by the Notifications grid, if any.
     pub const fn take_pending_notify_action(&mut self) -> Option<NotifyAction> {
         self.pending_notify_action.take()
+    }
+
+    /// Refresh the Settings Daemon-section auto-standup toggle from a
+    /// `hangar/daemon_config_get` result (D13). Caches the value so a later
+    /// `set_health` rebuild keeps it, and overlays the live settings state when it
+    /// already exists (mirrors [`Self::set_notify_rules`]).
+    pub const fn set_autostandup_enabled(&mut self, on: bool) {
+        self.autostandup_enabled = on;
+        if let Some(s) = self.settings.as_mut() {
+            s.set_autostandup_enabled(on);
+        }
+    }
+
+    /// Take the pending `autostandup.enabled` write raised by the Daemon-section
+    /// toggle (`a`, D13), if any.
+    pub const fn take_pending_autostandup_set(&mut self) -> Option<bool> {
+        self.pending_autostandup_set.take()
     }
 
     /// The Notifications grid's current edit scope (global/workspace,
@@ -1247,6 +1275,11 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                         states.pending_notify_action = Some(NotifyAction::Refresh {
                             scope: notify_scope,
                         });
+                    }
+                    // `a` on the Daemon section flipped the auto-standup toggle (D13):
+                    // defer the `hangar/daemon_config_set` write for the render pass.
+                    Some(SettingsIntent::ToggleAutostandup(on)) => {
+                        states.pending_autostandup_set = Some(on);
                     }
                     // KeychainWrite / New / Rename land in their own beads.
                     _ => {

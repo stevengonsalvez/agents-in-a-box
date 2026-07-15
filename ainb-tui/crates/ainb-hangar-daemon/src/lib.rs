@@ -223,11 +223,11 @@ pub mod seed;
 /// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
 /// and all-or-nothing.
 pub mod skills_sync;
-/// Auto-standup watcher (D13, Stevie's LOCKED override; spec P9 §4.8).
+/// Auto-standup watcher (D13; spec P9 §4.8).
 ///
 /// [`standup::StandupWatcher`] is a daemon-global periodic scan that WRITES
 /// `/standup` into a stagnant, idle-at-prompt session via the one verified send
-/// path — behind every guardrail: a global toggle (default ON), a per-session
+/// path — behind every guardrail: a global toggle (default OFF, opt-in), a per-session
 /// opt-out, a 60-minute per-session cooldown, and a max-one-concurrent cap. The
 /// pure [`standup::decide_standup`] gate is the exhaustively-tested heart; a busy
 /// / mid-turn session is NEVER written to (hook status, never a pane heuristic).
@@ -475,7 +475,7 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
     // Spec P9 (D13): spawn the auto-standup watcher — a daemon-global periodic
     // scan that WRITES `/standup` into a stagnant, idle-at-prompt session behind
-    // every guardrail (global toggle default ON, per-session opt-out, 60-min
+    // every guardrail (global toggle default OFF/opt-in, per-session opt-out, 60-min
     // cooldown, max-one concurrent). It writes via the one verified send path
     // (INV-2) and raises a `waiting` "standup ready" attention row when a fired
     // standup's turn completes. Non-fatal like the scheduler: a discovery / send /

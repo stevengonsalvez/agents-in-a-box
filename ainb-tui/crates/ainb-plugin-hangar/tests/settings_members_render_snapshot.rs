@@ -84,6 +84,7 @@ fn tui_renders_members_with_roles() {
     insta::assert_snapshot!(map, @r###"
       Daemon
         /tmp/hangar.sock · ● connected
+          Auto-standup: ○ off  ·  [a] toggle
       Providers
       LLM Keys
       Workspaces

@@ -101,6 +101,42 @@ fn state() -> SettingsState {
     SettingsState::new(health(), providers(), keys(), workspaces())
 }
 
+/// `a` on the Daemon section flips the auto-standup toggle (D13): the local value
+/// inverts AND a `ToggleAutostandup` intent carries the NEW value for the glue to
+/// persist. A second `a` flips it back.
+#[test]
+fn a_on_daemon_section_toggles_autostandup_and_emits_intent() {
+    let s = state(); // lands on the Daemon section, toggle defaults OFF
+    assert!(!s.autostandup_enabled());
+    let out = reduce_settings(&s, SettingsEvent::Key('a'));
+    assert!(out.state.autostandup_enabled(), "optimistic flip to ON");
+    assert_eq!(out.intent, Some(SettingsIntent::ToggleAutostandup(true)));
+    // Toggling again flips back to OFF and emits the matching intent.
+    let out2 = reduce_settings(&out.state, SettingsEvent::Key('a'));
+    assert!(!out2.state.autostandup_enabled());
+    assert_eq!(out2.intent, Some(SettingsIntent::ToggleAutostandup(false)));
+}
+
+/// The auto-standup toggle is Daemon-section-scoped: `a` on another section never
+/// flips it (no accidental daemon-config write from the Keys/Workspaces panes).
+#[test]
+fn a_off_the_daemon_section_does_not_toggle_autostandup() {
+    let mut s = state();
+    s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Providers
+    let out = reduce_settings(&s, SettingsEvent::Key('a'));
+    assert!(!out.state.autostandup_enabled());
+    assert_eq!(out.intent, None);
+}
+
+/// A `hangar/daemon_config_get` snapshot sets the live toggle value the pane shows.
+#[test]
+fn set_autostandup_enabled_reflects_live_value() {
+    let mut s = state();
+    assert!(!s.autostandup_enabled());
+    s.set_autostandup_enabled(true);
+    assert!(s.autostandup_enabled());
+}
+
 /// j/k cycle through the six settings sections.
 #[test]
 fn j_k_navigates_settings_sections() {
