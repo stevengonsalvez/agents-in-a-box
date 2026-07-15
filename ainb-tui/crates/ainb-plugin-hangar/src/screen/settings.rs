@@ -1001,20 +1001,28 @@ fn render_member_rows(
     row
 }
 
-/// Paint the Daemon section body: the socket-path + connection-status line, then
-/// EVERY daemon-config knob (one row per [`DAEMON_CONFIG_REGISTRY`] descriptor)
-/// showing its label + live value. The `▶` cursor (in `SELECTION_GREEN`) marks
-/// the selected row; a bool ON row also paints green with a filled dot. The key
-/// hints (`J/K move · enter edit · [a] auto-standup`) sit right by the control
-/// (house rule). Returns the next free row. Split out of [`render_settings`] to
-/// keep that function within the line cap.
+/// Paint the Daemon section body and return `(next free row, cursor row)`.
+///
+/// The body is PROGRESSIVE: only the focused section shows its editor.
+///
+/// - Inactive: the socket line plus a one-line auto-standup summary. The config
+///   rows carry a cursor that only the focused section can move, so painting five
+///   of them from an unfocused section is both unusable and (at seven rows) enough
+///   to push whole sections below the fold.
+/// - Active: the socket line, EVERY knob (one row per [`DAEMON_CONFIG_REGISTRY`]
+///   descriptor) with its label + live value, and the key hints. The `▶` cursor
+///   (in `SELECTION_GREEN`) marks the selected row; a bool ON row also paints
+///   green with a filled dot.
+///
+/// The returned cursor row is `Some` only when the section is active, and lets
+/// [`render_settings`] keep the selected knob in view when the pane scrolls.
 fn render_daemon_body(
     buf: &mut WireBuffer,
     area_w: u16,
     mut row: u16,
     bottom: u16,
     state: &SettingsState,
-) -> u16 {
+) -> (u16, Option<u16>) {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const GREEN: Color = Color::rgb(100, 200, 100);
     const RED: Color = Color::rgb(220, 100, 100);
@@ -1023,6 +1031,7 @@ fn render_daemon_body(
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 
     let section_active = state.section == SettingsSection::Daemon;
+    let mut cursor_row = None;
     let put = |buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color| {
         for (ch, cx) in s.chars().zip(x..area_w) {
             let mut cell = Cell::new(ch.to_string());
@@ -1046,11 +1055,36 @@ fn render_daemon_body(
         row += 1;
     }
 
+    // Unfocused: collapse the editor to the auto-standup summary. `a` still works
+    // from anywhere in the section, so the summary names the key that drives it.
+    if !section_active {
+        if row < bottom {
+            let on = state.autostandup_enabled();
+            let (dot, color) = if on {
+                ("● on", SELECTION_GREEN)
+            } else {
+                ("○ off", TEXT)
+            };
+            put(
+                buf,
+                6,
+                row,
+                &format!("Auto-standup: {dot}  ·  [a] toggle"),
+                color,
+            );
+            row += 1;
+        }
+        return (row, None);
+    }
+
     for (idx, desc) in DAEMON_CONFIG_REGISTRY.iter().enumerate() {
         if row >= bottom {
             break;
         }
         let selected = section_active && idx == state.config_sel;
+        if selected {
+            cursor_row = Some(row);
+        }
         let cursor = if selected { "▶ " } else { "  " };
         let value = state.config_effective(idx);
         // A bool row shows a ●/○ dot; other kinds show the raw value. A selected
@@ -1091,7 +1125,7 @@ fn render_daemon_body(
         );
         row += 1;
     }
-    row
+    (row, cursor_row)
 }
 
 /// A compact display label for an attention-kind wire token (the grid's row
@@ -1216,12 +1250,57 @@ fn render_notify_grid(
     row
 }
 
+/// Where each section landed in the unscrolled (virtual) paint, so
+/// [`render_settings`] can pick a scroll offset without re-deriving the layout.
+struct SectionLayout {
+    /// Total painted height of every section.
+    total: u16,
+    /// The active section's first row (its header).
+    active_start: u16,
+    /// One past the active section's last row.
+    active_end: u16,
+    /// The active section's selected row, when it has a cursor.
+    cursor_row: Option<u16>,
+}
+
+/// The scroll offset that keeps the active section — and its cursor — in view.
+///
+/// The pane paints top-down from a fixed origin, so with no offset a section far
+/// enough down the stack simply falls off the bottom and becomes unreachable
+/// (invisible AND unusable, since the keys that drive it give no feedback).
+///
+/// Rules, in order: show everything when it fits; otherwise scroll just far
+/// enough to reveal the active section's tail, never past its header, and finally
+/// keep the cursor row on screen when the active section is itself taller than
+/// the viewport.
+fn scroll_offset(layout: &SectionLayout, viewport_h: u16) -> u16 {
+    if viewport_h == 0 || layout.total <= viewport_h {
+        return 0;
+    }
+    let mut offset = layout.active_end.saturating_sub(viewport_h);
+    offset = offset.min(layout.active_start);
+    if let Some(cursor) = layout.cursor_row {
+        if cursor < offset {
+            offset = cursor;
+        } else if cursor >= offset + viewport_h {
+            offset = cursor + 1 - viewport_h;
+        }
+    }
+    offset.min(layout.total.saturating_sub(viewport_h))
+}
+
 /// Render the settings screen into `buf` between rows `top` and `bottom`.
 ///
-/// The five sections paint stacked top-down; the active one is accent-highlighted.
-/// When the key-entry modal is open it overlays a centred password-style input
-/// (masked, never the raw value). Width-aware: each row's value column is clipped
-/// at `area_w`.
+/// The six sections paint stacked top-down; the active one is accent-highlighted
+/// and is the only one that expands its editor. When the key-entry modal is open
+/// it overlays a centred password-style input (masked, never the raw value).
+/// Width-aware: each row's value column is clipped at `area_w`.
+///
+/// Sections are painted at VIRTUAL rows into a scratch buffer first, then the
+/// visible window is blitted in at `top`. That keeps the scroll offset a single
+/// decision made against the real layout ([`scroll_offset`]) instead of duplicating
+/// each section's height here — the sections' own painters stay the one place that
+/// knows how tall they are.
 pub fn render_settings(
     buf: &mut WireBuffer,
     area_w: u16,
@@ -1230,12 +1309,42 @@ pub fn render_settings(
     bottom: u16,
     state: &SettingsState,
 ) {
+    use ainb_plugin_sdk::Coord;
+
+    let viewport_h = bottom.saturating_sub(top);
+    let mut scratch = WireBuffer::new(area_w, u16::MAX);
+    let layout = paint_sections(&mut scratch, area_w, state);
+    let offset = scroll_offset(&layout, viewport_h);
+
+    for (coord, cell) in scratch.cells {
+        if coord.y >= offset && coord.y - offset < viewport_h {
+            buf.push(Coord::new(coord.x, top + (coord.y - offset)), cell);
+        }
+    }
+
+    // Modal overlays sit above the scrolled pane, centred on the whole area.
+    if let Some(km) = &state.key_entry {
+        render_key_entry_modal(buf, area_w, area_h, km.expose().chars().count());
+    }
+    if let Some(input) = &state.config_input {
+        render_config_input_overlay(buf, area_w, area_h, input);
+    }
+}
+
+/// Paint every section stacked from virtual row 0, reporting the resulting
+/// [`SectionLayout`]. Unbounded in height on purpose — the caller clips.
+fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> SectionLayout {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const TITLE: Color = Color::rgb(255, 215, 0);
     const TEXT: Color = Color::rgb(220, 220, 230);
     // Active-workspace indicator colour (TUI palette SELECTION_GREEN).
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 
+    let top = 0;
+    let bottom = u16::MAX;
+    let mut active_start = 0;
+    let mut active_end = 0;
+    let mut cursor_row = None;
     let mut row = top;
     let put = |buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color| {
         for (ch, cx) in s.chars().zip(x..area_w) {
@@ -1256,11 +1365,11 @@ pub fn render_settings(
         if row >= bottom {
             break;
         }
-        let marker = if section == state.section {
-            "▶ "
-        } else {
-            "  "
-        };
+        let is_active = section == state.section;
+        if is_active {
+            active_start = row;
+        }
+        let marker = if is_active { "▶ " } else { "  " };
         put(buf, 0, row, &format!("{marker}{}", section.title()), TITLE);
         row += 1;
         if row >= bottom {
@@ -1268,7 +1377,9 @@ pub fn render_settings(
         }
         match section {
             SettingsSection::Daemon => {
-                row = render_daemon_body(buf, area_w, row, bottom, state);
+                let (next, cursor) = render_daemon_body(buf, area_w, row, bottom, state);
+                row = next;
+                cursor_row = cursor.or(cursor_row);
             }
             SettingsSection::Providers => {
                 for p in &state.providers {
@@ -1317,14 +1428,16 @@ pub fn render_settings(
                 row = render_notify_grid(buf, area_w, row, bottom, state, selected);
             }
         }
+        if is_active {
+            active_end = row;
+        }
     }
 
-    // Modal overlays.
-    if let Some(km) = &state.key_entry {
-        render_key_entry_modal(buf, area_w, area_h, km.expose().chars().count());
-    }
-    if let Some(input) = &state.config_input {
-        render_config_input_overlay(buf, area_w, area_h, input);
+    SectionLayout {
+        total: row,
+        active_start,
+        active_end,
+        cursor_row,
     }
 }
 

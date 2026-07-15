@@ -80,23 +80,28 @@ fn tui_renders_members_with_roles() {
     render_settings(&mut buf, 60, 14, 0, 14, &s);
 
     let map = glyph_map(&buf, 60);
-    // POSITIVE: the Daemon section lists every config knob, and both members render
-    // under the Members section as `email · role`.
+    // POSITIVE: both members render under the Members section as `email · role`.
+    //
+    // REGRESSION GUARD: every section below the focused one must still be on
+    // screen. When the Daemon section grew from 2 body rows to 7, this 14-row pane
+    // silently lost the ENTIRE Notifications section — a shipped feature became
+    // invisible. The unfocused Daemon section now collapses to its summary, so the
+    // `Notifications` header, `scope: global · [g] toggle`, the channel grid and
+    // its hint stay visible. Do not re-baseline those rows away.
     insta::assert_snapshot!(map, @r###"
       Daemon
         /tmp/hangar.sock · ● connected
-          Auto-standup: ○ off
-          Stagnant minutes: 15
-          Cooldown minutes: 60
-          Max concurrent: 1
-          Default agent: claude
-        ↑/↓ move · enter/space edit · [a] auto-standup
+          Auto-standup: ○ off  ·  [a] toggle
       Providers
       LLM Keys
       Workspaces
     ▶ Members
         amy@x.io · owner
         bob@x.io · admin
+      Notifications
+        scope: global · [g] toggle
+                      phone   web     os      atc
+        J/K kind · h/l channel · space toggle
     "###);
 
     // NON-VACUOUS COLOUR CHECK: the owner row's glyphs paint in `SELECTION_GREEN`.
