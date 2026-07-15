@@ -244,7 +244,11 @@ fn daemon_cursor_is_not_bound_to_j_or_k() {
     let s = reduce_settings(&state(), SettingsEvent::CursorDown).state;
     assert_eq!(s.config_sel(), 1);
     let after_k = reduce_settings(&s, SettingsEvent::Key('K')).state;
-    assert_eq!(after_k.config_sel(), 1, "`K` is a routing key, not a cursor key");
+    assert_eq!(
+        after_k.config_sel(),
+        1,
+        "`K` is a routing key, not a cursor key"
+    );
     let after_j = reduce_settings(&s, SettingsEvent::Key('J')).state;
     assert_eq!(after_j.config_sel(), 1, "`J` is not a cursor key either");
 }
@@ -265,8 +269,15 @@ fn arrows_do_not_move_the_cursor_under_an_open_overlay() {
     let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
     assert!(s.config_input_buffer().is_some(), "overlay open");
     let out = reduce_settings(&s, SettingsEvent::CursorDown);
-    assert_eq!(out.state.config_sel(), idx, "cursor frozen under the overlay");
-    assert!(out.state.config_input_buffer().is_some(), "overlay stays open");
+    assert_eq!(
+        out.state.config_sel(),
+        idx,
+        "cursor frozen under the overlay"
+    );
+    assert!(
+        out.state.config_input_buffer().is_some(),
+        "overlay stays open"
+    );
 }
 
 /// Editing the enum knob (card_agent.default) cycles to the next variant and
@@ -373,7 +384,11 @@ fn int_overlay_rejects_out_of_range_and_keeps_the_overlay_open() {
     let s = reduce_settings(&s, SettingsEvent::Key('3')).state;
     let s = reduce_settings(&s, SettingsEvent::Key('0')).state;
     let out = reduce_settings(&s, SettingsEvent::Key('\n'));
-    assert_eq!(out.state.config_input_buffer(), None, "a valid value closes it");
+    assert_eq!(
+        out.state.config_input_buffer(),
+        None,
+        "a valid value closes it"
+    );
     assert_eq!(out.state.config_values()[idx].as_deref(), Some("30"));
 }
 

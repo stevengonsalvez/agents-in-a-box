@@ -3018,7 +3018,10 @@ async fn run_daemon_config_list(store: &Store, format: OutputFormat) -> Result<(
 
 /// One `config list` row: the knob's descriptor and its stored value (`None` when
 /// the key has no row, i.e. the coded default is in force).
-type ConfigRow = (&'static ainb_hangar_core::daemon_config::ConfigDescriptor, Option<String>);
+type ConfigRow = (
+    &'static ainb_hangar_core::daemon_config::ConfigDescriptor,
+    Option<String>,
+);
 
 /// Render the `config list` rows in `format`, returning the exact text to print.
 ///
@@ -3104,7 +3107,10 @@ fn config_shown_value(
     desc: &ainb_hangar_core::daemon_config::ConfigDescriptor,
     stored: Option<&str>,
 ) -> String {
-    stored.map_or_else(|| format!("{} (default)", desc.default), ToString::to_string)
+    stored.map_or_else(
+        || format!("{} (default)", desc.default),
+        ToString::to_string,
+    )
 }
 
 /// `hangar daemon config get <key>`: print one knob's current value, or its

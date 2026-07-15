@@ -5343,7 +5343,9 @@ mod tests {
     /// BEFORE `route_key`), not `reduce_settings`, or the bug is invisible.
     #[test]
     fn digits_type_into_the_daemon_config_overlay_not_tab_switch() {
-        use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
+        use ainb_hangar_core::daemon_config::{
+            DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN,
+        };
         let mut p = plugin_on_daemon_settings();
 
         // Move the cursor onto `autostandup.stagnant_min` (an Int knob) and open
@@ -5417,8 +5419,14 @@ mod tests {
             2,
             "both edits must be queued, got {queued:?} — a dropped write is invisible"
         );
-        assert_eq!(queued[0], (KEY_AUTOSTANDUP_ENABLED.to_string(), "true".to_string()));
-        assert_eq!(queued[1], (KEY_CARD_AGENT_DEFAULT.to_string(), "codex".to_string()));
+        assert_eq!(
+            queued[0],
+            (KEY_AUTOSTANDUP_ENABLED.to_string(), "true".to_string())
+        );
+        assert_eq!(
+            queued[1],
+            (KEY_CARD_AGENT_DEFAULT.to_string(), "codex".to_string())
+        );
 
         // Draining hands them over in edit order and leaves the queue empty.
         let drained = p.screens.take_pending_daemon_config_sets();

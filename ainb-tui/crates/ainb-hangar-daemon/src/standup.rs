@@ -864,7 +864,8 @@ mod tests {
 
         let cfg = StandupConfig::load(store.pool()).await.unwrap();
         assert_eq!(
-            cfg.cooldown_minutes, cfg::MIN_AUTOSTANDUP_COOLDOWN_MIN,
+            cfg.cooldown_minutes,
+            cfg::MIN_AUTOSTANDUP_COOLDOWN_MIN,
             "a legacy 0 cooldown must be floored, not honoured"
         );
 
