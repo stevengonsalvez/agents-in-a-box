@@ -35,20 +35,22 @@ pub const DEFAULT_WORKSPACE_NAME: &str = "Default Workspace";
 /// Email of the bootstrapped owner user.
 pub const DEFAULT_OWNER_EMAIL: &str = "stevie@local";
 
-/// Stable id of the single host runtime the daemon self-registers and claims
-/// tasks for. The seed, the daemon's default claim id, and every
-/// `agent_create` binding MUST resolve to this same value (see
-/// [`default_runtime_id`]).
+/// Stable id of the single host runtime the daemon self-registers and claims for.
+///
+/// The seed, the daemon's default claim id, and every `agent_create` binding MUST
+/// resolve to this same value (see [`default_runtime_id`]).
 pub const DEFAULT_RUNTIME_ID: &str = "default";
 
 /// The provider a freshly-seeded starter agent (and the self-registered runtime)
 /// advertises by default.
 pub const DEFAULT_PROVIDER: &str = "claude";
 
-/// The providers `hangar/agent_create` accepts. The chosen value is recorded on
-/// the agent row (migration 0041) and HONOURED at dispatch: the agent binds the
-/// single default runtime (an execution slot claimed by id, not provider) and the
-/// daemon spawns the recorded provider's backend per task.
+/// The providers `hangar/agent_create` accepts.
+///
+/// The chosen value is recorded on the agent row (migration 0041) and HONOURED at
+/// dispatch: the agent binds the single default runtime (an execution slot claimed
+/// by id, not provider) and the daemon spawns the recorded provider's backend per
+/// task.
 pub const SUPPORTED_PROVIDERS: [&str; 3] = ["claude", "codex", "copilot"];
 
 /// `daemon_id` recorded for the self-registered host runtime. Keyed with
@@ -227,10 +229,11 @@ pub async fn ensure_runtime(
     Ok(true)
 }
 
-/// Create one agent from scratch, filling every FK behind the scenes: bind the
-/// default runtime (ensuring its row exists), resolve the default owner, mint a
-/// fresh id, and insert. The caller supplies only the human `name` (+ an
-/// already-normalised `provider` and optional `instructions`).
+/// Create one agent from scratch, filling every FK behind the scenes.
+///
+/// Binds the default runtime (ensuring its row exists), resolves the default
+/// owner, mints a fresh id, and inserts. The caller supplies only the human
+/// `name` (+ an already-normalised `provider` and optional `instructions`).
 ///
 /// The returned [`Agent`] carries the minted id so a caller can route to it
 /// (e.g. as a squad leader). `provider` is recorded on the row and HONOURED at
@@ -278,9 +281,11 @@ pub async fn create_agent(
     Ok(agent)
 }
 
-/// Count the workspace's agents (active AND archived), the non-clobber guard the
-/// boot seed reads before laying down a starter agent: a user who created,
-/// renamed, or archived their own agent has count > 0, so the seed skips.
+/// Count the workspace's agents (active AND archived).
+///
+/// The non-clobber guard the boot seed reads before laying down a starter agent:
+/// a user who created, renamed, or archived their own agent has count > 0, so the
+/// seed skips.
 ///
 /// # Errors
 ///
