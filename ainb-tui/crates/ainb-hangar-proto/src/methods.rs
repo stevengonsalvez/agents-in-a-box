@@ -278,6 +278,24 @@ pub const HANGAR_AGENT_UPDATE: &str = "hangar/agent_update";
 /// agent id flips no row and is rejected as a not-found error.
 pub const HANGAR_AGENT_ARCHIVE: &str = "hangar/agent_archive";
 
+/// `hangar/agent_create` — create one agent from scratch (fresh-home path).
+///
+/// Params: [`crate::snapshots::AgentCreateParams`]
+/// (`{ workspace_id?, name, provider?, instructions? }`). The daemon fills every
+/// FK behind the scenes — it ensures the default workspace + owner, binds the
+/// single default runtime, and mints the id — so the caller supplies only the
+/// human `name` (+ an optional `provider` of `claude`/`codex`/`copilot`,
+/// defaulting to the runtime's advertised `claude`, and optional `instructions`).
+/// Result: the refreshed [`crate::snapshots::AgentsListResult`] so the client
+/// folds the new agent into the cache that drives its "has an agent" gate.
+///
+/// Mutating: an empty `name` or an unsupported `provider` is rejected with
+/// `INVALID_PARAMS`. The recorded provider is HONOURED at dispatch: the agent
+/// binds the single default runtime (an execution slot the claim loop keys off by
+/// id, not provider), and the daemon spawns the recorded provider's backend per
+/// task — so a `codex` agent runs codex.
+pub const HANGAR_AGENT_CREATE: &str = "hangar/agent_create";
+
 /// `hangar/members_list` — snapshot the human members of a workspace (e38.11).
 ///
 /// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
@@ -986,6 +1004,8 @@ pub const ALL_METHODS: &[&str] = &[
     // catalogue is append-only.
     HANGAR_DAEMON_CONFIG_GET,
     HANGAR_DAEMON_CONFIG_SET,
+    // Agent create-from-scratch (fresh-home bootstrap), likewise appended.
+    HANGAR_AGENT_CREATE,
     HANGAR_DAEMON_CONFIG_LIST,
 ];
 
@@ -1089,6 +1109,7 @@ mod tests {
             HANGAR_BOARD_CARD_MOVE,
             HANGAR_SQUAD_FANOUT,
             HANGAR_RUN_HISTORY,
+            HANGAR_AGENT_CREATE,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -1180,6 +1201,7 @@ mod tests {
             HANGAR_NOTIFY_RULE_SET,
             HANGAR_DAEMON_CONFIG_GET,
             HANGAR_DAEMON_CONFIG_SET,
+            HANGAR_AGENT_CREATE,
             HANGAR_DAEMON_CONFIG_LIST,
         ];
         for m in declared {

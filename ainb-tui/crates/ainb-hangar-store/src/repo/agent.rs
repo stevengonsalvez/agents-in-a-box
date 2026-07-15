@@ -69,6 +69,13 @@ pub struct Agent {
     /// Per-agent environment variables (stored as a JSON-object `agent_env`
     /// column), kept as an ordered key-value list for deterministic encoding.
     pub agent_env: Vec<(String, String)>,
+    /// Optional per-agent provider override (`"claude"`/`"codex"`/`"copilot"`),
+    /// recorded at create time (migration 0041); `None` = fall back to the
+    /// runtime's advertised provider. Honoured at dispatch: the agent binds the
+    /// single default runtime (an execution slot claimed by id, not by provider),
+    /// and the daemon spawns THIS provider's backend per task, so a `codex` agent
+    /// runs codex.
+    pub provider: Option<String>,
 }
 
 /// A partial-edit instruction for one agent's mutable config (e38.15).
@@ -136,8 +143,8 @@ impl AgentRepo {
         sqlx::query(
             "INSERT INTO agent \
              (id, workspace_id, name, runtime_id, instructions, visibility, owner_id, \
-              archived, model, cli_args, mcp_config, thinking, agent_env) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              archived, model, cli_args, mcp_config, thinking, agent_env, provider) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -152,6 +159,7 @@ impl AgentRepo {
         .bind(agent.mcp_config.clone().unwrap_or_else(|| "{}".to_string()))
         .bind(&agent.thinking)
         .bind(env_to_json(&agent.agent_env))
+        .bind(&agent.provider)
         .execute(pool)
         .await?;
         Ok(())
@@ -328,7 +336,7 @@ impl AgentRepo {
 /// The full column list every `SELECT` reads, in [`Agent::from_row`] order. A
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
-     owner_id, archived, model, cli_args, mcp_config, thinking, agent_env FROM agent";
+     owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -400,6 +408,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             mcp_config: mcp_config_from_raw(row.try_get::<String, _>("mcp_config")?),
             thinking: row.try_get("thinking")?,
             agent_env: env_from_json(&row.try_get::<String, _>("agent_env")?)?,
+            provider: row.try_get("provider")?,
         })
     }
 }

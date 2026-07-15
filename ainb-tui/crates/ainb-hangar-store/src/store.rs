@@ -66,6 +66,14 @@ impl Store {
         let opts = SqliteConnectOptions::new()
             .filename(&db_path)
             .create_if_missing(true)
+            // Foreign keys are load-bearing, so DECLARE the dependency rather than
+            // inheriting sqlx's default. `agent.runtime_id` (and every other
+            // `REFERENCES`) is only a real constraint with this on: it is what stops
+            // a runtime being renamed out from under its agents, and what several
+            // repos' "the engine enforces the parent link" reasoning rests on. An
+            // sqlx default change would otherwise silently turn every FK inert with
+            // nothing going red — see `fk_enforcement_is_on_and_rejects_orphans`.
+            .foreign_keys(true)
             .journal_mode(SqliteJournalMode::Wal)
             // WAL + `NORMAL` fsync is the standard durable-enough tuning: the
             // default `FULL` fsyncs on EVERY commit, so under the daemon's many
@@ -131,5 +139,45 @@ impl Store {
     #[must_use]
     pub const fn home_env() -> &'static str {
         HOME_ENV
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Foreign keys MUST be enforced. The whole runtime-identity design rests on
+    /// it (`agent.runtime_id` is an FK, which is why a runtime cannot be renamed),
+    /// as does several repos' "the engine enforces the parent link" reasoning.
+    ///
+    /// This is pinned in CI deliberately: it was previously only an inherited sqlx
+    /// default that no test asserted, and a comment claiming the OPPOSITE ("PRAGMA
+    /// foreign_keys is off in this crate") survived long enough to justify a real
+    /// bug. An sqlx default change — or a stray `.foreign_keys(false)` — must fail
+    /// here rather than silently turning every `REFERENCES` into a decoration.
+    #[tokio::test]
+    async fn fk_enforcement_is_on_and_rejects_orphans() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // (a) The pragma itself is ON.
+        let fk: i64 = sqlx::query_scalar("PRAGMA foreign_keys").fetch_one(pool).await.unwrap();
+        assert_eq!(fk, 1, "PRAGMA foreign_keys must be ON");
+
+        // (b) It is actually ENFORCED: an agent naming a nonexistent runtime (and
+        //     workspace/owner) is rejected, not silently persisted as an orphan.
+        let err = sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('a-orphan', 'ws-nope', 'orphan', 'rt-nope', 'workspace', 'u-nope')",
+        )
+        .execute(pool)
+        .await
+        .expect_err("an agent with a dangling runtime_id FK must be rejected");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("FOREIGN KEY constraint failed"),
+            "expected an FK violation, got: {msg}"
+        );
     }
 }

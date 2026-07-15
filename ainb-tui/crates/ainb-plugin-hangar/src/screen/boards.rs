@@ -1593,8 +1593,8 @@ fn card_title_key(
 /// dropdown over the injected roster (scratch always first); ↑↓ move the
 /// highlight, Enter picks it and advances to the agent chips. Repo is REQUIRED —
 /// Enter with the dropdown closed re-opens it (the pointer at scratch) rather
-/// than advancing repo-less. Esc closes an open dropdown, else steps back to the
-/// title input.
+/// than advancing repo-less. Esc closes an open dropdown, else cancels the whole
+/// overlay (single-press abort from any stage).
 fn card_repo_key(
     state: &BoardsState,
     column_id: &str,
@@ -1615,14 +1615,9 @@ fn card_repo_key(
         )
     };
     match (dropdown, key) {
-        // Field closed: `@` opens the dropdown; Esc steps back to the title.
-        (None, BoardsKey::Esc) => set_overlay(
-            state,
-            BoardsOverlay::CardTitle {
-                column_id: column_id.to_string(),
-                title,
-            },
-        ),
+        // Field closed: `@` opens the dropdown; Esc cancels the whole overlay
+        // (single-press abort from any stage — no invisible per-stage back-step).
+        (None, BoardsKey::Esc) => close_overlay(state),
         (None, BoardsKey::Char('@')) => reopen(state, String::new(), Some(0)),
         // Enter with the field closed: in an EDIT, KEEP the card's current repo
         // (prefill) and advance to the agent stage — the user changes the repo only
@@ -1709,8 +1704,7 @@ fn edit_focused_card(state: &BoardsState) -> BoardsReduction {
 
 /// Stage 3 of card create: pick the provider agent chip (spec F1/F4). ↑↓ move
 /// over claude / codex / copilot; Enter advances to the profile pick. Copilot is
-/// selectable (F8 — the dispatch gate fires at run). Esc steps back to the repo
-/// pick.
+/// selectable (F8 — the dispatch gate fires at run). Esc cancels the whole overlay.
 fn card_agent_key(
     state: &BoardsState,
     column_id: &str,
@@ -1731,15 +1725,7 @@ fn card_agent_key(
         )
     };
     match key {
-        BoardsKey::Esc => set_overlay(
-            state,
-            BoardsOverlay::CardRepo {
-                column_id: column_id.to_string(),
-                title,
-                query: String::new(),
-                dropdown: None,
-            },
-        ),
+        BoardsKey::Esc => close_overlay(state),
         BoardsKey::Up => reopen(state, cursor.saturating_sub(1)),
         BoardsKey::Down => reopen(state, (cursor + 1).min(AgentChip::ALL.len() - 1)),
         // The BRANCHED commit point (F6): an EDIT commits here — the agent stage is
@@ -1778,8 +1764,8 @@ fn card_agent_key(
 
 /// Stage 4 of card create: pick the assignee profile. Up/Down move the cursor
 /// over the injected roster; Enter commits the create carrying the title + repo +
-/// agent + profile (with a `None` profile when the roster is empty); Esc steps
-/// back to the agent chips.
+/// agent + profile (with a `None` profile when the roster is empty); Esc cancels
+/// the whole overlay.
 fn card_profile_key(
     state: &BoardsState,
     column_id: &str,
@@ -1803,15 +1789,7 @@ fn card_profile_key(
         )
     };
     match key {
-        BoardsKey::Esc => set_overlay(
-            state,
-            BoardsOverlay::CardAgent {
-                column_id: column_id.to_string(),
-                title,
-                repo_ref,
-                cursor: agent.index(),
-            },
-        ),
+        BoardsKey::Esc => close_overlay(state),
         BoardsKey::Up => reopen(state, cursor.saturating_sub(1)),
         BoardsKey::Down => reopen(state, (cursor + 1).min(n.saturating_sub(1))),
         BoardsKey::Enter => {
@@ -3393,6 +3371,51 @@ mod tests {
         let out = reduce_boards(&s, BoardsEvent::Key(BoardsKey::Esc));
         assert_eq!(out.intent, None);
         assert!(out.state.overlay().is_none(), "Esc closes the overlay");
+    }
+
+    /// Esc is a single-press abort from EVERY create-wizard stage (repo / agent /
+    /// profile), not an invisible per-stage back-step. Regression guard: a user who
+    /// typed a title + Enter landed in the repo stage and pressed Esc/`q` expecting
+    /// to bail; the old back-step left the overlay open (swallowing `q` as text) and
+    /// the board frozen.
+    #[test]
+    fn esc_cancels_from_every_wizard_stage() {
+        let mut state = BoardsState::from_snapshot(&one_board());
+        state.set_profiles(vec!["codex-agent".into()]);
+        // Stage 2 (repo, closed field): Esc closes the whole overlay.
+        let repo = typed_card(&state, "test");
+        let repo = reduce_boards(&repo, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            repo.overlay(),
+            Some(BoardsOverlay::CardRepo { .. })
+        ));
+        let out = reduce_boards(&repo, BoardsEvent::Key(BoardsKey::Esc));
+        assert_eq!(out.intent, None);
+        assert!(out.state.overlay().is_none(), "Esc cancels at repo stage");
+
+        // Stage 3 (agent): drive repo → scratch → agent, then Esc closes.
+        let agent = reduce_boards(&repo, BoardsEvent::Key(BoardsKey::Char('@'))).state;
+        let agent = reduce_boards(&agent, BoardsEvent::Key(BoardsKey::Enter)).state; // scratch → agent
+        assert!(matches!(
+            agent.overlay(),
+            Some(BoardsOverlay::CardAgent { .. })
+        ));
+        let out = reduce_boards(&agent, BoardsEvent::Key(BoardsKey::Esc));
+        assert_eq!(out.intent, None);
+        assert!(out.state.overlay().is_none(), "Esc cancels at agent stage");
+
+        // Stage 4 (profile): Enter at agent → profile, then Esc closes.
+        let profile = reduce_boards(&agent, BoardsEvent::Key(BoardsKey::Enter)).state;
+        assert!(matches!(
+            profile.overlay(),
+            Some(BoardsOverlay::CardProfile { .. })
+        ));
+        let out = reduce_boards(&profile, BoardsEvent::Key(BoardsKey::Esc));
+        assert_eq!(out.intent, None);
+        assert!(
+            out.state.overlay().is_none(),
+            "Esc cancels at profile stage"
+        );
     }
 
     /// A refresh preserves the injected profile roster + an in-flight overlay so a

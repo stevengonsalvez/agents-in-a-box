@@ -25,10 +25,11 @@
 //! it) and only blocks when the *target* is currently an owner and is the *only*
 //! one; demoting one of two owners is allowed.
 //!
-//! `PRAGMA foreign_keys` is off in this crate (mirroring the rest of the repos),
-//! so the `(workspace_id, user_id)` composite PK and the `role` `CHECK` are the
-//! engine-enforced invariants; the role-token validation and last-owner guard
-//! are enforced here in application code.
+//! The `(workspace_id, user_id)` composite PK and the `role` `CHECK` are the
+//! engine-enforced invariants (as are the declared FKs — sqlx enables `PRAGMA
+//! foreign_keys` by default). The role-token validation and the last-owner guard
+//! are semantic rules no constraint can express, so they are enforced here in
+//! application code.
 
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::SqlitePool;

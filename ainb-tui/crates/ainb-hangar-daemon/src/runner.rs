@@ -136,6 +136,18 @@ const CODEX_LOG_FILE: &str = "codex.jsonl";
 const CODEX_EXEC_SUBCOMMAND: &str = "exec";
 /// The codex model flag (`codex exec -m <model> …`).
 const CODEX_MODEL_FLAG: &str = "-m";
+/// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
+/// provider. Its own log keeps a copilot transcript separate from claude/codex.
+const COPILOT_LOG_FILE: &str = "copilot.jsonl";
+/// The copilot flag that permits tool use without an interactive confirmation
+/// prompt. Verified against GitHub Copilot CLI 1.0.68: `--allow-all-tools` is
+/// documented as "required for non-interactive mode", so a headless run without
+/// it stalls on a permission prompt it can never answer (stdin is null). The FS
+/// sandbox + env allowlist remain the real confinement boundary.
+const COPILOT_ALLOW_ALL_TOOLS_FLAG: &str = "--allow-all-tools";
+/// The copilot model flag (`copilot --model <model>`), verified against Copilot
+/// CLI 1.0.68 (`$ copilot --model gpt-5.4`).
+const COPILOT_MODEL_FLAG: &str = "--model";
 
 /// Static configuration for a [`Runner`].
 #[derive(Debug, Clone)]
@@ -146,6 +158,10 @@ pub struct RunnerConfig {
     /// [`Runner::run_codex`] (e38.16); a daemon that never dispatches a codex
     /// task simply never spawns it.
     pub codex_path: PathBuf,
+    /// Absolute path to the `copilot` binary (or a test stand-in script). Used by
+    /// [`Runner::run_copilot`]; a daemon that never dispatches a copilot task
+    /// simply never spawns it.
+    pub copilot_path: PathBuf,
     /// Hard wall-clock deadline; the subprocess is killed past it
     /// ([`FailureReason::Timeout`]). Reference default: 2.5h.
     pub max_runtime: Duration,
@@ -273,10 +289,11 @@ struct UsageBlock {
 
 /// Which provider exec path the daemon routes a task to (e38.16).
 ///
-/// Resolved from the task's agent → runtime → `provider` wire name. An
-/// unrecognised provider falls back to [`Self::Claude`] so a misconfigured or
-/// not-yet-implemented backend still dispatches (rather than stranding the
-/// task) — the same default-to-claude convention the rest of the daemon uses.
+/// Resolved from the task's AGENT `provider` when set (migration 0041), else its
+/// runtime's advertised `provider`. Every wired provider — `claude`, `codex`,
+/// `copilot` — has its own exec path; only a genuinely unrecognised name falls
+/// back to [`Self::Claude`] so a misconfigured agent still dispatches (rather than
+/// stranding the task).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Backend {
     /// The `claude` provider — [`Runner::run_claude`]. The default exec path: a
@@ -285,18 +302,22 @@ pub enum Backend {
     Claude,
     /// The `codex` provider — [`Runner::run_codex`].
     Codex,
+    /// The `copilot` provider (GitHub Copilot CLI) — [`Runner::run_copilot`].
+    Copilot,
 }
 
 impl Backend {
-    /// Resolve a provider wire name (`"claude"`, `"codex"`, …) to a backend.
+    /// Resolve a provider wire name (`"claude"`, `"codex"`, `"copilot"`) to a
+    /// backend.
     ///
-    /// Matching is case-insensitive. Any name that is not a wired exec path maps
-    /// to [`Self::Claude`] (the safe default), mirroring
-    /// [`crate::materialise::ProviderSkillLayout::from_provider`]'s catch-all.
+    /// Matching is case-insensitive. Only a genuinely UNKNOWN name falls back to
+    /// [`Self::Claude`] (the safe default) — every wired provider routes to its own
+    /// exec path, mirroring [`crate::materialise::ProviderSkillLayout::from_provider`].
     #[must_use]
     pub fn from_provider(provider: &str) -> Self {
         match provider.to_ascii_lowercase().as_str() {
             "codex" => Self::Codex,
+            "copilot" => Self::Copilot,
             _ => Self::Claude,
         }
     }
@@ -307,6 +328,7 @@ impl Backend {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
+            Self::Copilot => "copilot",
         }
     }
 }
@@ -331,10 +353,11 @@ pub struct ProviderInvocation {
 ///
 /// The orchestration in [`Runner::run_provider`] is identical across providers;
 /// only these three differ. A new provider is one more `ProviderSpec` builder
-/// (see [`Runner::claude_spec`] / [`Runner::codex_spec`]) rather than a new copy
-/// of the run loop.
+/// (see [`Runner::claude_spec`] / [`Runner::codex_spec`] / [`Runner::copilot_spec`])
+/// rather than a new copy of the run loop.
 struct ProviderSpec {
-    /// The provider's wire name (`"claude"`, `"codex"`), for logs/tracing.
+    /// The provider's wire name (`"claude"`, `"codex"`, `"copilot"`), for
+    /// logs/tracing.
     name: &'static str,
     /// The provider-log file under [`ExecEnv::logs`].
     log_file: &'static str,
@@ -381,7 +404,7 @@ impl Runner {
     /// Build the (tokio) spawn command for `program`, wrapped in the OS-level FS
     /// sandbox when [`RunnerConfig::sandbox`] is on.
     ///
-    /// `program` is the provider binary (claude or codex): every provider spawns
+    /// `program` is the provider binary (claude / codex / copilot): every provider spawns
     /// through this one wrapper, so the codex exec path gets exactly the same
     /// confinement as claude (e38.16). The confinement policy is derived from the
     /// task's [`ExecEnv`]: writes are confined to the task root
@@ -575,6 +598,85 @@ impl Runner {
         .await
     }
 
+    /// Run the `copilot` provider (GitHub Copilot CLI) for one task.
+    ///
+    /// The copilot counterpart of [`Self::run_codex`]: same orchestration
+    /// ([`Self::run_provider`]), same env allowlist + sandbox confinement, its own
+    /// program path, argv, and log file.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_copilot<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+    {
+        self.run_copilot_with_env(env, source_env, std::iter::empty(), invocation).await
+    }
+
+    /// [`Self::run_copilot`], plus per-agent `extra_env` overrides layered onto the
+    /// child env *after* the allowlist filter — the copilot counterpart of
+    /// [`Self::run_codex_with_env`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_copilot_with_env<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        self.run_copilot_in(
+            env,
+            source_env,
+            extra_env,
+            invocation,
+            &RunLocation::in_task_tree(env),
+        )
+        .await
+    }
+
+    /// [`Self::run_copilot_with_env`], but executing in an explicit [`RunLocation`]
+    /// (F5) — the copilot counterpart of [`Self::run_codex_in`].
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_copilot_in<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
+        let spec = Self::copilot_spec(invocation);
+        self.run_provider(
+            &self.cfg.copilot_path,
+            env,
+            source_env,
+            extra_env,
+            spec,
+            location,
+        )
+        .await
+    }
+
     /// The program path + argv for a provider run, WITHOUT spawning it (ccc / D6).
     ///
     /// The interactive tmux path ([`crate::interactive`]) needs the exact program
@@ -593,6 +695,10 @@ impl Runner {
             Backend::Codex => (
                 self.cfg.codex_path.clone(),
                 Self::codex_spec(invocation).argv,
+            ),
+            Backend::Copilot => (
+                self.cfg.copilot_path.clone(),
+                Self::copilot_spec(invocation).argv,
             ),
         }
     }
@@ -618,6 +724,68 @@ impl Runner {
         ProviderSpec {
             name: "codex",
             log_file: CODEX_LOG_FILE,
+            argv,
+        }
+    }
+
+    /// The `copilot` provider spec: copilot log file + `--allow-all-tools`
+    /// [+ `--model <model>`] [+ the agent's `cli_args`].
+    ///
+    /// Flags verified against GitHub Copilot CLI 1.0.68 (`copilot --help`):
+    /// `--allow-all-tools` is "required for non-interactive mode", and `--model`
+    /// is a real flag (`$ copilot --model gpt-5.4`) — so, unlike the interactive
+    /// session launcher's stale "no model flag for these providers" rule, the
+    /// agent's configured `model` IS threaded here. No subcommand is invented
+    /// (copilot has none).
+    ///
+    /// # Permission policy: copilot is granted blanket tool autonomy, claude is not
+    ///
+    /// `--allow-all-tools` auto-approves EVERY tool call in an unattended
+    /// background subprocess, and it is the ONLY provider argv here that does so
+    /// ([`Self::claude_spec`] passes no `--dangerously-skip-permissions`). That
+    /// asymmetry is deliberate, not an oversight:
+    ///
+    /// * It is **mandatory**, not discretionary — Copilot CLI 1.0.68 documents
+    ///   `--allow-all-tools` as "required for non-interactive mode", so a copilot
+    ///   agent without it stalls on a permission prompt it can never answer (stdin
+    ///   is null) and dies. Gating it behind agent config would ship a provider
+    ///   that is broken by default — the "recorded but doesn't actually work"
+    ///   footgun this surface already rejected once. A required flag is not a
+    ///   policy knob.
+    /// * The blast radius is bounded by the FS sandbox (Seatbelt/Landlock) and the
+    ///   deny-by-default env allowlist, but NOT eliminated: within the sandbox the
+    ///   agent may still execute arbitrary commands and reach the network. This is
+    ///   the same trust posture the daemon already warns about at dispatch
+    ///   (`warnings::danger-full-access`), so copilot is not a new exposure class
+    ///   — it is the existing one made explicit in argv.
+    /// * Claude reaches the same place by a different route (its permission
+    ///   behaviour under `--print` differs), so the two are not yet symmetrical.
+    ///   When the `-p` gap below is closed, claude will need this decision too —
+    ///   resolve BOTH providers' permission policy in one pass then, rather than
+    ///   inventing a half-policy here.
+    ///
+    /// # Known gap: no `-p` prompt (headless copilot cannot run yet)
+    ///
+    /// Copilot only runs non-interactively with `-p/--prompt <text>`; bare
+    /// `copilot` starts an INTERACTIVE session. The daemon has no prompt→argv
+    /// plumbing for ANY provider — [`ExecEnv`] carries no prompt and the task
+    /// brief reaches the agent only as `CLAUDE.md` in the workdir (the same reason
+    /// [`Self::claude_spec`] passes no `-p`). So this argv routes and confines
+    /// copilot correctly, but a REAL copilot run would still open a session rather
+    /// than execute the brief. Closing that needs a prompt on `ExecEnv` +
+    /// [`ProviderSpec`], which is a separate change (it affects claude too —
+    /// verified: bare `claude` with a null stdin exits 1 with "Input must be
+    /// provided either through stdin or as a prompt argument when using --print").
+    fn copilot_spec(invocation: &ProviderInvocation) -> ProviderSpec {
+        let mut argv = vec![COPILOT_ALLOW_ALL_TOOLS_FLAG.to_string()];
+        if let Some(model) = &invocation.model {
+            argv.push(COPILOT_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
+        ProviderSpec {
+            name: "copilot",
+            log_file: COPILOT_LOG_FILE,
             argv,
         }
     }

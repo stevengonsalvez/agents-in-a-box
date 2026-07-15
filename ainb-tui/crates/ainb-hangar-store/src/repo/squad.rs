@@ -29,11 +29,13 @@
 //! index is the resolve-or-reject guard: creating a second squad with a name that
 //! already exists in the workspace is rejected with [`SquadRepoError::DuplicateName`].
 //!
-//! `PRAGMA foreign_keys` is off in this crate (mirroring the rest of the repos),
-//! so the `(workspace_id, name)` UNIQUE index, the `(squad_id, member_type,
+//! The `(workspace_id, name)` UNIQUE index, the `(squad_id, member_type,
 //! member_id)` composite PK, the two `leader_type`/`member_type` CHECKs, and the
-//! `squad_id` FK are the engine-enforced invariants; the workspace-scope guard and
-//! the leader-resolution are enforced here in application code.
+//! `squad_id` FK are the engine-enforced invariants (foreign keys ARE on — sqlx
+//! enables `PRAGMA foreign_keys` by default). The actor-ref `_id` halves carry no
+//! FK by design (they are polymorphic), and an FK could not express tenant scope
+//! anyway, so the workspace-scope guard and the leader-resolution are enforced
+//! here in application code.
 
 use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::ids::WorkspaceId;

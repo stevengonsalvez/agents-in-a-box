@@ -50,6 +50,10 @@ pub mod board;
 /// cancel RPC uses to signal the claim loop to stop a live run (headless process
 /// group / interactive tmux session). See [`cancel::registry`].
 pub mod cancel;
+/// Fresh-home boot seed: lay down the default workspace + runtime + one starter
+/// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
+/// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.
+pub mod default_home;
 /// Env allowlist config + task-env builder (P5.3).
 ///
 /// Loads/saves `~/.agents-in-a-box/hangar/env.allow.toml` (foreign sections preserved,
@@ -322,11 +326,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
     let store: Store = Store::open_in(&dir).await?;
 
-    // e38.20: self-register this daemon's runtime so a real (non-test) boot
-    // advertises an `agent_runtime` row the claim loop, agent picker, and
-    // daemon-health pane all key off. A failure here is non-fatal (logged +
-    // swallowed inside the helper) — the daemon must still sweep + serve.
-    crate::runtime_register::self_register_from_env(store.pool()).await;
+    // Fresh-home boot seed: lay down the default workspace + runtime + one
+    // starter agent so an empty home "just works" (a runtime shows in the Daemon
+    // pane, the agent picker is non-empty, and the Squad create gate is already
+    // cleared). Idempotent + non-clobbering, and it self-registers the runtime
+    // under the SAME default id the claim loop keys off (subsuming the old
+    // e38.20 self-register). A failure is non-fatal — the daemon must still
+    // sweep + serve — so it is logged and swallowed here.
+    if let Err(e) = crate::default_home::ensure_default_home(store.pool()).await {
+        tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
+    }
 
     // P8.5: the in-memory health stats collector — shared between the RPC server
     // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
@@ -527,6 +536,14 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     if once {
         return Ok(());
     }
-    let cfg = DaemonConfig::from_env();
+    let mut cfg = DaemonConfig::from_env();
+    // The claim loop MUST key off the runtime id that is actually registered (and
+    // that the seeded/created agents are bound to). A runtime cannot be renamed —
+    // `agent.runtime_id` is an enforced FK — so an existing row's id wins over a
+    // changed `HANGAR_DAEMON_RUNTIME_ID` (which is warned about, not obeyed).
+    // Resolving here keeps the registered row, the agents, and the claim loop on
+    // ONE id instead of claiming for an id nothing is bound to.
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
+    cfg.runtime_id = Some(crate::runtime_register::effective_runtime_id(store.pool(), now).await);
     run(store.pool().clone(), cfg, stats, broker.sink()).await
 }

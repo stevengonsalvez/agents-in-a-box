@@ -195,6 +195,7 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
             mcp_config: None,
             thinking: None,
             agent_env: Vec::new(),
+            provider: None,
         },
     )
     .await?;

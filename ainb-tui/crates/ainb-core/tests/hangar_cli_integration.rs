@@ -427,6 +427,7 @@ fn seed_agent(home: &std::path::Path) {
                 mcp_config: None,
                 thinking: None,
                 agent_env: Vec::new(),
+                provider: None,
             },
         )
         .await
@@ -580,6 +581,59 @@ fn agent_list_on_empty_db_is_clean_noop() {
     let (ok, out) = run(tmp.path(), &["hangar", "agent", "list"]);
     assert!(ok, "agent list on empty db should exit 0; out={out}");
     assert!(out.contains("no agents"), "expected empty marker:\n{out}");
+}
+
+/// `ainb hangar agent create --name` on a fresh home lays down the default
+/// workspace/runtime/owner behind the scenes, inserts the agent, and prints its
+/// NAME (never an id). A follow-up `agent list` shows it, and an unsupported
+/// provider is a clean error.
+#[test]
+fn agent_create_on_fresh_home_inserts_and_lists() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "reviewer",
+            "--provider",
+            "codex",
+        ],
+    );
+    assert!(ok, "agent create should exit 0 on a fresh home; out={out}");
+    assert!(
+        out.contains("created agent reviewer"),
+        "missing create ack (by name):\n{out}"
+    );
+
+    let (ok, out) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(ok, "agent list should exit 0; out={out}");
+    assert!(
+        out.contains("reviewer"),
+        "created agent not in list:\n{out}"
+    );
+
+    // An unsupported provider is rejected, not silently coerced.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "x",
+            "--provider",
+            "gpt5",
+        ],
+    );
+    assert!(!ok, "an unsupported provider must fail; out={out}");
+    assert!(
+        out.contains("unsupported provider"),
+        "missing provider error:\n{out}"
+    );
 }
 
 /// Create an issue via the CLI and return its id (pulled from the create ack).
@@ -1000,6 +1054,7 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 mcp_config: None,
                 thinking: None,
                 agent_env: Vec::new(),
+                provider: None,
             },
         )
         .await
