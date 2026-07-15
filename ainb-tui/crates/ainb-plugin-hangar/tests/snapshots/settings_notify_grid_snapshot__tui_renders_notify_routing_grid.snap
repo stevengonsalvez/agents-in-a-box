@@ -4,7 +4,12 @@ expression: map
 ---
   Daemon
     /tmp/hangar.sock · ● connected
-      Auto-standup: ○ off  ·  [a] toggle
+      Auto-standup: ○ off
+      Stagnant minutes: 15
+      Cooldown minutes: 60
+      Max concurrent: 1
+      Default agent: claude
+    J/K move · enter/space edit · [a] auto-standup
   Providers
   LLM Keys
   Workspaces

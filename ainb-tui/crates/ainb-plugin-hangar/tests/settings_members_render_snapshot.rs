@@ -80,21 +80,23 @@ fn tui_renders_members_with_roles() {
     render_settings(&mut buf, 60, 14, 0, 14, &s);
 
     let map = glyph_map(&buf, 60);
-    // POSITIVE: both members render under the Members section as `email · role`.
+    // POSITIVE: the Daemon section lists every config knob, and both members render
+    // under the Members section as `email · role`.
     insta::assert_snapshot!(map, @r###"
       Daemon
         /tmp/hangar.sock · ● connected
-          Auto-standup: ○ off  ·  [a] toggle
+          Auto-standup: ○ off
+          Stagnant minutes: 15
+          Cooldown minutes: 60
+          Max concurrent: 1
+          Default agent: claude
+        J/K move · enter/space edit · [a] auto-standup
       Providers
       LLM Keys
       Workspaces
     ▶ Members
         amy@x.io · owner
         bob@x.io · admin
-      Notifications
-        scope: global · [g] toggle
-                      phone   web     os      atc
-        J/K kind · h/l channel · space toggle
     "###);
 
     // NON-VACUOUS COLOUR CHECK: the owner row's glyphs paint in `SELECTION_GREEN`.
