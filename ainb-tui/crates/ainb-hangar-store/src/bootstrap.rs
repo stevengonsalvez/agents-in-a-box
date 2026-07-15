@@ -202,32 +202,46 @@ pub async fn ensure_default_workspace(pool: &SqlitePool) -> Result<String, sqlx:
 /// runtime therefore CANNOT be renamed after first boot: if a caller passes a
 /// different `runtime_id` for an existing `(workspace, daemon, provider)` tuple
 /// (e.g. a changed `HANGAR_DAEMON_RUNTIME_ID`), this refreshes the EXISTING row's
-/// `status`/`last_seen_at` and keeps its original `id`. Boot resolves the
-/// effective claim id from the existing row up front (see the daemon's
+/// `status`/`last_seen_at`, keeps its original `id`, and RETURNS that id. Boot
+/// takes the daemon's claim id from this same call (see the daemon's
 /// `effective_runtime_id`), so the registered row, the agents bound to it, and the
 /// claim loop all stay aligned — no drift, no stranding, no FK error.
 ///
-/// Returns `Ok(true)` when a row was written/refreshed, `Ok(false)` when there is
-/// no workspace to attach to yet (a benign no-op).
+/// Returns `Ok(Some(id))` — the id the row ACTUALLY settled on, which is the
+/// pre-existing id when one was already registered and `runtime_id` otherwise —
+/// or `Ok(None)` when there is no workspace to attach to yet (a benign no-op).
+///
+/// Returning the settled id makes this the single atomic resolve+register: a
+/// caller binds what demonstrably exists rather than re-reading (a read-then-write
+/// race where a concurrent daemon registered a different id between the read and
+/// the insert would otherwise FK-fail the caller's insert).
 ///
 /// # Errors
 ///
-/// Returns a [`sqlx::Error`] if the workspace lookup or the upsert fails.
+/// Returns a [`sqlx::Error`] if the workspace lookup or the upsert fails. It never
+/// FK-errors (the `id` is never rewritten); a `UNIQUE constraint failed:
+/// agent_runtime.id` can still surface if the CONFIGURED id already exists under a
+/// DIFFERENT `(workspace, daemon, provider)` tuple — a genuine misconfiguration,
+/// reported here rather than silently mis-binding an agent later.
 pub async fn ensure_runtime(
     pool: &SqlitePool,
     runtime_id: &str,
     now_ms: i64,
-) -> Result<bool, sqlx::Error> {
+) -> Result<Option<String>, sqlx::Error> {
     let Some(workspace_id) = find_default_workspace(pool).await? else {
-        return Ok(false);
+        return Ok(None);
     };
-    sqlx::query(
+    // One statement: insert-or-refresh and hand back the id that now owns the
+    // tuple. `DO UPDATE` (not `DO NOTHING`) is what makes `RETURNING` yield the
+    // existing row on the conflict path.
+    let settled: String = sqlx::query_scalar(
         "INSERT INTO agent_runtime \
          (id, workspace_id, daemon_id, provider, runtime_mode, last_seen_at, status) \
          VALUES (?, ?, ?, ?, ?, ?, 'online') \
          ON CONFLICT(workspace_id, daemon_id, provider) DO UPDATE SET \
            status = 'online', \
-           last_seen_at = excluded.last_seen_at",
+           last_seen_at = excluded.last_seen_at \
+         RETURNING id",
     )
     .bind(runtime_id)
     .bind(&workspace_id)
@@ -235,69 +249,30 @@ pub async fn ensure_runtime(
     .bind(DEFAULT_PROVIDER)
     .bind(SELF_RUNTIME_MODE)
     .bind(now_ms)
-    .execute(pool)
+    .fetch_one(pool)
     .await?;
-    Ok(true)
-}
-
-/// The id of the host runtime already registered for this daemon's
-/// `(workspace, daemon_id, provider)` tuple, or `None` when none exists yet.
-///
-/// Because a runtime cannot be renamed after first boot (its `id` is an FK
-/// target), an existing row's id is the identity the claim loop, the registered
-/// row, and every bound agent must all use.
-///
-/// # Errors
-///
-/// Returns a [`sqlx::Error`] if the lookup fails.
-pub async fn existing_host_runtime_id(pool: &SqlitePool) -> Result<Option<String>, sqlx::Error> {
-    let Some(workspace_id) = find_default_workspace(pool).await? else {
-        return Ok(None);
-    };
-    sqlx::query_scalar(
-        "SELECT id FROM agent_runtime \
-         WHERE workspace_id = ? AND daemon_id = ? AND provider = ? LIMIT 1",
-    )
-    .bind(&workspace_id)
-    .bind(SELF_DAEMON_ID)
-    .bind(DEFAULT_PROVIDER)
-    .fetch_optional(pool)
-    .await
-}
-
-/// Resolve the runtime id a new agent binds to (and the daemon claims for).
-///
-/// The EXISTING host runtime's id when one is registered — a runtime cannot be
-/// renamed, so its id wins — else the configured/default id
-/// ([`default_runtime_id`]) for a brand-new home. Keeping create and claim on this
-/// one resolver is what keeps a created agent bound to the runtime the daemon
-/// actually claims for.
-///
-/// # Errors
-///
-/// Returns a [`sqlx::Error`] if the lookup fails.
-pub async fn resolve_runtime_id(pool: &SqlitePool) -> Result<String, sqlx::Error> {
-    Ok(existing_host_runtime_id(pool).await?.unwrap_or_else(default_runtime_id))
+    Ok(Some(settled))
 }
 
 /// Create one agent from scratch, filling every FK behind the scenes.
 ///
-/// Binds the default runtime (ensuring its row exists), resolves the default
-/// owner, mints a fresh id, and inserts. The caller supplies only the human
-/// `name` (+ an already-normalised `provider` and optional `instructions`).
+/// Ensures the host runtime and binds the id that upsert SETTLED on, resolves the
+/// default owner, mints a fresh id, and inserts. The caller supplies only the
+/// human `name` (+ an already-normalised `provider` and optional `instructions`).
 ///
 /// The returned [`Agent`] carries the minted id so a caller can route to it
 /// (e.g. as a squad leader). `provider` is recorded on the row and HONOURED at
 /// dispatch: the agent binds the single host runtime (an execution slot the claim
 /// loop keys off by id, not by provider), and the daemon spawns the recorded
-/// provider's backend per task — so a `codex` agent runs codex. The agent binds
-/// the EXISTING runtime id when one is registered ([`resolve_runtime_id`]), so a
-/// created agent is always on the runtime the daemon actually claims for.
+/// provider's backend per task — so a `codex` agent runs codex. Binding the id
+/// [`ensure_runtime`] returned (rather than re-reading it) means the agent is
+/// always on a runtime that demonstrably exists — no read-then-write window in
+/// which a concurrent daemon could register a different id and FK-fail this insert.
 ///
 /// # Errors
 ///
-/// Returns a [`sqlx::Error`] if the workspace has no owner user yet (the FK could
-/// not be filled) or if the runtime upsert / agent insert fails.
+/// Returns a [`sqlx::Error`] if there is no workspace / owner user yet (the FK
+/// could not be filled) or if the runtime upsert / agent insert fails.
 pub async fn create_agent(
     pool: &SqlitePool,
     workspace_id: &str,
@@ -305,14 +280,14 @@ pub async fn create_agent(
     provider: &str,
     instructions: Option<String>,
 ) -> Result<Agent, sqlx::Error> {
-    // Bind the runtime the daemon actually claims for: the existing host runtime
-    // when one is registered (a runtime cannot be renamed), else the default.
-    let runtime_id = resolve_runtime_id(pool).await?;
     let now = SystemClock.now_ms();
-    // The agent's runtime FK must exist; ensure it before the insert. A fresh
-    // home may not have registered a runtime yet (the CLI create path runs with
-    // no daemon), so this makes the create self-sufficient.
-    ensure_runtime(pool, &runtime_id, now).await?;
+    // ONE atomic upsert: ensure the runtime FK exists (a fresh home may have none
+    // — the CLI create path runs with no daemon) and take back the id it settled
+    // on, which is the pre-existing runtime's id when one is already registered
+    // (a runtime cannot be renamed) and the configured default otherwise.
+    let runtime_id = ensure_runtime(pool, &default_runtime_id(), now)
+        .await?
+        .ok_or(sqlx::Error::RowNotFound)?;
 
     let owner_id = default_owner_id(pool).await?.ok_or_else(|| sqlx::Error::RowNotFound)?;
 
@@ -432,17 +407,22 @@ mod tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         let pool = store.pool();
 
-        assert!(
-            !ensure_runtime(pool, "default", 1_000).await.unwrap(),
+        assert_eq!(
+            ensure_runtime(pool, "default", 1_000).await.unwrap(),
+            None,
             "no workspace ⇒ no-op"
         );
         ensure_default_workspace(pool).await.unwrap();
-        assert!(
-            ensure_runtime(pool, "default", 1_000).await.unwrap(),
-            "workspace ⇒ upsert"
+        assert_eq!(
+            ensure_runtime(pool, "default", 1_000).await.unwrap().as_deref(),
+            Some("default"),
+            "workspace ⇒ upsert, returning the id it settled on"
         );
         // A restart upserts, never duplicates.
-        assert!(ensure_runtime(pool, "default", 2_000).await.unwrap());
+        assert_eq!(
+            ensure_runtime(pool, "default", 2_000).await.unwrap().as_deref(),
+            Some("default")
+        );
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime")
             .fetch_one(pool)
             .await
@@ -468,17 +448,23 @@ mod tests {
 
         // First boot registers the runtime; an agent binds it (the FK that makes a
         // rename impossible).
-        assert!(ensure_runtime(pool, "runtime-a", 1_000).await.unwrap());
+        assert_eq!(
+            ensure_runtime(pool, "runtime-a", 1_000).await.unwrap().as_deref(),
+            Some("runtime-a")
+        );
         let agent = create_agent(pool, &ws, "bound", "claude", None).await.unwrap();
         assert_eq!(
             agent.runtime_id, "runtime-a",
             "the agent binds the existing runtime"
         );
 
-        // (a) A later boot with a DIFFERENT configured id must NOT error.
-        assert!(
-            ensure_runtime(pool, "runtime-b", 2_000).await.unwrap(),
-            "a changed runtime id must refresh the existing row, never FK-error"
+        // (a) A later boot with a DIFFERENT configured id must NOT error, and must
+        //     report back the EXISTING id it settled on (never the configured one).
+        assert_eq!(
+            ensure_runtime(pool, "runtime-b", 2_000).await.unwrap().as_deref(),
+            Some("runtime-a"),
+            "a changed runtime id must refresh the existing row (never FK-error) and \
+             return the id actually in use"
         );
 
         // (b) Still exactly one runtime row.
@@ -505,10 +491,12 @@ mod tests {
                 .is_none(),
             "the configured-but-rejected id never became a row"
         );
+        // A fresh agent created AFTER the rename attempt still binds the existing
+        // runtime — create takes its id from the same atomic ensure.
+        let later = create_agent(pool, &ws, "later", "codex", None).await.unwrap();
         assert_eq!(
-            existing_host_runtime_id(pool).await.unwrap().as_deref(),
-            Some("runtime-a"),
-            "the resolver reports the existing id as the one to bind/claim"
+            later.runtime_id, "runtime-a",
+            "a later create binds the id in use, not the configured one"
         );
 
         // (d) The agent is not orphaned: its FK still resolves to a live runtime.

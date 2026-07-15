@@ -279,14 +279,12 @@ pub async fn run(
         Arc::new(SystemClock),
     );
 
-    if cfg.disable_claim || cfg.runtime_id.is_none() {
+    let Some(runtime_id) = cfg.runtime_id.clone().filter(|_| !cfg.disable_claim) else {
         tracing::info!(claim = false, "claim loop disabled; sweepers only");
         tokio::signal::ctrl_c().await?;
         tracing::info!("ainb-hangar-daemon shutting down");
         return Ok(());
-    }
-
-    let runtime_id = cfg.runtime_id.clone().expect("runtime_id present");
+    };
 
     // e38.25 crash recovery: this daemon just booted, so any task still frozen
     // `dispatched`/`running` for its runtime is an orphan from a previous

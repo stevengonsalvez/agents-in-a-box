@@ -39,14 +39,17 @@ const STARTER_AGENT_NAME: &str = "claude";
 /// boot path logs and swallows this — a seed failure must never down the daemon.
 pub async fn ensure_default_home(pool: &SqlitePool) -> Result<()> {
     let workspace_id = bootstrap::ensure_default_workspace(pool).await?;
-    // An already-registered runtime's id wins (a runtime cannot be renamed), so
-    // the seed, the claim loop, and every bound agent stay on ONE id.
-    let runtime_id = crate::runtime_register::effective_runtime_id(pool).await;
     let now = SystemClock.now_ms();
-    // Self-register the host runtime (logs the outcome, swallows a transient
-    // failure). The starter-agent create below re-ensures the runtime, so a
-    // swallowed error here still surfaces if it would strand the agent's FK.
-    crate::runtime_register::self_register(pool, &runtime_id, now).await;
+    // Self-register the host runtime (and resolve its effective id) in one atomic
+    // upsert: an already-registered runtime's id wins — a runtime cannot be
+    // renamed — so the seed, the claim loop, and every bound agent stay on ONE id.
+    // Called for the registration + the "configured id ignored" warning; the
+    // returned id is not needed here because `create_agent` below takes the id
+    // from its own atomic ensure. Registering here matters even when the starter
+    // agent is skipped (an existing roster), so the runtime still shows online.
+    // A transient failure is swallowed inside — the create re-ensures and would
+    // surface anything that actually strands the agent's FK.
+    let _effective = crate::runtime_register::effective_runtime_id(pool, now).await;
 
     // Non-clobber guard: seed a starter agent ONLY when the workspace has none.
     // A user who made/renamed/archived their own agent keeps count > 0 → skip;
