@@ -49,16 +49,12 @@ use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 
 use crate::cli::OutputFormat;
 
-/// Default workspace bootstrapped when the Hangar database has no workspace yet.
+/// The default workspace slug + owner details now live in
+/// [`ainb_hangar_store::bootstrap`] — the single shared, idempotent lay-down the
+/// CLI, the daemon boot seed, and `agent_create` all delegate to. The wrappers
+/// [`ensure_default_workspace`] / [`find_default_workspace`] / [`default_owner_id`]
+/// keep the existing CLI callers untouched.
 ///
-/// The CLI is usable standalone (no daemon / TUI onboarding required), so
-/// `issue create` lazily lays down a single workspace + owner the first time it
-/// runs. Mirrors the single-workspace-at-v1 reality (migration 0001 docs).
-const DEFAULT_WORKSPACE_SLUG: &str = "default";
-/// Human name of the bootstrapped default workspace.
-const DEFAULT_WORKSPACE_NAME: &str = "Default Workspace";
-/// Email of the bootstrapped owner user.
-const DEFAULT_OWNER_EMAIL: &str = "stevie@local";
 /// Member id used as the default issue creator (`member:stevie`).
 const DEFAULT_CREATOR_ID: &str = "stevie";
 /// Lifecycle state a freshly-created issue lands in.
@@ -3178,12 +3174,9 @@ async fn resolve_agent_runtime(
 
 /// Return the default workspace id, or `None` if no workspace exists yet.
 async fn find_default_workspace(store: &Store) -> Result<Option<String>> {
-    let id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM workspace ORDER BY created_at LIMIT 1")
-            .fetch_optional(store.pool())
-            .await
-            .context("query default workspace")?;
-    Ok(id)
+    ainb_hangar_store::bootstrap::find_default_workspace(store.pool())
+        .await
+        .context("query default workspace")
 }
 
 /// Return the default workspace id, lazily bootstrapping a workspace + owner
@@ -3194,41 +3187,9 @@ async fn find_default_workspace(store: &Store) -> Result<Option<String>> {
 /// (FK-less by design, per the actor module), so the member row is informational
 /// but kept consistent. Idempotent: a second call returns the existing id.
 async fn ensure_default_workspace(store: &Store) -> Result<String> {
-    if let Some(id) = find_default_workspace(store).await? {
-        return Ok(id);
-    }
-    let pool = store.pool();
-    let idgen = SystemIdGen;
-    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
-    let workspace_id = idgen.new_ulid();
-    let user_id = idgen.new_ulid();
-
-    // The workspace's `issue_prefix` is left NULL ("no explicit prefix"): the
-    // HGR default issue id (63l.3) lives at the display layer
-    // (`issue_display_id`), not the stored column, so a fresh issue's TITLE stays
-    // verbatim while its display id still reads HGR-1, HGR-2, ….
-    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&workspace_id)
-        .bind(DEFAULT_WORKSPACE_SLUG)
-        .bind(DEFAULT_WORKSPACE_NAME)
-        .bind(now)
-        .execute(pool)
+    ainb_hangar_store::bootstrap::ensure_default_workspace(store.pool())
         .await
-        .context("bootstrap default workspace")?;
-    sqlx::query("INSERT INTO user (id, email, created_at) VALUES (?, ?, ?)")
-        .bind(&user_id)
-        .bind(DEFAULT_OWNER_EMAIL)
-        .bind(now)
-        .execute(pool)
-        .await
-        .context("bootstrap default owner user")?;
-    sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, ?, 'owner')")
-        .bind(&workspace_id)
-        .bind(&user_id)
-        .execute(pool)
-        .await
-        .context("bootstrap default member")?;
-    Ok(workspace_id)
+        .context("bootstrap default workspace")
 }
 
 /// Read a workspace's configured `issue_prefix` by id (e38.21).
@@ -3253,11 +3214,9 @@ async fn workspace_issue_prefix(
 /// Return the default owner user id (the first user, oldest first), or `None`
 /// if no user exists yet.
 async fn default_owner_id(store: &Store) -> Result<Option<String>> {
-    let id: Option<String> = sqlx::query_scalar("SELECT id FROM user ORDER BY created_at LIMIT 1")
-        .fetch_optional(store.pool())
+    ainb_hangar_store::bootstrap::default_owner_id(store.pool())
         .await
-        .context("query default owner user")?;
-    Ok(id)
+        .context("query default owner user")
 }
 
 // ──────────────────────────────────────────────────────────────────────────

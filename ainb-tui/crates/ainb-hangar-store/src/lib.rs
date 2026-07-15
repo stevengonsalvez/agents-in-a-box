@@ -18,6 +18,12 @@ use sqlx::SqlitePool;
 mod store;
 pub use store::Store;
 
+/// Fresh-home bootstrap: the idempotent default workspace + owner + runtime +
+/// starter-agent lay-down every entry point (CLI, daemon boot, `agent_create`)
+/// shares, plus the stable [`bootstrap::default_runtime_id`] the seed and the
+/// daemon's claim loop both key off.
+pub mod bootstrap;
+
 /// Typed repository wrappers over the Hangar schema.
 ///
 /// One sub-module per logical table group: [`repo::agent`],
