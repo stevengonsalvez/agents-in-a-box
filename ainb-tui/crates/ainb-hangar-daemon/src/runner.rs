@@ -738,6 +738,32 @@ impl Runner {
     /// agent's configured `model` IS threaded here. No subcommand is invented
     /// (copilot has none).
     ///
+    /// # Permission policy: copilot is granted blanket tool autonomy, claude is not
+    ///
+    /// `--allow-all-tools` auto-approves EVERY tool call in an unattended
+    /// background subprocess, and it is the ONLY provider argv here that does so
+    /// ([`Self::claude_spec`] passes no `--dangerously-skip-permissions`). That
+    /// asymmetry is deliberate, not an oversight:
+    ///
+    /// * It is **mandatory**, not discretionary — Copilot CLI 1.0.68 documents
+    ///   `--allow-all-tools` as "required for non-interactive mode", so a copilot
+    ///   agent without it stalls on a permission prompt it can never answer (stdin
+    ///   is null) and dies. Gating it behind agent config would ship a provider
+    ///   that is broken by default — the "recorded but doesn't actually work"
+    ///   footgun this surface already rejected once. A required flag is not a
+    ///   policy knob.
+    /// * The blast radius is bounded by the FS sandbox (Seatbelt/Landlock) and the
+    ///   deny-by-default env allowlist, but NOT eliminated: within the sandbox the
+    ///   agent may still execute arbitrary commands and reach the network. This is
+    ///   the same trust posture the daemon already warns about at dispatch
+    ///   (`warnings::danger-full-access`), so copilot is not a new exposure class
+    ///   — it is the existing one made explicit in argv.
+    /// * Claude reaches the same place by a different route (its permission
+    ///   behaviour under `--print` differs), so the two are not yet symmetrical.
+    ///   When the `-p` gap below is closed, claude will need this decision too —
+    ///   resolve BOTH providers' permission policy in one pass then, rather than
+    ///   inventing a half-policy here.
+    ///
     /// # Known gap: no `-p` prompt (headless copilot cannot run yet)
     ///
     /// Copilot only runs non-interactively with `-p/--prompt <text>`; bare
@@ -747,7 +773,9 @@ impl Runner {
     /// [`Self::claude_spec`] passes no `-p`). So this argv routes and confines
     /// copilot correctly, but a REAL copilot run would still open a session rather
     /// than execute the brief. Closing that needs a prompt on `ExecEnv` +
-    /// [`ProviderSpec`], which is a separate change (it affects claude too).
+    /// [`ProviderSpec`], which is a separate change (it affects claude too —
+    /// verified: bare `claude` with a null stdin exits 1 with "Input must be
+    /// provided either through stdin or as a prompt argument when using --print").
     fn copilot_spec(invocation: &ProviderInvocation) -> ProviderSpec {
         let mut argv = vec![COPILOT_ALLOW_ALL_TOOLS_FLAG.to_string()];
         if let Some(model) = &invocation.model {

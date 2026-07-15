@@ -11,17 +11,18 @@
 //!
 //! # The stable-runtime invariant (correctness-critical)
 //!
-//! Every seeded / created agent binds [`resolve_runtime_id`], and the daemon's
-//! claim loop + self-register resolve the SAME id. If they diverged, an agent
-//! would bind a runtime the daemon never claims for and its tasks would never
-//! run. This module is the single source of that id, so the callers cannot drift.
+//! Every seeded / created agent binds the id [`ensure_runtime`] returns, and the
+//! daemon's claim loop + self-register resolve the SAME id through that same
+//! call. If they diverged, an agent would bind a runtime the daemon never claims
+//! for and its tasks would never run. That one atomic upsert is the single source
+//! of the id, so the callers cannot drift.
 //!
 //! A runtime **cannot be renamed** after first boot: `agent.runtime_id` is an
 //! enforced `REFERENCES agent_runtime(id)` FK (sqlx sets `PRAGMA foreign_keys = ON`),
 //! so an already-registered runtime's id always WINS over a changed
-//! `HANGAR_DAEMON_RUNTIME_ID` / [`DEFAULT_RUNTIME_ID`]. Only a brand-new home
-//! adopts the configured id ([`resolve_runtime_id`]); the daemon warns when it
-//! ignores a configured id.
+//! `HANGAR_DAEMON_RUNTIME_ID` / [`crate::bootstrap::DEFAULT_RUNTIME_ID`]. Only a brand-new
+//! home adopts the configured id (again via [`ensure_runtime`], which RETURNS the
+//! id it settled on); the daemon warns when it ignores a configured id.
 //!
 //! Every function here is idempotent and non-clobbering: it finds-or-creates and
 //! never rewrites or deletes a user's own rows, so calling it on every boot is
@@ -44,8 +45,8 @@ pub const DEFAULT_OWNER_EMAIL: &str = "stevie@local";
 /// Stable id used for the host runtime on a BRAND-NEW home.
 ///
 /// Once a runtime row exists its id wins forever (a runtime cannot be renamed —
-/// see the module docs), so this is only the first-boot default; use
-/// [`resolve_runtime_id`] to get the id actually in use.
+/// see the module docs), so this is only the first-boot default; take the id
+/// actually in use from [`ensure_runtime`]'s return value.
 pub const DEFAULT_RUNTIME_ID: &str = "default";
 
 /// The provider a freshly-seeded starter agent (and the self-registered runtime)
@@ -72,8 +73,8 @@ const SELF_RUNTIME_MODE: &str = "local";
 ///
 /// This is only the first-boot identity. Once a runtime is registered its id wins
 /// (a runtime cannot be renamed), so callers that need the id actually in use must
-/// go through [`resolve_runtime_id`] — the seam the seed, the claim loop, and
-/// `agent_create` all share.
+/// take it from [`ensure_runtime`]'s return value — the seam the seed, the claim
+/// loop, and `agent_create` all share.
 #[must_use]
 pub fn default_runtime_id() -> String {
     std::env::var("HANGAR_DAEMON_RUNTIME_ID")
@@ -219,10 +220,13 @@ pub async fn ensure_default_workspace(pool: &SqlitePool) -> Result<String, sqlx:
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] if the workspace lookup or the upsert fails. It never
-/// FK-errors (the `id` is never rewritten); a `UNIQUE constraint failed:
-/// agent_runtime.id` can still surface if the CONFIGURED id already exists under a
-/// DIFFERENT `(workspace, daemon, provider)` tuple — a genuine misconfiguration,
-/// reported here rather than silently mis-binding an agent later.
+/// FK-errors (the `id` is never rewritten). A `UNIQUE constraint failed:
+/// agent_runtime.id` can surface if the CONFIGURED id already exists under a
+/// DIFFERENT `(workspace, daemon, provider)` tuple: the `ON CONFLICT` target is the
+/// tuple, so a PK collision is not caught by it. That is unreachable in production
+/// — nothing outside tests writes a second `agent_runtime` row — and it is a
+/// genuine misconfiguration (two daemons/providers claiming one id), so erroring is
+/// the right answer.
 pub async fn ensure_runtime(
     pool: &SqlitePool,
     runtime_id: &str,
