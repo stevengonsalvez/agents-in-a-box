@@ -132,6 +132,7 @@ exit 0"#,
     );
     let runner = Runner::new(cfg_with_codex(script));
     let invocation = ProviderInvocation {
+        prompt: String::new(),
         model: Some("gpt-5-codex".to_string()),
         cli_args: vec!["--full-auto".to_string()],
     };

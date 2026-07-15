@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ainb_hangar_daemon::execenv::ExecEnv;
-use ainb_hangar_daemon::runner::{RunOutcome, Runner, RunnerConfig};
+use ainb_hangar_daemon::runner::{ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use ainb_hangar_store::service::fail::FailureReason;
 use tempfile::TempDir;
 
@@ -96,7 +96,14 @@ exit 0"#,
         ("HOME".to_string(), tmp.path().display().to_string()),
     ];
 
-    let outcome = runner.run_claude(&env, overrides.iter().cloned()).await.expect("run");
+    let outcome = runner
+        .run_claude(
+            &env,
+            overrides.iter().cloned(),
+            &ProviderInvocation::default(),
+        )
+        .await
+        .expect("run");
     let result = outcome.result();
 
     assert!(
@@ -127,7 +134,10 @@ async fn exec_captures_exit_code() {
         sandbox: true,
     });
 
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
 
     assert_eq!(outcome.result().exit_code, Some(0));
     assert!(matches!(outcome, RunOutcome::Success(_)));
@@ -157,7 +167,10 @@ exit 0"#,
         sandbox: true,
     });
 
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
     let usage = outcome.result().usage.clone().expect("usage captured from result line");
     assert_eq!(usage.input_tokens, 1200);
     assert_eq!(usage.output_tokens, 340);
@@ -180,7 +193,10 @@ async fn exec_no_result_usage_leaves_usage_none() {
         sandbox: true,
     });
 
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
     assert!(
         outcome.result().usage.is_none(),
         "a result line without usage leaves usage None"
@@ -208,7 +224,10 @@ exit 1"#,
         sandbox: true,
     });
 
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
 
     match outcome {
         RunOutcome::Failed { reason, result } => {
@@ -243,7 +262,10 @@ exit 75"#,
         sandbox: true,
     });
 
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
 
     match outcome {
         RunOutcome::Failed { reason, result } => {
@@ -278,7 +300,10 @@ exit 0"#,
         sandbox: true,
     });
 
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
 
     assert_eq!(
         outcome.result().session_id.as_deref(),
@@ -310,7 +335,10 @@ exit 0"#,
         sandbox: true,
     });
 
-    runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
 
     let jsonl = env.logs.join("claude.jsonl");
     assert!(jsonl.exists(), "expected claude.jsonl at {jsonl:?}");
@@ -347,7 +375,10 @@ exit 0"#,
     });
 
     let started = std::time::Instant::now();
-    let outcome = runner.run_claude(&env, std::iter::empty()).await.expect("run");
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
+        .await
+        .expect("run");
     let elapsed = started.elapsed();
 
     assert!(

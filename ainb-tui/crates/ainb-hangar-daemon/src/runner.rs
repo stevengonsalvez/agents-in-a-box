@@ -139,6 +139,15 @@ const CODEX_MODEL_FLAG: &str = "-m";
 /// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
 /// provider. Its own log keeps a copilot transcript separate from claude/codex.
 const COPILOT_LOG_FILE: &str = "copilot.jsonl";
+/// The claude non-interactive prompt flag. Verified against Claude Code 2.1.210:
+/// "starts an interactive session by default, use -p/--print for non-interactive
+/// output".
+const CLAUDE_PROMPT_FLAG: &str = "-p";
+/// The claude model flag (`claude --model <model>`).
+const CLAUDE_MODEL_FLAG: &str = "--model";
+/// The copilot non-interactive prompt flag (`copilot -p "<text>"`). Verified
+/// against Copilot CLI 1.0.68: "Execute a prompt in non-interactive mode".
+const COPILOT_PROMPT_FLAG: &str = "-p";
 /// The copilot flag that permits tool use without an interactive confirmation
 /// prompt. Verified against GitHub Copilot CLI 1.0.68: `--allow-all-tools` is
 /// documented as "required for non-interactive mode", so a headless run without
@@ -333,14 +342,24 @@ impl Backend {
     }
 }
 
-/// The per-agent provider config the runner threads into a provider's argv
-/// (e38.16). Sourced from the agent row's migration-0015 config columns.
+/// What to invoke a provider with for ONE run: the task's prompt plus the
+/// per-agent config (e38.16, from the agent row's migration-0015 columns).
 ///
-/// `model` and `cli_args` flow onto the provider's command line; the agent's
-/// `agent_env` is threaded separately (it goes into the child env, not the
-/// argv) via the `extra_env` argument of [`Runner::run_codex_with_env`].
+/// `prompt` / `model` / `cli_args` flow onto the provider's command line; the
+/// agent's `agent_env` is threaded separately (it goes into the child env, not
+/// the argv) via the `extra_env` argument of [`Runner::run_codex_with_env`].
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProviderInvocation {
+    /// The task brief handed to the provider non-interactively (`claude -p <x>`,
+    /// `copilot -p <x>`, `codex exec <x>`).
+    ///
+    /// EVERY agent CLI starts an interactive session when given no prompt, and the
+    /// daemon spawns them with a null stdin — so an empty prompt means the provider
+    /// exits immediately instead of doing the work (verified: bare `claude` with a
+    /// null stdin exits 1 with "Input must be provided either through stdin or as a
+    /// prompt argument when using --print"). An empty string omits the flag, which
+    /// is only correct for callers that have nothing to ask.
+    pub prompt: String,
     /// Optional model override (e.g. `gpt-5-codex`); `None` = provider default.
     pub model: Option<String>,
     /// Extra provider CLI arguments appended verbatim after the subcommand
@@ -466,11 +485,17 @@ impl Runner {
     ///
     /// Returns an [`std::io::Error`] if the binary cannot be spawned, the log
     /// file cannot be opened/written, or stdout cannot be read.
-    pub async fn run_claude<I>(&self, env: &ExecEnv, source_env: I) -> std::io::Result<RunOutcome>
+    pub async fn run_claude<I>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        invocation: &ProviderInvocation,
+    ) -> std::io::Result<RunOutcome>
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        self.run_claude_in(env, source_env, &RunLocation::in_task_tree(env)).await
+        self.run_claude_in(env, source_env, invocation, &RunLocation::in_task_tree(env))
+            .await
     }
 
     /// [`Self::run_claude`], but executing in an explicit [`RunLocation`] (F5) —
@@ -485,15 +510,15 @@ impl Runner {
         &self,
         env: &ExecEnv,
         source_env: I,
+        invocation: &ProviderInvocation,
         location: &RunLocation,
     ) -> std::io::Result<RunOutcome>
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        // claude takes no extra argv at v1 (the task is handed to it via its
-        // materialised home + workdir, not the command line), so the spec argv is
-        // empty and there is no per-agent env beyond the allowlisted source env.
-        let spec = Self::claude_spec();
+        // The task brief reaches claude as `-p <prompt>`; the workdir + materialised
+        // home carry the CONTEXT (CLAUDE.md, skills) but never the ask itself.
+        let spec = Self::claude_spec(invocation);
         self.run_provider(
             &self.cfg.claude_path,
             env,
@@ -691,7 +716,10 @@ impl Runner {
         invocation: &ProviderInvocation,
     ) -> (PathBuf, Vec<String>) {
         match backend {
-            Backend::Claude => (self.cfg.claude_path.clone(), Self::claude_spec().argv),
+            Backend::Claude => (
+                self.cfg.claude_path.clone(),
+                Self::claude_spec(invocation).argv,
+            ),
             Backend::Codex => (
                 self.cfg.codex_path.clone(),
                 Self::codex_spec(invocation).argv,
@@ -703,12 +731,28 @@ impl Runner {
         }
     }
 
-    /// The `claude` provider spec: claude log file, no argv.
-    const fn claude_spec() -> ProviderSpec {
+    /// The `claude` provider spec: claude log file + the non-interactive
+    /// `-p <prompt>` [+ `--model <model>`] [+ `<cli_args>`].
+    ///
+    /// `-p/--print` is what makes claude non-interactive; verified against Claude
+    /// Code 2.1.210, whose help reads "starts an interactive session by default,
+    /// use -p/--print for non-interactive output". Without it the daemon's spawn
+    /// (null stdin, captured stdout) exits 1 without doing any work.
+    fn claude_spec(invocation: &ProviderInvocation) -> ProviderSpec {
+        let mut argv = Vec::new();
+        if !invocation.prompt.is_empty() {
+            argv.push(CLAUDE_PROMPT_FLAG.to_string());
+            argv.push(invocation.prompt.clone());
+        }
+        if let Some(model) = &invocation.model {
+            argv.push(CLAUDE_MODEL_FLAG.to_string());
+            argv.push(model.clone());
+        }
+        argv.extend(invocation.cli_args.iter().cloned());
         ProviderSpec {
             name: "claude",
             log_file: CLAUDE_LOG_FILE,
-            argv: Vec::new(),
+            argv,
         }
     }
 
@@ -721,6 +765,11 @@ impl Runner {
             argv.push(model.clone());
         }
         argv.extend(invocation.cli_args.iter().cloned());
+        // `codex exec [OPTIONS] [PROMPT]` — the prompt is a trailing POSITIONAL, so
+        // it must come after every option (verified: `codex exec --help`).
+        if !invocation.prompt.is_empty() {
+            argv.push(invocation.prompt.clone());
+        }
         ProviderSpec {
             name: "codex",
             log_file: CODEX_LOG_FILE,
@@ -764,20 +813,16 @@ impl Runner {
     ///   resolve BOTH providers' permission policy in one pass then, rather than
     ///   inventing a half-policy here.
     ///
-    /// # Known gap: no `-p` prompt (headless copilot cannot run yet)
-    ///
-    /// Copilot only runs non-interactively with `-p/--prompt <text>`; bare
-    /// `copilot` starts an INTERACTIVE session. The daemon has no prompt→argv
-    /// plumbing for ANY provider — [`ExecEnv`] carries no prompt and the task
-    /// brief reaches the agent only as `CLAUDE.md` in the workdir (the same reason
-    /// [`Self::claude_spec`] passes no `-p`). So this argv routes and confines
-    /// copilot correctly, but a REAL copilot run would still open a session rather
-    /// than execute the brief. Closing that needs a prompt on `ExecEnv` +
-    /// [`ProviderSpec`], which is a separate change (it affects claude too —
-    /// verified: bare `claude` with a null stdin exits 1 with "Input must be
-    /// provided either through stdin or as a prompt argument when using --print").
+    /// The brief is handed over as `-p <prompt>` (verified against Copilot CLI
+    /// 1.0.68: "Execute a prompt in non-interactive mode"). Bare `copilot` would
+    /// start an INTERACTIVE session against the daemon's null stdin and do nothing.
     fn copilot_spec(invocation: &ProviderInvocation) -> ProviderSpec {
-        let mut argv = vec![COPILOT_ALLOW_ALL_TOOLS_FLAG.to_string()];
+        let mut argv = Vec::new();
+        if !invocation.prompt.is_empty() {
+            argv.push(COPILOT_PROMPT_FLAG.to_string());
+            argv.push(invocation.prompt.clone());
+        }
+        argv.push(COPILOT_ALLOW_ALL_TOOLS_FLAG.to_string());
         if let Some(model) = &invocation.model {
             argv.push(COPILOT_MODEL_FLAG.to_string());
             argv.push(model.clone());

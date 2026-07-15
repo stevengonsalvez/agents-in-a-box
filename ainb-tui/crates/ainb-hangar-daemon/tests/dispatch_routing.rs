@@ -123,7 +123,10 @@ fn runner_with_all(dir: &Path) -> (Runner, PathBuf) {
 /// Mirror the daemon's `execute_claimed` routing: backend → exec method.
 async fn dispatch(runner: &Runner, backend: Backend, env: &ExecEnv) -> RunOutcome {
     match backend {
-        Backend::Claude => runner.run_claude(env, std::iter::empty()).await.expect("run claude"),
+        Backend::Claude => runner
+            .run_claude(env, std::iter::empty(), &ProviderInvocation::default())
+            .await
+            .expect("run claude"),
         Backend::Codex => runner
             .run_codex(env, std::iter::empty(), &ProviderInvocation::default())
             .await
@@ -269,6 +272,7 @@ fn copilot_command_carries_verified_non_interactive_flags() {
 
     // The agent's configured model is threaded (copilot DOES support --model).
     let invocation = ProviderInvocation {
+        prompt: "do the thing".to_string(),
         model: Some("gpt-5.4".to_string()),
         cli_args: vec!["--add-dir".to_string(), "/tmp/x".to_string()],
     };

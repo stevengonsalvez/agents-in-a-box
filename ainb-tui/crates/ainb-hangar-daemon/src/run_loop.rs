@@ -68,6 +68,12 @@ const DEFAULT_POLL_MS: u64 = 1_000;
 /// Provider runtime deadline (reference running TTL: 2.5h).
 const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
+/// The brief used when a task has neither an issue nor agent instructions.
+///
+/// Never empty: a provider spawned with no prompt starts an interactive session
+/// against the daemon's null stdin and exits non-zero without working.
+const FALLBACK_PROMPT: &str = "Review the repository in your working directory and \
+     continue the work described in its context files (e.g. CLAUDE.md).";
 const TAIL_LINES: usize = 200;
 
 /// The parent-session identity the daemon stamps onto every task it spawns
@@ -570,7 +576,9 @@ async fn execute_claimed(
     // the runner threads into that provider's argv + env. A resolve fault
     // defaults the dispatch to `claude` with empty config so a misconfigured
     // agent still runs rather than stranding the task.
-    let dispatch = resolve_dispatch(pool, &task.agent_id).await.unwrap_or_default();
+    let dispatch = resolve_dispatch(pool, &task.agent_id, task.issue_id.as_deref())
+        .await
+        .unwrap_or_default();
 
     // F5: provision the run's working directory from the card's `repo_ref`.
     //
@@ -790,7 +798,7 @@ async fn execute_claimed(
             // (the interactive path already returns `anyhow::Result`).
             match dispatch.backend {
                 Backend::Claude => runner
-                    .run_claude_in(&env, task_env, &location)
+                    .run_claude_in(&env, task_env, &dispatch.invocation, &location)
                     .await
                     .map_err(anyhow::Error::from),
                 Backend::Codex => runner
@@ -1541,12 +1549,17 @@ struct ResolvedDispatch {
 ///
 /// Returns an error if the agent id is malformed or the agent / runtime row is
 /// missing — the caller falls back to the [`ResolvedDispatch::default`].
-async fn resolve_dispatch(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<ResolvedDispatch> {
+async fn resolve_dispatch(
+    pool: &SqlitePool,
+    agent_id: &str,
+    issue_id: Option<&str>,
+) -> anyhow::Result<ResolvedDispatch> {
     use ainb_hangar_store::repo::agent::AgentRepo;
     use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
     let agent = AgentRepo::get(pool, agent_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("agent {agent_id} not found"))?;
+    let prompt = build_prompt(pool, issue_id, agent.instructions.as_deref()).await;
     let runtime = AgentRuntimeRepo::get(pool, &agent.runtime_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
@@ -1555,11 +1568,47 @@ async fn resolve_dispatch(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<R
     Ok(ResolvedDispatch {
         backend: Backend::from_provider(provider),
         invocation: ProviderInvocation {
+            prompt,
             model: agent.model,
             cli_args: agent.cli_args,
         },
         agent_env: agent.agent_env,
     })
+}
+
+/// The brief handed to the provider non-interactively for a task.
+///
+/// Every agent CLI needs the ask on its command line — the workdir carries only
+/// CONTEXT (`CLAUDE.md`, materialised skills), never the work itself — so a task
+/// with no prompt runs nothing. Sources, in order:
+///
+/// 1. the task's issue (`title` + `description`) — the normal case,
+/// 2. the agent's own `instructions` — a chat / autopilot task with no issue,
+/// 3. [`FALLBACK_PROMPT`] — so a provider is never spawned promptless (which is
+///    an immediate non-zero exit, not a no-op).
+async fn build_prompt(
+    pool: &SqlitePool,
+    issue_id: Option<&str>,
+    agent_instructions: Option<&str>,
+) -> String {
+    use ainb_hangar_store::repo::issue::IssueRepo;
+
+    if let Some(issue_id) = issue_id {
+        if let Ok(Some(issue)) = IssueRepo::get_by_id(pool, issue_id).await {
+            let mut brief = issue.title;
+            if let Some(desc) = issue.description.filter(|d| !d.trim().is_empty()) {
+                brief.push_str("\n\n");
+                brief.push_str(&desc);
+            }
+            if !brief.trim().is_empty() {
+                return brief;
+            }
+        }
+    }
+    agent_instructions
+        .map(str::trim)
+        .filter(|i| !i.is_empty())
+        .map_or_else(|| FALLBACK_PROMPT.to_string(), ToString::to_string)
 }
 
 /// Resolve the provider wire name and owning workspace for a task's agent
@@ -1943,6 +1992,96 @@ mod tests {
         assert!(InteractiveSessions::default().drain().is_empty());
     }
 
+    /// The task brief MUST reach the provider's argv. Every agent CLI starts an
+    /// interactive session with no prompt and the daemon spawns them with a null
+    /// stdin, so a promptless dispatch runs nothing (verified: bare `claude` exits
+    /// 1 with "Input must be provided..."). Covers the issue source, the
+    /// agent-instructions fallback, and the never-empty guarantee.
+    #[tokio::test]
+    async fn dispatch_carries_the_task_brief_to_the_provider() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // (1) An issue's title + description become the brief.
+        let issue_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: issue_id.clone(),
+                workspace_id: ws.clone(),
+                title: "Fix the login bug".into(),
+                description: Some("It 500s on empty password.".into()),
+                state: "open".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id)).await.unwrap();
+        assert_eq!(
+            disp.invocation.prompt, "Fix the login bug\n\nIt 500s on empty password.",
+            "the issue title + description must become the brief"
+        );
+
+        // …and it lands on the argv as `-p <brief>` (not just in the struct).
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "claude".into(),
+            codex_path: "codex".into(),
+            copilot_path: "copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let (_p, argv) = runner.provider_command(disp.backend, &disp.invocation);
+        assert_eq!(
+            argv.first().map(String::as_str),
+            Some("-p"),
+            "claude must be invoked non-interactively: {argv:?}"
+        );
+        assert!(argv.contains(&"Fix the login bug\n\nIt 500s on empty password.".to_string()));
+
+        // (2) No issue → the agent's own instructions are the brief.
+        let instructed = bootstrap::create_agent(
+            pool,
+            &ws,
+            "guided",
+            "claude",
+            Some("Triage the inbox.".into()),
+        )
+        .await
+        .unwrap();
+        let disp = resolve_dispatch(pool, &instructed.id, None).await.unwrap();
+        assert_eq!(disp.invocation.prompt, "Triage the inbox.");
+
+        // (3) Neither → a non-empty fallback, never a promptless spawn.
+        let disp = resolve_dispatch(pool, &agent.id, None).await.unwrap();
+        assert!(
+            !disp.invocation.prompt.is_empty(),
+            "a prompt is never empty"
+        );
+        assert_eq!(disp.invocation.prompt, FALLBACK_PROMPT);
+    }
+
     /// Provider-honoring proof: `resolve_dispatch` selects the backend from the
     /// AGENT's provider, overriding the runtime's advertised default. A `codex`
     /// agent bound to the single `claude`-advertised host runtime dispatches the
@@ -1965,7 +2104,7 @@ mod tests {
 
         // A codex agent on that claude-advertised runtime → codex backend.
         let codex = bootstrap::create_agent(pool, &ws, "coder", "codex", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &codex.id).await.unwrap();
+        let disp = resolve_dispatch(pool, &codex.id, None).await.unwrap();
         assert_eq!(
             disp.backend,
             Backend::Codex,
@@ -1975,7 +2114,7 @@ mod tests {
         // A copilot agent on that claude-advertised runtime → copilot backend
         // (no more silent claude fallback).
         let copilot = bootstrap::create_agent(pool, &ws, "helper", "copilot", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &copilot.id).await.unwrap();
+        let disp = resolve_dispatch(pool, &copilot.id, None).await.unwrap();
         assert_eq!(
             disp.backend,
             Backend::Copilot,
@@ -1984,7 +2123,7 @@ mod tests {
 
         // A claude agent on the same runtime → claude backend.
         let claude = bootstrap::create_agent(pool, &ws, "writer", "claude", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &claude.id).await.unwrap();
+        let disp = resolve_dispatch(pool, &claude.id, None).await.unwrap();
         assert_eq!(disp.backend, Backend::Claude);
 
         // An agent with NO provider override falls back to the runtime's provider.
@@ -2006,7 +2145,7 @@ mod tests {
             provider: None,
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
-        let disp = resolve_dispatch(pool, "bare-agent").await.unwrap();
+        let disp = resolve_dispatch(pool, "bare-agent", None).await.unwrap();
         assert_eq!(
             disp.backend,
             Backend::Claude,
