@@ -654,6 +654,7 @@ async fn handle(
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
+        methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
         methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
         methods::HANGAR_AGENT_ARCHIVE => handle_agent_archive(pool, req).await,
         methods::HANGAR_MEMBERS_LIST => handle_members_list(pool, req).await,
@@ -1528,6 +1529,40 @@ async fn handle_comment_add(
 /// config; the provider EXEC consumption of `model`/`args` is a separate bead
 /// (e38.16), so no event is pushed (the agent list is not event-driven — the
 /// plugin re-pulls `agents_list` after a mutation).
+/// Dispatch `hangar/agent_create`: create one agent from scratch, filling every
+/// FK behind the scenes, and answer with the refreshed `agents_list` so the
+/// client folds the new agent into the cache that drives its "has an agent" gate.
+///
+/// The daemon ensures the default workspace + owner (so the fresh-home / TUI
+/// create path never rejects on a not-yet-materialised default workspace), binds
+/// the single default runtime (the id the claim loop keys off, so the agent's
+/// tasks actually run), and mints the id — the caller supplies only `name`
+/// (+ optional `provider` / `instructions`). An empty `name` or an unsupported
+/// `provider` is rejected with `INVALID_PARAMS`; creation is never gated on the
+/// provider (an agent bound to the default runtime always runs).
+async fn handle_agent_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AgentCreateParams =
+        parse_params(req, "{ workspace_id?, name, provider?, instructions? }")?;
+    let name = params.name.trim();
+    if name.is_empty() {
+        return Err(invalid_params("agent name must not be empty"));
+    }
+    let provider = ainb_hangar_store::bootstrap::normalize_provider(params.provider.as_deref())
+        .map_err(|e| invalid_params(&e))?;
+    let wire = params.workspace_id.as_deref().unwrap_or("").trim();
+    let ws = resolve_or_bootstrap_default(pool, wire).await?;
+    ainb_hangar_store::bootstrap::create_agent(pool, ws.as_str(), name, &provider, params.instructions)
+        .await
+        .map_err(|e| store_err(&e))?;
+    // Answer with the refreshed roster (the same shape agents_list returns) so
+    // the plugin folds the new agent into its cached list and the squad gate clears.
+    let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
+}
+
 async fn handle_agent_update(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -1761,7 +1796,9 @@ async fn handle_squad_create(
 
     let params: ainb_hangar_proto::snapshots::SquadCreateParams =
         parse_params(req, "{ workspace_id, name, leader }")?;
-    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    // Ensure-then-resolve: a squad create against a just-booted default workspace
+    // (or before the boot seed materialised it) lays it down rather than rejecting.
+    let ws = resolve_or_bootstrap_default(pool, &params.workspace_id).await?;
     if params.name.trim().is_empty() {
         return Err(invalid_params("squad name must not be empty"));
     }
@@ -3898,6 +3935,32 @@ async fn resolve_wire_or_reject(pool: &SqlitePool, wire: &str) -> Result<Workspa
     resolve_wire(pool, wire)
         .await?
         .ok_or_else(|| invalid_params(&format!("unknown workspace `{wire}`")))
+}
+
+/// Resolve `wire` to a workspace, lazily laying down the DEFAULT workspace when
+/// it is unresolved AND the caller meant the default (an empty wire, or the
+/// literal default slug) — the fresh-home / TUI create path, which must
+/// ensure-then-resolve rather than reject a not-yet-materialised default.
+///
+/// A non-empty, non-default wire that resolves to nothing is still rejected
+/// (`INVALID_PARAMS`) — a typo'd or foreign workspace must never be silently
+/// bootstrapped into existence.
+async fn resolve_or_bootstrap_default(
+    pool: &SqlitePool,
+    wire: &str,
+) -> Result<WorkspaceId, RpcError> {
+    if let Some(ws) = resolve_wire(pool, wire).await? {
+        return Ok(ws);
+    }
+    let means_default =
+        wire.is_empty() || wire == ainb_hangar_store::bootstrap::DEFAULT_WORKSPACE_SLUG;
+    if !means_default {
+        return Err(invalid_params(&format!("unknown workspace `{wire}`")));
+    }
+    ainb_hangar_store::bootstrap::ensure_default_workspace(pool)
+        .await
+        .map_err(|e| store_err(&e))?;
+    resolve_wire_or_reject(pool, ainb_hangar_store::bootstrap::DEFAULT_WORKSPACE_SLUG).await
 }
 
 /// Serialize a result payload to a JSON value, mapping a (near-impossible)

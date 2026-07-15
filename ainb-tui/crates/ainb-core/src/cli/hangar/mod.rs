@@ -394,6 +394,8 @@ pub struct AutopilotIdArgs {
 /// `model`/`args` is a separate concern (e38.16).
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
+    /// Create a new agent from scratch (fills workspace/runtime/owner behind the scenes).
+    Create(AgentCreateArgs),
     /// List the workspace's agents (active by default; `--all` includes archived).
     List(AgentListArgs),
     /// Edit an agent's config knobs (model / args / MCP / thinking / env / name).
@@ -402,6 +404,29 @@ pub enum AgentCommand {
     Archive(AgentArchiveArgs),
     /// Un-archive an agent (restore it to the active picker).
     Unarchive(AgentArchiveArgs),
+}
+
+/// Arguments for `hangar agent create`.
+///
+/// The daemon-less create-from-scratch path: fills the workspace / runtime /
+/// owner FKs behind the scenes so the caller supplies only a `name`. `provider`
+/// is optional (`claude`/`codex`/`copilot`, default `claude`) and recorded on the
+/// row; the agent binds the default runtime regardless, so its tasks still run.
+#[derive(Args, Debug)]
+pub struct AgentCreateArgs {
+    /// The new agent's name.
+    #[arg(long)]
+    pub name: String,
+    /// Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Optional instructions / system prompt for the agent.
+    #[arg(long)]
+    pub instructions: Option<String>,
+    /// Workspace slug to create the agent in. Defaults to the bootstrapped
+    /// `default` workspace (created if absent).
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar agent list`.
@@ -1649,11 +1674,42 @@ async fn run_templates_use(store: &Store, args: TemplatesUseArgs) -> Result<()> 
 async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
+        AgentCommand::Create(args) => run_agent_create(&store, args).await,
         AgentCommand::List(args) => run_agent_list(&store, args, format).await,
         AgentCommand::Edit(args) => run_agent_edit(&store, args).await,
         AgentCommand::Archive(args) => run_agent_set_archived(&store, args, true).await,
         AgentCommand::Unarchive(args) => run_agent_set_archived(&store, args, false).await,
     }
+}
+
+/// `hangar agent create`: create one agent from scratch, filling the workspace /
+/// runtime / owner FKs behind the scenes. Prints the created agent's name (never
+/// the id). An unsupported provider or empty name is a CLI error.
+async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
+    let name = args.name.trim();
+    if name.is_empty() {
+        anyhow::bail!("agent name must not be empty");
+    }
+    let provider = ainb_hangar_store::bootstrap::normalize_provider(args.provider.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    // An explicit --workspace must exist; the default is ensured (created if absent).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id.ok_or_else(|| anyhow::anyhow!("no workspace with slug {slug}"))?
+        }
+        None => ensure_default_workspace(store).await?,
+    };
+    let agent =
+        ainb_hangar_store::bootstrap::create_agent(store.pool(), &workspace_id, name, &provider, args.instructions)
+            .await
+            .context("create agent")?;
+    println!("created agent {}", agent.name);
+    Ok(())
 }
 
 /// `hangar agent list`: list the workspace's agents (active, or all with `--all`).
