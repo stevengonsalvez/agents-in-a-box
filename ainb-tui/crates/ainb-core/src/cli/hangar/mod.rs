@@ -3078,12 +3078,33 @@ async fn run_daemon_run() -> Result<()> {
 /// `$AINB_HANGAR_HOME` this process resolved, so it shares one home; its stdout/
 /// stderr go to the daemon's own rolling log, not this terminal.
 fn run_daemon_start() -> Result<()> {
+    start_daemon_if_stopped(true)
+}
+
+/// Best-effort autostart of the Hangar daemon before the TUI connects.
+///
+/// Idempotent (a live pid is a no-op) and non-fatal: a spawn failure is logged
+/// and swallowed so the TUI still launches (it shows the offline panel until the
+/// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
+/// `mcp_pool`'s `ensure_daemon` warn-and-continue.
+pub fn ensure_hangar_daemon() {
+    if let Err(e) = start_daemon_if_stopped(false) {
+        tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
+    }
+}
+
+/// Spawn the daemon as a detached background child unless it is already running,
+/// recording its EXACT pid. When `announce` is true the outcome is printed
+/// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
+fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     let pid_path = daemon_pid_path()?;
 
     // Already running? Bail out cleanly rather than spawning a duplicate.
     if let Some(pid) = read_daemon_pid(&pid_path) {
         if pid_is_running(pid) {
-            println!("hangar daemon: already running (pid {pid})");
+            if announce {
+                println!("hangar daemon: already running (pid {pid})");
+            }
             return Ok(());
         }
         // Stale pid file from a crashed daemon: drop it before re-spawning.
@@ -3130,7 +3151,9 @@ fn run_daemon_start() -> Result<()> {
     std::fs::write(&pid_path, format!("{pid}\n"))
         .with_context(|| format!("write pid file {}", pid_path.display()))?;
 
-    println!("hangar daemon: started (pid {pid})");
+    if announce {
+        println!("hangar daemon: started (pid {pid})");
+    }
     Ok(())
 }
 

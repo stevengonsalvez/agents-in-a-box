@@ -165,6 +165,12 @@ async fn tokio_main() -> Result<()> {
         Some(("tui", _)) | None => {
             entered_tui = true;
 
+            // Best-effort: bring the Hangar daemon up before the TUI connects, so
+            // a fresh home shows a runtime + a seeded agent (the boot seed runs in
+            // the daemon) instead of an offline panel. Idempotent + non-fatal — a
+            // spawn failure is logged and the TUI still launches.
+            cli::hangar::ensure_hangar_daemon();
+
             // Best-effort: drop shipped default presets into
             // ~/.agents-in-a-box/presets.toml on first run. Never overwrites
             // user-edited files (see `install_default_presets`). Also migrates
