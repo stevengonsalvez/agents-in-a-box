@@ -147,6 +147,7 @@ async fn seed_agent(
             mcp_config: None,
             thinking: None,
             agent_env: Vec::new(),
+            provider: None,
         },
     )
     .await

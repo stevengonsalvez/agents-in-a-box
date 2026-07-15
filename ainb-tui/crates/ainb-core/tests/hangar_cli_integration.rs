@@ -427,6 +427,7 @@ fn seed_agent(home: &std::path::Path) {
                 mcp_config: None,
                 thinking: None,
                 agent_env: Vec::new(),
+                provider: None,
             },
         )
         .await
@@ -1000,6 +1001,7 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 mcp_config: None,
                 thinking: None,
                 agent_env: Vec::new(),
+                provider: None,
             },
         )
         .await
