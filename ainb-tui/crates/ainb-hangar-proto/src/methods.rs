@@ -875,6 +875,16 @@ pub const HANGAR_DAEMON_CONFIG_GET: &str = "hangar/daemon_config_get";
 /// The Settings auto-standup toggle persists `autostandup.enabled` through this.
 pub const HANGAR_DAEMON_CONFIG_SET: &str = "hangar/daemon_config_set";
 
+/// `hangar/daemon_config_list` — read EVERY user-config knob in one round trip.
+///
+/// Params: none (`{}`). Result: [`crate::snapshots::DaemonConfigListResult`]
+/// (`{ entries: [{ key, value }] }`), one entry per
+/// [`ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY`] descriptor, whose
+/// `value` is `None` when the key has no stored row. The Settings Daemon-section
+/// editor reads the whole configurable set through this rather than a get per
+/// key, so a new registry knob surfaces without new wiring.
+pub const HANGAR_DAEMON_CONFIG_LIST: &str = "hangar/daemon_config_list";
+
 /// `auth/hello` — authenticate a freshly-opened socket connection.
 ///
 /// Params: [`crate::auth::HelloParams`] (`{ token: String }` — the plaintext
@@ -996,6 +1006,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_DAEMON_CONFIG_SET,
     // Agent create-from-scratch (fresh-home bootstrap), likewise appended.
     HANGAR_AGENT_CREATE,
+    HANGAR_DAEMON_CONFIG_LIST,
 ];
 
 #[cfg(test)]
@@ -1191,6 +1202,7 @@ mod tests {
             HANGAR_DAEMON_CONFIG_GET,
             HANGAR_DAEMON_CONFIG_SET,
             HANGAR_AGENT_CREATE,
+            HANGAR_DAEMON_CONFIG_LIST,
         ];
         for m in declared {
             assert!(

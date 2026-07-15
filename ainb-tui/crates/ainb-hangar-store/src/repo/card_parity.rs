@@ -25,9 +25,16 @@ use sqlx::SqlitePool;
 use super::daemon_config::DaemonConfigRepo;
 
 /// `daemon_config` key holding the host-wide default card agent (F4 global tier).
-pub const AGENT_GLOBAL_DEFAULT_KEY: &str = "card_agent.default";
+///
+/// This is a USER-config knob, so its key is owned by the daemon-config registry
+/// (`ainb_hangar_core::daemon_config`) — the config surfaces (TUI/CLI) and this
+/// cascade read one authoritative key.
+pub const AGENT_GLOBAL_DEFAULT_KEY: &str = ainb_hangar_core::daemon_config::KEY_CARD_AGENT_DEFAULT;
 /// `daemon_config` key holding the most-recently-picked card agent (F4 last-used
 /// tier). Updated on every card create/run so the next overlay pre-selects it.
+///
+/// Deliberately NOT a config-registry knob: this is internal STATE the daemon
+/// overwrites on each dispatch, so it is never surfaced as an editable row.
 pub const AGENT_LAST_USED_KEY: &str = "card_agent.last_used";
 
 /// Stateless accessor over the migration-0032 card-parity columns + the F4

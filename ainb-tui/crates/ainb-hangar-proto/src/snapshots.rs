@@ -1881,6 +1881,28 @@ pub struct DaemonConfigSetResult {
     pub value: String,
 }
 
+/// One entry in a [`DaemonConfigListResult`]: a registry key and its currently
+/// stored value (`None` when the key has no row — the caller applies the coded
+/// default from the descriptor).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfigEntry {
+    /// The `daemon_config` registry key.
+    pub key: String,
+    /// The stored value, or `None` when no row exists (use the coded default).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_DAEMON_CONFIG_LIST`]: every user-config
+/// knob's current stored value, one entry per registry descriptor in registry
+/// order. Lets a surface read the whole configurable set in one round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct DaemonConfigListResult {
+    /// One entry per [`ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY`]
+    /// descriptor, in registry order.
+    pub entries: Vec<DaemonConfigEntry>,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

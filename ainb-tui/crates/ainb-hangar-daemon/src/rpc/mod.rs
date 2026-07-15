@@ -710,6 +710,7 @@ async fn handle(
         methods::HANGAR_NOTIFY_RULE_SET => handle_notify_rule_set(pool, req).await,
         methods::HANGAR_DAEMON_CONFIG_GET => handle_daemon_config_get(pool, req).await,
         methods::HANGAR_DAEMON_CONFIG_SET => handle_daemon_config_set(pool, req).await,
+        methods::HANGAR_DAEMON_CONFIG_LIST => handle_daemon_config_list(pool).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -3884,8 +3885,7 @@ async fn handle_daemon_config_get(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
-    let params: ainb_hangar_proto::snapshots::DaemonConfigGetParams =
-        parse_params(req, "{ key }")?;
+    let params: ainb_hangar_proto::snapshots::DaemonConfigGetParams = parse_params(req, "{ key }")?;
     let key = params.key.trim();
     if key.is_empty() {
         return Err(invalid_params("daemon_config key must not be empty"));
@@ -3896,6 +3896,11 @@ async fn handle_daemon_config_get(
         value,
     })
 }
+
+/// The largest `daemon_config` value the set RPC will look at. Every registry
+/// kind (bool / bounded int / enum token) is far shorter, so this only bounds
+/// absurd input, never a legal one.
+const MAX_DAEMON_CONFIG_VALUE_LEN: usize = 256;
 
 /// Dispatch `hangar/daemon_config_set` (D13): write one `daemon_config` value by
 /// key. Mutating + idempotent (re-writing the same value is a no-op replace). A
@@ -3913,11 +3918,55 @@ async fn handle_daemon_config_set(
     if key.is_empty() {
         return Err(invalid_params("daemon_config key must not be empty"));
     }
-    DaemonConfigRepo::set(pool, key, &params.value).await.map_err(|e| store_err(&e))?;
+    // Bound the value before doing anything with it. Every registry kind (bool /
+    // bounded int / enum) rejects a long value anyway, so this cannot change which
+    // values are accepted — it just stops an absurd payload being echoed back in a
+    // rejection message. (The allocation itself already happened during JSON
+    // parsing; a true bound belongs at the frame layer, not here.)
+    if params.value.len() > MAX_DAEMON_CONFIG_VALUE_LEN {
+        return Err(invalid_params(&format!(
+            "daemon_config value must be at most {MAX_DAEMON_CONFIG_VALUE_LEN} bytes"
+        )));
+    }
+    // Every write passes the registry's descriptor gate — the SAME gate the CLI
+    // uses — so an out-of-range int / bad bool / unknown enum is rejected
+    // identically on both legs, and the stored string is the canonical form the
+    // daemon's typed accessors decode.
+    //
+    // An unknown key is REJECTED rather than passed through. This used to be a
+    // generic escape hatch, which meant the two legs of the "single gate"
+    // disagreed: the CLI refused `unknown config key`, the RPC silently stored it.
+    // The daemon's own internal state (`card_agent.last_used`) is written straight
+    // through DaemonConfigRepo in-process and never travels this RPC, so nothing
+    // legitimate needs the hatch.
+    let desc = ainb_hangar_core::daemon_config::descriptor(key)
+        .ok_or_else(|| invalid_params(&format!("unknown config key `{key}`")))?;
+    let value = desc.validate(&params.value).map_err(|e| invalid_params(&e))?;
+    DaemonConfigRepo::set(pool, key, &value).await.map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::DaemonConfigSetResult {
         key: key.to_string(),
-        value: params.value,
+        value,
     })
+}
+
+/// Dispatch `hangar/daemon_config_list`: read every user-config knob's stored
+/// value in one round trip. Iterates
+/// [`ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY`] so a new registry
+/// knob is listed without any handler change; a key with no row reports `value =
+/// None` (the caller applies the descriptor's coded default).
+async fn handle_daemon_config_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let mut entries = Vec::with_capacity(DAEMON_CONFIG_REGISTRY.len());
+    for desc in DAEMON_CONFIG_REGISTRY {
+        let value = DaemonConfigRepo::get(pool, desc.key).await.map_err(|e| store_err(&e))?;
+        entries.push(ainb_hangar_proto::snapshots::DaemonConfigEntry {
+            key: desc.key.to_string(),
+            value,
+        });
+    }
+    to_value(&ainb_hangar_proto::snapshots::DaemonConfigListResult { entries })
 }
 
 /// Dispatch `atc/unregister` (spec P9, D12): disable a registered ATC instance's
@@ -5803,7 +5852,10 @@ mod tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         let get = dispatch(
             store.pool(),
-            &req(methods::HANGAR_DAEMON_CONFIG_GET, serde_json::json!({"key": "  "})),
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_GET,
+                serde_json::json!({"key": "  "}),
+            ),
             &health(),
             &sink(),
         )
@@ -5820,5 +5872,173 @@ mod tests {
         )
         .await;
         assert_eq!(set.error.unwrap().code, INVALID_PARAMS);
+    }
+
+    /// `daemon_config_list` returns one entry per registry knob (unset → null),
+    /// and reflects a prior write.
+    #[tokio::test]
+    async fn daemon_config_list_covers_registry_and_reflects_writes() {
+        use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        let listed = dispatch(
+            pool,
+            &req(methods::HANGAR_DAEMON_CONFIG_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(listed.error.is_none(), "{listed:?}");
+        let entries = listed.result.unwrap()["entries"].as_array().unwrap().clone();
+        assert_eq!(
+            entries.len(),
+            DAEMON_CONFIG_REGISTRY.len(),
+            "one list entry per registry knob"
+        );
+
+        // Write one knob, then confirm the list reflects it.
+        dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "autostandup.stagnant_min", "value": "30"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        let relisted = dispatch(
+            pool,
+            &req(methods::HANGAR_DAEMON_CONFIG_LIST, serde_json::json!({})),
+            &health(),
+            &sink(),
+        )
+        .await;
+        let entries = relisted.result.unwrap()["entries"].as_array().unwrap().clone();
+        let row = entries
+            .iter()
+            .find(|e| e["key"] == "autostandup.stagnant_min")
+            .expect("stagnant_min listed");
+        assert_eq!(row["value"], serde_json::json!("30"));
+    }
+
+    /// A registry-validated set rejects an out-of-range int / bad enum with
+    /// `INVALID_PARAMS`, and normalizes a tolerant/mixed-case value it accepts.
+    #[tokio::test]
+    async fn daemon_config_set_validates_registry_knobs() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // Out-of-range int → rejected.
+        let bad = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "autostandup.stagnant_min", "value": "99999"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(bad.error.unwrap().code, INVALID_PARAMS);
+
+        // Bad enum → rejected.
+        let bad_enum = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "card_agent.default", "value": "gemini"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(bad_enum.error.unwrap().code, INVALID_PARAMS);
+
+        // Mixed-case enum → accepted + normalized to the canonical spelling.
+        let ok = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "card_agent.default", "value": "CODEX"}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(ok.error.is_none(), "{ok:?}");
+        assert_eq!(ok.result.unwrap()["value"], serde_json::json!("codex"));
+    }
+
+    /// The set RPC and the CLI are meant to be ONE gate, so they must agree on
+    /// what a legal key is. The RPC used to pass unknown keys straight through to
+    /// the table while the CLI rejected them with `unknown config key` — the two
+    /// legs disagreed, and anything could be written into `daemon_config`.
+    #[tokio::test]
+    async fn daemon_config_set_rejects_unknown_keys_like_the_cli() {
+        use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        for key in ["not.a.knob", "card_agent.last_used"] {
+            let got = dispatch(
+                pool,
+                &req(
+                    methods::HANGAR_DAEMON_CONFIG_SET,
+                    serde_json::json!({"key": key, "value": "x"}),
+                ),
+                &health(),
+                &sink(),
+            )
+            .await;
+            assert_eq!(
+                got.error.as_ref().map(|e| e.code),
+                Some(INVALID_PARAMS),
+                "`{key}` is not a registry knob and must be refused, got {got:?}"
+            );
+            assert_eq!(
+                DaemonConfigRepo::get(pool, key).await.unwrap(),
+                None,
+                "a refused key must not be written"
+            );
+        }
+
+        // `card_agent.last_used` is internal state the daemon writes in-process
+        // through the repo — refusing it over RPC does not disturb that path.
+        DaemonConfigRepo::set(pool, "card_agent.last_used", "codex").await.unwrap();
+        assert_eq!(
+            DaemonConfigRepo::get(pool, "card_agent.last_used").await.unwrap(),
+            Some("codex".to_string())
+        );
+    }
+
+    /// An absurdly long value is refused up front rather than echoed back.
+    #[tokio::test]
+    async fn daemon_config_set_bounds_the_value_length() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let huge = "9".repeat(MAX_DAEMON_CONFIG_VALUE_LEN + 1);
+        let got = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_SET,
+                serde_json::json!({"key": "autostandup.stagnant_min", "value": huge}),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        let err = got.error.expect("an over-long value is refused");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(
+            !err.message.contains("999999"),
+            "the rejection must not echo the payload back: {}",
+            err.message
+        );
     }
 }

@@ -81,6 +81,13 @@ fn tui_renders_members_with_roles() {
 
     let map = glyph_map(&buf, 60);
     // POSITIVE: both members render under the Members section as `email · role`.
+    //
+    // REGRESSION GUARD: every section below the focused one must still be on
+    // screen. When the Daemon section grew from 2 body rows to 7, this 14-row pane
+    // silently lost the ENTIRE Notifications section — a shipped feature became
+    // invisible. The unfocused Daemon section now collapses to its summary, so the
+    // `Notifications` header, `scope: global · [g] toggle`, the channel grid and
+    // its hint stay visible. Do not re-baseline those rows away.
     insta::assert_snapshot!(map, @r###"
       Daemon
         /tmp/hangar.sock · ● connected

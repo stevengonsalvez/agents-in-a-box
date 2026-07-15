@@ -538,14 +538,21 @@ pub struct ScreenStates {
     /// A deferred notify-rule RPC raised by the Notifications grid (tcp T5),
     /// drained by the `render` pass. `None` when idle.
     pub pending_notify_action: Option<NotifyAction>,
-    /// Cached live `autostandup.enabled` value from `hangar/daemon_config_get`
-    /// (D13). Seeds the Settings Daemon-section toggle regardless of arrival order,
-    /// and survives a `set_health` rebuild. Defaults OFF (the coded server default).
-    pub autostandup_enabled: bool,
-    /// A deferred `autostandup.enabled` write raised by the Daemon-section toggle
-    /// (`a`, D13): the NEW value awaiting the `render` pass to fire
-    /// `hangar/daemon_config_set` over the daemon socket. `None` when idle.
-    pub pending_autostandup_set: Option<bool>,
+    /// Cached live daemon-config values from `hangar/daemon_config_list` as
+    /// `(key, value)` pairs. Seeds the Settings Daemon-section rows regardless of
+    /// arrival order and survives a `set_health` rebuild (each is replayed into the
+    /// rebuilt state). Empty until the first list reply lands.
+    pub daemon_config_cache: Vec<(String, Option<String>)>,
+    /// Deferred daemon-config writes raised by Daemon-section edits (bool toggle,
+    /// enum cycle, or committed int overlay): the `(key, value)` pairs awaiting the
+    /// `render` pass to fire `hangar/daemon_config_set`, in edit order. Empty when
+    /// idle.
+    ///
+    /// A QUEUE, not a slot: the registry generalised this surface from one knob to
+    /// N, and keys land faster than render passes. With a single slot, toggling
+    /// auto-standup and then cycling the default agent before the next frame
+    /// silently dropped the first write while the pane still showed it applied.
+    pub pending_daemon_config_set: Vec<(String, String)>,
     /// Set when the logs screen's level filter changed (P8.6), asking the glue
     /// to re-read the structured-log file under the new `--level` floor. Drained
     /// by the `render` pass. `false` when idle.
@@ -815,9 +822,11 @@ impl ScreenStates {
         state.set_members(self.member_rows.clone());
         // Carry any cached notification grid too (tcp T5), same rebuild survival.
         state.set_notify_rules(self.notify_rule_rows.clone());
-        // Carry the cached auto-standup toggle (D13) so a `set_health` rebuild keeps
-        // the live value rather than snapping the row back to OFF.
-        state.set_autostandup_enabled(self.autostandup_enabled);
+        // Replay the cached daemon-config values so a `set_health` rebuild keeps
+        // every live knob rather than snapping the rows back to their defaults.
+        for (key, value) in &self.daemon_config_cache {
+            state.set_config_value(key, value.clone());
+        }
         self.settings = Some(state);
     }
 
@@ -864,21 +873,22 @@ impl ScreenStates {
         self.pending_notify_action.take()
     }
 
-    /// Refresh the Settings Daemon-section auto-standup toggle from a
-    /// `hangar/daemon_config_get` result (D13). Caches the value so a later
-    /// `set_health` rebuild keeps it, and overlays the live settings state when it
-    /// already exists (mirrors [`Self::set_notify_rules`]).
-    pub const fn set_autostandup_enabled(&mut self, on: bool) {
-        self.autostandup_enabled = on;
+    /// Apply a full `hangar/daemon_config_list` result: cache every `(key, value)`
+    /// so a later `set_health` rebuild keeps them, and overlay the live settings
+    /// state when it already exists (mirrors [`Self::set_notify_rules`]).
+    pub fn set_daemon_config_entries(&mut self, entries: Vec<(String, Option<String>)>) {
+        self.daemon_config_cache.clone_from(&entries);
         if let Some(s) = self.settings.as_mut() {
-            s.set_autostandup_enabled(on);
+            for (key, value) in entries {
+                s.set_config_value(&key, value);
+            }
         }
     }
 
-    /// Take the pending `autostandup.enabled` write raised by the Daemon-section
-    /// toggle (`a`, D13), if any.
-    pub const fn take_pending_autostandup_set(&mut self) -> Option<bool> {
-        self.pending_autostandup_set.take()
+    /// Drain every pending daemon-config write raised by Daemon-section edits, in
+    /// edit order. Returns an empty vec when idle.
+    pub fn take_pending_daemon_config_sets(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.pending_daemon_config_set)
     }
 
     /// The Notifications grid's current edit scope (global/workspace,
@@ -1235,6 +1245,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                 // (else the settings screen goes dead and stops navigating).
                 let ev = if matches!(key.code, KeyCode::Esc) {
                     SettingsEvent::Esc
+                } else if matches!(key.code, KeyCode::Up) {
+                    SettingsEvent::CursorUp
+                } else if matches!(key.code, KeyCode::Down) {
+                    SettingsEvent::CursorDown
                 } else if let Some(c) = key_char(key) {
                     SettingsEvent::Key(c)
                 } else {
@@ -1276,10 +1290,11 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                             scope: notify_scope,
                         });
                     }
-                    // `a` on the Daemon section flipped the auto-standup toggle (D13):
-                    // defer the `hangar/daemon_config_set` write for the render pass.
-                    Some(SettingsIntent::ToggleAutostandup(on)) => {
-                        states.pending_autostandup_set = Some(on);
+                    // A Daemon-section edit (bool/enum/int) asked to persist one
+                    // knob: defer the `hangar/daemon_config_set` write for the
+                    // render pass, which re-reads the whole config afterwards.
+                    Some(SettingsIntent::SetDaemonConfig { key, value }) => {
+                        states.pending_daemon_config_set.push((key, value));
                     }
                     // KeychainWrite / New / Rename land in their own beads.
                     _ => {

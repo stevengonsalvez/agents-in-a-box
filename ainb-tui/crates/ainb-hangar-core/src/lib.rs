@@ -22,6 +22,10 @@ pub mod autopilot;
 pub mod channel;
 /// Wall-clock injection (`HangarClock` + `SystemClock` / `FixedClock`).
 pub mod clock;
+/// The single source of truth for the daemon's user-configurable knobs — the
+/// typed descriptor registry both the TUI Settings pane and the
+/// `ainb hangar daemon config` CLI iterate (keys, kinds, defaults, validation).
+pub mod daemon_config;
 /// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded
 /// deny family that always overrides. Pure + IO-free; the TOML loader and
 /// daemon wiring live in `ainb-hangar-daemon`.
