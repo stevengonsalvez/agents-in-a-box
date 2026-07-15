@@ -24,7 +24,8 @@
 //! # Workspace scoping
 //!
 //! Every mutation takes a [`WorkspaceId`] and resolves BOTH endpoints inside it
-//! before writing (there is no FK — `PRAGMA foreign_keys` is off in this crate),
+//! before writing (the schema declares no FK on either issue id, and an FK would
+//! prove only existence, never the tenant — see migration 0036),
 //! so a dependency can never reference a foreign-tenant / nonexistent issue or
 //! cross a workspace boundary. The composite PK `(dependent, blocker)` is the sole
 //! engine-enforced invariant; existence, scoping, and acyclicity are enforced

@@ -29,11 +29,13 @@
 //! creating (or renaming into) a board name that already exists in the workspace
 //! is rejected with [`BoardRepoError::DuplicateName`].
 //!
-//! `PRAGMA foreign_keys` is off in this crate (mirroring the rest of the repos),
-//! so the `(workspace_id, name)` UNIQUE index, the `(board_id, issue_id)`
-//! composite PK, and the `board_id`/`column_id` FKs are the engine-enforced
-//! invariants; the workspace-scope guard, the `ord` contiguity, and the
-//! card-reparking on column delete are enforced here in application code.
+//! The `(workspace_id, name)` UNIQUE index, the `(board_id, issue_id)` composite
+//! PK, and the declared `board_id`/`column_id` FKs are the engine-enforced
+//! invariants (foreign keys ARE on — sqlx enables `PRAGMA foreign_keys` by
+//! default). What the engine does NOT give us is tenant scoping (an FK proves a
+//! parent exists, not which workspace owns it) or ordering: the workspace-scope
+//! guard, the `ord` contiguity, and the card-reparking on column delete are
+//! enforced here in application code.
 
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::{Row, SqlitePool};
@@ -459,10 +461,12 @@ impl BoardRepo {
     ///
     /// Workspace-scoped via the board; a `column_id` that is `Some` must belong to
     /// the board, and `issue_id` must name an issue that lives in the SAME
-    /// workspace (else [`BoardRepoError::NotFound`]). `board_card.issue_id` carries
-    /// no FK (`PRAGMA foreign_keys` is off), so this service-layer check is the
-    /// only guard against persisting a card for a nonexistent or sibling-tenant
-    /// issue — the "card = issue, workspace-scoped" invariant (D8/§4.5).
+    /// workspace (else [`BoardRepoError::NotFound`]). The schema declares NO FK on
+    /// `board_card.issue_id` (so the engine — which does enforce declared FKs —
+    /// has nothing to check here), and an FK would prove only existence, never the
+    /// tenant. This service-layer check is therefore the only guard against
+    /// persisting a card for a nonexistent or sibling-tenant issue — the
+    /// "card = issue, workspace-scoped" invariant (D8/§4.5).
     ///
     /// # Errors
     ///

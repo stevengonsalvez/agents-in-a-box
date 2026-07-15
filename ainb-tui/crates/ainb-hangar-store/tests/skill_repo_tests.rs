@@ -3,9 +3,10 @@
 //! Proves the workspace-scoped skill repository: create writes a `skill` row
 //! plus its ordered `skill_file` children, lookups are tenant-isolated, the
 //! agent junction is idempotent, `(workspace_id, name)` is unique, and deleting
-//! a skill cascades to its files in-app (FK cascade is unavailable — the crate
-//! runs with `PRAGMA foreign_keys` off, so `SkillRepo::delete` removes children
-//! explicitly inside a transaction).
+//! a skill cascades to its files in-app (the schema declares no
+//! `ON DELETE CASCADE` on `skill_file`, so `SkillRepo::delete` removes children
+//! explicitly inside a transaction — foreign keys themselves ARE enforced, which
+//! is exactly why the children must be removed first).
 
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::skill::SkillFileInput;

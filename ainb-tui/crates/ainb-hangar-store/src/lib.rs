@@ -12,6 +12,32 @@
 //! embedded at compile time by [`sqlx::migrate!`], so a migration edit that is
 //! not picked up usually means a stale build cache — run
 //! `cargo clean -p ainb-hangar-store` and rebuild.
+//!
+//! ## An applied migration file is IMMUTABLE — including its comments
+//!
+//! `sqlx` records a checksum of each migration's FULL FILE TEXT in
+//! `_sqlx_migrations`. Editing an already-applied file — even a comment — changes
+//! that checksum, and the next boot against an existing database aborts with
+//! `migration N was previously applied but has been modified`, i.e. the daemon
+//! refuses to start on every home that ever booted. Corrections to an applied
+//! migration's prose therefore CANNOT be made in-file; document the correction
+//! here (or in the owning repo module) instead. Only brand-new migrations are
+//! editable, and only until they ship.
+//!
+//! ## Foreign keys ARE enforced
+//!
+//! Several applied migration comments (0009/0010/0016/0017/0018/0027/0036) claim
+//! "`PRAGMA foreign_keys` is off in this crate". That is **false and frozen**:
+//! `sqlx` turns `PRAGMA foreign_keys = ON` on by default for every `SQLite`
+//! connection and [`Store::open_in`] never disables it, so every declared
+//! `REFERENCES` IS engine-enforced (e.g. `agent.runtime_id` cannot be orphaned,
+//! and `0010`'s `autopilot_run_id` link is a real constraint, not documentation).
+//! Those comments cannot be corrected in place (see above) — this is the
+//! authoritative statement. Where a table declares NO foreign key, that is a
+//! deliberate schema choice (a polymorphic actor-ref, or a link an FK could not
+//! tenant-scope), NOT a consequence of FKs being off; the service-layer guards
+//! those repos apply are still required, because an FK proves only that a parent
+//! row exists, never which workspace owns it.
 
 use sqlx::SqlitePool;
 
