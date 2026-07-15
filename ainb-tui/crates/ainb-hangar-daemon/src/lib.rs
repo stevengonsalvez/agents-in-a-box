@@ -536,6 +536,13 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     if once {
         return Ok(());
     }
-    let cfg = DaemonConfig::from_env();
+    let mut cfg = DaemonConfig::from_env();
+    // The claim loop MUST key off the runtime id that is actually registered (and
+    // that the seeded/created agents are bound to). A runtime cannot be renamed —
+    // `agent.runtime_id` is an enforced FK — so an existing row's id wins over a
+    // changed `HANGAR_DAEMON_RUNTIME_ID` (which is warned about, not obeyed).
+    // Resolving here keeps the registered row, the agents, and the claim loop on
+    // ONE id instead of claiming for an id nothing is bound to.
+    cfg.runtime_id = Some(crate::runtime_register::effective_runtime_id(store.pool()).await);
     run(store.pool().clone(), cfg, stats, broker.sink()).await
 }

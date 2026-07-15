@@ -39,7 +39,9 @@ const STARTER_AGENT_NAME: &str = "claude";
 /// boot path logs and swallows this — a seed failure must never down the daemon.
 pub async fn ensure_default_home(pool: &SqlitePool) -> Result<()> {
     let workspace_id = bootstrap::ensure_default_workspace(pool).await?;
-    let runtime_id = bootstrap::default_runtime_id();
+    // An already-registered runtime's id wins (a runtime cannot be renamed), so
+    // the seed, the claim loop, and every bound agent stay on ONE id.
+    let runtime_id = crate::runtime_register::effective_runtime_id(pool).await;
     let now = SystemClock.now_ms();
     // Self-register the host runtime (logs the outcome, swallows a transient
     // failure). The starter-agent create below re-ensures the runtime, so a

@@ -9,27 +9,73 @@
 //! place to run.
 //!
 //! [`register_runtime`] closes that gap: at boot the daemon upserts an
-//! `agent_runtime` row keyed on its own runtime id, marking it `online`. It is
-//! **idempotent** — a restart updates the same row (`status` + `last_seen_at`)
-//! rather than conflicting — so booting twice never duplicates or errors.
+//! `agent_runtime` row for its `(workspace, daemon_id, provider)` tuple, marking
+//! it `online`. It is **idempotent** — a restart refreshes the same row
+//! (`status` + `last_seen_at`) rather than conflicting — so booting twice never
+//! duplicates or errors.
+//!
+//! # A runtime cannot be renamed
+//!
+//! `agent.runtime_id` is a NOT NULL `REFERENCES agent_runtime(id)` FK and SQLite
+//! enforces foreign keys (sqlx sets `PRAGMA foreign_keys = ON`), so a registered
+//! runtime's `id` can never change once an agent binds it. [`effective_runtime_id`]
+//! therefore resolves the daemon's claim identity from the DB up front: an
+//! already-registered runtime's id WINS over whatever `HANGAR_DAEMON_RUNTIME_ID` /
+//! the default says (with a warning), so the registered row, the agents bound to
+//! it, and the claim loop always agree. Only a brand-new home adopts the
+//! configured id.
 //!
 //! The row's `workspace_id` FK requires a `workspace` row to exist. A daemon
 //! booted against a brand-new home with no workspace yet has nothing to attach
-//! to, so registration is a no-op in that case (returns `false`); the first
-//! `ainb hangar issue create` lazily bootstraps the workspace, and the next
-//! daemon boot registers against it.
+//! to, so registration is a no-op in that case (returns `false`); the boot seed
+//! lays the workspace down first, so in practice this only guards odd orderings.
 
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 
-/// Upsert this daemon's `agent_runtime` row, keyed on `runtime_id`.
+/// Resolve the runtime id this daemon registers under AND claims for.
+///
+/// An already-registered runtime's id WINS: a runtime cannot be renamed once an
+/// agent's `runtime_id` FK references it (see the module docs), so a changed
+/// `HANGAR_DAEMON_RUNTIME_ID` is ignored — with a `warn!` naming both ids — rather
+/// than silently registering nothing and stranding every task. Only a brand-new
+/// home (no runtime row yet) adopts the configured/default id.
+///
+/// Read-only + infallible from the caller's view: a lookup fault falls back to the
+/// configured id (logged), because refusing to boot over a transient read is worse
+/// than registering the configured identity.
+pub async fn effective_runtime_id(pool: &SqlitePool) -> String {
+    let configured = ainb_hangar_store::bootstrap::default_runtime_id();
+    match ainb_hangar_store::bootstrap::existing_host_runtime_id(pool).await {
+        Ok(Some(existing)) => {
+            if existing != configured {
+                tracing::warn!(
+                    configured = %configured,
+                    existing = %existing,
+                    "HANGAR_DAEMON_RUNTIME_ID={configured} ignored; existing runtime {existing} \
+                     is in use; a runtime cannot be renamed after first boot"
+                );
+            }
+            existing
+        }
+        Ok(None) => configured,
+        Err(e) => {
+            tracing::warn!(error = %e, "runtime id resolve failed; using the configured id");
+            configured
+        }
+    }
+}
+
+/// Upsert this daemon's `agent_runtime` row for its
+/// `(workspace, daemon_id, provider)` tuple.
 ///
 /// A thin wrapper over [`ainb_hangar_store::bootstrap::ensure_runtime`], the one
 /// shared upsert every entry point uses (the CLI `agent create`, the boot seed,
 /// this self-register). Resolves the default (oldest) workspace and writes — or,
-/// on a restart, refreshes — a single `agent_runtime` row with `id = runtime_id`,
-/// marking it `online` with a fresh `last_seen_at`. Idempotent via
-/// `ON CONFLICT(id)`.
+/// on a restart, refreshes (`status` + `last_seen_at`) — the host runtime row.
+/// Idempotent, and it never changes an existing row's `id` (that would break the
+/// `agent.runtime_id` FK); pass [`effective_runtime_id`] so the id you register is
+/// the id already in use.
 ///
 /// Returns `Ok(true)` when a row was written/refreshed, `Ok(false)` when there
 /// is no workspace to attach to yet (a brand-new home before the boot seed) — a
@@ -50,9 +96,8 @@ pub async fn register_runtime(pool: &SqlitePool, runtime_id: &str, now_ms: i64) 
 /// daemon (it still sweeps + serves).
 ///
 /// Called by the boot seed ([`crate::default_home::ensure_default_home`]) with
-/// the resolved [`ainb_hangar_store::bootstrap::default_runtime_id`] — the SAME
-/// id the claim loop keys off, keeping the seed, the claim runtime, and every
-/// created agent's binding in lockstep.
+/// [`effective_runtime_id`] — the SAME id the claim loop keys off, keeping the
+/// seed, the claim runtime, and every created agent's binding in lockstep.
 pub async fn self_register(pool: &SqlitePool, runtime_id: &str, now_ms: i64) {
     match register_runtime(pool, runtime_id, now_ms).await {
         Ok(true) => tracing::info!(runtime_id = %runtime_id, "self-registered agent runtime"),
