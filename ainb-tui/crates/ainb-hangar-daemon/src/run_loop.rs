@@ -118,7 +118,11 @@ impl DaemonConfig {
     /// Build the config from the process environment (see the module table).
     #[must_use]
     pub fn from_env() -> Self {
-        let runtime_id = std::env::var("HANGAR_DAEMON_RUNTIME_ID").ok().filter(|s| !s.is_empty());
+        // A fresh home now claims for the stable default runtime even with no
+        // env override: the boot seed registers that runtime + a starter agent
+        // bound to it, so the claim loop (run_loop.rs, skipped when `None`) is
+        // enabled out of the box. `HANGAR_DAEMON_RUNTIME_ID` still overrides.
+        let runtime_id = Some(ainb_hangar_store::bootstrap::default_runtime_id());
         let claude_path = std::env::var_os("HANGAR_CLAUDE_PATH")
             .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
         let codex_path = std::env::var_os("HANGAR_CODEX_PATH")
