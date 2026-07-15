@@ -14,7 +14,9 @@ use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use ainb_hangar_daemon::execenv::ExecEnv;
-use ainb_hangar_daemon::runner::{ProviderInvocation, RunOutcome, Runner, RunnerConfig};
+use ainb_hangar_daemon::runner::{
+    Backend, Mode, ProviderInvocation, RunOutcome, Runner, RunnerConfig,
+};
 use ainb_hangar_store::service::fail::FailureReason;
 use tempfile::TempDir;
 
@@ -374,4 +376,124 @@ exit 0"#,
         RunOutcome::Success(_) => panic!("expected Failed(Timeout), got Success"),
         RunOutcome::Cancelled(_) => panic!("expected Failed(Timeout), got Cancelled"),
     }
+}
+
+/// A fake `claude` that models the REAL permission semantics of Claude Code
+/// 2.1.210 under `-p`, as measured with a clean `$HOME`:
+///
+/// * WITHOUT `--dangerously-skip-permissions`, tool calls are DENIED. The process
+///   still prints a `result` line with `subtype:"success"` and **exits 0** — it
+///   just never writes the file.
+/// * WITH the flag, the write lands.
+///
+/// The exit code is 0 in BOTH branches on purpose: that is precisely what made
+/// the bug silent, since [`RunOutcome::Success`] is keyed on exit code. A test
+/// that asserted only the outcome would pass either way — so the assertion that
+/// matters is the file on disk.
+fn fake_claude_permission_aware(dir: &Path) -> PathBuf {
+    write_script(
+        dir,
+        "fake-claude-perm.sh",
+        r#"skip=""
+for a in "$@"; do
+  if [ "$a" = "--dangerously-skip-permissions" ]; then skip="1"; fi
+done
+echo '{"type":"system","session_id":"perm-1"}'
+if [ -n "$skip" ]; then
+  printf 'TOOLPROOF_OK' > proof.txt
+  echo '{"type":"result","subtype":"success","is_error":false,"result":"DONE"}'
+else
+  echo '{"type":"result","subtype":"success","is_error":false,"permission_denials":[{"tool_name":"Write"}],"result":"I do not have permission to write that file."}'
+fi
+exit 0"#,
+    )
+}
+
+/// REGRESSION (silent no-op): a tool-using claude run must actually produce its
+/// side effect, not merely report success.
+///
+/// Mutation-proof: drop `--dangerously-skip-permissions` from `claude_spec` and
+/// this test goes RED on the `proof.txt` assertion — while the `RunOutcome`
+/// assertion below stays GREEN, reproducing the exact false-green class that let
+/// this ship (every prior headless proof used a no-tool brief).
+#[tokio::test]
+async fn exec_tool_using_task_actually_writes_its_file() {
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = fake_claude_permission_aware(tmp.path());
+    let runner = Runner::new(RunnerConfig {
+        claude_path: script,
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
+        max_runtime: Duration::from_secs(10),
+        tail_lines: 50,
+        sandbox: true,
+    });
+
+    let outcome = runner
+        .run_claude(&env, std::iter::empty(), &invocation())
+        .await
+        .expect("run");
+
+    // The daemon scores this run a success...
+    assert!(
+        matches!(outcome, RunOutcome::Success(_)),
+        "expected Success, got {outcome:?}"
+    );
+    // ...so the ONLY assertion that can catch a silent no-op is the side effect.
+    let proof = env.workdir.join("proof.txt");
+    assert!(
+        proof.is_file(),
+        "tool-using task reported success but wrote NO file: the daemon would \
+         mark this task `done` over an untouched workdir"
+    );
+    assert_eq!(
+        fs::read_to_string(&proof).expect("read proof"),
+        "TOOLPROOF_OK",
+        "tool ran but produced the wrong content"
+    );
+}
+
+/// The claude argv must carry a permission flag, or a tool-using task silently
+/// no-ops (denied tool, exit 0, task marked `done`).
+///
+/// Pins `--dangerously-skip-permissions`: the operator's explicit choice of
+/// blanket tool autonomy, taken because the narrower `acceptEdits` measurably
+/// denies `Bash` and would leave a build/test task half-done yet reported as
+/// success. The escape hatch (`cli_args` appended after) is pinned too, since a
+/// task overriding the posture depends on ordering.
+#[test]
+fn claude_argv_carries_skip_permissions_and_cli_args_can_override() {
+    let runner = Runner::new(RunnerConfig {
+        claude_path: PathBuf::from("/nonexistent/claude"),
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
+        max_runtime: Duration::from_secs(1),
+        tail_lines: 1,
+        sandbox: true,
+    });
+    let (_prog, argv) = runner.provider_command(Backend::Claude, &invocation(), Mode::Headless);
+    assert!(
+        argv.iter().any(|a| a == "--dangerously-skip-permissions"),
+        "claude argv must carry --dangerously-skip-permissions or a tool-using task \
+         silently no-ops, got {argv:?}"
+    );
+
+    // A task's own cli_args are appended AFTER the daemon's flag, so an override
+    // wins. If this ordering ever flips, the escape hatch dies silently.
+    let overridden = ProviderInvocation {
+        cli_args: vec!["--permission-mode".to_string(), "plan".to_string()],
+        ..invocation()
+    };
+    let (_p, argv2) = runner.provider_command(Backend::Claude, &overridden, Mode::Headless);
+    let skip_at = argv2
+        .iter()
+        .position(|a| a == "--dangerously-skip-permissions")
+        .expect("flag present");
+    let override_at =
+        argv2.iter().position(|a| a == "--permission-mode").expect("cli_args appended");
+    assert!(
+        override_at > skip_at,
+        "cli_args must come AFTER the daemon flag so a task can override it, got {argv2:?}"
+    );
 }

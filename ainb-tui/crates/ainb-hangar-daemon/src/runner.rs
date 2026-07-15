@@ -175,6 +175,38 @@ const COPILOT_LOG_FILE: &str = "copilot.jsonl";
 const CLAUDE_PRINT_FLAG: &str = "-p";
 /// The claude model flag (`claude --model <model>`).
 const CLAUDE_MODEL_FLAG: &str = "--model";
+/// The claude flag that auto-approves EVERY tool call, including `Bash`.
+///
+/// # Why the daemon must be explicit about permissions
+///
+/// With NO permission flag, claude's tool gating is decided by
+/// `$HOME/.claude/settings.json` (`defaultMode` / `allow`) — i.e. by the
+/// OPERATOR'S PERSONAL CONFIG, which the daemon neither owns nor controls. That
+/// makes headless behaviour silently machine-dependent. Measured against Claude
+/// Code 2.1.210 (`Bash` proven by an env nonce the model cannot fabricate with
+/// `Write`):
+///
+/// | `$HOME` | sandbox | argv | `Write` | `Bash` |
+/// |---|---|---|---|---|
+/// | operator's, `defaultMode: bypassPermissions` | off | (none) | allowed | allowed |
+/// | clean (no settings) | off | (none) | denied | denied |
+/// | clean | off | `--permission-mode acceptEdits` | allowed | **denied** |
+/// | clean | off | `--dangerously-skip-permissions` | allowed | allowed |
+/// | operator's | **ON** | (none) | **denied** | **denied** |
+///
+/// The last row is the one that matters: the sandbox's read roots exclude the
+/// operator's `$HOME`, so `~/.claude/settings.json` is UNREADABLE and a personal
+/// `defaultMode` cannot apply. Confined + flagless therefore always denies.
+///
+/// A denial is not loud. Claude emits `permission_denials`, answers in prose ("I
+/// attempted to create the file but the write permission wasn't granted"), and
+/// **exits 0** — and [`RunOutcome::Success`] is keyed on exit code 0, so the
+/// daemon marks such a task `done` over an untouched workdir. Carrying the flag
+/// makes the posture explicit, deterministic, and independent of whose machine
+/// the daemon runs on.
+///
+/// See [`Runner::claude_spec`] for the trust posture this implies.
+const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
 /// The copilot HEADLESS prompt flag (`copilot -p "<text>"`). Verified against
 /// Copilot CLI 1.0.68: "Execute a prompt in non-interactive mode (exits after
 /// completion)" — so it is exactly wrong for an attachable session, which is why
@@ -857,8 +889,8 @@ impl Runner {
         }
     }
 
-    /// The `claude` provider spec: claude log file + `[-p] [--model <model>]
-    /// [<cli_args>…] -- <prompt>`.
+    /// The `claude` provider spec: claude log file + `[-p]
+    /// --dangerously-skip-permissions [--model <model>] [<cli_args>…] -- <prompt>`.
     ///
     /// Verified against Claude Code 2.1.210, whose usage is
     /// `claude [options] [command] [prompt]`:
@@ -873,11 +905,51 @@ impl Runner {
     /// The prompt is a POSITIONAL either way — `-p` is a boolean and never takes
     /// it — and rides last, after [`ARG_SEPARATOR`], so a `-`-leading brief cannot
     /// be read as a flag.
+    ///
+    /// # Permission policy: blanket tool autonomy, deliberately
+    ///
+    /// `--dangerously-skip-permissions` (both modes) auto-approves **EVERY** tool
+    /// call — including `Bash`, i.e. arbitrary shell commands — in an unattended
+    /// background subprocess. This is an explicit operator decision, not a
+    /// default that drifted in, and it is stated plainly rather than softened:
+    ///
+    /// * A headless claude MUST carry some permission flag or its gating falls
+    ///   through to the operator's personal `~/.claude/settings.json` — which the
+    ///   sandbox makes unreadable, so a confined run denies every tool, exits 0,
+    ///   and is marked `done` over an untouched workdir (see
+    ///   [`CLAUDE_SKIP_PERMISSIONS_FLAG`] for the measured matrix).
+    /// * `--permission-mode acceptEdits` is narrower and closes the *write* case,
+    ///   but MEASURABLY denies `Bash` (verified with a clean `$HOME` and an
+    ///   env-nonce only a real shell could resolve). A task that must run a build,
+    ///   a test, or any command would therefore be denied — and, by the very same
+    ///   exit-0 mechanism, still report `done` having half-done the work. Closing
+    ///   the write no-op while leaving the shell no-op open was judged worse than
+    ///   granting the wider mode knowingly.
+    /// * `--allowedTools <list>` cannot be fixed ahead of time: the daemon does not
+    ///   know a brief's tool needs, so a static list breaks arbitrary tasks.
+    ///
+    /// ## What actually confines this
+    ///
+    /// The blast radius is bounded by the FS sandbox (Seatbelt/Landlock) + the
+    /// deny-by-default env allowlist — NOT by claude's own permission prompt,
+    /// which is now fully bypassed. **The sandbox is currently OFF for headless
+    /// runs** (bead `ai-coder-rules-48b`: a confined child cannot reach the
+    /// Keychain credential), so until that lands, a brief built from untrusted
+    /// text (e.g. a board issue) can drive arbitrary shell as the daemon user.
+    /// That exposure is accepted knowingly and is why 48b matters.
+    ///
+    /// A task can still override via `cli_args`, appended after this flag.
+    ///
+    /// Claude joins the other providers in carrying blanket tool autonomy: copilot
+    /// `--allow-all-tools` (mandatory for non-interactive mode); codex runs
+    /// `--full-auto` only when the agent passes it via `cli_args` (its spec adds
+    /// no permission flag of its own).
     fn claude_spec(invocation: &ProviderInvocation, mode: Mode) -> ProviderSpec {
         let mut argv = Vec::new();
         if mode == Mode::Headless {
             argv.push(CLAUDE_PRINT_FLAG.to_string());
         }
+        argv.push(CLAUDE_SKIP_PERMISSIONS_FLAG.to_string());
         if let Some(model) = &invocation.model {
             argv.push(CLAUDE_MODEL_FLAG.to_string());
             argv.push(model.clone());
@@ -959,9 +1031,11 @@ impl Runner {
     /// # Permission policy: copilot is granted blanket tool autonomy, claude is not
     ///
     /// `--allow-all-tools` auto-approves EVERY tool call in an unattended
-    /// background subprocess, and it is the ONLY provider argv here that does so
-    /// ([`Self::claude_spec`] passes no `--dangerously-skip-permissions`). That
-    /// asymmetry is deliberate, not an oversight:
+    /// background subprocess. It is no longer the only provider argv that does so:
+    /// claude carries `--dangerously-skip-permissions` and codex `--full-auto`, so
+    /// all three now grant blanket tool autonomy (see [`Self::claude_spec`] for the
+    /// operator decision behind claude's). The rationale below is why copilot's is
+    /// not merely acceptable but unavoidable:
     ///
     /// * It is **mandatory**, not discretionary — Copilot CLI 1.0.68 documents
     ///   `--allow-all-tools` as "required for non-interactive mode", so a copilot
@@ -976,9 +1050,13 @@ impl Runner {
     ///   the same trust posture the daemon already warns about at dispatch
     ///   (`warnings::danger-full-access`), so copilot is not a new exposure class
     ///   — it is the existing one made explicit in argv.
-    /// * Claude reaches the same place by a different route (its permission
-    ///   behaviour under `--print` differs), so the two are not yet symmetrical.
-    ///   Resolving BOTH providers' permission policy in one pass is still open.
+    /// * Claude's permission policy is now resolved too, and it was NOT the same
+    ///   route: an earlier note here assumed claude "reaches the same place by a
+    ///   different route" under `--print`. Measured against 2.1.210, it did not —
+    ///   a flagless `-p` run DENIED the tool, wrote nothing, and exited 0, which
+    ///   the daemon scored as success. Claude now carries
+    ///   `--dangerously-skip-permissions` by operator decision, so both providers
+    ///   are explicit in argv and equally wide.
     ///
     /// # The brief rides a value-taking flag, chosen by [`Mode`]
     ///
