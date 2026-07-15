@@ -922,8 +922,16 @@ impl HangarPlugin {
                 ainb_hangar_proto::snapshots::DaemonConfigGetResult,
             >(result.clone())
             {
-                // Absent row / unparseable value => the coded default OFF.
-                let on = r.value.as_deref() == Some("true");
+                // Absent row / unrecognized value => the coded default OFF.
+                // Mirror the daemon's tolerant `parse_bool` (1/true/yes/on,
+                // case-insensitive) so the toggle can never disagree with what
+                // the daemon actually does.
+                let on = r.value.as_deref().is_some_and(|v| {
+                    matches!(
+                        v.trim().to_ascii_lowercase().as_str(),
+                        "1" | "true" | "yes" | "on"
+                    )
+                });
                 self.screens.set_autostandup_enabled(on);
             }
         }
@@ -3752,6 +3760,7 @@ impl Plugin for HangarPlugin {
         // daemon socket; the reply re-fetches so the pane reflects the persisted
         // value.
         if let Some(on) = self.screens.take_pending_autostandup_set() {
+            let mut sent = false;
             if let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) {
                 let body = encode_request(
                     DAEMON_CONFIG_SET_REQ_ID,
@@ -3762,10 +3771,22 @@ impl Plugin for HangarPlugin {
                     }),
                 );
                 if let Ok(body) = body {
-                    if let Err(e) = host.unix_socket_send(stream_id, body).await {
-                        let _ = host.log_info(format!("hangar: autostandup set failed: {e}")).await;
+                    match host.unix_socket_send(stream_id, body).await {
+                        Ok(()) => sent = true,
+                        Err(e) => {
+                            let _ =
+                                host.log_info(format!("hangar: autostandup set failed: {e}")).await;
+                        }
                     }
                 }
+            }
+            // On a successful send the SET reply re-fetches (via `fetch_pending`).
+            // If the write never left the plugin (disconnected / encode / send
+            // error), re-fetch here so the pane reconciles to the persisted value
+            // instead of showing the optimistic flip forever.
+            if !sent {
+                self.fetch_pending = true;
+                self.conn.on_event();
             }
         }
         // P6.5: drain any deferred skill RPC (sync / detail / attach / detach)
