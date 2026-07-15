@@ -9,113 +9,101 @@
 //! place to run.
 //!
 //! [`register_runtime`] closes that gap: at boot the daemon upserts an
-//! `agent_runtime` row keyed on its own runtime id, marking it `online`. It is
-//! **idempotent** — a restart updates the same row (`status` + `last_seen_at`)
-//! rather than conflicting — so booting twice never duplicates or errors.
+//! `agent_runtime` row for its `(workspace, daemon_id, provider)` tuple, marking
+//! it `online`. It is **idempotent** — a restart refreshes the same row
+//! (`status` + `last_seen_at`) rather than conflicting — so booting twice never
+//! duplicates or errors.
+//!
+//! # A runtime cannot be renamed
+//!
+//! `agent.runtime_id` is a NOT NULL `REFERENCES agent_runtime(id)` FK and SQLite
+//! enforces foreign keys (sqlx sets `PRAGMA foreign_keys = ON`), so a registered
+//! runtime's `id` can never change once an agent binds it. [`effective_runtime_id`]
+//! therefore resolves the daemon's claim identity from the DB up front: an
+//! already-registered runtime's id WINS over whatever `HANGAR_DAEMON_RUNTIME_ID` /
+//! the default says (with a warning), so the registered row, the agents bound to
+//! it, and the claim loop always agree. Only a brand-new home adopts the
+//! configured id.
 //!
 //! The row's `workspace_id` FK requires a `workspace` row to exist. A daemon
 //! booted against a brand-new home with no workspace yet has nothing to attach
-//! to, so registration is a no-op in that case (returns `false`); the first
-//! `ainb hangar issue create` lazily bootstraps the workspace, and the next
-//! daemon boot registers against it.
+//! to, so registration is a no-op in that case (returns `false`); the boot seed
+//! lays the workspace down first, so in practice this only guards odd orderings.
 
 use anyhow::{Context, Result};
 use sqlx::SqlitePool;
 
-/// `daemon_id` recorded for a self-registered runtime.
+/// Resolve the runtime id this daemon registers under AND claims for.
 ///
-/// The reference schema keys uniqueness on `(workspace_id, daemon_id, provider)`;
-/// a single host daemon advertises one provider, so a stable literal keeps the
-/// upsert deterministic (a restart targets the same tuple). The runtime's own
-/// id (the PK) is what callers route to; `daemon_id` is descriptive metadata.
-const SELF_DAEMON_ID: &str = "ainb-hangar-daemon";
+/// An already-registered runtime's id WINS: a runtime cannot be renamed once an
+/// agent's `runtime_id` FK references it (see the module docs), so a changed
+/// `HANGAR_DAEMON_RUNTIME_ID` is ignored — with a `warn!` naming both ids — rather
+/// than silently registering nothing and stranding every task. Only a brand-new
+/// home (no runtime row yet) adopts the configured/default id.
+///
+/// Registers AND resolves in ONE atomic upsert
+/// ([`ainb_hangar_store::bootstrap::ensure_runtime`], which returns the id it
+/// settled on), so there is no read-then-write window in which the resolved id
+/// could stop being the registered one.
+///
+/// Infallible from the caller's view: a fault falls back to the configured id
+/// (logged), because refusing to boot over a transient error is worse than
+/// carrying on with the configured identity.
+pub async fn effective_runtime_id(pool: &SqlitePool, now_ms: i64) -> String {
+    let configured = ainb_hangar_store::bootstrap::default_runtime_id();
+    match ainb_hangar_store::bootstrap::ensure_runtime(pool, &configured, now_ms).await {
+        Ok(Some(settled)) => {
+            if settled != configured {
+                tracing::warn!(
+                    configured = %configured,
+                    existing = %settled,
+                    "HANGAR_DAEMON_RUNTIME_ID={configured} ignored; existing runtime {settled} \
+                     is in use; a runtime cannot be renamed after first boot"
+                );
+            } else {
+                tracing::info!(runtime_id = %settled, "self-registered agent runtime");
+            }
+            settled
+        }
+        // No workspace to attach to yet: nothing registered, carry the configured id.
+        Ok(None) => {
+            tracing::info!(runtime_id = %configured, "runtime self-register skipped (no workspace yet)");
+            configured
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "runtime self-register/resolve failed; using the configured id");
+            configured
+        }
+    }
+}
 
-/// Provider a self-registered runtime advertises.
+/// Upsert this daemon's `agent_runtime` row for its
+/// `(workspace, daemon_id, provider)` tuple.
 ///
-/// The daemon's claim loop resolves the actual provider per-task from the
-/// agent's backend; the runtime row's `provider` column is the advertised
-/// default. `claude` mirrors the seed fixture + the v1 default backend.
-const SELF_PROVIDER: &str = "claude";
-
-/// Runtime mode for a self-registered runtime (always a local daemon today).
-const SELF_RUNTIME_MODE: &str = "local";
-
-/// Upsert this daemon's `agent_runtime` row, keyed on `runtime_id`.
+/// A thin wrapper over [`ainb_hangar_store::bootstrap::ensure_runtime`], the one
+/// shared upsert every entry point uses (the CLI `agent create`, the boot seed,
+/// this self-register). Resolves the default (oldest) workspace and writes — or,
+/// on a restart, refreshes (`status` + `last_seen_at`) — the host runtime row.
+/// Idempotent, and it never changes an existing row's `id` (that would break the
+/// `agent.runtime_id` FK); pass [`effective_runtime_id`] so the id you register is
+/// the id already in use.
 ///
-/// Resolves the default (oldest) workspace and writes — or, on a restart,
-/// refreshes — a single `agent_runtime` row with `id = runtime_id`, marking it
-/// `online` with a fresh `last_seen_at`. Idempotent: the `ON CONFLICT(id)`
-/// clause updates the existing row instead of erroring, so booting repeatedly is
-/// safe.
-///
-/// Returns `Ok(true)` when a row was written/refreshed, `Ok(false)` when there
-/// is no workspace to attach to yet (a brand-new home before the first
-/// `issue create` bootstrap) — a benign no-op the daemon logs and continues past.
+/// Returns `Ok(Some(id))` — the id the row actually settled on (the pre-existing
+/// one when a runtime is already registered) — or `Ok(None)` when there is no
+/// workspace to attach to yet (a brand-new home before the boot seed).
 ///
 /// # Errors
 ///
 /// Propagates a [`sqlx::Error`] (wrapped) if the workspace lookup or the upsert
 /// itself fails for a reason other than the absent-workspace no-op.
-pub async fn register_runtime(pool: &SqlitePool, runtime_id: &str, now_ms: i64) -> Result<bool> {
-    let workspace_id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM workspace ORDER BY created_at LIMIT 1")
-            .fetch_optional(pool)
-            .await
-            .context("resolve default workspace for runtime self-register")?;
-
-    let Some(workspace_id) = workspace_id else {
-        // No workspace yet: nothing to attach a runtime to. The first
-        // `issue create` lays one down; the next boot registers against it.
-        return Ok(false);
-    };
-
-    // Idempotent upsert. `ON CONFLICT(id)` refreshes a row a previous boot wrote
-    // (a restart) rather than tripping the PK / the unique
-    // (workspace_id, daemon_id, provider) index.
-    sqlx::query(
-        "INSERT INTO agent_runtime \
-         (id, workspace_id, daemon_id, provider, runtime_mode, last_seen_at, status) \
-         VALUES (?, ?, ?, ?, ?, ?, 'online') \
-         ON CONFLICT(id) DO UPDATE SET \
-           status = 'online', \
-           last_seen_at = excluded.last_seen_at",
-    )
-    .bind(runtime_id)
-    .bind(&workspace_id)
-    .bind(SELF_DAEMON_ID)
-    .bind(SELF_PROVIDER)
-    .bind(SELF_RUNTIME_MODE)
-    .bind(now_ms)
-    .execute(pool)
-    .await
-    .context("upsert self-registered agent_runtime row")?;
-
-    Ok(true)
-}
-
-/// Boot-time entry point: self-register this daemon's runtime from the
-/// environment, logging the outcome.
-///
-/// Reads `HANGAR_DAEMON_RUNTIME_ID` (the same identity the claim loop keys off);
-/// an unset/empty value means an anonymous daemon with nothing to register, so
-/// this is a no-op. Otherwise it calls [`register_runtime`] with a fresh
-/// timestamp and logs the result. A failure is logged and swallowed — runtime
-/// self-registration must never down the daemon (it still sweeps + serves).
-pub async fn self_register_from_env(pool: &SqlitePool) {
-    let Some(runtime_id) = std::env::var("HANGAR_DAEMON_RUNTIME_ID").ok().filter(|s| !s.is_empty())
-    else {
-        return;
-    };
-    let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
-    match register_runtime(pool, &runtime_id, now).await {
-        Ok(true) => tracing::info!(runtime_id = %runtime_id, "self-registered agent runtime"),
-        Ok(false) => {
-            tracing::info!(runtime_id = %runtime_id, "runtime self-register skipped (no workspace yet)");
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, runtime_id = %runtime_id, "runtime self-register failed");
-        }
-    }
+pub async fn register_runtime(
+    pool: &SqlitePool,
+    runtime_id: &str,
+    now_ms: i64,
+) -> Result<Option<String>> {
+    ainb_hangar_store::bootstrap::ensure_runtime(pool, runtime_id, now_ms)
+        .await
+        .context("upsert self-registered agent_runtime row")
 }
 
 #[cfg(test)]
@@ -143,8 +131,12 @@ mod tests {
         let pool = store.pool();
         seed_workspace(pool).await;
 
-        let wrote = register_runtime(pool, "rt-self", 1_000).await.unwrap();
-        assert!(wrote, "a workspace exists, so the runtime must register");
+        let settled = register_runtime(pool, "rt-self", 1_000).await.unwrap();
+        assert_eq!(
+            settled.as_deref(),
+            Some("rt-self"),
+            "a workspace exists, so the runtime must register under the given id"
+        );
 
         let row = ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo::get(pool, "rt-self")
             .await
@@ -152,7 +144,7 @@ mod tests {
             .expect("the self-registered runtime row exists");
         assert_eq!(row.id, "rt-self");
         assert_eq!(row.workspace_id, "ws-1");
-        assert_eq!(row.provider, SELF_PROVIDER);
+        assert_eq!(row.provider, "claude", "the host runtime advertises claude");
         assert_eq!(row.status, "online");
         assert_eq!(row.last_seen_at, Some(1_000));
     }
@@ -165,10 +157,16 @@ mod tests {
         seed_workspace(pool).await;
 
         // First boot.
-        assert!(register_runtime(pool, "rt-self", 1_000).await.unwrap());
+        assert_eq!(
+            register_runtime(pool, "rt-self", 1_000).await.unwrap().as_deref(),
+            Some("rt-self")
+        );
         // Second boot (restart) with a later heartbeat: must NOT error on the PK
         // / unique-index conflict, and must refresh the existing row.
-        assert!(register_runtime(pool, "rt-self", 2_000).await.unwrap());
+        assert_eq!(
+            register_runtime(pool, "rt-self", 2_000).await.unwrap().as_deref(),
+            Some("rt-self")
+        );
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime")
             .fetch_one(pool)
@@ -196,8 +194,8 @@ mod tests {
 
         // No workspace seeded: registration is a benign no-op, never an error
         // (the FK would otherwise fail).
-        let wrote = register_runtime(pool, "rt-self", 1_000).await.unwrap();
-        assert!(!wrote, "no workspace ⇒ nothing to register");
+        let settled = register_runtime(pool, "rt-self", 1_000).await.unwrap();
+        assert_eq!(settled, None, "no workspace ⇒ nothing to register");
 
         let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_runtime")
             .fetch_one(pool)

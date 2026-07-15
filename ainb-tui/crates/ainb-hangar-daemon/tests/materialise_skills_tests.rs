@@ -25,8 +25,9 @@ use sqlx::SqlitePool;
 const AGENT_ID: &str = "ag-test-0001";
 
 /// Seed one workspace + one agent (+ its runtime/owner rows) and return the
-/// typed ids the materialiser keys off. `PRAGMA foreign_keys` is off in the
-/// store crate, but we seed the parent rows anyway for fidelity.
+/// typed ids the materialiser keys off. The parent rows are REQUIRED: foreign
+/// keys are enforced (sqlx sets `PRAGMA foreign_keys = ON`), so the agent's
+/// workspace/runtime/owner must exist before it can be inserted.
 async fn seed(pool: &SqlitePool) -> (WorkspaceId, AgentId) {
     let ws = "ws-test-0001";
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, 'test', 'Test', 0)")

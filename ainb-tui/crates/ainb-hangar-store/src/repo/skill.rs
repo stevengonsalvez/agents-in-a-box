@@ -43,9 +43,9 @@
 //!
 //! The `(workspace_id, name)` unique index (`idx_skill_workspace_name`,
 //! migration 0008) is the authoritative guard that a skill name resolves to
-//! exactly one row per tenant — `PRAGMA foreign_keys` is off in this crate, so
-//! uniqueness and cascade-on-delete are enforced in application code, not by the
-//! engine.
+//! exactly one row per tenant. The schema declares no `ON DELETE CASCADE` on
+//! `skill_file`, so the cascade-on-delete is performed explicitly in application
+//! code (see [`SkillRepo::delete`]) rather than by the engine.
 
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
@@ -458,9 +458,10 @@ impl SkillRepo {
     /// cross-tenant call is a complete no-op — it removes neither the parent nor
     /// any child file.
     ///
-    /// `PRAGMA foreign_keys` is off in this crate (and the schema declares no
-    /// `ON DELETE CASCADE` on `skill_file`), so the cascade is performed
-    /// explicitly: child files are deleted first, then the parent, atomically.
+    /// The schema declares no `ON DELETE CASCADE` on `skill_file`, so the cascade
+    /// is performed explicitly: child files are deleted first, then the parent,
+    /// atomically. (Foreign keys ARE enforced — sqlx enables `PRAGMA
+    /// foreign_keys` — which is exactly why the children must go first.)
     /// Any `agent_skill` links are left to the caller (deleting a skill that is
     /// still attached is a service-layer decision, not a storage one).
     ///

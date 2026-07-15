@@ -69,6 +69,7 @@ async fn insert_and_get_agent_roundtrip() {
         mcp_config: None,
         thinking: None,
         agent_env: Vec::new(),
+        provider: None,
     };
 
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
@@ -105,6 +106,7 @@ async fn update_config_persists_and_is_partial() {
         mcp_config: None,
         thinking: None,
         agent_env: Vec::new(),
+        provider: None,
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
@@ -175,6 +177,7 @@ async fn update_config_is_workspace_scoped_and_empty_is_noop() {
         mcp_config: None,
         thinking: None,
         agent_env: Vec::new(),
+        provider: None,
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
@@ -223,6 +226,7 @@ async fn archive_flips_flag_and_hides_from_active_list() {
         mcp_config: None,
         thinking: None,
         agent_env: Vec::new(),
+        provider: None,
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 

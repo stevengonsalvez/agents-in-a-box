@@ -2,7 +2,7 @@
 source: crates/ainb-plugin-hangar/tests/squads_screen_snapshot.rs
 expression: full
 ---
-              [c]reate [a]dd [d]el [x]assign
+  [n]ew-agent [c]reate [a]dd [d]el [x]assign
 ▶ shippers  leader: ● lead-bot  (2 members)
     └ ◐ worker-bot  · agent
     └ ● alice  · human

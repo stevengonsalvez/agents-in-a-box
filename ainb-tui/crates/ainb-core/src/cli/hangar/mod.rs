@@ -49,16 +49,12 @@ use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 
 use crate::cli::OutputFormat;
 
-/// Default workspace bootstrapped when the Hangar database has no workspace yet.
+/// The default workspace slug + owner details now live in
+/// [`ainb_hangar_store::bootstrap`] — the single shared, idempotent lay-down the
+/// CLI, the daemon boot seed, and `agent_create` all delegate to. The wrappers
+/// [`ensure_default_workspace`] / [`find_default_workspace`] / [`default_owner_id`]
+/// keep the existing CLI callers untouched.
 ///
-/// The CLI is usable standalone (no daemon / TUI onboarding required), so
-/// `issue create` lazily lays down a single workspace + owner the first time it
-/// runs. Mirrors the single-workspace-at-v1 reality (migration 0001 docs).
-const DEFAULT_WORKSPACE_SLUG: &str = "default";
-/// Human name of the bootstrapped default workspace.
-const DEFAULT_WORKSPACE_NAME: &str = "Default Workspace";
-/// Email of the bootstrapped owner user.
-const DEFAULT_OWNER_EMAIL: &str = "stevie@local";
 /// Member id used as the default issue creator (`member:stevie`).
 const DEFAULT_CREATOR_ID: &str = "stevie";
 /// Lifecycle state a freshly-created issue lands in.
@@ -398,6 +394,8 @@ pub struct AutopilotIdArgs {
 /// `model`/`args` is a separate concern (e38.16).
 #[derive(Subcommand, Debug)]
 pub enum AgentCommand {
+    /// Create a new agent from scratch (fills workspace/runtime/owner behind the scenes).
+    Create(AgentCreateArgs),
     /// List the workspace's agents (active by default; `--all` includes archived).
     List(AgentListArgs),
     /// Edit an agent's config knobs (model / args / MCP / thinking / env / name).
@@ -406,6 +404,29 @@ pub enum AgentCommand {
     Archive(AgentArchiveArgs),
     /// Un-archive an agent (restore it to the active picker).
     Unarchive(AgentArchiveArgs),
+}
+
+/// Arguments for `hangar agent create`.
+///
+/// The daemon-less create-from-scratch path: fills the workspace / runtime /
+/// owner FKs behind the scenes so the caller supplies only a `name`. `provider`
+/// is optional (`claude`/`codex`/`copilot`, default `claude`) and is HONOURED at
+/// dispatch — the daemon spawns that provider's backend for the agent's tasks.
+#[derive(Args, Debug)]
+pub struct AgentCreateArgs {
+    /// The new agent's name.
+    #[arg(long)]
+    pub name: String,
+    /// Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`.
+    #[arg(long)]
+    pub provider: Option<String>,
+    /// Optional instructions / system prompt for the agent.
+    #[arg(long)]
+    pub instructions: Option<String>,
+    /// Workspace slug to create the agent in. Defaults to the bootstrapped
+    /// `default` workspace (created if absent).
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar agent list`.
@@ -1653,11 +1674,47 @@ async fn run_templates_use(store: &Store, args: TemplatesUseArgs) -> Result<()> 
 async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
+        AgentCommand::Create(args) => run_agent_create(&store, args).await,
         AgentCommand::List(args) => run_agent_list(&store, args, format).await,
         AgentCommand::Edit(args) => run_agent_edit(&store, args).await,
         AgentCommand::Archive(args) => run_agent_set_archived(&store, args, true).await,
         AgentCommand::Unarchive(args) => run_agent_set_archived(&store, args, false).await,
     }
+}
+
+/// `hangar agent create`: create one agent from scratch, filling the workspace /
+/// runtime / owner FKs behind the scenes. Prints the created agent's name (never
+/// the id). An unsupported provider or empty name is a CLI error.
+async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
+    let name = args.name.trim();
+    if name.is_empty() {
+        anyhow::bail!("agent name must not be empty");
+    }
+    let provider = ainb_hangar_store::bootstrap::normalize_provider(args.provider.as_deref())
+        .map_err(|e| anyhow::anyhow!(e))?;
+    // An explicit --workspace must exist; the default is ensured (created if absent).
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => {
+            let id: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+                .bind(slug)
+                .fetch_optional(store.pool())
+                .await
+                .context("look up workspace by slug")?;
+            id.ok_or_else(|| anyhow::anyhow!("no workspace with slug {slug}"))?
+        }
+        None => ensure_default_workspace(store).await?,
+    };
+    let agent = ainb_hangar_store::bootstrap::create_agent(
+        store.pool(),
+        &workspace_id,
+        name,
+        &provider,
+        args.instructions,
+    )
+    .await
+    .context("create agent")?;
+    println!("created agent {}", agent.name);
+    Ok(())
 }
 
 /// `hangar agent list`: list the workspace's agents (active, or all with `--all`).
@@ -3026,12 +3083,33 @@ async fn run_daemon_run() -> Result<()> {
 /// `$AINB_HANGAR_HOME` this process resolved, so it shares one home; its stdout/
 /// stderr go to the daemon's own rolling log, not this terminal.
 fn run_daemon_start() -> Result<()> {
+    start_daemon_if_stopped(true)
+}
+
+/// Best-effort autostart of the Hangar daemon before the TUI connects.
+///
+/// Idempotent (a live pid is a no-op) and non-fatal: a spawn failure is logged
+/// and swallowed so the TUI still launches (it shows the offline panel until the
+/// daemon comes up). Quiet — no stdout, since the TUI owns the terminal. Mirrors
+/// `mcp_pool`'s `ensure_daemon` warn-and-continue.
+pub fn ensure_hangar_daemon() {
+    if let Err(e) = start_daemon_if_stopped(false) {
+        tracing::warn!(error = %e, "hangar daemon autostart failed (TUI continues)");
+    }
+}
+
+/// Spawn the daemon as a detached background child unless it is already running,
+/// recording its EXACT pid. When `announce` is true the outcome is printed
+/// (the `hangar daemon start` CLI verb); the TUI autostart passes `false`.
+fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     let pid_path = daemon_pid_path()?;
 
     // Already running? Bail out cleanly rather than spawning a duplicate.
     if let Some(pid) = read_daemon_pid(&pid_path) {
         if pid_is_running(pid) {
-            println!("hangar daemon: already running (pid {pid})");
+            if announce {
+                println!("hangar daemon: already running (pid {pid})");
+            }
             return Ok(());
         }
         // Stale pid file from a crashed daemon: drop it before re-spawning.
@@ -3078,7 +3156,9 @@ fn run_daemon_start() -> Result<()> {
     std::fs::write(&pid_path, format!("{pid}\n"))
         .with_context(|| format!("write pid file {}", pid_path.display()))?;
 
-    println!("hangar daemon: started (pid {pid})");
+    if announce {
+        println!("hangar daemon: started (pid {pid})");
+    }
     Ok(())
 }
 
@@ -3178,12 +3258,9 @@ async fn resolve_agent_runtime(
 
 /// Return the default workspace id, or `None` if no workspace exists yet.
 async fn find_default_workspace(store: &Store) -> Result<Option<String>> {
-    let id: Option<String> =
-        sqlx::query_scalar("SELECT id FROM workspace ORDER BY created_at LIMIT 1")
-            .fetch_optional(store.pool())
-            .await
-            .context("query default workspace")?;
-    Ok(id)
+    ainb_hangar_store::bootstrap::find_default_workspace(store.pool())
+        .await
+        .context("query default workspace")
 }
 
 /// Return the default workspace id, lazily bootstrapping a workspace + owner
@@ -3194,41 +3271,9 @@ async fn find_default_workspace(store: &Store) -> Result<Option<String>> {
 /// (FK-less by design, per the actor module), so the member row is informational
 /// but kept consistent. Idempotent: a second call returns the existing id.
 async fn ensure_default_workspace(store: &Store) -> Result<String> {
-    if let Some(id) = find_default_workspace(store).await? {
-        return Ok(id);
-    }
-    let pool = store.pool();
-    let idgen = SystemIdGen;
-    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
-    let workspace_id = idgen.new_ulid();
-    let user_id = idgen.new_ulid();
-
-    // The workspace's `issue_prefix` is left NULL ("no explicit prefix"): the
-    // HGR default issue id (63l.3) lives at the display layer
-    // (`issue_display_id`), not the stored column, so a fresh issue's TITLE stays
-    // verbatim while its display id still reads HGR-1, HGR-2, ….
-    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
-        .bind(&workspace_id)
-        .bind(DEFAULT_WORKSPACE_SLUG)
-        .bind(DEFAULT_WORKSPACE_NAME)
-        .bind(now)
-        .execute(pool)
+    ainb_hangar_store::bootstrap::ensure_default_workspace(store.pool())
         .await
-        .context("bootstrap default workspace")?;
-    sqlx::query("INSERT INTO user (id, email, created_at) VALUES (?, ?, ?)")
-        .bind(&user_id)
-        .bind(DEFAULT_OWNER_EMAIL)
-        .bind(now)
-        .execute(pool)
-        .await
-        .context("bootstrap default owner user")?;
-    sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, ?, 'owner')")
-        .bind(&workspace_id)
-        .bind(&user_id)
-        .execute(pool)
-        .await
-        .context("bootstrap default member")?;
-    Ok(workspace_id)
+        .context("bootstrap default workspace")
 }
 
 /// Read a workspace's configured `issue_prefix` by id (e38.21).
@@ -3253,11 +3298,9 @@ async fn workspace_issue_prefix(
 /// Return the default owner user id (the first user, oldest first), or `None`
 /// if no user exists yet.
 async fn default_owner_id(store: &Store) -> Result<Option<String>> {
-    let id: Option<String> = sqlx::query_scalar("SELECT id FROM user ORDER BY created_at LIMIT 1")
-        .fetch_optional(store.pool())
+    ainb_hangar_store::bootstrap::default_owner_id(store.pool())
         .await
-        .context("query default owner user")?;
-    Ok(id)
+        .context("query default owner user")
 }
 
 // ──────────────────────────────────────────────────────────────────────────

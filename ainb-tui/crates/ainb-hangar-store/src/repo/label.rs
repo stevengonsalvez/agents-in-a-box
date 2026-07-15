@@ -32,8 +32,8 @@
 //! - the label is resolved (or, on attach, created) by `(workspace_id, name)`,
 //!   so a label name always binds to the caller's tenant.
 //!
-//! `PRAGMA foreign_keys` is off in this crate, so the `(workspace_id, name)`
-//! UNIQUE index (`idx_label_workspace_name`, migration 0016) and the
+//! Tenant scoping is NOT something the engine does for us: the `(workspace_id,
+//! name)` UNIQUE index (`idx_label_workspace_name`, migration 0016) and the
 //! `(issue_id, label_id)` composite PK are the engine-enforced invariants;
 //! referential integrity of the join (and its cascade on issue/label deletion)
 //! is enforced here in application code.

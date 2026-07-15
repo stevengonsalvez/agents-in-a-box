@@ -58,6 +58,7 @@ fn cfg_with_codex(codex_path: PathBuf) -> RunnerConfig {
         // bogus path is fine since `run_codex` never touches it.
         claude_path: PathBuf::from("/nonexistent/claude"),
         codex_path,
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,

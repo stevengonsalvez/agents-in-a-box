@@ -381,6 +381,13 @@ pub enum IssueCreateAction {
 /// agents/issues — the screen intent carries only ids.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SquadAction {
+    /// Create an AGENT named `name` (`n` + Enter) — `hangar/agent_create`; the glue
+    /// fires it with no ids and folds the refreshed roster back, clearing the
+    /// "no agent available to lead a squad" gate live.
+    CreateAgent {
+        /// The new agent's name.
+        name: String,
+    },
     /// Create a squad named `name` (`c` + Enter) — `hangar/squad_create`; the glue
     /// picks the leader from the cached agents.
     Create {
@@ -717,10 +724,12 @@ impl ScreenStates {
     pub fn set_squads(&mut self, snapshot: &ainb_hangar_proto::snapshots::SquadsListResult) {
         let selected = self.squads.selected_index();
         let creating = self.squads.create_buffer().map(str::to_string);
+        let creating_agent = self.squads.agent_buffer().map(str::to_string);
         let note = self.squads.note().cloned();
         let mut next = SquadsState::from_snapshot(snapshot, &self.actors);
         next.set_selected(selected);
         next.set_create_buffer(creating);
+        next.set_agent_buffer(creating_agent);
         next.set_note(note);
         self.squads = next;
         // tcp T4 / F7: the Boards assign-squad picker draws from the same roster, so
@@ -1754,6 +1763,7 @@ fn route_squads(states: &mut ScreenStates, key: &KeyEvent) {
     let out = reduce_squads(&states.squads, ev);
     states.squads = out.state;
     states.pending_squads_action = match out.intent {
+        Some(SquadsIntent::CreateAgent { name }) => Some(SquadAction::CreateAgent { name }),
         Some(SquadsIntent::CreateSquad { name }) => Some(SquadAction::Create { name }),
         Some(SquadsIntent::AddMember { squad_id }) => Some(SquadAction::AddMember { squad_id }),
         Some(SquadsIntent::RemoveMember {

@@ -94,6 +94,8 @@ pub struct DaemonConfig {
     pub claude_path: PathBuf,
     /// Path to the `codex` provider binary (e38.16).
     pub codex_path: PathBuf,
+    /// Path to the `copilot` provider binary (GitHub Copilot CLI).
+    pub copilot_path: PathBuf,
     /// Interval between claim polls.
     pub poll_interval: Duration,
     /// Hard wall-clock deadline for each provider run; the subprocess is killed
@@ -118,11 +120,17 @@ impl DaemonConfig {
     /// Build the config from the process environment (see the module table).
     #[must_use]
     pub fn from_env() -> Self {
-        let runtime_id = std::env::var("HANGAR_DAEMON_RUNTIME_ID").ok().filter(|s| !s.is_empty());
+        // A fresh home now claims for the stable default runtime even with no
+        // env override: the boot seed registers that runtime + a starter agent
+        // bound to it, so the claim loop (run_loop.rs, skipped when `None`) is
+        // enabled out of the box. `HANGAR_DAEMON_RUNTIME_ID` still overrides.
+        let runtime_id = Some(ainb_hangar_store::bootstrap::default_runtime_id());
         let claude_path = std::env::var_os("HANGAR_CLAUDE_PATH")
             .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
         let codex_path = std::env::var_os("HANGAR_CODEX_PATH")
             .map_or_else(|| PathBuf::from("codex"), PathBuf::from);
+        let copilot_path = std::env::var_os("HANGAR_COPILOT_PATH")
+            .map_or_else(|| PathBuf::from("copilot"), PathBuf::from);
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
         let provider_max_runtime = env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
@@ -152,6 +160,7 @@ impl DaemonConfig {
             runtime_id,
             claude_path,
             codex_path,
+            copilot_path,
             poll_interval,
             provider_max_runtime,
             sweeper,
@@ -270,14 +279,12 @@ pub async fn run(
         Arc::new(SystemClock),
     );
 
-    if cfg.disable_claim || cfg.runtime_id.is_none() {
+    let Some(runtime_id) = cfg.runtime_id.clone().filter(|_| !cfg.disable_claim) else {
         tracing::info!(claim = false, "claim loop disabled; sweepers only");
         tokio::signal::ctrl_c().await?;
         tracing::info!("ainb-hangar-daemon shutting down");
         return Ok(());
-    }
-
-    let runtime_id = cfg.runtime_id.clone().expect("runtime_id present");
+    };
 
     // e38.25 crash recovery: this daemon just booted, so any task still frozen
     // `dispatched`/`running` for its runtime is an orphan from a previous
@@ -295,6 +302,7 @@ pub async fn run(
     let runner = Runner::new(RunnerConfig {
         claude_path: cfg.claude_path.clone(),
         codex_path: cfg.codex_path.clone(),
+        copilot_path: cfg.copilot_path.clone(),
         max_runtime: cfg.provider_max_runtime,
         tail_lines: TAIL_LINES,
         // e38.23: confine every provider spawn in the OS-level FS sandbox by
@@ -795,6 +803,16 @@ async fn execute_claimed(
                     )
                     .await
                     .map_err(anyhow::Error::from),
+                Backend::Copilot => runner
+                    .run_copilot_in(
+                        &env,
+                        task_env,
+                        dispatch.agent_env,
+                        &dispatch.invocation,
+                        &location,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from),
             }
         }
     };
@@ -883,10 +901,11 @@ async fn run_interactive(
     // which is the trust model D6 chose for interactive over headless.
     let session_name = crate::interactive::session_name_for(&task.id);
     let (program, argv) = runner.provider_command(dispatch.backend, &dispatch.invocation);
-    // Mirror the headless env composition: the codex path layers the agent's
-    // `agent_env`; the claude path layers nothing (parity with `execute_claimed`).
+    // Mirror the headless env composition: the codex / copilot paths layer the
+    // agent's `agent_env`; the claude path layers nothing (parity with
+    // `execute_claimed`).
     let extra_env = match dispatch.backend {
-        Backend::Codex => dispatch.agent_env.clone(),
+        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone(),
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
@@ -1509,9 +1528,14 @@ struct ResolvedDispatch {
 /// Resolve the provider routing for a task's agent (e38.16).
 ///
 /// Reads the agent row (its migration-0015 `model`/`cli_args`/`agent_env`
-/// config) and its runtime's `provider` wire name, mapping the latter to a
-/// [`Backend`]. The agent's `model` and `cli_args` become the
-/// [`ProviderInvocation`]; its `agent_env` is carried separately.
+/// config) and picks the backend from the agent's OWN `provider` when set
+/// (migration 0041), falling back to its runtime's advertised `provider` when
+/// the agent has no override. The runtime is an execution slot the claim loop
+/// keys off by `runtime_id` (never by provider — see `claim.rs` `CLAIM_SQL`), so
+/// a `codex` agent bound to the single default (`claude`-advertised) runtime is
+/// still claimed and now dispatches the codex backend. The agent's `model` and
+/// `cli_args` become the [`ProviderInvocation`]; its `agent_env` is carried
+/// separately.
 ///
 /// # Errors
 ///
@@ -1526,8 +1550,10 @@ async fn resolve_dispatch(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<R
     let runtime = AgentRuntimeRepo::get(pool, &agent.runtime_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
+    // Per-agent provider wins; an agent with no override uses the runtime default.
+    let provider = agent.provider.as_deref().unwrap_or(&runtime.provider);
     Ok(ResolvedDispatch {
-        backend: Backend::from_provider(&runtime.provider),
+        backend: Backend::from_provider(provider),
         invocation: ProviderInvocation {
             model: agent.model,
             cli_args: agent.cli_args,
@@ -1915,5 +1941,76 @@ mod tests {
     #[test]
     fn interactive_sessions_empty_drains_to_nothing() {
         assert!(InteractiveSessions::default().drain().is_empty());
+    }
+
+    /// Provider-honoring proof: `resolve_dispatch` selects the backend from the
+    /// AGENT's provider, overriding the runtime's advertised default. A `codex`
+    /// agent bound to the single `claude`-advertised host runtime dispatches the
+    /// codex backend, a `copilot` agent dispatches the copilot backend, a `claude`
+    /// agent dispatches claude, and an agent with no override falls back to the
+    /// runtime's provider.
+    #[tokio::test]
+    async fn resolve_dispatch_honours_the_agent_provider_over_the_runtime() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        // The single host runtime advertises claude.
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+
+        // A codex agent on that claude-advertised runtime → codex backend.
+        let codex = bootstrap::create_agent(pool, &ws, "coder", "codex", None).await.unwrap();
+        let disp = resolve_dispatch(pool, &codex.id).await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Codex,
+            "a codex agent must dispatch the codex backend, not the runtime's claude"
+        );
+
+        // A copilot agent on that claude-advertised runtime → copilot backend
+        // (no more silent claude fallback).
+        let copilot = bootstrap::create_agent(pool, &ws, "helper", "copilot", None).await.unwrap();
+        let disp = resolve_dispatch(pool, &copilot.id).await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Copilot,
+            "a copilot agent must dispatch the copilot backend, not fall back to claude"
+        );
+
+        // A claude agent on the same runtime → claude backend.
+        let claude = bootstrap::create_agent(pool, &ws, "writer", "claude", None).await.unwrap();
+        let disp = resolve_dispatch(pool, &claude.id).await.unwrap();
+        assert_eq!(disp.backend, Backend::Claude);
+
+        // An agent with NO provider override falls back to the runtime's provider.
+        let owner = bootstrap::default_owner_id(pool).await.unwrap().unwrap();
+        let bare = Agent {
+            id: "bare-agent".into(),
+            workspace_id: ws.clone(),
+            name: "bare".into(),
+            runtime_id: bootstrap::default_runtime_id(),
+            instructions: None,
+            visibility: "workspace".into(),
+            owner_id: owner,
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
+            provider: None,
+        };
+        AgentRepo::insert(pool, &bare).await.unwrap();
+        let disp = resolve_dispatch(pool, "bare-agent").await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Claude,
+            "no per-agent override falls back to the runtime's advertised provider"
+        );
     }
 }

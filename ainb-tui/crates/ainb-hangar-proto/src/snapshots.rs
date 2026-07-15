@@ -1041,6 +1041,32 @@ pub struct AgentUpdateParams {
     pub agent_env: Option<Vec<(String, String)>>,
 }
 
+/// Params for [`crate::methods::HANGAR_AGENT_CREATE`]: create one agent from
+/// scratch on the fresh-home path.
+///
+/// The daemon fills every FK behind the scenes (default workspace + owner +
+/// runtime), so the caller supplies only the human `name`. `workspace_id` is
+/// optional — absent/empty means "the default workspace" (the daemon ensures it),
+/// so the TUI never has to surface an id. `provider` is optional
+/// (`claude`/`codex`/`copilot`); absent defaults to the runtime's advertised
+/// `claude`. `instructions` is the optional free-form system prompt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentCreateParams {
+    /// The target workspace; absent/empty = the default workspace (ensured by
+    /// the daemon). Kept optional so the TUI create prompt never surfaces an id.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace_id: Option<String>,
+    /// The new agent's human name (required, non-empty).
+    pub name: String,
+    /// Optional provider (`claude`/`codex`/`copilot`); absent = the runtime's
+    /// advertised default (`claude`). Recorded on the agent row.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub provider: Option<String>,
+    /// Optional free-form system prompt / instructions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub instructions: Option<String>,
+}
+
 /// Params for [`crate::methods::HANGAR_AGENT_ARCHIVE`] (e38.15): archive or
 /// un-archive one agent, scoped to a workspace.
 ///
@@ -2373,6 +2399,33 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<AgentArchiveParams>(&s).unwrap(),
             params
+        );
+    }
+
+    /// `AgentCreateParams` round-trips, and the optional fields are omitted when
+    /// absent so a minimal `{ "name": ... }` payload deserializes (the fresh-home
+    /// create needs neither an id nor a provider).
+    #[test]
+    fn agent_create_params_roundtrip_and_minimal() {
+        let full = AgentCreateParams {
+            workspace_id: Some("ws-1".into()),
+            name: "reviewer".into(),
+            provider: Some("codex".into()),
+            instructions: Some("be terse".into()),
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<AgentCreateParams>(&s).unwrap(), full);
+
+        // A name-only payload deserializes with every optional field defaulted.
+        let minimal: AgentCreateParams = serde_json::from_str(r#"{"name":"claude"}"#).unwrap();
+        assert_eq!(minimal.name, "claude");
+        assert!(minimal.workspace_id.is_none());
+        assert!(minimal.provider.is_none());
+        assert!(minimal.instructions.is_none());
+        // The optional fields are omitted from the serialized form when absent.
+        assert_eq!(
+            serde_json::to_string(&minimal).unwrap(),
+            r#"{"name":"claude"}"#
         );
     }
 

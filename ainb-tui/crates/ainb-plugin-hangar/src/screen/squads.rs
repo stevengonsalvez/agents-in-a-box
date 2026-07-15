@@ -113,6 +113,9 @@ pub struct SquadsState {
     selected: usize,
     /// The create-squad name buffer — `Some` only while the create input is open.
     create_input: Option<String>,
+    /// The create-AGENT name buffer — `Some` only while the `n` agent-create input
+    /// is open. Mutually exclusive with `create_input` (only one input at a time).
+    agent_input: Option<String>,
     /// A transient status note (last assignment / add / error), rendered above the
     /// list; its kind drives the color (green = ok, red = error).
     note: Option<Note>,
@@ -126,6 +129,7 @@ impl SquadsState {
             squads,
             selected: 0,
             create_input: None,
+            agent_input: None,
             note: None,
         }
     }
@@ -162,6 +166,18 @@ impl SquadsState {
     #[must_use]
     pub fn create_buffer(&self) -> Option<&str> {
         self.create_input.as_deref()
+    }
+
+    /// The current create-AGENT name buffer, if the `n` input is open.
+    #[must_use]
+    pub fn agent_buffer(&self) -> Option<&str> {
+        self.agent_input.as_deref()
+    }
+
+    /// Restore (or clear) the create-AGENT input buffer after a refresh, so a
+    /// snapshot arriving mid-typing does not wipe the half-typed name.
+    pub fn set_agent_buffer(&mut self, buf: Option<String>) {
+        self.agent_input = buf;
     }
 
     /// Set (or clear) the transient status note the render shows above the list.
@@ -321,6 +337,13 @@ pub enum SquadsEvent {
 /// of the actor catalogue.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum SquadsIntent {
+    /// Create an AGENT named `name` (`n` + Enter) — `hangar/agent_create`; the glue
+    /// fires it with no ids (the daemon fills workspace/runtime/owner) and folds the
+    /// refreshed roster back, so the "no agent available" squad gate clears live.
+    CreateAgent {
+        /// The new agent's name (non-blank).
+        name: String,
+    },
     /// Create a squad named `name` (`c` + Enter) — `hangar/squad_create`; the glue
     /// picks the leader from the cached agents.
     CreateSquad {
@@ -363,7 +386,9 @@ pub struct SquadsReduction {
 pub fn reduce_squads(state: &SquadsState, ev: SquadsEvent) -> SquadsReduction {
     match ev {
         SquadsEvent::Key(c) => {
-            if state.create_input.is_some() {
+            if state.agent_input.is_some() {
+                reduce_agent_key(state, c)
+            } else if state.create_input.is_some() {
                 reduce_create_key(state, c)
             } else {
                 reduce_key(state, c)
@@ -404,9 +429,47 @@ fn reduce_create_key(state: &SquadsState, c: char) -> SquadsReduction {
     }
 }
 
+/// Handle a key while the create-AGENT input is open: Enter submits (when
+/// non-blank) and emits [`SquadsIntent::CreateAgent`], Backspace deletes, any
+/// other printable char appends. Mirrors [`reduce_create_key`] exactly so the
+/// Esc-cancels-in-one-press semantics are identical.
+fn reduce_agent_key(state: &SquadsState, c: char) -> SquadsReduction {
+    let mut buf = state.agent_input.clone().unwrap_or_default();
+    match c {
+        '\n' => {
+            let name = buf.trim().to_string();
+            if name.is_empty() {
+                // Blank submit is a no-op — keep the input open.
+                return unchanged(state);
+            }
+            let mut next = state.clone();
+            next.agent_input = None;
+            with_intent(next, SquadsIntent::CreateAgent { name })
+        }
+        '\u{8}' => {
+            buf.pop();
+            let mut next = state.clone();
+            next.agent_input = Some(buf);
+            no_intent(next)
+        }
+        c if !c.is_control() => {
+            buf.push(c);
+            let mut next = state.clone();
+            next.agent_input = Some(buf);
+            no_intent(next)
+        }
+        _ => unchanged(state),
+    }
+}
+
 /// Handle a normal-mode key (P7 bindings).
 fn reduce_key(state: &SquadsState, c: char) -> SquadsReduction {
     match c {
+        'n' => {
+            let mut next = state.clone();
+            next.agent_input = Some(String::new());
+            no_intent(next)
+        }
         'j' => {
             let mut next = state.clone();
             next.move_selection(1);
@@ -460,9 +523,15 @@ fn reduce_key(state: &SquadsState, c: char) -> SquadsReduction {
     }
 }
 
-/// Handle Esc: cancel an open create input; a no-op otherwise.
+/// Handle Esc: cancel whichever input (agent-create or squad-create) is open in
+/// a SINGLE press; a no-op otherwise. Esc never steps back through state — it
+/// closes the open input outright.
 fn reduce_esc(state: &SquadsState) -> SquadsReduction {
-    if state.create_input.is_some() {
+    if state.agent_input.is_some() {
+        let mut next = state.clone();
+        next.agent_input = None;
+        no_intent(next)
+    } else if state.create_input.is_some() {
         let mut next = state.clone();
         next.create_input = None;
         no_intent(next)
@@ -526,7 +595,22 @@ pub fn render_squads(
         row = row.saturating_add(1);
     }
 
-    // Create-name input takes over the body while open.
+    // Create-AGENT input takes over the body while open (the `n` prompt).
+    if let Some(buffer) = state.agent_buffer() {
+        let line = format!("New agent name: {buffer}▏");
+        put_str(
+            buf,
+            0,
+            row,
+            "Enter an agent name, Esc to cancel",
+            MUTED_GRAY,
+            area_w,
+        );
+        put_str(buf, 0, row.saturating_add(1), &line, GOLD, area_w);
+        return;
+    }
+
+    // Create-squad name input takes over the body while open.
     if let Some(buffer) = state.create_buffer() {
         let line = format!("New squad name: {buffer}▏");
         put_str(
@@ -546,7 +630,7 @@ pub fn render_squads(
             buf,
             0,
             row,
-            "No squads. Press 'c' to create a squad",
+            "No squads. Press 'n' to create an agent, 'c' to create a squad",
             MUTED_GRAY,
             area_w,
         );
@@ -591,7 +675,7 @@ const fn first_visible(selected: usize, visible_rows: usize) -> usize {
 /// beside the controls it drives (`feedback_keybinding_hints_near_control`).
 /// Dropped on a terminal too narrow to hold them (the footer carries them too).
 fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
-    const HINTS: &str = "[c]reate [a]dd [d]el [x]assign";
+    const HINTS: &str = "[n]ew-agent [c]reate [a]dd [d]el [x]assign";
     let hint_w = u16::try_from(HINTS.chars().count()).unwrap_or(0);
     if hint_w >= area_w {
         return;
@@ -816,6 +900,42 @@ mod tests {
         let cancel = reduce_squads(&opened, SquadsEvent::Esc);
         assert!(!cancel.state.is_creating());
         assert!(cancel.intent.is_none());
+    }
+
+    /// `n` opens the create-AGENT input; typing + Enter raises a `CreateAgent`
+    /// intent; a single Esc cancels it outright (never stepping back).
+    #[test]
+    fn create_agent_flow_raises_intent_and_esc_cancels_in_one_press() {
+        let state = SquadsState::from_snapshot(&snapshot(), &actors());
+        let opened = reduce_squads(&state, SquadsEvent::Key('n')).state;
+        assert_eq!(opened.agent_buffer(), Some(""), "n opens the agent-create input");
+        assert!(!opened.is_creating(), "the squad-create input stays closed");
+
+        // Type "bot".
+        let typed = reduce_squads(&opened, SquadsEvent::Key('b')).state;
+        let typed = reduce_squads(&typed, SquadsEvent::Key('o')).state;
+        let typed = reduce_squads(&typed, SquadsEvent::Key('t')).state;
+        assert_eq!(typed.agent_buffer(), Some("bot"));
+
+        // Enter submits and closes the input.
+        let out = reduce_squads(&typed, SquadsEvent::Key('\n'));
+        assert_eq!(out.intent, Some(SquadsIntent::CreateAgent { name: "bot".into() }));
+        assert!(out.state.agent_buffer().is_none(), "input closes on submit");
+
+        // A SINGLE Esc on the open input cancels with no intent.
+        let cancel = reduce_squads(&typed, SquadsEvent::Esc);
+        assert!(cancel.state.agent_buffer().is_none(), "one Esc closes the agent input");
+        assert!(cancel.intent.is_none());
+    }
+
+    /// A blank agent-create submit is a no-op — the input stays open, no intent.
+    #[test]
+    fn blank_agent_create_submit_is_a_noop() {
+        let state = SquadsState::from_snapshot(&snapshot(), &actors());
+        let opened = reduce_squads(&state, SquadsEvent::Key('n')).state;
+        let out = reduce_squads(&opened, SquadsEvent::Key('\n'));
+        assert!(out.intent.is_none());
+        assert_eq!(out.state.agent_buffer(), Some(""), "blank submit keeps the input open");
     }
 
     /// A blank create submit is a no-op — the input stays open, no intent.

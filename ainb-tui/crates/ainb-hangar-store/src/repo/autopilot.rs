@@ -15,8 +15,10 @@
 //!
 //! # Workspace scoping (every by-id method)
 //!
-//! `PRAGMA foreign_keys` is off in this crate, so tenant isolation is enforced in
-//! application SQL, not by the engine. **Every by-id read and mutation filters
+//! Foreign keys ARE enforced (sqlx enables `PRAGMA foreign_keys` by default), but
+//! an FK only constrains that a parent row EXISTS — it says nothing about WHICH
+//! tenant it belongs to. So tenant isolation is enforced in application SQL, not
+//! by the engine. **Every by-id read and mutation filters
 //! `WHERE id = ? AND workspace_id = ?`**, and [`AutopilotRepo::list_runs`] joins
 //! through `autopilot` to verify the workspace — a caller holding an
 //! [`AutopilotId`] minted in workspace A can never read, toggle, or list the runs
