@@ -11,6 +11,31 @@ use std::path::{Path, PathBuf};
 /// and read/write only the task's isolated roots — it CANNOT read the operator's
 /// `$HOME`, `~/.ssh`, `~/.aws`, etc., which is the exfiltration path this bead
 /// closes.
+///
+/// # There is deliberately no Keychain / securityd grant
+///
+/// A confined provider whose credential lives in the macOS login Keychain cannot
+/// reach it (`deny default` blocks the securityd mach-lookup), so a headless run
+/// fails "Not logged in". Do NOT fix that by re-allowing
+/// `mach-lookup (global-name "com.apple.SecurityServer")`. That grant was built,
+/// measured, and removed:
+///
+/// * It is not per-item. Under this exact profile,
+///   `security find-generic-password -s 'Chrome Safe Storage' -w` goes from
+///   `DENIED rc=44` to returning the secret, silently and with no prompt — and
+///   that item is the master key for every Chrome-saved password, not the
+///   agent's own token. "securityd still arbitrates which items the caller may
+///   have" FAILS OPEN for any item that is ACL-permissive (`-A`) or was ever
+///   marked "Always Allow".
+/// * It cannot be scoped to one caller: the profile allows `process-exec*`, so a
+///   confined agent simply spawns `/usr/bin/security`.
+/// * With `allow_network` also on, and briefs built from board issue text, the
+///   chain prompt-injection -> `security` -> egress is complete.
+///
+/// The supported path is to inject the credential as an env var from the
+/// UNSANDBOXED parent daemon (`claude setup-token` ->
+/// `CLAUDE_CODE_OAUTH_TOKEN`), which needs no grant into `$HOME` at all. Until
+/// that lands, a headless run needs `HANGAR_DAEMON_DISABLE_SANDBOX=1`.
 #[derive(Debug, Clone)]
 pub struct SandboxPolicy {
     /// Paths the child may read (and execute). Includes the system roots a real

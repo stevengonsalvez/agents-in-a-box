@@ -57,7 +57,7 @@ use crate::events::EventSink;
 use crate::execenv::{prepare_env, write_context_prompt};
 use crate::health_stats::HealthStats;
 use crate::progress_comment;
-use crate::runner::{Backend, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
+use crate::runner::{Backend, Mode, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
     SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
     sweep_stale_running,
@@ -573,12 +573,30 @@ async fn execute_claimed(
 
     // e38.16: resolve which provider exec path this task routes to (agent →
     // runtime → provider) and the per-agent config (model / cli_args / agent_env)
-    // the runner threads into that provider's argv + env. A resolve fault
-    // defaults the dispatch to `claude` with empty config so a misconfigured
-    // agent still runs rather than stranding the task.
-    let dispatch = resolve_dispatch(pool, &task.agent_id, task.issue_id.as_deref())
-        .await
-        .unwrap_or_default();
+    // the runner threads into that provider's argv + env. A resolve fault falls
+    // back to the default provider WITH the fallback prompt, so a misconfigured
+    // agent still runs rather than stranding the task — the prompt is what makes
+    // that true (see `ResolvedDispatch::fallback`). The fault is logged rather
+    // than swallowed: silently substituting a different agent's behaviour is
+    // exactly the kind of thing an operator needs to see.
+    // The ONE place the task row's `mode` column becomes a `Mode`: it is resolved
+    // here, carried on the `ResolvedDispatch`, and read from there by both the
+    // branch that picks the exec path and the argv built for it — so the two can
+    // never disagree.
+    let mode = dispatch_mode(&task.mode);
+    let dispatch =
+        match resolve_dispatch(pool, &task.agent_id, task.issue_id.as_deref(), mode).await {
+            Ok(d) => d,
+            Err(e) => {
+                tracing::warn!(
+                    error = %e,
+                    task_id = %task.id,
+                    agent_id = %task.agent_id,
+                    "dispatch resolve failed; falling back to the default provider + prompt"
+                );
+                ResolvedDispatch::fallback(mode)
+            }
+        };
 
     // F5: provision the run's working directory from the card's `repo_ref`.
     //
@@ -777,7 +795,7 @@ async fn execute_claimed(
     // `cancel_guard` was registered up front (before the start transition).
     let provider = dispatch.backend.name();
     let provider_run = async {
-        if task.mode == "interactive" {
+        if mode == Mode::Interactive {
             run_interactive(
                 pool,
                 runner,
@@ -829,7 +847,7 @@ async fn execute_claimed(
         // over a provider future that became ready in the same poll.
         biased;
         () = cancel_guard.cancelled() => {
-            if task.mode == "interactive" {
+            if mode == Mode::Interactive {
                 // The detached session survives `run_interactive`'s dropped `wait`,
                 // so kill it by its EXACT name and clear the shutdown-reap entry the
                 // dropped future would otherwise leave registered (keeps the set
@@ -874,6 +892,24 @@ async fn execute_claimed(
     Ok(())
 }
 
+/// The program + argv [`run_interactive`] spawns into the tmux pane.
+///
+/// Trivial by design, and extracted for exactly one reason: it is the ONLY place
+/// the interactive argv is derived, and it is reachable from a test without
+/// tmux, a provider binary, or a database. The mode comes off the
+/// [`ResolvedDispatch`] the task row produced — this function has no mode of its
+/// own to get wrong, which is the whole point.
+///
+/// The previous shape passed the mode at the call site inside `run_interactive`,
+/// and its test re-derived the argv *beside* that call rather than through it.
+/// Hardcoding `Mode::Headless` in `run_interactive` therefore kept 254 lib tests
+/// and every integration test GREEN while reintroducing the exact regression this
+/// module exists to fix — the only coverage was a tmux tripwire that SKIPs when
+/// tmux is absent.
+fn interactive_command(runner: &Runner, dispatch: &ResolvedDispatch) -> (PathBuf, Vec<String>) {
+    runner.provider_command(dispatch.backend, &dispatch.invocation, dispatch.mode)
+}
+
 /// Launch a task's provider inside a REAL, attachable tmux session and await
 /// its completion (ccc / D6 interactive mode).
 ///
@@ -907,8 +943,12 @@ async fn run_interactive(
     // Landlock). Confining a live terminal the user attaches to and drives would
     // defeat the interactive feature; the human operator is present and in control,
     // which is the trust model D6 chose for interactive over headless.
+    //
+    // That claim is only true because the argv below is built for `Mode::Interactive`
+    // — a headless argv would make this a print-and-exit process wearing a tmux
+    // session's clothes.
     let session_name = crate::interactive::session_name_for(&task.id);
-    let (program, argv) = runner.provider_command(dispatch.backend, &dispatch.invocation);
+    let (program, argv) = interactive_command(runner, dispatch);
     // Mirror the headless env composition: the codex / copilot paths layer the
     // agent's `agent_env`; the claude path layers nothing (parity with
     // `execute_claimed`).
@@ -1519,18 +1559,77 @@ async fn materialise_agent_profile(
 /// The resolved provider routing for one task (e38.16): which exec path to take
 /// plus the per-agent config to thread into it.
 ///
-/// [`Default`] is the safe fallback (`claude`, no model/args/env) used when the
-/// agent/runtime resolve fails — a misconfigured agent still dispatches to the
-/// default provider rather than stranding the task.
-#[derive(Debug, Clone, Default)]
+/// Deliberately NOT [`Default`]: see [`ResolvedDispatch::fallback`]. A derived
+/// default would carry an empty prompt, which is not a degraded run but a
+/// guaranteed non-run.
+#[derive(Debug, Clone)]
 struct ResolvedDispatch {
     /// Which provider exec path [`execute_claimed`] routes to.
     backend: Backend,
+    /// Which CONTRACT that exec path is spawned for, resolved once from the
+    /// task row (see [`dispatch_mode`]) and carried beside `backend`.
+    ///
+    /// It lives here rather than being re-derived at each use so the pane a task
+    /// gets and the argv spawned into it cannot disagree. They did: the
+    /// interactive path built its argv with the headless call, so a `mode =
+    /// "interactive"` task spawned `claude -p` ("Print response and exit") into a
+    /// pane the operator was meant to attach to and drive. Re-deriving is what
+    /// gave that bug somewhere to live.
+    mode: Mode,
     /// The `model` + `cli_args` the provider threads onto its argv.
     invocation: ProviderInvocation,
     /// The agent's per-agent env (`agent_env`), layered onto the child env
     /// after the deny-by-default ambient allowlist.
     agent_env: Vec<(String, String)>,
+}
+
+/// The `tasks.mode` column value that asks for an attachable session (ccc / D6,
+/// the board's "Run ▾" affordance). Anything else is headless.
+const INTERACTIVE_TASK_MODE: &str = "interactive";
+
+/// The provider contract a task's `mode` column is asking for.
+///
+/// The ONE place a task row's mode becomes a [`Mode`]. Both the branch that picks
+/// the exec path and the argv built for it read it, so the pane a task gets and
+/// the argv spawned into it cannot disagree — which they did: a `mode =
+/// "interactive"` task was handed the print-and-exit headless argv and died in a
+/// pane the operator was meant to drive.
+fn dispatch_mode(task_mode: &str) -> Mode {
+    if task_mode == INTERACTIVE_TASK_MODE {
+        Mode::Interactive
+    } else {
+        Mode::Headless
+    }
+}
+
+impl ResolvedDispatch {
+    /// The fault fallback: the default provider, no per-agent config, and the
+    /// [`FALLBACK_PROMPT`] — used when the agent/runtime resolve fails so a
+    /// misconfigured agent still RUNS rather than stranding the task.
+    ///
+    /// The prompt is the entire point of this constructor existing instead of a
+    /// derived [`Default`]. `..Default::default()` here would hand the provider an
+    /// empty brief, and a promptless provider does not "run in a degraded way" —
+    /// it exits non-zero immediately, which is the very bug this fault path
+    /// claimed to avoid. The "never promptless" guarantee lives in
+    /// [`build_prompt`], and this path does not call it, so the invariant has to
+    /// be restated here.
+    ///
+    /// `mode` is still the task row's own — a resolve fault says nothing about
+    /// which contract the operator asked for, and defaulting it would spawn a
+    /// print-and-exit process into an interactive pane.
+    fn fallback(mode: Mode) -> Self {
+        Self {
+            backend: Backend::default(),
+            mode,
+            invocation: ProviderInvocation {
+                prompt: FALLBACK_PROMPT.to_string(),
+                model: None,
+                cli_args: Vec::new(),
+            },
+            agent_env: Vec::new(),
+        }
+    }
 }
 
 /// Resolve the provider routing for a task's agent (e38.16).
@@ -1548,11 +1647,12 @@ struct ResolvedDispatch {
 /// # Errors
 ///
 /// Returns an error if the agent id is malformed or the agent / runtime row is
-/// missing — the caller falls back to the [`ResolvedDispatch::default`].
+/// missing — the caller falls back to [`ResolvedDispatch::fallback`].
 async fn resolve_dispatch(
     pool: &SqlitePool,
     agent_id: &str,
     issue_id: Option<&str>,
+    mode: Mode,
 ) -> anyhow::Result<ResolvedDispatch> {
     use ainb_hangar_store::repo::agent::AgentRepo;
     use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
@@ -1567,6 +1667,7 @@ async fn resolve_dispatch(
     let provider = agent.provider.as_deref().unwrap_or(&runtime.provider);
     Ok(ResolvedDispatch {
         backend: Backend::from_provider(provider),
+        mode,
         invocation: ProviderInvocation {
             prompt,
             model: agent.model,
@@ -2037,13 +2138,16 @@ mod tests {
         .await
         .unwrap();
 
-        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id)).await.unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&issue_id), Mode::Headless)
+            .await
+            .unwrap();
         assert_eq!(
             disp.invocation.prompt, "Fix the login bug\n\nIt 500s on empty password.",
             "the issue title + description must become the brief"
         );
 
-        // …and it lands on the argv as `-p <brief>` (not just in the struct).
+        // …and it lands on the argv as the trailing positional (not just in the
+        // struct), behind `-p` so the run is non-interactive.
         let runner = Runner::new(RunnerConfig {
             claude_path: "claude".into(),
             codex_path: "codex".into(),
@@ -2052,13 +2156,16 @@ mod tests {
             tail_lines: 1,
             sandbox: false,
         });
-        let (_p, argv) = runner.provider_command(disp.backend, &disp.invocation);
+        let (_p, argv) = runner.provider_command(disp.backend, &disp.invocation, Mode::Headless);
         assert_eq!(
             argv.first().map(String::as_str),
             Some("-p"),
             "claude must be invoked non-interactively: {argv:?}"
         );
-        assert!(argv.contains(&"Fix the login bug\n\nIt 500s on empty password.".to_string()));
+        assert!(argv.ends_with(&[
+            "--".to_string(),
+            "Fix the login bug\n\nIt 500s on empty password.".to_string()
+        ]));
 
         // (2) No issue → the agent's own instructions are the brief.
         let instructed = bootstrap::create_agent(
@@ -2070,16 +2177,139 @@ mod tests {
         )
         .await
         .unwrap();
-        let disp = resolve_dispatch(pool, &instructed.id, None).await.unwrap();
+        let disp = resolve_dispatch(pool, &instructed.id, None, Mode::Headless).await.unwrap();
         assert_eq!(disp.invocation.prompt, "Triage the inbox.");
 
         // (3) Neither → a non-empty fallback, never a promptless spawn.
-        let disp = resolve_dispatch(pool, &agent.id, None).await.unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, None, Mode::Headless).await.unwrap();
         assert!(
             !disp.invocation.prompt.is_empty(),
             "a prompt is never empty"
         );
         assert_eq!(disp.invocation.prompt, FALLBACK_PROMPT);
+    }
+
+    /// A task row whose `mode` says "interactive" must never be handed a
+    /// print-and-exit argv.
+    ///
+    /// This is the regression that shipped: `run_interactive` built its argv with
+    /// the same call the headless path used, so a D6 "Run ▾" task spawned
+    /// `claude -p …` ("Print response and exit") into a tmux pane the operator was
+    /// meant to attach to and drive. It escaped because the only coverage was a
+    /// tmux e2e tripwire that SKIPs cleanly when tmux/the provider binaries are
+    /// absent — so this asserts the row→argv contract with no tmux at all.
+    ///
+    /// It drives [`interactive_command`], which is the function `run_interactive`
+    /// itself calls. That indirection is the point: the FIRST version of this test
+    /// re-derived the argv beside `run_interactive` instead of through it, so
+    /// hardcoding `Mode::Headless` inside `run_interactive` left this test — and
+    /// all 254 lib tests, and every integration test — GREEN. A test that
+    /// reimplements the code under test asserts nothing about that code.
+    #[test]
+    fn interactive_task_mode_never_produces_a_print_and_exit_argv() {
+        assert_eq!(dispatch_mode("interactive"), Mode::Interactive);
+        // Everything else is headless — including the empty/unknown values a row
+        // can carry.
+        assert_eq!(dispatch_mode("headless"), Mode::Headless);
+        assert_eq!(dispatch_mode(""), Mode::Headless);
+        assert_eq!(dispatch_mode("Interactive"), Mode::Headless);
+
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "claude".into(),
+            codex_path: "codex".into(),
+            copilot_path: "copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let inv = ProviderInvocation {
+            prompt: "do the thing".to_string(),
+            model: None,
+            cli_args: Vec::new(),
+        };
+        // A dispatch resolved from a row whose `mode` column says "interactive",
+        // exactly as `execute_claimed` resolves it.
+        let interactive_dispatch = |backend| ResolvedDispatch {
+            backend,
+            mode: dispatch_mode("interactive"),
+            invocation: inv.clone(),
+            agent_env: Vec::new(),
+        };
+
+        // The argv an INTERACTIVE task row actually gets, through the same
+        // function `run_interactive` calls.
+        let (_p, argv) = interactive_command(&runner, &interactive_dispatch(Backend::Claude));
+        assert!(
+            !argv.contains(&"-p".to_string()),
+            "an interactive task must not spawn claude in print-and-exit mode: {argv:?}"
+        );
+        assert!(
+            argv.ends_with(&["--".to_string(), "do the thing".to_string()]),
+            "an interactive task must still be seeded with its brief: {argv:?}"
+        );
+        let (_p, argv) = interactive_command(&runner, &interactive_dispatch(Backend::Copilot));
+        assert!(
+            !argv.contains(&"-p".to_string()),
+            "an interactive task must not spawn copilot in exits-after-completion mode: {argv:?}"
+        );
+        let (_p, argv) = interactive_command(&runner, &interactive_dispatch(Backend::Codex));
+        assert!(
+            !argv.contains(&"exec".to_string()),
+            "an interactive task must not spawn codex's non-interactive exec: {argv:?}"
+        );
+
+        // …and the headless row still gets the headless shape (the fix must not
+        // simply disable non-interactive execution).
+        let (_p, argv) = runner.provider_command(Backend::Claude, &inv, dispatch_mode("headless"));
+        assert!(
+            argv.contains(&"-p".to_string()),
+            "a headless task MUST print-and-exit: {argv:?}"
+        );
+    }
+
+    /// The RESOLVE-FAULT path must also be promptless-proof.
+    ///
+    /// `build_prompt` guarantees "never promptless", but the fault path does not
+    /// go through it — a failed `resolve_dispatch` (missing/malformed agent) is
+    /// caught by `execute_claimed` and substituted with `ResolvedDispatch::fallback`.
+    /// That substitution used to be `unwrap_or_default()`, whose empty prompt
+    /// recreated the exact bug the prompt threading fixed: the provider spawns and
+    /// exits 1 instead of running. The comment claimed a misconfigured agent
+    /// "still runs"; it could not.
+    #[tokio::test]
+    async fn dispatch_fault_still_yields_a_runnable_prompt() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+
+        // A task whose agent does not exist: resolve MUST fail, which is what
+        // drives `execute_claimed` onto the fallback.
+        let err = resolve_dispatch(pool, "agent-that-does-not-exist", None, Mode::Headless).await;
+        assert!(err.is_err(), "a missing agent must fail to resolve");
+
+        let disp = ResolvedDispatch::fallback(Mode::Headless);
+        assert!(
+            !disp.invocation.prompt.trim().is_empty(),
+            "the fault fallback must carry a real brief, or the provider exits 1 \
+             without doing any work"
+        );
+        assert_eq!(disp.invocation.prompt, FALLBACK_PROMPT);
+
+        // …and it survives all the way onto the argv, which is what the provider
+        // actually sees.
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "claude".into(),
+            codex_path: "codex".into(),
+            copilot_path: "copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let (_p, argv) = runner.provider_command(disp.backend, &disp.invocation, Mode::Headless);
+        assert!(
+            argv.ends_with(&["--".to_string(), FALLBACK_PROMPT.to_string()]),
+            "the fallback brief must reach the provider argv: {argv:?}"
+        );
     }
 
     /// Provider-honoring proof: `resolve_dispatch` selects the backend from the
@@ -2104,7 +2334,7 @@ mod tests {
 
         // A codex agent on that claude-advertised runtime → codex backend.
         let codex = bootstrap::create_agent(pool, &ws, "coder", "codex", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &codex.id, None).await.unwrap();
+        let disp = resolve_dispatch(pool, &codex.id, None, Mode::Headless).await.unwrap();
         assert_eq!(
             disp.backend,
             Backend::Codex,
@@ -2114,7 +2344,7 @@ mod tests {
         // A copilot agent on that claude-advertised runtime → copilot backend
         // (no more silent claude fallback).
         let copilot = bootstrap::create_agent(pool, &ws, "helper", "copilot", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &copilot.id, None).await.unwrap();
+        let disp = resolve_dispatch(pool, &copilot.id, None, Mode::Headless).await.unwrap();
         assert_eq!(
             disp.backend,
             Backend::Copilot,
@@ -2123,7 +2353,7 @@ mod tests {
 
         // A claude agent on the same runtime → claude backend.
         let claude = bootstrap::create_agent(pool, &ws, "writer", "claude", None).await.unwrap();
-        let disp = resolve_dispatch(pool, &claude.id, None).await.unwrap();
+        let disp = resolve_dispatch(pool, &claude.id, None, Mode::Headless).await.unwrap();
         assert_eq!(disp.backend, Backend::Claude);
 
         // An agent with NO provider override falls back to the runtime's provider.
@@ -2145,7 +2375,7 @@ mod tests {
             provider: None,
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
-        let disp = resolve_dispatch(pool, "bare-agent", None).await.unwrap();
+        let disp = resolve_dispatch(pool, "bare-agent", None, Mode::Headless).await.unwrap();
         assert_eq!(
             disp.backend,
             Backend::Claude,

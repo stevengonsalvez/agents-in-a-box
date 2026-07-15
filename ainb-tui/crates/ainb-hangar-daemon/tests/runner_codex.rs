@@ -20,6 +20,18 @@ use ainb_hangar_daemon::runner::{ProviderInvocation, RunOutcome, Runner, RunnerC
 use ainb_hangar_store::service::fail::FailureReason;
 use tempfile::TempDir;
 
+/// A minimal invocation carrying only a brief — the shape every real dispatch
+/// has. `ProviderInvocation` has no `Default` on purpose: a promptless provider
+/// exits non-zero instead of running, so these tests must state a brief rather
+/// than quietly assert against an argv no real run ever produces.
+fn brief_invocation() -> ProviderInvocation {
+    ProviderInvocation {
+        prompt: "do the thing".to_string(),
+        model: None,
+        cli_args: Vec::new(),
+    }
+}
+
 /// Build a per-task [`ExecEnv`] rooted in `dir` (workdir/output/logs created).
 fn exec_env_in(dir: &Path) -> ExecEnv {
     let workdir = dir.join("workdir");
@@ -85,7 +97,7 @@ async fn codex_exec_captures_exit_code_and_pins_session() {
     let runner = Runner::new(cfg_with_codex(script));
 
     let outcome = runner
-        .run_codex(&env, std::iter::empty(), &ProviderInvocation::default())
+        .run_codex(&env, std::iter::empty(), &brief_invocation())
         .await
         .expect("run");
 
@@ -102,7 +114,7 @@ async fn codex_exec_streams_jsonl_to_codex_log() {
     let runner = Runner::new(cfg_with_codex(script));
 
     runner
-        .run_codex(&env, std::iter::empty(), &ProviderInvocation::default())
+        .run_codex(&env, std::iter::empty(), &brief_invocation())
         .await
         .expect("run");
 
@@ -132,7 +144,10 @@ exit 0"#,
     );
     let runner = Runner::new(cfg_with_codex(script));
     let invocation = ProviderInvocation {
-        prompt: String::new(),
+        // A REAL brief. This used to be `String::new()`, which dodged the only
+        // thing that matters: deleting codex_spec's prompt push left this test —
+        // and the whole suite — green while every real codex run did nothing.
+        prompt: "do the thing".to_string(),
         model: Some("gpt-5-codex".to_string()),
         cli_args: vec!["--full-auto".to_string()],
     };
@@ -151,6 +166,22 @@ exit 0"#,
     assert!(
         tail.contains("--full-auto"),
         "argv must carry the agent's cli_args, got: {tail}"
+    );
+    // The BRIEF reaches codex, as the trailing positional after every option
+    // (`codex exec [OPTIONS] [PROMPT]`), fenced by `--`. Asserted on the argv the
+    // fake actually received, so it fails if the prompt is dropped OR misplaced
+    // ahead of the options.
+    let argv_line = tail
+        .lines()
+        .find(|l| l.starts_with("ARGV="))
+        .expect("fake codex must echo its argv");
+    assert!(
+        argv_line.ends_with("-- do the thing"),
+        "codex must receive the brief as the trailing positional after `--`, got: {argv_line}"
+    );
+    assert!(
+        argv_line.contains("--full-auto -- do the thing"),
+        "the brief must follow the agent's cli_args, not precede them: {argv_line}"
     );
 }
 
@@ -171,7 +202,7 @@ exit 0"#,
     // the child (it is not in the allowlist). The agent's explicit per-agent env
     // (FOO) is a deliberate override that MUST reach the child.
     let source = [("SECRET_KEY".to_string(), "leak".to_string())];
-    let invocation = ProviderInvocation::default();
+    let invocation = brief_invocation();
     let extra_env = [("FOO".to_string(), "bar".to_string())];
 
     let outcome = runner
@@ -208,7 +239,7 @@ exit 1"#,
     let runner = Runner::new(cfg_with_codex(script));
 
     let outcome = runner
-        .run_codex(&env, std::iter::empty(), &ProviderInvocation::default())
+        .run_codex(&env, std::iter::empty(), &brief_invocation())
         .await
         .expect("run");
 
@@ -239,7 +270,7 @@ exit 0"#,
 
     let started = std::time::Instant::now();
     let outcome = runner
-        .run_codex(&env, std::iter::empty(), &ProviderInvocation::default())
+        .run_codex(&env, std::iter::empty(), &brief_invocation())
         .await
         .expect("run");
     let elapsed = started.elapsed();
@@ -278,7 +309,7 @@ exit 0"#,
     let source = [("HOME".to_string(), tmp.path().display().to_string())];
 
     let outcome = runner
-        .run_codex(&env, source.iter().cloned(), &ProviderInvocation::default())
+        .run_codex(&env, source.iter().cloned(), &brief_invocation())
         .await
         .expect("run");
 

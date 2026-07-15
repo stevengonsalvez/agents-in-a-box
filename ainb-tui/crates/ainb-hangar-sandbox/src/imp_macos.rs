@@ -100,6 +100,10 @@ fn render_profile(program: &Path, policy: &SandboxPolicy) -> String {
         p.push_str("(allow network*)\n");
     }
 
+    // No `mach-lookup` is ever emitted — see the "no Keychain / securityd grant"
+    // section on `SandboxPolicy`. `deny default` covers mach services, so the
+    // absence of a rule here IS the denial.
+
     p
 }
 
@@ -144,6 +148,44 @@ mod tests {
         assert!(prof.contains("(allow network*)"));
         // The operator home must NOT be a blanket read root.
         assert!(!prof.contains("(subpath \"/Users\")"));
+    }
+
+    /// No profile this crate can generate reaches a mach service — in
+    /// particular securityd, which is the macOS Keychain.
+    ///
+    /// A `mach-lookup` on `com.apple.SecurityServer` was briefly shipped as an
+    /// opt-in "credential grant". It is not per-item: under this exact profile it
+    /// also hands over `Chrome Safe Storage` (the master key for every
+    /// Chrome-saved password) silently and with no prompt, and `process-exec*`
+    /// means a confined agent reaches it by spawning `/usr/bin/security`. Pin the
+    /// absence so it cannot come back by accident — see the rationale on
+    /// `SandboxPolicy`.
+    #[test]
+    fn profile_never_grants_mach_lookup() {
+        let policy = SandboxPolicy {
+            read_roots: vec![PathBuf::from("/usr")],
+            write_roots: vec![PathBuf::from("/tmp/task")],
+            allow_network: true,
+            disabled: false,
+        };
+        let prof = render_profile(Path::new("/bin/sh"), &policy);
+        assert!(
+            !prof.contains("mach-lookup"),
+            "no mach service may be re-allowed — securityd least of all: {prof}"
+        );
+        assert!(
+            !prof.contains("SecurityServer"),
+            "the Keychain grant must stay gone: {prof}"
+        );
+        // The full confined policy a real task gets must be just as silent.
+        let prof = render_profile(
+            Path::new("/bin/sh"),
+            &SandboxPolicy::confined_to(Path::new("/tmp/task")),
+        );
+        assert!(
+            !prof.contains("mach-lookup"),
+            "the default task policy must grant no mach service: {prof}"
+        );
     }
 
     #[test]
