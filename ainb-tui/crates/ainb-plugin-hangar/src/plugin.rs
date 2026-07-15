@@ -266,6 +266,19 @@ pub struct HangarPlugin {
     /// The host-shell start + re-dial can't run inline in `handle_key` (it would
     /// deadlock the reader loop), so it is deferred and drained in `render`.
     start_daemon_pending: bool,
+    /// Set when the user pressed the quit key (`q` → [`Intent::Quit`]) on a
+    /// hangar screen. The plugin can't quit the host itself; it publishes a
+    /// `ui.close_request` so the host pops this panel back to wherever it was
+    /// opened. Like `start_daemon_pending`, the publish awaits a host cap and so
+    /// can't run inline in `handle_key` (reader-loop deadlock) — it is drained in
+    /// `render`. Without this the router computed `Intent::Quit` and dropped it,
+    /// so `q` was dead on every hangar screen (only `Ctrl+C` escaped).
+    close_request_pending: bool,
+    /// The host's screen-id string for the surface the plugin is currently
+    /// focused on, captured from each `plugin/handle_key`. `ui.close_request`
+    /// must name the screen to pop, and the SDK `RenderParams` doesn't carry it —
+    /// so we stash it here from the key event that armed `close_request_pending`.
+    current_screen_id: String,
     /// The message from the last failed `[s]` start attempt (e38.36), surfaced in
     /// the offline empty-state so a start failure is visible rather than silent.
     /// `None` once a start succeeds or while none has been attempted.
@@ -381,6 +394,8 @@ impl Default for HangarPlugin {
             opener: crate::shell::default_opener(),
             daemon_starter: crate::shell::default_daemon_starter(),
             start_daemon_pending: false,
+            close_request_pending: false,
+            current_screen_id: String::new(),
             daemon_start_error: None,
             daemon_start_redial_until: None,
             daemon_start_last_redial: None,
@@ -2691,6 +2706,12 @@ impl HangarPlugin {
         // Routing-layer keys: tab switches, `?` help, Esc-close-modal, `q` quit.
         if let Some(ev) = routing_event(key, &app) {
             let reduction = crate::screen::reduce(&app, ev);
+            // `q` reduces to `Intent::Quit`. The plugin can't quit the host, so
+            // arm a `ui.close_request` (drained in `render`) instead of dropping
+            // the intent — otherwise `q` is dead on every hangar screen.
+            if matches!(reduction.intent, Some(crate::screen::Intent::Quit)) {
+                self.close_request_pending = true;
+            }
             self.app = Some(reduction.state);
             return;
         }
@@ -3610,6 +3631,9 @@ impl Plugin for HangarPlugin {
         if matches!(params.key.kind, ainb_plugin_sdk::KeyKind::Release) {
             return Ok(());
         }
+        // Remember the focused screen-id so a `q`-armed `ui.close_request` (drained
+        // in `render`, which lacks the screen-id) can name the surface to pop.
+        self.current_screen_id.clone_from(&params.screen_id);
         self.on_key(&params.key);
         // A Workspace-pane action (s/d/Refresh) may have been raised. We must NOT
         // perform the host-cap call here: `plugin/handle_key` runs INLINE on the
@@ -3814,6 +3838,17 @@ impl Plugin for HangarPlugin {
         // + re-dial handshake (awaiting host caps) can't deadlock the reader loop.
         if std::mem::take(&mut self.start_daemon_pending) {
             self.start_daemon_and_redial(host).await;
+        }
+        // Drain a deferred quit (`q` → `Intent::Quit`, armed in `handle_key`). The
+        // plugin can't quit the host; it asks the host to pop this panel back to
+        // wherever it was opened. Best-effort: if the publish is lost the user
+        // just presses `q` again.
+        if std::mem::take(&mut self.close_request_pending) {
+            let req = ainb_plugin_sdk::topics::UiCloseRequest {
+                screen_id: self.current_screen_id.clone(),
+            };
+            let payload = serde_json::to_vec(&req).unwrap_or_default();
+            let _ = host.snapshot_publish(ainb_plugin_sdk::topics::UI_CLOSE_REQUEST, payload).await;
         }
         // Keep re-dialing after a `[s]` start until the daemon binds or the
         // window expires (`wants_redraw` keeps frames coming meanwhile).
@@ -4222,6 +4257,21 @@ mod tests {
         assert!(
             p.start_daemon_pending,
             "[s] while offline must arm the daemon-start"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (key dispatch): `q` arms a `ui.close_request` so the
+    /// host pops the hangar panel back. Regression guard — the router computed
+    /// `Intent::Quit` but the routing branch dropped it, so `q` was dead on every
+    /// hangar screen (e.g. Daemon-health) and only `Ctrl+C` escaped.
+    #[test]
+    fn q_key_arms_close_request() {
+        let mut p = HangarPlugin::new();
+        assert!(!p.close_request_pending);
+        p.on_key(&char_press('q'));
+        assert!(
+            p.close_request_pending,
+            "`q` must arm a ui.close_request instead of being swallowed"
         );
     }
 
