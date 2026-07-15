@@ -48,6 +48,11 @@ pub async fn register_runtime(pool: &SqlitePool, runtime_id: &str, now_ms: i64) 
 /// Self-register the host runtime under the given id, logging the outcome. A
 /// failure is logged and swallowed — self-registration must never down the
 /// daemon (it still sweeps + serves).
+///
+/// Called by the boot seed ([`crate::default_home::ensure_default_home`]) with
+/// the resolved [`ainb_hangar_store::bootstrap::default_runtime_id`] — the SAME
+/// id the claim loop keys off, keeping the seed, the claim runtime, and every
+/// created agent's binding in lockstep.
 pub async fn self_register(pool: &SqlitePool, runtime_id: &str, now_ms: i64) {
     match register_runtime(pool, runtime_id, now_ms).await {
         Ok(true) => tracing::info!(runtime_id = %runtime_id, "self-registered agent runtime"),
@@ -58,20 +63,6 @@ pub async fn self_register(pool: &SqlitePool, runtime_id: &str, now_ms: i64) {
             tracing::warn!(error = %e, runtime_id = %runtime_id, "runtime self-register failed");
         }
     }
-}
-
-/// Boot-time entry point: self-register this daemon's runtime under the resolved
-/// default runtime id, logging the outcome.
-///
-/// Resolves [`ainb_hangar_store::bootstrap::default_runtime_id`] — the
-/// `HANGAR_DAEMON_RUNTIME_ID` override when set, else the stable default — so a
-/// no-env boot still registers (the fresh-home "just works" path). This is the
-/// SAME id the claim loop keys off, keeping the seed, the claim runtime, and
-/// every created agent's binding in lockstep.
-pub async fn self_register_from_env(pool: &SqlitePool) {
-    let runtime_id = ainb_hangar_store::bootstrap::default_runtime_id();
-    let now = ainb_hangar_core::clock::HangarClock::now_ms(&ainb_hangar_core::clock::SystemClock);
-    self_register(pool, &runtime_id, now).await;
 }
 
 #[cfg(test)]

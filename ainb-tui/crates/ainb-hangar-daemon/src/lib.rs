@@ -57,6 +57,10 @@ pub mod cancel;
 /// the claim loop uses before spawning a provider: ambient env is filtered by
 /// [`ainb_hangar_core::env_policy`] then keychain keys are layered on top.
 pub mod dispatch;
+/// Fresh-home boot seed: lay down the default workspace + runtime + one starter
+/// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
+/// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.
+pub mod default_home;
 /// The durable event outbox drain (T1 / architecture §4.1–§4.2).
 ///
 /// [`event_outbox::spawn`] drains the [`events::EventBroker`]'s lossless outbox
@@ -322,11 +326,16 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
 
     let store: Store = Store::open_in(&dir).await?;
 
-    // e38.20: self-register this daemon's runtime so a real (non-test) boot
-    // advertises an `agent_runtime` row the claim loop, agent picker, and
-    // daemon-health pane all key off. A failure here is non-fatal (logged +
-    // swallowed inside the helper) — the daemon must still sweep + serve.
-    crate::runtime_register::self_register_from_env(store.pool()).await;
+    // Fresh-home boot seed: lay down the default workspace + runtime + one
+    // starter agent so an empty home "just works" (a runtime shows in the Daemon
+    // pane, the agent picker is non-empty, and the Squad create gate is already
+    // cleared). Idempotent + non-clobbering, and it self-registers the runtime
+    // under the SAME default id the claim loop keys off (subsuming the old
+    // e38.20 self-register). A failure is non-fatal — the daemon must still
+    // sweep + serve — so it is logged and swallowed here.
+    if let Err(e) = crate::default_home::ensure_default_home(store.pool()).await {
+        tracing::warn!(error = %e, "fresh-home boot seed failed (daemon continues)");
+    }
 
     // P8.5: the in-memory health stats collector — shared between the RPC server
     // (which snapshots the rolling throughput ring for the `hangar/daemon_health`
