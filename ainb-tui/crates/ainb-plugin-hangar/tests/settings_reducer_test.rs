@@ -255,12 +255,11 @@ fn int_overlay_commits_valid_value() {
     for _ in 0..idx {
         s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
-    // Enter opens the overlay seeded with the current value (default "15").
+    // Enter opens the overlay EMPTY (the current value is a ghost hint, not a
+    // seed — digits append, so a seeded "15" would turn typing `3` into "153").
     let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
-    assert_eq!(s.config_input_buffer(), Some("15"));
-    // Clear the seed and type 30.
-    let s = reduce_settings(&s, SettingsEvent::Key('\u{8}')).state;
-    let s = reduce_settings(&s, SettingsEvent::Key('\u{8}')).state;
+    assert_eq!(s.config_input_buffer(), Some(""));
+    // Type 30.
     let s = reduce_settings(&s, SettingsEvent::Key('3')).state;
     let s = reduce_settings(&s, SettingsEvent::Key('0')).state;
     assert_eq!(s.config_input_buffer(), Some("30"));
@@ -277,10 +276,11 @@ fn int_overlay_commits_valid_value() {
     );
 }
 
-/// An out-of-range int is rejected on Enter: the overlay closes with NO write and
-/// NO intent (the optimistic edit never persists a bad value).
+/// An out-of-range int is rejected on Enter: NO write, NO intent, and the overlay
+/// STAYS OPEN carrying the descriptor's human error so the human can correct the
+/// number. A silent close would discard the edit with no explanation.
 #[test]
-fn int_overlay_rejects_out_of_range() {
+fn int_overlay_rejects_out_of_range_and_keeps_the_overlay_open() {
     use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
     let idx = DAEMON_CONFIG_REGISTRY
         .iter()
@@ -290,17 +290,38 @@ fn int_overlay_rejects_out_of_range() {
     for _ in 0..idx {
         s = reduce_settings(&s, SettingsEvent::CursorDown).state;
     }
-    let s = reduce_settings(&s, SettingsEvent::Key('\n')).state; // open, seed "15"
-    // Append digits to make "159999" (out of the 1..1440 range).
+    let s = reduce_settings(&s, SettingsEvent::Key('\n')).state; // open, empty
+    // Type 99999 (out of the 1..1440 range).
     let mut s = s;
-    for d in ['9', '9', '9', '9'] {
+    for d in ['9', '9', '9', '9', '9'] {
         s = reduce_settings(&s, SettingsEvent::Key(d)).state;
     }
     let out = reduce_settings(&s, SettingsEvent::Key('\n'));
-    assert_eq!(out.state.config_input_buffer(), None, "overlay closed");
+    assert_eq!(
+        out.state.config_input_buffer(),
+        Some("99999"),
+        "the overlay stays open with the typed value intact"
+    );
+    assert_eq!(
+        out.state.config_input_error(),
+        Some("`autostandup.stagnant_min` must be between 1 and 1440, got 99999"),
+        "the descriptor's own message is surfaced, not discarded"
+    );
     assert_eq!(out.intent, None, "no write on an invalid value");
     // The persisted value is unchanged (still unset → default).
     assert_eq!(out.state.config_values()[idx], None);
+
+    // Correcting the value clears the error and commits.
+    let mut s = out.state;
+    for _ in 0..5 {
+        s = reduce_settings(&s, SettingsEvent::Key('\u{8}')).state;
+    }
+    assert_eq!(s.config_input_error(), None, "editing clears the rejection");
+    let s = reduce_settings(&s, SettingsEvent::Key('3')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('0')).state;
+    let out = reduce_settings(&s, SettingsEvent::Key('\n'));
+    assert_eq!(out.state.config_input_buffer(), None, "a valid value closes it");
+    assert_eq!(out.state.config_values()[idx].as_deref(), Some("30"));
 }
 
 /// Esc cancels the numeric overlay in a SINGLE press — no partial step-back that

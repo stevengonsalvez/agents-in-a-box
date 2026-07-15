@@ -248,12 +248,24 @@ pub struct SettingsState {
 /// Holds the registry index being edited and the digits typed so far. Enter
 /// commits (validated against the descriptor's range); Esc cancels in a single
 /// press (clearing this — never a partial step-back).
+///
+/// The buffer opens EMPTY rather than seeded with the current value: digits
+/// append, so a seeded `15` turned a user typing `3` into `153` — the opposite of
+/// the intent. The current value is shown as a ghost hint instead (see
+/// [`render_config_input_overlay`]).
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct ConfigInput {
     /// The [`DAEMON_CONFIG_REGISTRY`] index being edited.
     reg_index: usize,
     /// The digits typed so far.
     buffer: String,
+    /// The value in force while the overlay is open, shown as a ghost hint so
+    /// the human can see what they are replacing.
+    current: String,
+    /// The rejection message from the last failed Enter, painted in the box. The
+    /// overlay stays open on an invalid value so the human can correct it rather
+    /// than silently losing the edit.
+    error: Option<String>,
 }
 
 impl SettingsState {
@@ -328,6 +340,13 @@ impl SettingsState {
     #[must_use]
     pub fn config_input_buffer(&self) -> Option<&str> {
         self.config_input.as_ref().map(|c| c.buffer.as_str())
+    }
+
+    /// The rejection message shown in the open numeric overlay, if the last Enter
+    /// was refused by the descriptor's validation (for tests + render).
+    #[must_use]
+    pub fn config_input_error(&self) -> Option<&str> {
+        self.config_input.as_ref().and_then(|c| c.error.as_deref())
     }
 
     /// The active section.
@@ -656,7 +675,9 @@ fn edit_config_row(state: &SettingsState, idx: usize) -> SettingsReduction {
             let mut next = state.clone();
             next.config_input = Some(ConfigInput {
                 reg_index: idx,
-                buffer: state.config_effective(idx).to_string(),
+                buffer: String::new(),
+                current: state.config_effective(idx).to_string(),
+                error: None,
             });
             no_intent(next)
         }
@@ -692,9 +713,10 @@ fn commit_config(state: &SettingsState, idx: usize, value: String) -> SettingsRe
 
 /// Handle a key while the numeric-input overlay is open: Enter commits (only when
 /// the typed value passes the descriptor's range validation — an invalid value
-/// simply closes the overlay without a write), Backspace trims, a digit extends
-/// the buffer, and every other key is ignored. Esc is handled by [`reduce_esc`]
-/// and cancels in a single press.
+/// keeps the overlay OPEN and paints the descriptor's own rejection message, so a
+/// mistyped number is correctable rather than silently discarded), Backspace
+/// trims, a digit extends the buffer, and every other key is ignored. Esc is
+/// handled by [`reduce_esc`] and cancels in a single press.
 fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction {
     let Some(input) = &state.config_input else {
         return unchanged(state);
@@ -703,17 +725,21 @@ fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction 
         '\n' | '\r' => {
             let idx = input.reg_index;
             let desc = &DAEMON_CONFIG_REGISTRY[idx];
-            // Validate against the descriptor; a valid value commits + closes, an
-            // invalid one just closes (no write) so a bad number never persists.
+            // Validate against the descriptor; a valid value commits + closes. An
+            // invalid one keeps the overlay open carrying `validate`'s human error
+            // (e.g. "must be between 1 and 1440, got 99999") — never a silent
+            // close, and never a write.
             match desc.validate(&input.buffer) {
                 Ok(value) => {
                     let mut committed = commit_config(state, idx, value);
                     committed.state.config_input = None;
                     committed
                 }
-                Err(_) => {
+                Err(msg) => {
                     let mut next = state.clone();
-                    next.config_input = None;
+                    if let Some(inp) = next.config_input.as_mut() {
+                        inp.error = Some(msg);
+                    }
                     no_intent(next)
                 }
             }
@@ -722,6 +748,9 @@ fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction 
             let mut next = state.clone();
             if let Some(inp) = next.config_input.as_mut() {
                 inp.buffer.pop();
+                // Editing clears the stale rejection: the message described the
+                // value the human is now changing.
+                inp.error = None;
             }
             no_intent(next)
         }
@@ -729,6 +758,7 @@ fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction 
             let mut next = state.clone();
             if let Some(inp) = next.config_input.as_mut() {
                 inp.buffer.push(d);
+                inp.error = None;
             }
             no_intent(next)
         }
@@ -1299,9 +1329,14 @@ pub fn render_settings(
 }
 
 /// Render the numeric-input overlay for editing an int daemon-config knob: a
-/// centred box showing the knob's label, its range, and the digits typed so far
-/// with a caret. `enter` commits, `esc` cancels — both named in the box. Never
-/// masks the value (unlike the key-entry modal, an int is not a secret).
+/// centred box showing the knob's label, its range, the current value as a ghost
+/// hint, and the digits typed so far with a caret. A rejected Enter paints the
+/// descriptor's error in place of the hint line. `enter` commits, `esc` cancels —
+/// both named in the box. Never masks the value (unlike the key-entry modal, an
+/// int is not a secret).
+///
+/// Clips on BOTH axes: a pane shorter than the box must drop the overflowing rows
+/// rather than paint `Coord`s below the area ([`WireBuffer::push`] does not clip).
 fn render_config_input_overlay(
     buf: &mut WireBuffer,
     area_w: u16,
@@ -1313,21 +1348,40 @@ fn render_config_input_overlay(
     const GOLD: Color = Color::rgb(255, 215, 0);
     const TEXT: Color = Color::rgb(220, 220, 230);
     const MUTED: Color = Color::rgb(120, 120, 140);
+    const RED: Color = Color::rgb(220, 100, 100);
 
     let desc = &DAEMON_CONFIG_REGISTRY[input.reg_index];
     let range = desc.type_hint();
     let title = format!(" {} ", desc.label);
     let value_line = format!("{}_", input.buffer);
+    // The status line is the rejection when there is one, else the ghost hint
+    // naming the value being replaced.
+    let (status, status_color) = match &input.error {
+        Some(msg) => (msg.clone(), RED),
+        None => (format!("current: {}", input.current), MUTED),
+    };
     let hint = "enter commit · esc cancel";
 
-    // A box sized to the widest line, centred in the area.
-    let inner_w = title.len().max(range.len()).max(value_line.len()).max(hint.len());
+    // A box sized to the widest line, centred in the area. Width is measured in
+    // CHARS, not bytes — a non-ASCII label (`.len()`) would over-size the box and
+    // push the border off the pane.
+    let inner_w = title
+        .chars()
+        .count()
+        .max(range.chars().count())
+        .max(value_line.chars().count())
+        .max(status.chars().count())
+        .max(hint.chars().count());
     let box_w = u16::try_from(inner_w + 4).unwrap_or(24).min(area_w);
-    let box_h: u16 = 6;
+    // One row per line (title/range/value/status/hint) plus the two borders.
+    let box_h: u16 = 7.min(area_h);
     let x0 = area_w.saturating_sub(box_w) / 2;
     let y0 = area_h.saturating_sub(box_h) / 2;
 
     let put = |buf: &mut WireBuffer, x: u16, y: u16, s: &str, color: Color| {
+        if y >= area_h {
+            return;
+        }
         for (i, ch) in s.chars().enumerate() {
             let cx = x + u16::try_from(i).unwrap_or(0);
             if cx >= area_w {
@@ -1353,5 +1407,6 @@ fn render_config_input_overlay(
     put(buf, tx, y0 + 1, &title, GOLD);
     put(buf, tx, y0 + 2, &range, MUTED);
     put(buf, tx, y0 + 3, &value_line, TEXT);
-    put(buf, tx, y0 + 4, hint, MUTED);
+    put(buf, tx, y0 + 4, &status, status_color);
+    put(buf, tx, y0 + 5, hint, MUTED);
 }
