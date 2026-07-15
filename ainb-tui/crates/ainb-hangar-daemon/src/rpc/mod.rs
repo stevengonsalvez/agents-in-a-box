@@ -709,6 +709,7 @@ async fn handle(
         methods::HANGAR_NOTIFY_RULE_SET => handle_notify_rule_set(pool, req).await,
         methods::HANGAR_DAEMON_CONFIG_GET => handle_daemon_config_get(pool, req).await,
         methods::HANGAR_DAEMON_CONFIG_SET => handle_daemon_config_set(pool, req).await,
+        methods::HANGAR_DAEMON_CONFIG_LIST => handle_daemon_config_list(pool).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown method: {other}"),
@@ -3840,8 +3841,7 @@ async fn handle_daemon_config_get(
 ) -> Result<serde_json::Value, RpcError> {
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
 
-    let params: ainb_hangar_proto::snapshots::DaemonConfigGetParams =
-        parse_params(req, "{ key }")?;
+    let params: ainb_hangar_proto::snapshots::DaemonConfigGetParams = parse_params(req, "{ key }")?;
     let key = params.key.trim();
     if key.is_empty() {
         return Err(invalid_params("daemon_config key must not be empty"));
@@ -3869,11 +3869,40 @@ async fn handle_daemon_config_set(
     if key.is_empty() {
         return Err(invalid_params("daemon_config key must not be empty"));
     }
-    DaemonConfigRepo::set(pool, key, &params.value).await.map_err(|e| store_err(&e))?;
+    // A known registry knob is validated + normalized through its descriptor so
+    // an out-of-range int / bad bool / unknown enum is rejected the same way the
+    // CLI rejects it, and the stored string is the canonical form the daemon's
+    // typed accessors decode. Non-registry keys (internal state like
+    // `card_agent.last_used`) pass through unchanged — this table is generic.
+    let value = match ainb_hangar_core::daemon_config::descriptor(key) {
+        Some(desc) => desc.validate(&params.value).map_err(|e| invalid_params(&e))?,
+        None => params.value,
+    };
+    DaemonConfigRepo::set(pool, key, &value).await.map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::DaemonConfigSetResult {
         key: key.to_string(),
-        value: params.value,
+        value,
     })
+}
+
+/// Dispatch `hangar/daemon_config_list`: read every user-config knob's stored
+/// value in one round trip. Iterates
+/// [`ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY`] so a new registry
+/// knob is listed without any handler change; a key with no row reports `value =
+/// None` (the caller applies the descriptor's coded default).
+async fn handle_daemon_config_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+    let mut entries = Vec::with_capacity(DAEMON_CONFIG_REGISTRY.len());
+    for desc in DAEMON_CONFIG_REGISTRY {
+        let value = DaemonConfigRepo::get(pool, desc.key).await.map_err(|e| store_err(&e))?;
+        entries.push(ainb_hangar_proto::snapshots::DaemonConfigEntry {
+            key: desc.key.to_string(),
+            value,
+        });
+    }
+    to_value(&ainb_hangar_proto::snapshots::DaemonConfigListResult { entries })
 }
 
 /// Dispatch `atc/unregister` (spec P9, D12): disable a registered ATC instance's
@@ -5733,7 +5762,10 @@ mod tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         let get = dispatch(
             store.pool(),
-            &req(methods::HANGAR_DAEMON_CONFIG_GET, serde_json::json!({"key": "  "})),
+            &req(
+                methods::HANGAR_DAEMON_CONFIG_GET,
+                serde_json::json!({"key": "  "}),
+            ),
             &health(),
             &sink(),
         )
