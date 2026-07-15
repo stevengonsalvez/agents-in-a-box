@@ -18,6 +18,18 @@ use ainb_hangar_daemon::runner::{ProviderInvocation, RunOutcome, Runner, RunnerC
 use ainb_hangar_store::service::fail::FailureReason;
 use tempfile::TempDir;
 
+/// A minimal invocation carrying only a brief — the shape every real dispatch
+/// has. `ProviderInvocation` has no `Default` on purpose: a promptless provider
+/// exits non-zero instead of running, so these tests must state a brief rather
+/// than quietly assert against an argv no real run ever produces.
+fn invocation() -> ProviderInvocation {
+    ProviderInvocation {
+        prompt: "do the thing".to_string(),
+        model: None,
+        cli_args: Vec::new(),
+    }
+}
+
 /// Build a per-task [`ExecEnv`] rooted in `dir` (workdir/output/logs created).
 fn exec_env_in(dir: &Path) -> ExecEnv {
     let workdir = dir.join("workdir");
@@ -97,11 +109,7 @@ exit 0"#,
     ];
 
     let outcome = runner
-        .run_claude(
-            &env,
-            overrides.iter().cloned(),
-            &ProviderInvocation::default(),
-        )
+        .run_claude(&env, overrides.iter().cloned(), &invocation())
         .await
         .expect("run");
     let result = outcome.result();
@@ -134,10 +142,7 @@ async fn exec_captures_exit_code() {
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
     assert_eq!(outcome.result().exit_code, Some(0));
     assert!(matches!(outcome, RunOutcome::Success(_)));
@@ -167,10 +172,7 @@ exit 0"#,
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
     let usage = outcome.result().usage.clone().expect("usage captured from result line");
     assert_eq!(usage.input_tokens, 1200);
     assert_eq!(usage.output_tokens, 340);
@@ -193,10 +195,7 @@ async fn exec_no_result_usage_leaves_usage_none() {
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
     assert!(
         outcome.result().usage.is_none(),
         "a result line without usage leaves usage None"
@@ -224,10 +223,7 @@ exit 1"#,
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
     match outcome {
         RunOutcome::Failed { reason, result } => {
@@ -262,10 +258,7 @@ exit 75"#,
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
     match outcome {
         RunOutcome::Failed { reason, result } => {
@@ -300,10 +293,7 @@ exit 0"#,
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
     assert_eq!(
         outcome.result().session_id.as_deref(),
@@ -335,10 +325,7 @@ exit 0"#,
         sandbox: true,
     });
 
-    runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
     let jsonl = env.logs.join("claude.jsonl");
     assert!(jsonl.exists(), "expected claude.jsonl at {jsonl:?}");
@@ -375,10 +362,7 @@ exit 0"#,
     });
 
     let started = std::time::Instant::now();
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &ProviderInvocation::default())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
     let elapsed = started.elapsed();
 
     assert!(

@@ -144,19 +144,78 @@ const CODEX_MODEL_FLAG: &str = "-m";
 /// would exit instantly there. The daemon supplies its own confinement (per-task
 /// isolated dir + FS sandbox + teardown), which is what codex's check is proxying
 /// for, so skip it rather than strand every non-repo codex task.
+///
+/// That justification is only honest while the FS sandbox is actually ON, and
+/// TODAY IT IS NOT. A confined provider cannot reach its own credential, so a
+/// headless run fails "Not logged in" and completes only with
+/// `HANGAR_DAEMON_DISABLE_SANDBOX=1` — i.e. in the one configuration codex
+/// actually runs, its own guard is skipped AND the confinement offered in
+/// exchange is absent. This flag is currently spending protection the daemon is
+/// not providing. That is a known, accepted interim state, not a claim of
+/// safety: the credential is being moved to a parent-injected env var
+/// (`CLAUDE_CODE_OAUTH_TOKEN`), after which confinement is re-enabled by default
+/// and this rationale becomes true again (bead `ai-coder-rules-48b`).
+///
+/// HEADLESS ONLY: it is an `exec` subcommand flag, and passing it to the
+/// interactive top-level command is a hard parse error (verified: `codex
+/// --skip-git-repo-check` → "unexpected argument", exit 2). See
+/// [`Runner::codex_spec`] for why that is also the right security posture.
 const CODEX_SKIP_GIT_CHECK_FLAG: &str = "--skip-git-repo-check";
 /// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
 /// provider. Its own log keeps a copilot transcript separate from claude/codex.
 const COPILOT_LOG_FILE: &str = "copilot.jsonl";
-/// The claude non-interactive prompt flag. Verified against Claude Code 2.1.210:
-/// "starts an interactive session by default, use -p/--print for non-interactive
-/// output".
-const CLAUDE_PROMPT_FLAG: &str = "-p";
+/// The claude flag that makes a run non-interactive. Verified against Claude
+/// Code 2.1.210, whose usage is `claude [options] [command] [prompt]` and whose
+/// help reads `-p, --print   Print response and exit (useful for pipes)`.
+///
+/// It is a BOOLEAN that takes no value — the brief is a trailing POSITIONAL, not
+/// this flag's argument. (Contrast [`COPILOT_HEADLESS_PROMPT_FLAG`], which looks
+/// identical (`-p`) but genuinely takes the prompt as its value. Same spelling,
+/// opposite grammar — hence the deliberately different names.)
+const CLAUDE_PRINT_FLAG: &str = "-p";
 /// The claude model flag (`claude --model <model>`).
 const CLAUDE_MODEL_FLAG: &str = "--model";
-/// The copilot non-interactive prompt flag (`copilot -p "<text>"`). Verified
-/// against Copilot CLI 1.0.68: "Execute a prompt in non-interactive mode".
-const COPILOT_PROMPT_FLAG: &str = "-p";
+/// The copilot HEADLESS prompt flag (`copilot -p "<text>"`). Verified against
+/// Copilot CLI 1.0.68: "Execute a prompt in non-interactive mode (exits after
+/// completion)" — so it is exactly wrong for an attachable session, which is why
+/// [`Mode`] picks between this and [`COPILOT_INTERACTIVE_PROMPT_FLAG`].
+const COPILOT_HEADLESS_PROMPT_FLAG: &str = "-p";
+/// The copilot INTERACTIVE prompt flag (`copilot -i "<text>"`). Verified against
+/// Copilot CLI 1.0.68: "-i, --interactive <prompt>   Start interactive mode and
+/// automatically execute this prompt" — a real session, seeded with the brief.
+///
+/// Copilot has NO positional prompt (`copilot [options] [command]`; a bare
+/// positional is rejected with "Invalid command format"), so this value-taking
+/// flag is the only way to seed an interactive copilot.
+const COPILOT_INTERACTIVE_PROMPT_FLAG: &str = "-i";
+/// The end-of-options separator: everything after it is a positional, never a
+/// flag.
+///
+/// The brief is arbitrary issue text, so it can start with `-` (an issue titled
+/// `- fix the login bug` is ordinary bullet-style prose). Without this separator
+/// the provider's parser reads the brief as flags. Verified against the real
+/// binaries:
+///
+/// * `codex exec "-fix the login bug"` → `error: unexpected argument '-f' found`
+///   (clap itself suggests "to pass '-f' as a value, use '-- -f'"); with `--` it
+///   parses.
+/// * `claude -p "-reply with …"` → the leading `-r` is silently absorbed as
+///   claude's own `-r/--resume`, which then fails on the REST of the brief
+///   ("Provided value \"eply with …\" is not a UUID"). A misparse into a
+///   different flag, not merely a rejection; with `--` the brief is delivered
+///   verbatim (verified: a `-`-leading brief round-tripped its answer back).
+///
+/// It also settles two adjacent hazards for free: a value-taking flag in the
+/// agent's `cli_args` can no longer swallow the brief (the separator terminates
+/// option parsing first), and a brief that is exactly a subcommand name can no
+/// longer hijack it (verified: `codex exec review` → "Specify --uncommitted …";
+/// `codex exec -- review` treats it as the prompt).
+///
+/// It is NOT used for copilot: its brief rides a value-taking flag (`-p`/`-i`),
+/// which already consumes a dash-leading value verbatim, and inserting `--`
+/// there BREAKS it — `copilot -p -- "-fix the login bug"` makes `--` the prompt
+/// value and then rejects the brief as `error: unknown option` (verified).
+const ARG_SEPARATOR: &str = "--";
 /// The copilot flag that permits tool use without an interactive confirmation
 /// prompt. Verified against GitHub Copilot CLI 1.0.68: `--allow-all-tools` is
 /// documented as "required for non-interactive mode", so a headless run without
@@ -351,23 +410,61 @@ impl Backend {
     }
 }
 
+/// Which contract a provider's argv is built for.
+///
+/// The two are OPPOSITE asks of the same binary, and every provider spells them
+/// differently, so the mode is an explicit argument rather than an implied
+/// default: one argv must never serve both. Passing a headless argv to the
+/// interactive path spawns a print-and-exit process into a pane the operator is
+/// meant to attach to and drive (claude's `-p/--print` is literally "Print
+/// response and exit"; copilot's `-p` is "exits after completion").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mode {
+    /// A captured subprocess with a null stdin: the provider must do the work
+    /// unattended and exit. Nobody can answer a prompt or drive a REPL.
+    Headless,
+    /// A REAL, attachable tmux terminal (ccc / D6): the provider must start a
+    /// live session, seeded with the brief, that the operator can take over.
+    Interactive,
+}
+
 /// What to invoke a provider with for ONE run: the task's prompt plus the
 /// per-agent config (e38.16, from the agent row's migration-0015 columns).
 ///
 /// `prompt` / `model` / `cli_args` flow onto the provider's command line; the
 /// agent's `agent_env` is threaded separately (it goes into the child env, not
 /// the argv) via the `extra_env` argument of [`Runner::run_codex_with_env`].
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+///
+/// # No `Default`
+///
+/// Deliberately NOT [`Default`]: a defaulted invocation is a promptless one, and
+/// a promptless provider does not run — it exits non-zero at once (verified:
+/// bare `claude` with a null stdin exits 1, "Input must be provided either
+/// through stdin or as a prompt argument when using --print"). A `..default()`
+/// fault path therefore does not degrade gracefully, it just fails later and
+/// less legibly. Callers must state the prompt, even if it is only a fallback
+/// (see `run_loop`'s `ResolvedDispatch::fallback`).
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderInvocation {
-    /// The task brief handed to the provider non-interactively (`claude -p <x>`,
-    /// `copilot -p <x>`, `codex exec <x>`).
+    /// The task brief. Reaches the provider as a positional after
+    /// [`ARG_SEPARATOR`] (claude / codex) or as the value of a prompt flag
+    /// (copilot); [`Mode`] decides the surrounding shape.
     ///
-    /// EVERY agent CLI starts an interactive session when given no prompt, and the
-    /// daemon spawns them with a null stdin — so an empty prompt means the provider
-    /// exits immediately instead of doing the work (verified: bare `claude` with a
-    /// null stdin exits 1 with "Input must be provided either through stdin or as a
-    /// prompt argument when using --print"). An empty string omits the flag, which
-    /// is only correct for callers that have nothing to ask.
+    /// MUST be non-empty — see the type-level "No `Default`" note. The specs do
+    /// not guard against an empty prompt: a caller that manufactures one gets a
+    /// loud provider-level failure rather than a silent interactive hang.
+    ///
+    /// # Visible in `ps`
+    ///
+    /// This lands in the child's argv, so it is world-readable via `ps` on the
+    /// host. Accepted deliberately: the brief is the operator's own issue text,
+    /// and `model` / `cli_args` already ride the same argv. It is a real (if
+    /// small) widening of what a local user can see versus keeping the brief on
+    /// stdin — noted here so the next reader knows it was a decision, not an
+    /// oversight. The repo's threat model does care about other local users (see
+    /// the 0o700 wrapper rationale in `interactive.rs`), so if a brief ever
+    /// carries something more sensitive than an issue title, stdin is the seam
+    /// to move it to.
     pub prompt: String,
     /// Optional model override (e.g. `gpt-5-codex`); `None` = provider default.
     pub model: Option<String>,
@@ -384,9 +481,9 @@ pub struct ProviderInvocation {
 /// (see [`Runner::claude_spec`] / [`Runner::codex_spec`] / [`Runner::copilot_spec`])
 /// rather than a new copy of the run loop.
 struct ProviderSpec {
-    /// The provider's wire name (`"claude"`, `"codex"`, `"copilot"`), for
-    /// logs/tracing.
-    name: &'static str,
+    /// Which provider this is — its wire name for logs/tracing
+    /// ([`Backend::name`]).
+    backend: Backend,
     /// The provider-log file under [`ExecEnv::logs`].
     log_file: &'static str,
     /// The argv to append after the program path (subcommand + flags + args).
@@ -441,6 +538,21 @@ impl Runner {
     /// network egress to the model API stays allowed. With the sandbox off, or on
     /// an unsupported platform, the command is the bare provider binary (the env
     /// allowlist + process-group kill still apply).
+    ///
+    /// # No credential grant
+    ///
+    /// The confined child is granted NOTHING under the operator's `$HOME` —
+    /// including the provider's own credential store. That is deliberate, and it
+    /// means a provider whose token lives in the macOS Keychain cannot
+    /// authenticate here: a real headless run fails "Not logged in · Please run
+    /// /login" and needs `HANGAR_DAEMON_DISABLE_SANDBOX=1` to complete. An
+    /// earlier attempt to grant the Keychain instead handed the child every
+    /// Chrome-saved password — see the rationale on
+    /// [`ainb_hangar_sandbox::SandboxPolicy`]. The fix is to inject the
+    /// credential as an env var from the UNSANDBOXED parent daemon
+    /// (`claude setup-token` -> `CLAUDE_CODE_OAUTH_TOKEN`), which needs no grant
+    /// into `$HOME` at all; until that lands, sandboxed headless runs are
+    /// unauthenticated by design.
     ///
     /// # Errors
     ///
@@ -525,9 +637,11 @@ impl Runner {
     where
         I: IntoIterator<Item = (String, String)>,
     {
-        // The task brief reaches claude as `-p <prompt>`; the workdir + materialised
-        // home carry the CONTEXT (CLAUDE.md, skills) but never the ask itself.
-        let spec = Self::claude_spec(invocation);
+        // The task brief reaches claude as the trailing positional; the workdir +
+        // materialised home carry the CONTEXT (CLAUDE.md, skills) but never the ask
+        // itself. `run_provider` captures stdout against a null stdin, so this is
+        // unambiguously the headless contract.
+        let spec = Self::claude_spec(invocation, Mode::Headless);
         self.run_provider(
             &self.cfg.claude_path,
             env,
@@ -620,7 +734,7 @@ impl Runner {
         I: IntoIterator<Item = (String, String)>,
         E: IntoIterator<Item = (String, String)>,
     {
-        let spec = Self::codex_spec(invocation);
+        let spec = Self::codex_spec(invocation, Mode::Headless);
         self.run_provider(
             &self.cfg.codex_path,
             env,
@@ -699,7 +813,7 @@ impl Runner {
         I: IntoIterator<Item = (String, String)>,
         E: IntoIterator<Item = (String, String)>,
     {
-        let spec = Self::copilot_spec(invocation);
+        let spec = Self::copilot_spec(invocation, Mode::Headless);
         self.run_provider(
             &self.cfg.copilot_path,
             env,
@@ -711,79 +825,122 @@ impl Runner {
         .await
     }
 
-    /// The program path + argv for a provider run, WITHOUT spawning it (ccc / D6).
+    /// The program path + argv for a provider run in `mode`, WITHOUT spawning it
+    /// (ccc / D6).
     ///
     /// The interactive tmux path ([`crate::interactive`]) needs the exact program
-    /// and arguments the headless path would exec, but launched inside a tmux
-    /// session instead of a captured subprocess. Returning them from here keeps the
-    /// per-provider argv shape (`codex exec [-m …]`) in one place rather than
-    /// re-deriving it at the call site.
+    /// and arguments to exec inside a tmux session rather than a captured
+    /// subprocess. Deriving them here keeps each provider's argv shape in one
+    /// place — but the shape DIFFERS by [`Mode`], so the caller must say which
+    /// contract it is spawning for; the headless argv is print-and-exit and would
+    /// hand the operator a dead pane.
     #[must_use]
     pub fn provider_command(
         &self,
         backend: Backend,
         invocation: &ProviderInvocation,
+        mode: Mode,
     ) -> (PathBuf, Vec<String>) {
         match backend {
             Backend::Claude => (
                 self.cfg.claude_path.clone(),
-                Self::claude_spec(invocation).argv,
+                Self::claude_spec(invocation, mode).argv,
             ),
             Backend::Codex => (
                 self.cfg.codex_path.clone(),
-                Self::codex_spec(invocation).argv,
+                Self::codex_spec(invocation, mode).argv,
             ),
             Backend::Copilot => (
                 self.cfg.copilot_path.clone(),
-                Self::copilot_spec(invocation).argv,
+                Self::copilot_spec(invocation, mode).argv,
             ),
         }
     }
 
-    /// The `claude` provider spec: claude log file + the non-interactive
-    /// `-p <prompt>` [+ `--model <model>`] [+ `<cli_args>`].
+    /// The `claude` provider spec: claude log file + `[-p] [--model <model>]
+    /// [<cli_args>…] -- <prompt>`.
     ///
-    /// `-p/--print` is what makes claude non-interactive; verified against Claude
-    /// Code 2.1.210, whose help reads "starts an interactive session by default,
-    /// use -p/--print for non-interactive output". Without it the daemon's spawn
-    /// (null stdin, captured stdout) exits 1 without doing any work.
-    fn claude_spec(invocation: &ProviderInvocation) -> ProviderSpec {
+    /// Verified against Claude Code 2.1.210, whose usage is
+    /// `claude [options] [command] [prompt]`:
+    ///
+    /// * [`Mode::Headless`] adds `-p/--print` ("Print response and exit"). Without
+    ///   it the daemon's spawn (null stdin, captured stdout) exits 1 having done
+    ///   nothing.
+    /// * [`Mode::Interactive`] OMITS it: the brief is still delivered (as the same
+    ///   trailing positional), but claude starts the real session the operator
+    ///   attaches to. `-p` here would print and exit into an empty pane.
+    ///
+    /// The prompt is a POSITIONAL either way — `-p` is a boolean and never takes
+    /// it — and rides last, after [`ARG_SEPARATOR`], so a `-`-leading brief cannot
+    /// be read as a flag.
+    fn claude_spec(invocation: &ProviderInvocation, mode: Mode) -> ProviderSpec {
         let mut argv = Vec::new();
-        if !invocation.prompt.is_empty() {
-            argv.push(CLAUDE_PROMPT_FLAG.to_string());
-            argv.push(invocation.prompt.clone());
+        if mode == Mode::Headless {
+            argv.push(CLAUDE_PRINT_FLAG.to_string());
         }
         if let Some(model) = &invocation.model {
             argv.push(CLAUDE_MODEL_FLAG.to_string());
             argv.push(model.clone());
         }
         argv.extend(invocation.cli_args.iter().cloned());
+        argv.push(ARG_SEPARATOR.to_string());
+        argv.push(invocation.prompt.clone());
         ProviderSpec {
-            name: "claude",
+            backend: Backend::Claude,
             log_file: CLAUDE_LOG_FILE,
             argv,
         }
     }
 
-    /// The `codex` provider spec: codex log file + the non-interactive argv
-    /// `exec [-m <model>] [<cli_args>…]` (e38.16).
-    fn codex_spec(invocation: &ProviderInvocation) -> ProviderSpec {
-        let mut argv = vec![
-            CODEX_EXEC_SUBCOMMAND.to_string(),
-            CODEX_SKIP_GIT_CHECK_FLAG.to_string(),
-        ];
+    /// The `codex` provider spec: codex log file + `[exec --skip-git-repo-check]
+    /// [-m <model>] [<cli_args>…] -- <prompt>` (e38.16).
+    ///
+    /// Verified against codex-cli 0.144.0, whose usage is both
+    /// `codex [OPTIONS] [PROMPT]` (interactive TUI) and `codex exec …`
+    /// ("Run Codex non-interactively"):
+    ///
+    /// * [`Mode::Headless`] leads with the `exec` subcommand, plus
+    ///   [`CODEX_SKIP_GIT_CHECK_FLAG`].
+    /// * [`Mode::Interactive`] omits BOTH, so the top-level TUI starts with the
+    ///   brief as its opening prompt. `codex exec` in a tmux pane would stream and
+    ///   exit rather than give the operator a session.
+    ///
+    /// # Why the git-repo check is skipped headlessly but not interactively
+    ///
+    /// This is not a judgement call — the CLI settles it. `--skip-git-repo-check`
+    /// is an `exec`-only flag: `codex --skip-git-repo-check …` at the top level is
+    /// a hard parse error ("unexpected argument '--skip-git-repo-check' found",
+    /// exit 2, verified), so an interactive session CANNOT carry it and would
+    /// refuse to start if it did.
+    ///
+    /// That happens to match the security reasoning. The flag's justification is
+    /// that the daemon supplies the confinement codex's check proxies for
+    /// (per-task isolated dir + FS sandbox + teardown) — but the interactive path
+    /// DELIBERATELY has no FS sandbox (see `run_loop::run_interactive`), so that
+    /// justification does not hold there. It does not need to: a human is attached
+    /// to the session and can answer codex's trust prompt themselves, which is
+    /// exactly the review the check exists to secure.
+    ///
+    /// The prompt is a trailing POSITIONAL in both shapes, after every option and
+    /// after [`ARG_SEPARATOR`] (which also stops a value-taking flag in `cli_args`
+    /// from swallowing it, and stops a brief like `review` from hijacking
+    /// `codex exec`'s `review` subcommand). Verified to compose:
+    /// `codex exec --skip-git-repo-check -- "-fix the login bug"` parses and runs.
+    fn codex_spec(invocation: &ProviderInvocation, mode: Mode) -> ProviderSpec {
+        let mut argv = Vec::new();
+        if mode == Mode::Headless {
+            argv.push(CODEX_EXEC_SUBCOMMAND.to_string());
+            argv.push(CODEX_SKIP_GIT_CHECK_FLAG.to_string());
+        }
         if let Some(model) = &invocation.model {
             argv.push(CODEX_MODEL_FLAG.to_string());
             argv.push(model.clone());
         }
         argv.extend(invocation.cli_args.iter().cloned());
-        // `codex exec [OPTIONS] [PROMPT]` — the prompt is a trailing POSITIONAL, so
-        // it must come after every option (verified: `codex exec --help`).
-        if !invocation.prompt.is_empty() {
-            argv.push(invocation.prompt.clone());
-        }
+        argv.push(ARG_SEPARATOR.to_string());
+        argv.push(invocation.prompt.clone());
         ProviderSpec {
-            name: "codex",
+            backend: Backend::Codex,
             log_file: CODEX_LOG_FILE,
             argv,
         }
@@ -821,19 +978,31 @@ impl Runner {
     ///   — it is the existing one made explicit in argv.
     /// * Claude reaches the same place by a different route (its permission
     ///   behaviour under `--print` differs), so the two are not yet symmetrical.
-    ///   When the `-p` gap below is closed, claude will need this decision too —
-    ///   resolve BOTH providers' permission policy in one pass then, rather than
-    ///   inventing a half-policy here.
+    ///   Resolving BOTH providers' permission policy in one pass is still open.
     ///
-    /// The brief is handed over as `-p <prompt>` (verified against Copilot CLI
-    /// 1.0.68: "Execute a prompt in non-interactive mode"). Bare `copilot` would
-    /// start an INTERACTIVE session against the daemon's null stdin and do nothing.
-    fn copilot_spec(invocation: &ProviderInvocation) -> ProviderSpec {
-        let mut argv = Vec::new();
-        if !invocation.prompt.is_empty() {
-            argv.push(COPILOT_PROMPT_FLAG.to_string());
-            argv.push(invocation.prompt.clone());
-        }
+    /// # The brief rides a value-taking flag, chosen by [`Mode`]
+    ///
+    /// Copilot has NO positional prompt (`copilot [options] [command]`; a bare
+    /// positional is rejected with "Invalid command format"), so — unlike claude
+    /// and codex — the brief is the VALUE of a flag, and which flag is the whole
+    /// interactive/headless distinction (verified against Copilot CLI 1.0.68):
+    ///
+    /// * [`Mode::Headless`] → `-p <prompt>`: "Execute a prompt in non-interactive
+    ///   mode (exits after completion)".
+    /// * [`Mode::Interactive`] → `-i <prompt>`: "Start interactive mode and
+    ///   automatically execute this prompt" — a real session, seeded with the
+    ///   brief, which is what an attachable tmux pane needs.
+    ///
+    /// Because the brief is a flag VALUE, it needs no [`ARG_SEPARATOR`]: the
+    /// parser consumes a `-`-leading value verbatim (verified: `copilot -p
+    /// "-fix the login bug"` parses). Adding `--` would BREAK it — `--` becomes
+    /// the prompt value and the brief is then rejected as an unknown option.
+    fn copilot_spec(invocation: &ProviderInvocation, mode: Mode) -> ProviderSpec {
+        let prompt_flag = match mode {
+            Mode::Headless => COPILOT_HEADLESS_PROMPT_FLAG,
+            Mode::Interactive => COPILOT_INTERACTIVE_PROMPT_FLAG,
+        };
+        let mut argv = vec![prompt_flag.to_string(), invocation.prompt.clone()];
         argv.push(COPILOT_ALLOW_ALL_TOOLS_FLAG.to_string());
         if let Some(model) = &invocation.model {
             argv.push(COPILOT_MODEL_FLAG.to_string());
@@ -841,7 +1010,7 @@ impl Runner {
         }
         argv.extend(invocation.cli_args.iter().cloned());
         ProviderSpec {
-            name: "copilot",
+            backend: Backend::Copilot,
             log_file: COPILOT_LOG_FILE,
             argv,
         }
@@ -982,7 +1151,11 @@ impl Runner {
         };
 
         let outcome = if timed_out {
-            tracing::warn!(provider = spec.name, reason = "timeout", "runner_failed");
+            tracing::warn!(
+                provider = spec.backend.name(),
+                reason = "timeout",
+                "runner_failed"
+            );
             RunOutcome::Failed {
                 reason: FailureReason::Timeout,
                 result,
@@ -995,7 +1168,7 @@ impl Runner {
             // re-dispatches a child task, rather than treating it as a terminal
             // agent error.
             tracing::warn!(
-                provider = spec.name,
+                provider = spec.backend.name(),
                 reason = "runtime_offline",
                 "runner_failed"
             );
@@ -1004,7 +1177,7 @@ impl Runner {
                 result,
             }
         } else {
-            tracing::warn!(provider = spec.name, reason = "agent_error", exit_code = ?exit_code, "runner_failed");
+            tracing::warn!(provider = spec.backend.name(), reason = "agent_error", exit_code = ?exit_code, "runner_failed");
             RunOutcome::Failed {
                 reason: FailureReason::AgentError,
                 result,
