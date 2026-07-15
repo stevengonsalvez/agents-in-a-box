@@ -288,6 +288,42 @@ fn copilot_command_carries_verified_non_interactive_flags() {
     );
 }
 
+/// Each provider's argv must be the shape that ACTUALLY runs headless — verified
+/// against the real CLIs (claude 2.1.210, codex-cli 0.144.0, Copilot CLI 1.0.70):
+///
+/// * claude needs `-p` or it opens a session and exits 1 on the daemon's null stdin,
+/// * codex needs `--skip-git-repo-check` or it exits 1 ("Not inside a trusted
+///   directory") in the daemon's non-repo in-tree workdir, and takes the prompt as a
+///   TRAILING positional,
+/// * copilot needs `-p` + `--allow-all-tools` ("required for non-interactive mode").
+#[test]
+fn every_provider_argv_is_the_verified_headless_shape() {
+    let tmp = TempDir::new().expect("tmp");
+    let (runner, _m) = runner_with_all(tmp.path());
+    let inv = ProviderInvocation {
+        prompt: "BRIEF".to_string(),
+        model: None,
+        cli_args: Vec::new(),
+    };
+
+    let (_p, claude) = runner.provider_command(Backend::Claude, &inv);
+    assert_eq!(claude, vec!["-p", "BRIEF"], "claude: -p <brief>");
+
+    let (_p, codex) = runner.provider_command(Backend::Codex, &inv);
+    assert_eq!(
+        codex,
+        vec!["exec", "--skip-git-repo-check", "BRIEF"],
+        "codex: exec --skip-git-repo-check <brief> (prompt is a trailing positional)"
+    );
+
+    let (_p, copilot) = runner.provider_command(Backend::Copilot, &inv);
+    assert_eq!(
+        copilot,
+        vec!["-p", "BRIEF", "--allow-all-tools"],
+        "copilot: -p <brief> --allow-all-tools"
+    );
+}
+
 #[test]
 fn wired_providers_route_and_unknown_defaults_to_claude() {
     // Every WIRED provider routes to its own exec path — copilot included; it no
