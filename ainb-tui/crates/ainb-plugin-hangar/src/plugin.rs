@@ -3771,7 +3771,7 @@ impl Plugin for HangarPlugin {
         // Drain a deferred daemon-config write (bool/enum/int edit) and fire it over
         // the daemon socket; the reply re-fetches the whole config so the pane
         // reflects the persisted value.
-        if let Some((key, value)) = self.screens.take_pending_daemon_config_set() {
+        for (key, value) in self.screens.take_pending_daemon_config_sets() {
             let mut sent = false;
             if let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) {
                 let body = encode_request(
@@ -5384,6 +5384,49 @@ mod tests {
             "digits accumulate in the overlay"
         );
         assert!(matches!(p.app_state().screen, Screen::Settings));
+    }
+
+    /// REGRESSION: two config edits landing before a render pass must BOTH be
+    /// written. The pending write used to be a single slot, so the second edit
+    /// overwrote the first — the first key was silently never persisted while the
+    /// pane happily showed it applied (the optimistic edit stays either way).
+    /// Keys arrive far faster than render passes, and the registry generalised
+    /// this surface from one knob to five, so this is reachable by simply typing.
+    #[test]
+    fn two_config_edits_before_a_render_both_queue() {
+        use ainb_hangar_core::daemon_config::{
+            DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_ENABLED, KEY_CARD_AGENT_DEFAULT,
+        };
+        let mut p = plugin_on_daemon_settings();
+
+        // Edit 1: `a` toggles auto-standup from anywhere in the section.
+        p.on_key(&char_press('a'));
+        // Edit 2: cycle the enum knob, with NO render pass in between.
+        let enum_idx = DAEMON_CONFIG_REGISTRY
+            .iter()
+            .position(|d| d.key == KEY_CARD_AGENT_DEFAULT)
+            .expect("enum knob present");
+        for _ in 0..enum_idx {
+            p.on_key(&key_press(KeyCode::Down));
+        }
+        p.on_key(&key_press(KeyCode::Enter));
+
+        let queued = &p.screens.pending_daemon_config_set;
+        assert_eq!(
+            queued.len(),
+            2,
+            "both edits must be queued, got {queued:?} — a dropped write is invisible"
+        );
+        assert_eq!(queued[0], (KEY_AUTOSTANDUP_ENABLED.to_string(), "true".to_string()));
+        assert_eq!(queued[1], (KEY_CARD_AGENT_DEFAULT.to_string(), "codex".to_string()));
+
+        // Draining hands them over in edit order and leaves the queue empty.
+        let drained = p.screens.take_pending_daemon_config_sets();
+        assert_eq!(drained.len(), 2, "the drain yields every queued write");
+        assert!(
+            p.screens.take_pending_daemon_config_sets().is_empty(),
+            "a drained queue is empty — no write fires twice"
+        );
     }
 
     /// REGRESSION: while the numeric overlay is open the plugin must DECLARE text

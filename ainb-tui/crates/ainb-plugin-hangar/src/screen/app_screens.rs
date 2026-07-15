@@ -536,10 +536,16 @@ pub struct ScreenStates {
     /// arrival order and survives a `set_health` rebuild (each is replayed into the
     /// rebuilt state). Empty until the first list reply lands.
     pub daemon_config_cache: Vec<(String, Option<String>)>,
-    /// A deferred daemon-config write raised by a Daemon-section edit (bool toggle,
-    /// enum cycle, or committed int overlay): the `(key, value)` awaiting the
-    /// `render` pass to fire `hangar/daemon_config_set`. `None` when idle.
-    pub pending_daemon_config_set: Option<(String, String)>,
+    /// Deferred daemon-config writes raised by Daemon-section edits (bool toggle,
+    /// enum cycle, or committed int overlay): the `(key, value)` pairs awaiting the
+    /// `render` pass to fire `hangar/daemon_config_set`, in edit order. Empty when
+    /// idle.
+    ///
+    /// A QUEUE, not a slot: the registry generalised this surface from one knob to
+    /// N, and keys land faster than render passes. With a single slot, toggling
+    /// auto-standup and then cycling the default agent before the next frame
+    /// silently dropped the first write while the pane still showed it applied.
+    pub pending_daemon_config_set: Vec<(String, String)>,
     /// Set when the logs screen's level filter changed (P8.6), asking the glue
     /// to re-read the structured-log file under the new `--level` floor. Drained
     /// by the `render` pass. `false` when idle.
@@ -870,9 +876,10 @@ impl ScreenStates {
         }
     }
 
-    /// Take the pending daemon-config write raised by a Daemon-section edit, if any.
-    pub fn take_pending_daemon_config_set(&mut self) -> Option<(String, String)> {
-        self.pending_daemon_config_set.take()
+    /// Drain every pending daemon-config write raised by Daemon-section edits, in
+    /// edit order. Returns an empty vec when idle.
+    pub fn take_pending_daemon_config_sets(&mut self) -> Vec<(String, String)> {
+        std::mem::take(&mut self.pending_daemon_config_set)
     }
 
     /// The Notifications grid's current edit scope (global/workspace,
@@ -1278,7 +1285,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     // knob: defer the `hangar/daemon_config_set` write for the
                     // render pass, which re-reads the whole config afterwards.
                     Some(SettingsIntent::SetDaemonConfig { key, value }) => {
-                        states.pending_daemon_config_set = Some((key, value));
+                        states.pending_daemon_config_set.push((key, value));
                     }
                     // KeychainWrite / New / Rename land in their own beads.
                     _ => {
