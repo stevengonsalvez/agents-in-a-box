@@ -2999,7 +2999,7 @@ async fn dispatch_daemon_config(cmd: DaemonConfigCommand, format: OutputFormat) 
 
 /// `hangar daemon config list`: every configurable's key, current value (or
 /// `(default)`), default, and type/range. Iterates the registry so a new knob is
-/// listed automatically. `--format json` emits one object per knob.
+/// listed automatically, in every output format.
 async fn run_daemon_config_list(store: &Store, format: OutputFormat) -> Result<()> {
     use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
     use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
@@ -3012,7 +3012,26 @@ async fn run_daemon_config_list(store: &Store, format: OutputFormat) -> Result<(
             .with_context(|| format!("read daemon_config `{}`", desc.key))?;
         rows.push((desc, stored));
     }
+    print!("{}", render_daemon_config_list(&rows, format)?);
+    Ok(())
+}
 
+/// One `config list` row: the knob's descriptor and its stored value (`None` when
+/// the key has no row, i.e. the coded default is in force).
+type ConfigRow = (&'static ainb_hangar_core::daemon_config::ConfigDescriptor, Option<String>);
+
+/// Render the `config list` rows in `format`, returning the exact text to print.
+///
+/// Split from the IO so the rendering is directly testable: the parity test counts
+/// the rows this emits against the registry length, which a test that merely
+/// re-queried the registry could never do.
+///
+/// # Errors
+///
+/// Returns an error only when the JSON form fails to serialize.
+fn render_daemon_config_list(rows: &[ConfigRow], format: OutputFormat) -> Result<String> {
+    use std::fmt::Write as _;
+    let mut out = String::new();
     match format {
         OutputFormat::Json => {
             let arr: Vec<_> = rows
@@ -3028,28 +3047,64 @@ async fn run_daemon_config_list(store: &Store, format: OutputFormat) -> Result<(
                     })
                 })
                 .collect();
-            println!(
+            let _ = writeln!(
+                out,
                 "{}",
                 serde_json::to_string_pretty(&arr).context("render config json")?
             );
         }
-        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
-            for (desc, stored) in &rows {
-                let shown = match stored {
-                    Some(v) => v.clone(),
-                    None => format!("{} (default)", desc.default),
-                };
-                println!(
+        OutputFormat::Csv => {
+            let _ = writeln!(out, "key,value,is_default,default,type,help");
+            for (desc, stored) in rows {
+                let _ = writeln!(
+                    out,
+                    "{},{},{},{},{},{}",
+                    csv_field(desc.key),
+                    csv_field(stored.as_deref().unwrap_or(desc.default)),
+                    csv_field(&stored.is_none().to_string()),
+                    csv_field(desc.default),
+                    csv_field(&desc.type_hint()),
+                    csv_field(desc.help),
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            let _ = writeln!(out, "| key | value | default | type | help |");
+            let _ = writeln!(out, "| --- | --- | --- | --- | --- |");
+            for (desc, stored) in rows {
+                let _ = writeln!(
+                    out,
+                    "| {} | {} | {} | {} | {} |",
+                    md_cell(desc.key),
+                    md_cell(&config_shown_value(desc, stored.as_deref())),
+                    md_cell(desc.default),
+                    md_cell(&desc.type_hint()),
+                    md_cell(desc.help),
+                );
+            }
+        }
+        OutputFormat::Text => {
+            for (desc, stored) in rows {
+                let _ = writeln!(
+                    out,
                     "{:<28} {:<20} [{}]  {}",
                     desc.key,
-                    shown,
+                    config_shown_value(desc, stored.as_deref()),
                     desc.type_hint(),
                     desc.help
                 );
             }
         }
     }
-    Ok(())
+    Ok(out)
+}
+
+/// A knob's display value: the stored string, or the coded default marked as such.
+fn config_shown_value(
+    desc: &ainb_hangar_core::daemon_config::ConfigDescriptor,
+    stored: Option<&str>,
+) -> String {
+    stored.map_or_else(|| format!("{} (default)", desc.default), ToString::to_string)
 }
 
 /// `hangar daemon config get <key>`: print one knob's current value, or its
@@ -3085,7 +3140,28 @@ async fn run_daemon_config_get(
                 serde_json::to_string_pretty(&v).context("render config json")?
             );
         }
-        OutputFormat::Text | OutputFormat::Csv | OutputFormat::Markdown => {
+        OutputFormat::Csv => {
+            println!("key,value,is_default,default");
+            println!(
+                "{},{},{},{}",
+                csv_field(desc.key),
+                csv_field(&value),
+                csv_field(&stored.is_none().to_string()),
+                csv_field(desc.default),
+            );
+        }
+        OutputFormat::Markdown => {
+            println!("| key | value | default |");
+            println!("| --- | --- | --- |");
+            println!(
+                "| {} | {} | {} |",
+                md_cell(desc.key),
+                md_cell(&value),
+                md_cell(desc.default),
+            );
+        }
+        // Text stays the bare value: `get` is the scriptable read.
+        OutputFormat::Text => {
             println!("{value}");
         }
     }
@@ -4745,6 +4821,38 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let store = Store::open_in(dir.path()).await.expect("open store");
 
+
+        // CSV: a header plus one row per knob.
+        let csv = render_daemon_config_list(&rows, OutputFormat::Csv).unwrap();
+        assert_eq!(csv.lines().count(), n + 1, "csv rows:\n{csv}");
+        assert!(csv.starts_with("key,value,is_default,default,type,help"));
+
+        // Markdown: a header + separator plus one row per knob.
+        let md = render_daemon_config_list(&rows, OutputFormat::Markdown).unwrap();
+        let md_rows = md.lines().filter(|l| l.starts_with("| ") && !l.contains("---")).count();
+        assert_eq!(md_rows - 1, n, "markdown body rows:\n{md}");
+
+        // JSON: one object per knob.
+        let json = render_daemon_config_list(&rows, OutputFormat::Json).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&json).expect("valid json");
+        assert_eq!(parsed.as_array().expect("json array").len(), n);
+    }
+
+    /// `csv` and `markdown` used to fall through to the plain-text arm and emit
+    /// neither format — the flag was silently ignored.
+    #[test]
+    fn cli_list_csv_and_markdown_are_not_plain_text() {
+        use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+        let rows: Vec<ConfigRow> = DAEMON_CONFIG_REGISTRY.iter().map(|d| (d, None)).collect();
+
+        let text = render_daemon_config_list(&rows, OutputFormat::Text).unwrap();
+        let csv = render_daemon_config_list(&rows, OutputFormat::Csv).unwrap();
+        let md = render_daemon_config_list(&rows, OutputFormat::Markdown).unwrap();
+
+        assert_ne!(csv, text, "csv must not be the plain-text arm");
+        assert_ne!(md, text, "markdown must not be the plain-text arm");
+        assert!(csv.contains(','), "csv must be comma-separated");
+        assert!(md.contains('|'), "markdown must be a pipe table");
         // set autostandup.stagnant_min 30 → persists the normalized value.
         run_daemon_config_set(
             &store,
