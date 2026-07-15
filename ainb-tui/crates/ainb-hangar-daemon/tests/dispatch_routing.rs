@@ -1,15 +1,17 @@
-//! e38.16 dispatch-routing test: a `claude`-backend agent takes the
-//! `run_claude` exec path and a `codex`-backend agent takes the `run_codex`
-//! exec path.
+//! e38.16 dispatch-routing test: each backend (`claude` / `codex` / `copilot`)
+//! takes its own exec path.
 //!
 //! Pure + deterministic (no tmux, no DB, no real provider). It exercises the
 //! exact routing the daemon's claim loop uses: resolve a [`Backend`] from a
-//! provider wire name, then dispatch to the matching [`Runner`] method. The
-//! exec path actually taken is proven by **which provider log file the run
-//! wrote** — `run_claude` writes `claude.jsonl`, `run_codex` writes
-//! `codex.jsonl`. A regression that ignored the backend (always `run_claude`)
-//! would write `claude.jsonl` for the codex case and the codex assertions would
-//! fail.
+//! provider wire name, then dispatch to the matching [`Runner`] method.
+//!
+//! The exec path actually taken is proven by **which BINARY was spawned** — each
+//! fake provider appends its own name to a shared marker file. That is the
+//! assertion that bites: the provider log file (`claude.jsonl` / `codex.jsonl` /
+//! `copilot.jsonl`) is chosen by the `ProviderSpec`, NOT by the binary, so a route
+//! that kept the right spec but spawned the WRONG program would still write the
+//! expected log and pass a log-only assertion. The log-file assertions are kept as
+//! a secondary signal (they catch a wrong SPEC); the marker catches a wrong BINARY.
 //!
 //! This is the fast both-legs companion to the tmux e2e tripwire
 //! `tripwire_dispatch_routes_by_backend.rs` (which drives the genuine daemon
@@ -53,20 +55,46 @@ fn write_script(dir: &Path, name: &str, body: &str) -> PathBuf {
     path
 }
 
-/// A fake provider that just emits a system line + result and exits 0.
-fn fake_provider(dir: &Path, name: &str) -> PathBuf {
+/// A fake provider that IDENTIFIES ITSELF, then emits a system line + result and
+/// exits 0.
+///
+/// The identity marker is the point: the per-provider log file
+/// (`claude.jsonl`/`codex.jsonl`/`copilot.jsonl`) is chosen by the `ProviderSpec`,
+/// NOT by the binary, so a log-file assertion alone proves only which SPEC ran. A
+/// `run_copilot_in` that wrongly spawned `cfg.claude_path` while keeping
+/// `copilot_spec` would still write `copilot.jsonl` and pass. Each fake therefore
+/// appends its OWN name to a marker file, so a test can assert WHICH BINARY the
+/// runner actually executed.
+///
+/// The marker path is baked into the script rather than passed as an env var:
+/// the runner filters the child env deny-by-default, so an env-carried marker
+/// would be stripped before the fake could read it.
+fn fake_provider(dir: &Path, name: &str, marker: &Path) -> PathBuf {
     write_script(
         dir,
         name,
-        r#"echo '{"type":"system","session_id":"s"}'
-echo '{"type":"result","content":"ok"}'
+        &format!(
+            r#"echo '{name}' >> '{}'
+echo '{{"type":"system","session_id":"s"}}'
+echo '{{"type":"result","content":"ok"}}'
 exit 0"#,
+            marker.display()
+        ),
     )
 }
 
-/// Build a runner whose claude/codex paths are two DISTINCT fake binaries, so a
-/// mis-route would spawn the wrong one (and the log-file assertion would catch
-/// it regardless).
+/// The provider binaries the runner actually spawned, in order.
+fn spawned(marker: &Path) -> Vec<String> {
+    fs::read_to_string(marker)
+        .unwrap_or_default()
+        .lines()
+        .map(str::to_string)
+        .collect()
+}
+
+/// Build a runner whose claude/codex/copilot paths are three DISTINCT fake
+/// binaries, so a mis-route spawns the wrong one and the identity marker catches
+/// it.
 fn runner_with(claude: PathBuf, codex: PathBuf, copilot: PathBuf) -> Runner {
     Runner::new(RunnerConfig {
         claude_path: claude,
@@ -78,14 +106,18 @@ fn runner_with(claude: PathBuf, codex: PathBuf, copilot: PathBuf) -> Runner {
     })
 }
 
-/// The three fake providers + a runner wired to them, so every route has a REAL
-/// distinct binary and a mis-route is proven by the wrong log file appearing.
-fn runner_with_all(dir: &Path) -> Runner {
-    runner_with(
-        fake_provider(dir, "fake-claude.sh"),
-        fake_provider(dir, "fake-codex.sh"),
-        fake_provider(dir, "fake-copilot.sh"),
-    )
+/// The three fake providers + a runner wired to them, plus the marker file each
+/// fake records its identity in. Every route has a REAL distinct binary, so a
+/// mis-route (right spec, wrong binary) is caught by the marker — not just by the
+/// spec-chosen log file.
+fn runner_with_all(dir: &Path) -> (Runner, PathBuf) {
+    let marker = dir.join("spawned.txt");
+    let runner = runner_with(
+        fake_provider(dir, "fake-claude.sh", &marker),
+        fake_provider(dir, "fake-codex.sh", &marker),
+        fake_provider(dir, "fake-copilot.sh", &marker),
+    );
+    (runner, marker)
 }
 
 /// Mirror the daemon's `execute_claimed` routing: backend → exec method.
@@ -107,7 +139,7 @@ async fn dispatch(runner: &Runner, backend: Backend, env: &ExecEnv) -> RunOutcom
 async fn claude_backend_takes_claude_path() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
-    let runner = runner_with_all(tmp.path());
+    let (runner, marker) = runner_with_all(tmp.path());
 
     // A claude runtime's provider wire name resolves to the claude backend.
     let backend = Backend::from_provider("claude");
@@ -116,6 +148,12 @@ async fn claude_backend_takes_claude_path() {
     let outcome = dispatch(&runner, backend, &env).await;
     assert!(matches!(outcome, RunOutcome::Success(_)));
 
+    // The CLAUDE BINARY ran (not merely: the claude spec's log file appeared).
+    assert_eq!(
+        spawned(&marker),
+        vec!["fake-claude.sh"],
+        "claude backend must spawn the claude binary"
+    );
     // run_claude writes claude.jsonl and never codex.jsonl.
     assert!(
         env.logs.join("claude.jsonl").exists(),
@@ -131,7 +169,7 @@ async fn claude_backend_takes_claude_path() {
 async fn codex_backend_takes_codex_path() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
-    let runner = runner_with_all(tmp.path());
+    let (runner, marker) = runner_with_all(tmp.path());
 
     // A codex runtime's provider wire name resolves to the codex backend.
     let backend = Backend::from_provider("codex");
@@ -139,6 +177,14 @@ async fn codex_backend_takes_codex_path() {
 
     let outcome = dispatch(&runner, backend, &env).await;
     assert!(matches!(outcome, RunOutcome::Success(_)));
+
+    // The CODEX BINARY ran — a spec-only assertion would not catch a route that
+    // kept codex_spec but spawned the claude path.
+    assert_eq!(
+        spawned(&marker),
+        vec!["fake-codex.sh"],
+        "codex backend must spawn the codex binary"
+    );
 
     // run_codex writes codex.jsonl and never claude.jsonl — the positive proof
     // the new path is taken, plus the negative proof it did NOT fall through to
@@ -162,7 +208,7 @@ async fn codex_backend_takes_codex_path() {
 async fn copilot_backend_takes_copilot_path() {
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
-    let runner = runner_with_all(tmp.path());
+    let (runner, marker) = runner_with_all(tmp.path());
 
     // A copilot agent's provider wire name resolves to the copilot backend.
     let backend = Backend::from_provider("copilot");
@@ -170,6 +216,23 @@ async fn copilot_backend_takes_copilot_path() {
 
     let outcome = dispatch(&runner, backend, &env).await;
     assert!(matches!(outcome, RunOutcome::Success(_)));
+
+    // The COPILOT BINARY ran. This is the assertion that actually bites: the log
+    // file below is chosen by copilot_spec, so a run_copilot_in that wrongly used
+    // cfg.claude_path would still write copilot.jsonl and pass without this.
+    assert_eq!(
+        spawned(&marker),
+        vec!["fake-copilot.sh"],
+        "copilot backend must spawn the COPILOT binary, not another provider's"
+    );
+    // The program the runner would exec is the configured copilot path.
+    let (program, _argv) =
+        runner.provider_command(Backend::Copilot, &ProviderInvocation::default());
+    assert_eq!(
+        program.file_name().unwrap(),
+        "fake-copilot.sh",
+        "provider_command must name the copilot binary"
+    );
 
     // Positive proof the copilot exec path ran…
     assert!(
@@ -195,7 +258,7 @@ async fn copilot_backend_takes_copilot_path() {
 #[test]
 fn copilot_command_carries_verified_non_interactive_flags() {
     let tmp = TempDir::new().expect("tmp");
-    let runner = runner_with_all(tmp.path());
+    let (runner, _marker) = runner_with_all(tmp.path());
 
     let (_program, argv) =
         runner.provider_command(Backend::Copilot, &ProviderInvocation::default());
