@@ -67,10 +67,13 @@ exit 0"#,
 /// Build a runner whose claude/codex paths are two DISTINCT fake binaries, so a
 /// mis-route would spawn the wrong one (and the log-file assertion would catch
 /// it regardless).
-const fn runner_with(claude: PathBuf, codex: PathBuf) -> Runner {
+fn runner_with(claude: PathBuf, codex: PathBuf) -> Runner {
     Runner::new(RunnerConfig {
         claude_path: claude,
         codex_path: codex,
+        // Not exercised by these two routes; a bogus path proves a mis-route to
+        // copilot would fail loudly rather than silently succeed.
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -85,6 +88,10 @@ async fn dispatch(runner: &Runner, backend: Backend, env: &ExecEnv) -> RunOutcom
             .run_codex(env, std::iter::empty(), &ProviderInvocation::default())
             .await
             .expect("run codex"),
+        Backend::Copilot => runner
+            .run_copilot(env, std::iter::empty(), &ProviderInvocation::default())
+            .await
+            .expect("run copilot"),
     }
 }
 
@@ -143,12 +150,17 @@ async fn codex_backend_takes_codex_path() {
 }
 
 #[test]
-fn unknown_provider_defaults_to_claude() {
-    // A not-yet-wired / misconfigured provider must still dispatch (to the safe
-    // default) rather than strand the task.
+fn wired_providers_route_and_unknown_defaults_to_claude() {
+    // Every WIRED provider routes to its own exec path — copilot included; it no
+    // longer silently falls back to claude.
+    assert_eq!(Backend::from_provider("codex"), Backend::Codex);
+    assert_eq!(Backend::from_provider("copilot"), Backend::Copilot);
+    assert_eq!(Backend::from_provider("claude"), Backend::Claude);
+    // A genuinely not-wired / misconfigured provider must still dispatch (to the
+    // safe default) rather than strand the task.
     assert_eq!(Backend::from_provider("gemini"), Backend::Claude);
-    assert_eq!(Backend::from_provider("copilot"), Backend::Claude);
     assert_eq!(Backend::from_provider(""), Backend::Claude);
     // Case-insensitive on the wired names.
     assert_eq!(Backend::from_provider("CODEX"), Backend::Codex);
+    assert_eq!(Backend::from_provider("Copilot"), Backend::Copilot);
 }

@@ -94,6 +94,8 @@ pub struct DaemonConfig {
     pub claude_path: PathBuf,
     /// Path to the `codex` provider binary (e38.16).
     pub codex_path: PathBuf,
+    /// Path to the `copilot` provider binary (GitHub Copilot CLI).
+    pub copilot_path: PathBuf,
     /// Interval between claim polls.
     pub poll_interval: Duration,
     /// Hard wall-clock deadline for each provider run; the subprocess is killed
@@ -127,6 +129,8 @@ impl DaemonConfig {
             .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
         let codex_path = std::env::var_os("HANGAR_CODEX_PATH")
             .map_or_else(|| PathBuf::from("codex"), PathBuf::from);
+        let copilot_path = std::env::var_os("HANGAR_COPILOT_PATH")
+            .map_or_else(|| PathBuf::from("copilot"), PathBuf::from);
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
         let provider_max_runtime = env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
@@ -156,6 +160,7 @@ impl DaemonConfig {
             runtime_id,
             claude_path,
             codex_path,
+            copilot_path,
             poll_interval,
             provider_max_runtime,
             sweeper,
@@ -299,6 +304,7 @@ pub async fn run(
     let runner = Runner::new(RunnerConfig {
         claude_path: cfg.claude_path.clone(),
         codex_path: cfg.codex_path.clone(),
+        copilot_path: cfg.copilot_path.clone(),
         max_runtime: cfg.provider_max_runtime,
         tail_lines: TAIL_LINES,
         // e38.23: confine every provider spawn in the OS-level FS sandbox by
@@ -799,6 +805,16 @@ async fn execute_claimed(
                     )
                     .await
                     .map_err(anyhow::Error::from),
+                Backend::Copilot => runner
+                    .run_copilot_in(
+                        &env,
+                        task_env,
+                        dispatch.agent_env,
+                        &dispatch.invocation,
+                        &location,
+                    )
+                    .await
+                    .map_err(anyhow::Error::from),
             }
         }
     };
@@ -887,10 +903,11 @@ async fn run_interactive(
     // which is the trust model D6 chose for interactive over headless.
     let session_name = crate::interactive::session_name_for(&task.id);
     let (program, argv) = runner.provider_command(dispatch.backend, &dispatch.invocation);
-    // Mirror the headless env composition: the codex path layers the agent's
-    // `agent_env`; the claude path layers nothing (parity with `execute_claimed`).
+    // Mirror the headless env composition: the codex / copilot paths layer the
+    // agent's `agent_env`; the claude path layers nothing (parity with
+    // `execute_claimed`).
     let extra_env = match dispatch.backend {
-        Backend::Codex => dispatch.agent_env.clone(),
+        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone(),
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
@@ -1931,8 +1948,9 @@ mod tests {
     /// Provider-honoring proof: `resolve_dispatch` selects the backend from the
     /// AGENT's provider, overriding the runtime's advertised default. A `codex`
     /// agent bound to the single `claude`-advertised host runtime dispatches the
-    /// codex backend; a `claude` agent dispatches claude; an agent with no
-    /// override falls back to the runtime's provider.
+    /// codex backend, a `copilot` agent dispatches the copilot backend, a `claude`
+    /// agent dispatches claude, and an agent with no override falls back to the
+    /// runtime's provider.
     #[tokio::test]
     async fn resolve_dispatch_honours_the_agent_provider_over_the_runtime() {
         use ainb_hangar_store::bootstrap;
@@ -1954,6 +1972,16 @@ mod tests {
             disp.backend,
             Backend::Codex,
             "a codex agent must dispatch the codex backend, not the runtime's claude"
+        );
+
+        // A copilot agent on that claude-advertised runtime → copilot backend
+        // (no more silent claude fallback).
+        let copilot = bootstrap::create_agent(pool, &ws, "helper", "copilot", None).await.unwrap();
+        let disp = resolve_dispatch(pool, &copilot.id).await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Copilot,
+            "a copilot agent must dispatch the copilot backend, not fall back to claude"
         );
 
         // A claude agent on the same runtime → claude backend.

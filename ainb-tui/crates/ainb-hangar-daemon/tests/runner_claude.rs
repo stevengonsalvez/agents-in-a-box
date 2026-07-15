@@ -79,6 +79,7 @@ exit 0"#,
         // e38.16: the codex path is irrelevant to a claude run; a placeholder is
         // fine since `run_claude` never spawns it.
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         // Exercise the WIRED sandbox path: the stand-in script reads `$HOME`
@@ -120,6 +121,7 @@ async fn exec_captures_exit_code() {
         // e38.16: the codex path is irrelevant to a claude run; a placeholder is
         // fine since `run_claude` never spawns it.
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -149,6 +151,7 @@ exit 0"#,
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -171,6 +174,7 @@ async fn exec_no_result_usage_leaves_usage_none() {
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -198,6 +202,7 @@ exit 1"#,
         // e38.16: the codex path is irrelevant to a claude run; a placeholder is
         // fine since `run_claude` never spawns it.
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -232,6 +237,7 @@ exit 75"#,
     let runner = Runner::new(RunnerConfig {
         claude_path: script,
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -266,6 +272,7 @@ exit 0"#,
         // e38.16: the codex path is irrelevant to a claude run; a placeholder is
         // fine since `run_claude` never spawns it.
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -297,6 +304,7 @@ exit 0"#,
         // e38.16: the codex path is irrelevant to a claude run; a placeholder is
         // fine since `run_claude` never spawns it.
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_secs(10),
         tail_lines: 50,
         sandbox: true,
@@ -332,6 +340,7 @@ exit 0"#,
         // e38.16: the codex path is irrelevant to a claude run; a placeholder is
         // fine since `run_claude` never spawns it.
         codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
         max_runtime: Duration::from_millis(100),
         tail_lines: 50,
         sandbox: true,

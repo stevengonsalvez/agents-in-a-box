@@ -54,10 +54,11 @@ pub const DEFAULT_PROVIDER: &str = "claude";
 
 /// The providers `hangar/agent_create` accepts.
 ///
-/// The chosen value is recorded on the agent row (migration 0041) and HONOURED at
-/// dispatch: the agent binds the single default runtime (an execution slot claimed
-/// by id, not provider) and the daemon spawns the recorded provider's backend per
-/// task.
+/// Each has a real exec path in the daemon's runner, and the chosen value is
+/// recorded on the agent row (migration 0041) and HONOURED at dispatch: the agent
+/// binds the single host runtime (an execution slot claimed by id, not provider)
+/// and the daemon spawns THIS provider's backend per task — a `codex` agent runs
+/// codex, a `copilot` agent runs copilot.
 pub const SUPPORTED_PROVIDERS: [&str; 3] = ["claude", "codex", "copilot"];
 
 /// `daemon_id` recorded for the self-registered host runtime. Keyed with
@@ -195,7 +196,7 @@ pub async fn ensure_default_workspace(pool: &SqlitePool) -> Result<String, sqlx:
 /// The conflict target is the REAL uniqueness key
 /// `(workspace_id, daemon_id, provider)` (migration 0002's unique index), not the
 /// primary key `id` — and the upsert NEVER changes the `id`. `agent.runtime_id`
-/// is a NOT NULL `REFERENCES agent_runtime(id)` FK and SQLite enforces foreign
+/// is a NOT NULL `REFERENCES agent_runtime(id)` FK and `SQLite` enforces foreign
 /// keys (sqlx sets `PRAGMA foreign_keys = ON`), so changing the runtime's `id`
 /// while agents reference it would raise `FOREIGN KEY constraint failed`. A
 /// runtime therefore CANNOT be renamed after first boot: if a caller passes a
