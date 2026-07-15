@@ -77,6 +77,20 @@ coded_default! {
 /// so the registry wires this const through directly.
 pub const DEFAULT_CARD_AGENT_DEFAULT: &str = "claude";
 
+/// The minimum legal per-session cooldown, in minutes.
+///
+/// A cooldown of `0` is NOT merely "no cooldown" — it disarms auto-standup's two
+/// safety gates at once. The cooldown check (`now - last < 0`) can never trip, and
+/// the daemon derives its stale-in-flight window from the same value
+/// (`cooldown * 60_000 * multiple`), so `0` makes every in-flight slot instantly
+/// reclaimable and the concurrency cap meaningless. The watcher then writes
+/// `/standup` into the session on EVERY reconcile tick, forever — exactly the
+/// write-mode blast radius the D13 gates exist to bound. Floor it at 1.
+///
+/// The daemon clamps to this on load as well, so a row written before this bound
+/// existed (or by hand) cannot resurrect the behaviour.
+pub const MIN_AUTOSTANDUP_COOLDOWN_MIN: i64 = 1;
+
 /// The shape of one configurable value — drives both the editor UI and the
 /// validation gate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -224,7 +238,7 @@ pub const DAEMON_CONFIG_REGISTRY: &[ConfigDescriptor] = &[
         key: KEY_AUTOSTANDUP_COOLDOWN_MIN,
         label: "Cooldown minutes",
         kind: ConfigKind::Int {
-            min: 0,
+            min: MIN_AUTOSTANDUP_COOLDOWN_MIN,
             max: 1440,
             step: 5,
         },
@@ -317,6 +331,31 @@ mod tests {
             descriptor(KEY_CARD_AGENT_DEFAULT).unwrap().default,
             DEFAULT_CARD_AGENT_DEFAULT
         );
+    }
+
+    /// The cooldown floor is a SAFETY bound, not a UI nicety: `0` defeats both the
+    /// cooldown gate and the stale-in-flight reclaim window the daemon derives
+    /// from it, degenerating auto-standup into writing `/standup` into the session
+    /// every tick. The registry must refuse to express it.
+    #[test]
+    fn cooldown_zero_is_rejected_by_the_registry_gate() {
+        let d = descriptor(KEY_AUTOSTANDUP_COOLDOWN_MIN).unwrap();
+        assert!(
+            d.validate("0").is_err(),
+            "cooldown 0 makes auto-standup fire every tick — it must not validate"
+        );
+        assert_eq!(
+            d.validate("1").unwrap(),
+            "1",
+            "the floor itself is still settable"
+        );
+        assert!(matches!(
+            d.kind,
+            ConfigKind::Int {
+                min: MIN_AUTOSTANDUP_COOLDOWN_MIN,
+                ..
+            }
+        ));
     }
 
     #[test]

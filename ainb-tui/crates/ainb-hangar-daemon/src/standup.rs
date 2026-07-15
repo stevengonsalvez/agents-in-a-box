@@ -132,6 +132,13 @@ impl StandupConfig {
     /// Load the config from `daemon_config`, falling back to the coded defaults
     /// key-by-key (a missing/garbage value never errors — the default holds).
     ///
+    /// The cooldown is floored at [`cfg::MIN_AUTOSTANDUP_COOLDOWN_MIN`]. The
+    /// registry gate refuses to WRITE a `0`, but this is the value that actually
+    /// arms the watcher, and a `0` here disarms both the cooldown check and the
+    /// stale-in-flight window derived from it — making the daemon write
+    /// `/standup` into the session every tick. A row predating the bound, or
+    /// written straight to SQLite, must not be able to do that.
+    ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] only if the underlying config reads fail.
@@ -149,7 +156,8 @@ impl StandupConfig {
                 KEY_COOLDOWN_MIN,
                 DEFAULT_COOLDOWN_MIN,
             )
-            .await?,
+            .await?
+            .max(cfg::MIN_AUTOSTANDUP_COOLDOWN_MIN),
             max_concurrent: DaemonConfigRepo::get_i64(
                 pool,
                 KEY_MAX_CONCURRENT,
@@ -840,6 +848,45 @@ mod tests {
         // …and an explicit disable turns it back off.
         DaemonConfigRepo::set(store.pool(), KEY_ENABLED, "false").await.unwrap();
         assert!(!StandupConfig::load(store.pool()).await.unwrap().enabled);
+    }
+
+    /// A stored `cooldown_min = 0` must not be able to disarm the watcher.
+    ///
+    /// The registry now refuses to write a 0, but this is the value that actually
+    /// arms the gates, and a row written before that bound existed (or straight to
+    /// SQLite) would otherwise make the cooldown check unfireable AND zero the
+    /// stale-in-flight window — writing `/standup` into the session every tick.
+    #[tokio::test]
+    async fn config_load_floors_a_zero_cooldown() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        DaemonConfigRepo::set(store.pool(), KEY_COOLDOWN_MIN, "0").await.unwrap();
+
+        let cfg = StandupConfig::load(store.pool()).await.unwrap();
+        assert_eq!(
+            cfg.cooldown_minutes, cfg::MIN_AUTOSTANDUP_COOLDOWN_MIN,
+            "a legacy 0 cooldown must be floored, not honoured"
+        );
+
+        // The gate is armed again: a session that just fired is held off, where a
+        // 0 cooldown would have fired another `/standup` immediately.
+        let now = 10_000_000;
+        let enabled = StandupConfig {
+            enabled: true,
+            ..cfg
+        };
+        let input = SessionGateInput {
+            idle_at_prompt: true,
+            idle_minutes: enabled.stagnant_minutes + 1,
+            opted_out: false,
+            last_standup_at: Some(now),
+            in_flight: false,
+        };
+        assert_eq!(
+            decide_standup(&enabled, &input, 0, now),
+            StandupDecision::Skip(SkipReason::Cooldown),
+            "the cooldown gate must trip for a session that just fired"
+        );
     }
 
     #[tokio::test]
