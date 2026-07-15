@@ -410,8 +410,8 @@ pub enum AgentCommand {
 ///
 /// The daemon-less create-from-scratch path: fills the workspace / runtime /
 /// owner FKs behind the scenes so the caller supplies only a `name`. `provider`
-/// is optional (`claude`/`codex`/`copilot`, default `claude`) and recorded on the
-/// row; the agent binds the default runtime regardless, so its tasks still run.
+/// is optional (`claude`/`codex`/`copilot`, default `claude`) and is HONOURED at
+/// dispatch — the daemon spawns that provider's backend for the agent's tasks.
 #[derive(Args, Debug)]
 pub struct AgentCreateArgs {
     /// The new agent's name.
@@ -1704,10 +1704,15 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
         }
         None => ensure_default_workspace(store).await?,
     };
-    let agent =
-        ainb_hangar_store::bootstrap::create_agent(store.pool(), &workspace_id, name, &provider, args.instructions)
-            .await
-            .context("create agent")?;
+    let agent = ainb_hangar_store::bootstrap::create_agent(
+        store.pool(),
+        &workspace_id,
+        name,
+        &provider,
+        args.instructions,
+    )
+    .await
+    .context("create agent")?;
     println!("created agent {}", agent.name);
     Ok(())
 }

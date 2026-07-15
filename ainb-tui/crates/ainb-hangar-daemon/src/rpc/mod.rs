@@ -1538,8 +1538,9 @@ async fn handle_comment_add(
 /// the single default runtime (the id the claim loop keys off, so the agent's
 /// tasks actually run), and mints the id — the caller supplies only `name`
 /// (+ optional `provider` / `instructions`). An empty `name` or an unsupported
-/// `provider` is rejected with `INVALID_PARAMS`; creation is never gated on the
-/// provider (an agent bound to the default runtime always runs).
+/// `provider` is rejected with `INVALID_PARAMS`. The recorded provider is HONOURED
+/// at dispatch (the daemon spawns that backend per task), so a `codex` agent runs
+/// codex even though it binds the single `claude`-advertised runtime.
 async fn handle_agent_create(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -1554,9 +1555,15 @@ async fn handle_agent_create(
         .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
-    ainb_hangar_store::bootstrap::create_agent(pool, ws.as_str(), name, &provider, params.instructions)
-        .await
-        .map_err(|e| store_err(&e))?;
+    ainb_hangar_store::bootstrap::create_agent(
+        pool,
+        ws.as_str(),
+        name,
+        &provider,
+        params.instructions,
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
     // Answer with the refreshed roster (the same shape agents_list returns) so
     // the plugin folds the new agent into its cached list and the squad gate clears.
     let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;

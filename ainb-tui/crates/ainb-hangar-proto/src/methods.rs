@@ -290,8 +290,10 @@ pub const HANGAR_AGENT_ARCHIVE: &str = "hangar/agent_archive";
 /// folds the new agent into the cache that drives its "has an agent" gate.
 ///
 /// Mutating: an empty `name` or an unsupported `provider` is rejected with
-/// `INVALID_PARAMS`. Creation is never gated on the provider — an agent bound to
-/// the default runtime always runs.
+/// `INVALID_PARAMS`. The recorded provider is HONOURED at dispatch: the agent
+/// binds the single default runtime (an execution slot the claim loop keys off by
+/// id, not provider), and the daemon spawns the recorded provider's backend per
+/// task — so a `codex` agent runs codex.
 pub const HANGAR_AGENT_CREATE: &str = "hangar/agent_create";
 
 /// `hangar/members_list` — snapshot the human members of a workspace (e38.11).

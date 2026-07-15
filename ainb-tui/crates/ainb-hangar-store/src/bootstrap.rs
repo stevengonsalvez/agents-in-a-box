@@ -46,8 +46,9 @@ pub const DEFAULT_RUNTIME_ID: &str = "default";
 pub const DEFAULT_PROVIDER: &str = "claude";
 
 /// The providers `hangar/agent_create` accepts. The chosen value is recorded on
-/// the agent row (migration 0041); the daemon still binds the single default
-/// runtime so the task runs regardless (the runtime resolves the exec path).
+/// the agent row (migration 0041) and HONOURED at dispatch: the agent binds the
+/// single default runtime (an execution slot claimed by id, not provider) and the
+/// daemon spawns the recorded provider's backend per task.
 pub const SUPPORTED_PROVIDERS: [&str; 3] = ["claude", "codex", "copilot"];
 
 /// `daemon_id` recorded for the self-registered host runtime. Keyed with

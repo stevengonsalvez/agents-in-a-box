@@ -1513,9 +1513,14 @@ struct ResolvedDispatch {
 /// Resolve the provider routing for a task's agent (e38.16).
 ///
 /// Reads the agent row (its migration-0015 `model`/`cli_args`/`agent_env`
-/// config) and its runtime's `provider` wire name, mapping the latter to a
-/// [`Backend`]. The agent's `model` and `cli_args` become the
-/// [`ProviderInvocation`]; its `agent_env` is carried separately.
+/// config) and picks the backend from the agent's OWN `provider` when set
+/// (migration 0041), falling back to its runtime's advertised `provider` when
+/// the agent has no override. The runtime is an execution slot the claim loop
+/// keys off by `runtime_id` (never by provider — see `claim.rs` `CLAIM_SQL`), so
+/// a `codex` agent bound to the single default (`claude`-advertised) runtime is
+/// still claimed and now dispatches the codex backend. The agent's `model` and
+/// `cli_args` become the [`ProviderInvocation`]; its `agent_env` is carried
+/// separately.
 ///
 /// # Errors
 ///
@@ -1530,8 +1535,10 @@ async fn resolve_dispatch(pool: &SqlitePool, agent_id: &str) -> anyhow::Result<R
     let runtime = AgentRuntimeRepo::get(pool, &agent.runtime_id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("runtime {} not found", agent.runtime_id))?;
+    // Per-agent provider wins; an agent with no override uses the runtime default.
+    let provider = agent.provider.as_deref().unwrap_or(&runtime.provider);
     Ok(ResolvedDispatch {
-        backend: Backend::from_provider(&runtime.provider),
+        backend: Backend::from_provider(provider),
         invocation: ProviderInvocation {
             model: agent.model,
             cli_args: agent.cli_args,
@@ -1919,5 +1926,65 @@ mod tests {
     #[test]
     fn interactive_sessions_empty_drains_to_nothing() {
         assert!(InteractiveSessions::default().drain().is_empty());
+    }
+
+    /// Provider-honoring proof: `resolve_dispatch` selects the backend from the
+    /// AGENT's provider, overriding the runtime's advertised default. A `codex`
+    /// agent bound to the single `claude`-advertised host runtime dispatches the
+    /// codex backend; a `claude` agent dispatches claude; an agent with no
+    /// override falls back to the runtime's provider.
+    #[tokio::test]
+    async fn resolve_dispatch_honours_the_agent_provider_over_the_runtime() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        // The single host runtime advertises claude.
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+
+        // A codex agent on that claude-advertised runtime → codex backend.
+        let codex = bootstrap::create_agent(pool, &ws, "coder", "codex", None).await.unwrap();
+        let disp = resolve_dispatch(pool, &codex.id).await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Codex,
+            "a codex agent must dispatch the codex backend, not the runtime's claude"
+        );
+
+        // A claude agent on the same runtime → claude backend.
+        let claude = bootstrap::create_agent(pool, &ws, "writer", "claude", None).await.unwrap();
+        let disp = resolve_dispatch(pool, &claude.id).await.unwrap();
+        assert_eq!(disp.backend, Backend::Claude);
+
+        // An agent with NO provider override falls back to the runtime's provider.
+        let owner = bootstrap::default_owner_id(pool).await.unwrap().unwrap();
+        let bare = Agent {
+            id: "bare-agent".into(),
+            workspace_id: ws.clone(),
+            name: "bare".into(),
+            runtime_id: bootstrap::default_runtime_id(),
+            instructions: None,
+            visibility: "workspace".into(),
+            owner_id: owner,
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
+            provider: None,
+        };
+        AgentRepo::insert(pool, &bare).await.unwrap();
+        let disp = resolve_dispatch(pool, "bare-agent").await.unwrap();
+        assert_eq!(
+            disp.backend,
+            Backend::Claude,
+            "no per-agent override falls back to the runtime's advertised provider"
+        );
     }
 }

@@ -70,10 +70,11 @@ pub struct Agent {
     /// column), kept as an ordered key-value list for deterministic encoding.
     pub agent_env: Vec<(String, String)>,
     /// Optional per-agent provider override (`"claude"`/`"codex"`/`"copilot"`),
-    /// recorded at create time (migration 0041); `None` = use the runtime's
-    /// advertised provider. The daemon still binds the agent to the single
-    /// default runtime, so a task always runs — this column records the user's
-    /// pick rather than gating dispatch.
+    /// recorded at create time (migration 0041); `None` = fall back to the
+    /// runtime's advertised provider. Honoured at dispatch: the agent binds the
+    /// single default runtime (an execution slot claimed by id, not by provider),
+    /// and the daemon spawns THIS provider's backend per task, so a `codex` agent
+    /// runs codex.
     pub provider: Option<String>,
 }
 
