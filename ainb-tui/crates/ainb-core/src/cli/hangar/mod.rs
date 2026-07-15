@@ -4794,33 +4794,33 @@ mod tests {
         assert_eq!(args.value, "30");
     }
 
-    /// The CLI `list` iterates the registry directly, so its row count is exactly
-    /// the registry length — a knob added to the registry can never silently miss
-    /// the CLI surface. (The TUI has the mirror-image parity test.)
+    /// The CLI `list` must EMIT one row per registry knob, in every format — a
+    /// knob added to the registry can never silently miss the CLI surface.
+    ///
+    /// This counts the rendered OUTPUT. The test it replaces asserted
+    /// `descriptor(desc.key).is_some()` for each registry entry, which is true by
+    /// definition (the registry is what `descriptor` searches) and never touched
+    /// the rendering at all — it would have passed against a `list` that printed
+    /// nothing.
     #[test]
-    fn cli_list_covers_every_registry_knob() {
+    fn cli_list_emits_one_row_per_registry_knob_in_every_format() {
         use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
-        assert!(
-            !DAEMON_CONFIG_REGISTRY.is_empty(),
-            "registry must not be empty"
-        );
-        // Every registry key must resolve back through the CLI's lookup gate.
+
+        let rows: Vec<ConfigRow> = DAEMON_CONFIG_REGISTRY.iter().map(|d| (d, None)).collect();
+        let n = DAEMON_CONFIG_REGISTRY.len();
+        assert!(n > 0, "registry must not be empty");
+
+        // Text: exactly one line per knob, each naming its key.
+        let text = render_daemon_config_list(&rows, OutputFormat::Text).unwrap();
+        let text_lines: Vec<&str> = text.lines().collect();
+        assert_eq!(text_lines.len(), n, "text rows:\n{text}");
         for desc in DAEMON_CONFIG_REGISTRY {
             assert!(
-                ainb_hangar_core::daemon_config::descriptor(desc.key).is_some(),
-                "registry key {} not resolvable",
+                text_lines.iter().any(|l| l.contains(desc.key)),
+                "`{}` missing from text output:\n{text}",
                 desc.key
             );
         }
-    }
-
-    #[tokio::test]
-    async fn config_set_get_round_trips_and_rejects_bad_input() {
-        use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
-
-        let dir = tempfile::tempdir().expect("tempdir");
-        let store = Store::open_in(dir.path()).await.expect("open store");
-
 
         // CSV: a header plus one row per knob.
         let csv = render_daemon_config_list(&rows, OutputFormat::Csv).unwrap();
@@ -4853,6 +4853,15 @@ mod tests {
         assert_ne!(md, text, "markdown must not be the plain-text arm");
         assert!(csv.contains(','), "csv must be comma-separated");
         assert!(md.contains('|'), "markdown must be a pipe table");
+    }
+
+    #[tokio::test]
+    async fn config_set_get_round_trips_and_rejects_bad_input() {
+        use ainb_hangar_store::repo::daemon_config::DaemonConfigRepo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
         // set autostandup.stagnant_min 30 → persists the normalized value.
         run_daemon_config_set(
             &store,

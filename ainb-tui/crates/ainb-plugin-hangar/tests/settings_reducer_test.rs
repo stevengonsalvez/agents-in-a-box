@@ -149,16 +149,69 @@ fn set_autostandup_enabled_reflects_live_value() {
     assert!(s.autostandup_enabled());
 }
 
-/// The Daemon section renders exactly one row per registry knob — a knob added
-/// to the registry can never silently miss the TUI surface (mirror of the CLI's
-/// `cli_list_covers_every_registry_knob`).
+/// The focused Daemon section RENDERS exactly one row per registry knob, each
+/// labelled — a knob added to the registry can never silently miss the TUI
+/// surface (mirror of the CLI's `cli_list_emits_one_row_per_registry_knob...`).
+///
+/// This paints into a `WireBuffer` and counts the labelled rows. The test it
+/// replaces asserted `config_values().len() == DAEMON_CONFIG_REGISTRY.len()`,
+/// which is constructed as `vec![None; DAEMON_CONFIG_REGISTRY.len()]` — it could
+/// not fail, and never touched `render_daemon_body` at all.
 #[test]
-fn daemon_section_row_count_matches_registry() {
+fn daemon_section_renders_one_row_per_registry_knob() {
     use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    use ainb_plugin_hangar::screen::settings::render_settings;
+    use ainb_plugin_sdk::WireBuffer;
+
+    // Focused, and tall enough that nothing is clipped.
     let s = state();
-    // The live config vector is sized to the registry, so every knob has a row.
-    assert_eq!(s.config_values().len(), DAEMON_CONFIG_REGISTRY.len());
-    assert!(!DAEMON_CONFIG_REGISTRY.is_empty());
+    assert_eq!(s.section(), SettingsSection::Daemon, "starts focused");
+    let mut buf = WireBuffer::new(80, 40);
+    render_settings(&mut buf, 80, 40, 0, 40, &s);
+    let map = glyph_map(&buf, 80);
+
+    for desc in DAEMON_CONFIG_REGISTRY {
+        assert!(
+            map.lines().any(|l| l.contains(desc.label)),
+            "`{}` ({}) has no rendered row:\n{map}",
+            desc.label,
+            desc.key
+        );
+    }
+    // One labelled row per knob — no more, no fewer — and exactly one of them
+    // carries the cursor. (`▶` also marks the section header and the active
+    // workspace, so count it only among the knob rows.)
+    let knob_lines = || {
+        map.lines()
+            .filter(|l| DAEMON_CONFIG_REGISTRY.iter().any(|d| l.contains(d.label)))
+    };
+    assert_eq!(
+        knob_lines().filter(|l| l.contains('▶')).count(),
+        1,
+        "exactly one knob row carries the cursor:\n{map}"
+    );
+    let knob_rows = knob_lines().count();
+    assert_eq!(
+        knob_rows,
+        DAEMON_CONFIG_REGISTRY.len(),
+        "one row per knob:\n{map}"
+    );
+}
+
+/// Flatten a `WireBuffer` to a glyph map for row assertions.
+fn glyph_map(buf: &ainb_plugin_sdk::WireBuffer, cols: u16) -> String {
+    let mut grid = vec![vec![' '; cols as usize]; buf.height.min(60) as usize];
+    for (coord, cell) in &buf.cells {
+        if (coord.y as usize) < grid.len() && coord.x < cols {
+            if let Some(ch) = cell.symbol.chars().next() {
+                grid[coord.y as usize][coord.x as usize] = ch;
+            }
+        }
+    }
+    grid.into_iter()
+        .map(|r| r.into_iter().collect::<String>().trim_end().to_string())
+        .collect::<Vec<_>>()
+        .join("\n")
 }
 
 /// The arrows move the Daemon-section cursor over the config rows, clamped at
