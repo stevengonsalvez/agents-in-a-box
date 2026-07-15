@@ -280,7 +280,7 @@ fn arrows_do_not_move_the_cursor_under_an_open_overlay() {
     );
 }
 
-/// Editing the enum knob (card_agent.default) cycles to the next variant and
+/// Editing the enum knob (`card_agent.default`) cycles to the next variant and
 /// emits a `SetDaemonConfig` intent carrying the normalized value.
 #[test]
 fn enter_on_enum_row_cycles_variant_and_emits_intent() {

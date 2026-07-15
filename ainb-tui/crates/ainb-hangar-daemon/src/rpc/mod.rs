@@ -5856,7 +5856,7 @@ mod tests {
     }
 
     /// A registry-validated set rejects an out-of-range int / bad enum with
-    /// INVALID_PARAMS, and normalizes a tolerant/mixed-case value it accepts.
+    /// `INVALID_PARAMS`, and normalizes a tolerant/mixed-case value it accepts.
     #[tokio::test]
     async fn daemon_config_set_validates_registry_knobs() {
         let dir = tempfile::tempdir().unwrap();

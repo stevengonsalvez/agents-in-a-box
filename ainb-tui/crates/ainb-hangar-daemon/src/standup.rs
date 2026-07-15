@@ -137,7 +137,7 @@ impl StandupConfig {
     /// arms the watcher, and a `0` here disarms both the cooldown check and the
     /// stale-in-flight window derived from it — making the daemon write
     /// `/standup` into the session every tick. A row predating the bound, or
-    /// written straight to SQLite, must not be able to do that.
+    /// written straight to `SQLite`, must not be able to do that.
     ///
     /// # Errors
     ///
@@ -854,7 +854,7 @@ mod tests {
     ///
     /// The registry now refuses to write a 0, but this is the value that actually
     /// arms the gates, and a row written before that bound existed (or straight to
-    /// SQLite) would otherwise make the cooldown check unfireable AND zero the
+    /// `SQLite`) would otherwise make the cooldown check unfireable AND zero the
     /// stale-in-flight window — writing `/standup` into the session every tick.
     #[tokio::test]
     async fn config_load_floors_a_zero_cooldown() {

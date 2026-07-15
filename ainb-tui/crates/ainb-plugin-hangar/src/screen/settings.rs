@@ -687,13 +687,10 @@ fn edit_config_row(state: &SettingsState, idx: usize) -> SettingsReduction {
 /// The `a` shortcut: toggle `autostandup.enabled` from anywhere in the Daemon
 /// section (independent of the cursor), matching the long-standing hotkey.
 fn edit_autostandup_shortcut(state: &SettingsState) -> SettingsReduction {
-    match DAEMON_CONFIG_REGISTRY
+    DAEMON_CONFIG_REGISTRY
         .iter()
         .position(|d| d.key == ainb_hangar_core::daemon_config::KEY_AUTOSTANDUP_ENABLED)
-    {
-        Some(idx) => edit_config_row(state, idx),
-        None => unchanged(state),
-    }
+        .map_or_else(|| unchanged(state), |idx| edit_config_row(state, idx))
 }
 
 /// Optimistically set knob `idx` to `value` and emit the persist intent. The
@@ -1469,10 +1466,10 @@ fn render_config_input_overlay(
     let value_line = format!("{}_", input.buffer);
     // The status line is the rejection when there is one, else the ghost hint
     // naming the value being replaced.
-    let (status, status_color) = match &input.error {
-        Some(msg) => (msg.clone(), RED),
-        None => (format!("current: {}", input.current), MUTED),
-    };
+    let (status, status_color) = input.error.as_ref().map_or_else(
+        || (format!("current: {}", input.current), MUTED),
+        |msg| (msg.clone(), RED),
+    );
     let hint = "enter commit · esc cancel";
 
     // A box sized to the widest line, centred in the area. Width is measured in
