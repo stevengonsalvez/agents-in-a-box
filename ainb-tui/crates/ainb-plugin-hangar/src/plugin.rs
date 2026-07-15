@@ -208,9 +208,11 @@ const NOTIFY_RULES_REQ_ID: i64 = 47;
 /// JSON-RPC id for a `hangar/notify_rule_set` upsert raised by a toggled routing
 /// cell (tcp T5). Its reply re-fetches the grid so the pane reflects the write.
 const NOTIFY_RULE_SET_REQ_ID: i64 = 48;
-/// `hangar/daemon_config_get` for the Settings auto-standup toggle (D13).
-const DAEMON_CONFIG_GET_REQ_ID: i64 = 49;
-/// `hangar/daemon_config_set` write from the auto-standup toggle (D13).
+/// `hangar/daemon_config_list` for the Settings Daemon-section config rows: reads
+/// every daemon-config knob's live value in one round trip.
+const DAEMON_CONFIG_LIST_REQ_ID: i64 = 49;
+/// `hangar/daemon_config_set` write from a Daemon-section knob edit; its reply
+/// re-fetches the whole config so the pane reflects the persisted value.
 const DAEMON_CONFIG_SET_REQ_ID: i64 = 50;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
@@ -806,10 +808,11 @@ impl HangarPlugin {
                     Some(crate::screen::app_screens::NotifyAction::Refresh { scope });
                 self.conn.on_event();
             }
-            // D13: the Settings auto-standup toggle's live value.
-            RpcId::Number(DAEMON_CONFIG_GET_REQ_ID) => self.apply_autostandup(resp),
+            // Every daemon-config knob's live value for the Settings pane.
+            RpcId::Number(DAEMON_CONFIG_LIST_REQ_ID) => self.apply_daemon_config_list(resp),
             RpcId::Number(DAEMON_CONFIG_SET_REQ_ID) => {
-                // Re-read after the write so the pane reflects the persisted value.
+                // Re-read the whole config after the write so the pane reflects the
+                // persisted value (reconciling the optimistic edit).
                 self.fetch_pending = true;
                 self.conn.on_event();
             }
@@ -914,25 +917,17 @@ impl HangarPlugin {
         self.conn.on_event();
     }
 
-    /// Populate the Settings auto-standup toggle from a `hangar/daemon_config_get`
-    /// result (D13): the daemon's persisted `autostandup.enabled` value.
-    fn apply_autostandup(&mut self, resp: &RpcResponse) {
+    /// Populate the Settings Daemon-section config rows from a
+    /// `hangar/daemon_config_list` result: every knob's persisted value (or `None`
+    /// for an unset knob, where the pane shows the descriptor's coded default).
+    fn apply_daemon_config_list(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
             if let Ok(r) = serde_json::from_value::<
-                ainb_hangar_proto::snapshots::DaemonConfigGetResult,
+                ainb_hangar_proto::snapshots::DaemonConfigListResult,
             >(result.clone())
             {
-                // Absent row / unrecognized value => the coded default OFF.
-                // Mirror the daemon's tolerant `parse_bool` (1/true/yes/on,
-                // case-insensitive) so the toggle can never disagree with what
-                // the daemon actually does.
-                let on = r.value.as_deref().is_some_and(|v| {
-                    matches!(
-                        v.trim().to_ascii_lowercase().as_str(),
-                        "1" | "true" | "yes" | "on"
-                    )
-                });
-                self.screens.set_autostandup_enabled(on);
+                let entries = r.entries.into_iter().map(|e| (e.key, e.value)).collect::<Vec<_>>();
+                self.screens.set_daemon_config_entries(entries);
             }
         }
         self.conn.on_event();
@@ -1642,11 +1637,11 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_MEMBERS_LIST,
                 scoped.clone(),
             ),
-            // D13: the Settings auto-standup toggle's live value.
+            // Every daemon-config knob's live value for the Settings Daemon section.
             (
-                DAEMON_CONFIG_GET_REQ_ID,
-                daemon_methods::HANGAR_DAEMON_CONFIG_GET,
-                serde_json::json!({ "key": "autostandup.enabled" }),
+                DAEMON_CONFIG_LIST_REQ_ID,
+                daemon_methods::HANGAR_DAEMON_CONFIG_LIST,
+                serde_json::json!({}),
             ),
             (
                 INBOX_LIST_REQ_ID,
@@ -3756,26 +3751,24 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_notify_action() {
             self.apply_notify_action(host, action).await;
         }
-        // D13: drain a deferred auto-standup toggle write and fire it over the
-        // daemon socket; the reply re-fetches so the pane reflects the persisted
-        // value.
-        if let Some(on) = self.screens.take_pending_autostandup_set() {
+        // Drain a deferred daemon-config write (bool/enum/int edit) and fire it over
+        // the daemon socket; the reply re-fetches the whole config so the pane
+        // reflects the persisted value.
+        if let Some((key, value)) = self.screens.take_pending_daemon_config_set() {
             let mut sent = false;
             if let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) {
                 let body = encode_request(
                     DAEMON_CONFIG_SET_REQ_ID,
                     daemon_methods::HANGAR_DAEMON_CONFIG_SET,
-                    serde_json::json!({
-                        "key": "autostandup.enabled",
-                        "value": if on { "true" } else { "false" },
-                    }),
+                    serde_json::json!({ "key": key, "value": value }),
                 );
                 if let Ok(body) = body {
                     match host.unix_socket_send(stream_id, body).await {
                         Ok(()) => sent = true,
                         Err(e) => {
-                            let _ =
-                                host.log_info(format!("hangar: autostandup set failed: {e}")).await;
+                            let _ = host
+                                .log_info(format!("hangar: daemon_config set failed: {e}"))
+                                .await;
                         }
                     }
                 }
@@ -3783,7 +3776,7 @@ impl Plugin for HangarPlugin {
             // On a successful send the SET reply re-fetches (via `fetch_pending`).
             // If the write never left the plugin (disconnected / encode / send
             // error), re-fetch here so the pane reconciles to the persisted value
-            // instead of showing the optimistic flip forever.
+            // instead of showing the optimistic edit forever.
             if !sent {
                 self.fetch_pending = true;
                 self.conn.on_event();

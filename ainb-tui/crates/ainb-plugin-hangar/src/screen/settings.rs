@@ -24,6 +24,7 @@
 //! [`KeyMaterial::expose`] reveals the raw bytes, at the single call site that
 //! performs the actual keychain write.
 
+use ainb_hangar_core::daemon_config::{ConfigKind, DAEMON_CONFIG_REGISTRY, parse_bool_token};
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
 use ainb_hangar_proto::snapshots::{MemberWireRow, NotifyRuleWireRow};
 use ainb_hangar_proto::{Channel, ChannelSet};
@@ -228,18 +229,38 @@ pub struct SettingsState {
     connection: ConnectionStatus,
     /// The key-entry modal's in-flight value, present while the modal is open.
     key_entry: Option<KeyMaterial>,
-    /// The live `autostandup.enabled` daemon-config toggle (D13). Read from the
-    /// daemon's `daemon_config` via `hangar/daemon_config_get` and flipped with `a`
-    /// on the Daemon section (writing back via `hangar/daemon_config_set`). Defaults
-    /// OFF until the daemon snapshot lands — matching the coded server default.
-    autostandup_enabled: bool,
+    /// The live stored value of every daemon-config knob, indexed 1:1 to
+    /// [`DAEMON_CONFIG_REGISTRY`]. `None` means the knob has no stored row (the
+    /// descriptor's coded default applies). Read from the daemon via
+    /// `hangar/daemon_config_list` and written back per-knob via
+    /// `hangar/daemon_config_set`.
+    config_values: Vec<Option<String>>,
+    /// The cursor over the Daemon-section config rows (0..registry len). Only
+    /// meaningful while the Daemon section is active.
+    config_sel: usize,
+    /// The in-flight numeric-input overlay for an `Int` knob (opened with
+    /// Enter/Space on an int row). `None` when no overlay is open.
+    config_input: Option<ConfigInput>,
+}
+
+/// The in-flight numeric-input overlay for editing an `Int` daemon-config knob.
+///
+/// Holds the registry index being edited and the digits typed so far. Enter
+/// commits (validated against the descriptor's range); Esc cancels in a single
+/// press (clearing this — never a partial step-back).
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ConfigInput {
+    /// The [`DAEMON_CONFIG_REGISTRY`] index being edited.
+    reg_index: usize,
+    /// The digits typed so far.
+    buffer: String,
 }
 
 impl SettingsState {
     /// A fresh settings state from the four daemon snapshots, landing on the
     /// daemon section with connection status derived from `health.connected`.
     #[must_use]
-    pub const fn new(
+    pub fn new(
         health: HealthSnapshot,
         providers: Vec<ProviderRow>,
         keys: Vec<KeyRow>,
@@ -264,8 +285,49 @@ impl SettingsState {
             list_selected: 0,
             connection,
             key_entry: None,
-            autostandup_enabled: false,
+            config_values: vec![None; DAEMON_CONFIG_REGISTRY.len()],
+            config_sel: 0,
+            config_input: None,
         }
+    }
+
+    /// The effective value string for the config knob at registry `idx`: the
+    /// stored value when set, else the descriptor's coded default. Panics only on
+    /// an out-of-range index, which the reducer/render never produce (both clamp
+    /// to the registry length).
+    #[must_use]
+    fn config_effective(&self, idx: usize) -> &str {
+        self.config_values[idx]
+            .as_deref()
+            .unwrap_or(DAEMON_CONFIG_REGISTRY[idx].default)
+    }
+
+    /// Overwrite one knob's live value by key (from a `daemon_config_list`/`_set`
+    /// reply). An unknown key is ignored so a stray/legacy key can't panic.
+    pub fn set_config_value(&mut self, key: &str, value: Option<String>) {
+        if let Some(idx) = DAEMON_CONFIG_REGISTRY.iter().position(|d| d.key == key) {
+            self.config_values[idx] = value;
+        }
+    }
+
+    /// The live config values, indexed to [`DAEMON_CONFIG_REGISTRY`] (for tests +
+    /// the glue's `set_health` carry-over).
+    #[must_use]
+    pub fn config_values(&self) -> &[Option<String>] {
+        &self.config_values
+    }
+
+    /// The Daemon-section config-row cursor (for tests).
+    #[must_use]
+    pub const fn config_sel(&self) -> usize {
+        self.config_sel
+    }
+
+    /// The in-flight numeric overlay's buffer, or `None` when no overlay is open
+    /// (for tests + render).
+    #[must_use]
+    pub fn config_input_buffer(&self) -> Option<&str> {
+        self.config_input.as_ref().map(|c| c.buffer.as_str())
     }
 
     /// The active section.
@@ -344,18 +406,24 @@ impl SettingsState {
         self.key_entry.is_some()
     }
 
-    /// The live `autostandup.enabled` toggle value (D13). Read from the daemon and
-    /// flipped with `a` on the Daemon section.
+    /// The live `autostandup.enabled` value, decoded from the generic config map
+    /// (the single internal source) with the daemon's tolerant bool parse — a
+    /// convenience view kept for the `a` shortcut + call sites that want the bool.
     #[must_use]
-    pub const fn autostandup_enabled(&self) -> bool {
-        self.autostandup_enabled
+    pub fn autostandup_enabled(&self) -> bool {
+        DAEMON_CONFIG_REGISTRY
+            .iter()
+            .position(|d| d.key == ainb_hangar_core::daemon_config::KEY_AUTOSTANDUP_ENABLED)
+            .is_some_and(|idx| parse_bool_token(self.config_effective(idx)).unwrap_or(false))
     }
 
-    /// Overwrite the `autostandup.enabled` toggle from a `hangar/daemon_config_get`
-    /// snapshot (or a post-write re-read). Keeps the live pane in sync with the
-    /// daemon's stored value.
-    pub const fn set_autostandup_enabled(&mut self, on: bool) {
-        self.autostandup_enabled = on;
+    /// Overwrite the `autostandup.enabled` value from a snapshot/re-read, writing
+    /// through the generic config map so there is one internal source of truth.
+    pub fn set_autostandup_enabled(&mut self, on: bool) {
+        self.set_config_value(
+            ainb_hangar_core::daemon_config::KEY_AUTOSTANDUP_ENABLED,
+            Some(if on { "true" } else { "false" }.to_string()),
+        );
     }
 }
 
@@ -404,11 +472,17 @@ pub enum SettingsIntent {
         /// The new push-channel set after the toggle.
         channels: ChannelSet,
     },
-    /// Toggle the global `autostandup.enabled` daemon-config value (`a` on the
-    /// Daemon section, D13). Carries the NEW value; the glue maps it to a
-    /// `hangar/daemon_config_set` write (key `autostandup.enabled`), whose reply
-    /// re-reads the value so the pane reflects the persisted state.
-    ToggleAutostandup(bool),
+    /// Persist one daemon-config knob (edited on the Daemon section: a bool
+    /// toggle, an enum cycle, or a committed int overlay). Carries the registry
+    /// `key` + the NEW normalized `value`; the glue maps it to a
+    /// `hangar/daemon_config_set` write, whose reply re-reads the whole config so
+    /// the pane reflects the persisted state.
+    SetDaemonConfig {
+        /// The `daemon_config` registry key being written.
+        key: String,
+        /// The new value to persist (already normalized by the editor).
+        value: String,
+    },
     /// Re-fetch the Notifications grid for the current scope (`g` flipped the
     /// grid's global/workspace scope, agents-in-a-box-cqh). The glue maps it to a
     /// `hangar/notify_rules_list` scoped to the state's [`SettingsState::notify_scope`]
@@ -440,10 +514,19 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
     if state.key_entry.is_some() {
         return reduce_key_entry_key(state, c);
     }
+    // The numeric-input overlay owns the keyboard while open (digits/commit/cancel).
+    if state.config_input.is_some() {
+        return reduce_config_input_key(state, c);
+    }
     // The Notifications grid owns a 2D cursor (kind × channel) + a toggle, so it
     // handles its own keys; `j`/`k` still move between sections.
     if state.section == SettingsSection::Notifications {
         return reduce_notify_key(state, c);
+    }
+    // The Daemon section is a cursor over the config knobs (J/K move, Enter/Space
+    // edit) plus the `a` auto-standup shortcut; `j`/`k` still leave the section.
+    if state.section == SettingsSection::Daemon {
+        return reduce_daemon_key(state, c);
     }
     match c {
         'j' => move_section(state, SettingsSection::next),
@@ -452,9 +535,6 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
         'J' => move_list(state, 1),
         'K' => move_list(state, -1),
         'n' if state.section == SettingsSection::Keys => open_key_entry(state),
-        // `a` on the Daemon section flips the global auto-standup toggle (D13):
-        // optimistic local flip + a `ToggleAutostandup` intent the glue persists.
-        'a' if state.section == SettingsSection::Daemon => toggle_autostandup(state),
         // Workspace pane controls (P5.5): s set-active, d toggle-default,
         // n new, r rename. All scoped to the Workspaces section.
         's' if state.section == SettingsSection::Workspaces => {
@@ -490,17 +570,137 @@ fn workspace_intent(
     )
 }
 
-/// Flip the global `autostandup.enabled` toggle (`a` on the Daemon section, D13):
-/// update the pane optimistically so the row flips immediately, and emit a
-/// [`SettingsIntent::ToggleAutostandup`] carrying the NEW value for the glue to
-/// persist (`hangar/daemon_config_set`). The post-write re-read reconciles.
-fn toggle_autostandup(state: &SettingsState) -> SettingsReduction {
+/// Handle a key on the Daemon section: `j`/`k` leave to the adjacent section,
+/// `J`/`K` move the config-row cursor, Enter/Space edit the selected knob, and
+/// `a` is the auto-standup shortcut (toggles `autostandup.enabled` from anywhere
+/// in the section, regardless of the cursor).
+fn reduce_daemon_key(state: &SettingsState, c: char) -> SettingsReduction {
+    match c {
+        'j' => move_section(state, SettingsSection::next),
+        'k' => move_section(state, SettingsSection::prev),
+        'J' => move_config_sel(state, 1),
+        'K' => move_config_sel(state, -1),
+        '\n' | '\r' | ' ' => edit_config_row(state, state.config_sel),
+        'a' => edit_autostandup_shortcut(state),
+        _ => unchanged(state),
+    }
+}
+
+/// Move the Daemon-section config-row cursor by `delta`, clamped to the registry.
+fn move_config_sel(state: &SettingsState, delta: i32) -> SettingsReduction {
     let mut next = state.clone();
-    let new_value = !next.autostandup_enabled;
-    next.autostandup_enabled = new_value;
+    let max = DAEMON_CONFIG_REGISTRY.len().saturating_sub(1);
+    if delta < 0 {
+        next.config_sel = next.config_sel.saturating_sub(1);
+    } else {
+        next.config_sel = (next.config_sel + 1).min(max);
+    }
+    no_intent(next)
+}
+
+/// Edit the config knob at registry `idx`: toggle a bool, cycle an enum, or open
+/// the numeric overlay for an int. Bool/enum edits flip the pane optimistically
+/// and emit a [`SettingsIntent::SetDaemonConfig`] the glue persists; the int case
+/// opens the overlay and emits nothing until Enter commits.
+fn edit_config_row(state: &SettingsState, idx: usize) -> SettingsReduction {
+    let Some(desc) = DAEMON_CONFIG_REGISTRY.get(idx) else {
+        return unchanged(state);
+    };
+    match desc.kind {
+        ConfigKind::Bool => {
+            let now = parse_bool_token(state.config_effective(idx)).unwrap_or(false);
+            let value = if now { "false" } else { "true" };
+            commit_config(state, idx, value.to_string())
+        }
+        ConfigKind::Enum { variants } => {
+            let cur = state.config_effective(idx);
+            // Cycle to the next variant after the current one (wrapping); default
+            // to the first when the current value is not a known variant.
+            let pos = variants.iter().position(|v| v.eq_ignore_ascii_case(cur)).unwrap_or(0);
+            let next_variant = variants[(pos + 1) % variants.len()];
+            commit_config(state, idx, next_variant.to_string())
+        }
+        ConfigKind::Int { .. } => {
+            let mut next = state.clone();
+            next.config_input = Some(ConfigInput {
+                reg_index: idx,
+                buffer: state.config_effective(idx).to_string(),
+            });
+            no_intent(next)
+        }
+    }
+}
+
+/// The `a` shortcut: toggle `autostandup.enabled` from anywhere in the Daemon
+/// section (independent of the cursor), matching the long-standing hotkey.
+fn edit_autostandup_shortcut(state: &SettingsState) -> SettingsReduction {
+    match DAEMON_CONFIG_REGISTRY
+        .iter()
+        .position(|d| d.key == ainb_hangar_core::daemon_config::KEY_AUTOSTANDUP_ENABLED)
+    {
+        Some(idx) => edit_config_row(state, idx),
+        None => unchanged(state),
+    }
+}
+
+/// Optimistically set knob `idx` to `value` and emit the persist intent. The
+/// glue writes it via `hangar/daemon_config_set`, then re-reads the whole config
+/// so the pane reconciles to the daemon's stored value.
+fn commit_config(state: &SettingsState, idx: usize, value: String) -> SettingsReduction {
+    let mut next = state.clone();
+    next.config_values[idx] = Some(value.clone());
     SettingsReduction {
         state: next,
-        intent: Some(SettingsIntent::ToggleAutostandup(new_value)),
+        intent: Some(SettingsIntent::SetDaemonConfig {
+            key: DAEMON_CONFIG_REGISTRY[idx].key.to_string(),
+            value,
+        }),
+    }
+}
+
+/// Handle a key while the numeric-input overlay is open: Enter commits (only when
+/// the typed value passes the descriptor's range validation — an invalid value
+/// simply closes the overlay without a write), Backspace trims, a digit extends
+/// the buffer, and every other key is ignored. Esc is handled by [`reduce_esc`]
+/// and cancels in a single press.
+fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction {
+    let Some(input) = &state.config_input else {
+        return unchanged(state);
+    };
+    match c {
+        '\n' | '\r' => {
+            let idx = input.reg_index;
+            let desc = &DAEMON_CONFIG_REGISTRY[idx];
+            // Validate against the descriptor; a valid value commits + closes, an
+            // invalid one just closes (no write) so a bad number never persists.
+            match desc.validate(&input.buffer) {
+                Ok(value) => {
+                    let mut committed = commit_config(state, idx, value);
+                    committed.state.config_input = None;
+                    committed
+                }
+                Err(_) => {
+                    let mut next = state.clone();
+                    next.config_input = None;
+                    no_intent(next)
+                }
+            }
+        }
+        '\u{8}' | '\u{7f}' => {
+            let mut next = state.clone();
+            if let Some(inp) = next.config_input.as_mut() {
+                inp.buffer.pop();
+            }
+            no_intent(next)
+        }
+        d if d.is_ascii_digit() => {
+            let mut next = state.clone();
+            if let Some(inp) = next.config_input.as_mut() {
+                inp.buffer.push(d);
+            }
+            no_intent(next)
+        }
+        _ => unchanged(state),
     }
 }
 
@@ -612,9 +812,12 @@ fn reduce_key_entry_key(state: &SettingsState, c: char) -> SettingsReduction {
     }
 }
 
-/// Esc: abort the key-entry modal if open; otherwise a no-op.
+/// Esc: cancel whichever overlay is open in a SINGLE press — the numeric config
+/// input or the key-entry modal — clearing it outright (never a partial
+/// step-back that would leave the overlay half-open). A no-op when neither is up.
 fn reduce_esc(state: &SettingsState) -> SettingsReduction {
     let mut next = state.clone();
+    next.config_input = None;
     next.key_entry = None;
     no_intent(next)
 }
@@ -737,10 +940,12 @@ fn render_member_rows(
 }
 
 /// Paint the Daemon section body: the socket-path + connection-status line, then
-/// the global auto-standup toggle (D13). ON paints in `SELECTION_GREEN` with a
-/// `▶` indicator + filled dot; OFF is muted with a hollow dot. `[a] toggle` names
-/// the key right by the control (house rule). Returns the next free row. Split out
-/// of [`render_settings`] to keep that function within the line cap.
+/// EVERY daemon-config knob (one row per [`DAEMON_CONFIG_REGISTRY`] descriptor)
+/// showing its label + live value. The `▶` cursor (in `SELECTION_GREEN`) marks
+/// the selected row; a bool ON row also paints green with a filled dot. The key
+/// hints (`J/K move · enter edit · [a] auto-standup`) sit right by the control
+/// (house rule). Returns the next free row. Split out of [`render_settings`] to
+/// keep that function within the line cap.
 fn render_daemon_body(
     buf: &mut WireBuffer,
     area_w: u16,
@@ -752,10 +957,12 @@ fn render_daemon_body(
     const GREEN: Color = Color::rgb(100, 200, 100);
     const RED: Color = Color::rgb(220, 100, 100);
     const TEXT: Color = Color::rgb(220, 220, 230);
+    const MUTED: Color = Color::rgb(120, 120, 140);
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 
-    let put = |buf: &mut WireBuffer, row: u16, s: &str, color: Color| {
-        for (ch, cx) in s.chars().zip(4..area_w) {
+    let section_active = state.section == SettingsSection::Daemon;
+    let put = |buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color| {
+        for (ch, cx) in s.chars().zip(x..area_w) {
             let mut cell = Cell::new(ch.to_string());
             cell.fg = Some(color);
             buf.push(Coord::new(cx, row), cell);
@@ -769,23 +976,56 @@ fn render_daemon_body(
         };
         put(
             buf,
+            4,
             row,
             &format!("{} · {status}", state.health.socket_path),
             color,
         );
         row += 1;
     }
-    if row < bottom {
-        let (mark, dot, label, tog_color) = if state.autostandup_enabled {
-            ("▶ ", "●", "on", SELECTION_GREEN)
-        } else {
-            ("  ", "○", "off", TEXT)
+
+    for (idx, desc) in DAEMON_CONFIG_REGISTRY.iter().enumerate() {
+        if row >= bottom {
+            break;
+        }
+        let selected = section_active && idx == state.config_sel;
+        let cursor = if selected { "▶ " } else { "  " };
+        let value = state.config_effective(idx);
+        // A bool row shows a ●/○ dot; other kinds show the raw value. A selected
+        // row (or a bool that is ON) accents green; the rest are plain text.
+        let (shown, color) = match desc.kind {
+            ConfigKind::Bool => {
+                let on = parse_bool_token(value).unwrap_or(false);
+                let dot = if on { "● on" } else { "○ off" };
+                let color = if on { SELECTION_GREEN } else { TEXT };
+                (
+                    dot.to_string(),
+                    if selected { SELECTION_GREEN } else { color },
+                )
+            }
+            _ => (
+                value.to_string(),
+                if selected { SELECTION_GREEN } else { TEXT },
+            ),
         };
         put(
             buf,
+            4,
             row,
-            &format!("{mark}Auto-standup: {dot} {label}  ·  [a] toggle"),
-            tog_color,
+            &format!("{cursor}{}: {shown}", desc.label),
+            color,
+        );
+        row += 1;
+    }
+
+    // Key hints right by the control (house rule).
+    if row < bottom {
+        put(
+            buf,
+            4,
+            row,
+            "J/K move · enter/space edit · [a] auto-standup",
+            MUTED,
         );
         row += 1;
     }
@@ -1021,4 +1261,65 @@ pub fn render_settings(
     if let Some(km) = &state.key_entry {
         render_key_entry_modal(buf, area_w, area_h, km.expose().chars().count());
     }
+    if let Some(input) = &state.config_input {
+        render_config_input_overlay(buf, area_w, area_h, input);
+    }
+}
+
+/// Render the numeric-input overlay for editing an int daemon-config knob: a
+/// centred box showing the knob's label, its range, and the digits typed so far
+/// with a caret. `enter` commits, `esc` cancels — both named in the box. Never
+/// masks the value (unlike the key-entry modal, an int is not a secret).
+fn render_config_input_overlay(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    area_h: u16,
+    input: &ConfigInput,
+) {
+    use ainb_plugin_sdk::{Cell, Color, Coord};
+    const CORNFLOWER: Color = Color::rgb(100, 149, 237);
+    const GOLD: Color = Color::rgb(255, 215, 0);
+    const TEXT: Color = Color::rgb(220, 220, 230);
+    const MUTED: Color = Color::rgb(120, 120, 140);
+
+    let desc = &DAEMON_CONFIG_REGISTRY[input.reg_index];
+    let range = desc.type_hint();
+    let title = format!(" {} ", desc.label);
+    let value_line = format!("{}_", input.buffer);
+    let hint = "enter commit · esc cancel";
+
+    // A box sized to the widest line, centred in the area.
+    let inner_w = title.len().max(range.len()).max(value_line.len()).max(hint.len());
+    let box_w = u16::try_from(inner_w + 4).unwrap_or(24).min(area_w);
+    let box_h: u16 = 6;
+    let x0 = area_w.saturating_sub(box_w) / 2;
+    let y0 = area_h.saturating_sub(box_h) / 2;
+
+    let put = |buf: &mut WireBuffer, x: u16, y: u16, s: &str, color: Color| {
+        for (i, ch) in s.chars().enumerate() {
+            let cx = x + u16::try_from(i).unwrap_or(0);
+            if cx >= area_w {
+                break;
+            }
+            let mut cell = Cell::new(ch.to_string());
+            cell.fg = Some(color);
+            buf.push(Coord::new(cx, y), cell);
+        }
+    };
+
+    // Rounded border.
+    let top = format!("╭{}╮", "─".repeat(box_w.saturating_sub(2) as usize));
+    let bot = format!("╰{}╯", "─".repeat(box_w.saturating_sub(2) as usize));
+    put(buf, x0, y0, &top, CORNFLOWER);
+    for row in 1..box_h.saturating_sub(1) {
+        put(buf, x0, y0 + row, "│", CORNFLOWER);
+        put(buf, x0 + box_w.saturating_sub(1), y0 + row, "│", CORNFLOWER);
+    }
+    put(buf, x0, y0 + box_h.saturating_sub(1), &bot, CORNFLOWER);
+
+    let tx = x0 + 2;
+    put(buf, tx, y0 + 1, &title, GOLD);
+    put(buf, tx, y0 + 2, &range, MUTED);
+    put(buf, tx, y0 + 3, &value_line, TEXT);
+    put(buf, tx, y0 + 4, hint, MUTED);
 }

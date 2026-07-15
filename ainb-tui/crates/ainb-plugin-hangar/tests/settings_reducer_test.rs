@@ -101,8 +101,8 @@ fn state() -> SettingsState {
     SettingsState::new(health(), providers(), keys(), workspaces())
 }
 
-/// `a` on the Daemon section flips the auto-standup toggle (D13): the local value
-/// inverts AND a `ToggleAutostandup` intent carries the NEW value for the glue to
+/// `a` on the Daemon section flips the auto-standup toggle: the local value
+/// inverts AND a `SetDaemonConfig` intent carries the NEW value for the glue to
 /// persist. A second `a` flips it back.
 #[test]
 fn a_on_daemon_section_toggles_autostandup_and_emits_intent() {
@@ -110,11 +110,23 @@ fn a_on_daemon_section_toggles_autostandup_and_emits_intent() {
     assert!(!s.autostandup_enabled());
     let out = reduce_settings(&s, SettingsEvent::Key('a'));
     assert!(out.state.autostandup_enabled(), "optimistic flip to ON");
-    assert_eq!(out.intent, Some(SettingsIntent::ToggleAutostandup(true)));
+    assert_eq!(
+        out.intent,
+        Some(SettingsIntent::SetDaemonConfig {
+            key: "autostandup.enabled".to_string(),
+            value: "true".to_string(),
+        })
+    );
     // Toggling again flips back to OFF and emits the matching intent.
     let out2 = reduce_settings(&out.state, SettingsEvent::Key('a'));
     assert!(!out2.state.autostandup_enabled());
-    assert_eq!(out2.intent, Some(SettingsIntent::ToggleAutostandup(false)));
+    assert_eq!(
+        out2.intent,
+        Some(SettingsIntent::SetDaemonConfig {
+            key: "autostandup.enabled".to_string(),
+            value: "false".to_string(),
+        })
+    );
 }
 
 /// The auto-standup toggle is Daemon-section-scoped: `a` on another section never
@@ -128,13 +140,157 @@ fn a_off_the_daemon_section_does_not_toggle_autostandup() {
     assert_eq!(out.intent, None);
 }
 
-/// A `hangar/daemon_config_get` snapshot sets the live toggle value the pane shows.
+/// A `hangar/daemon_config_list` snapshot sets the live toggle value the pane shows.
 #[test]
 fn set_autostandup_enabled_reflects_live_value() {
     let mut s = state();
     assert!(!s.autostandup_enabled());
     s.set_autostandup_enabled(true);
     assert!(s.autostandup_enabled());
+}
+
+/// The Daemon section renders exactly one row per registry knob — a knob added
+/// to the registry can never silently miss the TUI surface (mirror of the CLI's
+/// `cli_list_covers_every_registry_knob`).
+#[test]
+fn daemon_section_row_count_matches_registry() {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    let s = state();
+    // The live config vector is sized to the registry, so every knob has a row.
+    assert_eq!(s.config_values().len(), DAEMON_CONFIG_REGISTRY.len());
+    assert!(!DAEMON_CONFIG_REGISTRY.is_empty());
+}
+
+/// `J`/`K` move the Daemon-section cursor over the config rows, clamped at both
+/// ends.
+#[test]
+fn daemon_cursor_moves_and_clamps() {
+    use ainb_hangar_core::daemon_config::DAEMON_CONFIG_REGISTRY;
+    let s = state();
+    assert_eq!(s.config_sel(), 0);
+    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    assert_eq!(s.config_sel(), 1);
+    // `K` past the top clamps at 0.
+    let s = reduce_settings(&s, SettingsEvent::Key('K')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('K')).state;
+    assert_eq!(s.config_sel(), 0);
+    // `J` past the end clamps at the last row.
+    let mut s = s;
+    for _ in 0..DAEMON_CONFIG_REGISTRY.len() + 3 {
+        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    }
+    assert_eq!(s.config_sel(), DAEMON_CONFIG_REGISTRY.len() - 1);
+}
+
+/// Editing the enum knob (card_agent.default) cycles to the next variant and
+/// emits a `SetDaemonConfig` intent carrying the normalized value.
+#[test]
+fn enter_on_enum_row_cycles_variant_and_emits_intent() {
+    use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_CARD_AGENT_DEFAULT};
+    let idx = DAEMON_CONFIG_REGISTRY
+        .iter()
+        .position(|d| d.key == KEY_CARD_AGENT_DEFAULT)
+        .expect("enum knob present");
+    // Move the cursor onto the enum row.
+    let mut s = state();
+    for _ in 0..idx {
+        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    }
+    // Default is `claude`; one cycle → `codex`.
+    let out = reduce_settings(&s, SettingsEvent::Key('\n'));
+    assert_eq!(
+        out.intent,
+        Some(SettingsIntent::SetDaemonConfig {
+            key: KEY_CARD_AGENT_DEFAULT.to_string(),
+            value: "codex".to_string(),
+        })
+    );
+    assert_eq!(out.state.config_values()[idx].as_deref(), Some("codex"));
+}
+
+/// Editing an int knob opens the numeric overlay; typing digits then Enter
+/// commits the in-range value and emits a `SetDaemonConfig` intent.
+#[test]
+fn int_overlay_commits_valid_value() {
+    use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
+    let idx = DAEMON_CONFIG_REGISTRY
+        .iter()
+        .position(|d| d.key == KEY_AUTOSTANDUP_STAGNANT_MIN)
+        .expect("int knob present");
+    let mut s = state();
+    for _ in 0..idx {
+        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    }
+    // Enter opens the overlay seeded with the current value (default "15").
+    let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
+    assert_eq!(s.config_input_buffer(), Some("15"));
+    // Clear the seed and type 30.
+    let s = reduce_settings(&s, SettingsEvent::Key('\u{8}')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('\u{8}')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('3')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key('0')).state;
+    assert_eq!(s.config_input_buffer(), Some("30"));
+    // Enter commits: overlay closes, value persists, intent emitted.
+    let out = reduce_settings(&s, SettingsEvent::Key('\n'));
+    assert_eq!(out.state.config_input_buffer(), None, "overlay closed");
+    assert_eq!(out.state.config_values()[idx].as_deref(), Some("30"));
+    assert_eq!(
+        out.intent,
+        Some(SettingsIntent::SetDaemonConfig {
+            key: KEY_AUTOSTANDUP_STAGNANT_MIN.to_string(),
+            value: "30".to_string(),
+        })
+    );
+}
+
+/// An out-of-range int is rejected on Enter: the overlay closes with NO write and
+/// NO intent (the optimistic edit never persists a bad value).
+#[test]
+fn int_overlay_rejects_out_of_range() {
+    use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
+    let idx = DAEMON_CONFIG_REGISTRY
+        .iter()
+        .position(|d| d.key == KEY_AUTOSTANDUP_STAGNANT_MIN)
+        .unwrap();
+    let mut s = state();
+    for _ in 0..idx {
+        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    }
+    let s = reduce_settings(&s, SettingsEvent::Key('\n')).state; // open, seed "15"
+    // Append digits to make "159999" (out of the 1..1440 range).
+    let mut s = s;
+    for d in ['9', '9', '9', '9'] {
+        s = reduce_settings(&s, SettingsEvent::Key(d)).state;
+    }
+    let out = reduce_settings(&s, SettingsEvent::Key('\n'));
+    assert_eq!(out.state.config_input_buffer(), None, "overlay closed");
+    assert_eq!(out.intent, None, "no write on an invalid value");
+    // The persisted value is unchanged (still unset → default).
+    assert_eq!(out.state.config_values()[idx], None);
+}
+
+/// Esc cancels the numeric overlay in a SINGLE press — no partial step-back that
+/// would leave the overlay half-open (the regression guard).
+#[test]
+fn esc_cancels_int_overlay_in_one_press() {
+    use ainb_hangar_core::daemon_config::{DAEMON_CONFIG_REGISTRY, KEY_AUTOSTANDUP_STAGNANT_MIN};
+    let idx = DAEMON_CONFIG_REGISTRY
+        .iter()
+        .position(|d| d.key == KEY_AUTOSTANDUP_STAGNANT_MIN)
+        .unwrap();
+    let mut s = state();
+    for _ in 0..idx {
+        s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    }
+    let s = reduce_settings(&s, SettingsEvent::Key('\n')).state;
+    assert!(s.config_input_buffer().is_some(), "overlay open");
+    let out = reduce_settings(&s, SettingsEvent::Esc);
+    assert_eq!(
+        out.state.config_input_buffer(),
+        None,
+        "one Esc fully cancels"
+    );
+    assert_eq!(out.intent, None);
 }
 
 /// j/k cycle through the six settings sections.
@@ -344,11 +500,17 @@ fn notify_grid_space_toggles_cell_and_emits_set_intent() {
 }
 
 /// tcp T5: the Notifications keys are section-scoped — a `space` on the Daemon
-/// section never emits a rule change, and `j`/`k` still leave the grid.
+/// section edits a daemon-config knob (never a rule change), and `j`/`k` still
+/// leave the grid.
 #[test]
 fn notify_keys_are_section_scoped_and_j_k_still_navigate() {
-    // space on Daemon does nothing.
-    assert!(reduce_settings(&state(), SettingsEvent::Key(' ')).intent.is_none());
+    // space on Daemon edits the selected config knob — it emits a SetDaemonConfig
+    // (the first row's bool toggle), never a SetNotifyRule.
+    let out = reduce_settings(&state(), SettingsEvent::Key(' '));
+    assert!(
+        matches!(out.intent, Some(SettingsIntent::SetDaemonConfig { .. })),
+        "space on Daemon edits a config knob, not a notify rule"
+    );
     // j/k move between sections even from the grid.
     let s = notify_state();
     let up = reduce_settings(&s, SettingsEvent::Key('k')).state;
