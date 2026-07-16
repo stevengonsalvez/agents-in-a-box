@@ -223,6 +223,167 @@ async fn live_dispatch_writes_nonce_artifact() {
     eprintln!("LIVE E2E OK: task {task_id} done; nonce artifact verified at {artifact:?}");
 }
 
+/// The codex leg of the same tripwire: the REAL daemon dispatching the REAL
+/// `codex` binary through the REAL CLI path, proven by an on-disk nonce artifact.
+///
+/// Identical law to [`live_dispatch_writes_nonce_artifact`], one provider over:
+///
+/// ```text
+///  ainb hangar agent create --provider codex
+///         │
+///         ▼
+///  ainb hangar issue create --assign <agent>  ──▶ queued task
+///         │                                            │
+///         ▼                              real ainb-hangar-daemon (this binary)
+///  claim ─▶ dispatch ─▶ `codex exec --skip-git-repo-check -s danger-full-access
+///                        -- <brief>` ─▶ done
+///                                            │
+///                              agent runs a shell command: writes NONCE → file
+/// ```
+///
+/// # Two codex facts this leg pins that a fake could never surface
+///
+/// 1. **No model flag.** codex-cli 0.144.0 runs `codex exec` on its default model
+///    with no `-m`, so — unlike the claude leg's `--model haiku` pin — no
+///    `agent edit --model` step is needed (verified: a bare `codex exec -- …`
+///    ran and exited 0). Threading a guessed model id would be the bug.
+/// 2. **The sandbox flag is load-bearing.** `codex exec` DEFAULTS to a read-only
+///    sandbox; before the `-s danger-full-access` fix (this branch), a codex task
+///    ran a shell tool yet its write was silently dropped and the task still
+///    exited 0 — a `done` with no artifact. This leg is the live proof of that
+///    fix: the nonce lands only because the daemon now pins the sandbox policy.
+///
+/// # Mutation self-check
+///
+/// `LIVE_E2E_BREAK_CODEX=1` points the daemon at a no-op codex stand-in that
+/// exits 0 WITHOUT writing the nonce — a provider that reaches `done` having done
+/// no real work. The test then goes RED on the MISSING ARTIFACT (not on task
+/// state), proving the artifact — not the FSM status — is the trusted signal.
+#[tokio::test]
+async fn live_dispatch_codex_writes_nonce_artifact() {
+    // ---- Skip gates (a skip prints LOUD and returns clean — never a pass) ----
+    let Some(ainb) = ainb_bin() else {
+        eprintln!("SKIPPED: ainb binary not built (run `cargo build -p ainb --bin ainb`)");
+        return;
+    };
+    let Some(codex) = real_codex() else {
+        eprintln!("SKIPPED: no codex binary on PATH");
+        return;
+    };
+    if !codex_alive(&codex) {
+        eprintln!(
+            "SKIPPED: codex on PATH is not authenticated / did not answer the liveness probe"
+        );
+        return;
+    }
+
+    let tag = format!("{}-{}", std::process::id(), now_ms());
+    let nonce = format!("HANGAR-LIVE-CODEX-NONCE-{tag}");
+    let agent_name = format!("live-e2e-codex-{tag}");
+
+    let home = tempfile::tempdir().expect("tempdir home");
+    let db_path = home.path().join("hangar.db");
+
+    // 1. Create a CODEX agent via the real CLI. No `agent edit --model` follows:
+    //    codex runs on its default model with no `-m`, so pinning one is neither
+    //    needed nor desirable here (see the fn doc).
+    run_ainb(
+        &ainb,
+        home.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            &agent_name,
+            "--provider",
+            "codex",
+        ],
+    );
+
+    let pool = open_pool(&db_path).await;
+    let (agent_id, runtime_id) = agent_ids_by_name(&pool, &agent_name).await;
+
+    // 2. Spawn the REAL daemon pointed at the real codex (or the mutation stand-in
+    //    that reaches `done` WITHOUT writing the nonce).
+    let effective_codex = if std::env::var_os("LIVE_E2E_BREAK_CODEX").is_some() {
+        eprintln!(
+            "MUTATION: LIVE_E2E_BREAK_CODEX set — daemon uses a no-op codex that reaches \
+             `done` without writing the nonce"
+        );
+        write_noop_codex(home.path())
+    } else {
+        codex.clone()
+    };
+    let daemon = LiveDaemon::spawn_codex(
+        &home.path().join("daemon.log"),
+        home.path(),
+        &runtime_id,
+        &effective_codex,
+    );
+
+    // 3. Enqueue via the real user path. The brief tells codex to write the nonce
+    //    with a shell command — exercising codex's REAL tool use, not a fabricated
+    //    echo. The nonce is unguessable text handed to it here.
+    let brief = format!(
+        "Run exactly this one shell command and nothing else: \
+         printf '%s' '{nonce}' > {ARTIFACT_NAME}  \
+         Once the command has run, stop."
+    );
+    let stdout = run_ainb_capture(
+        &ainb,
+        home.path(),
+        &[
+            "hangar", "issue", "create", "--title", &brief, "--assign", &agent_id,
+        ],
+    );
+    let task_id = parse_queued_task_id(&stdout);
+
+    // 4. Poll to terminal, STOP the daemon by exact pid, THEN assert the artifact.
+    let row = wait_for_terminal(&pool, &task_id, TASK_BUDGET, home.path()).await;
+    let status: String = row.get("status");
+    drop(daemon);
+
+    // 5. THE side-effect assertion, FIRST. A codex task that reaches a terminal
+    //    state WITHOUT the artifact fails here — exactly the read-only-sandbox bug
+    //    class (done, exit 0, no write) this leg exists to catch.
+    let work_dir: Option<String> = row.get("work_dir");
+    let work_dir = work_dir.unwrap_or_else(|| {
+        panic!(
+            "codex task {task_id} reached status={status} but recorded NO work_dir. \
+             daemon log:\n{}",
+            read_log(home.path())
+        )
+    });
+    let artifact = Path::new(&work_dir).join(ARTIFACT_NAME);
+    let got = std::fs::read_to_string(&artifact).unwrap_or_else(|e| {
+        panic!(
+            "NONCE ARTIFACT MISSING at {artifact:?} ({e}); codex task status={status}. \
+             A codex task that reaches a terminal state WITHOUT the artifact is the exact \
+             bug class this tripwire exists to catch (exit 0 / done != real work — and, \
+             specifically here, codex's default read-only exec sandbox dropping the write). \
+             daemon log:\n{}",
+            read_log(home.path())
+        )
+    });
+    assert_eq!(
+        got.trim(),
+        nonce,
+        "artifact exists but nonce mismatch — codex wrote the WRONG bytes"
+    );
+
+    // 6. Only NOW is the status trustworthy: the artifact proved real work.
+    assert_eq!(
+        status,
+        "done",
+        "nonce artifact is present and correct, but the codex task status is {status:?}, not \
+         done — a finalize-path inconsistency. daemon log:\n{}",
+        read_log(home.path())
+    );
+
+    eprintln!("LIVE E2E CODEX OK: task {task_id} done; nonce artifact verified at {artifact:?}");
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -238,15 +399,47 @@ struct LiveDaemon {
 }
 
 impl LiveDaemon {
+    /// Spawn the claude leg's daemon: overrides `HANGAR_CLAUDE_PATH`.
     fn spawn(log_path: &Path, home: &Path, runtime_id: &str, claude_path: &Path) -> Self {
+        Self::spawn_with(
+            log_path,
+            home,
+            runtime_id,
+            &[("HANGAR_CLAUDE_PATH", claude_path)],
+        )
+    }
+
+    /// Spawn the codex leg's daemon: overrides `HANGAR_CODEX_PATH` so the runner's
+    /// `codex exec` path resolves the real codex binary (or the mutation stand-in).
+    fn spawn_codex(log_path: &Path, home: &Path, runtime_id: &str, codex_path: &Path) -> Self {
+        Self::spawn_with(
+            log_path,
+            home,
+            runtime_id,
+            &[("HANGAR_CODEX_PATH", codex_path)],
+        )
+    }
+
+    /// The shared spawn core: one plain child that inherits this process's
+    /// environment (so the spawned provider sees the real `$HOME` credentials),
+    /// overriding only the hangar knobs plus the given provider-path env pairs.
+    fn spawn_with(
+        log_path: &Path,
+        home: &Path,
+        runtime_id: &str,
+        provider_env: &[(&str, &Path)],
+    ) -> Self {
         let log = std::fs::File::create(log_path).expect("create daemon log");
         let err = log.try_clone().expect("clone daemon log handle");
-        let child = Command::new(daemon_bin())
-            .env("AINB_HANGAR_HOME", home)
+        let mut cmd = Command::new(daemon_bin());
+        cmd.env("AINB_HANGAR_HOME", home)
             .env("HANGAR_DAEMON_RUNTIME_ID", runtime_id)
-            .env("HANGAR_CLAUDE_PATH", claude_path)
             .env("HANGAR_DAEMON_DISABLE_SANDBOX", "1")
-            .env("HANGAR_DAEMON_POLL_MS", "200")
+            .env("HANGAR_DAEMON_POLL_MS", "200");
+        for (key, path) in provider_env {
+            cmd.env(key, path);
+        }
+        let child = cmd
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(log))
             .stderr(std::process::Stdio::from(err))
@@ -289,6 +482,11 @@ fn real_claude() -> Option<PathBuf> {
     which::which("claude").ok()
 }
 
+/// The real `codex` binary on PATH, if any.
+fn real_codex() -> Option<PathBuf> {
+    which::which("codex").ok()
+}
+
 /// Write an executable no-op stand-in for `claude` used ONLY by the mutation
 /// self-check. It emits the exact `system`+`result` JSONL the headless runner
 /// pins (so the run finalizes cleanly to `done`) but writes NO nonce file — a
@@ -302,14 +500,35 @@ fn write_noop_claude(dir: &Path) -> PathBuf {
          echo '{\"type\":\"result\",\"content\":\"ok\"}'\n\
          exit 0\n";
     std::fs::write(&path, body).expect("write noop-claude");
+    make_executable(&path);
+    path
+}
+
+/// The codex counterpart of [`write_noop_claude`]: an executable no-op stand-in
+/// for `codex` used ONLY by the codex mutation self-check. The daemon keys a
+/// codex run's success on its exit code (JSONL parsing is best-effort for codex),
+/// so this simply prints a line and exits 0 — a provider that reaches `done`
+/// having written NO nonce file. The live artifact assertion must catch it.
+/// Returns the script path to hand the daemon as `HANGAR_CODEX_PATH`.
+fn write_noop_codex(dir: &Path) -> PathBuf {
+    let path = dir.join("noop-codex.sh");
+    let body = "#!/bin/sh\n\
+         echo 'noop codex: reached done without writing the nonce'\n\
+         exit 0\n";
+    std::fs::write(&path, body).expect("write noop-codex");
+    make_executable(&path);
+    path
+}
+
+/// Mark a stand-in script executable (0o755) on unix so the daemon can spawn it.
+fn make_executable(path: &Path) {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        let mut perms = std::fs::metadata(&path).expect("stat noop-claude").permissions();
+        let mut perms = std::fs::metadata(path).expect("stat stand-in").permissions();
         perms.set_mode(0o755);
-        std::fs::set_permissions(&path, perms).expect("chmod noop-claude");
+        std::fs::set_permissions(path, perms).expect("chmod stand-in");
     }
-    path
 }
 
 /// Liveness + auth probe: `claude -p "reply PONG"` under a short timeout. An
@@ -329,6 +548,38 @@ fn claude_alive(claude: &Path) -> bool {
         return false;
     };
     out.status.success() && String::from_utf8_lossy(&out.stdout).to_uppercase().contains("PONG")
+}
+
+/// Codex liveness + auth probe: `codex exec --skip-git-repo-check -- "reply
+/// PONG"`, bounded by a hard wall-clock timeout. codex's non-interactive `exec`
+/// never prompts (null stdin), so an unauthenticated codex errors instead of
+/// hanging — but the probe is still bounded so a wedged CLI can never stall the
+/// suite. Runs the child on a helper thread and joins with `recv_timeout`; a
+/// timeout, spawn error, non-zero exit, or a reply without `PONG` all read as
+/// "not alive" and drive a LOUD skip, never a pass. `exec`'s output is drained
+/// via `output()` so a chatty codex cannot deadlock on a full stdout pipe.
+fn codex_alive(codex: &Path) -> bool {
+    let codex = codex.to_owned();
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let out = Command::new(&codex)
+            .args([
+                "exec",
+                "--skip-git-repo-check",
+                "--",
+                "reply with the single word PONG",
+            ])
+            .stdin(std::process::Stdio::null())
+            .output();
+        let _ = tx.send(out);
+    });
+    match rx.recv_timeout(Duration::from_secs(90)) {
+        Ok(Ok(out)) => {
+            out.status.success()
+                && String::from_utf8_lossy(&out.stdout).to_uppercase().contains("PONG")
+        }
+        _ => false,
+    }
 }
 
 /// Run an `ainb` subcommand under the isolated hangar home; panic on non-zero.

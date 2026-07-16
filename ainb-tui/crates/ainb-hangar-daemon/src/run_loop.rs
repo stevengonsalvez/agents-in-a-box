@@ -2319,6 +2319,65 @@ mod tests {
         );
     }
 
+    /// A HEADLESS codex row must carry the `-s danger-full-access` sandbox
+    /// policy, and an INTERACTIVE one must not.
+    ///
+    /// This locks the dispatch-path fix for the class of bug the codex live
+    /// tripwire surfaced: `codex exec` defaults to a read-only sandbox, so a
+    /// headless run with no `-s` flag lets the model invoke a shell tool yet
+    /// silently drops its write — the task exits 0 having produced no artifact.
+    /// The headless argv MUST therefore pin `danger-full-access` (the daemon's
+    /// own FS sandbox is the confinement boundary); the interactive TUI, which
+    /// has a human attached to answer trust prompts and no FS sandbox, must keep
+    /// codex's own default confinement.
+    #[test]
+    fn headless_codex_argv_pins_danger_full_access_sandbox() {
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "claude".into(),
+            codex_path: "codex".into(),
+            copilot_path: "copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let inv = ProviderInvocation {
+            prompt: "write the nonce".to_string(),
+            model: None,
+            cli_args: Vec::new(),
+        };
+
+        // Headless: exec + skip-git-repo-check + `-s danger-full-access`, in order.
+        let (_p, argv) = runner.provider_command(Backend::Codex, &inv, Mode::Headless);
+        let sandbox_at = argv.iter().position(|a| a == "-s").unwrap_or_else(|| {
+            panic!("headless codex argv must carry a `-s` sandbox flag: {argv:?}")
+        });
+        assert_eq!(
+            argv.get(sandbox_at + 1).map(String::as_str),
+            Some("danger-full-access"),
+            "headless codex must run `-s danger-full-access` or its writes are dropped: {argv:?}"
+        );
+        assert!(
+            argv.contains(&"exec".to_string())
+                && argv.contains(&"--skip-git-repo-check".to_string()),
+            "headless codex must still lead with `exec --skip-git-repo-check`: {argv:?}"
+        );
+
+        // Interactive: no exec, no sandbox override — codex keeps its own default.
+        let (_p, argv) = interactive_command(
+            &runner,
+            &ResolvedDispatch {
+                backend: Backend::Codex,
+                mode: dispatch_mode("interactive"),
+                invocation: inv.clone(),
+                agent_env: Vec::new(),
+            },
+        );
+        assert!(
+            !argv.contains(&"danger-full-access".to_string()),
+            "an interactive codex session must not be forced to danger-full-access: {argv:?}"
+        );
+    }
+
     /// The RESOLVE-FAULT path must also be promptless-proof.
     ///
     /// `build_prompt` guarantees "never promptless", but the fault path does not
