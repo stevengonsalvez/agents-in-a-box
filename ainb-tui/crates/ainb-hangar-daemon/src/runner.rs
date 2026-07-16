@@ -1656,7 +1656,7 @@ where
 /// `done`. The live tripwire `live_dispatch_writes_nonce_artifact` (in
 /// `tests/live_e2e.rs`, `live-e2e` feature) is the CI/scheduled test that catches
 /// that drift: it dispatches a REAL claude and asserts the run reaches `done` with
-/// a session_id + usage captured from a RECOGNISED terminal — so a shape drift
+/// a `session_id` + usage captured from a RECOGNISED terminal — so a shape drift
 /// turns it RED (failed / no usage), signalling the parser here needs updating.
 async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
@@ -1865,7 +1865,7 @@ mod tests {
     }
 
     /// The known error subtypes keep their mapped reasons — `error_max_turns`
-    /// retries FRESH (IterationLimit), other errors are terminal AgentError.
+    /// retries FRESH (`IterationLimit`), other errors are terminal `AgentError`.
     #[test]
     fn claude_error_subtypes_keep_their_reasons() {
         assert_eq!(
@@ -1884,7 +1884,7 @@ mod tests {
 
     /// FAIL-CLOSED: a `result` line carrying an UNKNOWN, non-error subtype (a
     /// future CLI renaming/adding a terminal shape) must NOT be guessed "success".
-    /// It fails closed to the distinct ProviderContractDrift reason.
+    /// It fails closed to the distinct `ProviderContractDrift` reason.
     ///
     /// Mutation check: reverting the final `Some(_) => ProviderContractDrift` arm
     /// back to the old denylist default (`_ => Success`) makes this assertion see
@@ -1932,7 +1932,7 @@ mod tests {
 
     /// FAIL-CLOSED: a structured provider (claude/codex headless) that exits 0 but
     /// emitted NO recognised terminal — a renamed/absent terminal event — must fail
-    /// closed to the DISTINCT ProviderContractDrift reason, never `done`.
+    /// closed to the DISTINCT `ProviderContractDrift` reason, never `done`.
     ///
     /// Mutation check: reverting the `if structured { ProviderContractDrift }` split
     /// back to an unconditional `FailureReason::AgentError` makes this see
@@ -1986,7 +1986,7 @@ mod tests {
     }
 
     /// A NON-structured provider (copilot emits no terminal stream) that exits 0
-    /// without a terminal stays a generic AgentError — NOT contract drift. This
+    /// without a terminal stays a generic `AgentError` — NOT contract drift. This
     /// pins the boundary so copilot is never mislabelled as a claude/codex shape
     /// change.
     #[test]
