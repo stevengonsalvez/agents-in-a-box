@@ -243,13 +243,16 @@ impl RetryService {
             FailureReason::IterationLimit
             | FailureReason::ApiInvalidRequest
             | FailureReason::SemanticInactivity => RetryDisposition::FreshRetry,
-            // Agent / user / sweeper / spawn / unclassified terminals — no retry.
-            // `SpawnError` is a misconfigured / missing provider binary: a
-            // re-dispatch under the same daemon config would only re-fail.
+            // Agent / user / sweeper / spawn / drift / unclassified terminals — no
+            // retry. `SpawnError` is a misconfigured / missing provider binary,
+            // and `ProviderContractDrift` is a CLI shape the parser cannot read: a
+            // re-dispatch under the same daemon config / CLI version would only
+            // re-fail identically, so a retry burns the chain for nothing.
             FailureReason::AgentError
             | FailureReason::UserCancel
             | FailureReason::Timeout
             | FailureReason::SpawnError
+            | FailureReason::ProviderContractDrift
             | FailureReason::Unknown => RetryDisposition::NoRetry,
         }
     }
@@ -280,6 +283,7 @@ const FAILURE_REASONS: &[FailureReason] = &[
     FailureReason::ApiInvalidRequest,
     FailureReason::SemanticInactivity,
     FailureReason::SpawnError,
+    FailureReason::ProviderContractDrift,
     FailureReason::Unknown,
 ];
 
@@ -304,6 +308,7 @@ mod tests {
             FailureReason::ApiInvalidRequest,
             FailureReason::SemanticInactivity,
             FailureReason::SpawnError,
+            FailureReason::ProviderContractDrift,
             FailureReason::Unknown,
         ] {
             assert!(
@@ -313,7 +318,7 @@ mod tests {
         }
         assert_eq!(
             FAILURE_REASONS.len(),
-            10,
+            11,
             "FAILURE_REASONS length drifted from the FailureReason variant count",
         );
     }
@@ -342,6 +347,11 @@ mod tests {
         assert_eq!(RetryService::retry_disposition(AgentError), NoRetry);
         assert_eq!(RetryService::retry_disposition(UserCancel), NoRetry);
         assert_eq!(RetryService::retry_disposition(Timeout), NoRetry);
+        assert_eq!(RetryService::retry_disposition(SpawnError), NoRetry);
+        assert_eq!(
+            RetryService::retry_disposition(ProviderContractDrift),
+            NoRetry
+        );
         assert_eq!(RetryService::retry_disposition(Unknown), NoRetry);
     }
 }

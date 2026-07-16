@@ -64,6 +64,19 @@ pub enum FailureReason {
     /// here the agent never started. Terminal (no retry): a misconfigured binary
     /// path will not self-heal on a re-dispatch with the same daemon config.
     SpawnError,
+    /// The provider's structured event contract drifted from the pinned CLI
+    /// shape: the runner ran a provider under its structured-output flag
+    /// (claude `--output-format stream-json`, codex `exec --json`) but the stream
+    /// carried NO recognised success/error terminal — an unknown non-error
+    /// `result` subtype, or no terminal event at all despite a clean exit. This is
+    /// held DISTINCT from [`Self::AgentError`] on purpose: it means "a future CLI
+    /// renamed / added a terminal shape the parser does not know", NOT "the agent
+    /// genuinely failed", so an operator can tell a parser-update need apart from a
+    /// real agent give-up. Fail-closed (never silently `done` over a shape we
+    /// cannot read) and terminal (no retry): the same CLI version re-drifts
+    /// identically, so a retry only burns the chain — the fix is updating the
+    /// parser, not re-running.
+    ProviderContractDrift,
     /// An unclassified failure.
     Unknown,
 }
@@ -87,6 +100,7 @@ impl FailureReason {
             Self::ApiInvalidRequest => "api_invalid_request",
             Self::SemanticInactivity => "semantic_inactivity",
             Self::SpawnError => "spawn_error",
+            Self::ProviderContractDrift => "provider_contract_drift",
             Self::Unknown => "unknown",
         }
     }
@@ -151,6 +165,7 @@ mod tests {
             FailureReason::ApiInvalidRequest,
             FailureReason::SemanticInactivity,
             FailureReason::SpawnError,
+            FailureReason::ProviderContractDrift,
             FailureReason::Unknown,
         ] {
             let serde_token = serde_json::to_value(reason)
