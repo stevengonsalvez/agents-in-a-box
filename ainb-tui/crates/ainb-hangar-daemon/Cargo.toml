@@ -21,6 +21,12 @@ test-support = []
 # behind an explicit feature. Off in production builds — nothing here ships in
 # the daemon binary.
 test-clock = []
+# Opt-in gate for the live, no-mock e2e tripwire (`tests/live_e2e.rs`), which
+# drives the REAL `claude` binary through the genuine dispatch chain. OFF by
+# default so a plain `cargo test` never spends money or needs an authenticated
+# provider — the whole suite stays hermetic. Turn on with
+# `cargo test --features live-e2e --test live_e2e`.
+live-e2e = []
 # P8.2: opt-in OTLP span export. OFF by default so a plain `cargo build` links
 # ZERO OpenTelemetry crates — the JSONL sink stays the daemon's only telemetry
 # path in the shipped binary. Turning this on pulls the `opentelemetry*` +

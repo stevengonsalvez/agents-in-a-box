@@ -24,6 +24,26 @@ test:
 test-verbose:
     cargo test -- --nocapture
 
+# Run the LIVE, no-mock e2e tripwire against the REAL claude binary.
+#
+# Skips CLEAN + LOUD (exit 0) when there is no authenticated `claude` on PATH,
+# so a skip never masquerades as a pass. When claude IS present it builds the
+# `ainb` binary (the CLI verbs the tripwire drives) + the daemon, then runs the
+# gated test single-threaded with full output (never truncated).
+test-live:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "SKIPPED: no authenticated claude on PATH"
+        exit 0
+    fi
+    if ! claude -p --model haiku -- "reply with the single word PONG" 2>/dev/null | grep -qi PONG; then
+        echo "SKIPPED: no authenticated claude on PATH"
+        exit 0
+    fi
+    cargo build -p ainb --bin ainb
+    cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e -- --nocapture --test-threads=1
+
 # Format code
 fmt:
     cargo fmt
