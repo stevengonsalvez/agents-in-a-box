@@ -430,10 +430,7 @@ async fn exec_tool_using_task_actually_writes_its_file() {
         sandbox: true,
     });
 
-    let outcome = runner
-        .run_claude(&env, std::iter::empty(), &invocation())
-        .await
-        .expect("run");
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
 
     // The daemon scores this run a success...
     assert!(
