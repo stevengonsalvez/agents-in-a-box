@@ -85,8 +85,8 @@ fn seed_codex_cache(home: &Path, five_pct: u8, week_pct: u8) {
 }
 
 /// Write a `codex-live.json` with ONLY a `seven_day` (weekly) window —
-/// no `five_hour` key at all. Reproduces the real prolite bug: a plan
-/// where the five-hour window is simply absent from the cache.
+/// no `five_hour` key at all: the cache shape a prolite plan produces
+/// once `parse_usage` routes windows by `limit_window_seconds`.
 fn seed_codex_cache_weekly_only(home: &Path, week_pct: u8) {
     let cache_dir = if cfg!(target_os = "macos") {
         home.join("Library").join("Caches").join("ainb")
@@ -274,9 +274,11 @@ fn tui_top_bar_hides_codex_when_no_cache() {
     );
 }
 
-/// The real prolite bug: a cache with ONLY `seven_day` (weekly) present,
-/// no `five_hour` key at all. The status bar must render `codex wk NN% ↻`
-/// and MUST NOT emit any `codex 5h` segment.
+/// Render-path assertion for a weekly-only cache (the prolite shape):
+/// ONLY `seven_day` present, no `five_hour` key. The status bar must
+/// render `codex wk NN% ↻` and MUST NOT emit any `codex 5h` segment.
+/// The parse-side regression guard is the unit test
+/// `parse_usage_routes_weekly_only_window_to_weekly_slot`.
 #[test]
 fn tui_top_bar_shows_codex_weekly_only() {
     if !tmux_available() {
