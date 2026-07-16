@@ -60,8 +60,10 @@ git_directories = []
 /// Write a fresh `codex-live.json` into the isolated cache dir (macOS:
 /// `~/Library/Caches/ainb`, Linux: `~/.cache/ainb`). `updated_at` is set
 /// to now so the reader treats it as fresh AND the poller throttle skips a
-/// clobbering write.
-fn seed_codex_cache(home: &Path, five_pct: u8, week_pct: u8) {
+/// clobbering write. `five_pct: None` omits the `five_hour` key entirely —
+/// the cache shape a prolite plan produces once `parse_usage` routes
+/// windows by `limit_window_seconds`.
+fn seed_codex_cache(home: &Path, five_pct: Option<u8>, week_pct: u8) {
     let cache_dir = if cfg!(target_os = "macos") {
         home.join("Library").join("Caches").join("ainb")
     } else {
@@ -70,13 +72,17 @@ fn seed_codex_cache(home: &Path, five_pct: u8, week_pct: u8) {
     fs::create_dir_all(&cache_dir).unwrap();
     let now = chrono::Utc::now();
     let updated = now.to_rfc3339();
-    let reset_5h = (now + chrono::Duration::hours(3)).to_rfc3339();
     let reset_wk = (now + chrono::Duration::days(4)).to_rfc3339();
+    let five_hour_line = five_pct
+        .map(|pct| {
+            let reset_5h = (now + chrono::Duration::hours(3)).to_rfc3339();
+            format!("\n  \"five_hour\": {{ \"pct\": {pct}, \"resets_at\": \"{reset_5h}\" }},")
+        })
+        .unwrap_or_default();
     let json = format!(
         r#"{{
   "version": 1,
-  "updated_at": "{updated}",
-  "five_hour": {{ "pct": {five_pct}, "resets_at": "{reset_5h}" }},
+  "updated_at": "{updated}",{five_hour_line}
   "seven_day": {{ "pct": {week_pct}, "resets_at": "{reset_wk}" }},
   "plan_type": "prolite"
 }}"#
@@ -176,7 +182,7 @@ fn tui_top_bar_shows_codex_quota_when_cache_present() {
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
-    seed_codex_cache(home_tmp.path(), 24, 50);
+    seed_codex_cache(home_tmp.path(), Some(24), 50);
 
     let session = format!("tripwire-codex-{}", std::process::id());
     let _guard = TmuxSessionGuard {
@@ -247,5 +253,59 @@ fn tui_top_bar_hides_codex_when_no_cache() {
     assert!(
         !cap.contains("codex 5h"),
         "codex segment rendered despite no cache / no auth (hide-on-fail broken).\n{cap}"
+    );
+}
+
+/// Render-path assertion for a weekly-only cache (the prolite shape):
+/// ONLY `seven_day` present, no `five_hour` key. The status bar must
+/// render `codex wk NN% ↻` and MUST NOT emit any `codex 5h` segment.
+/// The parse-side regression guard is the unit test
+/// `parse_usage_routes_weekly_only_window_to_weekly_slot`.
+#[test]
+fn tui_top_bar_shows_codex_weekly_only() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_isolated_home(home_tmp.path());
+    seed_codex_cache(home_tmp.path(), None, 7);
+
+    let session = format!("tripwire-codex-wkonly-{}", std::process::id());
+    let _guard = TmuxSessionGuard {
+        name: session.clone(),
+    };
+
+    launch_and_goto_sessions(home_tmp.path(), &session);
+
+    // The watcher refreshes the snapshot every 5s; give it a few ticks to
+    // overlay the seeded codex cache and the status bar to repaint. The
+    // rendered cluster should be `codex wk 7% ↻ …` with no `5h` segment.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let shown = poll(&session, deadline, |c| {
+        c.contains("codex") && c.contains("wk") && c.contains("7%")
+    });
+
+    let final_cap = shown.unwrap_or_else(|| capture(&session));
+    assert!(
+        final_cap.contains("codex"),
+        "codex cluster never rendered on the top bar.\n{final_cap}"
+    );
+    assert!(
+        final_cap.contains("wk"),
+        "codex weekly window (wk) not rendered.\n{final_cap}"
+    );
+    assert!(
+        final_cap.contains("7%"),
+        "codex weekly percentage (7%) not visible.\n{final_cap}"
+    );
+    assert!(
+        final_cap.contains('↻'),
+        "codex reset stamp (↻) not visible.\n{final_cap}"
+    );
+    assert!(
+        !final_cap.contains("codex 5h"),
+        "weekly-only cache must never produce a 5h segment.\n{final_cap}"
     );
 }

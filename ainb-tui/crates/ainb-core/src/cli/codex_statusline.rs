@@ -17,9 +17,11 @@
 //       originator: codex_cli_rs                 (else Cloudflare 403s)
 //
 //   → `rate_limit.{primary_window,secondary_window}.{used_percent,
-//      reset_at}` where primary = 5h (limit_window_seconds 18000),
-//      secondary = weekly (604800), and `reset_at` is an absolute Unix
-//      epoch.
+//      reset_at,limit_window_seconds}` where `reset_at` is an absolute
+//      Unix epoch. The 5h vs weekly window is identified by
+//      `limit_window_seconds` (18000 vs 604800), NOT by primary/secondary
+//      position: some tiers (e.g. prolite) return a weekly-only window in
+//      `primary_window` with `secondary_window: null`. See `parse_usage`.
 //
 // Design constraints:
 //   - This is the single pull command; both drivers (the Codex `stop`
@@ -130,6 +132,11 @@ struct WhamWindow {
     /// payloads → the TUI just omits the `↻ <reset>` affordance.
     #[serde(default)]
     reset_at: Option<i64>,
+    /// Length of the rate-limit window in seconds (`18000` = 5h,
+    /// `604800` = weekly). This is what tells the 5h window apart from the
+    /// weekly one — the position in the payload does NOT (see `parse_usage`).
+    #[serde(default)]
+    limit_window_seconds: Option<i64>,
 }
 
 impl WhamWindow {
@@ -143,25 +150,53 @@ impl WhamWindow {
     }
 }
 
+/// Windows at or above this length (seconds) are the weekly bucket;
+/// shorter ones are the 5h bucket. Splits `18000` (5h) from `604800`
+/// (weekly) with a full day of slack on either side.
+const WEEKLY_WINDOW_MIN_SECONDS: i64 = 86_400;
+
 /// Parse a `wham/usage` response body into a populated `CodexLiveCache`.
 ///
-/// `primary_window` → 5h, `secondary_window` → weekly (matches the
-/// endpoint's window semantics: primary `limit_window_seconds` 18000,
-/// secondary 604800). Returns `Err` only when the body is not valid JSON;
-/// a well-formed body that simply lacks `rate_limit` yields a cache with
-/// both windows `None` (a valid "logged in but no quota data" state).
+/// Windows are routed by `limit_window_seconds`, NOT by position: the
+/// endpoint moves the sole window between `primary_window` and
+/// `secondary_window` across plan tiers (e.g. `prolite` returns a
+/// weekly-only window in `primary_window` with `secondary_window: null`),
+/// so a positional map mislabels the weekly window as 5h. A window whose
+/// length is `>= WEEKLY_WINDOW_MIN_SECONDS` fills the weekly slot, else the
+/// 5h slot; when `limit_window_seconds` is absent we fall back to position
+/// (primary → 5h, secondary → weekly).
+///
+/// Returns `Err` only when the body is not valid JSON; a well-formed body
+/// that simply lacks `rate_limit` yields a cache with both windows `None`
+/// (a valid "logged in but no quota data" state).
 ///
 /// `now_rfc3339` is injected so tests are deterministic; production passes
 /// `chrono::Utc::now().to_rfc3339()`.
 pub fn parse_usage(body: &str, now_rfc3339: String) -> Result<CodexLiveCache> {
     let usage: WhamUsage = serde_json::from_str(body)?;
-    let (five_hour, seven_day) = match usage.rate_limit {
-        Some(rl) => (
-            rl.primary_window.and_then(|w| w.to_rate_window()),
-            rl.secondary_window.and_then(|w| w.to_rate_window()),
-        ),
-        None => (None, None),
-    };
+    let mut five_hour = None;
+    let mut seven_day = None;
+    if let Some(rl) = usage.rate_limit {
+        for (window, is_primary) in [(rl.primary_window, true), (rl.secondary_window, false)] {
+            let Some(w) = window else { continue };
+            let is_weekly = match w.limit_window_seconds {
+                Some(secs) => secs >= WEEKLY_WINDOW_MIN_SECONDS,
+                None => !is_primary,
+            };
+            let Some(rw) = w.to_rate_window() else {
+                continue;
+            };
+            let slot = if is_weekly {
+                &mut seven_day
+            } else {
+                &mut five_hour
+            };
+            // First window to claim a slot keeps it: if the API ever put two
+            // windows in the same bucket, the earlier (primary) one wins
+            // rather than being overwritten by the later one.
+            slot.get_or_insert(rw);
+        }
+    }
     Ok(CodexLiveCache {
         version: CODEX_CACHE_SCHEMA_VERSION,
         updated_at: now_rfc3339,
@@ -380,6 +415,39 @@ mod tests {
                 .unwrap()
                 .timestamp(),
             1781787612
+        );
+    }
+
+    /// The live `prolite` shape as of 2026-07: a single weekly-only window
+    /// in `primary_window` (`limit_window_seconds` 604800) with
+    /// `secondary_window: null`. Positional mapping would mislabel this as
+    /// 5h; routing by `limit_window_seconds` puts it in the weekly slot.
+    const PROLITE_WEEKLY_ONLY_BODY: &str = r#"{
+        "plan_type": "prolite",
+        "rate_limit": {
+            "allowed": true,
+            "primary_window": {
+                "used_percent": 1,
+                "limit_window_seconds": 604800,
+                "reset_at": 1784718621
+            },
+            "secondary_window": null
+        }
+    }"#;
+
+    #[test]
+    fn parse_usage_routes_weekly_only_window_to_weekly_slot() {
+        let c = parse_usage(PROLITE_WEEKLY_ONLY_BODY, "now".to_string()).expect("parses");
+        assert!(c.five_hour.is_none(), "no 5h window on this tier");
+        let wk = c.seven_day.expect("weekly present in primary_window");
+        assert_eq!(wk.pct, 1);
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(
+                wk.resets_at.as_ref().expect("weekly reset_at present")
+            )
+            .expect("resets_at is valid RFC3339")
+            .timestamp(),
+            1784718621
         );
     }
 
