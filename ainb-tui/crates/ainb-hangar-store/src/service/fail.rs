@@ -58,6 +58,12 @@ pub enum FailureReason {
     /// The run stalled with no semantic progress (no new tool calls / output) —
     /// conversation-poisoning, retried *fresh* rather than resuming the stall.
     SemanticInactivity,
+    /// The provider subprocess could not be spawned or its OS-level execution
+    /// faulted — e.g. the configured `claude` / `codex` path does not resolve
+    /// (ENOENT). Distinct from [`Self::AgentError`] (the agent ran and gave up):
+    /// here the agent never started. Terminal (no retry): a misconfigured binary
+    /// path will not self-heal on a re-dispatch with the same daemon config.
+    SpawnError,
     /// An unclassified failure.
     Unknown,
 }
@@ -80,6 +86,7 @@ impl FailureReason {
             Self::IterationLimit => "iteration_limit",
             Self::ApiInvalidRequest => "api_invalid_request",
             Self::SemanticInactivity => "semantic_inactivity",
+            Self::SpawnError => "spawn_error",
             Self::Unknown => "unknown",
         }
     }
@@ -143,6 +150,7 @@ mod tests {
             FailureReason::IterationLimit,
             FailureReason::ApiInvalidRequest,
             FailureReason::SemanticInactivity,
+            FailureReason::SpawnError,
             FailureReason::Unknown,
         ] {
             let serde_token = serde_json::to_value(reason)

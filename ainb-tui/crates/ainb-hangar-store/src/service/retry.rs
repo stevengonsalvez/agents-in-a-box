@@ -28,7 +28,8 @@
 //!   from the resume hint so an auto-retry never inherits a stuck conversation.
 //! - **[`RetryDisposition::NoRetry`]** — [`FailureReason::AgentError`] (the LLM
 //!   mis-tooled / gave up), [`FailureReason::UserCancel`] (terminal by intent),
-//!   and [`FailureReason::Timeout`] / [`FailureReason::Unknown`]: no child row.
+//!   [`FailureReason::SpawnError`] (provider binary missing / unspawnable), and
+//!   [`FailureReason::Timeout`] / [`FailureReason::Unknown`]: no child row.
 //!
 //! `attempt >= max_attempts` caps the chain regardless of disposition.
 //!
@@ -242,10 +243,13 @@ impl RetryService {
             FailureReason::IterationLimit
             | FailureReason::ApiInvalidRequest
             | FailureReason::SemanticInactivity => RetryDisposition::FreshRetry,
-            // Agent / user / sweeper / unclassified terminals — no retry.
+            // Agent / user / sweeper / spawn / unclassified terminals — no retry.
+            // `SpawnError` is a misconfigured / missing provider binary: a
+            // re-dispatch under the same daemon config would only re-fail.
             FailureReason::AgentError
             | FailureReason::UserCancel
             | FailureReason::Timeout
+            | FailureReason::SpawnError
             | FailureReason::Unknown => RetryDisposition::NoRetry,
         }
     }
@@ -275,6 +279,7 @@ const FAILURE_REASONS: &[FailureReason] = &[
     FailureReason::IterationLimit,
     FailureReason::ApiInvalidRequest,
     FailureReason::SemanticInactivity,
+    FailureReason::SpawnError,
     FailureReason::Unknown,
 ];
 
@@ -298,6 +303,7 @@ mod tests {
             FailureReason::IterationLimit,
             FailureReason::ApiInvalidRequest,
             FailureReason::SemanticInactivity,
+            FailureReason::SpawnError,
             FailureReason::Unknown,
         ] {
             assert!(
@@ -307,7 +313,7 @@ mod tests {
         }
         assert_eq!(
             FAILURE_REASONS.len(),
-            9,
+            10,
             "FAILURE_REASONS length drifted from the FailureReason variant count",
         );
     }
