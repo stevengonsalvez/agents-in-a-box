@@ -60,34 +60,10 @@ git_directories = []
 /// Write a fresh `codex-live.json` into the isolated cache dir (macOS:
 /// `~/Library/Caches/ainb`, Linux: `~/.cache/ainb`). `updated_at` is set
 /// to now so the reader treats it as fresh AND the poller throttle skips a
-/// clobbering write.
-fn seed_codex_cache(home: &Path, five_pct: u8, week_pct: u8) {
-    let cache_dir = if cfg!(target_os = "macos") {
-        home.join("Library").join("Caches").join("ainb")
-    } else {
-        home.join(".cache").join("ainb")
-    };
-    fs::create_dir_all(&cache_dir).unwrap();
-    let now = chrono::Utc::now();
-    let updated = now.to_rfc3339();
-    let reset_5h = (now + chrono::Duration::hours(3)).to_rfc3339();
-    let reset_wk = (now + chrono::Duration::days(4)).to_rfc3339();
-    let json = format!(
-        r#"{{
-  "version": 1,
-  "updated_at": "{updated}",
-  "five_hour": {{ "pct": {five_pct}, "resets_at": "{reset_5h}" }},
-  "seven_day": {{ "pct": {week_pct}, "resets_at": "{reset_wk}" }},
-  "plan_type": "prolite"
-}}"#
-    );
-    fs::write(cache_dir.join("codex-live.json"), json).unwrap();
-}
-
-/// Write a `codex-live.json` with ONLY a `seven_day` (weekly) window —
-/// no `five_hour` key at all: the cache shape a prolite plan produces
-/// once `parse_usage` routes windows by `limit_window_seconds`.
-fn seed_codex_cache_weekly_only(home: &Path, week_pct: u8) {
+/// clobbering write. `five_pct: None` omits the `five_hour` key entirely —
+/// the cache shape a prolite plan produces once `parse_usage` routes
+/// windows by `limit_window_seconds`.
+fn seed_codex_cache(home: &Path, five_pct: Option<u8>, week_pct: u8) {
     let cache_dir = if cfg!(target_os = "macos") {
         home.join("Library").join("Caches").join("ainb")
     } else {
@@ -97,10 +73,16 @@ fn seed_codex_cache_weekly_only(home: &Path, week_pct: u8) {
     let now = chrono::Utc::now();
     let updated = now.to_rfc3339();
     let reset_wk = (now + chrono::Duration::days(4)).to_rfc3339();
+    let five_hour_line = five_pct
+        .map(|pct| {
+            let reset_5h = (now + chrono::Duration::hours(3)).to_rfc3339();
+            format!("\n  \"five_hour\": {{ \"pct\": {pct}, \"resets_at\": \"{reset_5h}\" }},")
+        })
+        .unwrap_or_default();
     let json = format!(
         r#"{{
   "version": 1,
-  "updated_at": "{updated}",
+  "updated_at": "{updated}",{five_hour_line}
   "seven_day": {{ "pct": {week_pct}, "resets_at": "{reset_wk}" }},
   "plan_type": "prolite"
 }}"#
@@ -200,7 +182,7 @@ fn tui_top_bar_shows_codex_quota_when_cache_present() {
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
-    seed_codex_cache(home_tmp.path(), 24, 50);
+    seed_codex_cache(home_tmp.path(), Some(24), 50);
 
     let session = format!("tripwire-codex-{}", std::process::id());
     let _guard = TmuxSessionGuard {
@@ -288,7 +270,7 @@ fn tui_top_bar_shows_codex_weekly_only() {
 
     let home_tmp = tempfile::tempdir().expect("home tempdir");
     seed_isolated_home(home_tmp.path());
-    seed_codex_cache_weekly_only(home_tmp.path(), 7);
+    seed_codex_cache(home_tmp.path(), None, 7);
 
     let session = format!("tripwire-codex-wkonly-{}", std::process::id());
     let _guard = TmuxSessionGuard {
