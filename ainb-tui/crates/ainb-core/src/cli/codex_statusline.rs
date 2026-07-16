@@ -17,9 +17,11 @@
 //       originator: codex_cli_rs                 (else Cloudflare 403s)
 //
 //   → `rate_limit.{primary_window,secondary_window}.{used_percent,
-//      reset_at}` where primary = 5h (limit_window_seconds 18000),
-//      secondary = weekly (604800), and `reset_at` is an absolute Unix
-//      epoch.
+//      reset_at,limit_window_seconds}` where `reset_at` is an absolute
+//      Unix epoch. The 5h vs weekly window is identified by
+//      `limit_window_seconds` (18000 vs 604800), NOT by primary/secondary
+//      position: some tiers (e.g. prolite) return a weekly-only window in
+//      `primary_window` with `secondary_window: null`. See `parse_usage`.
 //
 // Design constraints:
 //   - This is the single pull command; both drivers (the Codex `stop`
