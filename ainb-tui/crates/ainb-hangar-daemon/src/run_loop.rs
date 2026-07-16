@@ -860,7 +860,29 @@ async fn execute_claimed(
             // `kill_on_drop(true)`, SIGKILLing the provider's process group.
             RunOutcome::Cancelled(crate::runner::RunnerResult::default())
         }
-        res = provider_run => res?,
+        res = provider_run => match res {
+            Ok(outcome) => outcome,
+            // The provider process could not be spawned / executed (the
+            // configured `claude` / `codex` path does not resolve → ENOENT, or an
+            // OS-level exec/wait fault). The task is already `running` here, so
+            // propagating this error out of `execute_claimed` left the row frozen
+            // `running` until the multi-hour running TTL sweep — a task that
+            // already died sitting `running` indefinitely, well past any dispatch
+            // budget. Convert it to a terminal FAILED outcome so it flows through
+            // the SAME `finalize_failure` seam the agent-error path uses
+            // (teardown / run-history / event / retry taxonomy), finalising the
+            // row to `failed` immediately. `SpawnError` is `NoRetry`: a
+            // misconfigured binary path will not self-heal on a re-dispatch. The
+            // running-TTL sweeper stays as the backstop for a genuine crash that
+            // never reaches this arm at all.
+            Err(e) => {
+                tracing::error!(task_id = %task.id, error = %e, "provider spawn/exec failed; failing task");
+                RunOutcome::Failed {
+                    reason: ainb_hangar_store::service::fail::FailureReason::SpawnError,
+                    result: crate::runner::RunnerResult::default(),
+                }
+            }
+        },
     };
     // The guard is dropped once the run is decided so the registry stays bounded
     // to genuinely-live runs (its `Drop` deregisters this task).
