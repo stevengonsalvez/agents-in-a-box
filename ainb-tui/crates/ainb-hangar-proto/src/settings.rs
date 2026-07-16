@@ -138,6 +138,21 @@ pub struct DaemonHealthSnapshot {
     /// The rolling per-second throughput window — exactly [`THROUGHPUT_WINDOW`]
     /// samples, oldest-first, the last sample being the most recent whole second.
     pub task_throughput_60s: Vec<ThroughputSample>,
+    /// The answering daemon's version string.
+    ///
+    /// `#[serde(default)]` so a snapshot from a daemon that predates this field
+    /// still decodes — the empty string is itself the signal the pane renders as
+    /// "stale daemon binary".
+    #[serde(default)]
+    pub daemon_version: String,
+    /// Live database-drift diagnosis, `None` when healthy.
+    ///
+    /// `Some` when the applied schema is AHEAD of the answering binary's
+    /// embedded migrations (a stale daemon serving a newer database — every
+    /// pane silently renders zeros) or when the probe query fails outright.
+    /// The pane renders this as a loud red banner instead of empty stats.
+    #[serde(default)]
+    pub db_error: Option<String>,
 }
 
 #[cfg(test)]
@@ -166,12 +181,32 @@ mod tests {
                     failed: u32::from(i == 30),
                 })
                 .collect(),
+            daemon_version: "1.16.0 (abc1234, 2026-07-17, source)".into(),
+            db_error: Some("database schema (migration 41) is AHEAD".into()),
         };
         let s = serde_json::to_string(&snap).unwrap();
         let back: DaemonHealthSnapshot = serde_json::from_str(&s).unwrap();
         assert_eq!(back, snap);
         assert_eq!(back.task_throughput_60s.len(), THROUGHPUT_WINDOW);
         assert_eq!(back.task_throughput_60s[30].failed, 1);
+    }
+
+    /// A snapshot from a daemon that PREDATES the `daemon_version` / `db_error`
+    /// fields still decodes — with the empty-version sentinel the pane renders
+    /// as "stale daemon binary". Tolerant decode is the whole point of the
+    /// serde defaults: the old-daemon case is exactly the one that must not
+    /// fail to parse.
+    #[test]
+    fn daemon_health_snapshot_decodes_pre_version_wire() {
+        let old_wire = r#"{
+            "runtimes": [],
+            "claim_cache": {"used": 0, "capacity": 64},
+            "concurrent_tasks": 0,
+            "task_throughput_60s": []
+        }"#;
+        let back: DaemonHealthSnapshot = serde_json::from_str(old_wire).unwrap();
+        assert_eq!(back.daemon_version, "");
+        assert_eq!(back.db_error, None);
     }
 
     /// The settings snapshots round-trip through JSON.

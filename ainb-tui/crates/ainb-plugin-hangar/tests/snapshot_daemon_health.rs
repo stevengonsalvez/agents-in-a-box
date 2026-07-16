@@ -66,6 +66,8 @@ fn seeded_snapshot() -> DaemonHealthSnapshot {
         },
         concurrent_tasks: 3,
         task_throughput_60s: throughput,
+        daemon_version: "1.16.0 (abc1234, source)".into(),
+        db_error: None,
     }
 }
 
@@ -218,4 +220,77 @@ fn connected_runtime_dot_is_green() {
         green_dot,
         "the connected runtime's `●` presence dot must be painted ONLINE_GREEN"
     );
+}
+
+/// `OFFLINE_RED` — the warning/banner colour on the daemon-health pane.
+const OFFLINE_RED: ainb_plugin_sdk::Color = ainb_plugin_sdk::Color::rgb(220, 120, 100);
+
+/// A `db_error` in the snapshot renders the red DATABASE UNREACHABLE banner
+/// with the daemon's diagnosis — the stale-binary-serving-a-newer-database trap
+/// must scream, never render silently-blank zeros.
+#[test]
+fn db_error_renders_red_banner() {
+    let mut snap = seeded_snapshot();
+    snap.db_error =
+        Some("database schema (migration 41) is AHEAD of this daemon binary".into());
+    let state = DaemonHealthState::from_snapshot(snap);
+    let mut buf = WireBuffer::new(100, 24);
+    render_daemon_health(&mut buf, 100, 0, 24, &state);
+    let full = glyph_map(&buf, 100);
+
+    assert!(
+        full.contains("DATABASE UNREACHABLE"),
+        "banner headline:\n{full}"
+    );
+    assert!(
+        full.contains("migration 41"),
+        "banner carries the daemon's diagnosis:\n{full}"
+    );
+    // Non-vacuous colour check: the banner glyphs are painted OFFLINE_RED.
+    let red_banner = buf
+        .cells
+        .iter()
+        .any(|(_, cell)| cell.symbol == "✗" && cell.fg == Some(OFFLINE_RED));
+    assert!(red_banner, "the banner `✗` must be painted OFFLINE_RED");
+}
+
+/// An EMPTY `daemon_version` (a daemon that predates version reporting) renders
+/// the stale-binary warning instead of a version line.
+#[test]
+fn empty_version_renders_stale_daemon_warning() {
+    let mut snap = seeded_snapshot();
+    snap.daemon_version = String::new();
+    let state = DaemonHealthState::from_snapshot(snap);
+    let mut buf = WireBuffer::new(100, 24);
+    render_daemon_health(&mut buf, 100, 0, 24, &state);
+    let full = glyph_map(&buf, 100);
+
+    assert!(
+        full.contains("stale binary"),
+        "pre-version daemon must be flagged stale:\n{full}"
+    );
+    assert!(
+        !full.contains("daemon: 1.16"),
+        "no version line when the daemon reported none:\n{full}"
+    );
+}
+
+/// The healthy path renders the version line and NO banner (the banner must
+/// never false-positive on a healthy daemon).
+#[test]
+fn healthy_snapshot_renders_version_no_banner() {
+    let state = DaemonHealthState::from_snapshot(seeded_snapshot());
+    let mut buf = WireBuffer::new(100, 24);
+    render_daemon_health(&mut buf, 100, 0, 24, &state);
+    let full = glyph_map(&buf, 100);
+
+    assert!(
+        full.contains("daemon: 1.16.0 (abc1234, source)"),
+        "version line:\n{full}"
+    );
+    assert!(
+        !full.contains("DATABASE UNREACHABLE"),
+        "no banner on healthy:\n{full}"
+    );
+    assert!(!full.contains("stale binary"), "no stale warning:\n{full}");
 }

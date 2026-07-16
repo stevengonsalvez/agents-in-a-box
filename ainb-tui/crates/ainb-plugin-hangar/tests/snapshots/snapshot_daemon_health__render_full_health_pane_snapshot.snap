@@ -1,9 +1,9 @@
 ---
-source: "../plugins/hangar-tui/tests/snapshot_daemon_health.rs"
-assertion_line: 104
+source: crates/ainb-plugin-hangar/tests/snapshot_daemon_health.rs
 expression: full
 ---
 Daemon health
+daemon: 1.16.0 (abc1234, source)
 
 runtime: claude  ● connected  pid 14829
 
