@@ -161,6 +161,37 @@ const CODEX_MODEL_FLAG: &str = "-m";
 /// --skip-git-repo-check` → "unexpected argument", exit 2). See
 /// [`Runner::codex_spec`] for why that is also the right security posture.
 const CODEX_SKIP_GIT_CHECK_FLAG: &str = "--skip-git-repo-check";
+/// The codex sandbox-policy flag (`codex exec -s <mode>`), verified against
+/// codex-cli 0.144.0 (`-s, --sandbox <SANDBOX_MODE>`, possible values
+/// `read-only`, `workspace-write`, `danger-full-access`).
+const CODEX_SANDBOX_FLAG: &str = "-s";
+/// The sandbox policy the daemon selects for a HEADLESS codex `exec` run:
+/// `danger-full-access` — codex applies NO internal FS/network confinement.
+///
+/// This is not a convenience toggle; without it a codex agent can do no work.
+/// `codex exec` DEFAULTS to a read-only sandbox, so a headless run with no `-s`
+/// flag lets the model *invoke* a tool yet silently drops the write — the task
+/// exits 0 having produced nothing (verified against codex-cli 0.144.0: a brief
+/// instructing `printf … > file` ran the tool, exited 0, and wrote NO file with
+/// no `-s`; the identical brief under `-s workspace-write` and
+/// `-s danger-full-access` both wrote the file and exited 0). That is precisely
+/// the "reaches `done` having done no real work" bug class the live tripwire
+/// exists to catch, and it is a total functional break for the codex provider,
+/// not a subtle policy choice.
+///
+/// Why `danger-full-access` rather than `workspace-write`: the daemon's OWN
+/// OS-level FS sandbox (Seatbelt/Landlock, e38.23) is the confinement boundary —
+/// the same justification already documented for [`CODEX_SKIP_GIT_CHECK_FLAG`].
+/// Layering codex's internal Seatbelt UNDER the daemon's Seatbelt on macOS nests
+/// two sandboxes and breaks path resolution; `danger-full-access` disables
+/// codex's own confinement so the daemon's is the single boundary. This mirrors
+/// copilot's mandatory `--allow-all-tools` exactly (both delegate confinement to
+/// the daemon FS sandbox + env allowlist, both surfaced by the P5.6
+/// `warnings::danger-full-access` operator warning). HEADLESS ONLY: the
+/// interactive path deliberately has no FS sandbox and a human is attached to
+/// answer codex's own trust/approval prompts, so it keeps codex's default
+/// confinement (see [`Runner::codex_spec`]).
+const CODEX_SANDBOX_HEADLESS: &str = "danger-full-access";
 /// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
 /// provider. Its own log keeps a copilot transcript separate from claude/codex.
 const COPILOT_LOG_FILE: &str = "copilot.jsonl";
@@ -892,16 +923,19 @@ impl Runner {
         }
     }
 
-    /// The `codex` provider spec: codex log file + `[exec --skip-git-repo-check]
-    /// [-m <model>] [<cli_args>…] -- <prompt>` (e38.16).
+    /// The `codex` provider spec: codex log file + `[exec --skip-git-repo-check
+    /// -s danger-full-access] [-m <model>] [<cli_args>…] -- <prompt>` (e38.16).
     ///
     /// Verified against codex-cli 0.144.0, whose usage is both
     /// `codex [OPTIONS] [PROMPT]` (interactive TUI) and `codex exec …`
     /// ("Run Codex non-interactively"):
     ///
     /// * [`Mode::Headless`] leads with the `exec` subcommand, plus
-    ///   [`CODEX_SKIP_GIT_CHECK_FLAG`].
-    /// * [`Mode::Interactive`] omits BOTH, so the top-level TUI starts with the
+    ///   [`CODEX_SKIP_GIT_CHECK_FLAG`] and the [`CODEX_SANDBOX_FLAG`]
+    ///   `danger-full-access` policy — without the latter, codex's default
+    ///   read-only `exec` sandbox drops every write and the agent produces
+    ///   nothing (see [`CODEX_SANDBOX_HEADLESS`]).
+    /// * [`Mode::Interactive`] omits ALL THREE, so the top-level TUI starts with the
     ///   brief as its opening prompt. `codex exec` in a tmux pane would stream and
     ///   exit rather than give the operator a session.
     ///
@@ -931,6 +965,8 @@ impl Runner {
         if mode == Mode::Headless {
             argv.push(CODEX_EXEC_SUBCOMMAND.to_string());
             argv.push(CODEX_SKIP_GIT_CHECK_FLAG.to_string());
+            argv.push(CODEX_SANDBOX_FLAG.to_string());
+            argv.push(CODEX_SANDBOX_HEADLESS.to_string());
         }
         if let Some(model) = &invocation.model {
             argv.push(CODEX_MODEL_FLAG.to_string());
