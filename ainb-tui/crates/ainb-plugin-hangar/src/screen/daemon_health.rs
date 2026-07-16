@@ -45,6 +45,14 @@ pub struct DaemonHealthState {
     concurrent_tasks: u32,
     /// The rolling per-second throughput window (oldest-first).
     throughput: Vec<ThroughputSample>,
+    /// The answering daemon's version string. Empty when the daemon predates
+    /// version reporting — rendered as a loud "stale daemon binary" warning,
+    /// because a pre-field daemon is by definition an old build.
+    daemon_version: String,
+    /// Live database-drift diagnosis from the daemon (`None` = healthy).
+    /// `Some` renders as a red banner ABOVE the stats: zeros under a dead
+    /// database are lies, and the banner says so.
+    db_error: Option<String>,
 }
 
 impl DaemonHealthState {
@@ -57,7 +65,15 @@ impl DaemonHealthState {
             claim_capacity: snap.claim_cache.capacity,
             concurrent_tasks: snap.concurrent_tasks,
             throughput: snap.task_throughput_60s,
+            daemon_version: snap.daemon_version,
+            db_error: snap.db_error,
         }
+    }
+
+    /// The database-drift banner text, if any (read accessor for tests / glue).
+    #[must_use]
+    pub fn db_error(&self) -> Option<&str> {
+        self.db_error.as_deref()
     }
 
     /// The registered runtimes (read accessor for tests / glue).
@@ -103,7 +119,42 @@ pub fn render_daemon_health(
 ) {
     let mut row = top;
     put_str(buf, 0, row, "Daemon health", GOLD, area_w);
-    row += 2;
+    row += 1;
+
+    // Daemon version line — the eyeball check for "am I talking to the build I
+    // think I am?". An EMPTY version means the daemon predates version
+    // reporting, which is by definition a stale binary: warn loudly.
+    if row <= bottom {
+        if state.daemon_version.is_empty() {
+            put_str(
+                buf,
+                0,
+                row,
+                "⚠ daemon predates version reporting — stale binary; restart the daemon",
+                OFFLINE_RED,
+                area_w,
+            );
+        } else {
+            let x = put_str(buf, 0, row, "daemon: ", MUTED_GRAY, area_w);
+            put_str(buf, x, row, &state.daemon_version, SOFT_WHITE, area_w);
+        }
+        row += 1;
+    }
+
+    // Database-drift banner (red, ABOVE the stats): when the daemon reports its
+    // database is dead or ahead of its binary, the zeros below are lies — say
+    // so instead of rendering a silently-blank pane.
+    if let Some(err) = &state.db_error {
+        if row <= bottom {
+            put_str(buf, 0, row, "✗ DATABASE UNREACHABLE", OFFLINE_RED, area_w);
+            row += 1;
+        }
+        if row <= bottom {
+            put_str(buf, 2, row, err, OFFLINE_RED, area_w);
+            row += 1;
+        }
+    }
+    row += 1;
 
     // Runtimes list (one row each): `runtime: <provider>  ● <status>  pid <pid>`.
     if state.runtimes.is_empty() {

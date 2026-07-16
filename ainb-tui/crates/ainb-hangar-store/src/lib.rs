@@ -93,3 +93,40 @@ pub async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
     sqlx::migrate!("./migrations").run(pool).await?;
     Ok(())
 }
+
+/// Probe whether the LIVE database has drifted away from the schema this
+/// binary was compiled against, returning a human-readable description of the
+/// drift (or the probe failure) — `None` means healthy.
+///
+/// The trap this catches: a stale daemon binary keeps serving a database that
+/// a NEWER binary has since migrated forward. `sqlx` only validates migrations
+/// at pool-open, so the running daemon never notices — its queries half-work
+/// against the newer schema and every surface renders empty zeros instead of
+/// an error. The daemon-health snapshot calls this on demand so the TUI can
+/// scream "restart the daemon" instead of rendering a silently-blank pane.
+///
+/// Two signals, both folded into the returned string:
+/// - the applied `MAX(version)` in `_sqlx_migrations` is AHEAD of the newest
+///   migration embedded in this binary → stale binary;
+/// - the probe query itself fails (file deleted, corrupt, locked) → the
+///   database is unreachable outright.
+pub async fn schema_drift(pool: &SqlitePool) -> Option<String> {
+    let embedded_max = sqlx::migrate!("./migrations")
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .unwrap_or(0);
+    let applied_max: Result<Option<i64>, sqlx::Error> =
+        sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
+            .fetch_one(pool)
+            .await;
+    match applied_max {
+        Ok(Some(applied)) if applied > embedded_max => Some(format!(
+            "database schema (migration {applied}) is AHEAD of this daemon binary \
+             (migration {embedded_max}) — stale binary; restart the daemon from the \
+             current build"
+        )),
+        Ok(_) => None,
+        Err(e) => Some(format!("database unreachable: {e}")),
+    }
+}

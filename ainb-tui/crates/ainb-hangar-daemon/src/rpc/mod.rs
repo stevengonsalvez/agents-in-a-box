@@ -4029,6 +4029,10 @@ async fn daemon_health_snapshot(
         claim_cache: health.stats.claim_cache(concurrent_tasks),
         concurrent_tasks,
         task_throughput_60s: health.stats.throughput_window(now_sec),
+        daemon_version: health.version.clone(),
+        // Live drift probe: a stale daemon serving a newer database (or a dead
+        // database file) must surface as a loud banner, not silent zero stats.
+        db_error: ainb_hangar_store::schema_drift(pool).await,
     })
 }
 
