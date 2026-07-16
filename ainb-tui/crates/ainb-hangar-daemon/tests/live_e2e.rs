@@ -220,7 +220,35 @@ async fn live_dispatch_writes_nonce_artifact() {
         read_log(home.path())
     );
 
-    eprintln!("LIVE E2E OK: task {task_id} done; nonce artifact verified at {artifact:?}");
+    // 8. bead 48c: `--output-format stream-json` makes claude emit the structured
+    //    terminal the runner pins session_id + usage from. Before it, `claude -p`
+    //    printed ~5 bytes of plain text and BOTH were silently `None` despite the
+    //    runner's session-pin doc promising otherwise. A real success must now
+    //    populate them end-to-end — asserted on the DB row + the usage table, the
+    //    live proof 48c is closed.
+    let session_id: Option<String> = row.get("session_id");
+    assert!(
+        session_id.as_deref().is_some_and(|s| !s.is_empty()),
+        "48c: a real claude success must persist a session_id (got {session_id:?}); it was None \
+         while claude emitted plain text. daemon log:\n{}",
+        read_log(home.path())
+    );
+    let usage = fetch_usage(&pool, &task_id).await.unwrap_or_else(|| {
+        panic!(
+            "48c: a real claude success must record token usage in task_usage for {task_id}; \
+             usage was None while claude emitted plain text. daemon log:\n{}",
+            read_log(home.path())
+        )
+    });
+    assert!(
+        usage.output_tokens > 0,
+        "48c: recorded usage must carry real output tokens, got {usage:?}"
+    );
+
+    eprintln!(
+        "LIVE E2E OK: task {task_id} done; nonce artifact verified at {artifact:?}; \
+         48c session_id={session_id:?} usage={usage:?}"
+    );
 }
 
 /// The codex leg of the same tripwire: the REAL daemon dispatching the REAL
@@ -384,6 +412,113 @@ async fn live_dispatch_codex_writes_nonce_artifact() {
     eprintln!("LIVE E2E CODEX OK: task {task_id} done; nonce artifact verified at {artifact:?}");
 }
 
+/// bead 48d (the DB-row proof): the REAL daemon must NOT mark a task `done` when
+/// the provider EXITS 0 but its structured stream reports non-success.
+///
+/// ```text
+///  issue create ──▶ queued task
+///        │                    │
+///        ▼         real ainb-hangar-daemon (this binary)
+///  claim ─▶ dispatch ─▶ stand-in claude: emits `result subtype=error_max_turns`
+///                        then `exit 0`   ─▶ status=failed reason=iteration_limit
+/// ```
+///
+/// # Why a stand-in, not the real CLI, for THIS leg
+///
+/// Empirically (verified against Claude Code 2.1.211 / codex-cli 0.144.0), both
+/// real CLIs exit *non-zero* on their hard failures: claude `--max-turns 1`
+/// exits 1, codex `turn.failed` exits 1. A refusal exits 0 but self-reports
+/// `subtype:"success"` (a SEMANTIC problem, out of scope here). So the exact 48d
+/// hole — a provider that EXITS 0 while its OWN terminal reports an error — cannot
+/// be induced with the live CLI; a stand-in emitting claude's real
+/// `error_max_turns` result and exiting 0 is the only way to exercise it. The
+/// daemon under test is REAL, and the assertion is the DB ROW (status +
+/// failure_reason), never a log line.
+///
+/// # Mutation self-check
+///
+/// Revert the finalize-on-structured-result change in `runner::run_provider`
+/// (the `match terminal { … }` block) and this task reaches `done` — the exit-0
+/// fallback scores it `Success` — turning the `failed` + `iteration_limit`
+/// assertions RED. Restore → green. That flip IS the bug 48c/48d closes.
+#[tokio::test]
+async fn live_exit0_structured_error_finalizes_failed_not_done() {
+    let Some(ainb) = ainb_bin() else {
+        eprintln!("SKIPPED: ainb binary not built (run `cargo build -p ainb --bin ainb`)");
+        return;
+    };
+    // No claude/PATH/auth gate: the provider is a deterministic stand-in and the
+    // DAEMON is real, so this leg runs whenever the live-e2e feature + binaries
+    // are built (no spend, no provider dependency).
+    let tag = format!("{}-{}", std::process::id(), now_ms());
+    let agent_name = format!("live-e2e-exit0err-{tag}");
+    let home = tempfile::tempdir().expect("tempdir home");
+    let db_path = home.path().join("hangar.db");
+
+    run_ainb(
+        &ainb,
+        home.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            &agent_name,
+            "--provider",
+            "claude",
+        ],
+    );
+    let pool = open_pool(&db_path).await;
+    let (agent_id, runtime_id) = agent_ids_by_name(&pool, &agent_name).await;
+
+    // A stand-in `claude` that emits claude's REAL max-turns terminal, then exits
+    // 0 — the exact exit-0-structured-failure shape the live CLI never produces.
+    let standin = write_exit0_structured_error_claude(home.path());
+    let daemon = LiveDaemon::spawn(
+        &home.path().join("daemon.log"),
+        home.path(),
+        &runtime_id,
+        &standin,
+    );
+
+    let stdout = run_ainb_capture(
+        &ainb,
+        home.path(),
+        &[
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "structured-error tripwire brief",
+            "--assign",
+            &agent_id,
+        ],
+    );
+    let task_id = parse_queued_task_id(&stdout);
+
+    let row = wait_for_terminal(&pool, &task_id, TASK_BUDGET, home.path()).await;
+    let status: String = row.get("status");
+    let reason: Option<String> = row.get("failure_reason");
+    drop(daemon);
+
+    assert_eq!(
+        status,
+        "failed",
+        "the provider EXITED 0 but reported error_max_turns — the task must be `failed`, not \
+         `done` over no work (bead 48d). daemon log:\n{}",
+        read_log(home.path())
+    );
+    assert_eq!(
+        reason.as_deref(),
+        Some("iteration_limit"),
+        "error_max_turns must persist the retry-fresh iteration_limit reason, got {reason:?}. \
+         daemon log:\n{}",
+        read_log(home.path())
+    );
+
+    eprintln!("LIVE E2E OK: exit-0 structured error → task {task_id} failed/iteration_limit");
+}
+
 // ---------------------------------------------------------------------------
 // Harness
 // ---------------------------------------------------------------------------
@@ -505,19 +640,62 @@ fn write_noop_claude(dir: &Path) -> PathBuf {
 }
 
 /// The codex counterpart of [`write_noop_claude`]: an executable no-op stand-in
-/// for `codex` used ONLY by the codex mutation self-check. The daemon keys a
-/// codex run's success on its exit code (JSONL parsing is best-effort for codex),
-/// so this simply prints a line and exits 0 — a provider that reaches `done`
-/// having written NO nonce file. The live artifact assertion must catch it.
-/// Returns the script path to hand the daemon as `HANGAR_CODEX_PATH`.
+/// for `codex` used ONLY by the codex mutation self-check. It emits codex's
+/// structured `turn.completed` success terminal (bead 48c: the daemon now
+/// finalizes a codex run on that event, not its exit code) but writes NO nonce
+/// file — a provider that reaches `done` having done no real work. The live
+/// artifact assertion must catch it. Returns the script path to hand the daemon
+/// as `HANGAR_CODEX_PATH`.
 fn write_noop_codex(dir: &Path) -> PathBuf {
     let path = dir.join("noop-codex.sh");
     let body = "#!/bin/sh\n\
-         echo 'noop codex: reached done without writing the nonce'\n\
+         echo '{\"type\":\"thread.started\",\"thread_id\":\"noop-codex\"}'\n\
+         echo '{\"type\":\"turn.completed\",\"usage\":{\"input_tokens\":1,\"output_tokens\":1}}'\n\
          exit 0\n";
     std::fs::write(&path, body).expect("write noop-codex");
     make_executable(&path);
     path
+}
+
+/// A stand-in `claude` for [`live_exit0_structured_error_finalizes_failed_not_done`]:
+/// it emits claude's REAL `error_max_turns` terminal (bead 48d) and then exits 0
+/// — the exit-0-structured-failure shape the live CLI never produces (real claude
+/// exits 1 on max-turns). The daemon must finalize this `failed`/`iteration_limit`,
+/// never `done`. Returns the script path to hand the daemon as `HANGAR_CLAUDE_PATH`.
+fn write_exit0_structured_error_claude(dir: &Path) -> PathBuf {
+    let path = dir.join("exit0-error-claude.sh");
+    let body = "#!/bin/sh\n\
+         echo '{\"type\":\"system\",\"session_id\":\"exit0-err\"}'\n\
+         echo '{\"type\":\"result\",\"subtype\":\"error_max_turns\",\"is_error\":true,\"num_turns\":2}'\n\
+         exit 0\n";
+    std::fs::write(&path, body).expect("write exit0-error claude");
+    make_executable(&path);
+    path
+}
+
+/// A `task_usage` row's token/cost tallies, for the 48c capture assertion.
+#[derive(Debug)]
+struct UsageRow {
+    #[allow(dead_code)]
+    input_tokens: i64,
+    output_tokens: i64,
+    #[allow(dead_code)]
+    cost_usd: f64,
+}
+
+/// Fetch the recorded usage for a task from `task_usage`, or `None` if the run
+/// reported none (the pre-48c state for claude).
+async fn fetch_usage(pool: &SqlitePool, task_id: &str) -> Option<UsageRow> {
+    sqlx::query("SELECT input_tokens, output_tokens, cost_usd FROM task_usage WHERE task_id = ?")
+        .bind(task_id)
+        .fetch_optional(pool)
+        .await
+        .expect("query task_usage")
+        .map(|r| UsageRow {
+            input_tokens: r.get("input_tokens"),
+            output_tokens: r.get("output_tokens"),
+            cost_usd: r.get("cost_usd"),
+        })
 }
 
 /// Mark a stand-in script executable (0o755) on unix so the daemon can spawn it.
