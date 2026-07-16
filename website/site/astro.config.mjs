@@ -155,6 +155,7 @@ export default defineConfig({
             { label: 'The construct', slug: 'knowledge/reflect-memory/construct' },
             { label: 'Recall reference (57 ports)', slug: 'knowledge/reflect-memory/recall' },
             { label: 'Why build, not adopt', slug: 'knowledge/reflect-memory/comparison' },
+            { label: 'Memory browser (reflect serve)', slug: 'knowledge/reflect-memory/serve' },
           ],
         },
         {
