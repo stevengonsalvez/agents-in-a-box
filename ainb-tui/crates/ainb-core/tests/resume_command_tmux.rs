@@ -50,6 +50,7 @@ fn kill(name: &str) {
 async fn launched_command(
     name: &str,
     agent: SessionAgentType,
+    model: Option<&str>,
     resume_transcript: Option<PathBuf>,
     resume_requested: bool,
 ) -> String {
@@ -57,8 +58,7 @@ async fn launched_command(
     mgr.start_cli_in_tmux(
         name,
         true, // skip_permissions (yolo)
-        None, // claude_model
-        None, // codex_model
+        model.map(str::to_string),
         agent,
         resume_transcript,
         resume_requested,
@@ -82,6 +82,7 @@ async fn claude_resume_launches_continue_not_resume_path() {
     let cmd = launched_command(
         &name,
         SessionAgentType::Claude,
+        None,
         Some(PathBuf::from("/tmp/whatever.jsonl")),
         true,
     )
@@ -112,7 +113,14 @@ async fn codex_resume_launches_resume_last() {
     let name = format!("ainb-verify-codex-{}", std::process::id());
     new_session(&name);
     // Codex gets no transcript path; resume_requested drives `resume --last`.
-    let cmd = launched_command(&name, SessionAgentType::Codex, None, true).await;
+    let cmd = launched_command(
+        &name,
+        SessionAgentType::Codex,
+        Some("gpt-5.6-luna"),
+        None,
+        true,
+    )
+    .await;
     kill(&name);
 
     assert!(
@@ -122,6 +130,10 @@ async fn codex_resume_launches_resume_last() {
     assert!(
         cmd.contains("--dangerously-bypass-approvals-and-sandbox"),
         "codex yolo flag must survive resume, got: {cmd}"
+    );
+    assert!(
+        cmd.contains("--model gpt-5.6-luna"),
+        "raw Codex model must survive resume, got: {cmd}"
     );
 }
 
@@ -133,7 +145,7 @@ async fn copilot_resume_launches_continue() {
     }
     let name = format!("ainb-verify-copilot-{}", std::process::id());
     new_session(&name);
-    let cmd = launched_command(&name, SessionAgentType::Copilot, None, true).await;
+    let cmd = launched_command(&name, SessionAgentType::Copilot, None, None, true).await;
     kill(&name);
 
     assert!(
@@ -154,7 +166,7 @@ async fn claude_fresh_launch_has_no_resume() {
     }
     let name = format!("ainb-verify-fresh-{}", std::process::id());
     new_session(&name);
-    let cmd = launched_command(&name, SessionAgentType::Claude, None, false).await;
+    let cmd = launched_command(&name, SessionAgentType::Claude, None, None, false).await;
     kill(&name);
 
     assert!(

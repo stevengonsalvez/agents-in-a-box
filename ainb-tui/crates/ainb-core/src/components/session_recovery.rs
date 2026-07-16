@@ -873,8 +873,7 @@ impl SessionRecoveryState {
                     &provider,
                     agent_type,
                     true, // skip_permissions — recovery launches yolo, as before
-                    None, // claude_model
-                    None, // codex_model
+                    None, // model
                     true, // resume_requested — orphan recovery is a resume
                     has_history,
                 )

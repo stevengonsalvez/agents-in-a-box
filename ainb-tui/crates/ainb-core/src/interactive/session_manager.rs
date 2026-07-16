@@ -13,9 +13,7 @@
 
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::git::WorktreeManager;
-use crate::models::{
-    ClaudeModel, CodexModel, Session, SessionAgentType, SessionMode, SessionStatus,
-};
+use crate::models::{CodexModel, Session, SessionAgentType, SessionMode, SessionStatus};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -61,7 +59,8 @@ pub struct InteractiveSession {
     pub workspace_name: String,
     pub created_at: DateTime<Utc>,
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
-    pub model: Option<ClaudeModel>,   // Claude model for this session (only for Claude agent)
+    pub skip_permissions: bool,       // Provider-specific dangerous/yolo launch flag
+    pub model: Option<String>,        // Raw provider model ID passed through to the CLI
     pub headroom_enabled: bool,       // Route this session's CLI through the local Headroom proxy
     pub rtk_enabled: bool,            // RTK PreToolUse hook wired in session's worktree
 }
@@ -93,9 +92,46 @@ pub struct SessionMetadata {
     #[serde(default)]
     pub skip_permissions: Option<bool>,
     #[serde(default)]
-    pub model: Option<ClaudeModel>,
+    pub model: Option<String>,
+    /// Legacy Codex-only field. New writes use provider-agnostic `model`.
     #[serde(default)]
     pub codex_model: Option<CodexModel>,
+}
+
+impl SessionMetadata {
+    /// Resolve the raw model value used for launch/restart.
+    ///
+    /// New metadata stores the exact CLI value in `model`. Legacy enum values
+    /// serialized as strings are translated to their historical canonical IDs.
+    /// Old Codex records stored their model in `codex_model`, so retain that
+    /// fallback until the on-disk corpus has naturally migrated.
+    pub fn launch_model(&self) -> Option<String> {
+        if let Some(model) = self.model.as_deref() {
+            return normalize_persisted_model(self.agent_type, model);
+        }
+
+        self.codex_model.and_then(|model| model.cli_value()).map(str::to_string)
+    }
+}
+
+fn normalize_persisted_model(agent_type: SessionAgentType, value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") || trimmed == "SystemDefault" {
+        return None;
+    }
+
+    let legacy = match (agent_type, trimmed) {
+        (SessionAgentType::Claude, "Fable") => Some("claude-fable-5"),
+        (SessionAgentType::Claude, "Opus") => Some("claude-opus-4-8"),
+        (SessionAgentType::Claude, "Opus47") => Some("claude-opus-4-7"),
+        (SessionAgentType::Claude, "Opus46") => Some("claude-opus-4-6"),
+        (SessionAgentType::Claude, "Sonnet") => Some("claude-sonnet-4-6"),
+        (SessionAgentType::Claude, "Haiku") => Some("claude-haiku-4-5"),
+        (SessionAgentType::Claude, "OpusPlan") => Some("opusplan"),
+        _ => None,
+    };
+
+    Some(legacy.unwrap_or(trimmed).to_string())
 }
 
 /// Storage for all persisted session metadata
@@ -339,20 +375,13 @@ impl InteractiveSessionManager {
         base_branch: Option<String>,
         skip_permissions: bool,
         agent_type: SessionAgentType,
-        model: Option<ClaudeModel>,
-        codex_model: Option<CodexModel>,
+        model: Option<String>,
         headroom_enabled: bool,
         rtk_enabled: bool,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
-            "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, codex_model={:?}, skip_permissions={})",
-            session_id,
-            branch_name,
-            workspace_name,
-            agent_type,
-            model,
-            codex_model,
-            skip_permissions
+            "Creating Interactive session {} for branch '{}' in workspace '{}' (agent={:?}, model={:?}, skip_permissions={})",
+            session_id, branch_name, workspace_name, agent_type, model, skip_permissions
         );
 
         // Check if session already exists
@@ -399,14 +428,13 @@ impl InteractiveSessionManager {
             | SessionAgentType::Gemini
             | SessionAgentType::Copilot => {
                 info!(
-                    "Starting {:?} CLI in tmux session (model={:?}, codex_model={:?}, skip_permissions={})",
-                    agent_type, model, codex_model, skip_permissions
+                    "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
+                    agent_type, model, skip_permissions
                 );
                 self.start_cli_in_tmux(
                     &tmux_session_name,
                     skip_permissions,
-                    model,
-                    codex_model,
+                    model.clone(),
                     agent_type,
                     None,
                     false, // resume_requested — fresh launch
@@ -430,7 +458,8 @@ impl InteractiveSessionManager {
             workspace_name: workspace_name.clone(),
             created_at,
             agent_type,
-            model,
+            skip_permissions,
+            model: model.clone(),
             headroom_enabled,
             rtk_enabled,
         };
@@ -449,7 +478,7 @@ impl InteractiveSessionManager {
             rtk_enabled,
             skip_permissions: Some(skip_permissions),
             model,
-            codex_model,
+            codex_model: None,
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
         // can't lost-update this upsert (pu4).
@@ -499,18 +528,16 @@ impl InteractiveSessionManager {
         branch_name: String,
         skip_permissions: bool,
         agent_type: SessionAgentType,
-        model: Option<ClaudeModel>,
-        codex_model: Option<CodexModel>,
+        model: Option<String>,
         headroom_enabled: bool,
         rtk_enabled: bool,
     ) -> Result<InteractiveSession, InteractiveSessionError> {
         info!(
-            "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?}, codex_model={:?})",
+            "Creating Interactive session {} with existing worktree at '{}' (agent={:?}, model={:?})",
             session_id,
             existing_worktree_path.display(),
             agent_type,
-            model,
-            codex_model
+            model
         );
 
         // Check if session already exists
@@ -568,14 +595,13 @@ impl InteractiveSessionManager {
             | SessionAgentType::Gemini
             | SessionAgentType::Copilot => {
                 info!(
-                    "Starting {:?} CLI in tmux session (model={:?}, codex_model={:?}, skip_permissions={})",
-                    agent_type, model, codex_model, skip_permissions
+                    "Starting {:?} CLI in tmux session (model={:?}, skip_permissions={})",
+                    agent_type, model, skip_permissions
                 );
                 self.start_cli_in_tmux(
                     &tmux_session_name,
                     skip_permissions,
-                    model,
-                    codex_model,
+                    model.clone(),
                     agent_type,
                     None,
                     false, // resume_requested — fresh launch
@@ -600,7 +626,8 @@ impl InteractiveSessionManager {
             workspace_name: workspace_name.clone(),
             created_at,
             agent_type,
-            model,
+            skip_permissions,
+            model: model.clone(),
             headroom_enabled,
             rtk_enabled,
         };
@@ -619,7 +646,7 @@ impl InteractiveSessionManager {
             rtk_enabled,
             skip_permissions: Some(skip_permissions),
             model,
-            codex_model,
+            codex_model: None,
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
         if let Err(e) = SessionStore::mutate(|store| store.upsert(metadata)) {
@@ -744,7 +771,8 @@ impl InteractiveSessionManager {
                     workspace_name,
                     created_at: metadata.created_at,
                     agent_type,
-                    model: None,
+                    skip_permissions: metadata.skip_permissions.unwrap_or(true),
+                    model: metadata.launch_model(),
                     headroom_enabled: metadata.headroom_enabled,
                     rtk_enabled: metadata.rtk_enabled,
                 });
@@ -794,6 +822,7 @@ impl InteractiveSessionManager {
                     workspace_name,
                     created_at: Utc::now(),
                     agent_type,
+                    skip_permissions: true,
                     model: None,
                     headroom_enabled: false,
                     rtk_enabled: false,
@@ -1346,8 +1375,7 @@ impl InteractiveSessionManager {
         provider: &crate::config::CliProvider,
         agent_type: SessionAgentType,
         skip_permissions: bool,
-        claude_model: Option<ClaudeModel>,
-        codex_model: Option<CodexModel>,
+        model: Option<&str>,
         resume_requested: bool,
         has_history: bool,
     ) -> Vec<String> {
@@ -1365,28 +1393,19 @@ impl InteractiveSessionManager {
             cmd_parts.push("--last".to_string());
         }
 
-        // Add `--model` only when the provider's model resolves to a
-        // non-`SystemDefault` variant. SystemDefault → no flag (CLI default
-        // applies). Gemini / Copilot: never emit `--model` today. For codex
-        // resume these land after `resume --last`, a valid option position.
-        match agent_type {
-            SessionAgentType::Claude => {
-                if let Some(m) = claude_model {
-                    if let Some(id) = m.cli_value() {
-                        cmd_parts.push("--model".to_string());
-                        cmd_parts.push(id.to_string());
-                    }
-                }
+        // AINB does not own provider model catalogs. Pass any non-default raw
+        // value through unchanged; provider CLI performs validation.
+        if matches!(
+            agent_type,
+            SessionAgentType::Claude | SessionAgentType::Codex
+        ) {
+            if let Some(model) = model
+                .map(str::trim)
+                .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"))
+            {
+                cmd_parts.push("--model".to_string());
+                cmd_parts.push(model.to_string());
             }
-            SessionAgentType::Codex => {
-                if let Some(m) = codex_model {
-                    if let Some(id) = m.cli_value() {
-                        cmd_parts.push("--model".to_string());
-                        cmd_parts.push(id.to_string());
-                    }
-                }
-            }
-            _ => {}
         }
 
         // Add skip permissions flag if specified (provider-specific). Valid
@@ -1433,19 +1452,15 @@ impl InteractiveSessionManager {
     ///   * Copilot: emits `--continue` (most recent copilot session; unguarded).
     ///   * Gemini: no resume flag wired — always starts fresh.
     ///
-    /// **Model flag emission (2026-05 refresh):**
-    ///   * Claude: `--model <id>` only when `claude_model` is a non-default
-    ///     `ClaudeModel`. `None` / `Some(SystemDefault)` ⇒ flag omitted (CLI
-    ///     default applies).
-    ///   * Codex: `--model <id>` only when `codex_model` is a non-default
-    ///     `CodexModel`. Same omit-on-default semantics as Claude.
+    /// **Model flag emission:**
+    ///   * Claude / Codex: pass the raw persisted value through unchanged.
+    ///     `None`, empty, or `default` omits the flag.
     ///   * Gemini / Copilot: never emit `--model`.
     pub async fn start_cli_in_tmux(
         &self,
         session_name: &str,
         skip_permissions: bool,
-        claude_model: Option<ClaudeModel>,
-        codex_model: Option<CodexModel>,
+        model: Option<String>,
         agent_type: SessionAgentType,
         resume_transcript: Option<PathBuf>,
         resume_requested: bool,
@@ -1514,14 +1529,12 @@ impl InteractiveSessionManager {
             &provider,
             agent_type,
             skip_permissions,
-            claude_model,
-            codex_model,
+            model.as_deref(),
             resume_requested,
             resume_transcript.is_some(),
         );
 
         let cli_cmd = cmd_parts.join(" ");
-        let full_cmd = format!("{}{}", env_setup, cli_cmd);
 
         info!(
             "Starting {} with command: {}",
@@ -1573,7 +1586,12 @@ impl InteractiveSessionManager {
         } else {
             // Env-setup path: wrap in `sh -c` so the inline `export FOO=bar; …`
             // gets evaluated. Use sh (not zsh) — no .zshrc, no race.
-            let full_line = format!("{env_setup}exec {cli_cmd}");
+            let escaped_cmd = cmd_parts
+                .iter()
+                .map(|part| shell_escape::escape(part.into()).into_owned())
+                .collect::<Vec<_>>()
+                .join(" ");
+            let full_line = format!("{env_setup}exec {escaped_cmd}");
             Command::new("tmux")
                 .args(["respawn-pane", "-k", "-t", &target, "sh", "-c", &full_line])
                 .output()
@@ -1590,11 +1608,10 @@ impl InteractiveSessionManager {
         }
 
         info!(
-            "Started {} CLI in tmux session: {} (claude_model={:?}, codex_model={:?}, skip_permissions={})",
+            "Started {} CLI in tmux session: {} (model={:?}, skip_permissions={})",
             provider.display_name(),
             session_name,
-            claude_model,
-            codex_model,
+            model,
             skip_permissions
         );
         Ok(())
@@ -1681,11 +1698,11 @@ impl InteractiveSession {
         let mut session = Session::new_with_options(
             self.workspace_name.clone(),
             self.worktree_path.to_string_lossy().to_string(),
-            false, // skip_permissions
+            self.skip_permissions,
             SessionMode::Interactive,
             None, // boss_prompt
             self.agent_type,
-            self.model,
+            self.model.clone(),
         );
 
         session.id = self.session_id;
@@ -2060,6 +2077,85 @@ mod tests {
         std::env::remove_var("AINB_HOME");
     }
 
+    #[tokio::test]
+    async fn persisted_launch_settings_survive_live_session_discovery() {
+        use crate::models::session::SessionAgentType;
+        use chrono::Utc;
+        use tempfile::TempDir;
+
+        let _env = crate::headroom::HEADROOM_ENV_LOCK.lock().unwrap();
+
+        let dir = TempDir::new().expect("tempdir");
+        std::env::set_var("AINB_HOME", dir.path());
+
+        let worktree = dir.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let tmux_name = "tmux_persisted_launch_settings";
+
+        SessionStore::mutate(|store| {
+            store.upsert(SessionMetadata {
+                session_id: uuid::Uuid::new_v4(),
+                tmux_session_name: tmux_name.to_string(),
+                worktree_path: worktree,
+                workspace_name: "test".to_string(),
+                created_at: Utc::now(),
+                agent_type: SessionAgentType::Codex,
+                headroom_enabled: false,
+                rtk_enabled: false,
+                skip_permissions: Some(true),
+                model: Some("gpt-5.6-luna".to_string()),
+                codex_model: Some(CodexModel::Gpt55),
+            });
+        })
+        .expect("save");
+
+        let manager = InteractiveSessionManager::new().expect("manager");
+        let discovered = manager
+            .discover_session_from_tmux(tmux_name)
+            .await
+            .expect("discover persisted session");
+        let session = discovered.to_session_model();
+
+        assert!(
+            session.skip_permissions,
+            "live discovery must preserve dangerous-permissions launch setting"
+        );
+        assert_eq!(
+            session.model.as_deref(),
+            Some("gpt-5.6-luna"),
+            "live discovery must preserve model used by idle restart"
+        );
+
+        std::env::remove_var("AINB_HOME");
+    }
+
+    #[test]
+    fn legacy_typed_model_metadata_resolves_to_launch_ids() {
+        let claude: SessionMetadata = serde_json::from_value(serde_json::json!({
+            "session_id": uuid::Uuid::new_v4(),
+            "tmux_session_name": "tmux_legacy_claude",
+            "worktree_path": "/tmp/legacy-claude",
+            "workspace_name": "legacy",
+            "created_at": "2026-07-16T00:00:00Z",
+            "agent_type": "Claude",
+            "model": "Opus"
+        }))
+        .expect("legacy Claude metadata");
+        assert_eq!(claude.launch_model().as_deref(), Some("claude-opus-4-8"));
+
+        let codex: SessionMetadata = serde_json::from_value(serde_json::json!({
+            "session_id": uuid::Uuid::new_v4(),
+            "tmux_session_name": "tmux_legacy_codex",
+            "worktree_path": "/tmp/legacy-codex",
+            "workspace_name": "legacy",
+            "created_at": "2026-07-16T00:00:00Z",
+            "agent_type": "Codex",
+            "codex_model": "Gpt55"
+        }))
+        .expect("legacy Codex metadata");
+        assert_eq!(codex.launch_model().as_deref(), Some("gpt-5.5"));
+    }
+
     /// pu4: `SessionStore::mutate` must serialise concurrent load-modify-save
     /// through the cross-process lock so racing writers never lost-update the
     /// store. Two thread pools each upsert a disjoint set of keys into the SAME
@@ -2206,14 +2302,13 @@ mod tests {
     // ---- build_cli_cmd_parts: launch/resume argv assembly ------------------
 
     use crate::config::CliProvider;
-    use crate::models::{ClaudeModel, CodexModel, SessionAgentType};
+    use crate::models::{CodexModel, SessionAgentType};
 
     fn parts(
         provider: CliProvider,
         agent: SessionAgentType,
         skip: bool,
-        claude_model: Option<ClaudeModel>,
-        codex_model: Option<CodexModel>,
+        model: Option<&str>,
         resume: bool,
         has_history: bool,
     ) -> Vec<String> {
@@ -2221,8 +2316,7 @@ mod tests {
             &provider,
             agent,
             skip,
-            claude_model,
-            codex_model,
+            model,
             resume,
             has_history,
         )
@@ -2234,7 +2328,6 @@ mod tests {
             CliProvider::Claude,
             SessionAgentType::Claude,
             true,
-            None,
             None,
             false,
             false,
@@ -2248,7 +2341,6 @@ mod tests {
             CliProvider::Claude,
             SessionAgentType::Claude,
             true,
-            None,
             None,
             true,
             true,
@@ -2268,7 +2360,6 @@ mod tests {
             SessionAgentType::Claude,
             true,
             None,
-            None,
             true,
             false,
         );
@@ -2282,7 +2373,6 @@ mod tests {
             SessionAgentType::Claude,
             false,
             None,
-            None,
             true,
             true,
         );
@@ -2295,8 +2385,7 @@ mod tests {
             CliProvider::Claude,
             SessionAgentType::Claude,
             true,
-            Some(ClaudeModel::Opus),
-            None,
+            Some("opus"),
             true,
             true,
         );
@@ -2305,7 +2394,7 @@ mod tests {
             vec![
                 "claude",
                 "--model",
-                "claude-opus-4-8",
+                "opus",
                 "--dangerously-skip-permissions",
                 "--continue",
             ]
@@ -2319,7 +2408,6 @@ mod tests {
             CliProvider::Codex,
             SessionAgentType::Codex,
             true,
-            None,
             None,
             true,
             false,
@@ -2341,8 +2429,7 @@ mod tests {
             CliProvider::Codex,
             SessionAgentType::Codex,
             true,
-            None,
-            Some(CodexModel::Gpt55),
+            Some("gpt-5.6-luna"),
             true,
             false,
         );
@@ -2353,7 +2440,7 @@ mod tests {
                 "resume",
                 "--last",
                 "--model",
-                "gpt-5.5",
+                "gpt-5.6-luna",
                 "--dangerously-bypass-approvals-and-sandbox",
             ]
         );
@@ -2365,7 +2452,6 @@ mod tests {
             CliProvider::Codex,
             SessionAgentType::Codex,
             true,
-            None,
             None,
             false,
             false,
@@ -2384,7 +2470,6 @@ mod tests {
             SessionAgentType::Copilot,
             true,
             None,
-            None,
             true,
             false, // has_history irrelevant for copilot (no cwd probe)
         );
@@ -2397,7 +2482,6 @@ mod tests {
             CliProvider::Copilot,
             SessionAgentType::Copilot,
             true,
-            None,
             None,
             false,
             false,

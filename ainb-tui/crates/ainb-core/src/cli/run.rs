@@ -17,7 +17,6 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{SessionMetadata, SessionStore};
-use crate::models::ClaudeModel;
 use crate::models::session::SessionAgentType;
 use crate::tmux::TmuxSession;
 
@@ -73,8 +72,8 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         format!("{workspace_name}-{short_id}")
     });
 
-    // Step 5: Parse model
-    let model = parse_model(&args.model);
+    // Step 5: Keep model opaque. Provider CLI owns model validation/catalog.
+    let model = requested_model(args.model.as_deref());
 
     // Step 5.5: Wire shared MCP pool (Claude only; never blocks creation).
     // Ensures the pool daemon is up and merge-writes the worktree's
@@ -85,7 +84,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     }
 
     // Step 6: Build Claude command
-    let claude_cmd = build_agent_command(&args, Some(model));
+    let claude_cmd = build_agent_command(&args);
 
     // Step 6b: Parent linkage (event-driven plumbing). When spawned with
     // `--parent <id>`, this session is a child of an orchestrator (e.g. ATC).
@@ -142,7 +141,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         headroom_enabled: false,
         rtk_enabled: false,
         skip_permissions: Some(args.dangerously_skip_permissions),
-        model: Some(model),
+        model: model.clone(),
         codex_model: None,
     };
 
@@ -160,7 +159,10 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     println!("  Tmux Session: {tmux_name}");
     println!("  Working Dir:  {}", work_dir.display());
     println!("  Branch:       {branch_name}");
-    println!("  Model:        {}", model.display_name());
+    println!(
+        "  Model:        {}",
+        model.as_deref().unwrap_or("system default")
+    );
     println!();
     println!("To attach to this session:");
     println!("  tmux attach -t {tmux_name}");
@@ -351,13 +353,10 @@ fn get_current_branch(repo_path: &std::path::Path) -> Option<String> {
     }
 }
 
-/// Parse model string to `ClaudeModel` enum.
-///
-/// Delegates to `ClaudeModel::parse` so the alias / canonical-id mapping lives
-/// in exactly one place. Unknown / empty values resolve to `SystemDefault`,
-/// which means the spawned `claude` command will omit `--model` entirely.
-fn parse_model(model_str: &str) -> ClaudeModel {
-    ClaudeModel::parse(model_str)
+/// Normalize only AINB's no-model sentinels. Every other value stays opaque.
+fn requested_model(model: Option<&str>) -> Option<String> {
+    let model = model?.trim();
+    (!model.is_empty() && !model.eq_ignore_ascii_case("default")).then(|| model.to_string())
 }
 
 /// Validate that the selected provider's CLI binary is installed and on PATH
@@ -382,39 +381,20 @@ fn validate_provider_installed(provider: &CliProvider) -> Result<()> {
 
 /// Build the agent CLI command with appropriate flags for the selected provider.
 ///
-/// **Model emission semantics (2026-05 refresh):**
-///   * Claude — `--model <canonical-id>` (e.g. `claude-opus-4-8`) emitted ONLY
-///     when `model` resolves to a non-`SystemDefault` variant. The
-///     `ClaudeModel::SystemDefault` variant (or `None`) causes the flag to be
-///     omitted entirely so the installed `claude` CLI's default applies.
-///   * Codex — when the caller's raw `args.model` string parses into a
-///     non-`SystemDefault` `CodexModel`, `--model <id>` is emitted (e.g.
-///     `--model gpt-5.4`). Default / empty / unknown strings → no flag.
+/// **Model emission semantics:**
+///   * Claude / Codex — pass any non-empty, non-`default` value through
+///     unchanged. Provider CLI owns model validation and future model IDs.
 ///   * Gemini / Copilot — never emit `--model` (those CLIs don't accept it
 ///     in this codebase).
-fn build_agent_command(args: &RunArgs, model: Option<ClaudeModel>) -> String {
-    use crate::models::CodexModel;
-
+fn build_agent_command(args: &RunArgs) -> String {
     let provider = args.tool.to_cli_provider();
     let mut cmd_parts = vec![provider.command().to_string()];
 
     match provider {
-        CliProvider::Claude => {
-            if let Some(m) = model {
-                if let Some(id) = m.cli_value() {
-                    cmd_parts.push("--model".to_string());
-                    cmd_parts.push(id.to_string());
-                }
-            }
-        }
-        CliProvider::Codex => {
-            // Codex no longer hard-blocks `--model`. Parse the raw `--model`
-            // string into a CodexModel; emit only when it's not the
-            // SystemDefault sentinel (covers `""` and `"default"`).
-            let cm = CodexModel::parse(&args.model);
-            if let Some(id) = cm.cli_value() {
+        CliProvider::Claude | CliProvider::Codex => {
+            if let Some(model) = requested_model(args.model.as_deref()) {
                 cmd_parts.push("--model".to_string());
-                cmd_parts.push(id.to_string());
+                cmd_parts.push(model);
             }
         }
         CliProvider::Gemini | CliProvider::Copilot => {
@@ -427,7 +407,11 @@ fn build_agent_command(args: &RunArgs, model: Option<ClaudeModel>) -> String {
         cmd_parts.push(provider.skip_permissions_flag().to_string());
     }
 
-    cmd_parts.join(" ")
+    cmd_parts
+        .iter()
+        .map(|part| shell_escape::escape(part.into()).into_owned())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 /// Send a prompt to the tmux session
@@ -472,27 +456,6 @@ mod tests {
     use crate::cli::Tool;
 
     #[test]
-    fn test_parse_model() {
-        // Aliases (back-compat with on-disk user presets) still resolve.
-        assert_eq!(parse_model("sonnet"), ClaudeModel::Sonnet);
-        assert_eq!(parse_model("SONNET"), ClaudeModel::Sonnet);
-        assert_eq!(parse_model("opus"), ClaudeModel::Opus);
-        assert_eq!(parse_model("haiku"), ClaudeModel::Haiku);
-        assert_eq!(parse_model("claude-sonnet"), ClaudeModel::Sonnet);
-        // Canonical IDs (2026-06 refresh) also resolve.
-        assert_eq!(parse_model("claude-fable-5"), ClaudeModel::Fable);
-        assert_eq!(parse_model("claude-opus-4-8"), ClaudeModel::Opus);
-        assert_eq!(parse_model("claude-opus-4-7"), ClaudeModel::Opus47);
-        assert_eq!(parse_model("claude-sonnet-4-6"), ClaudeModel::Sonnet);
-        assert_eq!(parse_model("claude-haiku-4-5"), ClaudeModel::Haiku);
-        assert_eq!(parse_model("opusplan"), ClaudeModel::OpusPlan);
-        // Empty / default / unknown all map to SystemDefault (omit --model).
-        assert_eq!(parse_model(""), ClaudeModel::SystemDefault);
-        assert_eq!(parse_model("default"), ClaudeModel::SystemDefault);
-        assert_eq!(parse_model("unknown"), ClaudeModel::SystemDefault);
-    }
-
-    #[test]
     fn test_build_agent_command() {
         let args = RunArgs {
             remote_repo: None,
@@ -500,7 +463,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Claude,
-            model: "sonnet".to_string(),
+            model: Some("sonnet".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: true,
@@ -509,14 +472,37 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
+        let cmd = build_agent_command(&args);
         assert!(cmd.contains("claude"));
-        // Full canonical ID, not the `sonnet` alias.
         assert!(
-            cmd.contains("--model claude-sonnet-4-6"),
-            "expected full canonical id, got: {cmd}"
+            cmd.contains("--model sonnet"),
+            "AINB must pass Claude's raw model value through, got: {cmd}"
         );
         assert!(cmd.contains("--dangerously-skip-permissions"));
+    }
+
+    #[test]
+    fn test_build_claude_command_passes_unknown_model_through() {
+        let args = RunArgs {
+            remote_repo: None,
+            repo: None,
+            create_branch: None,
+            worktree: false,
+            tool: Tool::Claude,
+            model: Some("claude-next-9".to_string()),
+            prompt: None,
+            attach: false,
+            dangerously_skip_permissions: false,
+            name: None,
+            interactive: false,
+            parent: None,
+        };
+
+        let cmd = build_agent_command(&args);
+        assert!(
+            cmd.contains("--model claude-next-9"),
+            "AINB must not reject future Claude model IDs, got: {cmd}"
+        );
     }
 
     #[test]
@@ -527,7 +513,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Claude,
-            model: "opus".to_string(),
+            model: Some("opus".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -536,9 +522,9 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::Opus));
+        let cmd = build_agent_command(&args);
         assert!(cmd.contains("claude"));
-        assert!(cmd.contains("--model claude-opus-4-8"));
+        assert!(cmd.contains("--model opus"));
         assert!(!cmd.contains("--dangerously-skip-permissions"));
     }
 
@@ -550,7 +536,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Claude,
-            model: String::new(),
+            model: Some(String::new()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -559,7 +545,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::SystemDefault));
+        let cmd = build_agent_command(&args);
         assert!(cmd.starts_with("claude"));
         assert!(
             !cmd.contains("--model"),
@@ -576,7 +562,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Claude,
-            model: "default".to_string(),
+            model: None,
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -585,7 +571,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, None);
+        let cmd = build_agent_command(&args);
         assert!(!cmd.contains("--model"));
     }
 
@@ -601,7 +587,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: "default".to_string(),
+            model: None,
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -610,7 +596,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
+        let cmd = build_agent_command(&args);
         assert!(
             cmd.starts_with("codex"),
             "Command should start with codex, got: {}",
@@ -633,7 +619,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: "gpt-5.4".to_string(),
+            model: Some("gpt-5.4".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -642,11 +628,35 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, None);
+        let cmd = build_agent_command(&args);
         assert!(cmd.starts_with("codex"));
         assert!(
             cmd.contains("--model gpt-5.4"),
             "Codex with explicit gpt-5.4 must emit --model, got: {cmd}"
+        );
+    }
+
+    #[test]
+    fn test_build_codex_command_passes_unknown_model_through() {
+        let args = RunArgs {
+            remote_repo: None,
+            repo: None,
+            create_branch: None,
+            worktree: false,
+            tool: Tool::Codex,
+            model: Some("gpt-5.6-luna".to_string()),
+            prompt: None,
+            attach: false,
+            dangerously_skip_permissions: false,
+            name: None,
+            interactive: false,
+            parent: None,
+        };
+
+        let cmd = build_agent_command(&args);
+        assert!(
+            cmd.contains("--model gpt-5.6-luna"),
+            "AINB must not reject future Codex model IDs, got: {cmd}"
         );
     }
 
@@ -658,7 +668,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Codex,
-            model: "default".to_string(),
+            model: None,
             prompt: None,
             attach: false,
             dangerously_skip_permissions: true,
@@ -667,7 +677,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
+        let cmd = build_agent_command(&args);
         assert!(
             cmd.starts_with("codex"),
             "Command should start with codex, got: {}",
@@ -692,7 +702,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Gemini,
-            model: "sonnet".to_string(),
+            model: Some("sonnet".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -701,7 +711,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
+        let cmd = build_agent_command(&args);
         assert!(
             cmd.starts_with("gemini"),
             "Command should start with gemini, got: {}",
@@ -721,7 +731,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Copilot,
-            model: "sonnet".to_string(),
+            model: Some("sonnet".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -730,7 +740,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, Some(ClaudeModel::Sonnet));
+        let cmd = build_agent_command(&args);
         assert!(
             cmd.starts_with("copilot"),
             "Command should start with copilot, got: {}",
@@ -746,7 +756,7 @@ mod tests {
             create_branch: None,
             worktree: false,
             tool: Tool::Copilot,
-            model: "sonnet".to_string(),
+            model: Some("sonnet".to_string()),
             prompt: None,
             attach: false,
             dangerously_skip_permissions: false,
@@ -755,7 +765,7 @@ mod tests {
             parent: None,
         };
 
-        let cmd = build_agent_command(&args, None);
+        let cmd = build_agent_command(&args);
         assert_eq!(
             cmd, "copilot",
             "Copilot with no flags should just be 'copilot'"

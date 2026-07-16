@@ -488,11 +488,9 @@ pub struct Session {
     #[serde(default)]
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
     #[serde(default)]
-    pub model: Option<ClaudeModel>, // Claude model for this session (only for Claude agent)
-    /// Codex model (only meaningful when `agent_type == Codex`). Mirrors
-    /// `model` for the Claude agent: `Some(SystemDefault)` and `None` both
-    /// cause `--model` to be omitted from the spawned `codex` command;
-    /// anything else emits `--model <id>`.
+    pub model: Option<String>, // Raw provider model ID passed through to the CLI
+    /// Legacy Codex model field retained for old serialized Session values.
+    /// New launch paths use the provider-agnostic raw `model` field.
     #[serde(default)]
     pub codex_model: Option<CodexModel>,
     #[serde(default)]
@@ -710,7 +708,7 @@ impl Session {
         mode: SessionMode,
         boss_prompt: Option<String>,
         agent_type: SessionAgentType,
-        model: Option<ClaudeModel>,
+        model: Option<String>,
     ) -> Self {
         let now = Utc::now();
         let branch_name = format!("ainb/{}", name.replace(' ', "-").to_lowercase());

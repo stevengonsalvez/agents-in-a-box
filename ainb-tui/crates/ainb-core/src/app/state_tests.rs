@@ -311,7 +311,7 @@ mod tests {
     #[test]
     fn test_stopped_session_from_metadata_preserves_launch_settings() {
         use crate::interactive::SessionMetadata;
-        use crate::models::{ClaudeModel, SessionAgentType};
+        use crate::models::SessionAgentType;
         use std::path::PathBuf;
 
         let metadata = SessionMetadata {
@@ -324,7 +324,7 @@ mod tests {
             headroom_enabled: false,
             rtk_enabled: false,
             skip_permissions: Some(false),
-            model: Some(ClaudeModel::Opus),
+            model: Some("claude-opus-4-8".to_string()),
             codex_model: None,
         };
 
@@ -333,7 +333,7 @@ mod tests {
             !session.skip_permissions,
             "Some(false) must be preserved, not defaulted to yolo"
         );
-        assert_eq!(session.model, Some(ClaudeModel::Opus));
+        assert_eq!(session.model.as_deref(), Some("claude-opus-4-8"));
     }
 
     // -- SessionFilter tests ------------------------------------------------
