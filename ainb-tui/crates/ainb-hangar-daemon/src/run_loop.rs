@@ -326,6 +326,12 @@ pub async fn run(
     // `dispatched` from the instant of claim through to its terminal finalize —
     // so the DB's live in-flight count is the authoritative bound the next claim
     // consults, and a spawned-but-not-yet-polled run is already accounted for.
+    // The platform credential store, built ONCE for the daemon's lifetime and
+    // shared across concurrent runs (one Keychain session, not one per task).
+    // `execute_claimed` takes it as a trait object, so a test can inject the
+    // in-memory double instead of touching the real Keychain.
+    let secrets = crate::claude_cred::default_backend();
+
     let mut runs: JoinSet<()> = JoinSet::new();
     // a54 shutdown reap: the set of live interactive tmux sessions, so `Ctrl-C`
     // can kill each by exact name instead of orphaning a detached pane.
@@ -377,10 +383,11 @@ pub async fn run(
                 let stats = stats.clone();
                 let events = events.clone();
                 let interactive = interactive.clone();
+                let secrets = secrets.clone();
                 runs.spawn(async move {
                     let clock = SystemClock;
                     if let Err(e) =
-                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive)
+                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive, secrets.as_ref())
                             .await
                     {
                         tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
@@ -539,6 +546,11 @@ pub fn spawn_gc_sweeper(
 /// Returns an error only for an unrecoverable I/O / DB fault while *setting up*
 /// the run (missing row, slug lookup, env prep, start). A provider failure is a
 /// normal FSM outcome (`fail`), not an error here.
+// One over the lint's 7: the secret backend joins the existing seven collaborators
+// (pool, runner, task, clock, stats, events, interactive) as a thin DI handle.
+// Bundling them into a context struct is a larger refactor than this credential
+// change warrants; the sibling run functions here carry the same shape.
+#[allow(clippy::too_many_arguments)]
 async fn execute_claimed(
     pool: &SqlitePool,
     runner: &Runner,
@@ -547,6 +559,7 @@ async fn execute_claimed(
     stats: &HealthStats,
     events: &EventSink,
     interactive: &InteractiveSessions,
+    secrets: &(dyn ainb_hangar_secrets::SecretBackend + Send + Sync),
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
@@ -710,14 +723,19 @@ async fn execute_claimed(
     // pass), layering keychain-resident API keys on top via
     // `dispatch::build_task_env`. The policy is loaded from
     // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent).
-    // The keychain key list is empty until P5.2 wires `host/secret_store_get`
-    // into dispatch; the seam is in place so adding keys is a one-line change.
-    // The runner re-applies its own deny-by-default 12-var filter as
-    // defense-in-depth (a strict subset of this policy).
     let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let policy = load_env_policy();
-    let keychain_keys: Vec<(String, String)> = Vec::new();
-    let mut task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
+    let mut task_env = crate::dispatch::build_task_env(&daemon_env, std::iter::empty(), &policy);
+
+    // The daemon-resolved claude credential. It rides `extra_env` (the unfiltered
+    // append below), NOT `task_env`/`source_env` — so it does not go through, and
+    // does not have to widen, the deny-by-default allowlist. An *ambient*
+    // `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own env stays dropped for every
+    // provider (it is not on the runner's exact-match allowlist), while the
+    // *resolved* value reaches a claude child only. `keys_for_backend` returns an
+    // empty vec for codex/copilot, so a claude token can never leak into their
+    // children even though every backend shares this seam.
+    let cred_env = crate::claude_cred::keys_for_backend(dispatch.backend, secrets, &daemon_env);
 
     // ccc / D11: mark this daemon-spawned session as a legitimate fleet member by
     // stamping AINB_PARENT_SESSION into the provider's child env. The lifecycle
@@ -796,6 +814,12 @@ async fn execute_claimed(
     let provider = dispatch.backend.name();
     let provider_run = async {
         if mode == Mode::Interactive {
+            // The interactive path is DELIBERATELY unsandboxed (see
+            // `run_interactive`): the attached claude reaches the Keychain and
+            // `~/.claude` natively and auto-refreshes, so it needs no injected
+            // token. `cred_env` (headless-only, consumed in the `else` arm) is
+            // intentionally not threaded here — a static `CLAUDE_CODE_OAUTH_TOKEN`
+            // would override keychain auth and go stale mid-session.
             run_interactive(
                 pool,
                 runner,
@@ -816,7 +840,13 @@ async fn execute_claimed(
             // (the interactive path already returns `anyhow::Result`).
             match dispatch.backend {
                 Backend::Claude => runner
-                    .run_claude_in(&env, task_env, &dispatch.invocation, &location)
+                    .run_claude_in_with_env(
+                        &env,
+                        task_env,
+                        cred_env,
+                        &dispatch.invocation,
+                        &location,
+                    )
                     .await
                     .map_err(anyhow::Error::from),
                 Backend::Codex => runner

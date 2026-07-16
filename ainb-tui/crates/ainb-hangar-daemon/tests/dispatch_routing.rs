@@ -319,6 +319,12 @@ fn copilot_command_carries_verified_non_interactive_flags() {
 /// against the real CLIs (claude 2.1.210, codex-cli 0.144.0, Copilot CLI 1.0.70):
 ///
 /// * claude needs `-p` or it opens a session and exits 1 on the daemon's null stdin,
+///   AND a permission flag or every tool call is denied while the process still
+///   exits 0 — a silent no-op the daemon scores as `done`. This assertion formerly
+///   pinned a bare `-p BRIEF`: that shape was only ever exercised against no-tool
+///   briefs ("reply OK"), which is exactly why the gap went unseen. The flag is
+///   `--dangerously-skip-permissions` by operator decision (blanket tool autonomy,
+///   including `Bash`); the narrower `acceptEdits` measurably denies `Bash`.
 /// * codex needs `--skip-git-repo-check` or it exits 1 ("Not inside a trusted
 ///   directory") in the daemon's non-repo in-tree workdir, and takes the prompt as a
 ///   TRAILING positional,
@@ -340,7 +346,12 @@ fn every_provider_argv_is_the_verified_headless_shape() {
     };
 
     let (_p, claude) = runner.provider_command(Backend::Claude, &inv, Mode::Headless);
-    assert_eq!(claude, vec!["-p", "--", "BRIEF"], "claude: -p -- <brief>");
+    assert_eq!(
+        claude,
+        vec!["-p", "--dangerously-skip-permissions", "--", "BRIEF"],
+        "claude: -p --dangerously-skip-permissions -- <brief> (without a permission \
+         flag, tools are denied and the run exits 0 having done nothing)"
+    );
 
     let (_p, codex) = runner.provider_command(Backend::Codex, &inv, Mode::Headless);
     assert_eq!(

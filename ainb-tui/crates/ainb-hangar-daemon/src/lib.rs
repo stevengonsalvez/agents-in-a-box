@@ -50,6 +50,12 @@ pub mod board;
 /// cancel RPC uses to signal the claim loop to stop a live run (headless process
 /// group / interactive tmux session). See [`cancel::registry`].
 pub mod cancel;
+/// Daemon-level `claude` credential resolution (Keychain/env -> child env).
+///
+/// The confined child can reach neither the Keychain nor the operator's
+/// `~/.claude`, so the unsandboxed daemon resolves the token and injects it as
+/// ONE env var, for the `claude` backend only.
+pub mod claude_cred;
 /// Fresh-home boot seed: lay down the default workspace + runtime + one starter
 /// agent so an empty `hangar.db` "just works" (a runtime shows in the Daemon
 /// pane and the Squad create gate is already cleared). Idempotent + non-clobbering.

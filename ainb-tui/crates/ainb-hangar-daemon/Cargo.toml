@@ -51,6 +51,10 @@ path = "src/lib.rs"
 [dependencies]
 ainb-hangar-store = { path = "../ainb-hangar-store" }
 ainb-hangar-core = { path = "../ainb-hangar-core" }
+# Platform credential store (Keychain on macOS) behind one trait. The daemon is
+# UNSANDBOXED, so it resolves the claude credential here and injects it into the
+# confined child's env; the child never touches the keychain itself.
+ainb-hangar-secrets = { path = "../ainb-hangar-secrets" }
 # Fleet orchestration libs (the ONE send path + the needs classifier + session
 # discovery), extracted below both this crate and ainb-core so the daemon can
 # drive the SAME verified tmux send and the SAME ASK>ERR>IDLE>WAIT classifier the
@@ -155,6 +159,8 @@ opentelemetry-otlp = { version = "0.30", optional = true, default-features = fal
 tracing-opentelemetry = { version = "0.31", optional = true }
 
 [dev-dependencies]
+# The in-memory secret double, so credential tests never touch the real Keychain.
+ainb-hangar-secrets = { path = "../ainb-hangar-secrets", features = ["test-backend"] }
 assert_cmd = "2"
 serde_json = { workspace = true }
 tempfile = { workspace = true }
