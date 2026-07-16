@@ -489,21 +489,34 @@ struct UsageBlock {
 }
 
 /// Map a claude `result` line's `subtype`/`is_error` onto a [`TerminalSignal`]
-/// (beads 48c/48d).
+/// (beads 48c/48d) as an ALLOWLIST — fail-closed on any shape not pinned against
+/// claude 2.1.211.
 ///
 /// `error_max_turns` is the iteration-budget exhaustion the daemon retries FRESH
-/// ([`FailureReason::IterationLimit`]); any other error is a terminal agent
-/// error. A `result` with no subtype and no error — the routing fakes'
-/// `{"type":"result","content":"ok"}` — is treated as success so existing
-/// dispatch tests stay valid.
+/// ([`FailureReason::IterationLimit`]); any other `error*` subtype (or the
+/// `is_error` flag) is a terminal agent error. The ONLY success tokens are
+/// claude's pinned `subtype:"success"` and a subtype-less `result` (the routing
+/// fakes' `{"type":"result","content":"ok"}`; real claude 2.1.211 always stamps a
+/// subtype, so `None` is never a live claude success line). Anything else — a
+/// `result` carrying an UNKNOWN, non-error subtype — is
+/// [`FailureReason::ProviderContractDrift`]: a future CLI that renames or adds a
+/// terminal shape MUST fail closed and stay observable, never be guessed
+/// "success" and marked `done` over work that may not have happened (the denylist
+/// hole this replaces).
 fn classify_claude_result(subtype: Option<&str>, is_error: bool) -> TerminalSignal {
     match subtype {
+        // Iteration-budget exhaustion retries FRESH — kept first so an
+        // `is_error:true` on the same line cannot swallow its distinct reason.
         Some("error_max_turns") => TerminalSignal::Failure(FailureReason::IterationLimit),
-        Some(s) if is_error || s.starts_with("error") => {
-            TerminalSignal::Failure(FailureReason::AgentError)
-        }
+        // Any explicit `error*` subtype => terminal agent error.
+        Some(s) if s.starts_with("error") => TerminalSignal::Failure(FailureReason::AgentError),
+        // The hard-error flag with a non-error / absent subtype => agent error.
         _ if is_error => TerminalSignal::Failure(FailureReason::AgentError),
-        _ => TerminalSignal::Success,
+        // ALLOWLIST: the only recognised success signals.
+        Some("success") | None => TerminalSignal::Success,
+        // Fail-closed: a `result` with an unknown, non-error subtype is a shape
+        // this parser was never pinned against — flag drift, do not guess success.
+        Some(_) => TerminalSignal::Failure(FailureReason::ProviderContractDrift),
     }
 }
 
@@ -1741,6 +1754,56 @@ mod tests {
                 "no path under the operator's $HOME ({home}) may be granted:\n{profile}"
             );
         }
+    }
+
+    /// The pinned genuine-success shapes MUST still classify as success: real
+    /// claude 2.1.211 stamps `subtype:"success"`, and the routing fakes emit a
+    /// subtype-less `result`. This guards the allowlist against mis-failing real
+    /// work.
+    #[test]
+    fn claude_success_and_fake_result_classify_success() {
+        assert_eq!(
+            classify_claude_result(Some("success"), false),
+            TerminalSignal::Success,
+        );
+        assert_eq!(classify_claude_result(None, false), TerminalSignal::Success);
+    }
+
+    /// The known error subtypes keep their mapped reasons — `error_max_turns`
+    /// retries FRESH (IterationLimit), other errors are terminal AgentError.
+    #[test]
+    fn claude_error_subtypes_keep_their_reasons() {
+        assert_eq!(
+            classify_claude_result(Some("error_max_turns"), true),
+            TerminalSignal::Failure(FailureReason::IterationLimit),
+        );
+        assert_eq!(
+            classify_claude_result(Some("error_during_execution"), true),
+            TerminalSignal::Failure(FailureReason::AgentError),
+        );
+        assert_eq!(
+            classify_claude_result(None, true),
+            TerminalSignal::Failure(FailureReason::AgentError),
+        );
+    }
+
+    /// FAIL-CLOSED: a `result` line carrying an UNKNOWN, non-error subtype (a
+    /// future CLI renaming/adding a terminal shape) must NOT be guessed "success".
+    /// It fails closed to the distinct ProviderContractDrift reason.
+    ///
+    /// Mutation check: reverting the final `Some(_) => ProviderContractDrift` arm
+    /// back to the old denylist default (`_ => Success`) makes this assertion see
+    /// `TerminalSignal::Success` and flip RED.
+    #[test]
+    fn claude_unknown_subtype_fails_closed_as_contract_drift() {
+        assert_eq!(
+            classify_claude_result(Some("completed"), false),
+            TerminalSignal::Failure(FailureReason::ProviderContractDrift),
+        );
+        assert_eq!(
+            classify_claude_result(Some("finished_ok"), false),
+            TerminalSignal::Failure(FailureReason::ProviderContractDrift),
+        );
     }
 
     #[test]
