@@ -476,6 +476,19 @@ struct StreamLine {
     /// token tallies: claude `result.usage` or codex `turn.completed.usage`.
     #[serde(default)]
     usage: Option<UsageBlock>,
+    /// codex `turn.failed.error` object — its `message` is the provider's own
+    /// reason string, logged so a codex failure is observable rather than a bare
+    /// `AgentError`.
+    #[serde(default)]
+    error: Option<StreamError>,
+}
+
+/// The `error` sub-object of a codex `turn.failed` [`StreamLine`]: carries the
+/// provider's human-readable failure `message`.
+#[derive(Debug, Default, Clone, Deserialize)]
+struct StreamError {
+    #[serde(default)]
+    message: Option<String>,
 }
 
 /// The `usage` sub-object of a [`StreamLine`]: the token tallies (e38.35). Field
@@ -1633,6 +1646,18 @@ where
 /// the terminal signal take the LAST `result`/`turn.*` line (a multi-turn
 /// stream's final tally/outcome wins). A `result` reporting neither tokens nor
 /// cost (e.g. a bare `{"type":"result","content":"ok"}`) leaves `usage` `None`.
+///
+/// # Drift canary
+///
+/// The terminal shapes matched here are pinned against claude 2.1.211 / codex
+/// 0.144.0. If a future CLI renames its terminal event or adds a new non-error
+/// `result` subtype, [`classify_claude_result`] / [`finalize_outcome`] fail
+/// CLOSED to [`FailureReason::ProviderContractDrift`] rather than mark the task
+/// `done`. The live tripwire `live_dispatch_writes_nonce_artifact` (in
+/// `tests/live_e2e.rs`, `live-e2e` feature) is the CI/scheduled test that catches
+/// that drift: it dispatches a REAL claude and asserts the run reaches `done` with
+/// a session_id + usage captured from a RECOGNISED terminal — so a shape drift
+/// turns it RED (failed / no usage), signalling the parser here needs updating.
 async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
     mut log_file: std::fs::File,
@@ -1679,8 +1704,12 @@ async fn stream_stdout(
                     }
                     terminal = Some(TerminalSignal::Success);
                 }
-                // codex terminal failure.
+                // codex terminal failure — surface the provider's own message
+                // (was previously discarded, leaving only a bare AgentError).
                 "turn.failed" => {
+                    if let Some(msg) = parsed.error.and_then(|e| e.message) {
+                        tracing::warn!(provider = "codex", error = %msg, "codex_turn_failed");
+                    }
                     terminal = Some(TerminalSignal::Failure(FailureReason::AgentError));
                 }
                 _ => {}
