@@ -3102,9 +3102,11 @@ async fn dispatch_daemon_cred(cmd: DaemonCredCommand) -> Result<()> {
 /// is held only as bytes and never echoed. Synchronous: the subprocess and stdin
 /// read are blocking, and this is a one-shot operator command, not on any hot path.
 fn run_daemon_cred_set(args: DaemonCredSetArgs) -> Result<()> {
-    use ainb_hangar_daemon::claude_cred;
+    use ainb_hangar_daemon::claude_cred::{self, TokenBytes};
 
-    let token: String = if args.setup_token {
+    // Held as `TokenBytes` (zeroize-on-drop), never a plain `String`, so the token
+    // material is not left lingering in freed heap after the store write.
+    let token: TokenBytes = if args.setup_token {
         // Drive the interactive browser flow. stderr/stdin are inherited so the
         // user sees the prompt and completes OAuth; stdout is captured for the
         // minted token. Verified shape: the token is an `sk-ant-oat…` word.
@@ -3118,23 +3120,24 @@ fn run_daemon_cred_set(args: DaemonCredSetArgs) -> Result<()> {
             anyhow::bail!("`claude setup-token` exited without minting a token");
         }
         let stdout = String::from_utf8_lossy(&out.stdout);
-        claude_cred::extract_setup_token(&stdout)
-            .context("no token found in `claude setup-token` output")?
+        let minted = claude_cred::extract_setup_token(&stdout)
+            .context("no token found in `claude setup-token` output")?;
+        TokenBytes::from(minted.as_bytes())
     } else {
         // Read from STDIN so the token never lands on argv or in shell history.
         use std::io::Read as _;
         let mut buf = String::new();
         std::io::stdin().read_to_string(&mut buf).context("read token from stdin")?;
-        let trimmed = buf.trim().to_string();
+        let trimmed = buf.trim();
         if trimmed.is_empty() {
             anyhow::bail!("no token on stdin (pipe the token, or use --setup-token)");
         }
-        trimmed
+        TokenBytes::from(trimmed.as_bytes())
     };
 
     claude_cred::default::store_token(token.as_bytes()).context("store claude credential")?;
-    // Confirm without echoing the value.
-    println!("claude credential stored ({} bytes)", token.len());
+    // Fixed confirmation: never echo the value, and never disclose its length.
+    println!("claude credential stored");
     Ok(())
 }
 

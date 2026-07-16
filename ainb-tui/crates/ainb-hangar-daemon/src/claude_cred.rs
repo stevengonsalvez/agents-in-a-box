@@ -43,6 +43,10 @@ use std::collections::HashMap;
 
 use ainb_hangar_secrets::{Scope, SecretBackend, SecretBytes};
 
+/// Re-export so a CLI/TUI caller can hold token material in the zeroizing
+/// [`SecretBytes`] newtype without a direct `ainb-hangar-secrets` dependency.
+pub use ainb_hangar_secrets::SecretBytes as TokenBytes;
+
 use crate::runner::Backend;
 
 /// Build the platform's secret backend for production use.
