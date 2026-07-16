@@ -84,6 +84,30 @@ fn seed_codex_cache(home: &Path, five_pct: u8, week_pct: u8) {
     fs::write(cache_dir.join("codex-live.json"), json).unwrap();
 }
 
+/// Write a `codex-live.json` with ONLY a `seven_day` (weekly) window —
+/// no `five_hour` key at all. Reproduces the real prolite bug: a plan
+/// where the five-hour window is simply absent from the cache.
+fn seed_codex_cache_weekly_only(home: &Path, week_pct: u8) {
+    let cache_dir = if cfg!(target_os = "macos") {
+        home.join("Library").join("Caches").join("ainb")
+    } else {
+        home.join(".cache").join("ainb")
+    };
+    fs::create_dir_all(&cache_dir).unwrap();
+    let now = chrono::Utc::now();
+    let updated = now.to_rfc3339();
+    let reset_wk = (now + chrono::Duration::days(4)).to_rfc3339();
+    let json = format!(
+        r#"{{
+  "version": 1,
+  "updated_at": "{updated}",
+  "seven_day": {{ "pct": {week_pct}, "resets_at": "{reset_wk}" }},
+  "plan_type": "prolite"
+}}"#
+    );
+    fs::write(cache_dir.join("codex-live.json"), json).unwrap();
+}
+
 fn is_on_sessions_screen(c: &str) -> bool {
     c.contains("Session Details")
         || c.contains("Select a session to view details")
@@ -247,5 +271,57 @@ fn tui_top_bar_hides_codex_when_no_cache() {
     assert!(
         !cap.contains("codex 5h"),
         "codex segment rendered despite no cache / no auth (hide-on-fail broken).\n{cap}"
+    );
+}
+
+/// The real prolite bug: a cache with ONLY `seven_day` (weekly) present,
+/// no `five_hour` key at all. The status bar must render `codex wk NN% ↻`
+/// and MUST NOT emit any `codex 5h` segment.
+#[test]
+fn tui_top_bar_shows_codex_weekly_only() {
+    if !tmux_available() {
+        eprintln!("SKIP: tmux not available");
+        return;
+    }
+
+    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    seed_isolated_home(home_tmp.path());
+    seed_codex_cache_weekly_only(home_tmp.path(), 7);
+
+    let session = format!("tripwire-codex-wkonly-{}", std::process::id());
+    let _guard = TmuxSessionGuard {
+        name: session.clone(),
+    };
+
+    launch_and_goto_sessions(home_tmp.path(), &session);
+
+    // The watcher refreshes the snapshot every 5s; give it a few ticks to
+    // overlay the seeded codex cache and the status bar to repaint. The
+    // rendered cluster should be `codex wk 7% ↻ …` with no `5h` segment.
+    let deadline = Instant::now() + Duration::from_secs(20);
+    let shown = poll(&session, deadline, |c| {
+        c.contains("codex") && c.contains("wk") && c.contains("7%")
+    });
+
+    let final_cap = shown.unwrap_or_else(|| capture(&session));
+    assert!(
+        final_cap.contains("codex"),
+        "codex cluster never rendered on the top bar.\n{final_cap}"
+    );
+    assert!(
+        final_cap.contains("wk"),
+        "codex weekly window (wk) not rendered.\n{final_cap}"
+    );
+    assert!(
+        final_cap.contains("7%"),
+        "codex weekly percentage (7%) not visible.\n{final_cap}"
+    );
+    assert!(
+        final_cap.contains('↻'),
+        "codex reset stamp (↻) not visible.\n{final_cap}"
+    );
+    assert!(
+        !final_cap.contains("codex 5h"),
+        "weekly-only cache must never produce a 5h segment.\n{final_cap}"
     );
 }
