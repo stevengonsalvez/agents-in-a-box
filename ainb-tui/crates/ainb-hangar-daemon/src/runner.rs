@@ -187,7 +187,11 @@ const CODEX_SANDBOX_FLAG: &str = "-s";
 /// codex's own confinement so the daemon's is the single boundary. This mirrors
 /// copilot's mandatory `--allow-all-tools` exactly (both delegate confinement to
 /// the daemon FS sandbox + env allowlist, both surfaced by the P5.6
-/// `warnings::danger-full-access` operator warning). HEADLESS ONLY: the
+/// `warnings::danger-full-access` operator warning). NOTE: "the daemon's is the
+/// single boundary" holds only while the daemon FS sandbox is ON; in the current
+/// `HANGAR_DAEMON_DISABLE_SANDBOX` interim there is no boundary for ANY provider
+/// (claude/codex/copilot alike) — the real confinement floor is turning the daemon
+/// sandbox on, tracked separately, not hardening codex in isolation. HEADLESS ONLY: the
 /// interactive path deliberately has no FS sandbox and a human is attached to
 /// answer codex's own trust/approval prompts, so it keeps codex's default
 /// confinement (see [`Runner::codex_spec`]).
