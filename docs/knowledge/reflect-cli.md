@@ -108,6 +108,12 @@ The producer hooks (`Stop`, `PreCompact`) only enqueue; reflection itself runs l
 
 Inspect drain spend with `reflect cost`. See the plugin [`CHANGELOG.md`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/CHANGELOG.md) for the 4.0.0 cost rearchitecture.
 
+## Memory browser
+
+`reflect serve` launches a local, loopback-only web app for browsing, searching, graphing, and
+curating the same KB this CLI reads and writes — no separate index, no auth, no cloud. See the
+[memory browser guide](/knowledge/reflect-memory/serve/) for the subcommand's flags and views.
+
 ## See also
 
 - [Knowledge base overview](./overview.md)
