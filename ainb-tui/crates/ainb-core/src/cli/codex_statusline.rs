@@ -418,6 +418,37 @@ mod tests {
         );
     }
 
+    /// The live `prolite` shape as of 2026-07: a single weekly-only window
+    /// in `primary_window` (`limit_window_seconds` 604800) with
+    /// `secondary_window: null`. Positional mapping would mislabel this as
+    /// 5h; routing by `limit_window_seconds` puts it in the weekly slot.
+    const PROLITE_WEEKLY_ONLY_BODY: &str = r#"{
+        "plan_type": "prolite",
+        "rate_limit": {
+            "allowed": true,
+            "primary_window": {
+                "used_percent": 1,
+                "limit_window_seconds": 604800,
+                "reset_at": 1784718621
+            },
+            "secondary_window": null
+        }
+    }"#;
+
+    #[test]
+    fn parse_usage_routes_weekly_only_window_to_weekly_slot() {
+        let c = parse_usage(PROLITE_WEEKLY_ONLY_BODY, "now".to_string()).expect("parses");
+        assert!(c.five_hour.is_none(), "no 5h window on this tier");
+        let wk = c.seven_day.expect("weekly present in primary_window");
+        assert_eq!(wk.pct, 1);
+        assert_eq!(
+            chrono::DateTime::parse_from_rfc3339(wk.resets_at.as_ref().unwrap())
+                .unwrap()
+                .timestamp(),
+            1784718621
+        );
+    }
+
     #[test]
     fn parse_usage_rounds_fractional_percent() {
         let body =
