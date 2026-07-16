@@ -104,6 +104,14 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
+    // The claude OAuth token the daemon RESOLVES and injects at dispatch (see
+    // `crate::claude_cred`). A confined child can reach neither the Keychain nor
+    // the operator's `~/.claude`, so this env var is its ONLY credential. It is
+    // daemon-controlled config injected on top of the policy pass — never an
+    // inherited ambient secret — and the daemon-side override it resolves from
+    // (`HANGAR_CLAUDE_OAUTH_TOKEN`) is deliberately absent from this list, so it
+    // is read by the daemon and inherited by nothing.
+    crate::claude_cred::CHILD_ENV_VAR,
     // ccc / D11: the parent-session linkage the daemon stamps onto every task it
     // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
     // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
