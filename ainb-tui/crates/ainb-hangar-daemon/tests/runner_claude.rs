@@ -292,10 +292,18 @@ exit 0"#,
 
 #[tokio::test]
 async fn exec_exit0_without_success_terminal_marks_failed() {
-    // bead 48d (the other half): a provider that exits 0 having emitted NO
-    // terminal success event — a truncated / empty structured stream — must
-    // finalize `Failed`, never `Success`. The daemon must not mark a task `done`
-    // over work that never reported completion.
+    // bead 48d (the other half): a claude headless run (structured `stream-json`)
+    // that exits 0 having emitted NO terminal event — a truncated / renamed /
+    // empty structured stream — must finalize `Failed`, never `Success`. Because
+    // this run PROMISED a structured terminal yet produced none, the reason is the
+    // DISTINCT ProviderContractDrift (the CLI shape drifted from the pinned
+    // parser), not a generic AgentError — so an operator can tell a parser-update
+    // need from a real agent give-up. The daemon must not mark a task `done` over
+    // work that never reported completion.
+    //
+    // Integration mutation proof: reverting finalize_outcome's exit-0-no-terminal
+    // arm to `Success` flips this to `done` (RED as `done over no work`);
+    // dropping the `structured` split flips `reason` to AgentError (RED here).
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
     // A `system` line (so session_id is pinned) but NO `result` terminal — the
@@ -319,7 +327,7 @@ exit 0"#,
 
     match outcome {
         RunOutcome::Failed { reason, result } => {
-            assert_eq!(reason, FailureReason::AgentError);
+            assert_eq!(reason, FailureReason::ProviderContractDrift);
             assert_eq!(
                 result.exit_code,
                 Some(0),
@@ -327,7 +335,9 @@ exit 0"#,
             );
         }
         other => {
-            panic!("exit-0 with no success terminal must be Failed(AgentError), got {other:?}")
+            panic!(
+                "exit-0 with no success terminal must be Failed(ProviderContractDrift), got {other:?}"
+            )
         }
     }
 }
