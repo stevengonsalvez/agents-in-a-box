@@ -243,15 +243,24 @@ pub fn keys_for_backend<S: std::hash::BuildHasher>(
     if kind != Backend::Claude {
         return Vec::new();
     }
-    let (_src, token) = resolve(secrets, daemon_env);
-    token
-        .map(|t| {
-            vec![(
-                CHILD_ENV_VAR.to_string(),
-                String::from_utf8_lossy(t.as_bytes()).into_owned(),
-            )]
-        })
-        .unwrap_or_default()
+    let Some(token) = resolve(secrets, daemon_env).1 else {
+        return Vec::new();
+    };
+    // A claude OAuth token is ASCII (`sk-ant-oat…`); a non-UTF-8 value means a
+    // corrupted store entry. Inject NOTHING rather than a lossily-mangled token —
+    // claude then fails to authenticate loudly (a wrong token is a silent 401),
+    // which is the correct outcome for corruption. The error is logged without the
+    // value.
+    match std::str::from_utf8(token.as_bytes()) {
+        Ok(s) => vec![(CHILD_ENV_VAR.to_string(), s.to_string())],
+        Err(e) => {
+            tracing::error!(
+                error = %e,
+                "stored claude credential is not valid UTF-8 (corrupted?); injecting nothing"
+            );
+            Vec::new()
+        }
+    }
 }
 
 #[cfg(test)]

@@ -104,14 +104,6 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     "CLAUDE_HOME",
     "CODEX_HOME",
     "CURSOR_HOME",
-    // The claude OAuth token the daemon RESOLVES and injects at dispatch (see
-    // `crate::claude_cred`). A confined child can reach neither the Keychain nor
-    // the operator's `~/.claude`, so this env var is its ONLY credential. It is
-    // daemon-controlled config injected on top of the policy pass — never an
-    // inherited ambient secret — and the daemon-side override it resolves from
-    // (`HANGAR_CLAUDE_OAUTH_TOKEN`) is deliberately absent from this list, so it
-    // is read by the daemon and inherited by nothing.
-    crate::claude_cred::CHILD_ENV_VAR,
     // ccc / D11: the parent-session linkage the daemon stamps onto every task it
     // spawns (see `run_loop`). It is daemon-controlled config, not an inherited
     // ambient secret, so allowlisting it leaks nothing — and it MUST survive the
@@ -677,6 +669,38 @@ impl Runner {
     where
         I: IntoIterator<Item = (String, String)>,
     {
+        self.run_claude_in_with_env(env, source_env, std::iter::empty(), invocation, location)
+            .await
+    }
+
+    /// [`Self::run_claude_in`], plus a set of `extra_env` pairs layered onto the
+    /// child env **after** the allowlist filter (the codex/copilot counterpart is
+    /// [`Self::run_codex_in`]'s `extra_env`).
+    ///
+    /// This is the injection path for the daemon-resolved claude credential
+    /// (`crate::claude_cred`): a confined child can reach neither the Keychain nor
+    /// the operator's `~/.claude`, so the daemon supplies `CLAUDE_CODE_OAUTH_TOKEN`
+    /// here. It rides `extra_env` — NOT `source_env` — precisely so it does NOT go
+    /// through (and does not have to widen) the deny-by-default allowlist: an
+    /// *ambient* `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own env is still dropped
+    /// for every provider, while the *resolved* value reaches this claude child
+    /// only. The caller is responsible for backend-gating what it passes here.
+    ///
+    /// # Errors
+    ///
+    /// As [`Self::run_claude`].
+    pub async fn run_claude_in_with_env<I, E>(
+        &self,
+        env: &ExecEnv,
+        source_env: I,
+        extra_env: E,
+        invocation: &ProviderInvocation,
+        location: &RunLocation,
+    ) -> std::io::Result<RunOutcome>
+    where
+        I: IntoIterator<Item = (String, String)>,
+        E: IntoIterator<Item = (String, String)>,
+    {
         // The task brief reaches claude as the trailing positional; the workdir +
         // materialised home carry the CONTEXT (CLAUDE.md, skills) but never the ask
         // itself. `run_provider` captures stdout against a null stdin, so this is
@@ -686,7 +710,7 @@ impl Runner {
             &self.cfg.claude_path,
             env,
             source_env,
-            std::iter::empty(),
+            extra_env,
             spec,
             location,
         )
@@ -1496,6 +1520,55 @@ mod tests {
         assert!(
             child.iter().all(|(k, _)| k != "SECRET_KEY"),
             "secret filtered"
+        );
+    }
+
+    #[test]
+    fn ambient_claude_token_never_reaches_a_child_but_resolved_injection_does() {
+        use ainb_hangar_secrets::{InMemoryBackend, Scope, SecretBackend as _};
+
+        // The daemon's OWN env carries an ambient CLAUDE_CODE_OAUTH_TOKEN (a
+        // leaked operator secret). The store holds the resolved credential.
+        let mut daemon_env = std::collections::HashMap::new();
+        daemon_env.insert("HOME".to_string(), "/h".to_string());
+        daemon_env.insert(
+            crate::claude_cred::CHILD_ENV_VAR.to_string(),
+            "AMBIENT-LEAK".to_string(),
+        );
+        let store = InMemoryBackend::new();
+        store.put(&Scope::Global, crate::claude_cred::SECRET_KEY, b"RESOLVED").unwrap();
+
+        // The child's source_env is the ambient daemon env (as `build_task_env`
+        // would filter it). CLAUDE_CODE_OAUTH_TOKEN is NOT on ENV_ALLOWLIST, so
+        // `compose_child_env` drops it for EVERY backend.
+        let source: Vec<(String, String)> =
+            daemon_env.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+
+        // Codex / copilot resolve NO credential (backend gate) — their extra_env
+        // carries no token, and the ambient one is filtered out. A claude token
+        // must never appear in their child env.
+        for backend in [Backend::Codex, Backend::Copilot] {
+            let extra = crate::claude_cred::keys_for_backend(backend, &store, &daemon_env);
+            let child = compose_child_env(source.clone(), extra);
+            assert!(
+                child.iter().all(|(k, _)| k != crate::claude_cred::CHILD_ENV_VAR),
+                "{backend:?} child must carry NO CLAUDE_CODE_OAUTH_TOKEN, got {child:?}"
+            );
+        }
+
+        // Claude resolves the stored credential and injects it via extra_env
+        // (appended after the filter). The child sees the RESOLVED value — never
+        // the ambient leak.
+        let extra = crate::claude_cred::keys_for_backend(Backend::Claude, &store, &daemon_env);
+        let child = compose_child_env(source, extra);
+        let tok = child
+            .iter()
+            .find(|(k, _)| k == crate::claude_cred::CHILD_ENV_VAR)
+            .map(|(_, v)| v.as_str());
+        assert_eq!(
+            tok,
+            Some("RESOLVED"),
+            "claude child must carry the RESOLVED token, not the ambient leak"
         );
     }
 

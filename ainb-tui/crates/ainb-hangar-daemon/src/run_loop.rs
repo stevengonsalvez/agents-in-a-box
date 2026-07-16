@@ -723,20 +723,19 @@ async fn execute_claimed(
     // pass), layering keychain-resident API keys on top via
     // `dispatch::build_task_env`. The policy is loaded from
     // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent).
-    // The keychain keys are the daemon-resolved provider credentials, injected
-    // ON TOP of the policy pass (so they are never governed by the ambient
-    // allowlist). The runner re-applies its own deny-by-default filter as
-    // defense-in-depth (a strict subset of this policy), which is why
-    // `CLAUDE_CODE_OAUTH_TOKEN` is on its allowlist.
-    //
-    // Claude-only by construction: the seam reaches EVERY backend, so
-    // `claude_cred::keys_for_backend` gates on the dispatch's backend rather than
-    // handing a claude token to a codex/copilot child that has no use for it.
     let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
     let policy = load_env_policy();
-    let keychain_keys =
-        crate::claude_cred::keys_for_backend(dispatch.backend, secrets, &daemon_env);
-    let mut task_env = crate::dispatch::build_task_env(&daemon_env, keychain_keys, &policy);
+    let mut task_env = crate::dispatch::build_task_env(&daemon_env, std::iter::empty(), &policy);
+
+    // The daemon-resolved claude credential. It rides `extra_env` (the unfiltered
+    // append below), NOT `task_env`/`source_env` — so it does not go through, and
+    // does not have to widen, the deny-by-default allowlist. An *ambient*
+    // `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own env stays dropped for every
+    // provider (it is not on the runner's exact-match allowlist), while the
+    // *resolved* value reaches a claude child only. `keys_for_backend` returns an
+    // empty vec for codex/copilot, so a claude token can never leak into their
+    // children even though every backend shares this seam.
+    let cred_env = crate::claude_cred::keys_for_backend(dispatch.backend, secrets, &daemon_env);
 
     // ccc / D11: mark this daemon-spawned session as a legitimate fleet member by
     // stamping AINB_PARENT_SESSION into the provider's child env. The lifecycle
@@ -815,6 +814,12 @@ async fn execute_claimed(
     let provider = dispatch.backend.name();
     let provider_run = async {
         if mode == Mode::Interactive {
+            // The interactive path is DELIBERATELY unsandboxed (see
+            // `run_interactive`): the attached claude reaches the Keychain and
+            // `~/.claude` natively and auto-refreshes, so it needs no injected
+            // token. `cred_env` (headless-only, consumed in the `else` arm) is
+            // intentionally not threaded here — a static `CLAUDE_CODE_OAUTH_TOKEN`
+            // would override keychain auth and go stale mid-session.
             run_interactive(
                 pool,
                 runner,
@@ -835,7 +840,13 @@ async fn execute_claimed(
             // (the interactive path already returns `anyhow::Result`).
             match dispatch.backend {
                 Backend::Claude => runner
-                    .run_claude_in(&env, task_env, &dispatch.invocation, &location)
+                    .run_claude_in_with_env(
+                        &env,
+                        task_env,
+                        cred_env,
+                        &dispatch.invocation,
+                        &location,
+                    )
                     .await
                     .map_err(anyhow::Error::from),
                 Backend::Codex => runner
