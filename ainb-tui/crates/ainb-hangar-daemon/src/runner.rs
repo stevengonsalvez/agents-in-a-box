@@ -1487,6 +1487,27 @@ impl Runner {
 /// the parser was pinned against drifted — held DISTINCT from the
 /// [`FailureReason::AgentError`] a non-structured provider (copilot) gets, so an
 /// operator can tell "the provider contract changed" from "the agent gave up".
+/// Emit the LOUD, operator-actionable WARN for a provider contract drift: the
+/// provider name, WHY it drifted, and a bounded raw tail of the stream so an
+/// operator can read the actual (renamed / unknown) terminal line and update the
+/// parser.
+///
+/// The raw tail is the diagnostic instead of a captured CLI version: probing
+/// `<provider> --version` was rejected as fragile — it means an extra subprocess
+/// exec per dispatch, which corrupts side-effecting stand-ins (the retry tests'
+/// invocation-counter fake increments on EVERY exec) and its output format rots
+/// across releases. The recognised-terminal versions the parser is pinned against
+/// (claude 2.1.211 / codex 0.144.0) are documented at the const definitions, and
+/// the raw tail carries whatever version banner the provider itself emitted.
+fn log_contract_drift(backend: Backend, why: &str, stdout_tail: &str) {
+    tracing::warn!(
+        provider = backend.name(),
+        why,
+        raw_terminal_tail = %stdout_tail,
+        "provider_contract_drift: the provider's terminal-event shape drifted from the pinned parser — inspect the raw tail and update StreamLine/classify"
+    );
+}
+
 fn finalize_outcome(
     backend: Backend,
     structured: bool,
@@ -1509,7 +1530,11 @@ fn finalize_outcome(
     match terminal {
         Some(TerminalSignal::Failure(reason)) => {
             let reason = *reason;
-            tracing::warn!(provider = backend.name(), ?reason, exit_code = ?exit_code, "runner_failed_structured");
+            if reason == FailureReason::ProviderContractDrift {
+                log_contract_drift(backend, "unrecognised result subtype", &result.stdout_tail);
+            } else {
+                tracing::warn!(provider = backend.name(), ?reason, exit_code = ?exit_code, "runner_failed_structured");
+            }
             RunOutcome::Failed { reason, result }
         }
         Some(TerminalSignal::Success) if exit_code == Some(0) => RunOutcome::Success(result),
@@ -1528,12 +1553,20 @@ fn finalize_outcome(
                 } else {
                     FailureReason::AgentError
                 };
-                tracing::warn!(
-                    provider = backend.name(),
-                    ?reason,
-                    reason_detail = "no_success_terminal",
-                    "runner_failed"
-                );
+                if reason == FailureReason::ProviderContractDrift {
+                    log_contract_drift(
+                        backend,
+                        "no recognised terminal event",
+                        &result.stdout_tail,
+                    );
+                } else {
+                    tracing::warn!(
+                        provider = backend.name(),
+                        ?reason,
+                        reason_detail = "no_success_terminal",
+                        "runner_failed"
+                    );
+                }
                 RunOutcome::Failed { reason, result }
             }
             Some(EX_TEMPFAIL) => {
