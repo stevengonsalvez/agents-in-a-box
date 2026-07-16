@@ -442,9 +442,11 @@ mod tests {
         let wk = c.seven_day.expect("weekly present in primary_window");
         assert_eq!(wk.pct, 1);
         assert_eq!(
-            chrono::DateTime::parse_from_rfc3339(wk.resets_at.as_ref().unwrap())
-                .unwrap()
-                .timestamp(),
+            chrono::DateTime::parse_from_rfc3339(
+                wk.resets_at.as_ref().expect("weekly reset_at present")
+            )
+            .expect("resets_at is valid RFC3339")
+            .timestamp(),
             1784718621
         );
     }
