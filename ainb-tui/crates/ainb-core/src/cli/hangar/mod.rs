@@ -1178,6 +1178,38 @@ pub enum DaemonCommand {
     /// View + edit the daemon's user-config knobs (`list`/`get`/`set`).
     #[command(subcommand)]
     Config(DaemonConfigCommand),
+    /// Manage the one-time, host-wide `claude` credential the daemon injects
+    /// into confined headless runs (`status`/`set`/`clear`).
+    #[command(subcommand)]
+    Cred(DaemonCredCommand),
+}
+
+/// `hangar daemon cred <verb>` — the daemon-level claude credential.
+///
+/// The credential is a SECRET (not a `daemon_config` knob), so it lives in the
+/// platform secret store via `ainb_hangar_daemon::claude_cred`, never in the
+/// plaintext `daemon_config` table. It is configured ONCE at daemon level; there
+/// is no per-agent form.
+#[derive(clap::Subcommand, Debug)]
+pub enum DaemonCredCommand {
+    /// Report whether a credential is configured and where it resolves from
+    /// (env override / secret store / not set). Never prints the value.
+    Status,
+    /// Store a long-lived token. Reads the token from STDIN by default (so it
+    /// never lands on argv or in shell history); `--setup-token` instead drives
+    /// the interactive `claude setup-token` browser flow and captures the result.
+    Set(DaemonCredSetArgs),
+    /// Remove the stored credential. Idempotent.
+    Clear,
+}
+
+/// Arguments for `hangar daemon cred set`.
+#[derive(Args, Debug)]
+pub struct DaemonCredSetArgs {
+    /// Drive `claude setup-token` (browser OAuth) and capture the minted token,
+    /// instead of reading a token from STDIN.
+    #[arg(long)]
+    pub setup_token: bool,
 }
 
 /// `hangar daemon config <verb>`.
@@ -3037,7 +3069,73 @@ async fn dispatch_daemon(cmd: DaemonCommand, format: OutputFormat) -> Result<()>
         DaemonCommand::Restart => run_daemon_restart(),
         DaemonCommand::Setup => run_daemon_setup().await,
         DaemonCommand::Config(c) => dispatch_daemon_config(c, format).await,
+        DaemonCommand::Cred(c) => dispatch_daemon_cred(c).await,
     }
+}
+
+/// Dispatch the `hangar daemon cred` verbs against the platform secret store.
+///
+/// Unlike `daemon config`, this touches no `daemon_config` row — a credential is
+/// a secret, resolved and stored via `ainb_hangar_daemon::claude_cred`. The
+/// daemon injects whatever is stored on its next dispatch, so no restart is
+/// needed.
+async fn dispatch_daemon_cred(cmd: DaemonCredCommand) -> Result<()> {
+    use ainb_hangar_daemon::claude_cred;
+
+    match cmd {
+        DaemonCredCommand::Status => {
+            let src = claude_cred::default::source();
+            // Never prints the value — only the source label.
+            println!("claude credential: {}", src.label());
+            Ok(())
+        }
+        DaemonCredCommand::Clear => {
+            claude_cred::default::clear_token().context("clear claude credential")?;
+            println!("claude credential cleared");
+            Ok(())
+        }
+        DaemonCredCommand::Set(args) => run_daemon_cred_set(args),
+    }
+}
+
+/// Capture a token (from `claude setup-token` or STDIN) and store it. The token
+/// is held only as bytes and never echoed. Synchronous: the subprocess and stdin
+/// read are blocking, and this is a one-shot operator command, not on any hot path.
+fn run_daemon_cred_set(args: DaemonCredSetArgs) -> Result<()> {
+    use ainb_hangar_daemon::claude_cred;
+
+    let token: String = if args.setup_token {
+        // Drive the interactive browser flow. stderr/stdin are inherited so the
+        // user sees the prompt and completes OAuth; stdout is captured for the
+        // minted token. Verified shape: the token is an `sk-ant-oat…` word.
+        let out = std::process::Command::new("claude")
+            .arg("setup-token")
+            .stderr(std::process::Stdio::inherit())
+            .stdin(std::process::Stdio::inherit())
+            .output()
+            .context("run `claude setup-token` (is the claude CLI on PATH?)")?;
+        if !out.status.success() {
+            anyhow::bail!("`claude setup-token` exited without minting a token");
+        }
+        let stdout = String::from_utf8_lossy(&out.stdout);
+        claude_cred::extract_setup_token(&stdout)
+            .context("no token found in `claude setup-token` output")?
+    } else {
+        // Read from STDIN so the token never lands on argv or in shell history.
+        use std::io::Read as _;
+        let mut buf = String::new();
+        std::io::stdin().read_to_string(&mut buf).context("read token from stdin")?;
+        let trimmed = buf.trim().to_string();
+        if trimmed.is_empty() {
+            anyhow::bail!("no token on stdin (pipe the token, or use --setup-token)");
+        }
+        trimmed
+    };
+
+    claude_cred::default::store_token(token.as_bytes()).context("store claude credential")?;
+    // Confirm without echoing the value.
+    println!("claude credential stored ({} bytes)", token.len());
+    Ok(())
 }
 
 /// Dispatch the `hangar daemon config` verbs against the `daemon_config` table.

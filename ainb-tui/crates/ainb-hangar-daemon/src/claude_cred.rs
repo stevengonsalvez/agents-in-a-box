@@ -167,6 +167,66 @@ pub fn clear(backend: &dyn SecretBackend) -> ainb_hangar_secrets::Result<()> {
     backend.delete(&Scope::Global, SECRET_KEY)
 }
 
+/// The env var name (`sk-ant-oat…`) prefix that identifies a claude OAuth token
+/// in `claude setup-token` output. Used to pick the token line out of the
+/// interactive command's stdout.
+const OAUTH_TOKEN_PREFIX: &str = "sk-ant-oat";
+
+/// Extract the OAuth token from `claude setup-token` stdout.
+///
+/// `setup-token` prints human prose interspersed with the token; the token is
+/// the last whitespace-delimited word starting with [`OAUTH_TOKEN_PREFIX`].
+/// Pure + testable so the fragile parsing is covered without minting a real
+/// token. Returns `None` when no token-shaped word is present (the caller then
+/// reports a failed setup rather than storing garbage).
+#[must_use]
+pub fn extract_setup_token(stdout: &str) -> Option<String> {
+    stdout
+        .split_whitespace()
+        .rev()
+        .find(|w| w.starts_with(OAUTH_TOKEN_PREFIX) && w.len() > OAUTH_TOKEN_PREFIX.len())
+        .map(str::to_string)
+}
+
+/// Convenience wrappers over the platform-default backend, so a CLI/TUI caller
+/// needs no direct `ainb-hangar-secrets` dependency.
+pub mod default {
+    use super::{CredSource, SecretBytes, clear, default_backend, resolve, status, store};
+
+    /// The configured credential source, resolved from the default backend and
+    /// the process env.
+    #[must_use]
+    pub fn source() -> CredSource {
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        status(default_backend().as_ref(), &env)
+    }
+
+    /// Whether resolving a credential succeeds AND yields non-empty material.
+    #[must_use]
+    pub fn is_present() -> bool {
+        let env: std::collections::HashMap<String, String> = std::env::vars().collect();
+        resolve(default_backend().as_ref(), &env).1.is_some()
+    }
+
+    /// Store `token` in the default backend. Bytes, never a `String` on argv.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's store fault (locked/denied/unimplemented).
+    pub fn store_token(token: &[u8]) -> ainb_hangar_secrets::Result<()> {
+        store(default_backend().as_ref(), &SecretBytes::from(token))
+    }
+
+    /// Remove the stored token from the default backend. Idempotent.
+    ///
+    /// # Errors
+    ///
+    /// Propagates the backend's store fault.
+    pub fn clear_token() -> ainb_hangar_secrets::Result<()> {
+        clear(default_backend().as_ref())
+    }
+}
+
 /// The credential env pairs to inject for `backend_kind`, for the
 /// `build_task_env` keychain seam.
 ///
@@ -244,6 +304,19 @@ mod tests {
     fn no_credential_injects_nothing() {
         let b = InMemoryBackend::new();
         assert!(keys_for_backend(Backend::Claude, &b, &env(&[])).is_empty());
+    }
+
+    #[test]
+    fn extract_setup_token_picks_the_token_word() {
+        let out = "Visit https://claude.ai/oauth to authorize.\nYour token:\n  sk-ant-oat01-ABCdef123\nDone.";
+        assert_eq!(
+            extract_setup_token(out).as_deref(),
+            Some("sk-ant-oat01-ABCdef123")
+        );
+        // No token-shaped word -> None (never store prose).
+        assert_eq!(extract_setup_token("authorization was cancelled"), None);
+        // The bare prefix with no body is not a token.
+        assert_eq!(extract_setup_token("sk-ant-oat"), None);
     }
 
     #[test]
