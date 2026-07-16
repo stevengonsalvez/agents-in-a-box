@@ -42,7 +42,41 @@ test-live:
         exit 0
     fi
     cargo build -p ainb --bin ainb
-    cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e -- --nocapture --test-threads=1
+    cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e live_dispatch_writes_nonce_artifact -- --nocapture --test-threads=1
+
+# Run the LIVE, no-mock e2e tripwire against the REAL codex binary.
+#
+# The codex leg of `test-live`: same law (assert the on-disk nonce artifact
+# FIRST, task=done only as a cross-check), one provider over. Skips CLEAN + LOUD
+# (exit 0) when there is no authenticated `codex` on PATH, via a bounded
+# liveness probe (`codex exec -- "reply PONG"`) — macOS has no `timeout`, so a
+# background killer bounds it. The Rust test carries the same skip gate, so this
+# recipe only fast-fails the build when codex is plainly absent.
+test-live-codex:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v codex >/dev/null 2>&1; then
+        echo "SKIPPED: no codex binary on PATH"
+        exit 0
+    fi
+    probe=$(mktemp)
+    codex exec --skip-git-repo-check -- "reply with the single word PONG" >"$probe" 2>/dev/null &
+    pid=$!
+    ( sleep 90; kill "$pid" 2>/dev/null || true ) &
+    killer=$!
+    wait "$pid" 2>/dev/null && rc=0 || rc=$?
+    kill "$killer" 2>/dev/null || true
+    if [ "$rc" -ne 0 ] || ! grep -qi PONG "$probe"; then
+        echo "SKIPPED: codex on PATH is not authenticated / did not answer the liveness probe"
+        rm -f "$probe"
+        exit 0
+    fi
+    rm -f "$probe"
+    cargo build -p ainb --bin ainb
+    cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e live_dispatch_codex_writes_nonce_artifact -- --nocapture --test-threads=1
+
+# Run BOTH live e2e legs (claude + codex); each self-skips CLEAN + LOUD.
+test-live-all: test-live test-live-codex
 
 # Format code
 fmt:
