@@ -238,6 +238,101 @@ exit 1"#,
 }
 
 #[tokio::test]
+async fn exec_exit0_with_structured_error_marks_failed() {
+    // bead 48d: a provider that EXITS 0 but whose structured terminal reports an
+    // error (claude's `error_max_turns`) must finalize `Failed`, NOT `Success` —
+    // the exit code is not the completion signal. The reason is the one the
+    // subtype maps to (`error_max_turns` → the retry-fresh IterationLimit), and
+    // the session_id from the stream is still captured (48c).
+    //
+    // Mutation-proof: revert the finalize-on-structured-result change in
+    // `run_provider::run_provider` and this goes RED — exit 0 falls back to
+    // `Success` and the daemon marks the task `done` over an incomplete run.
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = write_script(
+        tmp.path(),
+        "fake-claude.sh",
+        r#"echo '{"type":"system","session_id":"sid-maxturns"}'
+echo '{"type":"result","subtype":"error_max_turns","is_error":true,"num_turns":2}'
+exit 0"#,
+    );
+    let runner = Runner::new(RunnerConfig {
+        claude_path: script,
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
+        max_runtime: Duration::from_secs(10),
+        tail_lines: 50,
+        sandbox: true,
+    });
+
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
+
+    match outcome {
+        RunOutcome::Failed { reason, result } => {
+            assert_eq!(
+                reason,
+                FailureReason::IterationLimit,
+                "error_max_turns must map to the retry-fresh IterationLimit reason"
+            );
+            assert_eq!(
+                result.exit_code,
+                Some(0),
+                "the process exited 0 — the STRUCTURED error, not the exit code, drove the failure"
+            );
+            assert_eq!(
+                result.session_id.as_deref(),
+                Some("sid-maxturns"),
+                "session_id must still be pinned from the stream-json system line (48c)"
+            );
+        }
+        other => panic!("exit-0 structured error must be Failed(IterationLimit), got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn exec_exit0_without_success_terminal_marks_failed() {
+    // bead 48d (the other half): a provider that exits 0 having emitted NO
+    // terminal success event — a truncated / empty structured stream — must
+    // finalize `Failed`, never `Success`. The daemon must not mark a task `done`
+    // over work that never reported completion.
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    // A `system` line (so session_id is pinned) but NO `result` terminal — the
+    // stream ended before any outcome, yet the process exited 0.
+    let script = write_script(
+        tmp.path(),
+        "fake-claude.sh",
+        r#"echo '{"type":"system","session_id":"sid-noterm"}'
+exit 0"#,
+    );
+    let runner = Runner::new(RunnerConfig {
+        claude_path: script,
+        codex_path: PathBuf::from("/nonexistent/codex"),
+        copilot_path: PathBuf::from("/nonexistent/copilot"),
+        max_runtime: Duration::from_secs(10),
+        tail_lines: 50,
+        sandbox: true,
+    });
+
+    let outcome = runner.run_claude(&env, std::iter::empty(), &invocation()).await.expect("run");
+
+    match outcome {
+        RunOutcome::Failed { reason, result } => {
+            assert_eq!(reason, FailureReason::AgentError);
+            assert_eq!(
+                result.exit_code,
+                Some(0),
+                "exit 0 with no success terminal is still a failure (48d)"
+            );
+        }
+        other => {
+            panic!("exit-0 with no success terminal must be Failed(AgentError), got {other:?}")
+        }
+    }
+}
+
+#[tokio::test]
 async fn exec_extempfail_75_marks_runtime_offline() {
     // EX_TEMPFAIL (75) is the provider's "transient runtime failure, retry later"
     // signal — it must classify as the infra/retryable RuntimeOffline reason
