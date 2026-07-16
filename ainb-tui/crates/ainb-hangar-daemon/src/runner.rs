@@ -673,6 +673,14 @@ struct ProviderSpec {
     log_file: &'static str,
     /// The argv to append after the program path (subcommand + flags + args).
     argv: Vec<String>,
+    /// Whether this argv requests the provider's STRUCTURED event stream (claude
+    /// `--output-format stream-json`, codex `exec --json`) — i.e. whether the run
+    /// PROMISES a machine terminal event. When `true`, a clean exit that produced
+    /// no recognised success/error terminal is CONTRACT DRIFT, not a plain agent
+    /// error: the stream shape the parser was pinned against changed. When `false`
+    /// (copilot, which emits no structured terminal), a missing terminal stays a
+    /// generic agent error. See [`finalize_outcome`].
+    structured: bool,
 }
 
 /// A provider that can be exec'd as an agent CLI subprocess.
@@ -1155,6 +1163,9 @@ impl Runner {
             backend: Backend::Claude,
             log_file: CLAUDE_LOG_FILE,
             argv,
+            // Only the headless argv carries `--output-format stream-json`, so
+            // only it promises a structured terminal to finalize on.
+            structured: mode == Mode::Headless,
         }
     }
 
@@ -1218,6 +1229,9 @@ impl Runner {
             backend: Backend::Codex,
             log_file: CODEX_LOG_FILE,
             argv,
+            // Only the headless `exec --json` argv promises the structured
+            // turn.completed / turn.failed terminal to finalize on.
+            structured: mode == Mode::Headless,
         }
     }
 
@@ -1294,6 +1308,9 @@ impl Runner {
             backend: Backend::Copilot,
             log_file: COPILOT_LOG_FILE,
             argv,
+            // Copilot emits no structured terminal stream, so a missing terminal
+            // stays a generic agent error (never contract drift).
+            structured: false,
         }
     }
 
@@ -1438,6 +1455,7 @@ impl Runner {
 
         Ok(finalize_outcome(
             spec.backend,
+            spec.structured,
             timed_out,
             terminal.as_ref(),
             exit_code,
@@ -1462,8 +1480,16 @@ impl Runner {
 ///   4. otherwise fall back to the exit code, where a bare exit 0 with NO
 ///      success terminal is itself a failure (the other 48d hole), and
 ///      [`EX_TEMPFAIL`] stays the retryable [`FailureReason::RuntimeOffline`].
+///
+/// The exit-0-no-terminal failure splits on `structured`: a run that PROMISED a
+/// machine terminal (claude `--output-format stream-json` / codex `exec --json`)
+/// yet produced none is [`FailureReason::ProviderContractDrift`] — the CLI shape
+/// the parser was pinned against drifted — held DISTINCT from the
+/// [`FailureReason::AgentError`] a non-structured provider (copilot) gets, so an
+/// operator can tell "the provider contract changed" from "the agent gave up".
 fn finalize_outcome(
     backend: Backend,
+    structured: bool,
     timed_out: bool,
     terminal: Option<&TerminalSignal>,
     exit_code: Option<i32>,
@@ -1492,16 +1518,23 @@ fn finalize_outcome(
         _ => match exit_code {
             Some(0) => {
                 // 48d: exit 0 but the provider never reported success — never
-                // mark this `done` over work that did not happen.
+                // mark this `done` over work that did not happen. A provider that
+                // PROMISED a structured terminal (claude/codex headless) yet
+                // emitted none is contract drift: its terminal shape drifted from
+                // the pinned parser. A non-structured provider (copilot) has no
+                // terminal to miss, so it stays a generic agent error.
+                let reason = if structured {
+                    FailureReason::ProviderContractDrift
+                } else {
+                    FailureReason::AgentError
+                };
                 tracing::warn!(
                     provider = backend.name(),
-                    reason = "no_success_terminal",
+                    ?reason,
+                    reason_detail = "no_success_terminal",
                     "runner_failed"
                 );
-                RunOutcome::Failed {
-                    reason: FailureReason::AgentError,
-                    result,
-                }
+                RunOutcome::Failed { reason, result }
             }
             Some(EX_TEMPFAIL) => {
                 // Transient runtime failure — infra/retryable so the daemon's
@@ -1803,6 +1836,116 @@ mod tests {
         assert_eq!(
             classify_claude_result(Some("finished_ok"), false),
             TerminalSignal::Failure(FailureReason::ProviderContractDrift),
+        );
+    }
+
+    /// A bare captured result with the given exit code and empty tails.
+    fn result_with_exit(exit_code: Option<i32>) -> RunnerResult {
+        RunnerResult {
+            exit_code,
+            session_id: None,
+            usage: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+        }
+    }
+
+    /// A genuine structured success on a clean exit MUST still reach Success —
+    /// the fail-closed changes must not mis-fail real work.
+    #[test]
+    fn structured_success_clean_exit_reaches_success() {
+        let outcome = finalize_outcome(
+            Backend::Claude,
+            true,
+            false,
+            Some(&TerminalSignal::Success),
+            Some(0),
+            result_with_exit(Some(0)),
+        );
+        assert!(
+            matches!(outcome, RunOutcome::Success(_)),
+            "genuine success must stay done, got {outcome:?}"
+        );
+    }
+
+    /// FAIL-CLOSED: a structured provider (claude/codex headless) that exits 0 but
+    /// emitted NO recognised terminal — a renamed/absent terminal event — must fail
+    /// closed to the DISTINCT ProviderContractDrift reason, never `done`.
+    ///
+    /// Mutation check: reverting the `if structured { ProviderContractDrift }` split
+    /// back to an unconditional `FailureReason::AgentError` makes this see
+    /// `AgentError` and flip RED (drift becomes indistinguishable from agent error);
+    /// reverting the whole arm to `RunOutcome::Success` makes it flip RED as `done`.
+    #[test]
+    fn structured_no_terminal_exit0_fails_closed_as_contract_drift() {
+        let outcome = finalize_outcome(
+            Backend::Claude,
+            true,
+            false,
+            None,
+            Some(0),
+            result_with_exit(Some(0)),
+        );
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Failed {
+                    reason: FailureReason::ProviderContractDrift,
+                    ..
+                }
+            ),
+            "structured exit-0 no-terminal must be ProviderContractDrift, got {outcome:?}"
+        );
+    }
+
+    /// Codex under `exec --json` is a structured stream: an unrecognised terminal
+    /// (parsed to `None`) on a clean exit fails closed to contract drift, same as
+    /// claude — not exit-code-trust `done`.
+    #[test]
+    fn codex_structured_unknown_terminal_fails_closed_as_contract_drift() {
+        let outcome = finalize_outcome(
+            Backend::Codex,
+            true,
+            false,
+            None,
+            Some(0),
+            result_with_exit(Some(0)),
+        );
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Failed {
+                    reason: FailureReason::ProviderContractDrift,
+                    ..
+                }
+            ),
+            "codex structured exit-0 no-terminal must be ProviderContractDrift, got {outcome:?}"
+        );
+    }
+
+    /// A NON-structured provider (copilot emits no terminal stream) that exits 0
+    /// without a terminal stays a generic AgentError — NOT contract drift. This
+    /// pins the boundary so copilot is never mislabelled as a claude/codex shape
+    /// change.
+    #[test]
+    fn non_structured_no_terminal_exit0_is_agent_error_not_drift() {
+        let outcome = finalize_outcome(
+            Backend::Copilot,
+            false,
+            false,
+            None,
+            Some(0),
+            result_with_exit(Some(0)),
+        );
+        assert!(
+            matches!(
+                outcome,
+                RunOutcome::Failed {
+                    reason: FailureReason::AgentError,
+                    ..
+                }
+            ),
+            "non-structured exit-0 no-terminal must be AgentError, got {outcome:?}"
         );
     }
 
