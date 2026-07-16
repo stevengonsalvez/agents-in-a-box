@@ -301,8 +301,9 @@ async fn codex_run_is_sandbox_confined() {
     let script = write_script(
         tmp.path(),
         "fake-codex.sh",
-        r#"echo '{"type":"system","session_id":"s"}'
+        r#"echo '{"type":"thread.started","thread_id":"s"}'
 echo "HOME=${HOME:-<absent>}"
+echo '{"type":"turn.completed","usage":{"input_tokens":1,"output_tokens":1}}'
 exit 0"#,
     );
     let runner = Runner::new(cfg_with_codex(script));
@@ -321,4 +322,76 @@ exit 0"#,
         outcome.result().stdout_tail.contains(&format!("HOME={}", tmp.path().display())),
         "HOME (allowlisted) must pass through the confined run"
     );
+}
+
+/// bead 48c: the codex `--json` terminal drives session + usage capture. A
+/// `thread.started` pins the session handle, and a `turn.completed` pins the
+/// token usage AND is the structured success signal — so a genuine codex success
+/// finalizes `Success` with both populated (they were silently dead before, when
+/// codex emitted un-parsed human text).
+#[tokio::test]
+async fn codex_turn_completed_captures_thread_id_and_usage() {
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = write_script(
+        tmp.path(),
+        "fake-codex.sh",
+        r#"echo '{"type":"thread.started","thread_id":"cdx-thread-9"}'
+echo '{"type":"turn.completed","usage":{"input_tokens":900,"output_tokens":120}}'
+exit 0"#,
+    );
+    let runner = Runner::new(cfg_with_codex(script));
+
+    let outcome = runner
+        .run_codex(&env, std::iter::empty(), &brief_invocation())
+        .await
+        .expect("run");
+
+    assert!(
+        matches!(outcome, RunOutcome::Success(_)),
+        "turn.completed is success, got {outcome:?}"
+    );
+    let result = outcome.result();
+    assert_eq!(
+        result.session_id.as_deref(),
+        Some("cdx-thread-9"),
+        "session_id must be pinned from codex's thread.started.thread_id (48c)"
+    );
+    let usage = result.usage.clone().expect("usage captured from turn.completed (48c)");
+    assert_eq!(usage.input_tokens, 900);
+    assert_eq!(usage.output_tokens, 120);
+}
+
+/// bead 48d: a codex run that EXITS 0 but emits a structured `turn.failed` must
+/// finalize `Failed`, not `Success`. The daemon no longer trusts codex's exit
+/// code alone — the provider's own reported outcome is authoritative.
+#[tokio::test]
+async fn codex_exit0_turn_failed_marks_failed() {
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = write_script(
+        tmp.path(),
+        "fake-codex.sh",
+        r#"echo '{"type":"thread.started","thread_id":"cdx-fail"}'
+echo '{"type":"turn.failed","error":{"message":"model refused"}}'
+exit 0"#,
+    );
+    let runner = Runner::new(cfg_with_codex(script));
+
+    let outcome = runner
+        .run_codex(&env, std::iter::empty(), &brief_invocation())
+        .await
+        .expect("run");
+
+    match outcome {
+        RunOutcome::Failed { reason, result } => {
+            assert_eq!(reason, FailureReason::AgentError);
+            assert_eq!(
+                result.exit_code,
+                Some(0),
+                "exit 0 with a structured turn.failed is still a failure (48d)"
+            );
+        }
+        other => panic!("exit-0 turn.failed must be Failed(AgentError), got {other:?}"),
+    }
 }

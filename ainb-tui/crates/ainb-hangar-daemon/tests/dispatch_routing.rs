@@ -348,16 +348,35 @@ fn every_provider_argv_is_the_verified_headless_shape() {
     let (_p, claude) = runner.provider_command(Backend::Claude, &inv, Mode::Headless);
     assert_eq!(
         claude,
-        vec!["-p", "--dangerously-skip-permissions", "--", "BRIEF"],
-        "claude: -p --dangerously-skip-permissions -- <brief> (without a permission \
-         flag, tools are denied and the run exits 0 having done nothing)"
+        vec![
+            "-p",
+            "--dangerously-skip-permissions",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+            "--",
+            "BRIEF"
+        ],
+        "claude: -p --dangerously-skip-permissions --output-format stream-json --verbose \
+         -- <brief> (the stream-json flags — bead 48c — make claude emit the structured \
+         terminal event the daemon finalizes on; stream-json requires --verbose under -p)"
     );
 
     let (_p, codex) = runner.provider_command(Backend::Codex, &inv, Mode::Headless);
     assert_eq!(
         codex,
-        vec!["exec", "--skip-git-repo-check", "--", "BRIEF"],
-        "codex: exec --skip-git-repo-check -- <brief> (prompt is a trailing positional)"
+        vec![
+            "exec",
+            "--skip-git-repo-check",
+            "-s",
+            "danger-full-access",
+            "--json",
+            "--",
+            "BRIEF"
+        ],
+        "codex: exec --skip-git-repo-check -s danger-full-access --json -- <brief> \
+         (--json — bead 48c — emits the structured turn.completed/turn.failed terminal; \
+         prompt is a trailing positional)"
     );
 
     let (_p, copilot) = runner.provider_command(Backend::Copilot, &inv, Mode::Headless);
@@ -486,6 +505,9 @@ fn brief_that_names_a_subcommand_does_not_hijack_it() {
         vec![
             "exec".to_string(),
             "--skip-git-repo-check".to_string(),
+            "-s".to_string(),
+            "danger-full-access".to_string(),
+            "--json".to_string(),
             "--".to_string(),
             "review".to_string()
         ],
@@ -514,6 +536,9 @@ fn value_taking_cli_arg_cannot_swallow_the_brief() {
         vec![
             "exec".to_string(),
             "--skip-git-repo-check".to_string(),
+            "-s".to_string(),
+            "danger-full-access".to_string(),
+            "--json".to_string(),
             "--add-dir".to_string(),
             "--".to_string(),
             "do the thing".to_string()

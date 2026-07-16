@@ -19,16 +19,23 @@
 //! # Outcome classification
 //!
 //! The runner does **not** itself touch the database. It returns a
-//! [`RunOutcome`] the daemon's claim loop maps onto the FSM:
-//! - clean exit (code 0)        → [`RunOutcome::Success`] → daemon `CompleteTask`,
-//! - exit [`EX_TEMPFAIL`] (75)   → [`RunOutcome::Failed`] with
-//!   [`FailureReason::RuntimeOffline`] — a provider's POSIX `sysexits.h`
-//!   "temporary failure, retry later" code, the infra/retryable failure the
+//! [`RunOutcome`] the daemon's claim loop maps onto the FSM. It finalizes on the
+//! provider's OWN structured terminal event (beads 48c/48d) — parsed from the
+//! `--output-format stream-json` (claude) / `--json` (codex) stream — NOT the
+//! bare exit code, because an agent CLI exits 0 on refusals and empty runs:
+//! - structured success + clean exit → [`RunOutcome::Success`] → daemon
+//!   `CompleteTask`,
+//! - structured error / refusal / max-turns (any exit code, incl. 0) →
+//!   [`RunOutcome::Failed`] with the mapped reason ([`FailureReason::IterationLimit`]
+//!   for `error_max_turns`, else [`FailureReason::AgentError`]),
+//! - **exit 0 with NO success terminal** → [`RunOutcome::Failed`] with
+//!   [`FailureReason::AgentError`] — the "done over no work" hole (48d),
+//! - exit [`EX_TEMPFAIL`] (75) with no success terminal → [`RunOutcome::Failed`]
+//!   with [`FailureReason::RuntimeOffline`] — the infra/retryable failure the
 //!   daemon's retry chain (e38.28) re-dispatches as a child task,
-//! - any other non-zero exit    → [`RunOutcome::Failed`] with
-//!   [`FailureReason::AgentError`] (the agent itself errored / gave up — terminal,
-//!   not retried),
-//! - deadline exceeded → kill   → [`RunOutcome::Failed`] with
+//! - any other non-zero exit with no success terminal → [`RunOutcome::Failed`]
+//!   with [`FailureReason::AgentError`],
+//! - deadline exceeded → kill → [`RunOutcome::Failed`] with
 //!   [`FailureReason::Timeout`].
 
 use std::path::{Path, PathBuf};
@@ -196,6 +203,15 @@ const CODEX_SANDBOX_FLAG: &str = "-s";
 /// answer codex's own trust/approval prompts, so it keeps codex's default
 /// confinement (see [`Runner::codex_spec`]).
 const CODEX_SANDBOX_HEADLESS: &str = "danger-full-access";
+/// The codex flag selecting its machine-readable event stream (bead 48c). `codex
+/// exec --json` emits one JSON event per line — a `thread.started` carrying the
+/// `thread_id` (codex's session handle), and a TERMINAL `turn.completed`
+/// (success, with `usage`) or `turn.failed` (error, with the provider's error
+/// message). WITHOUT it codex prints human text the runner cannot classify, so —
+/// exactly like claude pre-fix — the daemon can only trust the exit code.
+/// Verified against codex-cli 0.144.0. Headless-only (the interactive TUI has no
+/// `exec` subcommand to attach it to).
+const CODEX_JSON_FLAG: &str = "--json";
 /// The provider-log file written under [`ExecEnv::logs`] for the `copilot`
 /// provider. Its own log keeps a copilot transcript separate from claude/codex.
 const COPILOT_LOG_FILE: &str = "copilot.jsonl";
@@ -242,6 +258,22 @@ const CLAUDE_MODEL_FLAG: &str = "--model";
 ///
 /// See [`Runner::claude_spec`] for the trust posture this implies.
 const CLAUDE_SKIP_PERMISSIONS_FLAG: &str = "--dangerously-skip-permissions";
+/// The claude flag selecting the machine-readable event stream (bead 48c). Under
+/// `--print`, `--output-format stream-json` makes claude emit one JSON event per
+/// line — a `system` line carrying `session_id`, per-turn `assistant` lines, and
+/// a TERMINAL `{"type":"result",…}` line whose `subtype`/`is_error` report
+/// genuine success vs refusal/error/max-turns. WITHOUT it, `claude -p` prints
+/// PLAIN TEXT (~5 bytes), so `session_id`/`usage` never parse and the daemon has
+/// only the exit code to trust — the exact hole behind beads 48c/48d. Verified
+/// against Claude Code 2.1.211.
+const CLAUDE_OUTPUT_FORMAT_FLAG: &str = "--output-format";
+/// The `--output-format` value for the per-line JSON event stream (bead 48c).
+const CLAUDE_STREAM_JSON_FORMAT: &str = "stream-json";
+/// `--output-format stream-json` under `--print` HARD-REQUIRES `--verbose`
+/// (verified against Claude Code 2.1.211: without it claude errors "When using
+/// --print, --output-format=stream-json requires --verbose"). Headless-only,
+/// paired with the stream-json flag.
+const CLAUDE_VERBOSE_FLAG: &str = "--verbose";
 /// The copilot HEADLESS prompt flag (`copilot -p "<text>"`). Verified against
 /// Copilot CLI 1.0.68: "Execute a prompt in non-interactive mode (exits after
 /// completion)" — so it is exactly wrong for an attachable session, which is why
@@ -395,40 +427,113 @@ impl RunOutcome {
     }
 }
 
-/// A `system`-type JSONL line, the only shape the runner needs to decode (to pin
-/// `session_id`). Other line types are streamed to the log verbatim and ignored
-/// here.
-#[derive(Debug, Deserialize)]
-struct SystemLine {
-    #[serde(rename = "type")]
-    kind: String,
-    #[serde(default)]
-    session_id: Option<String>,
+/// The provider's OWN reported terminal outcome, parsed from its structured
+/// event stream (beads 48c/48d) — the signal the runner finalizes on INSTEAD of
+/// the bare exit code.
+///
+/// An agent CLI exits 0 on refusals and (for some shapes) errors, so exit 0
+/// alone is not success. A structured error / `turn.failed`, or the ABSENCE of
+/// any success terminal, is a failure even when the process exited 0 — closing
+/// the "exit 0 → done over no work" hole (48d).
+#[derive(Debug, Clone, PartialEq)]
+enum TerminalSignal {
+    /// Genuine success: claude `result` with `subtype:"success"` and
+    /// `is_error:false` (or a fake's `result` carrying no error), or codex
+    /// `turn.completed`.
+    Success,
+    /// The provider itself reported non-success: claude `result` with
+    /// `is_error:true` / an `error_*` subtype, or codex `turn.failed`. Carries the
+    /// FSM failure reason the subtype maps to.
+    Failure(FailureReason),
 }
 
-/// A `result`-type JSONL line, decoded to pin token/cost usage (e38.35).
+/// One structured stream line, decoded across BOTH provider shapes (bead 48c).
 ///
-/// The agent CLI's terminal `{"type":"result",…}` line carries a `usage` object
-/// and `total_cost_usd`. Every field is `#[serde(default)]` so a result line that
-/// omits usage (or a future shape change) decodes to zeros rather than failing
-/// the whole run.
-#[derive(Debug, Deserialize)]
-struct ResultLine {
-    #[serde(rename = "type")]
+/// A single struct so the stream reader is one pass, not a per-backend fork:
+/// claude emits `system` / `result`, codex emits `thread.started` /
+/// `turn.completed` / `turn.failed`, and each carries only its own fields. Every
+/// field is `#[serde(default)]` so a line of another type — or a future shape
+/// change — decodes to empties rather than failing the whole run.
+#[derive(Debug, Default, Deserialize)]
+struct StreamLine {
+    #[serde(rename = "type", default)]
     kind: String,
+    /// claude `system` line session handle.
+    #[serde(default)]
+    session_id: Option<String>,
+    /// codex `thread.started` session handle.
+    #[serde(default)]
+    thread_id: Option<String>,
+    /// claude `result` outcome discriminator (`success` / `error_max_turns` / …).
+    #[serde(default)]
+    subtype: Option<String>,
+    /// claude `result` hard-error flag.
+    #[serde(default)]
+    is_error: bool,
+    /// claude `result` total cost in USD (codex reports none → 0).
     #[serde(default)]
     total_cost_usd: f64,
+    /// token tallies: claude `result.usage` or codex `turn.completed.usage`.
     #[serde(default)]
     usage: Option<UsageBlock>,
 }
 
-/// The `usage` sub-object of a [`ResultLine`]: the token tallies (e38.35).
-#[derive(Debug, Default, Deserialize)]
+/// The `usage` sub-object of a [`StreamLine`]: the token tallies (e38.35). Field
+/// names are shared by claude's `result.usage` and codex's `turn.completed.usage`.
+#[derive(Debug, Default, Clone, Copy, Deserialize)]
 struct UsageBlock {
     #[serde(default)]
     input_tokens: i64,
     #[serde(default)]
     output_tokens: i64,
+}
+
+/// Map a claude `result` line's `subtype`/`is_error` onto a [`TerminalSignal`]
+/// (beads 48c/48d).
+///
+/// `error_max_turns` is the iteration-budget exhaustion the daemon retries FRESH
+/// ([`FailureReason::IterationLimit`]); any other error is a terminal agent
+/// error. A `result` with no subtype and no error — the routing fakes'
+/// `{"type":"result","content":"ok"}` — is treated as success so existing
+/// dispatch tests stay valid.
+fn classify_claude_result(subtype: Option<&str>, is_error: bool) -> TerminalSignal {
+    match subtype {
+        Some("error_max_turns") => TerminalSignal::Failure(FailureReason::IterationLimit),
+        Some(s) if is_error || s.starts_with("error") => {
+            TerminalSignal::Failure(FailureReason::AgentError)
+        }
+        _ if is_error => TerminalSignal::Failure(FailureReason::AgentError),
+        _ => TerminalSignal::Success,
+    }
+}
+
+/// Build a [`ProviderUsage`] from a stream line's token block + cost, or `None`
+/// when it reports nothing worth recording (all-zero) — the "no usage → record
+/// nothing" contract shared by claude `result` and codex `turn.completed`.
+fn provider_usage(block: Option<UsageBlock>, cost_usd: f64) -> Option<ProviderUsage> {
+    let block = block.unwrap_or_default();
+    let reported = block.input_tokens != 0 || block.output_tokens != 0 || cost_usd != 0.0;
+    reported.then_some(ProviderUsage {
+        input_tokens: block.input_tokens,
+        output_tokens: block.output_tokens,
+        cost_usd,
+    })
+}
+
+/// What one provider-stdout stream reader pinned (bead 48c): the session handle,
+/// token/cost usage, the provider's structured terminal outcome, and a bounded
+/// tail.
+struct StreamCapture {
+    /// First session handle seen (claude `system.session_id` / codex
+    /// `thread.started.thread_id`).
+    session_id: Option<String>,
+    /// Last usage tally seen (claude `result` / codex `turn.completed`).
+    usage: Option<ProviderUsage>,
+    /// The provider's OWN reported terminal outcome, or `None` if the stream
+    /// ended without one (the exit-0-no-terminal hole, 48d).
+    terminal: Option<TerminalSignal>,
+    /// Trailing stdout lines (up to the configured tail).
+    stdout_tail: String,
 }
 
 /// Which provider exec path the daemon routes a task to (e38.16).
@@ -1017,6 +1122,15 @@ impl Runner {
             argv.push(CLAUDE_PRINT_FLAG.to_string());
         }
         argv.push(CLAUDE_SKIP_PERMISSIONS_FLAG.to_string());
+        if mode == Mode::Headless {
+            // bead 48c: emit the structured event stream so the runner can pin
+            // session_id + usage and finalize on claude's OWN reported outcome,
+            // not the exit code. Headless-only — an interactive pane needs
+            // claude's normal TUI, and stream-json requires `--print`.
+            argv.push(CLAUDE_OUTPUT_FORMAT_FLAG.to_string());
+            argv.push(CLAUDE_STREAM_JSON_FORMAT.to_string());
+            argv.push(CLAUDE_VERBOSE_FLAG.to_string());
+        }
         if let Some(model) = &invocation.model {
             argv.push(CLAUDE_MODEL_FLAG.to_string());
             argv.push(model.clone());
@@ -1075,6 +1189,10 @@ impl Runner {
             argv.push(CODEX_SKIP_GIT_CHECK_FLAG.to_string());
             argv.push(CODEX_SANDBOX_FLAG.to_string());
             argv.push(CODEX_SANDBOX_HEADLESS.to_string());
+            // bead 48c: structured event stream so the runner can pin the
+            // thread_id + usage and finalize on codex's `turn.completed` /
+            // `turn.failed`, not the exit code. Headless-only (see the const).
+            argv.push(CODEX_JSON_FLAG.to_string());
         }
         if let Some(model) = &invocation.model {
             argv.push(CODEX_MODEL_FLAG.to_string());
@@ -1275,7 +1393,12 @@ impl Runner {
             }
         };
 
-        let (session_id, usage, stdout_tail) = stdout_task
+        let StreamCapture {
+            session_id,
+            usage,
+            terminal,
+            stdout_tail,
+        } = stdout_task
             .await
             .map_err(|e| std::io::Error::other(format!("stdout task join: {e}")))??;
         let stderr_tail = stderr_task
@@ -1300,40 +1423,94 @@ impl Runner {
             stderr_tail,
         };
 
-        let outcome = if timed_out {
-            tracing::warn!(
-                provider = spec.backend.name(),
-                reason = "timeout",
-                "runner_failed"
-            );
-            RunOutcome::Failed {
-                reason: FailureReason::Timeout,
-                result,
-            }
-        } else if exit_code == Some(0) {
-            RunOutcome::Success(result)
-        } else if exit_code == Some(EX_TEMPFAIL) {
-            // `EX_TEMPFAIL` (75): the provider signalled a transient runtime
-            // failure. Classify as infra/retryable so the daemon's retry chain
-            // re-dispatches a child task, rather than treating it as a terminal
-            // agent error.
-            tracing::warn!(
-                provider = spec.backend.name(),
-                reason = "runtime_offline",
-                "runner_failed"
-            );
-            RunOutcome::Failed {
-                reason: FailureReason::RuntimeOffline,
-                result,
-            }
-        } else {
-            tracing::warn!(provider = spec.backend.name(), reason = "agent_error", exit_code = ?exit_code, "runner_failed");
-            RunOutcome::Failed {
-                reason: FailureReason::AgentError,
-                result,
-            }
+        Ok(finalize_outcome(
+            spec.backend,
+            timed_out,
+            terminal.as_ref(),
+            exit_code,
+            result,
+        ))
+    }
+}
+
+/// Map a completed run's structured terminal signal + exit code onto a
+/// [`RunOutcome`] (beads 48c/48d).
+///
+/// Split out of [`Runner::run_provider`] so the finalize policy — *the
+/// provider's OWN reported outcome wins over the bare exit code* — reads as one
+/// self-contained decision. An agent CLI exits 0 on refusals and empty runs, so
+/// exit 0 is not a completion signal; the terminal `result` / `turn.*` event is.
+/// Precedence:
+///   1. timeout kill                        → [`FailureReason::Timeout`],
+///   2. structured failure (ANY exit code)  → the mapped reason — a
+///      provider-reported error/refusal/max-turns is a failure even at exit 0
+///      (the 48d hole),
+///   3. structured success AND a clean exit → [`RunOutcome::Success`],
+///   4. otherwise fall back to the exit code, where a bare exit 0 with NO
+///      success terminal is itself a failure (the other 48d hole), and
+///      [`EX_TEMPFAIL`] stays the retryable [`FailureReason::RuntimeOffline`].
+fn finalize_outcome(
+    backend: Backend,
+    timed_out: bool,
+    terminal: Option<&TerminalSignal>,
+    exit_code: Option<i32>,
+    result: RunnerResult,
+) -> RunOutcome {
+    if timed_out {
+        tracing::warn!(
+            provider = backend.name(),
+            reason = "timeout",
+            "runner_failed"
+        );
+        return RunOutcome::Failed {
+            reason: FailureReason::Timeout,
+            result,
         };
-        Ok(outcome)
+    }
+    match terminal {
+        Some(TerminalSignal::Failure(reason)) => {
+            let reason = *reason;
+            tracing::warn!(provider = backend.name(), ?reason, exit_code = ?exit_code, "runner_failed_structured");
+            RunOutcome::Failed { reason, result }
+        }
+        Some(TerminalSignal::Success) if exit_code == Some(0) => RunOutcome::Success(result),
+        // No structured success terminal (absent entirely, or a success terminal
+        // the process then contradicted with a non-zero exit).
+        _ => match exit_code {
+            Some(0) => {
+                // 48d: exit 0 but the provider never reported success — never
+                // mark this `done` over work that did not happen.
+                tracing::warn!(
+                    provider = backend.name(),
+                    reason = "no_success_terminal",
+                    "runner_failed"
+                );
+                RunOutcome::Failed {
+                    reason: FailureReason::AgentError,
+                    result,
+                }
+            }
+            Some(EX_TEMPFAIL) => {
+                // Transient runtime failure — infra/retryable so the daemon's
+                // retry chain re-dispatches a child task.
+                tracing::warn!(
+                    provider = backend.name(),
+                    reason = "runtime_offline",
+                    "runner_failed"
+                );
+                RunOutcome::Failed {
+                    reason: FailureReason::RuntimeOffline,
+                    result,
+                }
+            }
+            _ => {
+                tracing::warn!(provider = backend.name(), reason = "agent_error", exit_code = ?exit_code, "runner_failed");
+                RunOutcome::Failed {
+                    reason: FailureReason::AgentError,
+                    result,
+                }
+            }
+        },
     }
 }
 
@@ -1369,59 +1546,76 @@ where
 }
 
 /// Read the child's stdout line-by-line, appending each line to `log_file`,
-/// pinning the first `system` line's `session_id` and the last `result` line's
-/// token/cost `usage` (e38.35), and retaining a bounded tail.
+/// and pinning — across BOTH provider stream shapes (bead 48c) — the first
+/// session handle, the last usage tally, and the provider's structured terminal
+/// outcome.
 ///
-/// Returns `(first_session_id, last_usage, stdout_tail)`. The usage is taken from
-/// the LAST `result` line (a multi-result stream's final tally wins), mirroring
-/// how `session_id` takes the FIRST `system` line.
+/// The session handle takes the FIRST `system`/`thread.started` line; usage and
+/// the terminal signal take the LAST `result`/`turn.*` line (a multi-turn
+/// stream's final tally/outcome wins). A `result` reporting neither tokens nor
+/// cost (e.g. a bare `{"type":"result","content":"ok"}`) leaves `usage` `None`.
 async fn stream_stdout(
     stdout: tokio::process::ChildStdout,
     mut log_file: std::fs::File,
     tail_lines: usize,
-) -> std::io::Result<(Option<String>, Option<ProviderUsage>, String)> {
+) -> std::io::Result<StreamCapture> {
     use std::io::Write;
 
     let mut reader = BufReader::new(stdout).lines();
     let mut session_id: Option<String> = None;
     let mut usage: Option<ProviderUsage> = None;
+    let mut terminal: Option<TerminalSignal> = None;
     let mut tail: std::collections::VecDeque<String> = std::collections::VecDeque::new();
 
     while let Some(line) = reader.next_line().await? {
         writeln!(log_file, "{line}")?;
-        if session_id.is_none() {
-            if let Ok(parsed) = serde_json::from_str::<SystemLine>(&line) {
-                if parsed.kind == "system" {
-                    if let Some(sid) = parsed.session_id {
-                        session_id = Some(sid);
+        if let Ok(parsed) = serde_json::from_str::<StreamLine>(&line) {
+            match parsed.kind.as_str() {
+                // claude session handle — first wins.
+                "system" => {
+                    if session_id.is_none() {
+                        session_id = parsed.session_id;
                     }
                 }
-            }
-        }
-        // Pin token/cost usage from a `result` line. The last result line wins so
-        // a stream that ends with a corrected tally reflects the final figure. A
-        // result line that reports neither tokens nor cost (e.g. a bare
-        // `{"type":"result","content":"ok"}`) carries nothing to record, so it
-        // leaves `usage` as `None`.
-        if let Ok(parsed) = serde_json::from_str::<ResultLine>(&line) {
-            if parsed.kind == "result" {
-                let block = parsed.usage.unwrap_or_default();
-                let reported = block.input_tokens != 0
-                    || block.output_tokens != 0
-                    || parsed.total_cost_usd != 0.0;
-                if reported {
-                    usage = Some(ProviderUsage {
-                        input_tokens: block.input_tokens,
-                        output_tokens: block.output_tokens,
-                        cost_usd: parsed.total_cost_usd,
-                    });
+                // codex session handle — first wins.
+                "thread.started" => {
+                    if session_id.is_none() {
+                        session_id = parsed.thread_id;
+                    }
                 }
+                // claude terminal: pin usage + the structured success/error.
+                "result" => {
+                    if let Some(u) = provider_usage(parsed.usage, parsed.total_cost_usd) {
+                        usage = Some(u);
+                    }
+                    terminal = Some(classify_claude_result(
+                        parsed.subtype.as_deref(),
+                        parsed.is_error,
+                    ));
+                }
+                // codex terminal success: pin usage (codex reports no cost → 0).
+                "turn.completed" => {
+                    if let Some(u) = provider_usage(parsed.usage, 0.0) {
+                        usage = Some(u);
+                    }
+                    terminal = Some(TerminalSignal::Success);
+                }
+                // codex terminal failure.
+                "turn.failed" => {
+                    terminal = Some(TerminalSignal::Failure(FailureReason::AgentError));
+                }
+                _ => {}
             }
         }
         push_tail(&mut tail, line, tail_lines);
     }
     log_file.flush()?;
-    Ok((session_id, usage, join_tail(tail)))
+    Ok(StreamCapture {
+        session_id,
+        usage,
+        terminal,
+        stdout_tail: join_tail(tail),
+    })
 }
 
 /// Read a child pipe to EOF, retaining only a bounded trailing tail.
