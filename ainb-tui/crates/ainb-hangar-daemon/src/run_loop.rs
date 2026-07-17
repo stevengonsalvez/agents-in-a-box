@@ -2484,6 +2484,7 @@ mod tests {
             thinking: None,
             agent_env: Vec::new(),
             provider: None,
+            token_budget: None,
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
         let disp = resolve_dispatch(pool, "bare-agent", None, Mode::Headless).await.unwrap();

@@ -495,6 +495,13 @@ pub struct AgentEditArgs {
     /// given the whole env map is REPLACED with the values.
     #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append)]
     pub env: Vec<(String, String)>,
+    /// New token budget (rtk/headroom, migration 0042); omitted leaves it.
+    /// Mutually exclusive with `--clear-token-budget`.
+    #[arg(long = "token-budget", conflicts_with = "clear_token_budget")]
+    pub token_budget: Option<i64>,
+    /// Clear the token budget (back to unlimited); omitted leaves it.
+    #[arg(long = "clear-token-budget")]
+    pub clear_token_budget: bool,
     /// Workspace slug the agent belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -1835,6 +1842,8 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
     let cli_args = (!args.args.is_empty()).then_some(args.args);
     let agent_env = (!args.env.is_empty()).then_some(args.env);
 
+    let token_budget = clear_or_set(args.clear_token_budget, args.token_budget);
+
     let update = AgentConfigUpdate {
         name: args.name,
         instructions,
@@ -1843,13 +1852,14 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
         mcp_config,
         thinking,
         agent_env,
+        token_budget,
     };
 
     if update.is_empty() {
         anyhow::bail!(
             "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
              / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
-             / --env"
+             / --env / --token-budget / --clear-token-budget"
         );
     }
 
@@ -1890,7 +1900,7 @@ async fn run_agent_set_archived(
 /// (`Some(Some(v))`), else leave unchanged (`None`). The clap `conflicts_with`
 /// already bars both at once.
 #[allow(clippy::option_option)] // the nested Option IS the store's 3-state encoding
-fn clear_or_set(clear: bool, value: Option<String>) -> Option<Option<String>> {
+fn clear_or_set<T>(clear: bool, value: Option<T>) -> Option<Option<T>> {
     if clear { Some(None) } else { value.map(Some) }
 }
 

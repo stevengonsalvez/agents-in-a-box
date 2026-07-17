@@ -1558,7 +1558,7 @@ async fn handle_agent_create(
         .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
-    ainb_hangar_store::bootstrap::create_agent(
+    let created = ainb_hangar_store::bootstrap::create_agent(
         pool,
         ws.as_str(),
         name,
@@ -1567,6 +1567,22 @@ async fn handle_agent_create(
     )
     .await
     .map_err(|e| store_err(&e))?;
+    // Optional create-time token budget (0042): applied as a follow-up config
+    // write rather than widening create_agent's signature across every caller.
+    if let Some(budget) = params.token_budget {
+        let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
+            token_budget: Some(Some(budget)),
+            ..Default::default()
+        };
+        ainb_hangar_store::repo::agent::AgentRepo::update_config(
+            pool,
+            ws.as_str(),
+            &created.id,
+            &update,
+        )
+        .await
+        .map_err(|e| store_err(&e))?;
+    }
     // Answer with the refreshed roster (the same shape agents_list returns) so
     // the plugin folds the new agent into its cached list and the squad gate clears.
     let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
@@ -1623,6 +1639,7 @@ fn agent_config_update_from_params(
         cli_args: params.cli_args.clone(),
         mcp_config: field_to_nested(&params.mcp_config),
         thinking: field_to_nested(&params.thinking),
+        token_budget: field_to_nested(&params.token_budget),
         agent_env: params.agent_env.clone(),
     }
 }

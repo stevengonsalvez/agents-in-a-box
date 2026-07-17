@@ -76,6 +76,10 @@ pub struct Agent {
     /// and the daemon spawns THIS provider's backend per task, so a `codex` agent
     /// runs codex.
     pub provider: Option<String>,
+    /// Optional token budget (rtk/headroom) for this agent's runs; `None` =
+    /// unlimited (migration 0042). Stored + surfaced only in this milestone —
+    /// dispatch-time enforcement is a later feature.
+    pub token_budget: Option<i64>,
 }
 
 /// A partial-edit instruction for one agent's mutable config (e38.15).
@@ -111,6 +115,9 @@ pub struct AgentConfigUpdate {
     /// New per-agent env map, or `None` to leave it unchanged (an empty `Vec` is
     /// a valid "no env" value, distinct from leaving it).
     pub agent_env: Option<Vec<(String, String)>>,
+    /// New token budget: `None` leaves it, `Some(None)` clears it (back to
+    /// unlimited), `Some(Some(_))` sets it.
+    pub token_budget: Option<Option<i64>>,
 }
 
 impl AgentConfigUpdate {
@@ -125,6 +132,7 @@ impl AgentConfigUpdate {
             && self.mcp_config.is_none()
             && self.thinking.is_none()
             && self.agent_env.is_none()
+            && self.token_budget.is_none()
     }
 }
 
@@ -143,8 +151,9 @@ impl AgentRepo {
         sqlx::query(
             "INSERT INTO agent \
              (id, workspace_id, name, runtime_id, instructions, visibility, owner_id, \
-              archived, model, cli_args, mcp_config, thinking, agent_env, provider) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
+              token_budget) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -160,6 +169,7 @@ impl AgentRepo {
         .bind(&agent.thinking)
         .bind(env_to_json(&agent.agent_env))
         .bind(&agent.provider)
+        .bind(agent.token_budget)
         .execute(pool)
         .await?;
         Ok(())
@@ -271,6 +281,9 @@ impl AgentRepo {
         if update.agent_env.is_some() {
             sets.push("agent_env = ?");
         }
+        if update.token_budget.is_some() {
+            sets.push("token_budget = ?");
+        }
         let sql = format!(
             "UPDATE agent SET {} WHERE id = ? AND workspace_id = ?",
             sets.join(", ")
@@ -299,6 +312,9 @@ impl AgentRepo {
         }
         if let Some(agent_env) = &update.agent_env {
             query = query.bind(env_to_json(agent_env));
+        }
+        if let Some(token_budget) = &update.token_budget {
+            query = query.bind(token_budget);
         }
         let res = query.bind(id).bind(workspace_id).execute(pool).await?;
         Ok(res.rows_affected() == 1)
@@ -336,7 +352,8 @@ impl AgentRepo {
 /// The full column list every `SELECT` reads, in [`Agent::from_row`] order. A
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
-     owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider FROM agent";
+     owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
+     token_budget FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -409,6 +426,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             thinking: row.try_get("thinking")?,
             agent_env: env_from_json(&row.try_get::<String, _>("agent_env")?)?,
             provider: row.try_get("provider")?,
+            token_budget: row.try_get("token_budget")?,
         })
     }
 }
