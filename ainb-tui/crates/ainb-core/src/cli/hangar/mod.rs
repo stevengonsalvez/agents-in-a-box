@@ -1052,6 +1052,20 @@ pub struct IssueCreateArgs {
     /// is a separate concern; create just records the labels it is handed.
     #[arg(long = "label", action = clap::ArgAction::Append)]
     pub labels: Vec<String>,
+    /// The repo the run executes in: an absolute checkout path, the literal
+    /// `scratch`, or a REMOTE (`owner/repo`, a full URL, or `git@…`) — a remote
+    /// is cloned once into the shared clone cache and the local path persisted,
+    /// exactly like the board card-create path (migration 0032/0042).
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// The SOURCE branch the run branches FROM (migration 0042); omitted uses
+    /// the repo's default branch. Persisted on the issue AND the enqueued task.
+    #[arg(long = "source-branch")]
+    pub source_branch: Option<String>,
+    /// The TARGET branch a future PR lands INTO (migration 0042); stored on the
+    /// issue for later PR automation.
+    #[arg(long = "target-branch")]
+    pub target_branch: Option<String>,
 }
 
 /// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
@@ -2784,8 +2798,35 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 
+    // Resolve + persist the repo / branches (0032/0042). A remote repo token is
+    // cloned once into the shared clone cache (the board card-create parity),
+    // and the LOCAL path is what dispatch provisions from.
+    let repo_ref = match args.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(resolve_cli_repo_ref(raw).await?),
+        None => None,
+    };
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    if repo_ref.is_some() {
+        CardParityRepo::set_issue_repo_agent(pool, &workspace_id, &id, repo_ref.as_deref(), None)
+            .await
+            .context("persist issue repo")?;
+    }
+    if args.source_branch.is_some() || args.target_branch.is_some() {
+        CardParityRepo::set_issue_branches(
+            pool,
+            &workspace_id,
+            &id,
+            args.source_branch.as_deref(),
+            args.target_branch.as_deref(),
+        )
+        .await
+        .context("persist issue branches")?;
+    }
+
     // When assigned, enqueue a task for the agent's runtime so the daemon claims
-    // + dispatches it (materialising the agent's skills first).
+    // + dispatches it (materialising the agent's skills first). One transaction
+    // covers the insert + its dispatch inputs (repo / source branch), so the
+    // claim loop can never observe a half-written task.
     if let Some(a) = assignment {
         let task_id = idgen.new_ulid();
         // Scope the task to the issue's next run generation (migration 0039). A
@@ -2794,8 +2835,22 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         let generation = TaskRepo::next_generation_for_issue(pool, &id)
             .await
             .context("compute run generation for assigned task")?;
-        TaskRepo::insert(
-            pool,
+        // The task's agent_kind mirrors the assignee agent's provider (so a
+        // codex agent's task doesn't read back as the claude column default).
+        let provider: Option<Option<String>> =
+            sqlx::query_scalar("SELECT provider FROM agent WHERE id = ?")
+                .bind(&a.agent_id)
+                .fetch_optional(pool)
+                .await
+                .context("read agent provider")?;
+        let agent_kind = provider
+            .flatten()
+            .as_deref()
+            .and_then(ainb_hangar_core::agent_kind::AgentKind::parse)
+            .unwrap_or(ainb_hangar_core::agent_kind::AgentKind::DEFAULT);
+        let mut tx = pool.begin().await.context("begin enqueue tx")?;
+        TaskRepo::insert_in_tx(
+            &mut tx,
             &ainb_hangar_store::repo::task::NewTask {
                 id: task_id.clone(),
                 workspace_id,
@@ -2811,12 +2866,51 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         )
         .await
         .context("enqueue task for assigned agent")?;
+        if repo_ref.is_some() {
+            CardParityRepo::set_task_repo_agent_in_tx(
+                &mut tx,
+                &task_id,
+                repo_ref.as_deref(),
+                agent_kind,
+            )
+            .await
+            .context("persist task repo")?;
+        }
+        if args.source_branch.is_some() {
+            CardParityRepo::set_task_source_branch_in_tx(
+                &mut tx,
+                &task_id,
+                args.source_branch.as_deref(),
+            )
+            .await
+            .context("persist task source branch")?;
+        }
+        tx.commit().await.context("commit enqueue tx")?;
         println!("created issue {id}");
         println!("queued task {task_id}");
     } else {
         println!("created issue {id}");
     }
     Ok(())
+}
+
+/// Resolve a CLI `--repo` token to the local path dispatch provisions from:
+/// `scratch` and absolute paths pass through; anything else is treated as a
+/// REMOTE and cloned once into the shared clone cache (blocking git work off
+/// the async thread), mirroring the daemon's card-create resolve.
+async fn resolve_cli_repo_ref(raw: &str) -> Result<String> {
+    if raw == "scratch" || std::path::Path::new(raw).is_absolute() {
+        return Ok(raw.to_string());
+    }
+    let ainb_dir = ainb_hangar_core::hangar_home().context("resolve hangar home")?;
+    let remote = raw.to_string();
+    let cloned = tokio::task::spawn_blocking(move || {
+        ainb_fleet_core::repo_clone::ensure_clone(&ainb_dir, &remote)
+    })
+    .await
+    .context("join clone task")?
+    .with_context(|| format!("clone remote repo `{raw}`"))?;
+    Ok(cloned.display().to_string())
 }
 
 /// `hangar issue list`: list issues in the default workspace + state.
