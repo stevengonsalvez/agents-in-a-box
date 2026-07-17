@@ -16,6 +16,23 @@ build-release:
 run *args:
     cargo run -- {{args}}
 
+# Rebuild both binaries + restart the daemon onto the fresh build, then run the TUI
+#
+# Fixes the stale-daemon trap: `daemon start` no-ops when a daemon is already
+# running, so a rebuild alone leaves the OLD process serving the DB. This
+# restarts it explicitly so the running daemon always matches the code you just
+# built. `AINB_BIN` is pinned so every self-spawn resolves to the fresh binary
+# regardless of a brew `ainb` on $PATH.
+dev *args:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p ainb --bin ainb -p ainb-hangar-daemon
+    AINB="$(pwd)/target/debug/ainb"
+    export AINB_BIN="$AINB"
+    "$AINB" hangar daemon restart
+    "$AINB" hangar daemon status
+    exec "$AINB" {{args}}
+
 # Run tests
 test:
     cargo test
