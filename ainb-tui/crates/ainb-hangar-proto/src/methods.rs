@@ -199,6 +199,17 @@ pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 /// list re-renders the new row without re-pulling the whole snapshot.
 pub const HANGAR_ISSUE_CREATE: &str = "hangar/issue_create";
 
+/// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
+/// screen's create-wizard dispatch; plans/hangar-task-agent-model.md).
+///
+/// The board-less sibling of [`HANGAR_BOARD_CARD_RUN`]: the same launch core
+/// (refuse-run guard → squad fan-out vs single enqueue, repo REQUIRED, F4 agent
+/// cascade, 0042 source-branch resolve) minus the board-membership validation,
+/// with the F4 board tier skipped. Params: [`crate::snapshots::IssueRunParams`];
+/// result: [`crate::snapshots::BoardCardRunResult`] (identical shape — the
+/// caller cares about the enqueued task, not the surface it launched from).
+pub const HANGAR_ISSUE_RUN: &str = "hangar/issue_run";
+
 /// `hangar/issue_label_attach` — attach a label to one issue (e38.10).
 ///
 /// Params: [`crate::snapshots::IssueLabelParams`]

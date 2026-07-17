@@ -653,6 +653,7 @@ async fn execute_claimed(
         &scratch_slug,
         &home,
         &env.workdir,
+        task.source_branch.as_deref(),
     )?;
     let location = run_location_for(&run_wd);
     tracing::info!(task_id = %task.id, cwd = %run_wd.path().display(), "run workdir provisioned");

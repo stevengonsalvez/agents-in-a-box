@@ -1607,6 +1607,33 @@ pub struct BoardCardCreateParams {
     pub target_branch: Option<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_RUN`]: enqueue a run of one issue
+/// WITHOUT a board (the Issues create-wizard dispatch).
+///
+/// Same override semantics as [`BoardCardRunParams`], minus the board identity.
+/// Result shape: [`BoardCardRunResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueRunParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to launch.
+    pub issue_id: String,
+    /// The launch mode (`headless` or `interactive`).
+    pub mode: String,
+    /// A run-time REPO override; omitted uses the issue's persisted `repo_ref`
+    /// (repo REQUIRED at run, like `board_card_run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// A run-time AGENT override (`claude`/`codex`/`copilot`); omitted resolves
+    /// via the F4 cascade (board tier skipped — no board).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// A run-time SOURCE-BRANCH override (0042); omitted uses the issue's
+    /// persisted `source_branch`, else the repo's default branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6, D16): launch a
 /// card's issue on its assignee profile now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

@@ -685,6 +685,7 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
         methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
+        methods::HANGAR_ISSUE_RUN => handle_issue_run(pool, req).await,
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
         methods::HANGAR_BOARD_CARD_REORDER => handle_board_card_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_REMOVE => handle_board_card_remove(pool, req).await,
@@ -2561,6 +2562,89 @@ async fn handle_board_card_run(
         mode,
         run_override,
         agent_override,
+        params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+    )
+    .await
+    .map_err(card_run_err)?;
+
+    let result = match outcome {
+        CardRunOutcome::Single {
+            task_id,
+            agent_id,
+            runtime_id,
+        } => ainb_hangar_proto::snapshots::BoardCardRunResult {
+            task_id,
+            agent_id,
+            runtime_id,
+            mode: mode.to_string(),
+            member_task_ids: Vec::new(),
+        },
+        CardRunOutcome::Squad {
+            leader_task_id,
+            leader_agent_id,
+            leader_runtime_id,
+            member_task_ids,
+        } => ainb_hangar_proto::snapshots::BoardCardRunResult {
+            task_id: leader_task_id,
+            agent_id: leader_agent_id,
+            runtime_id: leader_runtime_id,
+            mode: mode.to_string(),
+            member_task_ids,
+        },
+    };
+    to_value(&result)
+}
+
+/// `hangar/issue_run`: enqueue a run of one issue WITHOUT a board (the Issues
+/// create-wizard dispatch; plans/hangar-task-agent-model.md).
+///
+/// The board-less sibling of [`handle_board_card_run`]: same mode validation,
+/// same tenant guard, the SAME [`run_card`] launch core (refuse-run guard →
+/// squad fan-out vs single enqueue, repo REQUIRED, F4 cascade with the board
+/// tier skipped via `board_id = None`, 0042 source-branch resolve) — minus the
+/// board-membership check, so an Issues-screen task needs no user board to
+/// exist. Answers the same [`BoardCardRunResult`] shape.
+///
+/// [`BoardCardRunResult`]: ainb_hangar_proto::snapshots::BoardCardRunResult
+async fn handle_issue_run(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::agent_kind::AgentKind;
+    use ainb_hangar_store::repo::issue::IssueRepo;
+
+    let params: ainb_hangar_proto::snapshots::IssueRunParams =
+        parse_params(req, "{ workspace_id, issue_id, mode }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let mode = match params.mode.trim() {
+        "" | "headless" => "headless",
+        "interactive" => "interactive",
+        other => {
+            return Err(invalid_params(&format!(
+                "mode must be `headless` or `interactive`, got `{other}`"
+            )));
+        }
+    };
+
+    // Tenant guard: the issue must exist in this workspace.
+    let issue = IssueRepo::get_by_id(pool, &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .filter(|i| i.workspace_id == ws.as_str())
+        .ok_or_else(|| invalid_params("no issue with that id in this workspace"))?;
+
+    let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
+    let source_override = params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let outcome = run_card(
+        pool,
+        &ws,
+        None, // board-less: the F4 board tier is skipped
+        &issue,
+        mode,
+        run_override,
+        agent_override,
+        source_override,
     )
     .await
     .map_err(card_run_err)?;
@@ -2728,6 +2812,7 @@ pub(crate) async fn run_card(
     mode: &str,
     repo_override: Option<&str>,
     agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
+    source_branch_override: Option<&str>,
 ) -> Result<CardRunOutcome, CardRunError> {
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
@@ -2779,6 +2864,14 @@ pub(crate) async fn run_card(
         .map_err(CardRunError::Db)?
         .unwrap_or((None, None));
     let repo_ref = repo_override.map(str::to_string).or(card_repo).ok_or(CardRunError::NoRepo)?;
+
+    // 3b. Source branch (0042): run-time override, else the card's persisted
+    // source_branch; `None` lets provision branch off the repo's default HEAD.
+    let card_source = CardParityRepo::get_issue_branches(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?
+        .and_then(|(source, _target)| source);
+    let source_branch = source_branch_override.map(str::to_string).or(card_source);
 
     // 4. F4 agent cascade + F8 dispatchable check.
     let agent_kind = match agent_override.or(card_agent) {
@@ -2868,6 +2961,9 @@ pub(crate) async fn run_card(
             .map_err(CardRunError::Db)?;
     }
     CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
+        .await
+        .map_err(CardRunError::Db)?;
+    CardParityRepo::set_task_source_branch_in_tx(&mut tx, &task_id, source_branch.as_deref())
         .await
         .map_err(CardRunError::Db)?;
     tx.commit().await.map_err(CardRunError::Db)?;

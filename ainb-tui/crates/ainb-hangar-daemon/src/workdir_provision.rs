@@ -115,7 +115,11 @@ fn ainb_root(home: &Path) -> PathBuf {
 ///   `git init`ed idempotently, run in place. Keyed on the per-CARD `scratch_slug`
 ///   (stable across reruns), NOT the per-run `slug`.
 /// - `Some(path)` naming a git repo → a fresh worktree under
-///   `<home>/.agents-in-a-box/worktrees/<slug>` on branch `ainb/<slug>`.
+///   `<home>/.agents-in-a-box/worktrees/<slug>` on branch `ainb/<slug>`, based on
+///   `source_branch` when given (resolved as `<src>` then `origin/<src>`), else
+///   the repo's current HEAD — the default branch, usually `main`. Hardcoding a
+///   literal `main` default would break `master`-default repos, so HEAD is the
+///   None-case base (migration 0042).
 /// - `None` (or a blank ref) → the `fallback` execenv workdir, untouched.
 ///
 /// Idempotent on resume: a worktree whose path already exists (a recovered task)
@@ -126,13 +130,16 @@ fn ainb_root(home: &Path) -> PathBuf {
 /// # Errors
 ///
 /// Returns an [`io::Error`] if a directory cannot be created, `git init` /
-/// `git worktree add` fails, or a worktree `repo_ref` is not a valid UTF-8 path.
+/// `git worktree add` fails, a given `source_branch` resolves to no ref (neither
+/// local nor `origin/`-prefixed — failing CLOSED beats silently branching off the
+/// wrong base), or a worktree `repo_ref` is not a valid UTF-8 path.
 pub fn provision(
     repo_ref: Option<&str>,
     slug: &str,
     scratch_slug: &str,
     home: &Path,
     fallback: &Path,
+    source_branch: Option<&str>,
 ) -> io::Result<RunWorkdir> {
     let repo_ref = repo_ref.map(str::trim).filter(|s| !s.is_empty());
     match repo_ref {
@@ -140,7 +147,7 @@ pub fn provision(
             path: fallback.to_path_buf(),
         }),
         Some("scratch") => provision_scratch(scratch_slug, home),
-        Some(path) => provision_worktree(Path::new(path), slug, home),
+        Some(path) => provision_worktree(Path::new(path), slug, home, source_branch),
     }
 }
 
@@ -157,7 +164,18 @@ fn provision_scratch(slug: &str, home: &Path) -> io::Result<RunWorkdir> {
 
 /// Add a fresh worktree for `repo` at `<home>/.agents-in-a-box/worktrees/<slug>`
 /// on branch `ainb/<slug>`, or reuse an already-registered one (resume).
-fn provision_worktree(repo: &Path, slug: &str, home: &Path) -> io::Result<RunWorkdir> {
+///
+/// With a `source_branch`, the new branch is based on that ref — resolved as the
+/// local `<src>` first, then `origin/<src>` (a fresh clone materialises only the
+/// default local branch; every other branch lives under `origin/`). An
+/// unresolvable source is an ERROR, never a silent fall-through to HEAD: a run
+/// on the wrong base would produce work against the wrong code.
+fn provision_worktree(
+    repo: &Path,
+    slug: &str,
+    home: &Path,
+    source_branch: Option<&str>,
+) -> io::Result<RunWorkdir> {
     let path = ainb_root(home).join("worktrees").join(slug);
     let branch = worktree_branch(slug);
     let wt = RunWorkdir::Worktree {
@@ -175,8 +193,43 @@ fn provision_worktree(repo: &Path, slug: &str, home: &Path) -> io::Result<RunWor
         std::fs::create_dir_all(parent)?;
     }
     let path_str = path.to_str().ok_or_else(non_utf8_path)?;
-    run_git(repo, &["worktree", "add", path_str, "-b", &branch])?;
+    match source_branch.map(str::trim).filter(|s| !s.is_empty()) {
+        Some(src) => {
+            let start = resolve_start_point(repo, src)?;
+            run_git(repo, &["worktree", "add", path_str, "-b", &branch, &start])?;
+        }
+        // No source chosen: branch off HEAD (the repo's default branch), the
+        // pre-0042 behavior.
+        None => run_git(repo, &["worktree", "add", path_str, "-b", &branch])?,
+    }
     Ok(wt)
+}
+
+/// Resolve a user-chosen source branch to the start-point `git worktree add`
+/// gets: the local `<src>` when it exists, else `origin/<src>` (the shape every
+/// non-default branch of a clone has), else a hard error naming both tries.
+fn resolve_start_point(repo: &Path, src: &str) -> io::Result<String> {
+    for candidate in [src.to_string(), format!("origin/{src}")] {
+        let ok = std::process::Command::new("git")
+            .arg("-C")
+            .arg(repo)
+            .args([
+                "rev-parse",
+                "--verify",
+                "--quiet",
+                &format!("{candidate}^{{commit}}"),
+            ])
+            .output()?
+            .status
+            .success();
+        if ok {
+            return Ok(candidate);
+        }
+    }
+    Err(io::Error::other(format!(
+        "source branch `{src}` not found in {} (tried `{src}` and `origin/{src}`)",
+        repo.display()
+    )))
 }
 
 /// Tear down a run's working directory (spec F5 keep-if-dirty).
@@ -457,13 +510,132 @@ mod tests {
         run_git(dir, &["commit", "--quiet", "-m", "init"]).unwrap();
     }
 
+    /// A chosen source branch bases the worktree on THAT branch's tree, not the
+    /// repo's HEAD (0042): a sentinel file that exists only on `feature/x` shows
+    /// up in the provisioned worktree, and one that exists only on the default
+    /// branch does not.
+    #[test]
+    fn worktree_bases_on_chosen_source_branch() {
+        let home = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        let repo = repo_dir.path();
+        init_repo_with_commit(repo);
+        // Default branch gains a HEAD-only file; feature/x gains its sentinel.
+        std::fs::write(repo.join("head-only.txt"), "on-head").unwrap();
+        run_git(repo, &["add", "."]).unwrap();
+        run_git(repo, &["commit", "--quiet", "-m", "head work"]).unwrap();
+        run_git(repo, &["branch", "feature/x", "HEAD~1"]).unwrap();
+        run_git(repo, &["switch", "--quiet", "feature/x"]).unwrap();
+        std::fs::write(repo.join("feature-sentinel.txt"), "on-feature").unwrap();
+        run_git(repo, &["add", "."]).unwrap();
+        run_git(repo, &["commit", "--quiet", "-m", "feature work"]).unwrap();
+        // Leave HEAD back on the default branch, so "off HEAD" would be WRONG.
+        run_git(repo, &["switch", "--quiet", "-"]).unwrap();
+
+        let fallback = home.path().join("fallback");
+        let wd = provision(
+            repo.to_str(),
+            "run-src",
+            "run-src",
+            home.path(),
+            &fallback,
+            Some("feature/x"),
+        )
+        .unwrap();
+        assert!(
+            wd.path().join("feature-sentinel.txt").exists(),
+            "the worktree must hold feature/x's tree"
+        );
+        assert!(
+            !wd.path().join("head-only.txt").exists(),
+            "the worktree must NOT hold the default branch's HEAD-only file"
+        );
+    }
+
+    /// An unknown source branch fails CLOSED (an error naming the ref), never a
+    /// silent fall-through to HEAD — a run on the wrong base is wrong work.
+    #[test]
+    fn unknown_source_branch_fails_closed() {
+        let home = tempfile::tempdir().unwrap();
+        let repo_dir = tempfile::tempdir().unwrap();
+        init_repo_with_commit(repo_dir.path());
+        let fallback = home.path().join("fallback");
+        let err = provision(
+            repo_dir.path().to_str(),
+            "run-bad",
+            "run-bad",
+            home.path(),
+            &fallback,
+            Some("no-such-branch"),
+        )
+        .unwrap_err();
+        assert!(
+            err.to_string().contains("no-such-branch"),
+            "the error must name the missing ref: {err}"
+        );
+    }
+
+    /// A remote-shaped clone (only origin/<branch> exists locally) still resolves
+    /// the source via the origin/ fallback — the ensure_clone case.
+    #[test]
+    fn source_branch_resolves_via_origin_prefix() {
+        let home = tempfile::tempdir().unwrap();
+        let origin_dir = tempfile::tempdir().unwrap();
+        let origin = origin_dir.path();
+        init_repo_with_commit(origin);
+        run_git(origin, &["branch", "feature/y"]).unwrap();
+        run_git(origin, &["switch", "--quiet", "feature/y"]).unwrap();
+        std::fs::write(origin.join("y-sentinel.txt"), "y").unwrap();
+        run_git(origin, &["add", "."]).unwrap();
+        run_git(origin, &["commit", "--quiet", "-m", "y"]).unwrap();
+        run_git(origin, &["switch", "--quiet", "-"]).unwrap();
+
+        // A plain clone materialises only the default local branch; feature/y
+        // exists solely as origin/feature/y — exactly ensure_clone's output.
+        let clone_dir = tempfile::tempdir().unwrap();
+        let clone = clone_dir.path().join("clone");
+        let out = Command::new("git")
+            .args([
+                "clone",
+                "--quiet",
+                origin.to_str().unwrap(),
+                clone.to_str().unwrap(),
+            ])
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+
+        let fallback = home.path().join("fallback");
+        let wd = provision(
+            clone.to_str(),
+            "run-origin",
+            "run-origin",
+            home.path(),
+            &fallback,
+            Some("feature/y"),
+        )
+        .unwrap();
+        assert!(
+            wd.path().join("y-sentinel.txt").exists(),
+            "origin/feature‑y must resolve via the origin/ fallback"
+        );
+    }
+
     /// A scratch ref git-inits an isolated repo under the home, idempotently. The
     /// dir is keyed on the per-CARD `scratch_slug`, NOT the per-run slug.
     #[test]
     fn scratch_git_inits_idempotently() {
         let home = tempfile::tempdir().unwrap();
         let fallback = home.path().join("fallback");
-        let a = provision(Some("scratch"), "run-1", "card-1", home.path(), &fallback).unwrap();
+        let a = provision(
+            Some("scratch"),
+            "run-1",
+            "card-1",
+            home.path(),
+            &fallback,
+            None,
+        )
+        .unwrap();
         let RunWorkdir::Scratch { path } = &a else {
             panic!("expected scratch, got {a:?}");
         };
@@ -473,7 +645,15 @@ mod tests {
             "scratch under ~/.agents-in-a-box/scratch/<scratch_slug>: {path:?}"
         );
         // A second provision is a no-op reuse (idempotent), not a re-init error.
-        let b = provision(Some("scratch"), "run-1", "card-1", home.path(), &fallback).unwrap();
+        let b = provision(
+            Some("scratch"),
+            "run-1",
+            "card-1",
+            home.path(),
+            &fallback,
+            None,
+        )
+        .unwrap();
         assert_eq!(a, b);
         // Teardown never removes a scratch repo.
         assert_eq!(teardown(&a).unwrap(), TeardownOutcome::NoOp);
@@ -489,11 +669,27 @@ mod tests {
         let fallback = home.path().join("fallback");
 
         // Run 1 of card-x provisions scratch and leaves a file behind.
-        let first = provision(Some("scratch"), "run-1", "card-x", home.path(), &fallback).unwrap();
+        let first = provision(
+            Some("scratch"),
+            "run-1",
+            "card-x",
+            home.path(),
+            &fallback,
+            None,
+        )
+        .unwrap();
         std::fs::write(first.path().join("notes.txt"), "prior scratch work").unwrap();
 
         // Run 2 of the SAME card (a DIFFERENT per-run slug) reuses the same dir.
-        let second = provision(Some("scratch"), "run-2", "card-x", home.path(), &fallback).unwrap();
+        let second = provision(
+            Some("scratch"),
+            "run-2",
+            "card-x",
+            home.path(),
+            &fallback,
+            None,
+        )
+        .unwrap();
         assert_eq!(
             first.path(),
             second.path(),
@@ -519,6 +715,7 @@ mod tests {
             "card-x-agentA",
             home.path(),
             &fallback,
+            None,
         )
         .unwrap();
         let b = provision(
@@ -527,6 +724,7 @@ mod tests {
             "card-x-agentB",
             home.path(),
             &fallback,
+            None,
         )
         .unwrap();
         assert_ne!(
@@ -551,6 +749,7 @@ mod tests {
             "slug-a",
             &home,
             &fallback,
+            None,
         )
         .unwrap();
         let RunWorkdir::Worktree { path, branch, .. } = &wd else {
@@ -585,8 +784,8 @@ mod tests {
         let fallback = home.join("fallback");
         let repo_ref = repo.to_str().unwrap();
 
-        let a = provision(Some(repo_ref), "slug-a", "slug-a", &home, &fallback).unwrap();
-        let b = provision(Some(repo_ref), "slug-b", "slug-b", &home, &fallback).unwrap();
+        let a = provision(Some(repo_ref), "slug-a", "slug-a", &home, &fallback, None).unwrap();
+        let b = provision(Some(repo_ref), "slug-b", "slug-b", &home, &fallback, None).unwrap();
         assert_ne!(a.path(), b.path(), "distinct worktree dirs");
         let (RunWorkdir::Worktree { branch: ba, .. }, RunWorkdir::Worktree { branch: bb, .. }) =
             (&a, &b)
@@ -613,6 +812,7 @@ mod tests {
             "clean",
             &home,
             &fallback,
+            None,
         )
         .unwrap();
         let path = wd.path().to_path_buf();
@@ -645,6 +845,7 @@ mod tests {
             "dirty",
             &home,
             &fallback,
+            None,
         )
         .unwrap();
         // Leave an uncommitted change in the worktree.
@@ -675,6 +876,7 @@ mod tests {
             "ahead",
             &home,
             &fallback,
+            None,
         )
         .unwrap();
         assert_eq!(commits_ahead(&wd).unwrap(), 0, "a no-commit run is 0 ahead");
@@ -703,9 +905,9 @@ mod tests {
         );
 
         // Scratch + fallback never surface a branch.
-        let scratch = provision(Some("scratch"), "s", "s", &home, &fallback).unwrap();
+        let scratch = provision(Some("scratch"), "s", "s", &home, &fallback, None).unwrap();
         assert_eq!(commits_ahead(&scratch).unwrap(), 0);
-        let fb = provision(None, "c", "c", &home, &fallback).unwrap();
+        let fb = provision(None, "c", "c", &home, &fallback, None).unwrap();
         assert_eq!(commits_ahead(&fb).unwrap(), 0);
     }
 
@@ -714,7 +916,7 @@ mod tests {
     fn no_repo_uses_fallback() {
         let home = tempfile::tempdir().unwrap();
         let fallback = home.path().join("execenv-workdir");
-        let wd = provision(None, "chat", "chat", home.path(), &fallback).unwrap();
+        let wd = provision(None, "chat", "chat", home.path(), &fallback, None).unwrap();
         assert_eq!(
             wd,
             RunWorkdir::Fallback {
@@ -724,7 +926,7 @@ mod tests {
         assert_eq!(wd.path(), fallback);
         assert_eq!(teardown(&wd).unwrap(), TeardownOutcome::NoOp);
         // A blank ref is treated the same as None.
-        let blank = provision(Some("  "), "chat", "chat", home.path(), &fallback).unwrap();
+        let blank = provision(Some("  "), "chat", "chat", home.path(), &fallback, None).unwrap();
         assert_eq!(blank, RunWorkdir::Fallback { path: fallback });
     }
 }
