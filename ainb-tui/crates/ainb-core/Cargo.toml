@@ -125,7 +125,7 @@ ainb-hangar-core = { path = "../ainb-hangar-core", version = "0.1.0" }
 # routes answers through `attention/answer` on the control plane (D18).
 ainb-hangar-proto = { path = "../ainb-hangar-proto", version = "0.1.0" }
 ainb-hangar-store = { path = "../ainb-hangar-store", version = "0.1.0" }
-ainb-hangar-daemon = { path = "../ainb-hangar-daemon", version = "0.1.0" }
+ainb-hangar-daemon = { path = "../ainb-hangar-daemon" }
 # sqlx — the hangar CLI workspace-bootstrap path issues raw SQL against the
 # store's pool (`Store::pool`) for the default-workspace seed and lookups.
 sqlx = { version = "0.8", default-features = false, features = [
