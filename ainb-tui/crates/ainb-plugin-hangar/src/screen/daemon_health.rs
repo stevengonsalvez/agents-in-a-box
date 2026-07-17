@@ -29,6 +29,23 @@ const ONLINE_GREEN: Color = Color::rgb(100, 200, 100);
 /// Disconnected runtime presence dot.
 const OFFLINE_RED: Color = Color::rgb(220, 120, 100);
 
+/// This client build's version — the workspace release version, since the
+/// plugin crate now inherits `version.workspace`. Compared against the
+/// daemon's reported version to catch a post-`brew upgrade` skew where an OLD
+/// daemon is still resident (a running daemon is never auto-restarted).
+const CLIENT_VERSION: &str = env!("CARGO_PKG_VERSION");
+
+/// Whether the daemon's reported version disagrees with this client's — the
+/// signal that a stale daemon is still serving after the binary was upgraded.
+///
+/// An empty `daemon` is NOT skew here: that case (a daemon predating version
+/// reporting) has its own dedicated warning. Only two known, differing
+/// versions count, so a daemon that simply hasn't answered yet never
+/// false-positives.
+fn version_skew(daemon: &str, client: &str) -> bool {
+    !daemon.is_empty() && daemon != client
+}
+
 /// The render-state cache for the daemon-health screen.
 ///
 /// A flattened, render-ready view of the wire [`DaemonHealthSnapshot`]. Default
@@ -136,9 +153,33 @@ pub fn render_daemon_health(
             );
         } else {
             let x = put_str(buf, 0, row, "daemon: ", MUTED_GRAY, area_w);
-            put_str(buf, x, row, &state.daemon_version, SOFT_WHITE, area_w);
+            let vcolor = if version_skew(&state.daemon_version, CLIENT_VERSION) {
+                OFFLINE_RED
+            } else {
+                SOFT_WHITE
+            };
+            put_str(buf, x, row, &state.daemon_version, vcolor, area_w);
         }
         row += 1;
+    }
+
+    // Version-skew banner (red): a running daemon is never auto-restarted, so
+    // after `brew upgrade` (or any rebuild) an OLD daemon keeps serving while
+    // this client is new. The stats below come from the stale daemon — say so,
+    // and give the exact fix.
+    if version_skew(&state.daemon_version, CLIENT_VERSION) {
+        if row <= bottom {
+            put_str(buf, 0, row, "✗ DAEMON VERSION SKEW", OFFLINE_RED, area_w);
+            row += 1;
+        }
+        if row <= bottom {
+            let msg = format!(
+                "daemon {} vs client {CLIENT_VERSION} — run `ainb hangar daemon restart`",
+                state.daemon_version
+            );
+            put_str(buf, 2, row, &msg, OFFLINE_RED, area_w);
+            row += 1;
+        }
     }
 
     // Database-drift banner (red, ABOVE the stats): when the daemon reports its

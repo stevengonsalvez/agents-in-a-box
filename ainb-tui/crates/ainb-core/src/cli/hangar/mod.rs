@@ -3008,6 +3008,31 @@ fn daemon_pid_path() -> Result<std::path::PathBuf> {
     Ok(home.join("hangar").join("daemon.pid"))
 }
 
+/// Path to the file recording the version of the binary that started the
+/// running daemon, written beside the pid file at launch.
+///
+/// A running daemon is never auto-restarted, so after `brew upgrade` (or any
+/// rebuild) the OLD daemon keeps serving while the CLI/TUI is new. This file
+/// lets `status` name the running daemon's version and flag the skew — without
+/// a socket dial (the CLI opens the store directly and never RPCs the daemon).
+fn daemon_version_path() -> Result<std::path::PathBuf> {
+    let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
+    Ok(home.join("hangar").join("daemon.version"))
+}
+
+/// Compare the recorded running-daemon version to `mine`, returning
+/// `Some(running)` when they disagree (the skew to warn about), else `None`.
+///
+/// `None` also when the running version is unknown (no file / empty) — an
+/// absent record is not proof of skew, so it degrades to "no warning" rather
+/// than a false positive. A pure function so the precedence is unit-testable.
+fn daemon_version_skew(running: Option<&str>, mine: &str) -> Option<String> {
+    match running {
+        Some(v) if !v.is_empty() && v != mine => Some(v.to_string()),
+        _ => None,
+    }
+}
+
 /// Read the recorded daemon pid, or `None` if the file is absent/empty/garbage.
 fn read_daemon_pid(path: &std::path::Path) -> Option<u32> {
     let text = std::fs::read_to_string(path).ok()?;
@@ -3375,6 +3400,23 @@ async fn run_daemon_status() -> Result<()> {
                 "socket not yet bound"
             };
             println!("hangar daemon: running (pid {pid}, {sock})");
+            // Version-skew check: a running daemon is never auto-restarted, so
+            // after an upgrade an OLD daemon can still be serving. Compare the
+            // recorded running-daemon version to THIS binary's and flag it.
+            let running = daemon_version_path()
+                .ok()
+                .and_then(|p| std::fs::read_to_string(p).ok())
+                .map(|s| s.trim().to_string());
+            match daemon_version_skew(running.as_deref(), env!("CARGO_PKG_VERSION")) {
+                Some(running_v) => {
+                    println!(
+                        "  ⚠ version skew: daemon {running_v} vs this binary {} — \
+                         run `ainb hangar daemon restart`",
+                        env!("CARGO_PKG_VERSION")
+                    );
+                }
+                None => println!("  version: {}", env!("CARGO_PKG_VERSION")),
+            }
         }
         Some(pid) => {
             println!("hangar daemon: stopped (stale pid {pid}, process gone)");
@@ -3509,6 +3551,14 @@ fn start_daemon_if_stopped(announce: bool) -> Result<()> {
     std::fs::write(&pid_path, format!("{pid}\n"))
         .with_context(|| format!("write pid file {}", pid_path.display()))?;
 
+    // Record the version of the binary now serving, beside the pid. The launcher
+    // and the daemon it spawns share the workspace version, so this is the
+    // running daemon's version. Best-effort: a write failure must not fail the
+    // start (the skew check just degrades to "unknown").
+    if let Ok(vpath) = daemon_version_path() {
+        std::fs::write(&vpath, format!("{}\n", env!("CARGO_PKG_VERSION"))).ok();
+    }
+
     if announce {
         println!("hangar daemon: started (pid {pid})");
     }
@@ -3522,6 +3572,11 @@ fn start_daemon_if_stopped(announce: bool) -> Result<()> {
 /// is cleaned up; an absent file is reported as "not running".
 fn run_daemon_stop() -> Result<()> {
     let pid_path = daemon_pid_path()?;
+    // Drop the version record too — a stopped daemon has no running version, and
+    // a lingering file would make `status` compare against a dead daemon.
+    if let Ok(vpath) = daemon_version_path() {
+        std::fs::remove_file(&vpath).ok();
+    }
     match read_daemon_pid(&pid_path) {
         Some(pid) if pid_is_running(pid) => {
             use nix::sys::signal::{Signal, kill};
@@ -4594,6 +4649,19 @@ mod tests {
     use super::*;
     use crate::cli::registry::CommandRegistry;
     use clap::FromArgMatches;
+
+    /// The skew helper flags a differing recorded version, and stays quiet for
+    /// a match, an absent record, or an empty one (absence is not skew).
+    #[test]
+    fn daemon_version_skew_flags_only_a_known_mismatch() {
+        assert_eq!(
+            daemon_version_skew(Some("1.15.0"), "1.16.0"),
+            Some("1.15.0".to_string())
+        );
+        assert_eq!(daemon_version_skew(Some("1.16.0"), "1.16.0"), None);
+        assert_eq!(daemon_version_skew(None, "1.16.0"), None);
+        assert_eq!(daemon_version_skew(Some(""), "1.16.0"), None);
+    }
 
     /// Build the real `ainb` clap surface (root + every registered command,
     /// including the `hangar` subtree) and parse `argv` through it.
