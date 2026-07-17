@@ -66,7 +66,9 @@ fn seeded_snapshot() -> DaemonHealthSnapshot {
         },
         concurrent_tasks: 3,
         task_throughput_60s: throughput,
-        daemon_version: "1.16.0 (abc1234, source)".into(),
+        // Match THIS build's version so the baseline fixture never trips the
+        // version-skew banner — the skew case is exercised by its own test.
+        daemon_version: env!("CARGO_PKG_VERSION").into(),
         db_error: None,
     }
 }
@@ -231,8 +233,7 @@ const OFFLINE_RED: ainb_plugin_sdk::Color = ainb_plugin_sdk::Color::rgb(220, 120
 #[test]
 fn db_error_renders_red_banner() {
     let mut snap = seeded_snapshot();
-    snap.db_error =
-        Some("database schema (migration 41) is AHEAD of this daemon binary".into());
+    snap.db_error = Some("database schema (migration 41) is AHEAD of this daemon binary".into());
     let state = DaemonHealthState::from_snapshot(snap);
     let mut buf = WireBuffer::new(100, 24);
     render_daemon_health(&mut buf, 100, 0, 24, &state);
@@ -285,12 +286,59 @@ fn healthy_snapshot_renders_version_no_banner() {
     let full = glyph_map(&buf, 100);
 
     assert!(
-        full.contains("daemon: 1.16.0 (abc1234, source)"),
+        full.contains(&format!("daemon: {}", env!("CARGO_PKG_VERSION"))),
         "version line:\n{full}"
     );
     assert!(
         !full.contains("DATABASE UNREACHABLE"),
         "no banner on healthy:\n{full}"
     );
+    assert!(
+        !full.contains("VERSION SKEW"),
+        "no skew banner on match:\n{full}"
+    );
     assert!(!full.contains("stale binary"), "no stale warning:\n{full}");
+}
+
+/// A daemon whose reported version differs from this client build renders the
+/// red VERSION SKEW banner with both versions + the restart command. This is
+/// the post-`brew upgrade` case: an OLD daemon still serving a NEW client.
+#[test]
+fn version_skew_renders_red_banner() {
+    let mut snap = seeded_snapshot();
+    snap.daemon_version = "1.14.0 (oldsha, ci)".into(); // != this build's version
+    let state = DaemonHealthState::from_snapshot(snap);
+    let mut buf = WireBuffer::new(100, 24);
+    render_daemon_health(&mut buf, 100, 0, 24, &state);
+    let full = glyph_map(&buf, 100);
+
+    assert!(
+        full.contains("DAEMON VERSION SKEW"),
+        "skew headline:\n{full}"
+    );
+    assert!(
+        full.contains("1.14.0"),
+        "banner names the daemon version:\n{full}"
+    );
+    assert!(
+        full.contains("ainb hangar daemon restart"),
+        "banner gives the fix:\n{full}"
+    );
+}
+
+/// A daemon reporting THIS client's exact version renders NO skew banner (the
+/// banner must not false-positive when versions agree).
+#[test]
+fn matching_version_renders_no_skew_banner() {
+    let mut snap = seeded_snapshot();
+    snap.daemon_version = env!("CARGO_PKG_VERSION").into();
+    let state = DaemonHealthState::from_snapshot(snap);
+    let mut buf = WireBuffer::new(100, 24);
+    render_daemon_health(&mut buf, 100, 0, 24, &state);
+    let full = glyph_map(&buf, 100);
+
+    assert!(
+        !full.contains("VERSION SKEW"),
+        "no skew banner on match:\n{full}"
+    );
 }
