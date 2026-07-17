@@ -131,7 +131,9 @@ const ISSUE_UPDATE_REQ_ID: i64 = 25;
 /// compose modal (e38.5).
 const COMMENT_ADD_REQ_ID: i64 = 26;
 /// JSON-RPC id for a `hangar/issue_create` request raised by the issue-list
-/// inline create flow (e38.29).
+/// create wizard (Phase 5; formerly the e38.29 inline title-only flow). Its
+/// reply carries the new `IssueRow`, whose id arms the follow-up
+/// `issue_update` + `issue_run` dispatch chain.
 const ISSUE_CREATE_REQ_ID: i64 = 27;
 /// JSON-RPC id for the `hangar/members_list` snapshot request feeding the
 /// settings Members pane (e38.11).
@@ -222,6 +224,11 @@ const DAEMON_CONFIG_SET_REQ_ID: i64 = 50;
 /// 49/50 are the daemon-config get/set pair, which landed on main while this
 /// branch was in review — this id must stay clear of them.
 const AGENT_CREATE_REQ_ID: i64 = 51;
+/// JSON-RPC id for a `hangar/issue_run` request raised by the Issues create
+/// wizard's dispatch (Phase 5). The reply is a `BoardCardRunResult` (same shape
+/// as `board_card_run`), surfaced as a transient issue-list note; an error is
+/// surfaced the same way — never silent.
+const ISSUE_RUN_REQ_ID: i64 = 52;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -366,6 +373,31 @@ pub struct HangarPlugin {
     /// Kanban / Autopilots / Skills card; its leaf binds to the screen's EXISTING
     /// daemon RPC seam. `None` when closed.
     list_context_menu: Option<crate::screen::list_context_menu::ListContextMenuState>,
+    /// The Issues create-wizard payload whose `hangar/issue_create` is in flight
+    /// (Phase 5): the repo / agent / branches to persist + dispatch once the
+    /// create reply hands back the new issue id. `None` when no wizard create is
+    /// pending. Cleared on the create's error reply (nothing to dispatch).
+    wizard_dispatch_in_flight: Option<WizardDispatch>,
+    /// The dispatch armed by a successful wizard `issue_create` reply: the new
+    /// `issue_id` plus the stashed payload, awaiting the next `render` pass (host
+    /// IO is safe there) to fire `issue_update` + `issue_run`. `None` when idle.
+    pending_issue_dispatch: Option<(String, WizardDispatch)>,
+}
+
+/// The Issues create-wizard fields that ride ALONGSIDE the `issue_create` call
+/// (Phase 5): persisted onto the new issue via `hangar/issue_update` and carried
+/// as explicit `hangar/issue_run` overrides, so the dispatch never depends on
+/// the persist landing first.
+#[derive(Debug, Clone)]
+struct WizardDispatch {
+    /// The picked repo (REQUIRED): absolute path, `scratch`, or a remote ref.
+    repo_ref: String,
+    /// The provider agent wire token (`claude` / `codex` / `copilot`).
+    agent: String,
+    /// The source branch the run branches FROM; `None` = repo default.
+    source_branch: Option<String>,
+    /// The target branch a future PR lands INTO; `None` = unset.
+    target_branch: Option<String>,
 }
 
 /// Read the daemon socket-auth token from `{hangar_home}/hangar/daemon.token`.
@@ -424,6 +456,8 @@ impl Default for HangarPlugin {
             board_layout: None,
             pending_board_mouse_intents: Vec::new(),
             list_context_menu: None,
+            wizard_dispatch_in_flight: None,
+            pending_issue_dispatch: None,
         }
     }
 }
@@ -850,6 +884,12 @@ impl HangarPlugin {
                 self.fetch_pending = true;
                 self.conn.on_event();
             }
+            // Phase 5: the wizard's `issue_create` reply hands back the new
+            // issue's id, arming the `issue_update` + `issue_run` follow-ups.
+            RpcId::Number(ISSUE_CREATE_REQ_ID) => self.apply_wizard_issue_created(resp),
+            // Phase 5: the wizard's `issue_run` reply — surfaced as a note either
+            // way (launch feedback or the daemon's rejection), never silent.
+            RpcId::Number(ISSUE_RUN_REQ_ID) => self.apply_issue_run(resp),
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             // The attention/subscribe ack carries the open-attention snapshot that
             // seeds the control-center board.
@@ -873,7 +913,6 @@ impl HangarPlugin {
                 | AUTOPILOT_TOGGLE_REQ_ID
                 | TASK_TRANSITION_REQ_ID
                 | ISSUE_UPDATE_REQ_ID
-                | ISSUE_CREATE_REQ_ID
                 | INBOX_MARK_READ_REQ_ID
                 | ATTENTION_ANSWER_REQ_ID
                 // P5: a profile/upsert reply re-fetches the snapshot batch so the
@@ -1140,6 +1179,56 @@ impl HangarPlugin {
                 self.screens.boards.set_note(format!("launched {} on {}", r.mode, r.agent_id));
             }
         }
+    }
+
+    /// Fold the wizard's `hangar/issue_create` reply (Phase 5): a success carries
+    /// the new `IssueRow`, whose id + the stashed
+    /// [`Self::wizard_dispatch_in_flight`] arm the `issue_update` + `issue_run`
+    /// follow-ups (fired on the next `render`, where host IO is safe). An error —
+    /// or an unparseable reply — surfaces as an issue-list note and DROPS the
+    /// stash (nothing was created, nothing to dispatch). Either way the snapshot
+    /// re-pull is armed so the board reflects the daemon's truth.
+    fn apply_wizard_issue_created(&mut self, resp: &RpcResponse) {
+        let dispatch = self.wizard_dispatch_in_flight.take();
+        if let Some(err) = &resp.error {
+            self.screens.issue_list.set_note(format!("create failed: {}", err.message));
+        } else if let Some(row) = resp.result.as_ref().and_then(|result| {
+            serde_json::from_value::<ainb_hangar_proto::events::IssueRow>(result.clone()).ok()
+        }) {
+            if let Some(dispatch) = dispatch {
+                self.pending_issue_dispatch = Some((row.id.as_str().to_string(), dispatch));
+            }
+        } else {
+            // A result that isn't an IssueRow: the issue may exist but its id is
+            // unknown, so the dispatch cannot fire. Say so rather than sit quiet.
+            self.screens
+                .issue_list
+                .set_note("create reply unreadable — issue not dispatched");
+        }
+        self.fetch_pending = true;
+        self.conn.on_event();
+    }
+
+    /// Surface the wizard's `hangar/issue_run` reply (Phase 5): a transient
+    /// issue-list note naming the agent + mode the task launched on, or the
+    /// daemon's rejection (e.g. the copilot F8 dispatch gate) — mirroring
+    /// [`Self::apply_board_card_run`], never silent. The card slides Todo → In
+    /// Progress via the daemon's pushed task lifecycle events.
+    fn apply_issue_run(&mut self, resp: &RpcResponse) {
+        if let Some(err) = &resp.error {
+            self.screens.issue_list.set_note(format!("run failed: {}", err.message));
+        } else if let Some(r) = resp.result.as_ref().and_then(|result| {
+            serde_json::from_value::<ainb_hangar_proto::snapshots::BoardCardRunResult>(
+                result.clone(),
+            )
+            .ok()
+        }) {
+            self.screens
+                .issue_list
+                .set_note(format!("launched {} on {}", r.mode, r.agent_id));
+        }
+        self.fetch_pending = true;
+        self.conn.on_event();
     }
 
     /// Surface a `hangar/board_card_cancel` reply (tcp T3 / F6): a transient note
@@ -2371,26 +2460,30 @@ impl HangarPlugin {
         }
     }
 
-    /// Fire a deferred issue-create RPC raised by the issue-list inline create
-    /// flow (e38.29).
-    ///
-    /// Maps the [`IssueCreateAction::Create`] to `hangar/issue_create`, creating a
-    /// new issue with the typed title authored by the current member, framed over
-    /// the socket cap. The daemon's `IssueCreated` push re-renders the new row
-    /// (mirroring `apply_comment_action` — this fires the RPC only, no separate
-    /// re-pull). A send failure is logged but non-fatal — the issue simply isn't
-    /// created.
+    /// Fire the first leg of the Issues create-wizard chain (Phase 5):
+    /// `hangar/issue_create` with the typed title, stashing the repo / agent /
+    /// branches on [`Self::wizard_dispatch_in_flight`] so the create reply (which
+    /// hands back the new issue id) can arm the `issue_update` + `issue_run`
+    /// follow-ups. Any failure to even SEND is surfaced as an issue-list note —
+    /// never a silent dead end.
     async fn apply_create_action(
         &mut self,
         host: &HostClient,
         action: crate::screen::IssueCreateAction,
     ) {
         use crate::screen::IssueCreateAction;
+        let IssueCreateAction::CreateAndRun {
+            title,
+            repo_ref,
+            source_branch,
+            target_branch,
+            agent,
+        } = action;
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            self.screens.issue_list.set_note("create failed: daemon link is down");
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let IssueCreateAction::Create { title } = action;
         let params = serde_json::json!({
             "workspace_id": ws, "title": title, "creator": SELF_AUTHOR_REF
         });
@@ -2399,10 +2492,81 @@ impl HangarPlugin {
             daemon_methods::HANGAR_ISSUE_CREATE,
             params,
         ) else {
+            self.screens.issue_list.set_note("create failed: could not encode request");
             return;
         };
+        // Stash the dispatch payload BEFORE the send so the reply handler finds
+        // it; a send failure clears it again (nothing will answer).
+        self.wizard_dispatch_in_flight = Some(WizardDispatch {
+            repo_ref,
+            agent,
+            source_branch,
+            target_branch,
+        });
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            self.wizard_dispatch_in_flight = None;
+            self.screens.issue_list.set_note(format!("create failed: {e}"));
             let _ = host.log_info(format!("hangar: issue create send failed: {e}")).await;
+        }
+    }
+
+    /// Fire the second leg of the Issues create-wizard chain (Phase 5), armed by
+    /// a successful `issue_create` reply: ONE `hangar/issue_update` persisting
+    /// repo / agent / source / target on the new issue (the append-only F6
+    /// pattern), then `hangar/issue_run` with the SAME values as explicit
+    /// overrides — so the run is correct even if the persist is still in flight.
+    /// A send failure on either leg surfaces as an issue-list note.
+    async fn fire_issue_dispatch(
+        &mut self,
+        host: &HostClient,
+        issue_id: String,
+        dispatch: WizardDispatch,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            self.screens.issue_list.set_note("run failed: daemon link is down");
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let update = ainb_hangar_proto::snapshots::IssueUpdateParams {
+            workspace_id: ws.clone(),
+            issue_id: issue_id.clone(),
+            repo_ref: Some(dispatch.repo_ref.clone()),
+            agent: Some(dispatch.agent.clone()),
+            source_branch: dispatch.source_branch.clone(),
+            target_branch: dispatch.target_branch.clone(),
+            ..Default::default()
+        };
+        let run = ainb_hangar_proto::snapshots::IssueRunParams {
+            workspace_id: ws,
+            issue_id,
+            mode: "headless".to_string(),
+            repo_ref: Some(dispatch.repo_ref),
+            agent: Some(dispatch.agent),
+            source_branch: dispatch.source_branch,
+        };
+        for (id, method, params) in [
+            (
+                ISSUE_UPDATE_REQ_ID,
+                daemon_methods::HANGAR_ISSUE_UPDATE,
+                serde_json::to_value(&update).unwrap_or_default(),
+            ),
+            (
+                ISSUE_RUN_REQ_ID,
+                daemon_methods::HANGAR_ISSUE_RUN,
+                serde_json::to_value(&run).unwrap_or_default(),
+            ),
+        ] {
+            let Ok(body) = encode_request(id, method, params) else {
+                self.screens
+                    .issue_list
+                    .set_note(format!("dispatch failed: could not encode {method}"));
+                return;
+            };
+            if let Err(e) = host.unix_socket_send(stream_id.clone(), body).await {
+                self.screens.issue_list.set_note(format!("dispatch failed: {e}"));
+                let _ = host.log_info(format!("hangar: {method} send failed: {e}")).await;
+                return;
+            }
         }
     }
 
@@ -3761,6 +3925,10 @@ impl Plugin for HangarPlugin {
             // input — renders were the only place host IO is safe, and with no
             // frames the daemon coming up was never noticed.
             || self.daemon_start_redial_until.is_some()
+            // Phase 5: a wizard dispatch armed by the `issue_create` reply needs a
+            // render to fire its `issue_update` + `issue_run` (host IO is only
+            // safe there). Consumed (taken) by that render, so not level-held.
+            || self.pending_issue_dispatch.is_some()
     }
 
     fn captures_text(&self) -> bool {
@@ -3890,11 +4058,17 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_comment_action() {
             self.apply_comment_action(host, action).await;
         }
-        // e38.29: drain any deferred issue-create (Enter on a non-blank title in
-        // the issue-list inline create flow) and fire `hangar/issue_create` over
-        // the daemon socket.
+        // Phase 5: drain a deferred wizard create (Enter on the Agent stage) and
+        // fire `hangar/issue_create` over the daemon socket; the reply arms the
+        // follow-up dispatch below.
         if let Some(action) = self.screens.take_pending_create_action() {
             self.apply_create_action(host, action).await;
+        }
+        // Phase 5: drain a dispatch armed by a successful wizard `issue_create`
+        // reply — fire `hangar/issue_update` (persist repo / agent / branches on
+        // the new issue) then `hangar/issue_run` (the actual launch).
+        if let Some((issue_id, dispatch)) = self.pending_issue_dispatch.take() {
+            self.fire_issue_dispatch(host, issue_id, dispatch).await;
         }
         // e38.13: drain any deferred command-palette search (every keystroke in
         // the palette) and fire `hangar/search` over the daemon socket; the read

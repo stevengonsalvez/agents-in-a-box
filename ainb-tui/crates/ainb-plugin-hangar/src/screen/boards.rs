@@ -346,8 +346,9 @@ impl AgentChip {
         }
     }
 
-    /// The chip's picker label (copilot flags its F8 dispatch gate).
-    const fn label(self) -> &'static str {
+    /// The chip's picker label (copilot flags its F8 dispatch gate). Crate-visible
+    /// so the Issues create-wizard agent stage renders the same labels.
+    pub(crate) const fn label(self) -> &'static str {
         match self {
             Self::Claude => "claude",
             Self::Codex => "codex",
@@ -368,10 +369,11 @@ impl AgentChip {
     }
 
     /// The chips in picker order (claude first — the cascade's safe default).
-    const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Copilot];
+    /// Crate-visible so the Issues create-wizard agent stage offers the same roster.
+    pub(crate) const ALL: [Self; 3] = [Self::Claude, Self::Codex, Self::Copilot];
 
     /// The chip at `idx`, clamped to [`AgentChip::Claude`].
-    fn at(idx: usize) -> Self {
+    pub(crate) fn at(idx: usize) -> Self {
         Self::ALL.get(idx).copied().unwrap_or(Self::Claude)
     }
 
@@ -422,7 +424,9 @@ impl RepoOption {
 /// The `@` dropdown candidates for `query`: [`RepoOption::scratch`] first
 /// (ALWAYS, the F2 guaranteed repo), then the injected roster
 /// (favorites-first + recency order preserved) fuzzy-filtered on `query`.
-fn repo_candidates(repos: &[RepoOption], query: &str) -> Vec<RepoOption> {
+/// Crate-visible so the Issues create-wizard repo stage shares the exact same
+/// candidate order + fuzzy filter as the Boards card create.
+pub(crate) fn repo_candidates(repos: &[RepoOption], query: &str) -> Vec<RepoOption> {
     let mut out = vec![RepoOption::scratch()];
     out.extend(
         repos

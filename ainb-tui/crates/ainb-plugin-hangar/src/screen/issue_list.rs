@@ -31,6 +31,8 @@ use ainb_hangar_proto::events::{HangarEvent, IssueRow};
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
+use super::boards::{AgentChip, RepoOption, repo_candidates};
+
 /// The number of status columns the board renders — the five canonical
 /// lifecycle statuses (63l.3). Kept as a single constant so the column enum, the
 /// card-board render, and the per-column scroll offsets stay in lockstep.
@@ -208,17 +210,111 @@ fn assignee_kind(row: &IssueRow) -> Option<ActorKind> {
 }
 
 /// Whether the screen is in normal navigation, filter-text-entry, or
-/// create-title-entry mode.
+/// the staged create-wizard mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IssueListMode {
     /// Normal row navigation (`j`/`k`, `enter`, `c`, …).
     Normal,
     /// `/` filter-input mode: keystrokes append to the [`IssueListState::query`].
     FilterInput,
-    /// `c` create-input mode (e38.29): keystrokes append to the
-    /// [`IssueListState::create_title`]; Enter submits a non-blank title (raising
-    /// [`IssueListIntent::CreateIssue`]), Esc/empty-Enter abort.
+    /// `c` create-wizard mode (Phase 5): the staged Title → Repo →
+    /// `SourceBranch` → `TargetBranch` → Agent overlay
+    /// ([`IssueListState::wizard`]) is open and captures every key.
+    ///
+    /// Enter advances / commits (raising [`IssueListIntent::CreateAndRun`] at
+    /// the final Agent stage), Esc cancels the WHOLE wizard from any stage in
+    /// one press.
     CreateInput,
+}
+
+/// A raw key folded into the open create wizard (Phase 5).
+///
+/// Mirrors the Boards `BoardsKey` shape: a `Char` is text in an input stage but
+/// ignored in a picker; `Up`/`Down` move a picker cursor but are ignored in an
+/// input.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardKey {
+    /// A printable character.
+    Char(char),
+    /// Backspace (delete the last input char).
+    Backspace,
+    /// Enter (advance / commit the stage).
+    Enter,
+    /// Escape (cancel the WHOLE wizard, from any stage).
+    Esc,
+    /// Cursor up (move a picker selection up).
+    Up,
+    /// Cursor down (move a picker selection down).
+    Down,
+}
+
+/// The staged Issues create wizard (Phase 5), mirroring the Boards card-create
+/// overlay.
+///
+/// Stages: Title → Repo (`@` fuzzy dropdown, REQUIRED) → `SourceBranch`
+/// (prefilled `main`) → `TargetBranch` (prefilled `main`) → Agent (REQUIRED —
+/// the commit lives ONLY on this stage, so a title-only inert issue is
+/// impossible to create here).
+///
+/// Each stage carries everything collected so far, so the reducer stays pure and
+/// a stage transition is a plain value swap. Esc anywhere drops the whole thing.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum CreateWizard {
+    /// Stage 1: typing the new issue's title. Enter on a non-blank title advances
+    /// to the repo pick; blank Enter holds.
+    Title {
+        /// The title typed so far.
+        title: String,
+    },
+    /// Stage 2: picking the repo (REQUIRED). `@` opens the fuzzy dropdown over the
+    /// injected roster (scratch always first); Enter with the dropdown closed
+    /// RE-OPENS it (never advances repo-less); Enter on a highlighted candidate
+    /// advances to the source-branch input.
+    Repo {
+        /// The title from stage 1.
+        title: String,
+        /// The post-`@` fuzzy query (empty until `@` opens the dropdown).
+        query: String,
+        /// `Some(cursor)` while the dropdown is open, `None` while closed.
+        dropdown: Option<usize>,
+    },
+    /// Stage 3: the SOURCE branch the run branches FROM, prefilled `main`. Enter
+    /// accepts (blank = unset → the repo default at dispatch).
+    SourceBranch {
+        /// The title from stage 1.
+        title: String,
+        /// The repo picked in stage 2.
+        repo_ref: String,
+        /// The branch text being edited (prefilled `main`).
+        branch: String,
+    },
+    /// Stage 4: the TARGET branch a future PR lands INTO, prefilled `main`. Enter
+    /// accepts (blank = unset).
+    TargetBranch {
+        /// The title from stage 1.
+        title: String,
+        /// The repo picked in stage 2.
+        repo_ref: String,
+        /// The source branch accepted in stage 3 (already trimmed; may be empty).
+        source_branch: String,
+        /// The branch text being edited (prefilled `main`).
+        branch: String,
+    },
+    /// Stage 5: the provider agent (REQUIRED — the whole point). ↑↓ move over
+    /// [`AgentChip::ALL`]; Enter COMMITS the wizard, raising
+    /// [`IssueListIntent::CreateAndRun`]. This is the only commit point.
+    Agent {
+        /// The title from stage 1.
+        title: String,
+        /// The repo picked in stage 2.
+        repo_ref: String,
+        /// The source branch accepted in stage 3 (trimmed; may be empty).
+        source_branch: String,
+        /// The target branch accepted in stage 4 (trimmed; may be empty).
+        target_branch: String,
+        /// The highlighted chip (index into [`AgentChip::ALL`]).
+        cursor: usize,
+    },
 }
 
 /// The render-state cache for the issue list.
@@ -239,11 +335,20 @@ pub struct IssueListState {
     /// The free-text query typed in filter-input mode (case-insensitive
     /// substring over the title).
     query: String,
-    /// Whether we are navigating, typing a filter, or typing a new-issue title.
+    /// Whether we are navigating, typing a filter, or in the create wizard.
     mode: IssueListMode,
-    /// The new-issue title typed in [`IssueListMode::CreateInput`] (e38.29).
-    /// Empty when not creating; cleared on submit / abort.
-    create_title: String,
+    /// The staged create wizard (Phase 5), open while `mode` is
+    /// [`IssueListMode::CreateInput`]. `None` otherwise.
+    wizard: Option<CreateWizard>,
+    /// The `@`-dropdown repo roster for the wizard's repo stage, injected by the
+    /// glue from the same `hangar/repo_list` snapshot the Boards screen gets
+    /// (favorites-first + recency order preserved). `scratch` is NOT in here —
+    /// [`repo_candidates`] prepends it always.
+    repos: Vec<RepoOption>,
+    /// A transient status note (create/run dispatch feedback or failure),
+    /// rendered on the bottom row and replaced by the next note / cleared when a
+    /// new wizard opens. Errors surface HERE, never silently dropped.
+    note: Option<String>,
     /// Maps a queued/running task to the issue it works on, so a `TaskStarted`
     /// event can promote the right issue to In Progress (the event carries only
     /// the task id, the queue carried the issue id).
@@ -268,7 +373,9 @@ impl Default for IssueListState {
             filter: FilterChip::All,
             query: String::new(),
             mode: IssueListMode::Normal,
-            create_title: String::new(),
+            wizard: None,
+            repos: Vec::new(),
+            note: None,
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
             hovered_id: None,
@@ -309,12 +416,13 @@ impl IssueListState {
         )
     }
 
-    /// Abort the create-input flow (Esc): drop the typed title and return to
-    /// normal navigation (e38.29). A no-op when not creating.
+    /// Abort the create wizard (Esc): drop the WHOLE staged overlay — whatever
+    /// stage it is on — and return to normal navigation in one press (Phase 5,
+    /// never trap the user). A no-op when not creating.
     pub fn abort_create(&mut self) {
         if self.mode == IssueListMode::CreateInput {
             self.mode = IssueListMode::Normal;
-            self.create_title.clear();
+            self.wizard = None;
         }
     }
 
@@ -330,11 +438,30 @@ impl IssueListState {
         &self.query
     }
 
-    /// The new-issue title being typed in [`IssueListMode::CreateInput`] (e38.29),
-    /// or the empty string when not in create mode.
+    /// The open create wizard (Phase 5), or `None` when not creating.
     #[must_use]
-    pub fn create_title(&self) -> &str {
-        &self.create_title
+    pub const fn wizard(&self) -> Option<&CreateWizard> {
+        self.wizard.as_ref()
+    }
+
+    /// Inject the `@`-dropdown repo roster for the wizard's repo stage (Phase 5),
+    /// from the glue's cached `hangar/repo_list` (the same snapshot the Boards
+    /// card-create dropdown draws from).
+    pub fn set_repos(&mut self, repos: Vec<RepoOption>) {
+        self.repos = repos;
+    }
+
+    /// The transient status note (dispatch feedback / failure), if any.
+    #[must_use]
+    pub fn note(&self) -> Option<&str> {
+        self.note.as_deref()
+    }
+
+    /// Surface a transient status note on the bottom row (Phase 5): the glue
+    /// reports every create/update/run reply — success AND failure — through
+    /// this, so a dispatch error is never silent.
+    pub fn set_note(&mut self, note: impl Into<String>) {
+        self.note = Some(note.into());
     }
 
     /// Iterate the rows passing the active chip + query, in daemon order.
@@ -602,6 +729,10 @@ impl IssueListState {
 pub enum IssueListEvent {
     /// A printable key was pressed (`'j'`, `'\n'` for enter, `'/'`, `'c'`, …).
     Key(char),
+    /// A structured key for the open create wizard (Phase 5): unlike [`Self::Key`]
+    /// it carries Up/Down/Esc, which the picker stages (repo dropdown, agent
+    /// chips) need. Ignored when no wizard is open.
+    Wizard(WizardKey),
     /// The active filter chip was changed.
     SetFilter(FilterChip),
     /// A domain event arrived on the subscribed stream.
@@ -618,12 +749,25 @@ pub enum IssueListIntent {
     OpenTaskDetail(IssueId),
     /// Open the agent-picker modal for the issue under the selection.
     OpenAgentPicker(IssueId),
-    /// Submit a new issue with the typed `title` (e38.29). Raised when Enter is
-    /// pressed on a non-blank title in [`IssueListMode::CreateInput`]; the plugin
-    /// glue lifts it into a `hangar/issue_create` RPC.
-    CreateIssue {
-        /// The non-blank title typed in the create input.
+    /// Commit the create wizard (Phase 5): create the issue AND dispatch it.
+    /// Raised ONLY by Enter on the wizard's final Agent stage — there is no path
+    /// to this intent without an agent, so a title-only inert issue (assignee
+    /// `◇ None`, never runs) cannot be created from this screen. The plugin glue
+    /// lifts it into `hangar/issue_create` → `hangar/issue_update` (persist repo /
+    /// agent / branches) → `hangar/issue_run`.
+    CreateAndRun {
+        /// The non-blank title typed in stage 1.
         title: String,
+        /// The repo picked in stage 2 (REQUIRED — an absolute path, `scratch`, or
+        /// a remote indicator the daemon clones).
+        repo_ref: String,
+        /// The source branch the run branches FROM; `None` = the repo default.
+        source_branch: Option<String>,
+        /// The target branch a future PR lands INTO; `None` = unset.
+        target_branch: Option<String>,
+        /// The provider agent wire token (`claude` / `codex` / `copilot`) —
+        /// always a real token, never empty.
+        agent: String,
     },
 }
 
@@ -642,6 +786,7 @@ pub struct IssueListReduction {
 pub fn reduce_issue_list(state: &IssueListState, ev: IssueListEvent) -> IssueListReduction {
     match ev {
         IssueListEvent::Key(c) => reduce_key(state, c),
+        IssueListEvent::Wizard(k) => reduce_wizard_key(state, k),
         IssueListEvent::SetFilter(chip) => set_filter(state, chip),
         IssueListEvent::Event(event) => fold_event(state, event),
     }
@@ -651,8 +796,20 @@ pub fn reduce_issue_list(state: &IssueListState, ev: IssueListEvent) -> IssueLis
 fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
     match state.mode {
         IssueListMode::FilterInput => reduce_filter_input_key(state, c),
-        IssueListMode::CreateInput => reduce_create_input_key(state, c),
+        // A plain char while the wizard is open folds in as a wizard key, so the
+        // legacy `Key(char)` path (Enter as '\n', Backspace as '\u{8}') keeps
+        // working alongside the structured [`IssueListEvent::Wizard`] events.
+        IssueListMode::CreateInput => reduce_wizard_key(state, wizard_key_from_char(c)),
         IssueListMode::Normal => reduce_normal_key(state, c),
+    }
+}
+
+/// Map the legacy reducer char vocabulary onto a [`WizardKey`].
+const fn wizard_key_from_char(c: char) -> WizardKey {
+    match c {
+        '\n' | '\r' => WizardKey::Enter,
+        '\u{8}' | '\u{7f}' => WizardKey::Backspace,
+        other => WizardKey::Char(other),
     }
 }
 
@@ -729,40 +886,299 @@ fn enter_filter_mode(state: &IssueListState) -> IssueListReduction {
     no_intent(next)
 }
 
-/// Enter create-input mode (`c`, e38.29): start typing a new-issue title with an
-/// empty buffer. No intent yet — the title is captured first, then Enter submits.
+/// Open the create wizard (`c`, Phase 5) at its Title stage. No intent yet — the
+/// staged inputs are collected first; only the final Agent stage commits.
 fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     let mut next = state.clone();
     next.mode = IssueListMode::CreateInput;
-    next.create_title = String::new();
+    next.wizard = Some(CreateWizard::Title {
+        title: String::new(),
+    });
+    // A fresh wizard supersedes any stale dispatch note.
+    next.note = None;
     no_intent(next)
 }
 
-/// Create-input-mode key handling (e38.29): Enter submits a non-blank title
-/// (leaving the mode + emitting [`IssueListIntent::CreateIssue`]), Backspace
-/// deletes the last char, any other printable char appends. Enter on a
-/// blank/whitespace title is a no-op that keeps the mode open (never an empty
-/// issue). Esc is handled by the router (it clears the buffer via
-/// [`IssueListState::abort_create`]).
-fn reduce_create_input_key(state: &IssueListState, c: char) -> IssueListReduction {
+/// Swap the open wizard for `wizard`, emitting no intent (a stage edit /
+/// transition).
+fn set_wizard(state: &IssueListState, wizard: CreateWizard) -> IssueListReduction {
     let mut next = state.clone();
-    match c {
-        '\n' | '\r' => {
-            if next.create_title.trim().is_empty() {
-                // Blank title: keep the mode open, submit nothing.
-                return no_intent(next);
-            }
-            let title = next.create_title.trim().to_string();
-            next.mode = IssueListMode::Normal;
-            next.create_title = String::new();
-            return with_intent(next, IssueListIntent::CreateIssue { title });
-        }
-        '\u{8}' | '\u{7f}' => {
-            next.create_title.pop();
-        }
-        other => next.create_title.push(other),
-    }
+    next.wizard = Some(wizard);
     no_intent(next)
+}
+
+/// Cancel the WHOLE wizard (Esc from any stage, Phase 5): back to normal
+/// navigation in one press, everything typed is dropped.
+fn cancel_wizard(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::Normal;
+    next.wizard = None;
+    no_intent(next)
+}
+
+/// Fold one [`WizardKey`] into the open create wizard, dispatching on its stage
+/// (Phase 5). Esc cancels the whole overlay from ANY stage; every other key is
+/// interpreted per stage. A wizard key with no wizard open is a no-op.
+fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReduction {
+    let Some(wizard) = state.wizard.clone() else {
+        return unchanged(state);
+    };
+    if key == WizardKey::Esc {
+        return cancel_wizard(state);
+    }
+    match wizard {
+        CreateWizard::Title { title } => wizard_title_key(state, title, key),
+        CreateWizard::Repo {
+            title,
+            query,
+            dropdown,
+        } => wizard_repo_key(state, title, query, dropdown, key),
+        CreateWizard::SourceBranch {
+            title,
+            repo_ref,
+            branch,
+        } => wizard_source_branch_key(state, title, repo_ref, branch, key),
+        CreateWizard::TargetBranch {
+            title,
+            repo_ref,
+            source_branch,
+            branch,
+        } => wizard_target_branch_key(state, title, repo_ref, source_branch, branch, key),
+        CreateWizard::Agent {
+            title,
+            repo_ref,
+            source_branch,
+            target_branch,
+            cursor,
+        } => wizard_agent_key(
+            state,
+            title,
+            repo_ref,
+            source_branch,
+            target_branch,
+            cursor,
+            key,
+        ),
+    }
+}
+
+/// Wizard stage 1 — Title: type the new issue's title. Enter on a non-blank
+/// title advances to the repo pick; blank Enter HOLDS the stage (never an empty
+/// issue); Backspace edits; Up/Down are no-ops.
+fn wizard_title_key(
+    state: &IssueListState,
+    mut title: String,
+    key: WizardKey,
+) -> IssueListReduction {
+    match key {
+        WizardKey::Backspace => {
+            title.pop();
+        }
+        WizardKey::Char(c) => title.push(c),
+        WizardKey::Enter => {
+            if !title.trim().is_empty() {
+                return set_wizard(
+                    state,
+                    CreateWizard::Repo {
+                        title: title.trim().to_string(),
+                        query: String::new(),
+                        dropdown: None,
+                    },
+                );
+            }
+            // Blank title: hold the stage open.
+        }
+        WizardKey::Up | WizardKey::Down | WizardKey::Esc => {}
+    }
+    set_wizard(state, CreateWizard::Title { title })
+}
+
+/// Wizard stage 2 — Repo (REQUIRED): `@` opens the fuzzy dropdown over the
+/// injected roster (scratch always first, exactly the Boards F2/F3 behaviour);
+/// ↑↓ move the highlight; Enter on a candidate advances to the source-branch
+/// input. Enter with the dropdown CLOSED re-opens it (the pointer at scratch)
+/// rather than ever advancing repo-less.
+fn wizard_repo_key(
+    state: &IssueListState,
+    title: String,
+    mut query: String,
+    dropdown: Option<usize>,
+    key: WizardKey,
+) -> IssueListReduction {
+    let reopen = |state: &IssueListState, query: String, dropdown: Option<usize>| {
+        set_wizard(
+            state,
+            CreateWizard::Repo {
+                title: title.clone(),
+                query,
+                dropdown,
+            },
+        )
+    };
+    match (dropdown, key) {
+        // Field closed: `@` opens the dropdown; Enter re-opens it (repo REQUIRED —
+        // never advance repo-less); anything else holds.
+        (None, WizardKey::Char('@') | WizardKey::Enter) => reopen(state, String::new(), Some(0)),
+        (None, _) => reopen(state, query, None),
+        // Dropdown open: edits re-filter and reset the highlight to the top.
+        (Some(_), WizardKey::Char(c)) => {
+            query.push(c);
+            reopen(state, query, Some(0))
+        }
+        (Some(_), WizardKey::Backspace) => {
+            query.pop();
+            reopen(state, query, Some(0))
+        }
+        (Some(cursor), WizardKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
+        (Some(cursor), WizardKey::Down) => {
+            let n = repo_candidates(&state.repos, &query).len();
+            reopen(state, query, Some((cursor + 1).min(n.saturating_sub(1))))
+        }
+        (Some(cursor), WizardKey::Enter) => {
+            let candidates = repo_candidates(&state.repos, &query);
+            let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) else {
+                // Impossible (scratch is always present), but never advance repo-less.
+                return reopen(state, query, Some(0));
+            };
+            set_wizard(
+                state,
+                CreateWizard::SourceBranch {
+                    title,
+                    repo_ref: picked.repo_ref.clone(),
+                    branch: "main".to_string(),
+                },
+            )
+        }
+        (Some(cursor), WizardKey::Esc) => reopen(state, query, Some(cursor)),
+    }
+}
+
+/// Wizard stage 3 — `SourceBranch`: a text input prefilled `main`. Enter accepts
+/// the (trimmed) value — blank means "unset, use the repo default at dispatch" —
+/// and advances to the target-branch input.
+fn wizard_source_branch_key(
+    state: &IssueListState,
+    title: String,
+    repo_ref: String,
+    mut branch: String,
+    key: WizardKey,
+) -> IssueListReduction {
+    match key {
+        WizardKey::Backspace => {
+            branch.pop();
+        }
+        WizardKey::Char(c) => branch.push(c),
+        WizardKey::Enter => {
+            return set_wizard(
+                state,
+                CreateWizard::TargetBranch {
+                    title,
+                    repo_ref,
+                    source_branch: branch.trim().to_string(),
+                    branch: "main".to_string(),
+                },
+            );
+        }
+        WizardKey::Up | WizardKey::Down | WizardKey::Esc => {}
+    }
+    set_wizard(
+        state,
+        CreateWizard::SourceBranch {
+            title,
+            repo_ref,
+            branch,
+        },
+    )
+}
+
+/// Wizard stage 4 — `TargetBranch`: a text input prefilled `main`. Enter accepts
+/// the (trimmed) value — blank means unset — and advances to the agent pick.
+fn wizard_target_branch_key(
+    state: &IssueListState,
+    title: String,
+    repo_ref: String,
+    source_branch: String,
+    mut branch: String,
+    key: WizardKey,
+) -> IssueListReduction {
+    match key {
+        WizardKey::Backspace => {
+            branch.pop();
+        }
+        WizardKey::Char(c) => branch.push(c),
+        WizardKey::Enter => {
+            return set_wizard(
+                state,
+                CreateWizard::Agent {
+                    title,
+                    repo_ref,
+                    source_branch,
+                    target_branch: branch.trim().to_string(),
+                    cursor: 0,
+                },
+            );
+        }
+        WizardKey::Up | WizardKey::Down | WizardKey::Esc => {}
+    }
+    set_wizard(
+        state,
+        CreateWizard::TargetBranch {
+            title,
+            repo_ref,
+            source_branch,
+            branch,
+        },
+    )
+}
+
+/// Wizard stage 5 — Agent (REQUIRED, the whole point): ↑↓ move over
+/// [`AgentChip::ALL`] (claude / codex / copilot — copilot is selectable, the F8
+/// gate fires at dispatch, same as Boards); Enter COMMITS the wizard, raising the
+/// one-and-only [`IssueListIntent::CreateAndRun`]. There is no other commit path,
+/// so the intent always carries a real agent token.
+fn wizard_agent_key(
+    state: &IssueListState,
+    title: String,
+    repo_ref: String,
+    source_branch: String,
+    target_branch: String,
+    cursor: usize,
+    key: WizardKey,
+) -> IssueListReduction {
+    let reopen = |state: &IssueListState, cursor: usize| {
+        set_wizard(
+            state,
+            CreateWizard::Agent {
+                title: title.clone(),
+                repo_ref: repo_ref.clone(),
+                source_branch: source_branch.clone(),
+                target_branch: target_branch.clone(),
+                cursor,
+            },
+        )
+    };
+    match key {
+        WizardKey::Up => reopen(state, cursor.saturating_sub(1)),
+        WizardKey::Down => reopen(state, (cursor + 1).min(AgentChip::ALL.len() - 1)),
+        WizardKey::Enter => {
+            let mut next = state.clone();
+            next.mode = IssueListMode::Normal;
+            next.wizard = None;
+            // Blank branch inputs mean "unset" — the daemon resolves the default.
+            let opt = |s: String| if s.is_empty() { None } else { Some(s) };
+            with_intent(
+                next,
+                IssueListIntent::CreateAndRun {
+                    title,
+                    repo_ref,
+                    source_branch: opt(source_branch),
+                    target_branch: opt(target_branch),
+                    agent: AgentChip::at(cursor).wire().to_string(),
+                },
+            )
+        }
+        WizardKey::Char(_) | WizardKey::Backspace | WizardKey::Esc => reopen(state, cursor),
+    }
 }
 
 /// Apply a new filter chip and re-clamp the selection into the new visible set.
@@ -876,11 +1292,28 @@ pub fn render_issue_list(
     // Working-agents avatar stack, right-aligned on the same chip row.
     crate::widgets::working_chip::render_working_chip(buf, top, area_w, working_count);
 
-    // e38.29: the inline create-issue input bar, when active, takes the bottom row
-    // as a single-line text input (`New issue · Title: <typed>▏`). Drawn last so it
-    // overlays the list; the rows above keep rendering as context.
-    if state.mode == IssueListMode::CreateInput {
-        render_create_bar(buf, area_w, bottom.saturating_sub(1), &state.create_title);
+    // Phase 5: the staged create wizard, when open, takes the two bottom rows
+    // (prompt + value) as an overlay. Drawn last so it overlays the list; the
+    // rows above keep rendering as context. When no wizard is open, a transient
+    // dispatch note (launch feedback / failure) paints on the bottom row instead.
+    if let Some(wizard) = state.wizard() {
+        render_wizard(
+            buf,
+            area_w,
+            bottom.saturating_sub(2),
+            bottom.saturating_sub(1),
+            wizard,
+            &state.repos,
+        );
+    } else if let Some(note) = state.note() {
+        put_str(
+            buf,
+            0,
+            bottom.saturating_sub(1),
+            note,
+            CREATE_ACCENT,
+            area_w,
+        );
     }
 
     // 63l.4 — the Issues screen is the headline of the redesign: it renders
@@ -907,17 +1340,161 @@ pub fn render_issue_list(
 /// gold headers + green selection so the create prompt reads as its own mode).
 const CREATE_ACCENT: Color = Color::rgb(120, 200, 160);
 
-/// Render the inline create-issue input bar at `(0, row)` (e38.29):
-/// `New issue · Title: <typed>▏` in the create accent followed by a muted
-/// keybinding hint. The caret `▏` sits after the typed text. Char-safe via
-/// [`put_str`].
-fn render_create_bar(buf: &mut WireBuffer, area_w: u16, row: u16, title: &str) {
-    // `New issue` + `Title:` are the prompt labels the tripwire detects to know
-    // the create input is active.
-    let prompt = format!("New issue · Title: {title}▏");
-    let next = put_str(buf, 0, row, &prompt, CREATE_ACCENT, area_w);
-    let hint = "  (Enter submit · Esc cancel)";
-    put_str(buf, next, row, hint, MUTED_GRAY, area_w);
+/// Gold stage-prompt colour for the create wizard (matches the Boards overlay
+/// prompts + the style guide's title gold).
+const GOLD: Color = Color::rgb(255, 215, 0);
+/// Selection green for the wizard's highlighted picker rows (style guide).
+const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+
+/// Render the staged create wizard on the two bottom rows (Phase 5): a gold
+/// stage prompt naming the keys, then the green input / picker value line —
+/// mirroring the Boards card-create overlay so the two flows read identically.
+/// Char-safe via [`put_str`].
+fn render_wizard(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    value_row: u16,
+    wizard: &CreateWizard,
+    repos: &[RepoOption],
+) {
+    match wizard {
+        CreateWizard::Title { title } => {
+            put_str(
+                buf,
+                0,
+                row,
+                "New task · Title (Enter → repo, Esc cancel):",
+                GOLD,
+                area_w,
+            );
+            put_str(
+                buf,
+                0,
+                value_row,
+                &format!("> {title}\u{2588}"),
+                SELECTION_GREEN,
+                area_w,
+            );
+        }
+        CreateWizard::Repo {
+            title,
+            query,
+            dropdown,
+        } => render_wizard_repo(buf, area_w, row, title, query, *dropdown, repos),
+        CreateWizard::SourceBranch { branch, .. } => {
+            put_str(
+                buf,
+                0,
+                row,
+                "Source branch — run branches FROM (Enter accept, blank = repo default):",
+                GOLD,
+                area_w,
+            );
+            put_str(
+                buf,
+                0,
+                value_row,
+                &format!("> {branch}\u{2588}"),
+                SELECTION_GREEN,
+                area_w,
+            );
+        }
+        CreateWizard::TargetBranch { branch, .. } => {
+            put_str(
+                buf,
+                0,
+                row,
+                "Target branch — PR lands INTO (Enter accept, blank = unset):",
+                GOLD,
+                area_w,
+            );
+            put_str(
+                buf,
+                0,
+                value_row,
+                &format!("> {branch}\u{2588}"),
+                SELECTION_GREEN,
+                area_w,
+            );
+        }
+        CreateWizard::Agent { title, cursor, .. } => {
+            let prompt = format!("Agent for \"{title}\" — REQUIRED (↑↓ pick, Enter create + run):");
+            put_str(buf, 0, row, &prompt, GOLD, area_w);
+            let mut x = 0u16;
+            for (i, chip) in AgentChip::ALL.iter().enumerate() {
+                let sel = i == *cursor;
+                let colour = if sel { SELECTION_GREEN } else { MUTED_GRAY };
+                let marker = if sel { "▶ " } else { "  " };
+                x = put_str(buf, x, value_row, marker, colour, area_w);
+                x = put_str(buf, x, value_row, chip.label(), colour, area_w);
+                x = put_str(buf, x, value_row, "   ", MUTED_GRAY, area_w);
+                if x >= area_w {
+                    break;
+                }
+            }
+        }
+    }
+}
+
+/// Render the wizard's repo stage (Phase 5): the prompt line plus either the
+/// closed-field hint (type `@` to search) or the open `@` dropdown — scratch
+/// always first (★ favorites, ★☁ remote-only), the highlighted candidate in
+/// green. Mirrors the Boards `render_card_repo`; the value line paints directly
+/// under the prompt `row`.
+fn render_wizard_repo(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    title: &str,
+    query: &str,
+    dropdown: Option<usize>,
+    repos: &[RepoOption],
+) {
+    let value_row = row.saturating_add(1);
+    let prompt = format!("Repo for \"{title}\" (@ to search, Enter pick — REQUIRED):");
+    put_str(buf, 0, row, &prompt, GOLD, area_w);
+    let Some(cursor) = dropdown else {
+        put_str(
+            buf,
+            0,
+            value_row,
+            "> type @ to pick a repo (scratch always available)",
+            MUTED_GRAY,
+            area_w,
+        );
+        return;
+    };
+    let candidates = repo_candidates(repos, query);
+    let mut x = put_str(
+        buf,
+        0,
+        value_row,
+        &format!("@{query} "),
+        SELECTION_GREEN,
+        area_w,
+    );
+    for (i, repo) in candidates.iter().enumerate() {
+        let sel = i == cursor;
+        let colour = if sel { SELECTION_GREEN } else { MUTED_GRAY };
+        let open = if sel { "[" } else { " " };
+        let close = if sel { "]" } else { " " };
+        let star = if repo.is_remote_only {
+            "★☁"
+        } else if repo.is_favorite {
+            "★"
+        } else {
+            ""
+        };
+        x = put_str(buf, x, value_row, open, colour, area_w);
+        x = put_str(buf, x, value_row, star, colour, area_w);
+        x = put_str(buf, x, value_row, &repo.label, colour, area_w);
+        x = put_str(buf, x, value_row, close, colour, area_w);
+        x = put_str(buf, x, value_row, " ", MUTED_GRAY, area_w);
+        if x >= area_w {
+            break;
+        }
+    }
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at `area_w`. Returns the next
@@ -1210,6 +1787,46 @@ mod tests {
         let after: Vec<String> =
             s.rows_in_column(IssueColumn::Todo).map(|r| r.id.as_str().to_string()).collect();
         assert_eq!(before, after);
+    }
+
+    /// Phase 5 — the create wizard renders each stage's prompt + value on the two
+    /// bottom rows: the Title input, the REQUIRED repo pick (scratch first in the
+    /// `@` dropdown), the `main`-prefilled branch inputs, and the agent chips with
+    /// the REQUIRED marker. Pins the overlay layout the manual `just dev` walk
+    /// exercises.
+    #[test]
+    fn wizard_overlay_renders_each_stage_prompt() {
+        let assert_paints = |state: &IssueListState, needles: &[&str]| {
+            let mut buf = WireBuffer::new(120, 24);
+            render_issue_list(&mut buf, 120, 1, 23, state, 0);
+            let painted = painted_text(&buf);
+            for needle in needles {
+                assert!(
+                    painted.contains(needle),
+                    "missing {needle:?} in:\n{painted}"
+                );
+            }
+        };
+        // Stage 1: title input.
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Key('F')).state;
+        assert_paints(&s, &["New task · Title", "> F"]);
+        // Stage 2: repo pick — REQUIRED, `@` dropdown with scratch always first.
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_paints(&s, &["Repo for \"F\"", "REQUIRED", "type @ to pick a repo"]);
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
+        assert_paints(&s, &["[scratch]"]);
+        // Stage 3 + 4: branch inputs prefilled `main`.
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_paints(&s, &["Source branch", "> main"]);
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_paints(&s, &["Target branch", "> main"]);
+        // Stage 5: the REQUIRED agent chips, claude highlighted first.
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_paints(
+            &s,
+            &["Agent for \"F\" — REQUIRED", "▶ claude", "codex", "copilot"],
+        );
     }
 
     /// Reconstruct the full painted text of a rendered buffer (every cell, in
