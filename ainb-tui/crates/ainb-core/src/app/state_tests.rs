@@ -336,6 +336,112 @@ mod tests {
         assert_eq!(session.model.as_deref(), Some("claude-opus-4-8"));
     }
 
+    #[tokio::test]
+    async fn idle_restart_respawns_a_dead_codex_pane_with_launch_settings() {
+        use crate::models::{Session, SessionStatus, Workspace};
+        use std::process::Command;
+        use std::time::Duration;
+
+        if Command::new("tmux")
+            .arg("-V")
+            .output()
+            .map_or(true, |output| !output.status.success())
+        {
+            eprintln!("skip: tmux unavailable");
+            return;
+        }
+
+        struct ExactTmuxSession(String);
+        impl Drop for ExactTmuxSession {
+            fn drop(&mut self) {
+                let _ = Command::new("tmux").args(["kill-session", "-t", &self.0]).output();
+            }
+        }
+
+        let home = tempfile::tempdir().expect("temp home");
+
+        let tmux_name = format!("ainb-idle-restart-{}", uuid::Uuid::new_v4());
+        let _tmux = ExactTmuxSession(tmux_name.clone());
+        assert!(
+            Command::new("tmux")
+                .args(["new-session", "-d", "-s", &tmux_name])
+                .status()
+                .expect("create tmux session")
+                .success()
+        );
+        assert!(
+            Command::new("tmux")
+                .args(["set-option", "-w", "-t", &tmux_name, "remain-on-exit", "on"])
+                .status()
+                .expect("set remain-on-exit")
+                .success()
+        );
+        assert!(
+            Command::new("tmux")
+                .args(["respawn-pane", "-k", "-t", &tmux_name, "sh", "-c", "exit 0"])
+                .status()
+                .expect("make pane dead")
+                .success()
+        );
+
+        let mut pane_dead = false;
+        for _ in 0..20 {
+            let dead = Command::new("tmux")
+                .args(["display-message", "-p", "-t", &tmux_name, "#{pane_dead}"])
+                .output()
+                .expect("read pane state");
+            if String::from_utf8_lossy(&dead.stdout).trim() == "1" {
+                pane_dead = true;
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        assert!(pane_dead, "precondition: pane must be dead before restart");
+
+        let session_id = uuid::Uuid::new_v4();
+        let worktree = home.path().join("worktree");
+        std::fs::create_dir_all(&worktree).expect("worktree");
+        let model = "gpt-5.6-luna".to_string();
+
+        let mut session = Session::new_with_options(
+            "idle-restart".to_string(),
+            worktree.to_string_lossy().to_string(),
+            true,
+            SessionMode::Interactive,
+            None,
+            SessionAgentType::Codex,
+            Some(model),
+        );
+        session.id = session_id;
+        session.status = SessionStatus::Idle;
+        session.tmux_session_name = Some(tmux_name.clone());
+
+        let mut workspace = Workspace::new("idle-restart".to_string(), worktree);
+        workspace.add_session(session);
+        let mut state = AppState::new();
+        state.workspaces.push(workspace);
+
+        state.restart_cli_in_tmux(session_id).await.expect("idle restart");
+
+        let pane = Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                &tmux_name,
+                "-F",
+                "#{pane_start_command}",
+            ])
+            .output()
+            .expect("read pane command");
+        let pane_command = String::from_utf8_lossy(&pane.stdout);
+        assert!(
+            pane_command.contains(
+                "codex resume --last --model gpt-5.6-luna --dangerously-bypass-approvals-and-sandbox"
+            ),
+            "idle restart must replace dead pane with persisted Codex argv, got: {pane_command}"
+        );
+    }
+
     // -- SessionFilter tests ------------------------------------------------
 
     use crate::app::state::SessionFilter;

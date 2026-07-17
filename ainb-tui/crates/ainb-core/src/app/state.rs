@@ -10768,9 +10768,8 @@ impl AppState {
     /// Restart Claude in an existing tmux session (for Idle sessions)
     async fn restart_cli_in_tmux(&mut self, session_id: Uuid) -> anyhow::Result<String> {
         use crate::config::CliProvider;
+        use crate::interactive::InteractiveSessionManager;
         use crate::models::session::SessionAgentType;
-        use anyhow::Context;
-        use std::process::Command;
 
         let session = self
             .find_session(session_id)
@@ -10805,77 +10804,34 @@ impl AppState {
             .and_then(crate::interactive::SessionMetadata::launch_model)
             .or_else(|| session.model.clone());
 
-        // Restart continues the existing conversation, for parity with the
-        // Stopped-session resume path: Claude `--continue`, Codex `resume
-        // --last`, Copilot `--continue`. `has_history` gates Claude's
-        // `--continue` (no prior transcript → fresh, avoids a dead pane).
-        let has_history = agent_type == SessionAgentType::Claude
-            && metadata
-                .map(|m| Self::find_latest_transcript(&m.worktree_path).is_some())
-                .unwrap_or(false);
-
-        let cmd_parts =
-            crate::interactive::session_manager::InteractiveSessionManager::build_cli_cmd_parts(
-                &provider,
-                agent_type,
-                skip_permissions,
-                model.as_deref(),
-                true, // resume_requested — restart continues the conversation
-                has_history,
-            );
-
-        // Preserve per-session Headroom routing across restart. `send-keys`
-        // bypasses build_env_setup_for_provider, so re-derive the proxy export
-        // from the persisted SessionMetadata (keyed by tmux name) and prepend
-        // it — otherwise a restarted HR session would silently stop routing
-        // through the proxy.
-        //
-        // Mirror the launch path (`start_cli_in_tmux`): the stored flag is
-        // *intent*; only inject the base URL when the proxy is actually
-        // healthy. Injecting a dead-port URL would brick the restarted CLI on
-        // connection-refused. Ensure the proxy first; degrade to direct on
-        // failure rather than pointing the session at a closed port.
-        let mut headroom_active = metadata.map(|m| m.headroom_enabled).unwrap_or(false)
-            && matches!(
-                agent_type,
-                SessionAgentType::Claude | SessionAgentType::Codex
-            );
-        if headroom_active {
-            if let Err(e) = crate::headroom::ensure_proxy_running().await {
-                warn!(
-                    "headroom proxy unavailable on restart — running DIRECT, no compression: {e}"
-                );
-                headroom_active = false;
-            }
-        }
-        let escaped_cmd = cmd_parts
-            .iter()
-            .map(|part| shell_escape::escape(part.into()).into_owned())
-            .collect::<Vec<_>>()
-            .join(" ");
-        let cli_cmd = format!(
-            "{}{}",
-            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_active),
-            escaped_cmd
-        );
+        // Reuse the launch/resume path: it replaces even a dead
+        // remain-on-exit pane with `respawn-pane -k`, restores provider argv,
+        // and reapplies Headroom/API-key/OTEL environment consistently.
+        let resume_transcript = if agent_type == SessionAgentType::Claude {
+            metadata.and_then(|m| Self::find_latest_transcript(&m.worktree_path))
+        } else {
+            None
+        };
+        let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
 
         info!(
-            "Restarting {} in tmux session '{}' for workspace '{}' (cmd: {})",
+            "Restarting {} in tmux session '{}' for workspace '{}'",
             provider.display_name(),
             tmux_session_name,
-            workspace_path,
-            cli_cmd
+            workspace_path
         );
 
-        let output = Command::new("tmux")
-            .args(&["send-keys", "-t", &tmux_session_name, &cli_cmd, "C-m"])
-            .output()
-            .context("Failed to send CLI restart command to tmux")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to send command to tmux: {}", stderr);
-        }
+        InteractiveSessionManager::new()?
+            .start_cli_in_tmux(
+                &tmux_session_name,
+                skip_permissions,
+                model,
+                agent_type,
+                resume_transcript,
+                true,
+                headroom_enabled,
+            )
+            .await?;
 
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(crate::models::SessionStatus::Running);
