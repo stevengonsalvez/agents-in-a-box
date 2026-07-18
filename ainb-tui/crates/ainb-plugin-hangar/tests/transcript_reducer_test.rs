@@ -218,6 +218,56 @@ fn x_key_then_esc_aborts_cancel_modal() {
     assert!(aborted.intent.is_none());
 }
 
+/// `x` opens the delete-confirm modal (no intent yet) regardless of lifecycle;
+/// Enter confirms → a `DeleteIssue` intent for the bound issue, closing the modal.
+#[test]
+fn x_key_opens_delete_modal_then_enter_deletes_bound_issue() {
+    // Queued (never ran): `x` still opens the confirm — delete is not
+    // lifecycle-gated (the daemon guards active tasks and surfaces a note).
+    let s = state_for_task();
+    let opened = reduce_task_detail(&s, TaskDetailEvent::Key('x'));
+    assert!(opened.state.delete_modal_open(), "x opens the delete modal");
+    assert!(opened.intent.is_none(), "opening emits no intent");
+
+    // Enter confirms → delete intent for the bound issue (i1).
+    let confirmed = reduce_task_detail(&opened.state, TaskDetailEvent::Key('\n'));
+    assert_eq!(
+        confirmed.intent,
+        Some(TaskDetailIntent::DeleteIssue(
+            IssueId::from_str("i1").unwrap()
+        )),
+        "Enter confirms the delete for the bound issue"
+    );
+    assert!(
+        !confirmed.state.delete_modal_open(),
+        "confirming closes the delete modal"
+    );
+}
+
+/// Opening the delete modal then pressing Esc aborts it without emitting a
+/// delete intent.
+#[test]
+fn x_key_then_esc_aborts_delete_modal() {
+    let opened = reduce_task_detail(&state_for_task(), TaskDetailEvent::Key('x')).state;
+    assert!(opened.delete_modal_open());
+    let aborted = reduce_task_detail(&opened, TaskDetailEvent::Esc);
+    assert!(!aborted.state.delete_modal_open(), "Esc closes the modal");
+    assert!(aborted.intent.is_none(), "Esc emits no delete intent");
+}
+
+/// While the delete modal is open every non-Enter/Esc key is swallowed (the
+/// modal is total), so a stray key never fires the delete or leaks to scroll.
+#[test]
+fn delete_modal_captures_other_keys() {
+    let opened = reduce_task_detail(&state_for_task(), TaskDetailEvent::Key('x')).state;
+    let after = reduce_task_detail(&opened, TaskDetailEvent::Key('j'));
+    assert!(
+        after.state.delete_modal_open(),
+        "a stray key keeps the modal open"
+    );
+    assert!(after.intent.is_none(), "a stray key fires nothing");
+}
+
 /// A long consecutive run of `Thinking` lines collapses under a single
 /// collapsible group entry rather than rendering all of them.
 #[test]

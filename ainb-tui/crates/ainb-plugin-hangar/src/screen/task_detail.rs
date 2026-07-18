@@ -31,7 +31,10 @@
 //! (succeeded / failed); `X` (cancel) is only meaningful while it is running, and
 //! opens a confirm modal (Esc aborts, Enter confirms → [`TaskDetailIntent::CancelTask`]).
 //! The reducer tracks lifecycle from the task events themselves so these keys are
-//! total no-ops when not applicable.
+//! total no-ops when not applicable. `x` (delete the bound issue) opens its own
+//! confirm modal the same way (Esc aborts, Enter → [`TaskDetailIntent::DeleteIssue`]);
+//! it is not lifecycle-gated — the daemon rejects a delete with active tasks and
+//! that rejection surfaces as a note.
 //!
 //! ## Collapsible thinking runs
 //!
@@ -88,6 +91,8 @@ const COMPOSE_ACCENT: Color = Color::rgb(120, 220, 160);
 const COMPOSE_PREFIX: &str = "💬 ";
 /// The keybinding hint painted after the caret on the compose bar.
 const COMPOSE_HINT: &str = "  [enter] post  [esc] cancel";
+/// The keybinding hint painted after the target on the delete-confirm bar (63l.5).
+const DELETE_HINT: &str = "  [enter] confirm  [esc] cancel";
 
 /// Where the task is in its lifecycle, derived from the task event stream.
 ///
@@ -215,6 +220,11 @@ pub struct TaskDetailState {
     stuck_to_bottom: bool,
     /// Whether the cancel-confirm modal is open.
     cancel_modal_open: bool,
+    /// Whether the `x` delete-confirm modal is open (63l.5). Mutually exclusive
+    /// with the cancel + compose modals; Enter confirms → [`TaskDetailIntent::DeleteIssue`],
+    /// Esc aborts. The daemon guards against deleting an issue with active tasks,
+    /// so the confirm always opens and a rejection surfaces as a note downstream.
+    delete_modal_open: bool,
     /// The comment-compose modal buffer (e38.5). `Some(buf)` while the modal is
     /// open (`buf` is the in-progress comment text, possibly empty); `None` when
     /// closed. While open the modal captures every key as text input, so it is
@@ -255,6 +265,7 @@ impl TaskDetailState {
             scroll_offset: 0,
             stuck_to_bottom: true,
             cancel_modal_open: false,
+            delete_modal_open: false,
             compose: None,
             pr_status: UNKNOWN_PR_STATUS,
             branch: None,
@@ -345,6 +356,12 @@ impl TaskDetailState {
         self.cancel_modal_open
     }
 
+    /// Whether the `x` delete-confirm modal is open (63l.5).
+    #[must_use]
+    pub const fn delete_modal_open(&self) -> bool {
+        self.delete_modal_open
+    }
+
     /// The comment-compose buffer when the compose modal is open (e38.5), or
     /// `None` when it is closed. `Some("")` is an open-but-empty modal.
     #[must_use]
@@ -416,6 +433,11 @@ pub enum TaskDetailIntent {
     RetryTask(TaskId),
     /// Cancel the (running) task, confirmed in the modal (`X` then Enter).
     CancelTask(TaskId),
+    /// Delete the bound issue, confirmed in the `x` modal (`x` then Enter, 63l.5).
+    /// The plugin glue fires `hangar/issue_delete` over the same deferred seam the
+    /// issue-list `x` uses, then navigates back to the issue list. Carries the
+    /// bound issue id.
+    DeleteIssue(ainb_hangar_core::ids::IssueId),
     /// Post a comment on the bound issue (`c`, type, Enter) — the plugin glue
     /// fires `hangar/comment_add` over the daemon socket (e38.5). Carries the
     /// issue the comment is for and the (non-empty) typed body.
@@ -463,6 +485,14 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
             _ => unchanged(state),
         };
     }
+    if state.delete_modal_open {
+        return match c {
+            '\n' | '\r' => confirm_delete(state),
+            // Any other key while the modal is open does nothing (Esc aborts via
+            // the dedicated event).
+            _ => unchanged(state),
+        };
+    }
     match c {
         'j' => scroll_down(state),
         'k' => scroll_up(state),
@@ -475,6 +505,10 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         ),
         // Cancel only while running; opens the confirm modal (no intent yet).
         'X' if state.lifecycle == TaskLifecycle::Running => open_cancel_modal(state),
+        // Delete the bound issue (`x`); opens the confirm modal (no intent yet).
+        // Not lifecycle-gated: the daemon rejects a delete with active tasks and
+        // that rejection surfaces as a note, so the confirm always opens.
+        'x' => open_delete_modal(state),
         _ => unchanged(state),
     }
 }
@@ -529,6 +563,10 @@ fn reduce_esc(state: &TaskDetailState) -> TaskDetailReduction {
         let mut next = state.clone();
         next.cancel_modal_open = false;
         no_intent(next)
+    } else if state.delete_modal_open {
+        let mut next = state.clone();
+        next.delete_modal_open = false;
+        no_intent(next)
     } else {
         unchanged(state)
     }
@@ -546,6 +584,21 @@ fn confirm_cancel(state: &TaskDetailState) -> TaskDetailReduction {
     let mut next = state.clone();
     next.cancel_modal_open = false;
     with_intent(next, TaskDetailIntent::CancelTask(state.task_id.clone()))
+}
+
+/// Open the `x` delete-confirm modal (63l.5; does not emit an intent yet).
+fn open_delete_modal(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.delete_modal_open = true;
+    no_intent(next)
+}
+
+/// Confirm the delete modal: close it and emit the delete intent for the bound
+/// issue (63l.5).
+fn confirm_delete(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut next = state.clone();
+    next.delete_modal_open = false;
+    with_intent(next, TaskDetailIntent::DeleteIssue(state.issue.id.clone()))
 }
 
 /// Scroll the viewport up one line, releasing sticky-bottom.
@@ -699,11 +752,16 @@ pub fn render_task_detail(
         }
     }
 
-    // The compose modal (e38.5), when open, takes the bottom row as an input bar,
-    // shrinking the transcript region by one row so the two never overlap.
+    // The compose modal (e38.5) / delete-confirm modal (63l.5), when open, take
+    // the bottom row as a bar, shrinking the transcript region by one row so the
+    // two never overlap. They are mutually exclusive (both capture input).
     let body_bottom = if state.compose.is_some() {
         let bar_row = bottom.saturating_sub(1);
         render_compose_bar(buf, area_w, bar_row, state.compose.as_deref().unwrap_or(""));
+        bar_row
+    } else if state.delete_modal_open {
+        let bar_row = bottom.saturating_sub(1);
+        render_delete_bar(buf, area_w, bar_row, state.issue());
         bar_row
     } else {
         bottom
@@ -741,6 +799,21 @@ fn render_compose_bar(buf: &mut WireBuffer, area_w: u16, row: u16, body: &str) {
     // A block caret so the cursor position is visible while typing.
     cx = put_clipped(buf, cx, row, "▏", COMPOSE_ACCENT, area_w);
     let _ = put_clipped(buf, cx, row, COMPOSE_HINT, HINT_MUTED, area_w);
+}
+
+/// Paint the single-row delete-confirm bar at `(0, row)` (63l.5):
+/// `🗑 delete <HGR-n · title>?` in the destructive red followed by a muted
+/// `[enter] confirm  [esc] cancel` keybinding hint. Clipped by **chars** at
+/// `area_w` (multi-byte safe) so a long title truncates cleanly. Red because the
+/// delete is irreversible — the bar makes the target unmistakable before Enter.
+fn render_delete_bar(buf: &mut WireBuffer, area_w: u16, row: u16, issue: &IssueRow) {
+    let prompt = issue.display_id.as_ref().map_or_else(
+        || format!("🗑 delete {}?", issue.title),
+        |d| format!("🗑 delete {d} · {}?", issue.title),
+    );
+    let mut cx = 0u16;
+    cx = put_clipped(buf, cx, row, &prompt, STATUS_RED, area_w);
+    let _ = put_clipped(buf, cx, row, DELETE_HINT, HINT_MUTED, area_w);
 }
 
 /// Paint the single-row PR badge at `(0, row)`: `▶ PR <url>` in gold, then the
@@ -1295,6 +1368,22 @@ mod card_tests {
             .map(|(_, cell)| cell.symbol.as_str())
             .collect();
         assert!(row0.contains("▶ PR "), "badge pinned to row 0: {row0}");
+    }
+
+    /// When the delete-confirm modal is open the bottom row paints the red
+    /// delete prompt naming the bound issue plus the confirm/cancel hint (63l.5).
+    #[test]
+    fn delete_modal_paints_confirm_bar_with_target() {
+        let mut s = state_for(full_issue());
+        s = reduce_task_detail(&s, TaskDetailEvent::Key('x')).state;
+        assert!(s.delete_modal_open(), "x opened the delete modal");
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("delete"), "delete prompt painted: {text}");
+        assert!(text.contains("Fix the widget"), "names the target issue");
+        assert!(text.contains("[enter] confirm"), "confirm hint painted");
+        assert!(text.contains("[esc] cancel"), "cancel hint painted");
     }
 
     /// `priority_p_label` maps the 0..3 urgency scale to P3..P0 (HIGHER = urgent).

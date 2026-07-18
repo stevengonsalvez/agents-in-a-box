@@ -3779,6 +3779,12 @@ impl HangarPlugin {
                 let reduction = crate::screen::reduce(app, AppEvent::Esc);
                 self.app = Some(reduction.state);
             }
+            NavIntent::BackToIssueList => {
+                let mut next = app.clone();
+                next.screen = Screen::IssueList;
+                next.prior_screen = None;
+                self.app = Some(next);
+            }
             NavIntent::NavigateToEntity { screen, id, kind } => {
                 self.navigate_to_entity(app, &screen, &id, &kind);
             }
