@@ -462,6 +462,47 @@ impl IssueListState {
         self.confirm_delete.as_ref()
     }
 
+    /// Open the `x` RED confirm overlay over the row carrying issue `id` (63l.5):
+    /// the seam the context-menu Delete uses so it lands in the SAME confirm flow
+    /// as the keyboard `x`. Selects the row first (resetting the chip/query so the
+    /// target is visible), then arms the overlay from it. A no-op when no cached
+    /// row carries that id (a stale menu). Enter then fires
+    /// [`IssueListIntent::DeleteIssue`] exactly as the keyboard path does.
+    pub fn open_confirm_delete_for(&mut self, id: &str) {
+        self.select_by_id(id);
+        // Only arm the overlay when the selection actually resolved to that id —
+        // `select_by_id` is a no-op for an unknown id, so guard against confirming
+        // a delete on whatever row happened to be selected.
+        if self.selected_row().map(|r| r.id.as_str()) != Some(id) {
+            return;
+        }
+        self.arm_confirm_delete();
+    }
+
+    /// Arm the delete-confirm overlay over the CURRENT selection (63d): build the
+    /// pending target from the selected row and enter [`IssueListMode::ConfirmDelete`].
+    /// A no-op when nothing is selected. Shared by the keyboard `x` path and the
+    /// context-menu Delete route so both raise an identical overlay.
+    fn arm_confirm_delete(&mut self) {
+        let Some(row) = self.selected_row() else {
+            return;
+        };
+        // Prefer the human display id (`HGR-7`) with the title; fall back to the
+        // raw id when a pre-63l.3 snapshot lacks a display id.
+        let label = match &row.display_id {
+            Some(display) => format!("{display} {}", row.title),
+            None => row.title.clone(),
+        };
+        let pending = PendingDelete {
+            id: row.id.clone(),
+            label,
+        };
+        self.mode = IssueListMode::ConfirmDelete;
+        self.confirm_delete = Some(pending);
+        // A fresh confirm supersedes any stale dispatch note.
+        self.note = None;
+    }
+
     /// The active filter chip.
     #[must_use]
     pub const fn filter(&self) -> FilterChip {
@@ -962,24 +1003,11 @@ fn cancel_wizard(state: &IssueListState) -> IssueListReduction {
 /// — the RED overlay collects the Enter/Esc decision first. A no-op when the list
 /// has no rows (nothing to delete), so `x` on an empty board never traps the user.
 fn enter_confirm_delete(state: &IssueListState) -> IssueListReduction {
-    let Some(row) = state.selected_row() else {
+    if state.selected_row().is_none() {
         return unchanged(state);
-    };
-    // Prefer the human display id (`HGR-7`) with the title; fall back to the raw
-    // id when a pre-63l.3 snapshot lacks a display id.
-    let label = match &row.display_id {
-        Some(display) => format!("{display} {}", row.title),
-        None => row.title.clone(),
-    };
-    let pending = PendingDelete {
-        id: row.id.clone(),
-        label,
-    };
+    }
     let mut next = state.clone();
-    next.mode = IssueListMode::ConfirmDelete;
-    next.confirm_delete = Some(pending);
-    // A fresh confirm supersedes any stale dispatch note.
-    next.note = None;
+    next.arm_confirm_delete();
     no_intent(next)
 }
 

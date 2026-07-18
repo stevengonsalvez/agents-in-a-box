@@ -3710,6 +3710,13 @@ impl HangarPlugin {
             ContextMenuIntent::CopyId { display_id } => {
                 tracing::info!(%display_id, "hangar: context-menu copy id");
             }
+            // Delete routes into the issue list's `x` RED confirm overlay (the SAME
+            // `hangar/issue_delete` path the keyboard `x` uses) — never an inline
+            // delete. The overlay's Enter arms `pending_delete_action`, drained +
+            // fired in `render`.
+            ContextMenuIntent::Delete { issue_id } => {
+                self.screens.issue_list.open_confirm_delete_for(&issue_id);
+            }
         }
     }
 
@@ -5430,6 +5437,44 @@ mod tests {
             p.pending_issue_assignee_update,
             Some(("card-b".to_string(), "member:alice".to_string())),
             "Assign > alice arms issue_update with assignee=member:alice for card-b"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (63l.5): `Delete` closes the menu and opens the issue
+    /// list's `x` RED confirm overlay for THAT card — NOT an inline delete. A
+    /// second Enter on the overlay then arms the SAME `pending_delete_action` the
+    /// keyboard `x` path uses (the one deferred `hangar/issue_delete` seam).
+    #[test]
+    fn context_menu_delete_opens_confirm_overlay_then_arms_delete() {
+        let mut p = connected_plugin_with_two_cards();
+        p.open_context_menu("card-b", (40, 6));
+
+        // Down x5 to `Delete` (Open→Move to→Priority→Assign→Copy id→Delete), Enter.
+        for _ in 0..5 {
+            p.on_key(&key_press(KeyCode::Down));
+        }
+        p.on_key(&key_press(KeyCode::Enter)); // fire Delete
+
+        // The menu closed and NO delete fired yet — only the confirm overlay opened.
+        assert!(p.context_menu.is_none(), "Delete closes the menu");
+        assert!(
+            p.screens
+                .issue_list
+                .confirm_delete()
+                .is_some_and(|pd| pd.id.as_str() == "card-b"),
+            "Delete opens the issue-list confirm overlay for card-b"
+        );
+        assert!(
+            p.screens.pending_delete_action.is_none(),
+            "no delete is armed until the overlay is confirmed"
+        );
+
+        // Enter on the open overlay confirms → arms the deferred issue_delete.
+        p.on_key(&key_press(KeyCode::Enter));
+        assert_eq!(
+            p.screens.take_pending_delete_action().map(|id| id.as_str().to_string()),
+            Some("card-b".to_string()),
+            "confirming the overlay arms hangar/issue_delete for card-b"
         );
     }
 
