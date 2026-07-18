@@ -1403,6 +1403,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             KeyCode::Esc => super::issue_list::WizardKey::Esc,
             KeyCode::Up => super::issue_list::WizardKey::Up,
             KeyCode::Down => super::issue_list::WizardKey::Down,
+            KeyCode::Left => super::issue_list::WizardKey::Left,
+            KeyCode::Right => super::issue_list::WizardKey::Right,
+            KeyCode::Tab => super::issue_list::WizardKey::Tab,
+            KeyCode::BackTab => super::issue_list::WizardKey::BackTab,
             _ => return None,
         };
         IssueListEvent::Wizard(k)

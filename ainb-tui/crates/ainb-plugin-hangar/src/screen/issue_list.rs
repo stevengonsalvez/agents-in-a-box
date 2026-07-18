@@ -254,83 +254,156 @@ pub enum WizardKey {
     Char(char),
     /// Backspace (delete the last input char).
     Backspace,
-    /// Enter (advance / commit the stage).
+    /// Enter (create when the required fields are satisfied, else jump focus to
+    /// the missing one).
     Enter,
-    /// Escape (cancel the WHOLE wizard, from any stage).
+    /// Escape (cancel the WHOLE wizard).
     Esc,
-    /// Cursor up (move a picker selection up).
+    /// Cursor up / previous row (also moves the `@` dropdown cursor when open).
     Up,
-    /// Cursor down (move a picker selection down).
+    /// Cursor down / next row (also moves the `@` dropdown cursor when open).
     Down,
+    /// Cursor left — cycle the focused picker row's value backwards (Repo / Agent).
+    Left,
+    /// Cursor right — cycle the focused picker row's value forwards (Repo / Agent).
+    Right,
+    /// Tab — move focus to the next row (wraps).
+    Tab,
+    /// Shift+Tab — move focus to the previous row (wraps).
+    BackTab,
 }
 
-/// The staged Issues create wizard (Phase 5), mirroring the Boards card-create
-/// overlay.
+/// A focusable row in the create-wizard card.
 ///
-/// Stages: Title → Repo (`@` fuzzy dropdown, REQUIRED) → `SourceBranch`
-/// (prefilled `main`) → `TargetBranch` (prefilled `main`) → Agent (REQUIRED —
-/// the commit lives ONLY on this stage, so a title-only inert issue is
-/// impossible to create here).
+/// The five rows render top-to-bottom in this order; ↑↓ / Tab / Shift+Tab move
+/// focus between them (wrapping, mirroring the host new-session Configure form).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WizardRow {
+    /// The issue title text row (REQUIRED — a blank title blocks create).
+    Title,
+    /// The repo picker row (REQUIRED — `@` fuzzy dropdown or ←/→ cycle; a
+    /// repo-less create is impossible).
+    Repo,
+    /// The SOURCE branch the run branches FROM (text, prefilled `main`).
+    Source,
+    /// The TARGET branch a future PR lands INTO (text, prefilled `main`).
+    Target,
+    /// The provider agent picker (←/→ cycle [`AgentChip::ALL`]; always valid).
+    Agent,
+}
+
+impl WizardRow {
+    /// The rows in render / focus-cycle order (Title → Repo → Source → Target →
+    /// Agent).
+    pub const ALL: [Self; 5] = [
+        Self::Title,
+        Self::Repo,
+        Self::Source,
+        Self::Target,
+        Self::Agent,
+    ];
+
+    /// This row's index in [`Self::ALL`] (the focus cursor position).
+    fn index(self) -> usize {
+        Self::ALL.iter().position(|r| *r == self).unwrap_or(0)
+    }
+}
+
+/// The Issues create wizard (Phase 5): a single centered form showing every field
+/// at once — Title / Repo / Source / Target / Agent — with a focused-row cursor.
 ///
-/// Each stage carries everything collected so far, so the reducer stays pure and
-/// a stage transition is a plain value swap. Esc anywhere drops the whole thing.
+/// Unlike the earlier staged flow, all fields exist from the moment the wizard
+/// opens; ↑↓ / Tab move focus, ←/→ cycle the picker rows, typing edits the
+/// focused text row, and `@` opens the repo fuzzy dropdown. Enter creates ONLY
+/// when the required fields are satisfied (a non-blank title AND a picked repo —
+/// the agent always carries a default), otherwise it jumps focus to the missing
+/// required row. This preserves the non-negotiable guard: a title-only /
+/// repo-less / agent-less issue (the inert `◇ None` card) can never be created.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum CreateWizard {
-    /// Stage 1: typing the new issue's title. Enter on a non-blank title advances
-    /// to the repo pick; blank Enter holds.
-    Title {
-        /// The title typed so far.
-        title: String,
-    },
-    /// Stage 2: picking the repo (REQUIRED). `@` opens the fuzzy dropdown over the
-    /// injected roster (scratch always first); Enter with the dropdown closed
-    /// RE-OPENS it (never advances repo-less); Enter on a highlighted candidate
-    /// advances to the source-branch input.
-    Repo {
-        /// The title from stage 1.
-        title: String,
-        /// The post-`@` fuzzy query (empty until `@` opens the dropdown).
-        query: String,
-        /// `Some(cursor)` while the dropdown is open, `None` while closed.
-        dropdown: Option<usize>,
-    },
-    /// Stage 3: the SOURCE branch the run branches FROM, prefilled `main`. Enter
-    /// accepts (blank = unset → the repo default at dispatch).
-    SourceBranch {
-        /// The title from stage 1.
-        title: String,
-        /// The repo picked in stage 2.
-        repo_ref: String,
-        /// The branch text being edited (prefilled `main`).
-        branch: String,
-    },
-    /// Stage 4: the TARGET branch a future PR lands INTO, prefilled `main`. Enter
-    /// accepts (blank = unset).
-    TargetBranch {
-        /// The title from stage 1.
-        title: String,
-        /// The repo picked in stage 2.
-        repo_ref: String,
-        /// The source branch accepted in stage 3 (already trimmed; may be empty).
-        source_branch: String,
-        /// The branch text being edited (prefilled `main`).
-        branch: String,
-    },
-    /// Stage 5: the provider agent (REQUIRED — the whole point). ↑↓ move over
-    /// [`AgentChip::ALL`]; Enter COMMITS the wizard, raising
-    /// [`IssueListIntent::CreateAndRun`]. This is the only commit point.
-    Agent {
-        /// The title from stage 1.
-        title: String,
-        /// The repo picked in stage 2.
-        repo_ref: String,
-        /// The source branch accepted in stage 3 (trimmed; may be empty).
-        source_branch: String,
-        /// The target branch accepted in stage 4 (trimmed; may be empty).
-        target_branch: String,
-        /// The highlighted chip (index into [`AgentChip::ALL`]).
-        cursor: usize,
-    },
+pub struct CreateWizard {
+    /// Which row currently has focus.
+    focus: WizardRow,
+    /// The title typed so far (REQUIRED — trimmed-blank blocks create).
+    title: String,
+    /// The picked repo's wire ref, or `None` until one is chosen (REQUIRED).
+    repo_ref: Option<String>,
+    /// The post-`@` fuzzy query filtering the repo dropdown.
+    repo_query: String,
+    /// `Some(cursor)` while the `@` dropdown is open, `None` while closed.
+    repo_dropdown: Option<usize>,
+    /// The SOURCE branch text (prefilled `main`; blank = repo default at dispatch).
+    source_branch: String,
+    /// The TARGET branch text (prefilled `main`; blank = unset).
+    target_branch: String,
+    /// The highlighted agent chip (index into [`AgentChip::ALL`]).
+    agent_cursor: usize,
+}
+
+impl Default for CreateWizard {
+    /// A fresh wizard: focus on Title, no repo picked yet, branches prefilled
+    /// `main`, agent defaulted to the first chip (claude).
+    fn default() -> Self {
+        Self {
+            focus: WizardRow::Title,
+            title: String::new(),
+            repo_ref: None,
+            repo_query: String::new(),
+            repo_dropdown: None,
+            source_branch: "main".to_string(),
+            target_branch: "main".to_string(),
+            agent_cursor: 0,
+        }
+    }
+}
+
+impl CreateWizard {
+    /// The row that currently has focus.
+    #[must_use]
+    pub const fn focus(&self) -> WizardRow {
+        self.focus
+    }
+
+    /// The title typed so far.
+    #[must_use]
+    pub fn title(&self) -> &str {
+        &self.title
+    }
+
+    /// The picked repo ref, or `None` until one is chosen.
+    #[must_use]
+    pub fn repo_ref(&self) -> Option<&str> {
+        self.repo_ref.as_deref()
+    }
+
+    /// The post-`@` fuzzy query.
+    #[must_use]
+    pub fn repo_query(&self) -> &str {
+        &self.repo_query
+    }
+
+    /// `Some(cursor)` while the `@` dropdown is open.
+    #[must_use]
+    pub const fn repo_dropdown(&self) -> Option<usize> {
+        self.repo_dropdown
+    }
+
+    /// The SOURCE branch text (may be blank).
+    #[must_use]
+    pub fn source_branch(&self) -> &str {
+        &self.source_branch
+    }
+
+    /// The TARGET branch text (may be blank).
+    #[must_use]
+    pub fn target_branch(&self) -> &str {
+        &self.target_branch
+    }
+
+    /// The highlighted agent chip index.
+    #[must_use]
+    pub const fn agent_cursor(&self) -> usize {
+        self.agent_cursor
+    }
 }
 
 /// The render-state cache for the issue list.
@@ -969,14 +1042,13 @@ fn enter_filter_mode(state: &IssueListState) -> IssueListReduction {
     no_intent(next)
 }
 
-/// Open the create wizard (`c`, Phase 5) at its Title stage. No intent yet — the
-/// staged inputs are collected first; only the final Agent stage commits.
+/// Open the create wizard (`c`, Phase 5) as a fresh single-form card focused on
+/// the Title row. No intent yet — Enter commits only once the required fields are
+/// satisfied.
 fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     let mut next = state.clone();
     next.mode = IssueListMode::CreateInput;
-    next.wizard = Some(CreateWizard::Title {
-        title: String::new(),
-    });
+    next.wizard = Some(CreateWizard::default());
     // A fresh wizard supersedes any stale dispatch note.
     next.note = None;
     no_intent(next)
@@ -1043,9 +1115,11 @@ fn cancel_confirm_delete(state: &IssueListState) -> IssueListReduction {
     no_intent(next)
 }
 
-/// Fold one [`WizardKey`] into the open create wizard, dispatching on its stage
-/// (Phase 5). Esc cancels the whole overlay from ANY stage; every other key is
-/// interpreted per stage. A wizard key with no wizard open is a no-op.
+/// Fold one [`WizardKey`] into the open single-form create wizard (Phase 5). Esc
+/// cancels the whole overlay; while the `@` dropdown is open it captures the nav
+/// keys; otherwise ↑↓/Tab move focus, ←/→ cycle the focused picker row, typing
+/// edits the focused text row, and Enter creates (or jumps to the missing
+/// required row). A wizard key with no wizard open is a no-op.
 fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReduction {
     let Some(wizard) = state.wizard.clone() else {
         return unchanged(state);
@@ -1053,259 +1127,214 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
     if key == WizardKey::Esc {
         return cancel_wizard(state);
     }
-    match wizard {
-        CreateWizard::Title { title } => wizard_title_key(state, title, key),
-        CreateWizard::Repo {
-            title,
-            query,
-            dropdown,
-        } => wizard_repo_key(state, title, query, dropdown, key),
-        CreateWizard::SourceBranch {
-            title,
-            repo_ref,
-            branch,
-        } => wizard_source_branch_key(state, title, repo_ref, branch, key),
-        CreateWizard::TargetBranch {
-            title,
-            repo_ref,
-            source_branch,
-            branch,
-        } => wizard_target_branch_key(state, title, repo_ref, source_branch, branch, key),
-        CreateWizard::Agent {
-            title,
-            repo_ref,
-            source_branch,
-            target_branch,
-            cursor,
-        } => wizard_agent_key(
-            state,
-            title,
-            repo_ref,
-            source_branch,
-            target_branch,
-            cursor,
-            key,
-        ),
+    // The `@` dropdown is modal over the repo row while open: it owns the nav and
+    // edit keys so the user can filter + pick without the focus cursor moving off.
+    if wizard.repo_dropdown.is_some() {
+        return wizard_dropdown_key(state, wizard, key);
     }
-}
-
-/// Wizard stage 1 — Title: type the new issue's title. Enter on a non-blank
-/// title advances to the repo pick; blank Enter HOLDS the stage (never an empty
-/// issue); Backspace edits; Up/Down are no-ops.
-fn wizard_title_key(
-    state: &IssueListState,
-    mut title: String,
-    key: WizardKey,
-) -> IssueListReduction {
     match key {
-        WizardKey::Backspace => {
-            title.pop();
-        }
-        WizardKey::Char(c) => title.push(c),
-        WizardKey::Enter => {
-            if !title.trim().is_empty() {
-                return set_wizard(
-                    state,
-                    CreateWizard::Repo {
-                        title: title.trim().to_string(),
-                        query: String::new(),
-                        dropdown: None,
-                    },
-                );
-            }
-            // Blank title: hold the stage open.
-        }
-        WizardKey::Up | WizardKey::Down | WizardKey::Esc => {}
+        WizardKey::Enter => wizard_try_create(state, wizard),
+        WizardKey::Tab | WizardKey::Down => wizard_move_focus(state, wizard, true),
+        WizardKey::BackTab | WizardKey::Up => wizard_move_focus(state, wizard, false),
+        WizardKey::Left => wizard_cycle_value(state, wizard, false),
+        WizardKey::Right => wizard_cycle_value(state, wizard, true),
+        WizardKey::Char(c) => wizard_type_char(state, wizard, c),
+        WizardKey::Backspace => wizard_backspace(state, wizard),
+        // Esc handled above.
+        WizardKey::Esc => unchanged(state),
     }
-    set_wizard(state, CreateWizard::Title { title })
 }
 
-/// Wizard stage 2 — Repo (REQUIRED): `@` opens the fuzzy dropdown over the
-/// injected roster (scratch always first, exactly the Boards F2/F3 behaviour);
-/// ↑↓ move the highlight; Enter on a candidate advances to the source-branch
-/// input. Enter with the dropdown CLOSED re-opens it (the pointer at scratch)
-/// rather than ever advancing repo-less.
-fn wizard_repo_key(
+/// Step `cur` one position `forward` (or backward) in a ring of `len`, wrapping.
+/// `len` is assumed non-zero by the callers (the row / chip / candidate lists are
+/// always non-empty).
+const fn ring_step(cur: usize, len: usize, forward: bool) -> usize {
+    if forward {
+        (cur + 1) % len
+    } else {
+        (cur + len - 1) % len
+    }
+}
+
+/// Move the focus cursor one row `forward` (or backward), wrapping (mirrors the
+/// host new-session Configure `cycle_focus`). Never leaves the form.
+fn wizard_move_focus(
     state: &IssueListState,
-    title: String,
-    mut query: String,
-    dropdown: Option<usize>,
-    key: WizardKey,
+    mut wizard: CreateWizard,
+    forward: bool,
 ) -> IssueListReduction {
-    let reopen = |state: &IssueListState, query: String, dropdown: Option<usize>| {
-        set_wizard(
-            state,
-            CreateWizard::Repo {
-                title: title.clone(),
-                query,
-                dropdown,
-            },
-        )
-    };
-    match (dropdown, key) {
-        // Field closed: `@` opens the dropdown; Enter re-opens it (repo REQUIRED —
-        // never advance repo-less); anything else holds.
-        (None, WizardKey::Char('@') | WizardKey::Enter) => reopen(state, String::new(), Some(0)),
-        (None, _) => reopen(state, query, None),
-        // Dropdown open: edits re-filter and reset the highlight to the top.
-        (Some(_), WizardKey::Char(c)) => {
-            query.push(c);
-            reopen(state, query, Some(0))
-        }
-        (Some(_), WizardKey::Backspace) => {
-            query.pop();
-            reopen(state, query, Some(0))
-        }
-        (Some(cursor), WizardKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
-        (Some(cursor), WizardKey::Down) => {
-            let n = repo_candidates(&state.repos, &query).len();
-            reopen(state, query, Some((cursor + 1).min(n.saturating_sub(1))))
-        }
-        (Some(cursor), WizardKey::Enter) => {
-            let candidates = repo_candidates(&state.repos, &query);
-            let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) else {
-                // Impossible (scratch is always present), but never advance repo-less.
-                return reopen(state, query, Some(0));
+    let next = ring_step(wizard.focus.index(), WizardRow::ALL.len(), forward);
+    wizard.focus = WizardRow::ALL[next];
+    set_wizard(state, wizard)
+}
+
+/// Cycle the focused picker row's value one step `forward` (or backward) —
+/// Repo / Agent only. A no-op on the text rows: ←/→ never edit text.
+fn wizard_cycle_value(
+    state: &IssueListState,
+    mut wizard: CreateWizard,
+    forward: bool,
+) -> IssueListReduction {
+    match wizard.focus {
+        WizardRow::Repo => {
+            // Cycle the (unfiltered) roster — scratch always first. From "none
+            // picked", → lands on scratch and ← on the last candidate, so ←/→ is
+            // a full alternative to the `@` dropdown for picking a repo.
+            let candidates = repo_candidates(&state.repos, "");
+            let Some(last) = candidates.len().checked_sub(1) else {
+                return set_wizard(state, wizard);
             };
-            set_wizard(
-                state,
-                CreateWizard::SourceBranch {
-                    title,
-                    repo_ref: picked.repo_ref.clone(),
-                    branch: "main".to_string(),
-                },
-            )
+            let current = wizard
+                .repo_ref
+                .as_deref()
+                .and_then(|r| candidates.iter().position(|c| c.repo_ref == r));
+            let next = match current {
+                Some(i) => ring_step(i, candidates.len(), forward),
+                None if forward => 0,
+                None => last,
+            };
+            wizard.repo_ref = Some(candidates[next].repo_ref.clone());
         }
-        (Some(cursor), WizardKey::Esc) => reopen(state, query, Some(cursor)),
+        WizardRow::Agent => {
+            wizard.agent_cursor = ring_step(wizard.agent_cursor, AgentChip::ALL.len(), forward);
+        }
+        WizardRow::Title | WizardRow::Source | WizardRow::Target => {}
     }
+    set_wizard(state, wizard)
 }
 
-/// Wizard stage 3 — `SourceBranch`: a text input prefilled `main`. Enter accepts
-/// the (trimmed) value — blank means "unset, use the repo default at dispatch" —
-/// and advances to the target-branch input.
-fn wizard_source_branch_key(
+/// Type one char into the focused row: append to the focused text row (Title /
+/// Source / Target), or open the `@` repo dropdown on the Repo row. Any other key
+/// on a picker row is ignored.
+fn wizard_type_char(
     state: &IssueListState,
-    title: String,
-    repo_ref: String,
-    mut branch: String,
+    mut wizard: CreateWizard,
+    c: char,
+) -> IssueListReduction {
+    match wizard.focus {
+        WizardRow::Title => wizard.title.push(c),
+        WizardRow::Source => wizard.source_branch.push(c),
+        WizardRow::Target => wizard.target_branch.push(c),
+        WizardRow::Repo => {
+            if c == '@' {
+                // Open the fuzzy dropdown fresh at scratch (cursor 0).
+                wizard.repo_query = String::new();
+                wizard.repo_dropdown = Some(0);
+            }
+            // Any non-`@` char on the closed repo row is ignored — the picker is
+            // driven by `@` / ←→, not free text.
+        }
+        WizardRow::Agent => {}
+    }
+    set_wizard(state, wizard)
+}
+
+/// Delete the last char of the focused text row (Title / Source / Target). A
+/// no-op on the picker rows.
+fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
+    match wizard.focus {
+        WizardRow::Title => {
+            wizard.title.pop();
+        }
+        WizardRow::Source => {
+            wizard.source_branch.pop();
+        }
+        WizardRow::Target => {
+            wizard.target_branch.pop();
+        }
+        WizardRow::Repo | WizardRow::Agent => {}
+    }
+    set_wizard(state, wizard)
+}
+
+/// Handle a key while the `@` repo dropdown is open: chars filter, Backspace
+/// deletes, ↑↓/←→ move the cursor, Enter picks the highlighted candidate (closing
+/// the dropdown), Tab/Shift+Tab close the dropdown and move focus. Never picks
+/// repo-less — Enter always resolves to a real candidate (scratch is always
+/// present).
+fn wizard_dropdown_key(
+    state: &IssueListState,
+    mut wizard: CreateWizard,
     key: WizardKey,
 ) -> IssueListReduction {
+    let cursor = wizard.repo_dropdown.unwrap_or(0);
     match key {
+        WizardKey::Char(c) => {
+            wizard.repo_query.push(c);
+            wizard.repo_dropdown = Some(0);
+        }
         WizardKey::Backspace => {
-            branch.pop();
+            wizard.repo_query.pop();
+            wizard.repo_dropdown = Some(0);
         }
-        WizardKey::Char(c) => branch.push(c),
+        WizardKey::Up | WizardKey::Left => {
+            wizard.repo_dropdown = Some(cursor.saturating_sub(1));
+        }
+        WizardKey::Down | WizardKey::Right => {
+            let n = repo_candidates(&state.repos, &wizard.repo_query).len();
+            wizard.repo_dropdown = Some((cursor + 1).min(n.saturating_sub(1)));
+        }
         WizardKey::Enter => {
-            return set_wizard(
-                state,
-                CreateWizard::TargetBranch {
-                    title,
-                    repo_ref,
-                    source_branch: branch.trim().to_string(),
-                    branch: "main".to_string(),
-                },
-            );
+            let candidates = repo_candidates(&state.repos, &wizard.repo_query);
+            if let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) {
+                wizard.repo_ref = Some(picked.repo_ref.clone());
+            }
+            wizard.repo_dropdown = None;
         }
-        WizardKey::Up | WizardKey::Down | WizardKey::Esc => {}
+        WizardKey::Tab => {
+            wizard.repo_dropdown = None;
+            return wizard_move_focus(state, wizard, true);
+        }
+        WizardKey::BackTab => {
+            wizard.repo_dropdown = None;
+            return wizard_move_focus(state, wizard, false);
+        }
+        // Esc is handled by the caller (cancels the whole wizard).
+        WizardKey::Esc => {}
     }
-    set_wizard(
-        state,
-        CreateWizard::SourceBranch {
-            title,
-            repo_ref,
-            branch,
-        },
-    )
+    set_wizard(state, wizard)
 }
 
-/// Wizard stage 4 — `TargetBranch`: a text input prefilled `main`. Enter accepts
-/// the (trimmed) value — blank means unset — and advances to the agent pick.
-fn wizard_target_branch_key(
-    state: &IssueListState,
-    title: String,
-    repo_ref: String,
-    source_branch: String,
-    mut branch: String,
-    key: WizardKey,
-) -> IssueListReduction {
-    match key {
-        WizardKey::Backspace => {
-            branch.pop();
-        }
-        WizardKey::Char(c) => branch.push(c),
-        WizardKey::Enter => {
-            return set_wizard(
-                state,
-                CreateWizard::Agent {
-                    title,
-                    repo_ref,
-                    source_branch,
-                    target_branch: branch.trim().to_string(),
-                    cursor: 0,
-                },
-            );
-        }
-        WizardKey::Up | WizardKey::Down | WizardKey::Esc => {}
+/// Enter with the dropdown closed: create when the REQUIRED fields are satisfied
+/// (a non-blank title AND a picked repo — the agent always carries a default),
+/// raising the one-and-only [`IssueListIntent::CreateAndRun`]. When a required
+/// field is missing, DO NOT create — jump focus to it (and open the `@` dropdown
+/// for the repo) so the user is guided, never silently blocked. This is the whole
+/// guard: an agent-less / repo-less / title-only issue is impossible to create.
+fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
+    if wizard.title.trim().is_empty() {
+        wizard.focus = WizardRow::Title;
+        return set_wizard(state, wizard);
     }
-    set_wizard(
-        state,
-        CreateWizard::TargetBranch {
-            title,
-            repo_ref,
-            source_branch,
-            branch,
-        },
-    )
-}
-
-/// Wizard stage 5 — Agent (REQUIRED, the whole point): ↑↓ move over
-/// [`AgentChip::ALL`] (claude / codex / copilot — copilot is selectable, the F8
-/// gate fires at dispatch, same as Boards); Enter COMMITS the wizard, raising the
-/// one-and-only [`IssueListIntent::CreateAndRun`]. There is no other commit path,
-/// so the intent always carries a real agent token.
-fn wizard_agent_key(
-    state: &IssueListState,
-    title: String,
-    repo_ref: String,
-    source_branch: String,
-    target_branch: String,
-    cursor: usize,
-    key: WizardKey,
-) -> IssueListReduction {
-    let reopen = |state: &IssueListState, cursor: usize| {
-        set_wizard(
-            state,
-            CreateWizard::Agent {
-                title: title.clone(),
-                repo_ref: repo_ref.clone(),
-                source_branch: source_branch.clone(),
-                target_branch: target_branch.clone(),
-                cursor,
-            },
-        )
+    let Some(repo_ref) = wizard.repo_ref.clone() else {
+        // Repo REQUIRED: guide the user to it with the dropdown open at scratch.
+        wizard.focus = WizardRow::Repo;
+        wizard.repo_query = String::new();
+        wizard.repo_dropdown = Some(0);
+        return set_wizard(state, wizard);
     };
-    match key {
-        WizardKey::Up => reopen(state, cursor.saturating_sub(1)),
-        WizardKey::Down => reopen(state, (cursor + 1).min(AgentChip::ALL.len() - 1)),
-        WizardKey::Enter => {
-            let mut next = state.clone();
-            next.mode = IssueListMode::Normal;
-            next.wizard = None;
-            // Blank branch inputs mean "unset" — the daemon resolves the default.
-            let opt = |s: String| if s.is_empty() { None } else { Some(s) };
-            with_intent(
-                next,
-                IssueListIntent::CreateAndRun {
-                    title,
-                    repo_ref,
-                    source_branch: opt(source_branch),
-                    target_branch: opt(target_branch),
-                    agent: AgentChip::at(cursor).wire().to_string(),
-                },
-            )
+    let mut next = state.clone();
+    next.mode = IssueListMode::Normal;
+    next.wizard = None;
+    // Blank branch inputs mean "unset" — the daemon resolves the default.
+    let opt = |s: &str| {
+        let t = s.trim();
+        if t.is_empty() {
+            None
+        } else {
+            Some(t.to_string())
         }
-        WizardKey::Char(_) | WizardKey::Backspace | WizardKey::Esc => reopen(state, cursor),
-    }
+    };
+    with_intent(
+        next,
+        IssueListIntent::CreateAndRun {
+            title: wizard.title.trim().to_string(),
+            repo_ref,
+            source_branch: opt(&wizard.source_branch),
+            target_branch: opt(&wizard.target_branch),
+            agent: AgentChip::at(wizard.agent_cursor).wire().to_string(),
+        },
+    )
 }
 
 /// Apply a new filter chip and re-clamp the selection into the new visible set.
@@ -1419,19 +1448,32 @@ pub fn render_issue_list(
     // Working-agents avatar stack, right-aligned on the same chip row.
     crate::widgets::working_chip::render_working_chip(buf, top, area_w, working_count);
 
-    // Phase 5: the staged create wizard, when open, takes the two bottom rows
-    // (prompt + value) as an overlay. Drawn last so it overlays the list; the
-    // rows above keep rendering as context. When no wizard is open, a transient
-    // dispatch note (launch feedback / failure) paints on the bottom row instead.
+    // 63l.4 — the Issues screen is the headline of the redesign: it renders
+    // through the Linear-style card-board widget (five status columns side by
+    // side, each a scrollable stack of bordered cards) rather than the old
+    // vertical section bands. The board runs from the first body row below the
+    // chip bar (`col_top`) to the footer (`bottom`).
+    //
+    // The selected card carries the heavy clay border; when the pointer is
+    // hovering a card it takes the highlight instead (the cursor target reads
+    // before a click), falling back to the keyboard selection when nothing is
+    // hovered. The per-column scroll offsets ride on the board columns
+    // ([`IssueListState::board_columns`]), so the SAME geometry feeds the render,
+    // the hit-map, and the mouse layer.
+    let col_top = top.saturating_add(1);
+    let columns = state.board_columns();
+    let highlight = state.highlight_board_card();
+    let _ = crate::widgets::card_board::render_card_board(
+        buf, area_w, col_top, bottom, &columns, highlight,
+    );
+
+    // Phase 5: overlays paint AFTER the board so they win at every shared cell
+    // (last write wins). The create wizard is a centered bordered card over the
+    // whole body region; the `x` delete-confirm is the RED bottom-strip overlay;
+    // otherwise a transient dispatch note (launch feedback / failure) paints on
+    // the bottom row.
     if let Some(wizard) = state.wizard() {
-        render_wizard(
-            buf,
-            area_w,
-            bottom.saturating_sub(2),
-            bottom.saturating_sub(1),
-            wizard,
-            &state.repos,
-        );
+        render_wizard(buf, area_w, col_top, bottom, wizard, &state.repos);
     } else if let Some(pending) = state.confirm_delete() {
         // 63d: the RED delete-confirm overlay on the two bottom rows.
         render_confirm_delete(
@@ -1451,25 +1493,6 @@ pub fn render_issue_list(
             area_w,
         );
     }
-
-    // 63l.4 — the Issues screen is the headline of the redesign: it renders
-    // through the Linear-style card-board widget (five status columns side by
-    // side, each a scrollable stack of bordered cards) rather than the old
-    // vertical section bands. The board runs from the first body row below the
-    // chip bar (`col_top`) to the footer (`bottom`).
-    //
-    // The selected card carries the heavy clay border; when the pointer is
-    // hovering a card it takes the highlight instead (the cursor target reads
-    // before a click), falling back to the keyboard selection when nothing is
-    // hovered. The per-column scroll offsets ride on the board columns
-    // ([`IssueListState::board_columns`]), so the SAME geometry feeds the render,
-    // the hit-map, and the mouse layer.
-    let col_top = top.saturating_add(1);
-    let columns = state.board_columns();
-    let highlight = state.highlight_board_card();
-    let _ = crate::widgets::card_board::render_card_board(
-        buf, area_w, col_top, bottom, &columns, highlight,
-    );
 }
 
 /// Accent for the create-issue input bar (a calm emerald, distinct from the
@@ -1509,139 +1532,216 @@ fn render_confirm_delete(
     );
 }
 
-/// Gold stage-prompt colour for the create wizard (matches the Boards overlay
-/// prompts + the style guide's title gold).
+/// Gold — the create-wizard card's border + title (the style guide's CTA gold).
 const GOLD: Color = Color::rgb(255, 215, 0);
-/// Selection green for the wizard's highlighted picker rows (style guide).
+/// Selection green for the focused row's value + the highlighted dropdown pick.
 const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+/// Soft-white for the unfocused rows' values (style guide body text).
+const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
+/// Dim backdrop behind the card so it reads as a floating surface over the board.
+const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 
-/// Render the staged create wizard on the two bottom rows (Phase 5): a gold
-/// stage prompt naming the keys, then the green input / picker value line —
-/// mirroring the Boards card-create overlay so the two flows read identically.
-/// Char-safe via [`put_str`].
+/// The card title inlaid on its top border.
+const WIZARD_TITLE: &str = "✦ New task";
+/// The in-card footer hint naming the nav keys.
+const WIZARD_HINT: &str = "↑↓ row   ←→ value   Enter create   Esc cancel";
+/// The card's fixed height: top border + 5 field rows + spacer + hint + bottom
+/// border.
+const WIZARD_CARD_H: u16 = 9;
+/// The card's preferred width (clamped to the viewport minus insets).
+const WIZARD_CARD_W: u16 = 54;
+
+/// Render the create wizard as a single centered bordered card over the body
+/// region `[top, bottom]` (Phase 5): a gold rounded frame titled `✦ New task`,
+/// every field (Title / Repo / Source / Target / Agent) on its own row with the
+/// focused row's value in green, and a footer hint. The `@` repo dropdown, when
+/// open, expands inline on the Repo row (scratch first). Degenerate viewports
+/// fall back to the title + hint so the card never panics or renders empty.
+/// Char-safe via [`put_card_str`].
 fn render_wizard(
     buf: &mut WireBuffer,
     area_w: u16,
-    row: u16,
-    value_row: u16,
+    top: u16,
+    bottom: u16,
     wizard: &CreateWizard,
     repos: &[RepoOption],
 ) {
-    match wizard {
-        CreateWizard::Title { title } => {
-            put_str(
-                buf,
-                0,
-                row,
-                "New task · Title (Enter → repo, Esc cancel):",
-                GOLD,
-                area_w,
-            );
-            put_str(
-                buf,
-                0,
-                value_row,
-                &format!("> {title}\u{2588}"),
-                SELECTION_GREEN,
-                area_w,
-            );
+    let inset: u16 = 2;
+    let max_w = area_w.saturating_sub(inset * 2);
+    let card_w = WIZARD_CARD_W.min(max_w);
+    let region_h = bottom.saturating_sub(top).saturating_add(1);
+
+    // Degenerate viewport: paint at least the title + hint (never panic / empty).
+    if card_w < 24 || region_h < WIZARD_CARD_H {
+        put_card_str(buf, 0, top, WIZARD_TITLE, GOLD, area_w, false);
+        put_card_str(
+            buf,
+            0,
+            top.saturating_add(1),
+            WIZARD_HINT,
+            GOLD,
+            area_w,
+            false,
+        );
+        return;
+    }
+
+    let left = (area_w.saturating_sub(card_w)) / 2;
+    let right = left + card_w; // exclusive
+    let card_top = top + (region_h - WIZARD_CARD_H) / 2;
+    let card_bottom = card_top + WIZARD_CARD_H - 1;
+
+    // Backdrop fill so the card fully occludes the board beneath it.
+    for y in card_top..=card_bottom {
+        for x in left..right {
+            let mut cell = Cell::new(" ");
+            cell.bg = Some(CARD_BACKDROP);
+            buf.push(Coord::new(x, y), cell);
         }
-        CreateWizard::Repo {
-            title,
-            query,
-            dropdown,
-        } => render_wizard_repo(buf, area_w, row, title, query, *dropdown, repos),
-        CreateWizard::SourceBranch { branch, .. } => {
-            put_str(
-                buf,
-                0,
-                row,
-                "Source branch — run branches FROM (Enter accept, blank = repo default):",
-                GOLD,
-                area_w,
-            );
-            put_str(
-                buf,
-                0,
-                value_row,
-                &format!("> {branch}\u{2588}"),
-                SELECTION_GREEN,
-                area_w,
-            );
+    }
+    draw_card_frame(buf, left, right, card_top, card_bottom);
+    // Title inlaid on the top edge: "┌─ ✦ New task ─…".
+    put_card_str(buf, left + 3, card_top, WIZARD_TITLE, GOLD, right, true);
+
+    // Field rows: a left label column then the value, one row per field.
+    let label_x = left + 2;
+    let value_x = left + 12;
+    let text_right = right.saturating_sub(1);
+    for (i, field) in WizardRow::ALL.iter().enumerate() {
+        let y = card_top + 1 + u16::try_from(i).unwrap_or(0);
+        let focused = wizard.focus() == *field;
+        let label = wizard_row_label(*field);
+        let label_colour = if focused { GOLD } else { MUTED_GRAY };
+        put_card_str(buf, label_x, y, label, label_colour, value_x, true);
+        render_wizard_field(buf, value_x, y, text_right, *field, wizard, repos);
+    }
+
+    // Footer hint, one blank spacer row above it (left as backdrop).
+    let hint_y = card_bottom.saturating_sub(1);
+    put_card_str(
+        buf,
+        label_x,
+        hint_y,
+        WIZARD_HINT,
+        MUTED_GRAY,
+        text_right,
+        true,
+    );
+}
+
+/// The label shown in the card's left column for `row`.
+const fn wizard_row_label(row: WizardRow) -> &'static str {
+    match row {
+        WizardRow::Title => "Title",
+        WizardRow::Repo => "Repo",
+        WizardRow::Source => "Source",
+        WizardRow::Target => "Target",
+        WizardRow::Agent => "Agent",
+    }
+}
+
+/// Render one field's marker + value at `(x, y)`, clipped at `right`. The focused
+/// row gets a `▶` marker + green value; the others a blank marker + soft-white.
+/// The Repo row expands the inline `@` dropdown when it is open; the Target row
+/// shows `(unset)` only when blank + unfocused.
+fn render_wizard_field(
+    buf: &mut WireBuffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    row: WizardRow,
+    wizard: &CreateWizard,
+    repos: &[RepoOption],
+) {
+    let focused = wizard.focus() == row;
+    let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
+    let marker = if focused { "▶ " } else { "  " };
+    let cx = put_card_str(buf, x, y, marker, value_colour, right, true);
+    let text = |raw: &str| -> String {
+        if focused {
+            format!("{raw}\u{2588}")
+        } else {
+            raw.to_string()
         }
-        CreateWizard::TargetBranch { branch, .. } => {
-            put_str(
-                buf,
-                0,
-                row,
-                "Target branch — PR lands INTO (Enter accept, blank = unset):",
-                GOLD,
-                area_w,
-            );
-            put_str(
-                buf,
-                0,
-                value_row,
-                &format!("> {branch}\u{2588}"),
-                SELECTION_GREEN,
-                area_w,
-            );
+    };
+    match row {
+        WizardRow::Title => {
+            put_card_str(buf, cx, y, &text(wizard.title()), value_colour, right, true);
         }
-        CreateWizard::Agent { title, cursor, .. } => {
-            let prompt = format!("Agent for \"{title}\" — REQUIRED (↑↓ pick, Enter create + run):");
-            put_str(buf, 0, row, &prompt, GOLD, area_w);
-            let mut x = 0u16;
-            for (i, chip) in AgentChip::ALL.iter().enumerate() {
-                let sel = i == *cursor;
-                let colour = if sel { SELECTION_GREEN } else { MUTED_GRAY };
-                let marker = if sel { "▶ " } else { "  " };
-                x = put_str(buf, x, value_row, marker, colour, area_w);
-                x = put_str(buf, x, value_row, chip.label(), colour, area_w);
-                x = put_str(buf, x, value_row, "   ", MUTED_GRAY, area_w);
-                if x >= area_w {
-                    break;
-                }
+        WizardRow::Repo => {
+            if let Some(cursor) = wizard.repo_dropdown() {
+                render_repo_dropdown(buf, cx, y, right, wizard, repos, cursor);
+            } else {
+                let label = repo_display_label(wizard.repo_ref(), repos);
+                put_card_str(buf, cx, y, &label, value_colour, right, true);
             }
+        }
+        WizardRow::Source => {
+            put_card_str(
+                buf,
+                cx,
+                y,
+                &text(wizard.source_branch()),
+                value_colour,
+                right,
+                true,
+            );
+        }
+        WizardRow::Target => {
+            let raw = wizard.target_branch();
+            let shown = if focused {
+                text(raw)
+            } else if raw.is_empty() {
+                "(unset)".to_string()
+            } else {
+                raw.to_string()
+            };
+            put_card_str(buf, cx, y, &shown, value_colour, right, true);
+        }
+        WizardRow::Agent => {
+            let label = AgentChip::at(wizard.agent_cursor()).label();
+            put_card_str(buf, cx, y, label, value_colour, right, true);
         }
     }
 }
 
-/// Render the wizard's repo stage (Phase 5): the prompt line plus either the
-/// closed-field hint (type `@` to search) or the open `@` dropdown — scratch
-/// always first (★ favorites, ★☁ remote-only), the highlighted candidate in
-/// green. Mirrors the Boards `render_card_repo`; the value line paints directly
-/// under the prompt `row`.
-fn render_wizard_repo(
+/// The Repo row's closed-state value: `(pick a repo …)` when none is chosen, else
+/// `@<label>` for the picked candidate (falling back to the raw ref).
+fn repo_display_label(repo_ref: Option<&str>, repos: &[RepoOption]) -> String {
+    repo_ref.map_or_else(
+        || "(pick a repo — @ or ←→)".to_string(),
+        |r| {
+            let label = repo_candidates(repos, "")
+                .into_iter()
+                .find(|c| c.repo_ref == r)
+                .map_or_else(|| r.to_string(), |c| c.label);
+            format!("@{label}")
+        },
+    )
+}
+
+/// Render the open `@` dropdown inline on the Repo row: `@query ` then the fuzzy
+/// candidates (scratch first; ★ favorites, ★☁ remote-only), the highlighted pick
+/// bracketed + green. Stays inside the card frame (clipped at `right`).
+fn render_repo_dropdown(
     buf: &mut WireBuffer,
-    area_w: u16,
-    row: u16,
-    title: &str,
-    query: &str,
-    dropdown: Option<usize>,
+    x: u16,
+    y: u16,
+    right: u16,
+    wizard: &CreateWizard,
     repos: &[RepoOption],
+    cursor: usize,
 ) {
-    let value_row = row.saturating_add(1);
-    let prompt = format!("Repo for \"{title}\" (@ to search, Enter pick — REQUIRED):");
-    put_str(buf, 0, row, &prompt, GOLD, area_w);
-    let Some(cursor) = dropdown else {
-        put_str(
-            buf,
-            0,
-            value_row,
-            "> type @ to pick a repo (scratch always available)",
-            MUTED_GRAY,
-            area_w,
-        );
-        return;
-    };
+    let query = wizard.repo_query();
     let candidates = repo_candidates(repos, query);
-    let mut x = put_str(
+    let mut cx = put_card_str(
         buf,
-        0,
-        value_row,
+        x,
+        y,
         &format!("@{query} "),
         SELECTION_GREEN,
-        area_w,
+        right,
+        true,
     );
     for (i, repo) in candidates.iter().enumerate() {
         let sel = i == cursor;
@@ -1655,15 +1755,69 @@ fn render_wizard_repo(
         } else {
             ""
         };
-        x = put_str(buf, x, value_row, open, colour, area_w);
-        x = put_str(buf, x, value_row, star, colour, area_w);
-        x = put_str(buf, x, value_row, &repo.label, colour, area_w);
-        x = put_str(buf, x, value_row, close, colour, area_w);
-        x = put_str(buf, x, value_row, " ", MUTED_GRAY, area_w);
-        if x >= area_w {
+        cx = put_card_str(buf, cx, y, open, colour, right, true);
+        cx = put_card_str(buf, cx, y, star, colour, right, true);
+        cx = put_card_str(buf, cx, y, &repo.label, colour, right, true);
+        cx = put_card_str(buf, cx, y, close, colour, right, true);
+        cx = put_card_str(buf, cx, y, " ", MUTED_GRAY, right, true);
+        if cx >= right {
             break;
         }
     }
+}
+
+/// Draw a rounded gold card frame from `(left, top)` to `(right-1, bottom)` over
+/// the backdrop.
+fn draw_card_frame(buf: &mut WireBuffer, left: u16, right: u16, top: u16, bottom: u16) {
+    let last = right.saturating_sub(1);
+    put_card_char(buf, left, top, '╭');
+    put_card_char(buf, last, top, '╮');
+    put_card_char(buf, left, bottom, '╰');
+    put_card_char(buf, last, bottom, '╯');
+    for x in (left + 1)..last {
+        put_card_char(buf, x, top, '─');
+        put_card_char(buf, x, bottom, '─');
+    }
+    for y in (top + 1)..bottom {
+        put_card_char(buf, left, y, '│');
+        put_card_char(buf, last, y, '│');
+    }
+}
+
+/// Write one gold frame glyph at `(x, y)` over the card backdrop.
+fn put_card_char(buf: &mut WireBuffer, x: u16, y: u16, ch: char) {
+    let mut cell = Cell::new(ch.to_string());
+    cell.fg = Some(GOLD);
+    cell.bg = Some(CARD_BACKDROP);
+    buf.push(Coord::new(x, y), cell);
+}
+
+/// Write `s` at `(x, row)` in `color`, clipping at `right` (exclusive). When
+/// `backdrop` is set the cells carry the card backdrop so the text floats on the
+/// card surface. Multi-byte safe. Returns the next free column.
+fn put_card_str(
+    buf: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    s: &str,
+    color: Color,
+    right: u16,
+    backdrop: bool,
+) -> u16 {
+    let mut cx = x;
+    for ch in s.chars() {
+        if cx >= right {
+            break;
+        }
+        let mut cell = Cell::new(ch.to_string());
+        cell.fg = Some(color);
+        if backdrop {
+            cell.bg = Some(CARD_BACKDROP);
+        }
+        buf.push(Coord::new(cx, row), cell);
+        cx = cx.saturating_add(1);
+    }
+    cx
 }
 
 /// Write `s` at `(x, row)` in `color`, clipping at `area_w`. Returns the next
@@ -1965,44 +2119,83 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    /// Phase 5 — the create wizard renders each stage's prompt + value on the two
-    /// bottom rows: the Title input, the REQUIRED repo pick (scratch first in the
-    /// `@` dropdown), the `main`-prefilled branch inputs, and the agent chips with
-    /// the REQUIRED marker. Pins the overlay layout the manual `just dev` walk
-    /// exercises.
+    /// Phase 5 — the create wizard renders as a single centered card showing ALL
+    /// five field labels at once, the typed title, the `main`-prefilled branches,
+    /// the default agent, and the nav-key footer hint, inside a gold rounded
+    /// frame. Pins the card layout the manual `just dev` walk exercises.
     #[test]
-    fn wizard_overlay_renders_each_stage_prompt() {
-        let assert_paints = |state: &IssueListState, needles: &[&str]| {
-            let mut buf = WireBuffer::new(120, 24);
-            render_issue_list(&mut buf, 120, 1, 23, state, 0);
-            let painted = painted_text(&buf);
-            for needle in needles {
-                assert!(
-                    painted.contains(needle),
-                    "missing {needle:?} in:\n{painted}"
-                );
-            }
-        };
-        // Stage 1: title input.
+    fn wizard_card_renders_all_fields_and_hint() {
         let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         let s = reduce_issue_list(&s, IssueListEvent::Key('F')).state;
-        assert_paints(&s, &["New task · Title", "> F"]);
-        // Stage 2: repo pick — REQUIRED, `@` dropdown with scratch always first.
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
-        assert_paints(&s, &["Repo for \"F\"", "REQUIRED", "type @ to pick a repo"]);
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
-        assert_paints(&s, &["[scratch]"]);
-        // Stage 3 + 4: branch inputs prefilled `main`.
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
-        assert_paints(&s, &["Source branch", "> main"]);
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
-        assert_paints(&s, &["Target branch", "> main"]);
-        // Stage 5: the REQUIRED agent chips, claude highlighted first.
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
-        assert_paints(
-            &s,
-            &["Agent for \"F\" — REQUIRED", "▶ claude", "codex", "copilot"],
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+        for needle in [
+            "New task",
+            "Title",
+            "Repo",
+            "Source",
+            "Target",
+            "Agent",
+            "main",
+            "claude",
+            "↑↓ row",
+            "Enter create",
+            "Esc cancel",
+        ] {
+            assert!(
+                painted.contains(needle),
+                "missing {needle:?} in card:\n{painted}"
+            );
+        }
+        // The typed title shows on the (focused) Title row.
+        assert!(painted.contains('F'), "typed title missing:\n{painted}");
+        // The card frame contributes a gold rounded top-left corner (the board's
+        // own card corners are not gold, so this is the wizard's frame).
+        let has_gold_corner = buf.cells.iter().any(|(_, c)| c.symbol == "╭" && c.fg == Some(GOLD));
+        assert!(
+            has_gold_corner,
+            "card must have a gold rounded top-left corner"
         );
+    }
+
+    /// Opening the `@` dropdown expands the fuzzy candidate list inline on the
+    /// Repo row, scratch first + bracketed as the highlighted pick.
+    #[test]
+    fn wizard_card_repo_dropdown_lists_scratch() {
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let s = type_into(&s, "Fix");
+        // Move focus to the Repo row, then open the dropdown.
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("[scratch]"),
+            "dropdown must list scratch bracketed:\n{painted}"
+        );
+    }
+
+    /// A degenerate viewport still paints the card title + hint — never panics,
+    /// never renders empty.
+    #[test]
+    fn wizard_card_degenerate_viewport_never_empty() {
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let mut buf = WireBuffer::new(12, 3);
+        render_issue_list(&mut buf, 12, 1, 2, &s, 0);
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("New task"),
+            "degenerate viewport must still show the card title:\n{painted}"
+        );
+    }
+
+    /// Type a string into the focused wizard row, char by char.
+    fn type_into(state: &IssueListState, text: &str) -> IssueListState {
+        text.chars().fold(state.clone(), |s, ch| {
+            reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char(ch))).state
+        })
     }
 
     /// Reconstruct the full painted text of a rendered buffer (every cell, in
@@ -2348,11 +2541,10 @@ mod tests {
             "x is typed into the wizard, never opens a delete confirm"
         );
         assert!(out.state.confirm_delete().is_none());
-        // The wizard is still on its Title stage with the typed 'x'.
-        assert!(matches!(
-            out.state.wizard(),
-            Some(CreateWizard::Title { .. })
-        ));
+        // The wizard is still open with the typed 'x' on the (focused) Title row.
+        let wizard = out.state.wizard().expect("wizard still open");
+        assert_eq!(wizard.focus(), WizardRow::Title);
+        assert_eq!(wizard.title(), "x");
     }
 
     /// `x` does NOT open the confirm while the `/` filter input is open — it is a

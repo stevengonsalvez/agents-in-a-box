@@ -10,8 +10,8 @@
 use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
 use ainb_hangar_proto::events::{HangarEvent, IssueRow};
 use ainb_plugin_hangar::screen::issue_list::{
-    CreateWizard, FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode,
-    IssueListState, WizardKey, reduce_issue_list,
+    FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode, IssueListState,
+    WizardKey, WizardRow, reduce_issue_list,
 };
 
 /// A wire `IssueRow` for tests. `state` drives column grouping (`open` → Todo,
@@ -109,10 +109,10 @@ fn slash_enters_filter_input_mode() {
 }
 
 // ---------------------------------------------------------------------------
-// Phase 5 — the staged create wizard (Title → Repo → SourceBranch →
-// TargetBranch → Agent), which FORCES an agent assignment before any create
-// can commit. The old title-only quick-create (an inert `◇ None` card) is
-// unreachable from this screen.
+// Phase 5 — the single-form create wizard (Title / Repo / Source / Target /
+// Agent all visible at once), which FORCES both a title and a repo (and always a
+// default agent) before any create can commit. The old title-only quick-create
+// (an inert `◇ None` card) is unreachable from this screen.
 // ---------------------------------------------------------------------------
 
 /// Fold one wizard key.
@@ -123,7 +123,7 @@ fn wiz(
     reduce_issue_list(s, IssueListEvent::Wizard(k))
 }
 
-/// Type a string into the open wizard stage, char by char.
+/// Type a string into the focused wizard text row, char by char.
 fn type_str(mut s: IssueListState, text: &str) -> IssueListState {
     for ch in text.chars() {
         s = wiz(&s, WizardKey::Char(ch)).state;
@@ -131,112 +131,204 @@ fn type_str(mut s: IssueListState, text: &str) -> IssueListState {
     s
 }
 
-/// `c` opens the create wizard on its Title stage; no intent yet.
+/// Open a fresh wizard focused on the Title row (the `c` entry point).
+fn open_wizard() -> IssueListState {
+    reduce_issue_list(&seeded_state(), IssueListEvent::Key('c')).state
+}
+
+/// A wizard with a valid title AND a picked repo (scratch, via the `@` dropdown),
+/// focus left on the Agent row — the "ready to create" fixture.
+fn ready_to_create() -> IssueListState {
+    let s = open_wizard();
+    let s = type_str(s, "Fix login");
+    // Move to Repo, open the dropdown (cursor at scratch), pick it.
+    let s = wiz(&s, WizardKey::Down).state;
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    let s = wiz(&s, WizardKey::Enter).state; // pick scratch, dropdown closes
+    // Land focus on the Agent row.
+    let s = wiz(&s, WizardKey::Down).state; // Repo → Source
+    let s = wiz(&s, WizardKey::Down).state; // Source → Target
+    wiz(&s, WizardKey::Down).state // Target → Agent
+}
+
+/// `c` opens the create wizard as a fresh single form focused on Title, with the
+/// branches prefilled `main`, no repo picked, and the default agent. No intent.
 #[test]
-fn c_opens_wizard_on_title_stage() {
+fn c_opens_wizard_focused_on_title() {
     let s = seeded_state();
     assert_eq!(s.mode(), IssueListMode::Normal);
 
     let out = reduce_issue_list(&s, IssueListEvent::Key('c'));
 
     assert_eq!(out.state.mode(), IssueListMode::CreateInput);
-    assert!(matches!(
-        out.state.wizard(),
-        Some(CreateWizard::Title { title }) if title.is_empty()
-    ));
+    let w = out.state.wizard().expect("wizard opens");
+    assert_eq!(w.focus(), WizardRow::Title);
+    assert!(w.title().is_empty());
+    assert_eq!(w.repo_ref(), None);
+    assert_eq!(w.source_branch(), "main");
+    assert_eq!(w.target_branch(), "main");
+    assert_eq!(w.agent_cursor(), 0);
     assert!(out.intent.is_none());
 }
 
-/// Enter on a blank/whitespace title HOLDS the Title stage open and raises no
-/// intent — never an empty issue.
+/// ↓ / Tab advance the focused row, ↑ / Shift+Tab retreat, both wrapping around
+/// the five rows (mirrors the host new-session Configure form).
 #[test]
-fn wizard_blank_title_enter_holds() {
-    let s = reduce_issue_list(&seeded_state(), IssueListEvent::Key('c')).state;
-    let s = type_str(s, "  ");
+fn wizard_focus_moves_and_wraps() {
+    let s = open_wizard();
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Title);
+
+    let s = wiz(&s, WizardKey::Down).state;
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Repo);
+    let s = wiz(&s, WizardKey::Tab).state;
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Source);
+
+    // Wrap forward: Agent → Title.
+    let s = wiz(&s, WizardKey::Down).state; // Target
+    let s = wiz(&s, WizardKey::Down).state; // Agent
+    let s = wiz(&s, WizardKey::Down).state; // wraps → Title
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Title);
+
+    // Wrap backward: Title → Agent.
+    let s = wiz(&s, WizardKey::Up).state;
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Agent);
+    let s = wiz(&s, WizardKey::BackTab).state;
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Target);
+}
+
+/// ←/→ cycle the Agent picker through `AgentChip::ALL`, wrapping; the branch text
+/// rows ignore ←/→ (they are not picker rows).
+#[test]
+fn wizard_left_right_cycles_agent_only() {
+    // Move focus to the Agent row.
+    let s = ready_to_create();
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Agent);
+    assert_eq!(s.wizard().unwrap().agent_cursor(), 0); // claude
+
+    let s = wiz(&s, WizardKey::Right).state;
+    assert_eq!(s.wizard().unwrap().agent_cursor(), 1); // codex
+    let s = wiz(&s, WizardKey::Right).state;
+    assert_eq!(s.wizard().unwrap().agent_cursor(), 2); // copilot
+    let s = wiz(&s, WizardKey::Right).state;
+    assert_eq!(
+        s.wizard().unwrap().agent_cursor(),
+        0,
+        "wraps back to claude"
+    );
+    let s = wiz(&s, WizardKey::Left).state;
+    assert_eq!(
+        s.wizard().unwrap().agent_cursor(),
+        2,
+        "left wraps to copilot"
+    );
+
+    // ←/→ on a text row is a no-op (Source keeps its prefill).
+    let s = wiz(&s, WizardKey::Up).state; // Agent → Target
+    let s = wiz(&s, WizardKey::Up).state; // Target → Source
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Source);
+    let out = wiz(&s, WizardKey::Right);
+    assert_eq!(out.state.wizard().unwrap().source_branch(), "main");
+}
+
+/// ←/→ on the Repo row cycles the roster (scratch first): from "none picked" →
+/// lands on scratch, and is a full alternative to the `@` dropdown.
+#[test]
+fn wizard_left_right_cycles_repo() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix");
+    let s = wiz(&s, WizardKey::Down).state; // focus Repo
+    assert_eq!(s.wizard().unwrap().repo_ref(), None);
+
+    // → picks the first candidate (scratch is always index 0).
+    let out = wiz(&s, WizardKey::Right);
+    assert_eq!(out.state.wizard().unwrap().repo_ref(), Some("scratch"));
+}
+
+/// Typing edits ONLY the focused text row; other rows are untouched.
+#[test]
+fn wizard_typing_edits_focused_text_row() {
+    let s = open_wizard();
+    let s = type_str(s, "Title text"); // Title row
+    assert_eq!(s.wizard().unwrap().title(), "Title text");
+
+    // Focus Source, clear the "main" prefill, type a custom ref.
+    let s = wiz(&s, WizardKey::Down).state; // Repo
+    let s = wiz(&s, WizardKey::Down).state; // Source
+    let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
+    let s = type_str(s, "feature/x");
+    let w = s.wizard().unwrap();
+    assert_eq!(w.source_branch(), "feature/x");
+    assert_eq!(
+        w.title(),
+        "Title text",
+        "Title untouched while editing Source"
+    );
+    assert_eq!(w.target_branch(), "main", "Target untouched");
+}
+
+/// `@` on the Repo row opens the fuzzy dropdown (cursor at scratch); subsequent
+/// chars filter it.
+#[test]
+fn wizard_at_opens_repo_dropdown() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix");
+    let s = wiz(&s, WizardKey::Down).state; // focus Repo
+    assert_eq!(s.wizard().unwrap().repo_dropdown(), None);
+
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    assert_eq!(s.wizard().unwrap().repo_dropdown(), Some(0));
+
+    // A filter char stays in the dropdown and resets the cursor to the top.
+    let s = wiz(&s, WizardKey::Char('z')).state;
+    assert_eq!(s.wizard().unwrap().repo_dropdown(), Some(0));
+    assert_eq!(s.wizard().unwrap().repo_query(), "z");
+}
+
+/// Enter with NO repo picked never creates — it jumps focus to the Repo row and
+/// opens its dropdown (the REQUIRED guard for a repo-less create).
+#[test]
+fn wizard_enter_without_repo_focuses_repo() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix login"); // title valid, but no repo picked
 
     let out = wiz(&s, WizardKey::Enter);
 
-    assert!(out.intent.is_none());
-    assert!(matches!(
-        out.state.wizard(),
-        Some(CreateWizard::Title { .. })
-    ));
+    assert!(out.intent.is_none(), "must not create repo-less");
+    let w = out.state.wizard().expect("wizard still open");
+    assert_eq!(w.focus(), WizardRow::Repo);
+    assert_eq!(
+        w.repo_dropdown(),
+        Some(0),
+        "dropdown opened to guide the user"
+    );
+}
+
+/// Enter with a blank title never creates — it holds and focuses the Title row.
+#[test]
+fn wizard_enter_blank_title_focuses_title() {
+    // Pick a repo first, then blank the title, then commit from the Agent row.
+    let s = ready_to_create();
+    // Move to Title and clear it.
+    let s = wiz(&s, WizardKey::Down).state; // Agent → wraps to Title
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Title);
+    let s = (0.."Fix login".len()).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
+    assert!(s.wizard().unwrap().title().is_empty());
+
+    let out = wiz(&s, WizardKey::Enter);
+
+    assert!(out.intent.is_none(), "blank title must not create");
+    assert_eq!(out.state.wizard().unwrap().focus(), WizardRow::Title);
     assert_eq!(out.state.mode(), IssueListMode::CreateInput);
 }
 
-/// Walk the wizard up to (but not into) the Agent stage: title typed, scratch
-/// repo picked, both branch stages accepted at their `main` prefill.
-fn wizard_at(stage: &str) -> IssueListState {
-    let s = reduce_issue_list(&seeded_state(), IssueListEvent::Key('c')).state;
-    let s = type_str(s, "Fix login");
-    if stage == "title" {
-        return s;
-    }
-    let s = wiz(&s, WizardKey::Enter).state; // → Repo
-    if stage == "repo" {
-        return s;
-    }
-    let s = wiz(&s, WizardKey::Char('@')).state; // open dropdown (cursor at scratch)
-    let s = wiz(&s, WizardKey::Enter).state; // pick scratch → SourceBranch
-    if stage == "source" {
-        return s;
-    }
-    let s = wiz(&s, WizardKey::Enter).state; // accept "main" → TargetBranch
-    if stage == "target" {
-        return s;
-    }
-    wiz(&s, WizardKey::Enter).state // accept "main" → Agent
-}
-
-/// Repo is REQUIRED: Enter with the dropdown closed RE-OPENS the dropdown (the
-/// cursor at scratch) instead of ever advancing repo-less.
+/// A complete form (title + repo + default agent) commits on Enter — from ANY
+/// focused row — raising `CreateAndRun` with every collected field.
 #[test]
-fn wizard_repo_enter_repo_less_reopens_dropdown() {
-    let s = wizard_at("repo");
-    assert!(matches!(
-        s.wizard(),
-        Some(CreateWizard::Repo { dropdown: None, .. })
-    ));
+fn wizard_complete_form_commits_create_and_run() {
+    let s = ready_to_create();
+    // Cycle the agent to codex to prove the picked value round-trips.
+    let s = wiz(&s, WizardKey::Right).state;
 
-    let out = wiz(&s, WizardKey::Enter);
-
-    // Still on the Repo stage — now with the dropdown open at scratch.
-    assert!(matches!(
-        out.state.wizard(),
-        Some(CreateWizard::Repo {
-            dropdown: Some(0),
-            ..
-        })
-    ));
-    assert!(out.intent.is_none());
-}
-
-/// The branch stages prefill `main` (source first, then target).
-#[test]
-fn wizard_branch_stages_prefill_main() {
-    let s = wizard_at("source");
-    assert!(matches!(
-        s.wizard(),
-        Some(CreateWizard::SourceBranch { branch, .. }) if branch == "main"
-    ));
-
-    let s = wiz(&s, WizardKey::Enter).state;
-    assert!(matches!(
-        s.wizard(),
-        Some(CreateWizard::TargetBranch { branch, source_branch, .. })
-            if branch == "main" && source_branch == "main"
-    ));
-}
-
-/// The full walk commits ONLY on the Agent stage, emitting `CreateAndRun` with
-/// every collected field — and the agent token is always a real provider.
-#[test]
-fn wizard_full_walk_commits_create_and_run_with_agent() {
-    let s = wizard_at("agent");
-    assert!(matches!(s.wizard(), Some(CreateWizard::Agent { .. })));
-
-    // ↓ once: claude → codex.
-    let s = wiz(&s, WizardKey::Down).state;
     let out = wiz(&s, WizardKey::Enter);
 
     assert_eq!(
@@ -249,25 +341,25 @@ fn wizard_full_walk_commits_create_and_run_with_agent() {
             agent: "codex".to_string(),
         })
     );
-    // The wizard closed and the screen is back to normal navigation.
     assert_eq!(out.state.mode(), IssueListMode::Normal);
     assert!(out.state.wizard().is_none());
 }
 
-/// Editing the source branch to a custom ref carries it through; blanking a
-/// branch input means "unset" (`None` on the intent).
+/// A blanked branch input means "unset" (`None` on the intent); a custom source
+/// ref carries through.
 #[test]
 fn wizard_branch_edits_and_blanks_round_trip() {
-    // Clear the "main" prefill on source, type a feature ref.
-    let s = wizard_at("source");
+    let s = ready_to_create();
+    // Focus Source (Agent → up twice), retype it, then blank Target.
+    let s = wiz(&s, WizardKey::Up).state; // Target
+    let s = wiz(&s, WizardKey::Up).state; // Source
     let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
     let s = type_str(s, "feature/x");
-    let s = wiz(&s, WizardKey::Enter).state;
-    // Blank the target prefill entirely (→ unset).
+    let s = wiz(&s, WizardKey::Down).state; // Target
     let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
-    let s = wiz(&s, WizardKey::Enter).state;
+    assert!(s.wizard().unwrap().target_branch().is_empty());
 
-    let out = wiz(&s, WizardKey::Enter); // commit on claude (cursor 0)
+    let out = wiz(&s, WizardKey::Enter); // commit (claude, cursor 0)
 
     assert_eq!(
         out.intent,
@@ -281,58 +373,48 @@ fn wizard_branch_edits_and_blanks_round_trip() {
     );
 }
 
-/// The commit intent is IMPOSSIBLE before the Agent stage: Enter on every
-/// earlier stage only holds, advances one stage, or re-opens the repo dropdown —
-/// it NEVER emits `CreateAndRun`. Combined with the full-walk test (whose commit
-/// fires only FROM the Agent stage) this proves no path yields an agent-less
-/// create: the intent constructor lives solely on the Agent stage's Enter.
+/// The REQUIRED guard is exhaustive: no key sequence can create a title-only or
+/// repo-less issue. Only a form with BOTH a title AND a repo yields the intent,
+/// and it always carries a real provider agent.
 #[test]
-fn wizard_never_commits_before_agent_stage() {
-    for stage in ["title", "repo", "source", "target"] {
-        let s = wizard_at(stage);
-        let out = wiz(&s, WizardKey::Enter);
-        assert!(
-            !matches!(out.intent, Some(IssueListIntent::CreateAndRun { .. })),
-            "stage {stage:?} must never emit CreateAndRun on Enter"
-        );
-        // Every pre-agent Enter keeps the wizard open (a hold or an advance) —
-        // the only Enter that CLOSES the wizard is the Agent-stage commit.
-        assert!(
-            out.state.wizard().is_some(),
-            "stage {stage:?} Enter must keep the wizard open"
-        );
-    }
-    // And the one commit that IS reachable always carries a real provider token.
-    let out = wiz(&wizard_at("agent"), WizardKey::Enter);
+fn wizard_required_guard_blocks_incomplete_creates() {
+    // Title only, no repo → Enter never creates.
+    let s = type_str(open_wizard(), "Only a title");
+    assert!(wiz(&s, WizardKey::Enter).intent.is_none());
+
+    // Repo only, no title → Enter never creates.
+    let s = open_wizard();
+    let s = wiz(&s, WizardKey::Down).state; // Repo
+    let s = wiz(&s, WizardKey::Right).state; // pick scratch
+    assert_eq!(s.wizard().unwrap().repo_ref(), Some("scratch"));
+    assert!(wiz(&s, WizardKey::Enter).intent.is_none());
+
+    // Both present → the ONLY path that creates, always with a real agent token.
+    let out = wiz(&ready_to_create(), WizardKey::Enter);
     match out.intent {
         Some(IssueListIntent::CreateAndRun { agent, .. }) => {
             assert!(["claude", "codex", "copilot"].contains(&agent.as_str()));
         }
-        other => panic!("agent-stage Enter must commit CreateAndRun, got {other:?}"),
+        other => panic!("complete form must commit CreateAndRun, got {other:?}"),
     }
 }
 
-/// Esc cancels the WHOLE wizard from every stage in ONE press — back to normal
-/// navigation, nothing retained, no intent (the user is never trapped).
+/// Esc cancels the WHOLE wizard in ONE press — from any focused row and with the
+/// `@` dropdown open — back to normal navigation, nothing retained, no intent.
 #[test]
-fn wizard_esc_cancels_whole_overlay_from_every_stage() {
-    for stage in ["title", "repo", "source", "target", "agent"] {
-        let s = wizard_at(stage);
+fn wizard_esc_cancels_whole_overlay() {
+    // From each focused row (Agent, then walking focus forward each step).
+    let mut s = ready_to_create();
+    for _ in 0..WizardRow::ALL.len() {
         let out = wiz(&s, WizardKey::Esc);
-        assert_eq!(
-            out.state.mode(),
-            IssueListMode::Normal,
-            "Esc from {stage:?} must return to Normal"
-        );
-        assert!(
-            out.state.wizard().is_none(),
-            "Esc from {stage:?} must drop the wizard"
-        );
+        assert_eq!(out.state.mode(), IssueListMode::Normal);
+        assert!(out.state.wizard().is_none());
         assert!(out.intent.is_none());
+        s = wiz(&s, WizardKey::Down).state; // advance focus for the next iteration
     }
-    // Esc with the repo DROPDOWN open is still a single-press whole-overlay
-    // cancel (never a trapped inner state).
-    let s = wizard_at("repo");
+    // With the dropdown open.
+    let s = open_wizard();
+    let s = wiz(&s, WizardKey::Down).state;
     let s = wiz(&s, WizardKey::Char('@')).state;
     let out = wiz(&s, WizardKey::Esc);
     assert_eq!(out.state.mode(), IssueListMode::Normal);
