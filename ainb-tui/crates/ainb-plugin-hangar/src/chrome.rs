@@ -166,8 +166,15 @@ pub fn render_footer(buf: &mut WireBuffer, area_w: u16, area_h: u16, active: &Sc
 /// The contextual + global key hints for `active`, in render order.
 fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
     let mut hints: Vec<(&str, &str)> = match active {
-        Screen::IssueList => vec![("a", "assign"), ("c", "create"), ("/", "filter")],
-        Screen::TaskDetail(_) => vec![("R", "retry"), ("X", "cancel")],
+        Screen::IssueList => {
+            vec![
+                ("a", "assign"),
+                ("c", "create"),
+                ("x", "delete"),
+                ("/", "filter"),
+            ]
+        }
+        Screen::TaskDetail(_) => vec![("R", "retry"), ("X", "cancel"), ("x", "delete")],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
@@ -332,6 +339,21 @@ mod tests {
             assert!(hints.contains(&("?", "help")));
             assert!(hints.contains(&("q", "quit")));
         }
+    }
+
+    /// The issue-list and task-detail footers both advertise the `x:delete`
+    /// keybinding (63l.5) alongside their other hints.
+    #[test]
+    fn footer_advertises_delete_on_issue_list_and_detail() {
+        assert!(
+            footer_hints(&Screen::IssueList).contains(&("x", "delete")),
+            "issue list footer must show x:delete"
+        );
+        let task = ainb_hangar_core::ids::TaskId::from_str("t1").unwrap();
+        assert!(
+            footer_hints(&Screen::TaskDetail(task)).contains(&("x", "delete")),
+            "task-detail footer must show x:delete"
+        );
     }
 
     /// The right cluster yields to the tabs: when there isn't room after the

@@ -1033,6 +1033,9 @@ pub enum NavIntent {
     OpenPrUrl(String),
     /// Close the active modal back to its prior screen (raised by Esc on a modal).
     CloseModal,
+    /// Switch to the issue-list tab (raised by a confirmed task-detail `x` delete,
+    /// 63l.5) so the deleted card's screen doesn't linger after the row is gone.
+    BackToIssueList,
     /// Jump to an entity's screen from the command palette (raised by Enter on a
     /// palette result, e38.13). Carries the jump-target screen token, the entity
     /// id, and the kind tag so the glue can switch the routing screen and select
@@ -1473,14 +1476,26 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
     // Lift the compose-submit intent into a deferred `hangar/comment_add` RPC the
     // `render` pass drains + fires (the sync key router can't `await`). Retry /
     // cancel intents are not yet wired to an RPC, so they fold as before.
-    if let Some(TaskDetailIntent::AddComment { issue_id, body }) = out.intent {
-        states.pending_comment_action = Some(IssueCommentAction::Add {
-            issue_id: issue_id.as_str().to_string(),
-            body,
-        });
+    let mut nav = None;
+    match &out.intent {
+        Some(TaskDetailIntent::AddComment { issue_id, body }) => {
+            states.pending_comment_action = Some(IssueCommentAction::Add {
+                issue_id: issue_id.as_str().to_string(),
+                body: body.clone(),
+            });
+        }
+        // 63l.5: confirmed `x` delete arms the SAME deferred `hangar/issue_delete`
+        // the issue-list `x` uses, then navigates back to the issue list so the
+        // card is gone once the daemon's `IssueDeleted` push lands. A daemon
+        // rejection (active tasks) surfaces as an issue-list note there.
+        Some(TaskDetailIntent::DeleteIssue(issue_id)) => {
+            states.pending_delete_action = Some(issue_id.clone());
+            nav = Some(NavIntent::BackToIssueList);
+        }
+        _ => {}
     }
     states.task_detail = Some(out.state);
-    None
+    nav
 }
 
 /// Kanban board key routing (P8.4): map the arrow keys (plus Shift) into the

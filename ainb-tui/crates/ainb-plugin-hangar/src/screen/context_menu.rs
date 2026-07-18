@@ -17,7 +17,7 @@
 //!                         │ Priority       ▸ │  └─▶│ Backlog      │
 //!                         │ Assign         ▸ │     │ Todo         │
 //!                         │ Copy id          │     │ In Progress  │── issue_update
-//!                         │ Delete  (greyed) │     │ In Review    │   {state}
+//!                         │ Delete           │     │ In Review    │   {state}
 //!                         └──────────────────┘     │ Done         │
 //!                                                  └──────────────┘
 //! ```
@@ -32,10 +32,11 @@
 //! - `Copy id` → [`ContextMenuIntent::CopyId`] → a copied-confirmation (no host
 //!   clipboard cap exists yet, so the menu shows a transient `copied` note rather
 //!   than touching the OS clipboard).
-//! - `Delete` is **greyed** — no issue-delete RPC exists in the daemon yet
-//!   (`hangar/issue_update` mutates fields; there is no destructive
-//!   `hangar/issue_delete`). The item paints muted and a footer note explains it,
-//!   rather than dispatching nothing silently or pretending to delete.
+//! - `Delete` → [`ContextMenuIntent::Delete`]. It does NOT delete inline: it
+//!   closes the menu and hands the target issue id to the plugin glue, which
+//!   opens the issue list's existing `x` RED confirm overlay for that id — the
+//!   same `hangar/issue_delete` path the keyboard `x` uses, never a second
+//!   confirm UI.
 //!
 //! ## Navigation
 //!
@@ -62,8 +63,6 @@ const TEXT: Color = Color::rgb(220, 220, 230);
 const SELECTED: Color = Color::rgb(255, 255, 255);
 /// Highlighted-item background fill so the cursor row reads as raised.
 const SELECTED_BG: Color = Color::rgb(60, 70, 110);
-/// Muted text for the disabled `Delete` item and the footer note.
-const DISABLED: Color = Color::rgb(120, 120, 135);
 /// A marker accent flagging the issue's CURRENT state / priority in a submenu so
 /// the user sees what is set before changing it.
 const CURRENT: Color = Color::rgb(150, 200, 150);
@@ -100,7 +99,7 @@ pub enum RootItem {
     Assign,
     /// Copy the `HGR-<n>` display id (a copied-confirmation note).
     CopyId,
-    /// Delete — greyed (no daemon issue-delete RPC exists yet).
+    /// Delete — routes into the issue list's `x` confirm overlay.
     Delete,
 }
 
@@ -130,11 +129,6 @@ impl RootItem {
     /// Whether this row opens a cascading submenu (painted with a `▸` caret).
     const fn has_submenu(self) -> bool {
         matches!(self, Self::MoveTo | Self::Priority | Self::Assign)
-    }
-
-    /// Whether this row is selectable. `Delete` is disabled (no delete RPC yet).
-    const fn is_enabled(self) -> bool {
-        !matches!(self, Self::Delete)
     }
 }
 
@@ -207,6 +201,13 @@ pub enum ContextMenuIntent {
     CopyId {
         /// The `HGR-<n>` display id copied.
         display_id: String,
+    },
+    /// Delete the issue — routed into the issue list's `x` RED confirm overlay by
+    /// the plugin glue (never an inline delete; the overlay's Enter fires the
+    /// `hangar/issue_delete` RPC, reusing the keyboard `x` path).
+    Delete {
+        /// The issue id the menu was raised for.
+        issue_id: String,
     },
 }
 
@@ -421,10 +422,6 @@ impl ContextMenuState {
         }
         if let Some(i) = self.hit_map.root_at(col, row) {
             self.root_selected = i;
-            // A click on a disabled row (Delete) is inert but keeps the menu open.
-            if !self.selected_root().is_enabled() {
-                return None;
-            }
             self.submenu = SubMenu::None;
             return self.activate();
         }
@@ -505,13 +502,17 @@ impl ContextMenuState {
                     display_id: self.display_id.clone(),
                 })
             }
-            // Disabled — inert.
-            RootItem::Delete => None,
+            RootItem::Delete => {
+                self.closed = true;
+                Some(ContextMenuIntent::Delete {
+                    issue_id: self.issue_id.clone(),
+                })
+            }
         }
     }
 
     /// Move the selection one row in `step`'s direction in the open submenu, else
-    /// the root list (skipping the disabled `Delete` root row).
+    /// the root list.
     const fn move_selection(&mut self, step: Step) {
         if matches!(self.submenu, SubMenu::None) {
             self.move_root_selection(step);
@@ -520,22 +521,12 @@ impl ContextMenuState {
         }
     }
 
-    /// Step the root selection to the next ENABLED row in `step`'s direction, so
-    /// the cursor never rests on the disabled `Delete` row. Stays put when there
-    /// is no enabled row further in that direction (a clamp at the edge).
+    /// Step the root selection one row in `step`'s direction, clamped at the list
+    /// edges (a step off the edge keeps the prior selection).
     const fn move_root_selection(&mut self, step: Step) {
         let last = RootItem::ALL.len() - 1;
-        let mut idx = self.root_selected;
-        loop {
-            let Some(next) = step.apply(idx, last) else {
-                // Hit the edge with no enabled row — keep the prior selection.
-                return;
-            };
-            idx = next;
-            if RootItem::ALL[idx].is_enabled() {
-                self.root_selected = idx;
-                return;
-            }
+        if let Some(next) = step.apply(self.root_selected, last) {
+            self.root_selected = next;
         }
     }
 
@@ -592,8 +583,7 @@ const SUB_W: u16 = 18;
 /// would overflow the right edge, and up when it would overflow the bottom). An
 /// open submenu cascades to the right of the root (flipping left when it would
 /// overflow). The selected row in each box paints with a filled background so the
-/// cursor is visible; the disabled `Delete` row paints muted; a submenu marks the
-/// issue's current value with a `✓`.
+/// cursor is visible; a submenu marks the issue's current value with a `✓`.
 pub fn render_context_menu(
     buf: &mut WireBuffer,
     area_w: u16,
@@ -632,21 +622,10 @@ pub fn render_context_menu(
                 label: item.label(),
                 trailing: caret,
                 selected: i == state.root_selected,
-                enabled: item.is_enabled(),
             },
         );
         hit_map.push_root(Rect::new(root_x + 1, row, MENU_W - 2, 1), i);
     }
-
-    // The greyed-Delete footer note, on the bottom border row.
-    put_str(
-        buf,
-        root_x + 1,
-        root_y + root_h - 1,
-        " delete: no RPC ",
-        DISABLED,
-        root_x + MENU_W - 1,
-    );
 
     // The copied-confirmation note replaces the title-row tail when armed.
     if state.copied {
@@ -716,7 +695,6 @@ fn render_submenu(
                 label,
                 trailing: marker,
                 selected: idx == sub_sel,
-                enabled: true,
             },
         );
         hit_map.push_sub(Rect::new(sub_x + 1, row, SUB_W - 2, 1), idx);
@@ -739,24 +717,16 @@ struct MenuRow<'a> {
     trailing: &'a str,
     /// Whether this row is the cursor selection (gets a highlight background).
     selected: bool,
-    /// Whether this row is enabled (a disabled row paints muted).
-    enabled: bool,
 }
 
 /// Paint one menu row inside a box: a backdrop fill, the label, and a trailing
 /// caret/marker glyph one cell in from the right border. The selected row gets a
-/// highlight background; a disabled row paints muted.
+/// highlight background.
 fn paint_row(buf: &mut WireBuffer, r: &MenuRow) {
     let inner_x = r.box_x + 1;
     let inner_right = r.box_x + r.box_w - 1;
     let bg = if r.selected { SELECTED_BG } else { BACKDROP };
-    let fg = if !r.enabled {
-        DISABLED
-    } else if r.selected {
-        SELECTED
-    } else {
-        TEXT
-    };
+    let fg = if r.selected { SELECTED } else { TEXT };
     // Backdrop fill across the inner row.
     for cx in inner_x..inner_right {
         let mut cell = Cell::new(" ");
@@ -995,25 +965,30 @@ mod tests {
         );
     }
 
-    /// Keyboard: the cursor skips the disabled `Delete` row — stepping down past
-    /// `Copy id` (index 4) cannot land on `Delete` (index 5), and the disabled
-    /// row fires nothing when activated directly.
+    /// Keyboard: the cursor reaches the `Delete` row (index 5) and activating it
+    /// fires a [`ContextMenuIntent::Delete`] for the raised issue, then closes the
+    /// menu (the plugin glue routes it into the `x` confirm overlay).
     #[test]
-    fn delete_row_is_disabled_and_unreachable() {
+    fn delete_row_is_enabled_and_fires_delete_intent() {
         let mut m = menu();
         for _ in 0..10 {
             m.handle_key(ContextMenuKey::Down);
         }
-        // The selection clamps at `Copy id` (4), never `Delete` (5).
+        // The cursor now rests on `Delete` (5), the last row, not clamped above it.
         assert_eq!(
             m.root_selected(),
-            4,
-            "cursor stops above the disabled Delete"
+            5,
+            "cursor reaches the enabled Delete row"
         );
-        // The Delete row, even when force-selected, fires no intent (no RPC).
-        m.root_selected = 5;
-        assert_eq!(m.handle_key(ContextMenuKey::Enter), None);
-        assert!(!m.is_closed(), "activating the disabled Delete is inert");
+        let fired = m.handle_key(ContextMenuKey::Enter);
+        assert_eq!(
+            fired,
+            Some(ContextMenuIntent::Delete {
+                issue_id: "issue-b".into(),
+            }),
+            "Delete fires a Delete intent for the raised issue"
+        );
+        assert!(m.is_closed(), "firing Delete closes the menu");
     }
 
     /// Keyboard: Esc inside an open submenu collapses back to the root; Esc at the
@@ -1115,16 +1090,18 @@ mod tests {
         assert!(text.contains('✓'), "the current status is marked with a ✓");
     }
 
-    /// Render: the greyed-Delete footer note is painted so the disabled item is
-    /// explained, not silently inert.
+    /// Render: the `Delete` row paints as a normal enabled item, with NO stale
+    /// "delete: no RPC" note now that the row routes into the confirm overlay.
     #[test]
-    fn render_paints_delete_disabled_note() {
+    fn render_paints_delete_without_disabled_note() {
         let mut buf = WireBuffer::new(80, 24);
         let mut m = menu();
         render_context_menu(&mut buf, 80, 24, &mut m);
+        let text = painted_text(&buf);
+        assert!(text.contains("Delete"), "the Delete row is painted");
         assert!(
-            painted_text(&buf).contains("delete: no RPC"),
-            "the disabled Delete item must carry an explanatory note"
+            !text.contains("delete: no RPC"),
+            "the stale disabled note must be gone"
         );
     }
 
