@@ -15,7 +15,7 @@
         "source": "github",
         "repo": "stevengonsalvez/ainb-reflect-memory",
         "path": "plugin",
-        "ref": "v5.2.2"
+        "ref": "v5.2.3"
       },
       "description": "Agent self-improvement + retrieval. Captures learnings via colon-namespaced sub-skills (reflect, reflect:consolidate, reflect:ingest, reflect:recall, reflect-status) and auto-injects relevant prior learnings via SessionStart/UserPromptSubmit hooks. PostToolUse arms low-cost mini-learning capture; Stop enqueues short-session reflection. Philosophy: Correct once, never again; recall everything next time.",
       "strict": false,
