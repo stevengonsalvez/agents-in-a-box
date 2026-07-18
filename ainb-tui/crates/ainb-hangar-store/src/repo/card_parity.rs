@@ -112,6 +112,89 @@ impl CardParityRepo {
         Ok(row.map(|(repo, agent)| (repo, agent.as_deref().and_then(AgentKind::parse))))
     }
 
+    /// Persist a card's source and/or target branch onto its issue row
+    /// (migration 0042), workspace-scoped like [`Self::set_issue_repo_agent`].
+    ///
+    /// PARTIAL update with the same contract: a `None` field is left unchanged
+    /// (never cleared), both-`None` is a no-op (`Ok(false)`). `source_branch` is
+    /// the ref a run branches FROM (dispatch defaults `main` when unset);
+    /// `target_branch` is where a future PR lands (stored for later automation).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault. `Ok(false)` when no
+    /// `(issue_id, workspace_id)` row matched or nothing was written.
+    pub async fn set_issue_branches(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+        source_branch: Option<&str>,
+        target_branch: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let mut sets: Vec<&str> = Vec::new();
+        if source_branch.is_some() {
+            sets.push("source_branch = ?");
+        }
+        if target_branch.is_some() {
+            sets.push("target_branch = ?");
+        }
+        if sets.is_empty() {
+            return Ok(false);
+        }
+        let sql = format!(
+            "UPDATE issue SET {} WHERE id = ? AND workspace_id = ?",
+            sets.join(", ")
+        );
+        let mut query = sqlx::query(&sql);
+        if let Some(source) = source_branch {
+            query = query.bind(source);
+        }
+        if let Some(target) = target_branch {
+            query = query.bind(target);
+        }
+        let res = query.bind(issue_id).bind(workspace_id).execute(pool).await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Read a card's persisted `(source_branch, target_branch)` from its issue,
+    /// or `None` when the issue does not exist (migration 0042).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn get_issue_branches(
+        pool: &SqlitePool,
+        issue_id: &str,
+    ) -> Result<Option<(Option<String>, Option<String>)>, sqlx::Error> {
+        sqlx::query_as::<_, (Option<String>, Option<String>)>(
+            "SELECT source_branch, target_branch FROM issue WHERE id = ?",
+        )
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Persist the resolved SOURCE branch onto a task row, WITHIN the enqueue
+    /// transaction (migration 0042) — same atomicity contract as
+    /// [`Self::set_task_repo_agent_in_tx`]: the claim loop can never observe a
+    /// task missing its dispatch inputs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_task_source_branch_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task_id: &str,
+        source_branch: Option<&str>,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE agent_task_queue SET source_branch = ? WHERE id = ?")
+            .bind(source_branch)
+            .bind(task_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
     /// Assign (or clear, with `None`) a card's SQUAD onto its issue row (tcp T4 /
     /// F7). Workspace-scoped so the write is self-guarded at the SQL boundary (a
     /// foreign-tenant issue id matches no row — never a cross-tenant write).
@@ -603,6 +686,79 @@ mod tests {
             CardParityRepo::resolve_agent_cascade(pool, &ws("ws-a"), None).await.unwrap(),
             AgentKind::Codex
         );
+    }
+
+    /// The 0042 branch fields round-trip: issue source/target branches are
+    /// partial + workspace-scoped like repo/agent, and a task's source_branch
+    /// persists through the enqueue-tx setter.
+    #[tokio::test]
+    async fn issue_and_task_branches_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        // Unset by default; missing issue → None.
+        assert_eq!(
+            CardParityRepo::get_issue_branches(pool, "issue-1").await.unwrap(),
+            Some((None, None))
+        );
+        assert_eq!(
+            CardParityRepo::get_issue_branches(pool, "nope").await.unwrap(),
+            None
+        );
+
+        // Set both; then a source-only edit must not drop the target.
+        assert!(
+            CardParityRepo::set_issue_branches(
+                pool,
+                "ws-a",
+                "issue-1",
+                Some("develop"),
+                Some("main")
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            CardParityRepo::set_issue_branches(pool, "ws-a", "issue-1", Some("feature/x"), None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            CardParityRepo::get_issue_branches(pool, "issue-1").await.unwrap(),
+            Some((Some("feature/x".to_string()), Some("main".to_string()))),
+            "a source-only edit must not drop the target branch"
+        );
+        // Both-None no-op; cross-tenant write misses.
+        assert!(
+            !CardParityRepo::set_issue_branches(pool, "ws-a", "issue-1", None, None)
+                .await
+                .unwrap()
+        );
+        assert!(
+            !CardParityRepo::set_issue_branches(pool, "ws-b", "issue-1", Some("hax"), None)
+                .await
+                .unwrap()
+        );
+
+        // Task-side: enqueue-tx setter persists, and the Task read model carries it.
+        sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u','u@e.com',0)")
+            .execute(pool)
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode, status) VALUES ('rt','ws-a','d','claude','local','online')").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) VALUES ('ag','ws-a','A','rt','x','workspace','u')").execute(pool).await.unwrap();
+        sqlx::query("INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, status, created_at) VALUES ('t1','ws-a','rt','ag','queued',0)").execute(pool).await.unwrap();
+
+        let mut tx = pool.begin().await.unwrap();
+        CardParityRepo::set_task_source_branch_in_tx(&mut tx, "t1", Some("feature/x"))
+            .await
+            .unwrap();
+        tx.commit().await.unwrap();
+        let task = crate::repo::task::TaskRepo::get_by_id(pool, "t1").await.unwrap().unwrap();
+        assert_eq!(task.source_branch.as_deref(), Some("feature/x"));
     }
 
     /// A card's squad assignment round-trips, defaults None, clears with None, and

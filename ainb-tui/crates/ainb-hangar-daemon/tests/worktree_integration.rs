@@ -62,6 +62,7 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         finished_at: None,
         autopilot_run_id: None,
         generation: 0,
+        source_branch: None,
         mode: "headless".to_string(),
         session_name: None,
         repo_ref: None,

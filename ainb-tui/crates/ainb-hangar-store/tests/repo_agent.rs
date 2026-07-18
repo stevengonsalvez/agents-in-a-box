@@ -70,6 +70,7 @@ async fn insert_and_get_agent_roundtrip() {
         thinking: None,
         agent_env: Vec::new(),
         provider: None,
+        token_budget: None,
     };
 
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
@@ -107,6 +108,7 @@ async fn update_config_persists_and_is_partial() {
         thinking: None,
         agent_env: Vec::new(),
         provider: None,
+        token_budget: None,
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
@@ -119,6 +121,7 @@ async fn update_config_persists_and_is_partial() {
         mcp_config: Some(Some(r#"{"servers":{}}"#.to_string())),
         thinking: Some(Some("high".to_string())),
         agent_env: Some(vec![("FOO".to_string(), "bar".to_string())]),
+        token_budget: Some(Some(750_000)),
     };
     let touched = AgentRepo::update_config(store.pool(), &workspace_id, "agent-1", &update)
         .await
@@ -133,6 +136,11 @@ async fn update_config_persists_and_is_partial() {
     assert_eq!(got.mcp_config.as_deref(), Some(r#"{"servers":{}}"#));
     assert_eq!(got.thinking.as_deref(), Some("high"));
     assert_eq!(got.agent_env, vec![("FOO".to_string(), "bar".to_string())]);
+    assert_eq!(
+        got.token_budget,
+        Some(750_000),
+        "budget set via config edit (0042)"
+    );
     assert!(!got.archived, "a config edit does not archive");
 
     // A partial edit (only the model) leaves the other fields alone.
@@ -178,6 +186,7 @@ async fn update_config_is_workspace_scoped_and_empty_is_noop() {
         thinking: None,
         agent_env: Vec::new(),
         provider: None,
+        token_budget: None,
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
@@ -227,6 +236,7 @@ async fn archive_flips_flag_and_hides_from_active_list() {
         thinking: None,
         agent_env: Vec::new(),
         provider: None,
+        token_budget: None,
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 

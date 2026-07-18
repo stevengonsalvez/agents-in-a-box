@@ -111,11 +111,7 @@ pub async fn apply_migrations(pool: &SqlitePool) -> anyhow::Result<()> {
 /// - the probe query itself fails (file deleted, corrupt, locked) → the
 ///   database is unreachable outright.
 pub async fn schema_drift(pool: &SqlitePool) -> Option<String> {
-    let embedded_max = sqlx::migrate!("./migrations")
-        .iter()
-        .map(|m| m.version)
-        .max()
-        .unwrap_or(0);
+    let embedded_max = sqlx::migrate!("./migrations").iter().map(|m| m.version).max().unwrap_or(0);
     let applied_max: Result<Option<i64>, sqlx::Error> =
         sqlx::query_scalar("SELECT MAX(version) FROM _sqlx_migrations")
             .fetch_one(pool)

@@ -301,6 +301,44 @@ pub struct IssueRow {
     /// `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub branch: Option<String>,
+    /// The card's persisted repo reference (`issue.repo_ref`, migration 0042): an
+    /// absolute path, `scratch`, or a remote indicator. `None` when the card has no
+    /// repo pinned yet. Drives the task-detail card's `Repo:` line (63d). Omitted
+    /// from the wire when `None` (`skip_serializing_if`) so the shape only grows for
+    /// a reader that supplies it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// The card's persisted provider agent wire token (`issue.agent_kind`, migration
+    /// 0042): `claude` / `codex` / `copilot`, or `None` when unset (the F4 cascade
+    /// decides at run). Drives the task-detail card's `Agent:` line (63d). Omitted
+    /// from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// The card's persisted SOURCE branch a run branches FROM (`issue.source_branch`,
+    /// migration 0042), or `None` for the repo default. Drives the task-detail card's
+    /// `Source:` line (63d). Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
+    /// The card's persisted TARGET branch a future PR lands INTO
+    /// (`issue.target_branch`, migration 0042), or `None` when unset. Drives the
+    /// task-detail card's `Target:` line (63d). Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+    /// How many tasks (any lifecycle) have ever run against this issue (63d).
+    /// `0` for a never-run issue. Drives the task-detail card's `Runs:` history
+    /// line, shown only when non-zero. `#[serde(default)]` keeps a pre-63d snapshot
+    /// decodable (defaults to `0`).
+    #[serde(default)]
+    pub run_count: u32,
+    /// The lifecycle status of the issue's latest task (`running` / `done` /
+    /// `failed` / …), or `None` when it never ran. Drives the `Runs:` line's
+    /// `(last: <status> …)`. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_status: Option<String>,
+    /// When the issue's latest task was created (epoch ms), or `None` when it never
+    /// ran. Drives the `Runs:` line's `<when>`. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_run_at: Option<i64>,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).

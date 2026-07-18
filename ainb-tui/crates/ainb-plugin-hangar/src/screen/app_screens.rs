@@ -355,19 +355,31 @@ pub enum IssueCommentAction {
     },
 }
 
-/// A deferred daemon RPC raised by the issue-list inline create flow (e38.29).
+/// A deferred daemon RPC chain raised by the issue-list create WIZARD (Phase 5).
 ///
-/// Like [`IssueCommentAction`], the sync key router can't `await`; the create
-/// input stashes the action on [`ScreenStates::pending_create_action`] and the
-/// plugin's `render` pass drains it and fires `hangar/issue_create` over the
-/// daemon socket cap. The daemon's `IssueCreated` push re-renders the new row.
+/// Like [`IssueCommentAction`], the sync key router can't `await`; the wizard's
+/// Agent-stage commit stashes the action on
+/// [`ScreenStates::pending_create_action`] and the plugin's `render` pass drains
+/// it and fires `hangar/issue_create`; on that reply the plugin fires
+/// `hangar/issue_update` (persisting repo / agent / branches on the new issue)
+/// and `hangar/issue_run` (the actual dispatch). Every field is collected by the
+/// wizard, so a create from this screen ALWAYS carries an agent and a repo — the
+/// title-only inert card is unrepresentable here.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IssueCreateAction {
-    /// Create a new issue with the typed title (Enter on a non-blank create
-    /// input) — `hangar/issue_create`.
-    Create {
+    /// Create a new issue AND dispatch it (Enter on the wizard's Agent stage).
+    CreateAndRun {
         /// The new issue's title (non-blank).
         title: String,
+        /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
+        /// indicator the daemon clones.
+        repo_ref: String,
+        /// The source branch the run branches FROM; `None` = repo default.
+        source_branch: Option<String>,
+        /// The target branch a future PR lands INTO; `None` = unset.
+        target_branch: Option<String>,
+        /// The provider agent wire token (`claude` / `codex` / `copilot`).
+        agent: String,
     },
 }
 
@@ -518,10 +530,15 @@ pub struct ScreenStates {
     /// non-empty buffer), awaiting the `render` pass to fire `hangar/comment_add`
     /// over the daemon socket (e38.5). `None` when idle.
     pub pending_comment_action: Option<IssueCommentAction>,
-    /// An issue-create RPC raised by the issue-list inline create flow (Enter on
-    /// a non-blank title), awaiting the `render` pass to fire `hangar/issue_create`
-    /// over the daemon socket (e38.29). `None` when idle.
+    /// A create-and-dispatch chain raised by the issue-list create wizard (Enter
+    /// on the Agent stage), awaiting the `render` pass to fire
+    /// `hangar/issue_create` (then, on its reply, `issue_update` + `issue_run`)
+    /// over the daemon socket (Phase 5). `None` when idle.
     pub pending_create_action: Option<IssueCreateAction>,
+    /// A delete raised by the issue-list `x` confirm overlay (Enter on the RED
+    /// overlay), awaiting the `render` pass to fire `hangar/issue_delete` over the
+    /// daemon socket (63d). Carries the issue to delete. `None` when idle.
+    pub pending_delete_action: Option<ainb_hangar_core::ids::IssueId>,
     /// A search RPC raised by the command-palette modal (each keystroke),
     /// awaiting the `render` pass to fire `hangar/search` over the daemon socket
     /// (e38.13). `None` when idle.
@@ -629,10 +646,12 @@ impl ScreenStates {
         self.boards.set_profiles(profiles);
     }
 
-    /// Inject the `@`-autocomplete repo roster the Boards card-create picker offers
-    /// (spec F3), from the cached `hangar/repo_list` (favorites-first + recency
-    /// order preserved; the reducer prepends `scratch` always).
+    /// Inject the `@`-autocomplete repo roster BOTH card-create pickers offer —
+    /// the Boards overlay (spec F3) and the Issues create wizard's repo stage
+    /// (Phase 5) — from the one cached `hangar/repo_list` (favorites-first +
+    /// recency order preserved; the reducers prepend `scratch` always).
     pub fn set_boards_repos(&mut self, repos: Vec<super::boards::RepoOption>) {
+        self.issue_list.set_repos(repos.clone());
         self.boards.set_repos(repos);
     }
 
@@ -934,6 +953,12 @@ impl ScreenStates {
     /// flow, if any (e38.29).
     pub const fn take_pending_create_action(&mut self) -> Option<IssueCreateAction> {
         self.pending_create_action.take()
+    }
+
+    /// Take the pending issue delete raised by the `x` confirm overlay, if any
+    /// (63d). The `render` pass drains it and fires `hangar/issue_delete`.
+    pub const fn take_pending_delete_action(&mut self) -> Option<ainb_hangar_core::ids::IssueId> {
+        self.pending_delete_action.take()
     }
 
     /// Take the pending search RPC raised by the command palette, if any
@@ -1363,17 +1388,53 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
 /// open-picker intents into [`NavIntent`]s (the routing screen lives on the
 /// plugin's [`AppState`], not in the issue-list reducer).
 fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
-    let c = key_char(key)?;
-    let out = reduce_issue_list(&states.issue_list, IssueListEvent::Key(c));
+    // Phase 5: while the create wizard is open, feed it the STRUCTURED key
+    // vocabulary — its picker stages (repo dropdown, agent chips) need Up/Down,
+    // and Esc must cancel the whole overlay — which the plain-char path can't
+    // carry. Any other key is an unmodelled no-op.
+    let ev = if states.issue_list.wizard().is_some() {
+        let k = match &key.code {
+            KeyCode::Char { ch } => super::issue_list::WizardKey::Char(*ch),
+            KeyCode::Enter => super::issue_list::WizardKey::Enter,
+            KeyCode::Backspace => super::issue_list::WizardKey::Backspace,
+            KeyCode::Esc => super::issue_list::WizardKey::Esc,
+            KeyCode::Up => super::issue_list::WizardKey::Up,
+            KeyCode::Down => super::issue_list::WizardKey::Down,
+            _ => return None,
+        };
+        IssueListEvent::Wizard(k)
+    } else {
+        IssueListEvent::Key(key_char(key)?)
+    };
+    let out = reduce_issue_list(&states.issue_list, ev);
     states.issue_list = out.state;
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
-        // e38.29: a submitted create-title lifts into a deferred
-        // `hangar/issue_create` RPC the `render` pass drains + fires (the sync key
-        // router can't `await`).
-        Some(IssueListIntent::CreateIssue { title }) => {
-            states.pending_create_action = Some(IssueCreateAction::Create { title });
+        // Phase 5: the wizard's Agent-stage commit lifts into a deferred
+        // create-and-dispatch chain the `render` pass drains + fires (the sync
+        // key router can't `await`).
+        Some(IssueListIntent::CreateAndRun {
+            title,
+            repo_ref,
+            source_branch,
+            target_branch,
+            agent,
+        }) => {
+            states.pending_create_action = Some(IssueCreateAction::CreateAndRun {
+                title,
+                repo_ref,
+                source_branch,
+                target_branch,
+                agent,
+            });
+            None
+        }
+        // 63d: Enter on the `x` RED confirm overlay lifts into a deferred
+        // `hangar/issue_delete` the `render` pass drains + fires (the sync key
+        // router can't `await`). The daemon's IssueDeleted push then drops the row.
+        Some(IssueListIntent::DeleteIssue(id)) => {
+            states.pending_delete_action = Some(id);
             None
         }
         None => None,

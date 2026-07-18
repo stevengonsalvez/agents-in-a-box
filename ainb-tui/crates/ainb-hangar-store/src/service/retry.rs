@@ -131,8 +131,9 @@ pub enum RetryDecision {
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
  (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
-  attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, generation, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, generation, \
+  source_branch, created_at) \
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -205,6 +206,7 @@ impl RetryService {
             .bind(&failed_task.repo_ref)
             .bind(&failed_task.agent_kind)
             .bind(failed_task.generation)
+            .bind(&failed_task.source_branch)
             .bind(clock.now_ms())
             .execute(pool)
             .await?;

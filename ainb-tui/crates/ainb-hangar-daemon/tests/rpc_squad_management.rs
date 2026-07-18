@@ -184,6 +184,7 @@ async fn seed_second_agent(store: &Store) {
             thinking: None,
             agent_env: Vec::new(),
             provider: None,
+            token_budget: None,
         },
     )
     .await
@@ -229,6 +230,7 @@ async fn seed_agent_on(store: &Store, agent_id: &str, runtime_id: &str) {
             thinking: None,
             agent_env: Vec::new(),
             provider: None,
+            token_budget: None,
         },
     )
     .await

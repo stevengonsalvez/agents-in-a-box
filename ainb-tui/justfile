@@ -66,6 +66,27 @@ test-live:
     cargo build -p ainb --bin ainb
     cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e live_dispatch_writes_nonce_artifact -- --nocapture --test-threads=1
 
+# Run the LIVE remote-repo + source-branch e2e leg (REAL daemon + claude).
+#
+# Proves the 0042 dispatch chain: a file:// remote is cloned, the worktree is
+# based on the chosen feature branch (sentinel asserted FIRST), the agent's
+# nonce lands in that tree, and only then task=done is trusted. Skips CLEAN +
+# LOUD without an authenticated claude. Mutation: LIVE_E2E_BREAK_SOURCE_BRANCH=1
+# must turn it RED.
+test-live-branch:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    if ! command -v claude >/dev/null 2>&1; then
+        echo "SKIPPED: no authenticated claude on PATH"
+        exit 0
+    fi
+    if ! claude -p --model haiku -- "reply with the single word PONG" 2>/dev/null | grep -qi PONG; then
+        echo "SKIPPED: no authenticated claude on PATH"
+        exit 0
+    fi
+    cargo build -p ainb --bin ainb
+    cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e live_dispatch_remote_repo_source_branch -- --nocapture --test-threads=1
+
 # Run the LIVE, no-mock e2e tripwire against the REAL codex binary.
 #
 # The codex leg of `test-live`: same law (assert the on-disk nonce artifact
@@ -98,7 +119,7 @@ test-live-codex:
     cargo test -p ainb-hangar-daemon --features live-e2e --test live_e2e live_dispatch_codex_writes_nonce_artifact -- --nocapture --test-threads=1
 
 # Run BOTH live e2e legs (claude + codex); each self-skips CLEAN + LOUD.
-test-live-all: test-live test-live-codex
+test-live-all: test-live test-live-codex test-live-branch
 
 # Format code
 fmt:

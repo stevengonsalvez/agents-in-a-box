@@ -495,6 +495,13 @@ pub struct AgentEditArgs {
     /// given the whole env map is REPLACED with the values.
     #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append)]
     pub env: Vec<(String, String)>,
+    /// New token budget (rtk/headroom, migration 0042); omitted leaves it.
+    /// Mutually exclusive with `--clear-token-budget`.
+    #[arg(long = "token-budget", conflicts_with = "clear_token_budget")]
+    pub token_budget: Option<i64>,
+    /// Clear the token budget (back to unlimited); omitted leaves it.
+    #[arg(long = "clear-token-budget")]
+    pub clear_token_budget: bool,
     /// Workspace slug the agent belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -923,9 +930,32 @@ pub enum IssueCommand {
     Show(IssueShowArgs),
     /// Edit an existing issue's state, assignee, priority, or due date.
     Update(IssueUpdateArgs),
+    /// Delete an issue and all its history (dry-run without `--yes`).
+    Delete(IssueDeleteArgs),
     /// Attach or detach a label on an issue.
     #[command(subcommand)]
     Label(IssueLabelCommand),
+}
+
+/// Arguments for `hangar issue delete`.
+///
+/// Without `--yes` this is a DRY RUN: it prints the issue title and the counts of
+/// what a real delete would remove (comments / tasks / placements) and exits
+/// WITHOUT deleting. Pass `--yes` to actually perform the cascade. The delete is
+/// workspace-scoped and refuses while any task on the issue is ACTIVE (cancel the
+/// run first), exactly like the `hangar/issue_delete` daemon RPC.
+#[derive(Args, Debug)]
+pub struct IssueDeleteArgs {
+    /// Issue id (ULID) to delete.
+    pub id: String,
+    /// Actually perform the delete. Without this flag the command only PREVIEWS
+    /// what would be removed and exits without touching the database.
+    #[arg(long)]
+    pub yes: bool,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar issue label <verb>`.
@@ -1045,6 +1075,20 @@ pub struct IssueCreateArgs {
     /// is a separate concern; create just records the labels it is handed.
     #[arg(long = "label", action = clap::ArgAction::Append)]
     pub labels: Vec<String>,
+    /// The repo the run executes in: an absolute checkout path, the literal
+    /// `scratch`, or a REMOTE (`owner/repo`, a full URL, or `git@…`) — a remote
+    /// is cloned once into the shared clone cache and the local path persisted,
+    /// exactly like the board card-create path (migration 0032/0042).
+    #[arg(long)]
+    pub repo: Option<String>,
+    /// The SOURCE branch the run branches FROM (migration 0042); omitted uses
+    /// the repo's default branch. Persisted on the issue AND the enqueued task.
+    #[arg(long = "source-branch")]
+    pub source_branch: Option<String>,
+    /// The TARGET branch a future PR lands INTO (migration 0042); stored on the
+    /// issue for later PR automation.
+    #[arg(long = "target-branch")]
+    pub target_branch: Option<String>,
 }
 
 /// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
@@ -1835,6 +1879,8 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
     let cli_args = (!args.args.is_empty()).then_some(args.args);
     let agent_env = (!args.env.is_empty()).then_some(args.env);
 
+    let token_budget = clear_or_set(args.clear_token_budget, args.token_budget);
+
     let update = AgentConfigUpdate {
         name: args.name,
         instructions,
@@ -1843,13 +1889,14 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
         mcp_config,
         thinking,
         agent_env,
+        token_budget,
     };
 
     if update.is_empty() {
         anyhow::bail!(
             "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
              / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
-             / --env"
+             / --env / --token-budget / --clear-token-budget"
         );
     }
 
@@ -1890,7 +1937,7 @@ async fn run_agent_set_archived(
 /// (`Some(Some(v))`), else leave unchanged (`None`). The clap `conflicts_with`
 /// already bars both at once.
 #[allow(clippy::option_option)] // the nested Option IS the store's 3-state encoding
-fn clear_or_set(clear: bool, value: Option<String>) -> Option<Option<String>> {
+fn clear_or_set<T>(clear: bool, value: Option<T>) -> Option<Option<T>> {
     if clear { Some(None) } else { value.map(Some) }
 }
 
@@ -2597,7 +2644,64 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Search(args) => run_issue_search(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
+        IssueCommand::Delete(args) => run_issue_delete(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
+    }
+}
+
+/// `hangar issue delete`: preview (default) or perform an issue delete,
+/// workspace-scoped and daemon-less.
+///
+/// Resolves the workspace the same way the other verbs do (`--workspace`, else the
+/// bootstrapped `default`). Without `--yes` it prints the [`IssueDeletePreview`]
+/// (title + dependent counts + active-task warning) and exits without deleting;
+/// with `--yes` it drives the store's single-transaction
+/// [`IssueRepo::delete_cascade`], refusing on an active task exactly like the
+/// daemon RPC. An unknown / foreign-tenant id is a not-found error, never a silent
+/// no-op.
+async fn run_issue_delete(store: &Store, args: IssueDeleteArgs) -> Result<()> {
+    use ainb_hangar_store::repo::issue::{IssueDeleteError, IssueRepo};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    let Some(preview) = IssueRepo::delete_preview(store.pool(), &workspace_id, &args.id)
+        .await
+        .with_context(|| format!("preview delete of issue {}", args.id))?
+    else {
+        anyhow::bail!("no issue with id {} in this workspace", args.id);
+    };
+
+    if !args.yes {
+        // DRY RUN: report what a real delete would remove and exit untouched.
+        println!("would delete issue {} \"{}\"", args.id, preview.title);
+        println!(
+            "  removes: {} comment(s), {} task(s), {} board placement(s), plus label links, dependency edges, and usage rows",
+            preview.summary.comments, preview.summary.tasks, preview.summary.placements
+        );
+        if preview.active_tasks > 0 {
+            println!(
+                "  WARNING: {} active task(s) — cancel the run first, then re-run with --yes",
+                preview.active_tasks
+            );
+        } else {
+            println!("  re-run with --yes to perform the delete");
+        }
+        return Ok(());
+    }
+
+    match IssueRepo::delete_cascade(store.pool(), &workspace_id, &args.id).await {
+        Ok(summary) => {
+            println!(
+                "deleted issue {} \"{}\" ({} comment(s), {} task(s), {} placement(s))",
+                args.id, preview.title, summary.comments, summary.tasks, summary.placements
+            );
+            Ok(())
+        }
+        Err(IssueDeleteError::NotFound) => {
+            anyhow::bail!("no issue with id {} in this workspace", args.id)
+        }
+        Err(e @ IssueDeleteError::ActiveTasks(_)) => anyhow::bail!("{e}"),
+        Err(IssueDeleteError::Db(e)) => Err(e).with_context(|| format!("delete issue {}", args.id)),
     }
 }
 
@@ -2774,8 +2878,35 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 
+    // Resolve + persist the repo / branches (0032/0042). A remote repo token is
+    // cloned once into the shared clone cache (the board card-create parity),
+    // and the LOCAL path is what dispatch provisions from.
+    let repo_ref = match args.repo.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(raw) => Some(resolve_cli_repo_ref(raw).await?),
+        None => None,
+    };
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    if repo_ref.is_some() {
+        CardParityRepo::set_issue_repo_agent(pool, &workspace_id, &id, repo_ref.as_deref(), None)
+            .await
+            .context("persist issue repo")?;
+    }
+    if args.source_branch.is_some() || args.target_branch.is_some() {
+        CardParityRepo::set_issue_branches(
+            pool,
+            &workspace_id,
+            &id,
+            args.source_branch.as_deref(),
+            args.target_branch.as_deref(),
+        )
+        .await
+        .context("persist issue branches")?;
+    }
+
     // When assigned, enqueue a task for the agent's runtime so the daemon claims
-    // + dispatches it (materialising the agent's skills first).
+    // + dispatches it (materialising the agent's skills first). One transaction
+    // covers the insert + its dispatch inputs (repo / source branch), so the
+    // claim loop can never observe a half-written task.
     if let Some(a) = assignment {
         let task_id = idgen.new_ulid();
         // Scope the task to the issue's next run generation (migration 0039). A
@@ -2784,8 +2915,22 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         let generation = TaskRepo::next_generation_for_issue(pool, &id)
             .await
             .context("compute run generation for assigned task")?;
-        TaskRepo::insert(
-            pool,
+        // The task's agent_kind mirrors the assignee agent's provider (so a
+        // codex agent's task doesn't read back as the claude column default).
+        let provider: Option<Option<String>> =
+            sqlx::query_scalar("SELECT provider FROM agent WHERE id = ?")
+                .bind(&a.agent_id)
+                .fetch_optional(pool)
+                .await
+                .context("read agent provider")?;
+        let agent_kind = provider
+            .flatten()
+            .as_deref()
+            .and_then(ainb_hangar_core::agent_kind::AgentKind::parse)
+            .unwrap_or(ainb_hangar_core::agent_kind::AgentKind::DEFAULT);
+        let mut tx = pool.begin().await.context("begin enqueue tx")?;
+        TaskRepo::insert_in_tx(
+            &mut tx,
             &ainb_hangar_store::repo::task::NewTask {
                 id: task_id.clone(),
                 workspace_id,
@@ -2801,12 +2946,51 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         )
         .await
         .context("enqueue task for assigned agent")?;
+        if repo_ref.is_some() {
+            CardParityRepo::set_task_repo_agent_in_tx(
+                &mut tx,
+                &task_id,
+                repo_ref.as_deref(),
+                agent_kind,
+            )
+            .await
+            .context("persist task repo")?;
+        }
+        if args.source_branch.is_some() {
+            CardParityRepo::set_task_source_branch_in_tx(
+                &mut tx,
+                &task_id,
+                args.source_branch.as_deref(),
+            )
+            .await
+            .context("persist task source branch")?;
+        }
+        tx.commit().await.context("commit enqueue tx")?;
         println!("created issue {id}");
         println!("queued task {task_id}");
     } else {
         println!("created issue {id}");
     }
     Ok(())
+}
+
+/// Resolve a CLI `--repo` token to the local path dispatch provisions from:
+/// `scratch` and absolute paths pass through; anything else is treated as a
+/// REMOTE and cloned once into the shared clone cache (blocking git work off
+/// the async thread), mirroring the daemon's card-create resolve.
+async fn resolve_cli_repo_ref(raw: &str) -> Result<String> {
+    if raw == "scratch" || std::path::Path::new(raw).is_absolute() {
+        return Ok(raw.to_string());
+    }
+    let ainb_dir = ainb_hangar_core::hangar_home().context("resolve hangar home")?;
+    let remote = raw.to_string();
+    let cloned = tokio::task::spawn_blocking(move || {
+        ainb_fleet_core::repo_clone::ensure_clone(&ainb_dir, &remote)
+    })
+    .await
+    .context("join clone task")?
+    .with_context(|| format!("clone remote repo `{raw}`"))?;
+    Ok(cloned.display().to_string())
 }
 
 /// `hangar issue list`: list issues in the default workspace + state.

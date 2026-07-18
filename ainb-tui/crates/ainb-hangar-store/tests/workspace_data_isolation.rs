@@ -148,6 +148,7 @@ async fn seed_agent(
             thinking: None,
             agent_env: Vec::new(),
             provider: None,
+            token_budget: None,
         },
     )
     .await

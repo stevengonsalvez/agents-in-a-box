@@ -947,6 +947,14 @@ pub struct IssueUpdateParams {
     /// cascade then decides), never an error. Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// New SOURCE branch the run branches FROM (migration 0042); `None` leaves
+    /// it. Resolved at dispatch (`main` default when never set). Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
+    /// New TARGET branch a future PR lands INTO (migration 0042); `None` leaves
+    /// it. Stored now, consumed by later PR automation. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LABEL_ATTACH`] /
@@ -1039,6 +1047,10 @@ pub struct AgentUpdateParams {
     /// empty list is a valid "no env").
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent_env: Option<Vec<(String, String)>>,
+    /// New token budget (rtk/headroom); omitted leaves it, `null` clears it
+    /// (back to unlimited), a value sets it (migration 0042).
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub token_budget: FieldUpdate<i64>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_CREATE`]: create one agent from
@@ -1065,6 +1077,9 @@ pub struct AgentCreateParams {
     /// Optional free-form system prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Optional token budget (rtk/headroom); absent = unlimited (migration 0042).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub token_budget: Option<i64>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_ARCHIVE`] (e38.15): archive or
@@ -1582,6 +1597,55 @@ pub struct BoardCardCreateParams {
     /// decides), never a hard reject — the wire stays forward-compatible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// The SOURCE branch a run branches FROM (migration 0042). APPEND-ONLY:
+    /// omitted (`None`) resolves to `main` at dispatch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
+    /// The TARGET branch a future PR lands INTO (migration 0042). APPEND-ONLY:
+    /// stored now, consumed by later PR automation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub target_branch: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_RUN`]: enqueue a run of one issue
+/// WITHOUT a board (the Issues create-wizard dispatch).
+///
+/// Same override semantics as [`BoardCardRunParams`], minus the board identity.
+/// Result shape: [`BoardCardRunResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueRunParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to launch.
+    pub issue_id: String,
+    /// The launch mode (`headless` or `interactive`).
+    pub mode: String,
+    /// A run-time REPO override; omitted uses the issue's persisted `repo_ref`
+    /// (repo REQUIRED at run, like `board_card_run`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub repo_ref: Option<String>,
+    /// A run-time AGENT override (`claude`/`codex`/`copilot`); omitted resolves
+    /// via the F4 cascade (board tier skipped — no board).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent: Option<String>,
+    /// A run-time SOURCE-BRANCH override (0042); omitted uses the issue's
+    /// persisted `source_branch`, else the repo's default branch.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_DELETE`] (63d): delete one issue and
+/// all its history from a workspace.
+///
+/// Workspace-scoped like every mutation: the daemon rejects a mistyped
+/// `workspace_id` with `INVALID_PARAMS`, and an `issue_id` owned by another tenant
+/// resolves to no row (also rejected, never a cross-tenant delete).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueDeleteParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to delete.
+    pub issue_id: String,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6, D16): launch a
@@ -1608,6 +1672,10 @@ pub struct BoardCardRunParams {
     /// cascade. An unrecognised token is ignored (cascade decides).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub agent: Option<String>,
+    /// A run-time SOURCE-BRANCH override (migration 0042). APPEND-ONLY: omitted
+    /// (`None`) uses the issue's persisted `source_branch`, else `main`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_branch: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6): the enqueued
@@ -1966,6 +2034,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
@@ -2324,6 +2399,8 @@ mod tests {
             title: Some("Renamed card".into()),
             repo_ref: Some("/repos/app".into()),
             agent: Some("codex".into()),
+            source_branch: Some("develop".into()),
+            target_branch: Some("main".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<IssueUpdateParams>(&s).unwrap(), full);
@@ -2385,6 +2462,7 @@ mod tests {
             mcp_config: FieldUpdate::Set(r#"{"servers":{}}"#.into()),
             thinking: FieldUpdate::Set("high".into()),
             agent_env: Some(vec![("FOO".into(), "bar".into())]),
+            token_budget: FieldUpdate::Set(500_000),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentUpdateParams>(&s).unwrap(), full);
@@ -2434,6 +2512,7 @@ mod tests {
             name: "reviewer".into(),
             provider: Some("codex".into()),
             instructions: Some("be terse".into()),
+            token_budget: Some(250_000),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentCreateParams>(&s).unwrap(), full);

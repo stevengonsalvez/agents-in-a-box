@@ -36,6 +36,13 @@ fn issue(pr_url: Option<&str>) -> IssueRow {
         labels: Vec::new(),
         pr_url: pr_url.map(String::from),
         branch: None,
+        repo_ref: None,
+        agent: None,
+        source_branch: None,
+        target_branch: None,
+        run_count: 0,
+        last_run_status: None,
+        last_run_at: None,
     }
 }
 

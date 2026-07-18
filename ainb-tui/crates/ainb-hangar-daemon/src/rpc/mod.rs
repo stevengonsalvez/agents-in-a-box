@@ -650,6 +650,7 @@ async fn handle(
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
+        methods::HANGAR_ISSUE_DELETE => handle_issue_delete(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
@@ -685,6 +686,7 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_MOVE => handle_board_card(pool, req, false).await,
         methods::HANGAR_BOARD_CARD_CREATE => handle_board_card_create(pool, req).await,
         methods::HANGAR_BOARD_CARD_RUN => handle_board_card_run(pool, req).await,
+        methods::HANGAR_ISSUE_RUN => handle_issue_run(pool, req).await,
         methods::HANGAR_BOARD_CARD_CANCEL => handle_board_card_cancel(pool, req, events).await,
         methods::HANGAR_BOARD_CARD_REORDER => handle_board_card_reorder(pool, req).await,
         methods::HANGAR_BOARD_CARD_REMOVE => handle_board_card_remove(pool, req).await,
@@ -1248,6 +1250,48 @@ async fn handle_issue_create(
     to_value(&row)
 }
 
+/// Dispatch `hangar/issue_delete` (63d): delete one issue and all its history,
+/// push the matching `IssueDeleted` event, and answer with `{}`.
+///
+/// Mirrors [`handle_issue_update`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS`, then drives the
+/// store's single-transaction cascade. A `(id, workspace)` pair that matches no
+/// issue is rejected as a not-found error (never a cross-tenant delete), and an
+/// ACTIVE task on the issue refuses the delete (`INVALID_PARAMS` telling the caller
+/// to cancel the run first). Only a committed delete pushes the event.
+async fn handle_issue_delete(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::ids::IssueId;
+    use ainb_hangar_proto::events::HangarEvent;
+    use ainb_hangar_store::repo::issue::{IssueDeleteError, IssueRepo};
+
+    let params: ainb_hangar_proto::snapshots::IssueDeleteParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    IssueRepo::delete_cascade(pool, ws.as_str(), &params.issue_id)
+        .await
+        .map_err(|e| match e {
+            // An unknown id or a cross-tenant issue: reject rather than ack a
+            // delete that never happened.
+            IssueDeleteError::NotFound => {
+                invalid_params(&format!("no issue `{}` in this workspace", params.issue_id))
+            }
+            // A live run blocks the delete — surface the "cancel first" message.
+            IssueDeleteError::ActiveTasks(_) => invalid_params(&e.to_string()),
+            IssueDeleteError::Db(ref db) => store_err(db),
+        })?;
+    // A committed delete announces the removal so a subscribed issue list drops
+    // the row without a full re-pull.
+    let issue_id = IssueId::from_str(params.issue_id.as_str())
+        .map_err(|e| invalid_params(&format!("malformed issue id: {e}")))?;
+    events.emit(ws.as_str(), HangarEvent::IssueDeleted { issue_id });
+    to_value(&serde_json::json!({}))
+}
+
 /// Dispatch `hangar/issue_update` (e38.8): edit one issue's fields, push the
 /// matching `IssueUpdated` event, and answer with the refreshed row.
 ///
@@ -1558,7 +1602,7 @@ async fn handle_agent_create(
         .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
-    ainb_hangar_store::bootstrap::create_agent(
+    let created = ainb_hangar_store::bootstrap::create_agent(
         pool,
         ws.as_str(),
         name,
@@ -1567,6 +1611,22 @@ async fn handle_agent_create(
     )
     .await
     .map_err(|e| store_err(&e))?;
+    // Optional create-time token budget (0042): applied as a follow-up config
+    // write rather than widening create_agent's signature across every caller.
+    if let Some(budget) = params.token_budget {
+        let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
+            token_budget: Some(Some(budget)),
+            ..Default::default()
+        };
+        ainb_hangar_store::repo::agent::AgentRepo::update_config(
+            pool,
+            ws.as_str(),
+            &created.id,
+            &update,
+        )
+        .await
+        .map_err(|e| store_err(&e))?;
+    }
     // Answer with the refreshed roster (the same shape agents_list returns) so
     // the plugin folds the new agent into its cached list and the squad gate clears.
     let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
@@ -1623,6 +1683,7 @@ fn agent_config_update_from_params(
         cli_args: params.cli_args.clone(),
         mcp_config: field_to_nested(&params.mcp_config),
         thinking: field_to_nested(&params.thinking),
+        token_budget: field_to_nested(&params.token_budget),
         agent_env: params.agent_env.clone(),
     }
 }
@@ -2544,6 +2605,89 @@ async fn handle_board_card_run(
         mode,
         run_override,
         agent_override,
+        params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+    )
+    .await
+    .map_err(card_run_err)?;
+
+    let result = match outcome {
+        CardRunOutcome::Single {
+            task_id,
+            agent_id,
+            runtime_id,
+        } => ainb_hangar_proto::snapshots::BoardCardRunResult {
+            task_id,
+            agent_id,
+            runtime_id,
+            mode: mode.to_string(),
+            member_task_ids: Vec::new(),
+        },
+        CardRunOutcome::Squad {
+            leader_task_id,
+            leader_agent_id,
+            leader_runtime_id,
+            member_task_ids,
+        } => ainb_hangar_proto::snapshots::BoardCardRunResult {
+            task_id: leader_task_id,
+            agent_id: leader_agent_id,
+            runtime_id: leader_runtime_id,
+            mode: mode.to_string(),
+            member_task_ids,
+        },
+    };
+    to_value(&result)
+}
+
+/// `hangar/issue_run`: enqueue a run of one issue WITHOUT a board (the Issues
+/// create-wizard dispatch; plans/hangar-task-agent-model.md).
+///
+/// The board-less sibling of [`handle_board_card_run`]: same mode validation,
+/// same tenant guard, the SAME [`run_card`] launch core (refuse-run guard →
+/// squad fan-out vs single enqueue, repo REQUIRED, F4 cascade with the board
+/// tier skipped via `board_id = None`, 0042 source-branch resolve) — minus the
+/// board-membership check, so an Issues-screen task needs no user board to
+/// exist. Answers the same [`BoardCardRunResult`] shape.
+///
+/// [`BoardCardRunResult`]: ainb_hangar_proto::snapshots::BoardCardRunResult
+async fn handle_issue_run(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::agent_kind::AgentKind;
+    use ainb_hangar_store::repo::issue::IssueRepo;
+
+    let params: ainb_hangar_proto::snapshots::IssueRunParams =
+        parse_params(req, "{ workspace_id, issue_id, mode }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let mode = match params.mode.trim() {
+        "" | "headless" => "headless",
+        "interactive" => "interactive",
+        other => {
+            return Err(invalid_params(&format!(
+                "mode must be `headless` or `interactive`, got `{other}`"
+            )));
+        }
+    };
+
+    // Tenant guard: the issue must exist in this workspace.
+    let issue = IssueRepo::get_by_id(pool, &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .filter(|i| i.workspace_id == ws.as_str())
+        .ok_or_else(|| invalid_params("no issue with that id in this workspace"))?;
+
+    let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
+    let source_override = params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let outcome = run_card(
+        pool,
+        &ws,
+        None, // board-less: the F4 board tier is skipped
+        &issue,
+        mode,
+        run_override,
+        agent_override,
+        source_override,
     )
     .await
     .map_err(card_run_err)?;
@@ -2711,6 +2855,7 @@ pub(crate) async fn run_card(
     mode: &str,
     repo_override: Option<&str>,
     agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
+    source_branch_override: Option<&str>,
 ) -> Result<CardRunOutcome, CardRunError> {
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
@@ -2762,6 +2907,14 @@ pub(crate) async fn run_card(
         .map_err(CardRunError::Db)?
         .unwrap_or((None, None));
     let repo_ref = repo_override.map(str::to_string).or(card_repo).ok_or(CardRunError::NoRepo)?;
+
+    // 3b. Source branch (0042): run-time override, else the card's persisted
+    // source_branch; `None` lets provision branch off the repo's default HEAD.
+    let card_source = CardParityRepo::get_issue_branches(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?
+        .and_then(|(source, _target)| source);
+    let source_branch = source_branch_override.map(str::to_string).or(card_source);
 
     // 4. F4 agent cascade + F8 dispatchable check.
     let agent_kind = match agent_override.or(card_agent) {
@@ -2851,6 +3004,9 @@ pub(crate) async fn run_card(
             .map_err(CardRunError::Db)?;
     }
     CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
+        .await
+        .map_err(CardRunError::Db)?;
+    CardParityRepo::set_task_source_branch_in_tx(&mut tx, &task_id, source_branch.as_deref())
         .await
         .map_err(CardRunError::Db)?;
     tx.commit().await.map_err(CardRunError::Db)?;

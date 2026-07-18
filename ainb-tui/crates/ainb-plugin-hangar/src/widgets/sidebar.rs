@@ -131,6 +131,13 @@ mod tests {
             labels: Vec::new(),
             pr_url: None,
             branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         }
     }
 

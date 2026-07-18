@@ -121,6 +121,104 @@ impl IssueFieldUpdate {
     }
 }
 
+/// Counts of the dependent rows an issue delete removes — the delete summary and
+/// the CLI dry-run preview both carry this (63d).
+///
+/// The three surfaced counts are the ones a human recognises ("this issue has 2
+/// comments, 1 run, and sits on 1 board"); the internal link rows (label links,
+/// dependency edges, usage rows) cascade silently.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct IssueDeleteSummary {
+    /// Comment rows on the issue.
+    pub comments: i64,
+    /// Task rows (any lifecycle state) enqueued against the issue.
+    pub tasks: i64,
+    /// Board placements (cards) referencing the issue.
+    pub placements: i64,
+}
+
+/// A dry-run preview of an issue delete: the human title, the dependent counts,
+/// and how many tasks are ACTIVE (which would block the delete) (63d).
+///
+/// The CLI prints this without `--yes`; a non-zero [`Self::active_tasks`] means a
+/// real delete would be refused with [`IssueDeleteError::ActiveTasks`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueDeletePreview {
+    /// The issue title (for the "would delete <title>" line).
+    pub title: String,
+    /// The dependent-row counts a delete would remove.
+    pub summary: IssueDeleteSummary,
+    /// How many of the issue's tasks are ACTIVE (queued / dispatched / running);
+    /// non-zero means a delete is refused until the run is cancelled.
+    pub active_tasks: i64,
+}
+
+/// Failure modes of [`IssueRepo::delete_cascade`] (63d).
+#[derive(Debug)]
+pub enum IssueDeleteError {
+    /// No issue matched `(id, workspace_id)` — an unknown id or a foreign tenant.
+    NotFound,
+    /// One or more tasks on the issue are ACTIVE (queued / dispatched / running);
+    /// the run must be cancelled before the issue can be deleted. Carries the
+    /// active count.
+    ActiveTasks(i64),
+    /// An underlying store fault.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for IssueDeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "no issue with that id in this workspace"),
+            Self::ActiveTasks(n) => write!(
+                f,
+                "{n} active task(s) on this issue — cancel the run first, then delete"
+            ),
+            Self::Db(e) => write!(f, "store error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for IssueDeleteError {}
+
+impl From<sqlx::Error> for IssueDeleteError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Statuses that make a task ACTIVE — an issue with any active task refuses
+/// deletion. Mirrors the `agent_task_queue.status` CHECK vocabulary (migration
+/// 0004); the terminal states (`done` / `failed` / `cancelled`) do not block.
+const ACTIVE_TASK_STATUSES: &str = "SELECT COUNT(*) FROM agent_task_queue \
+     WHERE issue_id = ? AND status IN ('queued','dispatched','running')";
+
+/// Count the dependent rows a delete would remove, over any connection (the pool
+/// for a preview, or the open transaction for the cascade). Re-borrows `conn`
+/// per query so the same connection drives all three counts.
+async fn count_dependents(
+    conn: &mut sqlx::SqliteConnection,
+    issue_id: &str,
+) -> Result<IssueDeleteSummary, sqlx::Error> {
+    let comments: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM comment WHERE issue_id = ?")
+        .bind(issue_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = ?")
+        .bind(issue_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    let placements: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM board_card WHERE issue_id = ?")
+        .bind(issue_id)
+        .fetch_one(&mut *conn)
+        .await?;
+    Ok(IssueDeleteSummary {
+        comments,
+        tasks,
+        placements,
+    })
+}
+
 /// Stateless typed wrapper over the `issue` table.
 pub struct IssueRepo;
 
@@ -418,6 +516,207 @@ impl IssueRepo {
         .fetch_all(pool)
         .await?;
         rows.iter().map(issue_from_row).collect()
+    }
+
+    /// Dry-run preview of an issue delete: the title, the dependent-row counts,
+    /// and the active-task count that would block the delete (63d).
+    ///
+    /// Workspace-scoped: a `(id, workspace_id)` pair that matches no issue (an
+    /// unknown id, or one owned by another tenant) yields `Ok(None)`, so a caller
+    /// can distinguish "absent" from "present with these counts". A read only —
+    /// nothing is mutated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn delete_preview(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+    ) -> Result<Option<IssueDeletePreview>, sqlx::Error> {
+        let title: Option<String> =
+            sqlx::query_scalar("SELECT title FROM issue WHERE id = ? AND workspace_id = ?")
+                .bind(issue_id)
+                .bind(workspace_id)
+                .fetch_optional(pool)
+                .await?;
+        let Some(title) = title else {
+            return Ok(None);
+        };
+        let mut conn = pool.acquire().await?;
+        let summary = count_dependents(&mut conn, issue_id).await?;
+        let active_tasks: i64 = sqlx::query_scalar(ACTIVE_TASK_STATUSES)
+            .bind(issue_id)
+            .fetch_one(&mut *conn)
+            .await?;
+        Ok(Some(IssueDeletePreview {
+            title,
+            summary,
+            active_tasks,
+        }))
+    }
+
+    /// Delete an issue and every dependent row in one transaction, in FK order
+    /// (63d).
+    ///
+    /// Refuses (leaving everything intact) when any task on the issue is ACTIVE —
+    /// a queued / dispatched / running run must be cancelled first, so a delete
+    /// never orphans a live task. Workspace-scoped: a `(id, workspace_id)` pair
+    /// that matches no issue is [`IssueDeleteError::NotFound`] and touches nothing.
+    ///
+    /// The cascade, in dependency order under a deferred-FK transaction (so a
+    /// retry task's `parent_task_id` self-reference to a sibling task in the same
+    /// delete set never trips mid-statement):
+    ///
+    /// 1. the `inbox_entry` notifications whose `subject_id` is the issue, one of
+    ///    its comments, or one of its tasks go (resolved by subquery WHILE the
+    ///    comment/task rows still exist) — a deleted issue's notifications must
+    ///    not deep-link to nothing.
+    /// 2. `run_history.task_id` is NULLED, not deleted — cost accounting never
+    ///    shrinks; the run row survives, detached from the vanishing task.
+    /// 3. the tasks' `task_usage` rows and `task`-kind `beads_mapping` rows go.
+    /// 4. the `agent_task_queue` task rows go.
+    /// 5. the issue's `issue_label` links, `comment`s, `board_card` placements,
+    ///    `card_dependency` edges (either endpoint), and `issue`-kind
+    ///    `beads_mapping` row go.
+    /// 6. the `issue` row itself goes.
+    ///
+    /// `event_log.entity` refs are DELIBERATELY left untouched: the event log is
+    /// an append-only audit trail (same rationale as keeping `run_history`).
+    ///
+    /// Returns the [`IssueDeleteSummary`] of what fell (the counts captured before
+    /// the deletes).
+    ///
+    /// # Errors
+    ///
+    /// [`IssueDeleteError::NotFound`] (no such issue in the workspace),
+    /// [`IssueDeleteError::ActiveTasks`] (a live run blocks the delete), or
+    /// [`IssueDeleteError::Db`] on a store fault.
+    pub async fn delete_cascade(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+    ) -> Result<IssueDeleteSummary, IssueDeleteError> {
+        let mut tx = pool.begin().await?;
+
+        // Resolve the issue within its workspace; a foreign / unknown id is
+        // NotFound and rolls the (empty) transaction back on drop.
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT title FROM issue WHERE id = ? AND workspace_id = ?")
+                .bind(issue_id)
+                .bind(workspace_id)
+                .fetch_optional(&mut *tx)
+                .await?;
+        if exists.is_none() {
+            return Err(IssueDeleteError::NotFound);
+        }
+
+        // Refuse while any task is live — deleting the issue would orphan the run.
+        let active: i64 = sqlx::query_scalar(ACTIVE_TASK_STATUSES)
+            .bind(issue_id)
+            .fetch_one(&mut *tx)
+            .await?;
+        if active > 0 {
+            return Err(IssueDeleteError::ActiveTasks(active));
+        }
+
+        // Capture the summary BEFORE any delete so the counts reflect what fell.
+        let summary = count_dependents(&mut tx, issue_id).await?;
+
+        // Defer FK enforcement to commit: a retry task chains to its parent via
+        // `parent_task_id`, so a single `DELETE ... WHERE issue_id = ?` over both
+        // would trip an immediate self-FK check depending on row order. The whole
+        // graph is consistent at commit, which is all that matters. `PRAGMA
+        // defer_foreign_keys` is transaction-scoped and resets on commit.
+        sqlx::query("PRAGMA defer_foreign_keys = ON").execute(&mut *tx).await?;
+
+        // 1. Drop the issue's inbox notifications — the entries whose by-value
+        //    `subject_id` (migration 0021) is the issue itself, one of its
+        //    comments, or one of its tasks. MUST run while the comment/task rows
+        //    still exist (the subqueries resolve their ids), and is workspace-
+        //    scoped for hygiene. `event_log.entity` is deliberately NOT cleaned:
+        //    the event log is an append-only audit trail (same rationale as
+        //    keeping `run_history` below).
+        sqlx::query(
+            "DELETE FROM inbox_entry \
+             WHERE workspace_id = ?2 \
+               AND (subject_id = ?1 \
+                    OR subject_id IN (SELECT id FROM comment WHERE issue_id = ?1) \
+                    OR subject_id IN (SELECT id FROM agent_task_queue WHERE issue_id = ?1))",
+        )
+        .bind(issue_id)
+        .bind(workspace_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 2. Preserve cost history: null the link from surviving run rows to the
+        //    tasks about to vanish (run_history.task_id is a nullable FK).
+        sqlx::query(
+            "UPDATE run_history SET task_id = NULL \
+             WHERE task_id IN (SELECT id FROM agent_task_queue WHERE issue_id = ?)",
+        )
+        .bind(issue_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 3. The tasks' children: usage rows (FK) + task-kind beads correlations.
+        sqlx::query(
+            "DELETE FROM beads_mapping \
+             WHERE hangar_kind = 'task' \
+               AND hangar_id IN (SELECT id FROM agent_task_queue WHERE issue_id = ?)",
+        )
+        .bind(issue_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query(
+            "DELETE FROM task_usage \
+             WHERE task_id IN (SELECT id FROM agent_task_queue WHERE issue_id = ?)",
+        )
+        .bind(issue_id)
+        .execute(&mut *tx)
+        .await?;
+
+        // 4. The task rows themselves.
+        sqlx::query("DELETE FROM agent_task_queue WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // 5. The issue's directly-linked rows.
+        sqlx::query("DELETE FROM issue_label WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM comment WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM board_card WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query(
+            "DELETE FROM card_dependency \
+             WHERE dependent_issue_id = ? OR blocker_issue_id = ?",
+        )
+        .bind(issue_id)
+        .bind(issue_id)
+        .execute(&mut *tx)
+        .await?;
+        sqlx::query("DELETE FROM beads_mapping WHERE hangar_kind = 'issue' AND hangar_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+
+        // 6. The issue row (workspace-scoped again, belt-and-braces).
+        sqlx::query("DELETE FROM issue WHERE id = ? AND workspace_id = ?")
+            .bind(issue_id)
+            .bind(workspace_id)
+            .execute(&mut *tx)
+            .await?;
+
+        tx.commit().await?;
+        Ok(summary)
     }
 }
 

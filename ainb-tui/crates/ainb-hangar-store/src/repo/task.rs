@@ -148,6 +148,12 @@ pub struct Task {
     /// [`NewTask::generation`]. Carried on the struct so the infra-retry path
     /// copies it verbatim (a retry is a new attempt of the SAME run generation).
     pub generation: i64,
+    /// The SOURCE branch this run branches FROM (migration 0042); `None`
+    /// resolves to `main` at dispatch. Distinct from [`Self::branch`], the
+    /// PRODUCED `ainb/<slug>` output recorded post-run. Written at enqueue via
+    /// [`super::card_parity::CardParityRepo::set_task_source_branch_in_tx`],
+    /// read back here so dispatch provisions from the claimed row.
+    pub source_branch: Option<String>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
@@ -536,7 +542,7 @@ impl TaskRepo {
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
      priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
-     mode, session_name, repo_ref, agent_kind, branch, generation";
+     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -566,6 +572,7 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         agent_kind: row.try_get("agent_kind")?,
         branch: row.try_get("branch")?,
         generation: row.try_get("generation")?,
+        source_branch: row.try_get("source_branch")?,
     })
 }
 

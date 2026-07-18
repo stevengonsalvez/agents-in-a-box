@@ -310,6 +310,7 @@ pub async fn create_agent(
         thinking: None,
         agent_env: Vec::new(),
         provider: Some(provider.to_string()),
+        token_budget: None,
     };
     AgentRepo::insert(pool, &agent).await?;
     Ok(agent)

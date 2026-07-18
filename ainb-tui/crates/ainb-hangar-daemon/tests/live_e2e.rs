@@ -437,6 +437,175 @@ async fn live_dispatch_codex_writes_nonce_artifact() {
 ///
 /// # Mutation self-check
 ///
+/// The remote-repo + source-branch leg (0042, plans/hangar-task-agent-model.md
+/// P3): the REAL daemon clones a REMOTE (`file://` bare) repo, provisions the
+/// run's worktree off a NON-default `feature/x` source branch, and the REAL
+/// claude writes the nonce INTO that worktree.
+///
+/// The assertion ladder, side-effects first:
+///   1. a sentinel file that exists ONLY on `feature/x` is present in the
+///      recorded work_dir → the worktree is based on the chosen source, not the
+///      remote's default HEAD (the exact 0042 claim);
+///   2. the default branch's HEAD-only file is ABSENT → not merely a superset;
+///   3. the nonce artifact → the agent genuinely worked in that tree;
+///   4. only then task=done.
+///
+/// Mutation-proof: `LIVE_E2E_BREAK_SOURCE_BRANCH=1` drops `--source-branch`
+/// from the enqueue, so the worktree lands on the remote's default branch and
+/// assertion 1 goes RED — proving this leg detects a wrong-base dispatch.
+#[tokio::test]
+async fn live_dispatch_remote_repo_source_branch() {
+    let Some(ainb) = ainb_bin() else {
+        eprintln!("SKIPPED: ainb binary not built (run `cargo build -p ainb --bin ainb`)");
+        return;
+    };
+    let Some(claude) = real_claude() else {
+        eprintln!("SKIPPED: no authenticated claude on PATH");
+        return;
+    };
+    if !claude_alive(&claude) {
+        eprintln!("SKIPPED: no authenticated claude on PATH");
+        return;
+    }
+
+    let tag = format!("{}-{}", std::process::id(), now_ms());
+    let nonce = format!("HANGAR-LIVE-NONCE-{tag}");
+    let agent_name = format!("live-e2e-branch-{tag}");
+    let home = tempfile::tempdir().expect("tempdir home");
+    let db_path = home.path().join("hangar.db");
+
+    // Build the REMOTE: a bare repo whose default branch holds `head-only.txt`
+    // and whose `feature/x` branch holds `feature-sentinel.txt` instead.
+    let remote_dir = tempfile::tempdir().expect("tempdir remote");
+    let remote_url = make_branchy_bare_remote(remote_dir.path());
+
+    run_ainb(
+        &ainb,
+        home.path(),
+        &["hangar", "agent", "create", "--name", &agent_name, "--provider", "claude"],
+    );
+    let pool = open_pool(&db_path).await;
+    let (agent_id, runtime_id) = agent_ids_by_name(&pool, &agent_name).await;
+    run_ainb(
+        &ainb,
+        home.path(),
+        &["hangar", "agent", "edit", &agent_id, "--model", "haiku"],
+    );
+
+    let daemon = LiveDaemon::spawn(&home.path().join("daemon.log"), home.path(), &runtime_id, &claude);
+
+    // Enqueue with the REMOTE repo + the feature source branch. The CLI clones
+    // the remote into the shared cache and persists the LOCAL path + the branch
+    // onto the issue AND the task row (one tx with the enqueue).
+    let brief = format!(
+        "Use the Bash tool to run exactly this one shell command and nothing else: \
+         printf '%s' '{nonce}' > {ARTIFACT_NAME}  \
+         Do not use the Write tool. Once the command has run, stop."
+    );
+    let break_source = std::env::var_os("LIVE_E2E_BREAK_SOURCE_BRANCH").is_some();
+    if break_source {
+        eprintln!(
+            "MUTATION: LIVE_E2E_BREAK_SOURCE_BRANCH set — enqueue omits --source-branch, so \
+             the worktree lands on the remote's default branch and the sentinel assert goes RED"
+        );
+    }
+    let mut args: Vec<&str> = vec![
+        "hangar", "issue", "create", "--title", &brief, "--assign", &agent_id, "--repo",
+        &remote_url,
+    ];
+    if !break_source {
+        args.extend_from_slice(&["--source-branch", "feature/x"]);
+    }
+    let stdout = run_ainb_capture(&ainb, home.path(), &args);
+    let task_id = parse_queued_task_id(&stdout);
+
+    let row = wait_for_terminal(&pool, &task_id, TASK_BUDGET, home.path()).await;
+    let status: String = row.get("status");
+    drop(daemon);
+
+    let work_dir: Option<String> = row.get("work_dir");
+    let work_dir = work_dir.unwrap_or_else(|| {
+        panic!(
+            "task {task_id} reached status={status} but recorded NO work_dir. daemon log:\n{}",
+            read_log(home.path())
+        )
+    });
+    let wd = Path::new(&work_dir);
+
+    // 1+2. THE source-branch assertion, before anything else: the worktree must
+    // hold feature/x's tree, not the default branch's.
+    assert!(
+        wd.join("feature-sentinel.txt").exists(),
+        "SOURCE-BRANCH VIOLATION: the worktree at {wd:?} lacks feature/x's sentinel — \
+         the run was based on the WRONG branch (status={status}). daemon log:\n{}",
+        read_log(home.path())
+    );
+    assert!(
+        !wd.join("head-only.txt").exists(),
+        "the worktree holds the default branch's HEAD-only file — it is NOT feature/x's tree"
+    );
+
+    // 3. The agent's own artifact in that same tree.
+    let artifact = wd.join(ARTIFACT_NAME);
+    let got = std::fs::read_to_string(&artifact).unwrap_or_else(|e| {
+        panic!(
+            "NONCE ARTIFACT MISSING at {artifact:?} ({e}); status={status}. daemon log:\n{}",
+            read_log(home.path())
+        )
+    });
+    assert_eq!(got.trim(), nonce, "artifact exists but nonce mismatch");
+
+    // 4. Only now is `done` trustworthy.
+    assert_eq!(status, "done", "sentinel + nonce present but status={status:?}, not done");
+
+    eprintln!(
+        "LIVE E2E BRANCH OK: task {task_id} done; worktree on feature/x verified at {wd:?}; \
+         nonce verified; remote clone + source-branch dispatch proven"
+    );
+}
+
+/// Build a bare "remote" with a default branch carrying `head-only.txt` and a
+/// `feature/x` branch carrying `feature-sentinel.txt` instead, returning its
+/// `file://` URL (so the CLI treats it as a REMOTE and exercises ensure_clone).
+fn make_branchy_bare_remote(dir: &Path) -> String {
+    let work = dir.join("work");
+    std::fs::create_dir_all(&work).expect("mk work");
+    let git = |args: &[&str]| {
+        let out = Command::new("git").arg("-C").arg(&work).args(args).output().expect("git");
+        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+    };
+    git(&["init", "--quiet"]);
+    git(&["config", "user.email", "t@e.com"]);
+    git(&["config", "user.name", "t"]);
+    std::fs::write(work.join("README.md"), "base").expect("write");
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "base"]);
+    // feature/x forks BEFORE the default branch gains its HEAD-only file.
+    git(&["branch", "feature/x"]);
+    std::fs::write(work.join("head-only.txt"), "on-default").expect("write");
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "default work"]);
+    git(&["switch", "--quiet", "feature/x"]);
+    std::fs::write(work.join("feature-sentinel.txt"), "on-feature").expect("write");
+    git(&["add", "."]);
+    git(&["commit", "--quiet", "-m", "feature work"]);
+    git(&["switch", "--quiet", "-"]);
+
+    let bare = dir.join("remote.git");
+    let out = Command::new("git")
+        .args([
+            "clone",
+            "--quiet",
+            "--bare",
+            work.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ])
+        .output()
+        .expect("bare clone");
+    assert!(out.status.success(), "bare clone: {}", String::from_utf8_lossy(&out.stderr));
+    format!("file://{}", bare.display())
+}
+
 /// Revert the finalize-on-structured-result change in `runner::run_provider`
 /// (the `match terminal { … }` block) and this task reaches `done` — the exit-0
 /// fallback scores it `Success` — turning the `failed` + `iteration_limit`
