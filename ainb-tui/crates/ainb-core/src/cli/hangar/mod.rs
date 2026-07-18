@@ -930,9 +930,32 @@ pub enum IssueCommand {
     Show(IssueShowArgs),
     /// Edit an existing issue's state, assignee, priority, or due date.
     Update(IssueUpdateArgs),
+    /// Delete an issue and all its history (dry-run without `--yes`).
+    Delete(IssueDeleteArgs),
     /// Attach or detach a label on an issue.
     #[command(subcommand)]
     Label(IssueLabelCommand),
+}
+
+/// Arguments for `hangar issue delete`.
+///
+/// Without `--yes` this is a DRY RUN: it prints the issue title and the counts of
+/// what a real delete would remove (comments / tasks / placements) and exits
+/// WITHOUT deleting. Pass `--yes` to actually perform the cascade. The delete is
+/// workspace-scoped and refuses while any task on the issue is ACTIVE (cancel the
+/// run first), exactly like the `hangar/issue_delete` daemon RPC.
+#[derive(Args, Debug)]
+pub struct IssueDeleteArgs {
+    /// Issue id (ULID) to delete.
+    pub id: String,
+    /// Actually perform the delete. Without this flag the command only PREVIEWS
+    /// what would be removed and exits without touching the database.
+    #[arg(long)]
+    pub yes: bool,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar issue label <verb>`.
@@ -2621,7 +2644,64 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Search(args) => run_issue_search(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
+        IssueCommand::Delete(args) => run_issue_delete(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
+    }
+}
+
+/// `hangar issue delete`: preview (default) or perform an issue delete,
+/// workspace-scoped and daemon-less.
+///
+/// Resolves the workspace the same way the other verbs do (`--workspace`, else the
+/// bootstrapped `default`). Without `--yes` it prints the [`IssueDeletePreview`]
+/// (title + dependent counts + active-task warning) and exits without deleting;
+/// with `--yes` it drives the store's single-transaction
+/// [`IssueRepo::delete_cascade`], refusing on an active task exactly like the
+/// daemon RPC. An unknown / foreign-tenant id is a not-found error, never a silent
+/// no-op.
+async fn run_issue_delete(store: &Store, args: IssueDeleteArgs) -> Result<()> {
+    use ainb_hangar_store::repo::issue::{IssueDeleteError, IssueRepo};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    let Some(preview) = IssueRepo::delete_preview(store.pool(), &workspace_id, &args.id)
+        .await
+        .with_context(|| format!("preview delete of issue {}", args.id))?
+    else {
+        anyhow::bail!("no issue with id {} in this workspace", args.id);
+    };
+
+    if !args.yes {
+        // DRY RUN: report what a real delete would remove and exit untouched.
+        println!("would delete issue {} \"{}\"", args.id, preview.title);
+        println!(
+            "  removes: {} comment(s), {} task(s), {} board placement(s), plus label links, dependency edges, and usage rows",
+            preview.summary.comments, preview.summary.tasks, preview.summary.placements
+        );
+        if preview.active_tasks > 0 {
+            println!(
+                "  WARNING: {} active task(s) — cancel the run first, then re-run with --yes",
+                preview.active_tasks
+            );
+        } else {
+            println!("  re-run with --yes to perform the delete");
+        }
+        return Ok(());
+    }
+
+    match IssueRepo::delete_cascade(store.pool(), &workspace_id, &args.id).await {
+        Ok(summary) => {
+            println!(
+                "deleted issue {} \"{}\" ({} comment(s), {} task(s), {} placement(s))",
+                args.id, preview.title, summary.comments, summary.tasks, summary.placements
+            );
+            Ok(())
+        }
+        Err(IssueDeleteError::NotFound) => {
+            anyhow::bail!("no issue with id {} in this workspace", args.id)
+        }
+        Err(e @ IssueDeleteError::ActiveTasks(_)) => anyhow::bail!("{e}"),
+        Err(IssueDeleteError::Db(e)) => Err(e).with_context(|| format!("delete issue {}", args.id)),
     }
 }
 

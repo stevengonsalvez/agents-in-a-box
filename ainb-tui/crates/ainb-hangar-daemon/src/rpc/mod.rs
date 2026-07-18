@@ -650,6 +650,7 @@ async fn handle(
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
+        methods::HANGAR_ISSUE_DELETE => handle_issue_delete(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
@@ -1247,6 +1248,48 @@ async fn handle_issue_create(
     // A committed insert announces the new issue to subscribers.
     events.emit(ws.as_str(), HangarEvent::IssueCreated(row.clone()));
     to_value(&row)
+}
+
+/// Dispatch `hangar/issue_delete` (63d): delete one issue and all its history,
+/// push the matching `IssueDeleted` event, and answer with `{}`.
+///
+/// Mirrors [`handle_issue_update`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS`, then drives the
+/// store's single-transaction cascade. A `(id, workspace)` pair that matches no
+/// issue is rejected as a not-found error (never a cross-tenant delete), and an
+/// ACTIVE task on the issue refuses the delete (`INVALID_PARAMS` telling the caller
+/// to cancel the run first). Only a committed delete pushes the event.
+async fn handle_issue_delete(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::ids::IssueId;
+    use ainb_hangar_proto::events::HangarEvent;
+    use ainb_hangar_store::repo::issue::{IssueDeleteError, IssueRepo};
+
+    let params: ainb_hangar_proto::snapshots::IssueDeleteParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    IssueRepo::delete_cascade(pool, ws.as_str(), &params.issue_id)
+        .await
+        .map_err(|e| match e {
+            // An unknown id or a cross-tenant issue: reject rather than ack a
+            // delete that never happened.
+            IssueDeleteError::NotFound => {
+                invalid_params(&format!("no issue `{}` in this workspace", params.issue_id))
+            }
+            // A live run blocks the delete — surface the "cancel first" message.
+            IssueDeleteError::ActiveTasks(_) => invalid_params(&e.to_string()),
+            IssueDeleteError::Db(ref db) => store_err(db),
+        })?;
+    // A committed delete announces the removal so a subscribed issue list drops
+    // the row without a full re-pull.
+    let issue_id = IssueId::from_str(params.issue_id.as_str())
+        .map_err(|e| invalid_params(&format!("malformed issue id: {e}")))?;
+    events.emit(ws.as_str(), HangarEvent::IssueDeleted { issue_id });
+    to_value(&serde_json::json!({}))
 }
 
 /// Dispatch `hangar/issue_update` (e38.8): edit one issue's fields, push the

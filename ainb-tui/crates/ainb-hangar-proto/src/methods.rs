@@ -199,6 +199,26 @@ pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 /// list re-renders the new row without re-pulling the whole snapshot.
 pub const HANGAR_ISSUE_CREATE: &str = "hangar/issue_create";
 
+/// `hangar/issue_delete` — delete one issue and all its history (63d).
+///
+/// Params: [`crate::snapshots::IssueDeleteParams`] (`{ workspace_id, issue_id }`).
+/// Result: `{}`. Cascades the issue's dependent rows in one store transaction
+/// ([`ainb_hangar_store::repo::issue::IssueRepo::delete_cascade`]): comments,
+/// board placements, label links, dependency edges, terminal tasks (+ their usage
+/// rows), while `run_history` survives with its task link nulled (cost accounting
+/// never shrinks).
+///
+/// **Refuses while any task is ACTIVE** (`queued` / `dispatched` / `running`) with
+/// an `INVALID_PARAMS` telling the caller to cancel the run first — a delete never
+/// orphans a live task. Mutating + workspace-scoped, mirroring
+/// [`HANGAR_ISSUE_UPDATE`]: the daemon resolves the workspace and rejects a
+/// mistyped one with `INVALID_PARAMS`, and an issue id owned by another tenant
+/// resolves to no row (a not-found rejection, never a cross-tenant delete). After
+/// a committed delete the daemon pushes the matching
+/// [`crate::events::HangarEvent::IssueDeleted`] so a subscribed issue list drops
+/// the row without a full re-pull.
+pub const HANGAR_ISSUE_DELETE: &str = "hangar/issue_delete";
+
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
 /// screen's create-wizard dispatch; plans/hangar-task-agent-model.md).
 ///
@@ -1018,6 +1038,8 @@ pub const ALL_METHODS: &[&str] = &[
     // Agent create-from-scratch (fresh-home bootstrap), likewise appended.
     HANGAR_AGENT_CREATE,
     HANGAR_DAEMON_CONFIG_LIST,
+    // Issue delete (63d) is APPENDED at the catalogue tail — append-only wire.
+    HANGAR_ISSUE_DELETE,
 ];
 
 #[cfg(test)]
@@ -1121,6 +1143,7 @@ mod tests {
             HANGAR_SQUAD_FANOUT,
             HANGAR_RUN_HISTORY,
             HANGAR_AGENT_CREATE,
+            HANGAR_ISSUE_DELETE,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
         }
@@ -1214,6 +1237,7 @@ mod tests {
             HANGAR_DAEMON_CONFIG_SET,
             HANGAR_AGENT_CREATE,
             HANGAR_DAEMON_CONFIG_LIST,
+            HANGAR_ISSUE_DELETE,
         ];
         for m in declared {
             assert!(

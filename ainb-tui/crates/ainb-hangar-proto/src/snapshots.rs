@@ -1634,6 +1634,20 @@ pub struct IssueRunParams {
     pub source_branch: Option<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_DELETE`] (63d): delete one issue and
+/// all its history from a workspace.
+///
+/// Workspace-scoped like every mutation: the daemon rejects a mistyped
+/// `workspace_id` with `INVALID_PARAMS`, and an `issue_id` owned by another tenant
+/// resolves to no row (also rejected, never a cross-tenant delete).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueDeleteParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to delete.
+    pub issue_id: String,
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6, D16): launch a
 /// card's issue on its assignee profile now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2020,6 +2034,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
