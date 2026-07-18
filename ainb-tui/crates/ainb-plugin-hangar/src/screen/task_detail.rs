@@ -69,6 +69,16 @@ const STATUS_AMBER: Color = Color::rgb(230, 190, 90);
 /// Cornflower-blue for the run's branch line (tcp T2, agents-in-a-box-ch3) —
 /// distinct from the gold PR badge so the two artifacts never read as one.
 const BRANCH_COLOR: Color = Color::rgb(100, 149, 237);
+/// Cornflower-blue for the detail-card border (63d; the style-guide border hue).
+const CARD_BORDER: Color = Color::rgb(100, 149, 237);
+/// Gold for the detail-card title (63d; the style-guide title/CTA gold).
+const CARD_TITLE: Color = Color::rgb(255, 215, 0);
+/// Soft white for the detail-card field VALUES (63d; the style-guide body ink).
+const CARD_VALUE: Color = Color::rgb(220, 220, 230);
+/// Muted gray for the detail-card field LABELS (63d; the style-guide muted hue).
+const CARD_LABEL: Color = Color::rgb(120, 120, 140);
+/// The em-dash placeholder painted for an unset card field (63d).
+const CARD_UNSET: &str = "—";
 /// The leading glyph + label painted before the branch name (`⎇ branch `).
 const BRANCH_PREFIX: &str = "⎇ branch ";
 /// Accent for the comment-compose input bar (a calm emerald, distinct from the
@@ -665,12 +675,17 @@ pub fn render_task_detail(
     bottom: u16,
     state: &TaskDetailState,
 ) {
-    // The PR badge (P9.2) takes the first row of the whole area when present,
+    // 63d: the issue DETAIL CARD spans the top of the area, so even a never-run
+    // issue reads as a real card. The PR badge / branch / transcript start on the
+    // first row BELOW it (+ its optional `Runs:` line).
+    let card_bottom = render_detail_card(buf, area_w, top, bottom, state.issue());
+
+    // The PR badge (P9.2) takes the first row below the card when present,
     // pushing the transcript + sidebar down one row. When absent there is NO
     // badge row at all (the layout shifts up) — never a `PR: none` placeholder.
-    let mut body_top = state.pr_url().map_or(top, |url| {
-        render_pr_badge(buf, area_w, top, url, state.pr_status());
-        top.saturating_add(1)
+    let mut body_top = state.pr_url().map_or(card_bottom, |url| {
+        render_pr_badge(buf, area_w, card_bottom, url, state.pr_status());
+        card_bottom.saturating_add(1)
     });
 
     // The run's branch line (tcp T2, agents-in-a-box-ch3) sits right under the PR
@@ -808,6 +823,312 @@ fn put_clipped(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, ri
     cx
 }
 
+/// Render the issue DETAIL CARD at the top of the task-detail screen (63d): a
+/// cornflower-bordered box carrying the issue's status / priority / created /
+/// assignee / agent / repo / branches / labels / description, so a never-run
+/// issue reads as a real card instead of an almost-empty page. Returns the first
+/// row BELOW the card (+ its optional `Runs:` history line) — the caller starts
+/// the PR badge / branch / transcript there.
+///
+/// Width-aware: every value is clipped by **chars** (never bytes — the utf8
+/// truncate trap this file documents), and the description wraps to the inner
+/// width, capped so the card always leaves room for the transcript below.
+///
+/// HEIGHT CONTRACT: the card budgets itself to `available - RESERVED_BELOW`
+/// (badge + branch + a minimum transcript region) and paints nothing (returns
+/// `top` unchanged) when that budget cannot fit a legible card — a short
+/// viewport (e.g. the 8-row snapshot panes) keeps the pre-card layout intact,
+/// with the PR badge / branch / transcript exactly where they always were.
+fn render_detail_card(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    top: u16,
+    bottom: u16,
+    issue: &IssueRow,
+) -> u16 {
+    let card_w = area_w;
+    let available = bottom.saturating_sub(top);
+
+    // The rows the card must LEAVE BELOW itself: the PR badge (1) + branch line
+    // (1) + a minimum legible transcript region (4). The card's whole budget is
+    // what remains after this reservation — the transcript feed is the screen's
+    // job, the card is context, so the card yields, never the feed.
+    const RESERVED_BELOW: u16 = 6;
+    // The card's fixed chrome: top border + 4 field rows + divider + bottom
+    // border = 7 rows; the description adds ≥1 more, a run history line 1 more.
+    const CARD_FIXED_ROWS: u16 = 7;
+    /// The description never exceeds this many wrapped lines, so even a tall
+    /// viewport keeps the card compact (≈40% of a 30-row pane at worst).
+    const DESC_MAX_LINES: u16 = 4;
+
+    let runs_line = issue.run_count > 0;
+    let runs_rows = u16::from(runs_line);
+    let budget = available.saturating_sub(RESERVED_BELOW);
+    let min_needed = CARD_FIXED_ROWS + 1 + runs_rows;
+    // Too narrow, or the viewport can't fit a legible card AND the reserved
+    // badge/branch/transcript region — skip the card entirely (the pre-card
+    // layout), never squeeze the transcript out.
+    if card_w < 16 || budget < min_needed {
+        return top;
+    }
+    let inner_right = card_w.saturating_sub(2); // content clip column (exclusive)
+
+    // Wrap the description (or the "no description" placeholder) to the inner
+    // width, capped to the row budget left after the fixed chrome + runs line —
+    // and to DESC_MAX_LINES absolutely — so the card never eats the transcript.
+    let inner_w = card_w.saturating_sub(4).max(1) as usize;
+    let desc_text = issue.description.as_deref().unwrap_or("no description");
+    let desc_budget = budget
+        .saturating_sub(CARD_FIXED_ROWS)
+        .saturating_sub(runs_rows)
+        .clamp(1, DESC_MAX_LINES) as usize;
+    let desc_lines = wrap_chars(desc_text, inner_w, desc_budget);
+    let mut row = top;
+
+    // --- top border with the gold title overlaid ---
+    draw_card_hline(buf, row, card_w, '╭', '╮');
+    let title = match &issue.display_id {
+        Some(d) => format!(" 📋 {} · {}", d, issue.title),
+        None => format!(" 📋 {}", issue.title),
+    };
+    put_clipped(buf, 2, row, &title, CARD_TITLE, inner_right);
+    row = row.saturating_add(1);
+
+    // --- Status / Priority / Created ---
+    card_field_row(
+        buf,
+        card_w,
+        row,
+        &[
+            ("Status: ", CARD_LABEL),
+            (&issue.state, CARD_VALUE),
+            ("   Priority: ", CARD_LABEL),
+            (&priority_p_label(issue.priority), CARD_VALUE),
+            ("   Created: ", CARD_LABEL),
+            (&fmt_card_date(issue.created_at), CARD_VALUE),
+        ],
+    );
+    row = row.saturating_add(1);
+
+    // --- Assignee / Agent ---
+    let assignee = issue.assignee.as_deref().unwrap_or("unassigned");
+    let agent = issue.agent.as_deref().unwrap_or(CARD_UNSET);
+    card_field_row(
+        buf,
+        card_w,
+        row,
+        &[
+            ("Assignee: ", CARD_LABEL),
+            (assignee, CARD_VALUE),
+            ("   Agent: ", CARD_LABEL),
+            (agent, CARD_VALUE),
+        ],
+    );
+    row = row.saturating_add(1);
+
+    // --- Repo / Source → Target ---
+    let repo = issue.repo_ref.as_deref().unwrap_or(CARD_UNSET);
+    let source = issue.source_branch.as_deref().unwrap_or(CARD_UNSET);
+    let target = issue.target_branch.as_deref().unwrap_or(CARD_UNSET);
+    card_field_row(
+        buf,
+        card_w,
+        row,
+        &[
+            ("Repo: ", CARD_LABEL),
+            (repo, CARD_VALUE),
+            ("   Source: ", CARD_LABEL),
+            (source, CARD_VALUE),
+            (" → Target: ", CARD_LABEL),
+            (target, CARD_VALUE),
+        ],
+    );
+    row = row.saturating_add(1);
+
+    // --- Labels ---
+    let labels = if issue.labels.is_empty() {
+        CARD_UNSET.to_string()
+    } else {
+        issue.labels.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ")
+    };
+    card_field_row(
+        buf,
+        card_w,
+        row,
+        &[("Labels: ", CARD_LABEL), (&labels, CARD_VALUE)],
+    );
+    row = row.saturating_add(1);
+
+    // --- divider ---
+    draw_card_divider(buf, row, card_w);
+    row = row.saturating_add(1);
+
+    // --- description (wrapped) ---
+    for line in &desc_lines {
+        card_field_row(buf, card_w, row, &[(line, CARD_VALUE)]);
+        row = row.saturating_add(1);
+    }
+
+    // --- bottom border ---
+    draw_card_hline(buf, row, card_w, '╰', '╯');
+    row = row.saturating_add(1);
+
+    // --- Runs history line (below the card, only when the issue has run) ---
+    if runs_line {
+        let when = issue.last_run_at.map(fmt_card_date);
+        let runs = match (&issue.last_run_status, when) {
+            (Some(status), Some(w)) => {
+                format!("  Runs: {} (last: {status} {w})", issue.run_count)
+            }
+            (Some(status), None) => format!("  Runs: {} (last: {status})", issue.run_count),
+            _ => format!("  Runs: {}", issue.run_count),
+        };
+        put_clipped(buf, 0, row, &runs, CARD_LABEL, card_w);
+        row = row.saturating_add(1);
+    }
+
+    row
+}
+
+/// Draw a card horizontal border row (top or bottom) spanning the full width,
+/// with the given corner glyphs, in the cornflower border colour (63d).
+fn draw_card_hline(buf: &mut WireBuffer, row: u16, card_w: u16, left: char, right: char) {
+    let mut s = String::new();
+    s.push(left);
+    for _ in 1..card_w.saturating_sub(1) {
+        s.push('─');
+    }
+    if card_w >= 2 {
+        s.push(right);
+    }
+    put_clipped(buf, 0, row, &s, CARD_BORDER, card_w);
+}
+
+/// Draw the card's inner divider row: `│` edges with a dashed fill between (63d).
+fn draw_card_divider(buf: &mut WireBuffer, row: u16, card_w: u16) {
+    let mut s = String::new();
+    s.push('│');
+    for _ in 1..card_w.saturating_sub(1) {
+        s.push('─');
+    }
+    if card_w >= 2 {
+        s.push('│');
+    }
+    put_clipped(buf, 0, row, &s, CARD_BORDER, card_w);
+}
+
+/// Draw one card content row: the `│` left+right edges in the border colour, then
+/// the label/value `segments` laid out left-to-right from the inner column,
+/// clipped by **chars** at the right edge (63d, utf8-safe).
+fn card_field_row(buf: &mut WireBuffer, card_w: u16, row: u16, segments: &[(&str, Color)]) {
+    let inner_right = card_w.saturating_sub(2);
+    // Edges first; the content overlays the interior between them.
+    put_clipped(buf, 0, row, "│", CARD_BORDER, card_w);
+    put_clipped(buf, card_w.saturating_sub(1), row, "│", CARD_BORDER, card_w);
+    let mut cx = 2u16;
+    for (text, color) in segments {
+        if cx >= inner_right {
+            break;
+        }
+        cx = put_clipped(buf, cx, row, text, *color, inner_right);
+    }
+}
+
+/// Wrap `text` into at most `max_lines` lines of at most `width` CHARS each
+/// (utf8-safe — never a byte slice). Greedy word wrap, hard-splitting a word
+/// longer than `width`; the last line is ellipsised when the text overflows the
+/// cap so a huge description never blows past the card.
+fn wrap_chars(text: &str, width: usize, max_lines: usize) -> Vec<String> {
+    if width == 0 || max_lines == 0 {
+        return Vec::new();
+    }
+    let mut lines: Vec<String> = Vec::new();
+    let mut current = String::new();
+    let mut current_len = 0usize;
+    for word in text.split_whitespace() {
+        let word_len = word.chars().count();
+        // A word longer than the line width is hard-split across lines.
+        if word_len > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+                current_len = 0;
+            }
+            for ch in word.chars() {
+                if current_len == width {
+                    lines.push(std::mem::take(&mut current));
+                    current_len = 0;
+                }
+                current.push(ch);
+                current_len += 1;
+            }
+            continue;
+        }
+        let sep = usize::from(!current.is_empty());
+        if current_len + sep + word_len > width {
+            lines.push(std::mem::take(&mut current));
+            current_len = 0;
+        }
+        if !current.is_empty() {
+            current.push(' ');
+            current_len += 1;
+        }
+        current.push_str(word);
+        current_len += word_len;
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        lines.push(String::new());
+    }
+    // Cap to max_lines, ellipsising the last kept line when we drop content.
+    if lines.len() > max_lines {
+        lines.truncate(max_lines);
+        if let Some(last) = lines.last_mut() {
+            let mut chars: Vec<char> = last.chars().collect();
+            if chars.len() >= width && width >= 1 {
+                chars.truncate(width.saturating_sub(1));
+            }
+            chars.push('…');
+            *last = chars.into_iter().collect();
+        }
+    }
+    lines
+}
+
+/// The `P0..P3` label for a wire priority scalar (63d). The scale is `0..3` with
+/// HIGHER = MORE URGENT (`3` = P0 urgent, `0` = P3 routine, the default), so the
+/// P-number is `3 - priority`.
+fn priority_p_label(priority: i64) -> String {
+    format!("P{}", 3 - priority.clamp(0, 3))
+}
+
+/// Format an epoch-millisecond timestamp as a UTC `YYYY-MM-DD` for the card
+/// (63d). Chrono is a dev-only dep here, so the civil date is derived with
+/// Hinnant's `days_from_civil` inverse — a pure, allocation-free conversion.
+fn fmt_card_date(ms: i64) -> String {
+    let days = ms.div_euclid(86_400_000);
+    let (y, m, d) = civil_from_days(days);
+    format!("{y:04}-{m:02}-{d:02}")
+}
+
+/// The inverse of Howard Hinnant's `days_from_civil`: map a day count since the
+/// Unix epoch (1970-01-01) to a proleptic-Gregorian `(year, month, day)` in UTC.
+/// Exact for the whole i64 range; no leap-second / timezone handling (a calendar
+/// date is all the card shows).
+fn civil_from_days(z: i64) -> (i64, u32, u32) {
+    let z = z + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32; // [1, 12]
+    (if m <= 2 { y + 1 } else { y }, m, d)
+}
+
 /// Convenience accessor re-exporting the transcript glyph for a [`MessageKind`]
 /// so call sites (and tests) can reach the taxonomy mapping without importing the
 /// widget module directly.
@@ -820,4 +1141,196 @@ pub const fn glyph_for(kind: MessageKind) -> char {
 #[must_use]
 pub const fn color_for(kind: MessageKind) -> ainb_plugin_sdk::Color {
     transcript_color(kind)
+}
+
+#[cfg(test)]
+mod card_tests {
+    use super::*;
+    use ainb_hangar_core::ids::{IssueId, TaskId};
+    use ainb_plugin_sdk::WireBuffer;
+
+    /// Reconstruct the full painted text of a rendered buffer (row-major) so a
+    /// render assertion can search for the card's labels / values.
+    fn painted_text(buf: &WireBuffer) -> String {
+        let mut out = String::new();
+        for y in 0..buf.height {
+            for (coord, cell) in &buf.cells {
+                if coord.y == y {
+                    out.push_str(&cell.symbol);
+                }
+            }
+        }
+        out
+    }
+
+    /// A fully-populated issue row for the card render assertions (63d).
+    fn full_issue() -> IssueRow {
+        IssueRow {
+            id: IssueId::from_str("i1").unwrap(),
+            display_id: Some("HGR-1".into()),
+            workspace_id: "ws".into(),
+            title: "Fix the widget".into(),
+            description: Some("The widget breaks on resize.".into()),
+            state: "todo".into(),
+            assignee: Some("agent:alice".into()),
+            creator: "member:me".into(),
+            created_at: 1_700_000_000_000,
+            priority: 1,
+            due_date: None,
+            labels: vec!["bug".into(), "p0".into()],
+            pr_url: None,
+            branch: None,
+            repo_ref: Some("/repos/widget".into()),
+            agent: Some("codex".into()),
+            source_branch: Some("main".into()),
+            target_branch: Some("release".into()),
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
+        }
+    }
+
+    fn state_for(issue: IssueRow) -> TaskDetailState {
+        TaskDetailState::new(TaskId::from_str("task-1").unwrap(), issue)
+    }
+
+    /// A never-run issue renders a full detail card — title, every field row, the
+    /// description — and NO `Runs:` history line (63d, the headline case).
+    #[test]
+    fn detail_card_renders_every_field_for_a_never_run_issue() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("📋 HGR-1 · Fix the widget"), "title: {text}");
+        assert!(text.contains("Status: "), "status label");
+        assert!(text.contains("todo"), "status value");
+        assert!(text.contains("Priority: "), "priority label");
+        assert!(text.contains("P2"), "priority 1 → P2");
+        assert!(text.contains("Created: "), "created label");
+        assert!(text.contains("2023-11-14"), "created date: {text}");
+        assert!(text.contains("Assignee: "), "assignee label");
+        assert!(text.contains("agent:alice"), "assignee value");
+        assert!(text.contains("Agent: "), "agent label");
+        assert!(text.contains("codex"), "agent value");
+        assert!(text.contains("Repo: "), "repo label");
+        assert!(text.contains("/repos/widget"), "repo value");
+        assert!(text.contains("Source: "), "source label");
+        assert!(text.contains("Target: "), "target label");
+        assert!(text.contains("release"), "target value");
+        assert!(text.contains("Labels: "), "labels label");
+        assert!(text.contains("[bug]"), "label chip bug");
+        assert!(text.contains("[p0]"), "label chip p0");
+        assert!(text.contains("The widget breaks on resize."), "description");
+        assert!(
+            !text.contains("Runs:"),
+            "a never-run issue has no runs line"
+        );
+    }
+
+    /// An issue with unset card fields renders the em-dash placeholders and
+    /// "no description", never a blank card (63d).
+    #[test]
+    fn detail_card_renders_placeholders_when_unset() {
+        let mut issue = full_issue();
+        issue.description = None;
+        issue.assignee = None;
+        issue.agent = None;
+        issue.repo_ref = None;
+        issue.source_branch = None;
+        issue.target_branch = None;
+        issue.labels = Vec::new();
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("unassigned"), "unset assignee");
+        assert!(
+            text.contains("—"),
+            "em-dash placeholder for unset repo/agent"
+        );
+        assert!(text.contains("no description"), "unset description");
+    }
+
+    /// An issue with run history renders the `Runs:` line below the card with the
+    /// count and latest run summary (63d).
+    #[test]
+    fn detail_card_renders_runs_line_when_issue_has_run() {
+        let mut issue = full_issue();
+        issue.run_count = 3;
+        issue.last_run_status = Some("running".into());
+        issue.last_run_at = Some(1_700_000_000_000);
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("Runs: 3"), "run count: {text}");
+        assert!(text.contains("last: running"), "latest run status");
+        assert!(text.contains("2023-11-14"), "latest run date");
+    }
+
+    /// HEIGHT CONTRACT regression (the coordinator's Finding 1): at a short
+    /// viewport (the 8-row snapshot panes) the card is skipped entirely so the
+    /// PR badge stays on row 0 and the transcript region is preserved — the card
+    /// must never squeeze the feed out.
+    #[test]
+    fn detail_card_yields_to_badge_and_transcript_at_short_viewports() {
+        let mut issue = full_issue();
+        issue.pr_url = Some("https://github.com/o/r/pull/7".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(100, 8);
+        render_task_detail(&mut buf, 100, 0, 8, &s);
+        let text = painted_text(&buf);
+
+        assert!(!text.contains('╭'), "no card border at 8 rows: {text}");
+        assert!(text.contains("▶ PR "), "PR badge still renders: {text}");
+        // The badge sits on row 0 exactly as before the card existed.
+        let row0: String = buf
+            .cells
+            .iter()
+            .filter(|(c, _)| c.y == 0)
+            .map(|(_, cell)| cell.symbol.as_str())
+            .collect();
+        assert!(row0.contains("▶ PR "), "badge pinned to row 0: {row0}");
+    }
+
+    /// `priority_p_label` maps the 0..3 urgency scale to P3..P0 (HIGHER = urgent).
+    #[test]
+    fn priority_p_label_maps_scale() {
+        assert_eq!(priority_p_label(0), "P3");
+        assert_eq!(priority_p_label(1), "P2");
+        assert_eq!(priority_p_label(2), "P1");
+        assert_eq!(priority_p_label(3), "P0");
+        // Out-of-range clamps rather than underflowing.
+        assert_eq!(priority_p_label(9), "P0");
+    }
+
+    /// `fmt_card_date` converts epoch-ms to a UTC calendar date without chrono.
+    #[test]
+    fn fmt_card_date_converts_epoch_ms() {
+        assert_eq!(fmt_card_date(0), "1970-01-01");
+        assert_eq!(fmt_card_date(1_700_000_000_000), "2023-11-14");
+    }
+
+    /// `wrap_chars` wraps on word boundaries, hard-splits an over-long word, and
+    /// ellipsises the last line when the text overflows the cap — all by CHARS.
+    #[test]
+    fn wrap_chars_wraps_and_caps() {
+        let lines = wrap_chars("alpha beta gamma delta", 11, 4);
+        assert!(
+            lines.iter().all(|l| l.chars().count() <= 11),
+            "no line over width"
+        );
+        assert!(lines.len() <= 4);
+        // A single word longer than the width is hard-split, never dropped.
+        let split = wrap_chars("supercalifragilistic", 5, 4);
+        assert!(split.len() > 1, "long word hard-split: {split:?}");
+        // Overflow past the cap ellipsises the last kept line.
+        let capped = wrap_chars("one two three four five six seven eight", 5, 2);
+        assert_eq!(capped.len(), 2);
+        assert!(capped[1].ends_with('…'), "overflow ellipsised: {capped:?}");
+    }
 }

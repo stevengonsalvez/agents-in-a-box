@@ -45,6 +45,13 @@ fn sample_issue() -> IssueRow {
         labels: Vec::new(),
         pr_url: Some("https://github.com/o/r/pull/42".to_string()),
         branch: None,
+        repo_ref: None,
+        agent: None,
+        source_branch: None,
+        target_branch: None,
+        run_count: 0,
+        last_run_status: None,
+        last_run_at: None,
     }
 }
 

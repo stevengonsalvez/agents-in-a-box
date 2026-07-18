@@ -535,6 +535,10 @@ pub struct ScreenStates {
     /// `hangar/issue_create` (then, on its reply, `issue_update` + `issue_run`)
     /// over the daemon socket (Phase 5). `None` when idle.
     pub pending_create_action: Option<IssueCreateAction>,
+    /// A delete raised by the issue-list `x` confirm overlay (Enter on the RED
+    /// overlay), awaiting the `render` pass to fire `hangar/issue_delete` over the
+    /// daemon socket (63d). Carries the issue to delete. `None` when idle.
+    pub pending_delete_action: Option<ainb_hangar_core::ids::IssueId>,
     /// A search RPC raised by the command-palette modal (each keystroke),
     /// awaiting the `render` pass to fire `hangar/search` over the daemon socket
     /// (e38.13). `None` when idle.
@@ -949,6 +953,12 @@ impl ScreenStates {
     /// flow, if any (e38.29).
     pub const fn take_pending_create_action(&mut self) -> Option<IssueCreateAction> {
         self.pending_create_action.take()
+    }
+
+    /// Take the pending issue delete raised by the `x` confirm overlay, if any
+    /// (63d). The `render` pass drains it and fires `hangar/issue_delete`.
+    pub const fn take_pending_delete_action(&mut self) -> Option<ainb_hangar_core::ids::IssueId> {
+        self.pending_delete_action.take()
     }
 
     /// Take the pending search RPC raised by the command palette, if any
@@ -1418,6 +1428,13 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
                 target_branch,
                 agent,
             });
+            None
+        }
+        // 63d: Enter on the `x` RED confirm overlay lifts into a deferred
+        // `hangar/issue_delete` the `render` pass drains + fires (the sync key
+        // router can't `await`). The daemon's IssueDeleted push then drops the row.
+        Some(IssueListIntent::DeleteIssue(id)) => {
+            states.pending_delete_action = Some(id);
             None
         }
         None => None,

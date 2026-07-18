@@ -229,6 +229,11 @@ const AGENT_CREATE_REQ_ID: i64 = 51;
 /// as `board_card_run`), surfaced as a transient issue-list note; an error is
 /// surfaced the same way — never silent.
 const ISSUE_RUN_REQ_ID: i64 = 52;
+/// Request id for the issue-list `x` delete (63d). The reply is a bare `{}` ack
+/// (the row is dropped by the daemon's `IssueDeleted` push, not this reply); an
+/// error (e.g. an active task) is surfaced as a transient issue-list note — never
+/// silent.
+const ISSUE_DELETE_REQ_ID: i64 = 53;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -890,6 +895,15 @@ impl HangarPlugin {
             // Phase 5: the wizard's `issue_run` reply — surfaced as a note either
             // way (launch feedback or the daemon's rejection), never silent.
             RpcId::Number(ISSUE_RUN_REQ_ID) => self.apply_issue_run(resp),
+            // 63d: the `x` delete reply. On success the daemon's IssueDeleted push
+            // already dropped the row, so nothing to fold; an error (e.g. an active
+            // task) surfaces as an issue-list note, never silent.
+            RpcId::Number(ISSUE_DELETE_REQ_ID) => {
+                if let Some(e) = &resp.error {
+                    self.screens.issue_list.set_note(format!("delete failed: {}", e.message));
+                }
+                self.conn.on_event();
+            }
             RpcId::Number(INBOX_LIST_REQ_ID) => self.apply_inbox(resp),
             // The attention/subscribe ack carries the open-attention snapshot that
             // seeds the control-center board.
@@ -2510,6 +2524,37 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire the issue-list `x` delete (63d): encode + send one
+    /// `hangar/issue_delete` over the daemon socket. The row is dropped by the
+    /// daemon's `IssueDeleted` push on success; a send failure — or a daemon
+    /// rejection on the reply — surfaces as an issue-list note, never silent.
+    async fn apply_delete_action(
+        &mut self,
+        host: &HostClient,
+        issue_id: ainb_hangar_core::ids::IssueId,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            self.screens.issue_list.set_note("delete failed: daemon link is down");
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id.as_str()
+        });
+        let Ok(body) = encode_request(
+            ISSUE_DELETE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_DELETE,
+            params,
+        ) else {
+            self.screens.issue_list.set_note("delete failed: could not encode request");
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            self.screens.issue_list.set_note(format!("delete failed: {e}"));
+            let _ = host.log_info(format!("hangar: issue delete send failed: {e}")).await;
+        }
+    }
+
     /// Fire the second leg of the Issues create-wizard chain (Phase 5), armed by
     /// a successful `issue_create` reply: ONE `hangar/issue_update` persisting
     /// repo / agent / source / target on the new issue (the append-only F6
@@ -2839,7 +2884,11 @@ impl HangarPlugin {
         // instead of quitting / switching tabs. Esc aborts the create flow.
         if matches!(app.screen, Screen::IssueList) && self.screens.issue_list.is_capturing_text() {
             if matches!(key.code, KeyCode::Esc) {
+                // Esc drops whichever capture surface is open in one press — the
+                // create wizard OR the `x` delete-confirm overlay (both no-op when
+                // not in their mode), never trapping the user (63d).
                 self.screens.issue_list.abort_create();
+                self.screens.issue_list.abort_confirm_delete();
                 return;
             }
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
@@ -3346,6 +3395,15 @@ impl HangarPlugin {
             // The card's run branch (ch3) — mirrored onto the row so the issue
             // carries it too; the detail below is seeded from the same value.
             branch: card.branch.clone(),
+            // 63d: the Kanban-synthesized header carries no card-parity / run
+            // summary of its own (the daemon owns those on the real issue row).
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -4064,6 +4122,12 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_create_action() {
             self.apply_create_action(host, action).await;
         }
+        // 63d: drain a deferred issue delete (Enter on the `x` confirm overlay) and
+        // fire `hangar/issue_delete` over the daemon socket; the reply's
+        // `IssueDeleted` push drops the row, and an error surfaces as a note.
+        if let Some(issue_id) = self.screens.take_pending_delete_action() {
+            self.apply_delete_action(host, issue_id).await;
+        }
         // Phase 5: drain a dispatch armed by a successful wizard `issue_create`
         // reply — fire `hangar/issue_update` (persist repo / agent / branches on
         // the new issue) then `hangar/issue_run` (the actual launch).
@@ -4685,6 +4749,13 @@ mod tests {
             labels: Vec::new(),
             pr_url: None,
             branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         }]);
         p
     }
@@ -4826,6 +4897,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -4842,6 +4920,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             },
         ]);
 
@@ -4986,6 +5071,13 @@ mod tests {
             labels: Vec::new(),
             pr_url: None,
             branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -5062,6 +5154,13 @@ mod tests {
             labels: Vec::new(),
             pr_url: None,
             branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -5130,6 +5229,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             })
             .collect();
         p.screens.set_issues(rows);
@@ -5202,6 +5308,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -5218,6 +5331,13 @@ mod tests {
                 labels: Vec::new(),
                 pr_url: None,
                 branch: None,
+                repo_ref: None,
+                agent: None,
+                source_branch: None,
+                target_branch: None,
+                run_count: 0,
+                last_run_status: None,
+                last_run_at: None,
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -5483,6 +5603,13 @@ mod tests {
             labels: Vec::new(),
             pr_url: None,
             branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);

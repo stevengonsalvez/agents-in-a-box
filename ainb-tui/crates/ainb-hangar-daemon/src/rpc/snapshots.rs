@@ -100,6 +100,9 @@ pub async fn issues_list(
             // ch3: the latest completed task's branch, so the task-detail opened
             // from the issue list renders the run-branch line.
             let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
+            // 63d: the card extras (repo/agent/branches + run summary) for the
+            // task-detail card.
+            let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
                 id,
                 display_id,
@@ -115,10 +118,74 @@ pub async fn issues_list(
                 labels: issue.labels,
                 pr_url,
                 branch,
+                repo_ref: extras.repo_ref,
+                agent: extras.agent,
+                source_branch: extras.source_branch,
+                target_branch: extras.target_branch,
+                run_count: extras.run_count,
+                last_run_status: extras.last_run_status,
+                last_run_at: extras.last_run_at,
             });
         }
     }
     Ok(out)
+}
+
+/// The extra fields a wire [`IssueRow`] carries for the task-detail card (63d):
+/// the migration-0042 card-parity fields plus the run-history summary.
+#[derive(Debug, Default, Clone)]
+struct IssueCardExtras {
+    repo_ref: Option<String>,
+    agent: Option<String>,
+    source_branch: Option<String>,
+    target_branch: Option<String>,
+    run_count: u32,
+    last_run_status: Option<String>,
+    last_run_at: Option<i64>,
+}
+
+/// Read the task-detail card extras for one issue (63d): the `repo_ref` / `agent`
+/// / source+target branches from the issue's migration-0042 columns
+/// ([`CardParityRepo`]), plus a one-query run summary (count + latest task's
+/// status + created_at) from `agent_task_queue`.
+///
+/// A single reader so every IssueRow-building path (list, search, update, create)
+/// fills the card extras identically. `agent` is the lowercase provider wire
+/// token; every field defaults to empty for a card with nothing pinned / never
+/// run.
+async fn issue_card_fields(
+    pool: &SqlitePool,
+    issue_id: &str,
+) -> Result<IssueCardExtras, sqlx::Error> {
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    let (repo_ref, agent) = CardParityRepo::get_issue_repo_agent(pool, issue_id)
+        .await?
+        .unwrap_or((None, None));
+    let (source_branch, target_branch) = CardParityRepo::get_issue_branches(pool, issue_id)
+        .await?
+        .unwrap_or((None, None));
+    // One round-trip for the run summary: total task count + the newest task's
+    // status + created_at (NULL for both when the issue never ran).
+    let (count, last_status, last_at): (i64, Option<String>, Option<i64>) = sqlx::query_as(
+        "SELECT COUNT(*), \
+         (SELECT status FROM agent_task_queue WHERE issue_id = ?1 \
+            ORDER BY created_at DESC, id DESC LIMIT 1), \
+         (SELECT created_at FROM agent_task_queue WHERE issue_id = ?1 \
+            ORDER BY created_at DESC, id DESC LIMIT 1) \
+         FROM agent_task_queue WHERE issue_id = ?1",
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await?;
+    Ok(IssueCardExtras {
+        repo_ref,
+        agent: agent.map(|a| a.as_str().to_string()),
+        source_branch,
+        target_branch,
+        run_count: u32::try_from(count).unwrap_or(u32::MAX),
+        last_run_status: last_status,
+        last_run_at: last_at,
+    })
 }
 
 /// The `HGR-<n>` display id for one issue, or `None` when the id resolves to no
@@ -172,6 +239,7 @@ pub async fn issues_search(
             issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
         let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
+        let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
             id,
             display_id,
@@ -187,6 +255,13 @@ pub async fn issues_search(
             labels: issue.labels,
             pr_url,
             branch,
+            repo_ref: extras.repo_ref,
+            agent: extras.agent,
+            source_branch: extras.source_branch,
+            target_branch: extras.target_branch,
+            run_count: extras.run_count,
+            last_run_status: extras.last_run_status,
+            last_run_at: extras.last_run_at,
         });
     }
     Ok(out)
@@ -1427,6 +1502,7 @@ pub async fn issue_row(
     let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
+    let extras = issue_card_fields(pool, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1442,6 +1518,13 @@ pub async fn issue_row(
         labels: issue.labels,
         pr_url,
         branch,
+        repo_ref: extras.repo_ref,
+        agent: extras.agent,
+        source_branch: extras.source_branch,
+        target_branch: extras.target_branch,
+        run_count: extras.run_count,
+        last_run_status: extras.last_run_status,
+        last_run_at: extras.last_run_at,
     }))
 }
 
@@ -1520,6 +1603,7 @@ async fn read_issue_row(
     let display_id = issue_display_row(pool, workspace_id, &issue.id, prefix.as_deref()).await?;
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
+    let extras = issue_card_fields(pool, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1535,6 +1619,13 @@ async fn read_issue_row(
         labels: issue.labels,
         pr_url,
         branch,
+        repo_ref: extras.repo_ref,
+        agent: extras.agent,
+        source_branch: extras.source_branch,
+        target_branch: extras.target_branch,
+        run_count: extras.run_count,
+        last_run_status: extras.last_run_status,
+        last_run_at: extras.last_run_at,
     }))
 }
 
@@ -1670,8 +1761,17 @@ pub async fn issue_create(
         due_date: None,
         labels: Vec::new(),
         pr_url: None,
-        // A freshly-created issue has no tasks yet, so no committed branch.
+        // A freshly-created issue has no tasks yet, so no committed branch, and no
+        // repo / agent / branches pinned until the follow-up issue_update (63d).
         branch: None,
+        repo_ref: None,
+        agent: None,
+        source_branch: None,
+        target_branch: None,
+        // A freshly-created issue has never run.
+        run_count: 0,
+        last_run_status: None,
+        last_run_at: None,
     })
 }
 

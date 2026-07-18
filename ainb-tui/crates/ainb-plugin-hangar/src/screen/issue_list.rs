@@ -225,6 +225,22 @@ pub enum IssueListMode {
     /// the final Agent stage), Esc cancels the WHOLE wizard from any stage in
     /// one press.
     CreateInput,
+    /// `x` delete-confirm mode (63d): a RED confirm overlay is open over the
+    /// selected row ([`IssueListState::confirm_delete`]). Enter emits
+    /// [`IssueListIntent::DeleteIssue`], Esc cancels in one press; every other key
+    /// is captured (so a stray tab-switch char never fires behind the modal).
+    ConfirmDelete,
+}
+
+/// The target of an open `x` delete-confirm overlay (63d): the issue id the
+/// [`IssueListIntent::DeleteIssue`] will carry, plus a human label
+/// (`<display_id> <title>`) the red overlay renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PendingDelete {
+    /// The issue the confirmed delete removes.
+    pub id: IssueId,
+    /// The human label shown in the overlay (`HGR-7 Fix the widget`).
+    pub label: String,
 }
 
 /// A raw key folded into the open create wizard (Phase 5).
@@ -362,6 +378,9 @@ pub struct IssueListState {
     /// card. The card-board render lifts the hovered card's border so the cursor
     /// target reads before a click. Cleared when the pointer moves to empty space.
     hovered_id: Option<String>,
+    /// The open `x` delete-confirm target (63d), set while `mode` is
+    /// [`IssueListMode::ConfirmDelete`]. `None` otherwise.
+    confirm_delete: Option<PendingDelete>,
 }
 
 impl Default for IssueListState {
@@ -379,6 +398,7 @@ impl Default for IssueListState {
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
             hovered_id: None,
+            confirm_delete: None,
         }
     }
 }
@@ -412,7 +432,7 @@ impl IssueListState {
     pub const fn is_capturing_text(&self) -> bool {
         matches!(
             self.mode,
-            IssueListMode::FilterInput | IssueListMode::CreateInput
+            IssueListMode::FilterInput | IssueListMode::CreateInput | IssueListMode::ConfirmDelete
         )
     }
 
@@ -424,6 +444,22 @@ impl IssueListState {
             self.mode = IssueListMode::Normal;
             self.wizard = None;
         }
+    }
+
+    /// Cancel the `x` delete-confirm overlay (Esc, 63d): drop the RED overlay and
+    /// return to normal navigation in one press. A no-op when not confirming.
+    pub fn abort_confirm_delete(&mut self) {
+        if self.mode == IssueListMode::ConfirmDelete {
+            self.mode = IssueListMode::Normal;
+            self.confirm_delete = None;
+        }
+    }
+
+    /// The open delete-confirm target (63d), or `None` when not confirming — the
+    /// renderer draws the RED overlay from this.
+    #[must_use]
+    pub const fn confirm_delete(&self) -> Option<&PendingDelete> {
+        self.confirm_delete.as_ref()
     }
 
     /// The active filter chip.
@@ -769,6 +805,10 @@ pub enum IssueListIntent {
         /// always a real token, never empty.
         agent: String,
     },
+    /// Delete the confirmed issue (63d): raised ONLY by Enter on the `x` RED
+    /// confirm overlay. The plugin glue lifts it into `hangar/issue_delete`; the
+    /// daemon's `IssueDeleted` push then drops the row from the list.
+    DeleteIssue(IssueId),
 }
 
 /// The result of folding one [`IssueListEvent`] into an [`IssueListState`].
@@ -800,6 +840,7 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
         // legacy `Key(char)` path (Enter as '\n', Backspace as '\u{8}') keeps
         // working alongside the structured [`IssueListEvent::Wizard`] events.
         IssueListMode::CreateInput => reduce_wizard_key(state, wizard_key_from_char(c)),
+        IssueListMode::ConfirmDelete => reduce_confirm_delete_key(state, c),
         IssueListMode::Normal => reduce_normal_key(state, c),
     }
 }
@@ -820,6 +861,7 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
         'k' => move_selection_up(state),
         '/' => enter_filter_mode(state),
         'c' => enter_create_mode(state),
+        'x' => enter_confirm_delete(state),
         'a' => state.selected_row().map_or_else(
             || unchanged(state),
             |row| {
@@ -913,6 +955,63 @@ fn cancel_wizard(state: &IssueListState) -> IssueListReduction {
     let mut next = state.clone();
     next.mode = IssueListMode::Normal;
     next.wizard = None;
+    no_intent(next)
+}
+
+/// Open the `x` delete-confirm overlay over the selected row (63d). No intent yet
+/// — the RED overlay collects the Enter/Esc decision first. A no-op when the list
+/// has no rows (nothing to delete), so `x` on an empty board never traps the user.
+fn enter_confirm_delete(state: &IssueListState) -> IssueListReduction {
+    let Some(row) = state.selected_row() else {
+        return unchanged(state);
+    };
+    // Prefer the human display id (`HGR-7`) with the title; fall back to the raw
+    // id when a pre-63l.3 snapshot lacks a display id.
+    let label = match &row.display_id {
+        Some(display) => format!("{display} {}", row.title),
+        None => row.title.clone(),
+    };
+    let pending = PendingDelete {
+        id: row.id.clone(),
+        label,
+    };
+    let mut next = state.clone();
+    next.mode = IssueListMode::ConfirmDelete;
+    next.confirm_delete = Some(pending);
+    // A fresh confirm supersedes any stale dispatch note.
+    next.note = None;
+    no_intent(next)
+}
+
+/// Delete-confirm key handling (63d): Enter emits [`IssueListIntent::DeleteIssue`]
+/// for the pending target, Esc cancels; every other key is captured (the overlay
+/// is modal). All paths that leave confirm mode reset back to normal navigation.
+fn reduce_confirm_delete_key(state: &IssueListState, c: char) -> IssueListReduction {
+    match c {
+        // Enter (delivered as '\n' / '\r') confirms the delete.
+        '\n' | '\r' => {
+            let Some(pending) = state.confirm_delete.clone() else {
+                // Defensive: no target — just drop back to navigation.
+                return cancel_confirm_delete(state);
+            };
+            let mut next = state.clone();
+            next.mode = IssueListMode::Normal;
+            next.confirm_delete = None;
+            with_intent(next, IssueListIntent::DeleteIssue(pending.id))
+        }
+        // Esc (delivered as the ESC char to the pure reducer) cancels.
+        '\u{1b}' => cancel_confirm_delete(state),
+        // Any other key is swallowed — the modal stays open until Enter / Esc.
+        _ => unchanged(state),
+    }
+}
+
+/// Cancel the delete-confirm overlay (Esc): back to normal navigation, target
+/// dropped, no intent.
+fn cancel_confirm_delete(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::Normal;
+    next.confirm_delete = None;
     no_intent(next)
 }
 
@@ -1305,6 +1404,15 @@ pub fn render_issue_list(
             wizard,
             &state.repos,
         );
+    } else if let Some(pending) = state.confirm_delete() {
+        // 63d: the RED delete-confirm overlay on the two bottom rows.
+        render_confirm_delete(
+            buf,
+            area_w,
+            bottom.saturating_sub(2),
+            bottom.saturating_sub(1),
+            pending,
+        );
     } else if let Some(note) = state.note() {
         put_str(
             buf,
@@ -1339,6 +1447,39 @@ pub fn render_issue_list(
 /// Accent for the create-issue input bar (a calm emerald, distinct from the
 /// gold headers + green selection so the create prompt reads as its own mode).
 const CREATE_ACCENT: Color = Color::rgb(120, 200, 160);
+
+/// The clay-red used across the plugin for destructive / offline states (the
+/// style guide's `OFFLINE_RED`); the `x` delete-confirm overlay paints in it so a
+/// destructive action reads as dangerous at a glance (63d).
+const OFFLINE_RED: Color = Color::rgb(220, 120, 100);
+
+/// Render the RED delete-confirm overlay on the two bottom rows (63d): a prompt
+/// naming the target + the irreversibility, then the key legend. Char-safe via
+/// [`put_str`]. Enter deletes, Esc cancels — both wired in the reducer.
+fn render_confirm_delete(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    value_row: u16,
+    pending: &PendingDelete,
+) {
+    put_str(
+        buf,
+        0,
+        row,
+        &format!("Delete issue {}? This removes its history.", pending.label),
+        OFFLINE_RED,
+        area_w,
+    );
+    put_str(
+        buf,
+        0,
+        value_row,
+        "Enter=delete  Esc=cancel",
+        OFFLINE_RED,
+        area_w,
+    );
+}
 
 /// Gold stage-prompt colour for the create wizard (matches the Boards overlay
 /// prompts + the style guide's title gold).
@@ -1533,6 +1674,13 @@ mod tests {
             labels: Vec::new(),
             pr_url: None,
             branch: None,
+            repo_ref: None,
+            agent: None,
+            source_branch: None,
+            target_branch: None,
+            run_count: 0,
+            last_run_status: None,
+            last_run_at: None,
         }
     }
 
@@ -2094,5 +2242,105 @@ mod tests {
                 coord.y,
             );
         }
+    }
+
+    /// `x` on a selected row opens the RED confirm overlay targeting that issue,
+    /// captures text (so nav keys are swallowed behind the modal), and raises no
+    /// intent yet (63d).
+    #[test]
+    fn x_opens_confirm_delete_for_selected_issue() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        let out = reduce_issue_list(&s, IssueListEvent::Key('x'));
+        assert_eq!(out.intent, None, "opening the confirm raises no intent");
+        assert_eq!(out.state.mode(), IssueListMode::ConfirmDelete);
+        assert!(out.state.is_capturing_text(), "confirm is a modal capture");
+        let pending = out.state.confirm_delete().expect("a target is set");
+        assert_eq!(pending.id, IssueId::from_str("i1").unwrap());
+        assert!(pending.label.contains("Issue i1"), "label names the issue");
+    }
+
+    /// Esc cancels the confirm overlay in one press, back to normal navigation
+    /// with the target dropped and no intent (63d).
+    #[test]
+    fn esc_cancels_confirm_delete() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None)]);
+        let opened = reduce_issue_list(&s, IssueListEvent::Key('x')).state;
+        assert_eq!(opened.mode(), IssueListMode::ConfirmDelete);
+        // Esc is delivered to the pure reducer as the ESC char.
+        let out = reduce_issue_list(&opened, IssueListEvent::Key('\u{1b}'));
+        assert_eq!(out.intent, None, "cancel raises no intent");
+        assert_eq!(out.state.mode(), IssueListMode::Normal);
+        assert!(out.state.confirm_delete().is_none(), "target dropped");
+    }
+
+    /// Enter on the confirm overlay emits the `DeleteIssue` intent for the target
+    /// and returns to normal navigation (63d).
+    #[test]
+    fn enter_confirms_delete_and_emits_intent() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        // Select the second row, then confirm-delete it.
+        let s = reduce_issue_list(&s, IssueListEvent::Key('j')).state;
+        let opened = reduce_issue_list(&s, IssueListEvent::Key('x')).state;
+        let out = reduce_issue_list(&opened, IssueListEvent::Key('\n'));
+        assert_eq!(
+            out.intent,
+            Some(IssueListIntent::DeleteIssue(
+                IssueId::from_str("i2").unwrap()
+            )),
+            "Enter emits DeleteIssue for the selected target"
+        );
+        assert_eq!(out.state.mode(), IssueListMode::Normal);
+        assert!(
+            out.state.confirm_delete().is_none(),
+            "target dropped after commit"
+        );
+    }
+
+    /// `x` on an empty list is a no-op — no confirm opens, nothing to delete (63d).
+    #[test]
+    fn x_on_empty_list_is_a_noop() {
+        let s = IssueListState::with_rows(Vec::new());
+        let out = reduce_issue_list(&s, IssueListEvent::Key('x'));
+        assert_eq!(out.intent, None);
+        assert_eq!(out.state.mode(), IssueListMode::Normal, "no confirm opens");
+        assert!(out.state.confirm_delete().is_none());
+    }
+
+    /// `x` does NOT open the confirm while the create wizard is open — the wizard
+    /// captures the keystroke as text, leaving its state machine intact (63d).
+    #[test]
+    fn x_does_not_fire_while_create_wizard_open() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None)]);
+        let wizard = reduce_issue_list(&s, IssueListEvent::Key('c')).state;
+        assert_eq!(wizard.mode(), IssueListMode::CreateInput);
+        let out = reduce_issue_list(&wizard, IssueListEvent::Key('x'));
+        assert_eq!(
+            out.state.mode(),
+            IssueListMode::CreateInput,
+            "x is typed into the wizard, never opens a delete confirm"
+        );
+        assert!(out.state.confirm_delete().is_none());
+        // The wizard is still on its Title stage with the typed 'x'.
+        assert!(matches!(
+            out.state.wizard(),
+            Some(CreateWizard::Title { .. })
+        ));
+    }
+
+    /// `x` does NOT open the confirm while the `/` filter input is open — it is a
+    /// query character, not the delete shortcut (63d).
+    #[test]
+    fn x_does_not_fire_while_filter_input_open() {
+        let s = IssueListState::with_rows(vec![row("i1", "open", None)]);
+        let filtering = reduce_issue_list(&s, IssueListEvent::Key('/')).state;
+        assert_eq!(filtering.mode(), IssueListMode::FilterInput);
+        let out = reduce_issue_list(&filtering, IssueListEvent::Key('x'));
+        assert_eq!(
+            out.state.mode(),
+            IssueListMode::FilterInput,
+            "x is typed into the filter query, never opens a delete confirm"
+        );
+        assert!(out.state.confirm_delete().is_none());
+        assert_eq!(out.state.query(), "x", "x appended to the filter query");
     }
 }
