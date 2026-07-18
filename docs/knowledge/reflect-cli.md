@@ -10,10 +10,10 @@ There are **two** independent versions and they are easy to confuse:
 
 | Component | Package / manifest | Version | Source of truth |
 |---|---|---|---|
-| `reflect` **CLI** | Python package `reflect-kb` | `0.1.1` | [`pyproject.toml`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/pyproject.toml) (ainb-reflect-memory root) |
+| `reflect` **CLI** | Python package `reflect-kb` | `0.3.0` | [`pyproject.toml`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/pyproject.toml) (ainb-reflect-memory root) |
 | `reflect` **plugin** (Claude Code wiring) | [`plugin/`](https://github.com/stevengonsalvez/ainb-reflect-memory/tree/main/plugin) | `3.6.0` | [`plugin/.claude-plugin/plugin.json`](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/plugin/.claude-plugin/plugin.json) |
 
-`reflect --version` reports the CLI version (`0.1.x`). The plugin version describes the harness wiring (hooks, skills, adapters) and is documented separately in the plugin architecture docs.
+`reflect --version` reports the CLI version (`0.3.x`). The plugin version describes the harness wiring (hooks, skills, adapters) and is documented separately in the plugin architecture docs.
 
 ## Install
 
@@ -26,7 +26,7 @@ uv tool install --upgrade 'git+https://github.com/stevengonsalvez/ainb-reflect-m
 Verify the install:
 
 ```bash
-reflect --version   # prints 0.1.x
+reflect --version   # prints 0.3.x
 ```
 
 > The `[graph]` extra will not resolve cleanly with plain `pip` on Python >= 3.11 because `nano-graphrag` pulls `graspologic -> hyppo -> numba -> llvmlite` (Python < 3.10 only). Use the `uv`/`pipx` `--no-deps` flow documented in the [ainb-reflect-memory README](https://github.com/stevengonsalvez/ainb-reflect-memory/blob/main/README.md).
