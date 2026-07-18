@@ -93,6 +93,14 @@ Copilot does not auto-inject `sessionStart` `additionalContext` into the model c
 - **`/reflect-status`** — view pipeline metrics, pending reviews, and KB health; approve/reject low-confidence items.
 - **`/reflect:errors-ack`** — triage the errors sink when the statusline shows a ⚠N badge.
 
+## Memory browser
+
+The knowledge base this plugin captures into and recalls from can also be browsed, searched, and
+curated from a local web app — `reflect serve`, part of the `reflect-kb` engine. It reads the same
+markdown KB the plugin writes to, so archiving or editing confidence there is visible on the next
+recall (after a `reflect reindex`). See the
+[memory browser guide](/knowledge/reflect-memory/serve/) for how to run it.
+
 ## Source
 
 [stevengonsalvez/ainb-reflect-memory](https://github.com/stevengonsalvez/ainb-reflect-memory) — Claude Code plugin (skills + lifecycle hooks, under `plugin/`) backed by the `reflect-kb` GraphRAG + qmd library (flattened at the repo root). Extracted out of the agents-in-a-box monorepo into its own repo. Diagram generated via /fireworks-tech-graph.
