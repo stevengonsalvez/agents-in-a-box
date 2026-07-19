@@ -219,6 +219,20 @@ pub const HANGAR_ISSUE_CREATE: &str = "hangar/issue_create";
 /// the row without a full re-pull.
 pub const HANGAR_ISSUE_DELETE: &str = "hangar/issue_delete";
 
+/// `hangar/issue_cancel_active` — cancel EVERY active task on one issue, WITHOUT a
+/// board (the Issues-screen "cancel the run(s) & delete" affordance).
+///
+/// The board-less sibling of [`HANGAR_BOARD_CARD_CANCEL`]: it resolves the issue's
+/// entire active set ([`ainb_hangar_store::repo::task::TaskRepo::active_tasks_for_issue`])
+/// and cancels each via the idempotent `CancelTaskService` FSM edge (signalling
+/// each live run to KILL + pushing its terminal event), so a delete blocked by
+/// live runs can be unblocked in place — no board coordinates required. Params:
+/// [`crate::snapshots::IssueCancelActiveParams`]; result:
+/// [`crate::snapshots::IssueCancelActiveResult`] (`{ cancelled }`). Mutating +
+/// workspace-scoped, mirroring [`HANGAR_ISSUE_DELETE`]. An issue with no active
+/// task is a clean `{ cancelled: 0 }`, never an error.
+pub const HANGAR_ISSUE_CANCEL_ACTIVE: &str = "hangar/issue_cancel_active";
+
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
 /// screen's create-wizard dispatch; plans/hangar-task-agent-model.md).
 ///
@@ -1040,6 +1054,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_DAEMON_CONFIG_LIST,
     // Issue delete (63d) is APPENDED at the catalogue tail — append-only wire.
     HANGAR_ISSUE_DELETE,
+    // Issue-scoped cancel-active (board-less cancel-and-delete), likewise appended.
+    HANGAR_ISSUE_CANCEL_ACTIVE,
 ];
 
 #[cfg(test)]
@@ -1238,6 +1254,7 @@ mod tests {
             HANGAR_AGENT_CREATE,
             HANGAR_DAEMON_CONFIG_LIST,
             HANGAR_ISSUE_DELETE,
+            HANGAR_ISSUE_CANCEL_ACTIVE,
         ];
         for m in declared {
             assert!(
