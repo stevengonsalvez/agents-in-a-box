@@ -194,6 +194,7 @@ async fn seed_minimal_tenancy(pool: &sqlx::SqlitePool) {
             thinking: None,
             agent_env: Vec::new(),
             provider: None,
+            token_budget: None,
         },
     )
     .await

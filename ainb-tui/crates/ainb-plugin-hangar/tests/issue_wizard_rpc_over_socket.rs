@@ -344,19 +344,17 @@ async fn wizard_commit_issues_create_update_and_run() {
         )
         .await;
 
-        // Walk the wizard: `c` opens it; type the title; Enter → repo stage;
-        // `@` opens the dropdown (cursor at scratch); Enter picks scratch →
-        // source branch (prefilled `main`); Enter accepts → target branch
-        // (prefilled `main`); Enter accepts → agent stage; Enter commits on
-        // claude (cursor 0).
+        // Walk the single-form wizard: `c` opens it (focus Title); type the
+        // title; ↓ moves focus to the Repo row; `@` opens the dropdown (cursor at
+        // scratch); Enter picks scratch (closing the dropdown); Enter with the
+        // required fields satisfied (title + repo, branches prefilled `main`,
+        // agent defaulted to claude) commits `CreateAndRun`.
         send_key(&mut host_write, KeyCode::Char { ch: 'c' }).await;
         for ch in "Wizard task".chars() {
             send_key(&mut host_write, KeyCode::Char { ch }).await;
         }
-        send_key(&mut host_write, KeyCode::Enter).await;
+        send_key(&mut host_write, KeyCode::Down).await;
         send_key(&mut host_write, KeyCode::Char { ch: '@' }).await;
-        send_key(&mut host_write, KeyCode::Enter).await;
-        send_key(&mut host_write, KeyCode::Enter).await;
         send_key(&mut host_write, KeyCode::Enter).await;
         send_key(&mut host_write, KeyCode::Enter).await;
 
