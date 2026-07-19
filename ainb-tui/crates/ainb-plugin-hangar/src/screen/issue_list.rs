@@ -1680,6 +1680,9 @@ const GOLD: Color = Color::rgb(255, 215, 0);
 const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 /// Soft-white for the unfocused rows' values (style guide body text).
 const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
+/// Cornflower blue — the local (📁) repo marker, mirroring the host new-session
+/// picker's `RowKind::Local` colour so a path-backed repo reads the same in both.
+const CORNFLOWER_BLUE: Color = Color::rgb(100, 149, 237);
 /// Dim backdrop behind the card so it reads as a floating surface over the board.
 const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 
@@ -1687,11 +1690,17 @@ const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 const WIZARD_TITLE: &str = "✦ New task";
 /// The in-card footer hint naming the nav keys.
 const WIZARD_HINT: &str = "↑↓ row   ←→ value   Enter create   Esc cancel";
-/// The card's fixed height: top border + 5 field rows + spacer + hint + bottom
-/// border.
+/// The card's COMPACT height (dropdown closed): top border + 5 field rows +
+/// spacer + hint + bottom border. The card grows past this by the number of
+/// visible dropdown rows while the `@` repo picker is open (see [`render_wizard`]).
 const WIZARD_CARD_H: u16 = 9;
 /// The card's preferred width (clamped to the viewport minus insets).
 const WIZARD_CARD_W: u16 = 54;
+/// The most repo candidates the open `@` dropdown shows at once; a longer roster
+/// scroll-follows the cursor within this window and flags the overflow with a
+/// `… N more` affordance. Bounds how far the card can grow so it never blows the
+/// viewport.
+const REPO_DROPDOWN_WINDOW: u16 = 6;
 
 /// Render the create wizard as a single centered bordered card over the body
 /// region `[top, bottom]` (Phase 5): a gold rounded frame titled `✦ New task`,
@@ -1728,10 +1737,17 @@ fn render_wizard(
         return;
     }
 
+    // While the `@` dropdown is open the card GROWS by the number of candidate
+    // rows it shows (filter line reuses the Repo row itself). The window is capped
+    // at [`REPO_DROPDOWN_WINDOW`] and further shrunk to whatever the viewport can
+    // hold, so the card never spills past `region_h` — compact again on close.
+    let dropdown_rows = repo_dropdown_visible_rows(wizard, repos, region_h);
+    let card_h = WIZARD_CARD_H + dropdown_rows;
+
     let left = (area_w.saturating_sub(card_w)) / 2;
     let right = left + card_w; // exclusive
-    let card_top = top + (region_h - WIZARD_CARD_H) / 2;
-    let card_bottom = card_top + WIZARD_CARD_H - 1;
+    let card_top = top + (region_h - card_h) / 2;
+    let card_bottom = card_top + card_h - 1;
 
     // Backdrop fill so the card fully occludes the board beneath it.
     for y in card_top..=card_bottom {
@@ -1745,17 +1761,26 @@ fn render_wizard(
     // Title inlaid on the top edge: "┌─ ✦ New task ─…".
     put_card_str(buf, left + 3, card_top, WIZARD_TITLE, GOLD, right, true);
 
-    // Field rows: a left label column then the value, one row per field.
+    // Field rows: a left label column then the value. Each field is one row EXCEPT
+    // the Repo row while its dropdown is open, which spans `1 + dropdown_rows`
+    // (filter line + candidate window), pushing the rows below it down — so `y`
+    // runs rather than being a fixed `card_top + 1 + i`.
     let label_x = left + 2;
     let value_x = left + 12;
     let text_right = right.saturating_sub(1);
-    for (i, field) in WizardRow::ALL.iter().enumerate() {
-        let y = card_top + 1 + u16::try_from(i).unwrap_or(0);
-        let focused = wizard.focus() == *field;
-        let label = wizard_row_label(*field);
+    let mut y = card_top + 1;
+    for field in WizardRow::ALL {
+        let focused = wizard.focus() == field;
+        let label = wizard_row_label(field);
         let label_colour = if focused { GOLD } else { MUTED_GRAY };
         put_card_str(buf, label_x, y, label, label_colour, value_x, true);
-        render_wizard_field(buf, value_x, y, text_right, *field, wizard, repos);
+        if field == WizardRow::Repo && wizard.repo_dropdown().is_some() {
+            render_repo_dropdown(buf, value_x, y, text_right, wizard, repos, dropdown_rows);
+            y = y.saturating_add(1 + dropdown_rows);
+            continue;
+        }
+        render_wizard_field(buf, value_x, y, text_right, field, wizard, repos);
+        y = y.saturating_add(1);
     }
 
     // Footer hint, one blank spacer row above it (left as backdrop).
@@ -1769,6 +1794,21 @@ fn render_wizard(
         text_right,
         true,
     );
+}
+
+/// How many candidate rows the open `@` dropdown paints (0 when closed): the
+/// candidate count capped at [`REPO_DROPDOWN_WINDOW`], then shrunk so the grown
+/// card still fits `region_h` (the compact frame plus these rows). Keeps the card
+/// growth bounded and the small-viewport fallback intact.
+fn repo_dropdown_visible_rows(wizard: &CreateWizard, repos: &[RepoOption], region_h: u16) -> u16 {
+    if wizard.repo_dropdown().is_none() {
+        return 0;
+    }
+    let n = u16::try_from(repo_candidates(repos, wizard.repo_query()).len()).unwrap_or(u16::MAX);
+    let want = n.min(REPO_DROPDOWN_WINDOW);
+    // The card must fit: WIZARD_CARD_H + rows <= region_h.
+    let budget = region_h.saturating_sub(WIZARD_CARD_H);
+    want.min(budget)
 }
 
 /// The label shown in the card's left column for `row`.
@@ -1811,12 +1851,9 @@ fn render_wizard_field(
             put_card_str(buf, cx, y, &text(wizard.title()), value_colour, right, true);
         }
         WizardRow::Repo => {
-            if let Some(cursor) = wizard.repo_dropdown() {
-                render_repo_dropdown(buf, cx, y, right, wizard, repos, cursor);
-            } else {
-                let label = repo_display_label(wizard.repo_ref(), repos);
-                put_card_str(buf, cx, y, &label, value_colour, right, true);
-            }
+            // The open-dropdown case is painted by the caller ([`render_wizard`])
+            // because it spans multiple rows; here the row is always CLOSED.
+            render_chosen_repo(buf, cx, y, right, wizard.repo_ref(), repos, focused);
         }
         WizardRow::Source => {
             put_card_str(
@@ -1847,24 +1884,108 @@ fn render_wizard_field(
     }
 }
 
-/// The Repo row's closed-state value: `(pick a repo …)` when none is chosen, else
-/// `@<label>` for the picked candidate (falling back to the raw ref).
-fn repo_display_label(repo_ref: Option<&str>, repos: &[RepoOption]) -> String {
-    repo_ref.map_or_else(
-        || "(pick a repo — @ or ←→)".to_string(),
-        |r| {
-            let label = repo_candidates(repos, "")
-                .into_iter()
-                .find(|c| c.repo_ref == r)
-                .map_or_else(|| r.to_string(), |c| c.label);
-            format!("@{label}")
-        },
-    )
+/// The marker glyph + its colour for `repo` in the repo picker, mirroring the
+/// host new-session picker's kind markers: `◇` scratch, `★☁` remote-only, `★`
+/// favorite (both gold), `📁` a local/path-backed repo (cornflower).
+fn repo_marker(repo: &RepoOption) -> (&'static str, Color) {
+    if repo.repo_ref == "scratch" {
+        ("◇ ", MUTED_GRAY)
+    } else if repo.is_remote_only {
+        ("★☁ ", GOLD)
+    } else if repo.is_favorite {
+        ("★ ", GOLD)
+    } else {
+        ("📁 ", CORNFLOWER_BLUE)
+    }
 }
 
-/// Render the open `@` dropdown inline on the Repo row: `@query ` then the fuzzy
-/// candidates (scratch first; ★ favorites, ★☁ remote-only), the highlighted pick
-/// bracketed + green. Stays inside the card frame (clipped at `right`).
+/// The dimmed locator painted after a candidate's label so identically-named
+/// repos are distinguishable — the `repo_ref` (absolute checkout path, `owner/repo`
+/// or URL for a remote-only favorite). `None` when it would merely echo the label
+/// (scratch, or a raw ref used as its own label), so the row never reads
+/// `scratch  scratch`.
+fn repo_locator(repo: &RepoOption) -> Option<&str> {
+    if repo.repo_ref == "scratch" || repo.repo_ref == repo.label {
+        None
+    } else {
+        Some(&repo.repo_ref)
+    }
+}
+
+/// Render the CLOSED Repo row's chosen value at `(x, y)`: `<marker> <label>
+/// <dimmed path>` for the picked candidate (the path disambiguates same-named
+/// repos, left-truncated to keep its tail when the card is narrow), or the empty
+/// prompt when nothing is picked. A focused, picked row gets a subtle ` (←→/@)`
+/// re-pick affordance so changing a wrong choice is discoverable.
+fn render_chosen_repo(
+    buf: &mut WireBuffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    repo_ref: Option<&str>,
+    repos: &[RepoOption],
+    focused: bool,
+) {
+    let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
+    let Some(repo_ref) = repo_ref else {
+        put_card_str(
+            buf,
+            x,
+            y,
+            "(pick a repo — @ or ←→)",
+            value_colour,
+            right,
+            true,
+        );
+        return;
+    };
+    // Resolve the picked ref to its roster candidate for the marker + label + path;
+    // a raw ref with no matching candidate falls back to a local (📁) row whose
+    // label IS the ref.
+    let candidate = repo_candidates(repos, "")
+        .into_iter()
+        .find(|c| c.repo_ref == repo_ref)
+        .unwrap_or_else(|| RepoOption {
+            label: repo_ref.to_string(),
+            repo_ref: repo_ref.to_string(),
+            is_favorite: false,
+            is_remote_only: false,
+        });
+    let (marker, marker_colour) = repo_marker(&candidate);
+    let mut cx = put_card_str(buf, x, y, marker, marker_colour, right, true);
+    cx = put_card_str(buf, cx, y, &candidate.label, value_colour, right, true);
+    if let Some(locator) = repo_locator(&candidate) {
+        cx = put_card_str(buf, cx, y, "  ", MUTED_GRAY, right, true);
+        let avail = right.saturating_sub(cx) as usize;
+        cx = put_card_str(
+            buf,
+            cx,
+            y,
+            &left_truncate(locator, avail),
+            MUTED_GRAY,
+            right,
+            true,
+        );
+    }
+    if focused {
+        put_card_str(
+            buf,
+            cx.saturating_add(1),
+            y,
+            "(←→/@)",
+            MUTED_GRAY,
+            right,
+            true,
+        );
+    }
+}
+
+/// Render the open `@` dropdown as a VERTICAL list mirroring the host new-session
+/// picker: a filter line (`@query▌`) on the Repo row itself, then one candidate
+/// per row below — `▸ <marker> <label>  <dimmed path>` — the highlighted pick
+/// green-arrowed, the rest muted. `visible_rows` candidate rows scroll-follow the
+/// cursor; a longer roster flags its overflow with a `… N more` affordance on the
+/// filter line. Stays inside the card frame (clipped at `right`).
 fn render_repo_dropdown(
     buf: &mut WireBuffer,
     x: u16,
@@ -1872,40 +1993,91 @@ fn render_repo_dropdown(
     right: u16,
     wizard: &CreateWizard,
     repos: &[RepoOption],
-    cursor: usize,
+    visible_rows: u16,
 ) {
+    let cursor = wizard.repo_dropdown().unwrap_or(0);
     let query = wizard.repo_query();
     let candidates = repo_candidates(repos, query);
-    let mut cx = put_card_str(
+    let n = candidates.len();
+    // Filter line: the live `@query` with a block cursor, on the Repo row.
+    let fx = put_card_str(
         buf,
         x,
         y,
-        &format!("@{query} "),
+        &format!("@{query}\u{2588}"),
         SELECTION_GREEN,
         right,
         true,
     );
-    for (i, repo) in candidates.iter().enumerate() {
-        let sel = i == cursor;
-        let colour = if sel { SELECTION_GREEN } else { MUTED_GRAY };
-        let open = if sel { "[" } else { " " };
-        let close = if sel { "]" } else { " " };
-        let star = if repo.is_remote_only {
-            "★☁"
-        } else if repo.is_favorite {
-            "★"
+
+    // Scroll-follow window: keep the cursor in view, anchored at the window bottom
+    // once it scrolls past the first page. Derived purely from the cursor so no
+    // scroll state has to live on the wizard (the reducer already clamps the
+    // cursor into `0..n`).
+    let window = visible_rows as usize;
+    let start = cursor.saturating_sub(window.saturating_sub(1));
+    let end = (start + window).min(n);
+    if end < n {
+        // More candidates below the window — flag the overflow inline.
+        put_card_str(
+            buf,
+            fx.saturating_add(1),
+            y,
+            &format!("… {} more", n - end),
+            MUTED_GRAY,
+            right,
+            true,
+        );
+    }
+
+    for (row_i, i) in (start..end).enumerate() {
+        let repo = &candidates[i];
+        let cy = y.saturating_add(1 + u16::try_from(row_i).unwrap_or(0));
+        let selected = i == cursor;
+        let arrow = if selected { "▸ " } else { "  " };
+        let arrow_colour = if selected {
+            SELECTION_GREEN
         } else {
-            ""
+            MUTED_GRAY
         };
-        cx = put_card_str(buf, cx, y, open, colour, right, true);
-        cx = put_card_str(buf, cx, y, star, colour, right, true);
-        cx = put_card_str(buf, cx, y, &repo.label, colour, right, true);
-        cx = put_card_str(buf, cx, y, close, colour, right, true);
-        cx = put_card_str(buf, cx, y, " ", MUTED_GRAY, right, true);
-        if cx >= right {
-            break;
+        let mut cx = put_card_str(buf, x, cy, arrow, arrow_colour, right, true);
+        let (marker, marker_colour) = repo_marker(repo);
+        cx = put_card_str(buf, cx, cy, marker, marker_colour, right, true);
+        let label_colour = if selected {
+            SELECTION_GREEN
+        } else {
+            SOFT_WHITE
+        };
+        cx = put_card_str(buf, cx, cy, &repo.label, label_colour, right, true);
+        if let Some(locator) = repo_locator(repo) {
+            cx = put_card_str(buf, cx, cy, "  ", MUTED_GRAY, right, true);
+            let avail = right.saturating_sub(cx) as usize;
+            put_card_str(
+                buf,
+                cx,
+                cy,
+                &left_truncate(locator, avail),
+                MUTED_GRAY,
+                right,
+                true,
+            );
         }
     }
+}
+
+/// Truncate `s` to `max` characters KEEPING THE TAIL (prefixed with `…` when cut),
+/// so a long repo path stays disambiguating — the tail (the repo's own folder) is
+/// what tells two same-named checkouts apart. Multi-byte safe (operates on chars).
+fn left_truncate(s: &str, max: usize) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    if chars.len() <= max {
+        return s.to_string();
+    }
+    if max <= 1 {
+        return "…".to_string();
+    }
+    let tail: String = chars[chars.len() - (max - 1)..].iter().collect();
+    format!("…{tail}")
 }
 
 /// Draw a rounded gold card frame from `(left, top)` to `(right-1, bottom)` over
@@ -2301,11 +2473,33 @@ mod tests {
         );
     }
 
-    /// Opening the `@` dropdown expands the fuzzy candidate list inline on the
-    /// Repo row, scratch first + bracketed as the highlighted pick.
+    /// A `RepoOption` roster fixture: a local scan + a favorite whose path differs
+    /// from its alias, so a render test can assert the dimmed locator.
+    fn repo_roster() -> Vec<RepoOption> {
+        vec![
+            RepoOption {
+                label: "rosetta".into(),
+                repo_ref: "/Users/dev/work/rosetta".into(),
+                is_favorite: false,
+                is_remote_only: false,
+            },
+            RepoOption {
+                label: "acme".into(),
+                repo_ref: "/Users/dev/fav/acme".into(),
+                is_favorite: true,
+                is_remote_only: false,
+            },
+        ]
+    }
+
+    /// Opening the `@` dropdown renders a VERTICAL list (new-session style): the
+    /// `@`-filter line, then one candidate per row with its marker, scratch first,
+    /// and the highlighted pick carrying the green `▸` arrow. Each candidate sits on
+    /// its own buffer row (proving the list is vertical, not the old single line).
     #[test]
-    fn wizard_card_repo_dropdown_lists_scratch() {
-        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+    fn wizard_card_repo_dropdown_lists_vertically() {
+        let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
         // Move focus to the Repo row, then open the dropdown.
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
@@ -2313,9 +2507,197 @@ mod tests {
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
         let painted = painted_text(&buf);
+        // The filter line and every candidate label are present.
+        for needle in ["@", "scratch", "rosetta", "acme", "▸"] {
+            assert!(painted.contains(needle), "missing {needle:?}:\n{painted}");
+        }
+        // Each candidate's marker glyph is unique to the card (never in the board
+        // behind it): ◇ scratch, 📁 local, ★ favorite. They must land on THREE
+        // distinct, strictly increasing rows — proof the list is vertical, scratch
+        // first — and the green ▸ arrow marks scratch (cursor 0 on open).
+        let marker_row = |glyph: &str| {
+            buf.cells.iter().find(|(_, c)| c.symbol == glyph).map(|(coord, _)| coord.y)
+        };
+        let scratch_row = marker_row("◇").expect("scratch marker painted");
+        let rosetta_row = marker_row("📁").expect("local marker painted");
+        let acme_row = marker_row("★").expect("favorite marker painted");
         assert!(
-            painted.contains("[scratch]"),
-            "dropdown must list scratch bracketed:\n{painted}"
+            scratch_row < rosetta_row && rosetta_row < acme_row,
+            "candidates must render on distinct increasing rows (scratch first): \
+             {scratch_row} < {rosetta_row} < {acme_row}"
+        );
+        let arrow_row = buf
+            .cells
+            .iter()
+            .find(|(_, c)| c.symbol == "▸")
+            .map(|(coord, _)| coord.y)
+            .expect("green selection arrow painted");
+        assert_eq!(
+            arrow_row, scratch_row,
+            "▸ must mark the highlighted scratch row"
+        );
+    }
+
+    /// A picked local repo's CLOSED row shows its marker + label + the dimmed path,
+    /// so which repo was chosen is unambiguous. The path substring is painted.
+    #[test]
+    fn wizard_picked_repo_shows_marker_label_and_path() {
+        let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        s.set_repos(repo_roster());
+        let s = type_into(&s, "Fix");
+        // Focus Repo, cycle ←→ to pick the `rosetta` scan (scratch=0, rosetta=1).
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // scratch
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // rosetta
+        assert_eq!(
+            s.wizard().unwrap().repo_ref(),
+            Some("/Users/dev/work/rosetta")
+        );
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+        assert!(painted.contains("rosetta"), "label missing:\n{painted}");
+        assert!(
+            painted.contains("/Users/dev/work/rosetta"),
+            "dimmed path missing:\n{painted}"
+        );
+    }
+
+    /// Two repos with the SAME basename render distinguishable dimmed paths, so the
+    /// picker can tell them apart — the whole point of the locator.
+    #[test]
+    fn wizard_dropdown_distinguishes_same_basename_repos() {
+        let roster = vec![
+            RepoOption {
+                label: "rosetta".into(),
+                repo_ref: "/Users/dev/a/rosetta".into(),
+                is_favorite: false,
+                is_remote_only: false,
+            },
+            RepoOption {
+                label: "rosetta".into(),
+                repo_ref: "/Users/dev/b/rosetta".into(),
+                is_favorite: false,
+                is_remote_only: false,
+            },
+        ];
+        let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        s.set_repos(roster);
+        let s = type_into(&s, "Fix");
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+        assert!(
+            painted.contains("/Users/dev/a/rosetta") && painted.contains("/Users/dev/b/rosetta"),
+            "both same-basename paths must render distinctly:\n{painted}"
+        );
+    }
+
+    /// A locator too wide for the field is truncated from the LEFT — the
+    /// disambiguating tail (the deepest path segments) is what survives, prefixed
+    /// with `…`. Keeping the head instead would collapse same-basename repos back
+    /// into indistinguishable prefixes, so this behaviour is load-bearing.
+    #[test]
+    fn left_truncate_keeps_the_disambiguating_tail() {
+        let path = "/Users/dev/very/long/workspace/path/to/rosetta";
+        let out = left_truncate(path, 12);
+        assert!(
+            out.starts_with('…'),
+            "truncated locator must lead with …: {out}"
+        );
+        assert!(out.ends_with("to/rosetta"), "must keep the tail: {out}");
+        assert!(
+            !out.contains("/Users/dev"),
+            "must NOT keep the non-disambiguating head: {out}"
+        );
+        // Exactly `max` chars wide (… + max-1 tail chars).
+        assert_eq!(
+            out.chars().count(),
+            12,
+            "truncated width must be `max`: {out}"
+        );
+        // A locator that already fits is returned untouched.
+        assert_eq!(left_truncate("short", 12), "short");
+    }
+
+    /// The card GROWS while the dropdown is open (more painted rows) and returns to
+    /// the compact height when it closes — measured by the span of painted rows.
+    #[test]
+    fn wizard_card_grows_on_open_and_compacts_on_close() {
+        let mut base =
+            reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        base.set_repos(repo_roster());
+        let base = type_into(&base, "Fix");
+        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state;
+
+        let painted_row_span = |s: &IssueListState| -> u16 {
+            let mut buf = WireBuffer::new(120, 24);
+            render_issue_list(&mut buf, 120, 1, 23, s, 0);
+            // Rows carrying a gold frame glyph bound the card top/bottom.
+            let ys: Vec<u16> = buf
+                .cells
+                .iter()
+                .filter(|(_, c)| c.fg == Some(GOLD) && (c.symbol == "│" || c.symbol == "╭"))
+                .map(|(coord, _)| coord.y)
+                .collect();
+            let (min, max) = (ys.iter().min().copied(), ys.iter().max().copied());
+            max.unwrap_or(0).saturating_sub(min.unwrap_or(0))
+        };
+
+        let closed_span = painted_row_span(&base);
+        let open = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
+        let open_span = painted_row_span(&open);
+        assert!(
+            open_span > closed_span,
+            "card must grow when the dropdown opens ({open_span} !> {closed_span})"
+        );
+
+        // Closing (Enter picks + closes) returns to the compact span.
+        let closed_again = reduce_issue_list(&open, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_eq!(
+            painted_row_span(&closed_again),
+            closed_span,
+            "card must return to compact height on close"
+        );
+    }
+
+    /// A roster longer than the visible window scrolls: paging the cursor Down past
+    /// the window reveals a later candidate that was off-screen at open.
+    #[test]
+    fn wizard_dropdown_scrolls_window_on_down() {
+        let roster: Vec<RepoOption> = (0..12)
+            .map(|i| RepoOption {
+                label: format!("repo{i:02}"),
+                repo_ref: format!("/w/repo{i:02}"),
+                is_favorite: false,
+                is_remote_only: false,
+            })
+            .collect();
+        let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        s.set_repos(roster);
+        let s = type_into(&s, "Fix");
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
+
+        // At open the last repo is off-window (13 candidates incl. scratch, window 6).
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        assert!(
+            !painted_text(&buf).contains("repo11"),
+            "last repo should be off-window at open"
+        );
+
+        // Page the cursor to the bottom; the window scroll-follows it into view.
+        let s = (0..12).fold(s, |s, _| {
+            reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state
+        });
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        assert!(
+            painted_text(&buf).contains("repo11"),
+            "scrolling down must reveal the last repo"
         );
     }
 
