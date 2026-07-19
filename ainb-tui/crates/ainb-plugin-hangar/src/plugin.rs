@@ -2577,6 +2577,14 @@ impl HangarPlugin {
         host: &HostClient,
         issue_id: ainb_hangar_core::ids::IssueId,
     ) {
+        // Only one delete may be in flight: the fixed ISSUE_DELETE_REQ_ID is not a
+        // per-call correlation token, so a second delete before the first reply
+        // lands would overwrite `delete_in_flight` and misattribute the reply to
+        // the wrong issue. Refuse the overlap instead.
+        if self.delete_in_flight.is_some() {
+            self.screens.issue_list.set_note("delete already in flight — please wait");
+            return;
+        }
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             self.screens.issue_list.set_note("delete failed: daemon link is down");
             return;
@@ -2613,6 +2621,14 @@ impl HangarPlugin {
         host: &HostClient,
         issue_id: ainb_hangar_core::ids::IssueId,
     ) {
+        // Only one cancel-and-delete may be in flight: ISSUE_CANCEL_ACTIVE_REQ_ID is
+        // a fixed per-method id, so an overlapping flow would overwrite
+        // `cancel_delete_in_flight` and could fire the delete retry against the
+        // wrong issue. Refuse the overlap.
+        if self.cancel_delete_in_flight.is_some() {
+            self.screens.issue_list.set_note("cancel already in flight — please wait");
+            return;
+        }
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             self.screens.issue_list.set_note("cancel failed: daemon link is down");
             return;
