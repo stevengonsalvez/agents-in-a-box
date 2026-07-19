@@ -284,6 +284,27 @@ fn wizard_at_opens_repo_dropdown() {
     assert_eq!(s.wizard().unwrap().repo_query(), "z");
 }
 
+/// Tabbing away from an open repo dropdown commits the highlighted candidate
+/// instead of discarding it — leaving the field with the pick made, dropdown
+/// closed, focus advanced.
+#[test]
+fn wizard_tab_from_dropdown_commits_highlight() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix");
+    let s = wiz(&s, WizardKey::Down).state; // focus Repo
+    let s = wiz(&s, WizardKey::Char('@')).state; // open dropdown, cursor on scratch
+
+    let out = wiz(&s, WizardKey::Tab);
+    let w = out.state.wizard().expect("wizard still open");
+    assert_eq!(
+        w.repo_ref(),
+        Some("scratch"),
+        "highlight committed, not lost"
+    );
+    assert_eq!(w.repo_dropdown(), None, "dropdown closed on tab-away");
+    assert_ne!(w.focus(), WizardRow::Repo, "focus advanced off Repo");
+}
+
 /// Enter with NO repo picked never creates — it jumps focus to the Repo row and
 /// opens its dropdown (the REQUIRED guard for a repo-less create).
 #[test]

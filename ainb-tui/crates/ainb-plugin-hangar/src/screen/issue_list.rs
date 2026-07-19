@@ -1151,8 +1151,10 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
 const fn ring_step(cur: usize, len: usize, forward: bool) -> usize {
     if forward {
         (cur + 1) % len
+    } else if cur == 0 {
+        len - 1
     } else {
-        (cur + len - 1) % len
+        cur - 1
     }
 }
 
@@ -1281,13 +1283,15 @@ fn wizard_dropdown_key(
             }
             wizard.repo_dropdown = None;
         }
-        WizardKey::Tab => {
+        WizardKey::Tab | WizardKey::BackTab => {
+            // Commit the highlighted candidate before leaving so tabbing away
+            // does not silently discard the pick.
+            let candidates = repo_candidates(&state.repos, &wizard.repo_query);
+            if let Some(picked) = candidates.get(cursor).or_else(|| candidates.first()) {
+                wizard.repo_ref = Some(picked.repo_ref.clone());
+            }
             wizard.repo_dropdown = None;
-            return wizard_move_focus(state, wizard, true);
-        }
-        WizardKey::BackTab => {
-            wizard.repo_dropdown = None;
-            return wizard_move_focus(state, wizard, false);
+            return wizard_move_focus(state, wizard, matches!(key, WizardKey::Tab));
         }
         // Esc is handled by the caller (cancels the whole wizard).
         WizardKey::Esc => {}
