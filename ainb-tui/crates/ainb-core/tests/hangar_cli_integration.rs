@@ -428,6 +428,7 @@ fn seed_agent(home: &std::path::Path) {
                 thinking: None,
                 agent_env: Vec::new(),
                 provider: None,
+                token_budget: None,
             },
         )
         .await
@@ -1055,6 +1056,7 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 thinking: None,
                 agent_env: Vec::new(),
                 provider: None,
+                token_budget: None,
             },
         )
         .await
