@@ -230,6 +230,13 @@ pub enum IssueListMode {
     /// [`IssueListIntent::DeleteIssue`], Esc cancels in one press; every other key
     /// is captured (so a stray tab-switch char never fires behind the modal).
     ConfirmDelete,
+    /// Second-chance confirm raised when a delete was REFUSED because the issue
+    /// still has active run(s): an amber overlay offering to cancel the run(s)
+    /// and delete ([`IssueListState::confirm_cancel_delete`]). `c`/`C`/Enter emit
+    /// [`IssueListIntent::CancelAndDeleteIssue`], Esc backs out; every other key
+    /// is captured. Entered from the plugin glue on the daemon's active-tasks
+    /// delete rejection, never directly by a key press.
+    ConfirmCancelDelete,
 }
 
 /// The target of an open `x` delete-confirm overlay (63d): the issue id the
@@ -454,6 +461,10 @@ pub struct IssueListState {
     /// The open `x` delete-confirm target (63d), set while `mode` is
     /// [`IssueListMode::ConfirmDelete`]. `None` otherwise.
     confirm_delete: Option<PendingDelete>,
+    /// The open "cancel run(s) & delete" target, set while `mode` is
+    /// [`IssueListMode::ConfirmCancelDelete`] (armed by the plugin glue when a
+    /// delete is refused for active tasks). `None` otherwise.
+    confirm_cancel_delete: Option<PendingDelete>,
 }
 
 impl Default for IssueListState {
@@ -472,6 +483,7 @@ impl Default for IssueListState {
             scroll_offsets: [0; COLUMN_COUNT],
             hovered_id: None,
             confirm_delete: None,
+            confirm_cancel_delete: None,
         }
     }
 }
@@ -505,7 +517,10 @@ impl IssueListState {
     pub const fn is_capturing_text(&self) -> bool {
         matches!(
             self.mode,
-            IssueListMode::FilterInput | IssueListMode::CreateInput | IssueListMode::ConfirmDelete
+            IssueListMode::FilterInput
+                | IssueListMode::CreateInput
+                | IssueListMode::ConfirmDelete
+                | IssueListMode::ConfirmCancelDelete
         )
     }
 
@@ -533,6 +548,47 @@ impl IssueListState {
     #[must_use]
     pub const fn confirm_delete(&self) -> Option<&PendingDelete> {
         self.confirm_delete.as_ref()
+    }
+
+    /// Cancel the "cancel run(s) & delete" overlay (Esc): drop it and return to
+    /// normal navigation in one press. A no-op when not in that mode.
+    pub fn abort_confirm_cancel_delete(&mut self) {
+        if self.mode == IssueListMode::ConfirmCancelDelete {
+            self.mode = IssueListMode::Normal;
+            self.confirm_cancel_delete = None;
+        }
+    }
+
+    /// The open "cancel run(s) & delete" target, or `None` when not in that mode —
+    /// the renderer draws the amber overlay from this.
+    #[must_use]
+    pub const fn confirm_cancel_delete(&self) -> Option<&PendingDelete> {
+        self.confirm_cancel_delete.as_ref()
+    }
+
+    /// Arm the "cancel run(s) & delete" overlay for issue `id` — the seam the
+    /// plugin glue drives when the daemon refuses a delete because the issue still
+    /// has active run(s). Selects the row (so the target is visible) and enters
+    /// [`IssueListMode::ConfirmCancelDelete`]; a `c`/`C`/Enter then emits
+    /// [`IssueListIntent::CancelAndDeleteIssue`]. A no-op when no cached row
+    /// carries that id (the row already vanished).
+    pub fn open_confirm_cancel_delete_for(&mut self, id: &str) {
+        self.select_by_id(id);
+        let Some(row) = self.selected_row().filter(|r| r.id.as_str() == id) else {
+            return;
+        };
+        let label = match &row.display_id {
+            Some(display) => format!("{display} {}", row.title),
+            None => row.title.clone(),
+        };
+        let pending = PendingDelete {
+            id: row.id.clone(),
+            label,
+        };
+        self.mode = IssueListMode::ConfirmCancelDelete;
+        self.confirm_cancel_delete = Some(pending);
+        // Supersede any stale dispatch / delete-failure note.
+        self.note = None;
     }
 
     /// Open the `x` RED confirm overlay over the row carrying issue `id` (63l.5):
@@ -923,6 +979,12 @@ pub enum IssueListIntent {
     /// confirm overlay. The plugin glue lifts it into `hangar/issue_delete`; the
     /// daemon's `IssueDeleted` push then drops the row from the list.
     DeleteIssue(IssueId),
+    /// Cancel the issue's active run(s) THEN delete it: raised by confirming the
+    /// "cancel run(s) & delete" overlay (armed after a delete was refused for
+    /// active tasks). The plugin glue fires `hangar/issue_cancel_active` and, on
+    /// its success reply, retries `hangar/issue_delete` (cancel commits before the
+    /// delete).
+    CancelAndDeleteIssue(IssueId),
 }
 
 /// The result of folding one [`IssueListEvent`] into an [`IssueListState`].
@@ -955,6 +1017,7 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
         // working alongside the structured [`IssueListEvent::Wizard`] events.
         IssueListMode::CreateInput => reduce_wizard_key(state, wizard_key_from_char(c)),
         IssueListMode::ConfirmDelete => reduce_confirm_delete_key(state, c),
+        IssueListMode::ConfirmCancelDelete => reduce_confirm_cancel_delete_key(state, c),
         IssueListMode::Normal => reduce_normal_key(state, c),
     }
 }
@@ -1112,6 +1175,38 @@ fn cancel_confirm_delete(state: &IssueListState) -> IssueListReduction {
     let mut next = state.clone();
     next.mode = IssueListMode::Normal;
     next.confirm_delete = None;
+    no_intent(next)
+}
+
+/// "Cancel run(s) & delete" key handling: `c` / `C` / Enter emit
+/// [`IssueListIntent::CancelAndDeleteIssue`] for the pending target, Esc backs
+/// out; every other key is captured (the overlay is modal). All exits reset back
+/// to normal navigation.
+fn reduce_confirm_cancel_delete_key(state: &IssueListState, c: char) -> IssueListReduction {
+    match c {
+        // Confirm: `c`/`C` (matching the "[C] cancel & delete" hint) or Enter.
+        'c' | 'C' | '\n' | '\r' => {
+            let Some(pending) = state.confirm_cancel_delete.clone() else {
+                return cancel_confirm_cancel_delete(state);
+            };
+            let mut next = state.clone();
+            next.mode = IssueListMode::Normal;
+            next.confirm_cancel_delete = None;
+            with_intent(next, IssueListIntent::CancelAndDeleteIssue(pending.id))
+        }
+        // Esc backs out, leaving the run(s) untouched.
+        '\u{1b}' => cancel_confirm_cancel_delete(state),
+        // Any other key is swallowed — the modal stays open until confirm / Esc.
+        _ => unchanged(state),
+    }
+}
+
+/// Back out of the "cancel run(s) & delete" overlay (Esc): normal navigation,
+/// target dropped, no intent.
+fn cancel_confirm_cancel_delete(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::Normal;
+    next.confirm_cancel_delete = None;
     no_intent(next)
 }
 
@@ -1487,6 +1582,15 @@ pub fn render_issue_list(
             bottom.saturating_sub(1),
             pending,
         );
+    } else if let Some(pending) = state.confirm_cancel_delete() {
+        // The amber "cancel run(s) & delete" overlay on the two bottom rows.
+        render_confirm_cancel_delete(
+            buf,
+            area_w,
+            bottom.saturating_sub(2),
+            bottom.saturating_sub(1),
+            pending,
+        );
     } else if let Some(note) = state.note() {
         put_str(
             buf,
@@ -1532,6 +1636,40 @@ fn render_confirm_delete(
         value_row,
         "Enter=delete  Esc=cancel",
         OFFLINE_RED,
+        area_w,
+    );
+}
+
+/// Amber used for the "cancel run(s) & delete" overlay — a caution accent
+/// distinct from the destructive clay-red, so the second-chance prompt reads as a
+/// recoverable choice rather than the point of no return.
+const CAUTION_AMBER: Color = Color::rgb(230, 180, 90);
+
+/// Render the amber "cancel run(s) & delete" overlay on the two bottom rows: the
+/// prompt explaining the issue still has active run(s), then the key legend.
+/// Char-safe via [`put_str`]. `c`/`C`/Enter cancels-then-deletes, Esc backs out —
+/// all wired in the reducer.
+fn render_confirm_cancel_delete(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    value_row: u16,
+    pending: &PendingDelete,
+) {
+    put_str(
+        buf,
+        0,
+        row,
+        &format!("{} has active run(s) blocking delete.", pending.label),
+        CAUTION_AMBER,
+        area_w,
+    );
+    put_str(
+        buf,
+        0,
+        value_row,
+        "c=cancel run(s) & delete  Esc=keep",
+        CAUTION_AMBER,
         area_w,
     );
 }
@@ -2518,6 +2656,75 @@ mod tests {
         assert!(
             out.state.confirm_delete().is_none(),
             "target dropped after commit"
+        );
+    }
+
+    /// Arming the "cancel run(s) & delete" overlay (the plugin-glue seam for a
+    /// delete refused on active tasks) selects the target row, enters the modal
+    /// capture mode, and raises no intent yet.
+    #[test]
+    fn open_confirm_cancel_delete_arms_the_overlay() {
+        let mut s =
+            IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        s.open_confirm_cancel_delete_for("i2");
+        assert_eq!(s.mode(), IssueListMode::ConfirmCancelDelete);
+        assert!(
+            s.is_capturing_text(),
+            "the cancel-delete overlay is a modal capture"
+        );
+        let pending = s.confirm_cancel_delete().expect("a target is set");
+        assert_eq!(pending.id, IssueId::from_str("i2").unwrap());
+        // Arming for an unknown id (the row already vanished) is a no-op.
+        let mut gone = IssueListState::with_rows(vec![row("i1", "open", None)]);
+        gone.open_confirm_cancel_delete_for("nope");
+        assert_eq!(
+            gone.mode(),
+            IssueListMode::Normal,
+            "unknown id arms nothing"
+        );
+        assert!(gone.confirm_cancel_delete().is_none());
+    }
+
+    /// `c` (and Enter) on the cancel-delete overlay emits `CancelAndDeleteIssue`
+    /// for the target and returns to normal navigation; Esc backs out cleanly.
+    #[test]
+    fn confirm_cancel_delete_emits_intent_and_esc_backs_out() {
+        let mut s =
+            IssueListState::with_rows(vec![row("i1", "open", None), row("i2", "open", None)]);
+        s.open_confirm_cancel_delete_for("i2");
+
+        // `c` confirms → cancel-then-delete intent for i2.
+        let out = reduce_issue_list(&s, IssueListEvent::Key('c'));
+        assert_eq!(
+            out.intent,
+            Some(IssueListIntent::CancelAndDeleteIssue(
+                IssueId::from_str("i2").unwrap()
+            )),
+            "c emits CancelAndDeleteIssue for the target"
+        );
+        assert_eq!(out.state.mode(), IssueListMode::Normal);
+        assert!(
+            out.state.confirm_cancel_delete().is_none(),
+            "target dropped after commit"
+        );
+
+        // Enter is an equivalent confirm.
+        let via_enter = reduce_issue_list(&s, IssueListEvent::Key('\n'));
+        assert_eq!(
+            via_enter.intent,
+            Some(IssueListIntent::CancelAndDeleteIssue(
+                IssueId::from_str("i2").unwrap()
+            )),
+            "Enter also confirms cancel-and-delete"
+        );
+
+        // Esc backs out with no intent, target dropped.
+        let esc = reduce_issue_list(&s, IssueListEvent::Key('\u{1b}'));
+        assert_eq!(esc.intent, None, "Esc raises no intent");
+        assert_eq!(esc.state.mode(), IssueListMode::Normal);
+        assert!(
+            esc.state.confirm_cancel_delete().is_none(),
+            "target dropped on Esc"
         );
     }
 

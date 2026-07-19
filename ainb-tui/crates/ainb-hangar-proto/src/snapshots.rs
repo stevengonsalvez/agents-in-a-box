@@ -1648,6 +1648,29 @@ pub struct IssueDeleteParams {
     pub issue_id: String,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_CANCEL_ACTIVE`]: cancel every active
+/// task on one issue (the board-less "cancel the run(s) & delete" affordance).
+///
+/// Workspace-scoped like every mutation: the daemon rejects a mistyped
+/// `workspace_id` with `INVALID_PARAMS`. The issue carries no board coordinates —
+/// the daemon resolves the active set from the issue id alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueCancelActiveParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose active run(s) to cancel.
+    pub issue_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUE_CANCEL_ACTIVE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueCancelActiveResult {
+    /// How many of the issue's active tasks this call transitioned to
+    /// `cancelled`. `0` when the issue had no active task (a clean no-op the
+    /// caller surfaces as a note, never an error).
+    pub cancelled: u64,
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6, D16): launch a
 /// card's issue on its assignee profile now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]

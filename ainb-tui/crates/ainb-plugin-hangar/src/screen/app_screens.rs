@@ -539,6 +539,11 @@ pub struct ScreenStates {
     /// overlay), awaiting the `render` pass to fire `hangar/issue_delete` over the
     /// daemon socket (63d). Carries the issue to delete. `None` when idle.
     pub pending_delete_action: Option<ainb_hangar_core::ids::IssueId>,
+    /// A "cancel run(s) & delete" raised by the issue-list confirm overlay after a
+    /// delete was refused for active tasks, awaiting the `render` pass to fire
+    /// `hangar/issue_cancel_active` (then, on its reply, retry `hangar/issue_delete`)
+    /// over the daemon socket. Carries the issue. `None` when idle.
+    pub pending_cancel_delete_action: Option<ainb_hangar_core::ids::IssueId>,
     /// A search RPC raised by the command-palette modal (each keystroke),
     /// awaiting the `render` pass to fire `hangar/search` over the daemon socket
     /// (e38.13). `None` when idle.
@@ -959,6 +964,15 @@ impl ScreenStates {
     /// (63d). The `render` pass drains it and fires `hangar/issue_delete`.
     pub const fn take_pending_delete_action(&mut self) -> Option<ainb_hangar_core::ids::IssueId> {
         self.pending_delete_action.take()
+    }
+
+    /// Take the pending "cancel run(s) & delete" raised by the issue-list confirm
+    /// overlay, if any. The `render` pass drains it and fires
+    /// `hangar/issue_cancel_active`.
+    pub const fn take_pending_cancel_delete_action(
+        &mut self,
+    ) -> Option<ainb_hangar_core::ids::IssueId> {
+        self.pending_cancel_delete_action.take()
     }
 
     /// Take the pending search RPC raised by the command palette, if any
@@ -1442,6 +1456,13 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         // router can't `await`). The daemon's IssueDeleted push then drops the row.
         Some(IssueListIntent::DeleteIssue(id)) => {
             states.pending_delete_action = Some(id);
+            None
+        }
+        // Confirming the "cancel run(s) & delete" overlay lifts into a deferred
+        // `hangar/issue_cancel_active` the `render` pass drains + fires; on its
+        // reply the plugin retries the delete (cancel commits before delete).
+        Some(IssueListIntent::CancelAndDeleteIssue(id)) => {
+            states.pending_cancel_delete_action = Some(id);
             None
         }
         None => None,

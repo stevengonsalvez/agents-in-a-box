@@ -212,6 +212,11 @@ pub async fn sweep_stale_running(
 /// stuck dispatch is failed by [`sweep_stale_dispatched`]. Mirrors the reference
 /// control plane `agent.sql.go:1979 ReclaimStaleDispatchedTaskForRuntime`.
 ///
+/// A `dispatched` row with a NULL `dispatched_at` (a claim whose timestamp was
+/// never stamped) is also reclaimed here: with no timestamp it cannot be inside
+/// the protection window, and leaving it would make it immortal — invisible to
+/// every time-based pass and thus a permanent block on its issue's delete.
+///
 /// Returns the number of rows reclaimed in this pass.
 ///
 /// # Errors
@@ -233,16 +238,23 @@ pub async fn reclaim_stale_dispatched(
     // `ReclaimStaleDispatchedTaskForRuntime`.)
     let window_cutoff = now - ms(cfg.reclaim_window);
     let ttl_cutoff = now - ms(cfg.dispatched_ttl);
+    // A NULL `dispatched_at` is a *stranded* claim: the row is `dispatched` but its
+    // dispatch timestamp was never stamped (a lost/never-recorded claim response),
+    // so the time-based band can never see it and it is immortal. Treat it as
+    // reclaimable — it is by definition outside the 90s protection window (there is
+    // no fresh in-flight timestamp to protect) — so it is redelivered to `queued`
+    // like any dispatch past the window. Stamped rows keep the exact band
+    // (`reclaim_window < age <= dispatched_ttl`): a fresh (<90s) dispatch stays
+    // protected and a past-TTL dispatch is still left to the fail step.
     let reclaimed = sqlx::query(
         "UPDATE agent_task_queue \
          SET status = 'queued', dispatched_at = NULL \
          WHERE id IN ( \
              SELECT id FROM agent_task_queue \
              WHERE status = 'dispatched' \
-               AND dispatched_at IS NOT NULL \
-               AND dispatched_at < ?1 \
-               AND dispatched_at >= ?2 \
                AND started_at IS NULL \
+               AND ( dispatched_at IS NULL \
+                     OR (dispatched_at < ?1 AND dispatched_at >= ?2) ) \
              ORDER BY dispatched_at \
              LIMIT ?3 \
          )",
@@ -363,6 +375,14 @@ pub async fn reclaim_orphaned_on_startup(
 /// The `from_status` and `age_column` arguments are fixed string literals chosen
 /// by the three callers (never user input), so interpolating them into the SQL
 /// is injection-safe; the time bounds and batch cap are parameter-bound.
+///
+/// A NULL `age_column` is treated as *infinitely old* (`age_column IS NULL` is
+/// matched explicitly, keeping the predicate index-friendly), so a `running` row
+/// whose `started_at` was never stamped — or a `dispatched`
+/// row with a NULL `dispatched_at` the reclaim step did not already redeliver — is
+/// failed rather than skipped forever. Without this a NULL-timestamp row is
+/// immortal (the old `IS NOT NULL` guard excluded it from every pass), which is
+/// exactly what strands a task and blocks its issue's delete.
 async fn fail_batch(
     pool: &SqlitePool,
     from_status: &str,
@@ -377,8 +397,7 @@ async fn fail_batch(
          WHERE id IN ( \
              SELECT id FROM agent_task_queue \
              WHERE status = '{from_status}' \
-               AND {age_column} IS NOT NULL \
-               AND {age_column} < ?2 \
+               AND ( {age_column} IS NULL OR {age_column} < ?2 ) \
              ORDER BY {age_column} \
              LIMIT ?3 \
          )"

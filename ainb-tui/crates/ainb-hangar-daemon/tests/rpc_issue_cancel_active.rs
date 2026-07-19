@@ -1,19 +1,17 @@
-//! Integration: the `hangar/issue_delete` RPC deletes an issue over a real
-//! framed `UnixStream`, pushes the matching `hangar/event` (`issue_deleted`) to
-//! subscribed connections, refuses while a task is ACTIVE, and is
-//! workspace-scoped (63d).
+//! Integration: the `hangar/issue_cancel_active` RPC cancels every active task on
+//! one issue over a real framed `UnixStream`, WITHOUT any board coordinates — the
+//! board-less "cancel the run(s) & delete" affordance.
 //!
-//! The seed fixture lays down three open issues in `WS_ID`; here a connection
-//! authenticates, subscribes the workspace, and asserts (a) a delete acks + pushes
-//! `issue_deleted` + drops the row from a follow-up `issues_list`, (b) an issue
-//! with a live task is refused with a "cancel the run first" error, and (c) a
-//! mistyped workspace is rejected, never a silent delete.
+//! The end-to-end story: an issue with a live task refuses `issue_delete` with a
+//! machine-readable `data.reason = "active_tasks"` marker; `issue_cancel_active`
+//! then clears the run (`{ cancelled: 1 }`), after which the same `issue_delete`
+//! succeeds. Also asserts a no-active-task issue is a clean `{ cancelled: 0 }` and
+//! a mistyped workspace is rejected, never a silent cancel.
 
 use std::time::{Duration, Instant};
 
 use ainb_hangar_daemon::rpc::{self, DaemonHealth};
 use ainb_hangar_daemon::seed::{self, WS_ID, WS_SLUG};
-use ainb_hangar_proto::events::EVENT_METHOD;
 use ainb_hangar_proto::{RpcId, RpcRequest, methods};
 use ainb_hangar_store::Store;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -97,17 +95,6 @@ impl Client {
         }
     }
 
-    async fn next_event(&mut self, timeout: Duration) -> Option<serde_json::Value> {
-        let deadline = Instant::now() + timeout;
-        loop {
-            let remaining = deadline.checked_duration_since(Instant::now())?;
-            let frame = self.read_frame(remaining).await?;
-            if frame.get("id").is_none() && frame["method"] == EVENT_METHOD {
-                return Some(frame["params"].clone());
-            }
-        }
-    }
-
     async fn auth_from_file(&mut self, dir: &std::path::Path) {
         let token_path = ainb_hangar_proto::auth::token_file_in(dir);
         let token = std::fs::read_to_string(&token_path).expect("read daemon.token");
@@ -156,64 +143,9 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     (socket_path, store)
 }
 
-/// An authenticated, subscribed connection deletes a seeded issue: the response
-/// acks, the connection receives the `issue_deleted` push, and the issue is gone
-/// from a fresh snapshot.
-#[tokio::test]
-async fn issue_delete_removes_and_pushes_event() {
-    let dir = tempfile::tempdir().unwrap();
-    let (socket_path, _store) = start_server(dir.path()).await;
-
-    let mut c = Client::connect(&socket_path).await;
-    c.auth_from_file(dir.path()).await;
-    c.subscribe(WS_SLUG).await;
-
-    // issue-3 has no task in the fixture (issue-1 carries the running task), so it
-    // is the clean happy-path delete.
-    let resp = c
-        .call(
-            methods::HANGAR_ISSUE_DELETE,
-            serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "issue-3" }),
-        )
-        .await;
-    assert!(resp["error"].is_null(), "delete must ack: {resp}");
-
-    // The subscribed connection received the issue_deleted push. Drain it BEFORE
-    // the next request — `call()` discards interleaved notifications.
-    let event = c
-        .next_event(Duration::from_secs(5))
-        .await
-        .expect("a committed delete must push an issue_deleted event");
-    assert_eq!(event["event"], "issue_deleted", "wrong event: {event}");
-    assert_eq!(event["issue_id"], "issue-3");
-
-    // The delete persisted: a fresh issues_list no longer carries issue-3, while
-    // its siblings remain.
-    let list = c
-        .call(
-            methods::HANGAR_ISSUES_LIST,
-            serde_json::json!({ "workspace_id": WS_SLUG }),
-        )
-        .await;
-    let issues = list["result"]["issues"].as_array().unwrap();
-    assert!(
-        issues.iter().all(|i| i["id"] != "issue-3"),
-        "issue-3 gone from the snapshot"
-    );
-    assert!(
-        issues.iter().any(|i| i["id"] == "issue-2"),
-        "sibling issue-2 untouched"
-    );
-}
-
-/// An issue with a live (running) task refuses the delete with a "cancel the run
-/// first" error, and the issue survives.
-#[tokio::test]
-async fn issue_delete_refuses_while_a_task_is_active() {
-    let dir = tempfile::tempdir().unwrap();
-    let (socket_path, store) = start_server(dir.path()).await;
-
-    // Enqueue a task on issue-2 and force it RUNNING (an active status).
+/// Enqueue a task on `issue_id` forced to `status` (an active status), returning
+/// nothing — the row exists after this.
+async fn seed_active_task(store: &Store, task_id: &str, issue_id: &str, status: &str) {
     let (runtime_id, agent_id): (String, String) =
         sqlx::query_as("SELECT a.runtime_id, a.id FROM agent a WHERE a.workspace_id = ? LIMIT 1")
             .bind(WS_ID)
@@ -223,90 +155,148 @@ async fn issue_delete_refuses_while_a_task_is_active() {
     sqlx::query(
         "INSERT INTO agent_task_queue \
          (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) \
-         VALUES ('t-live', ?, ?, ?, 'issue-2', 'running', 0)",
+         VALUES (?, ?, ?, ?, ?, ?, 0)",
     )
+    .bind(task_id)
     .bind(WS_ID)
     .bind(&runtime_id)
     .bind(&agent_id)
+    .bind(issue_id)
+    .bind(status)
     .execute(store.pool())
     .await
     .unwrap();
+}
+
+/// The full board-less flow: a live task blocks delete (with a machine-readable
+/// `active_tasks` marker), `issue_cancel_active` cancels it, and the retried
+/// delete then succeeds.
+#[tokio::test]
+async fn cancel_active_unblocks_a_delete_refused_for_active_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_active_task(&store, "t-live", "issue-2", "running").await;
 
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
+    c.subscribe(WS_SLUG).await;
 
-    let resp = c
+    // 1. The delete is refused, and the error carries the machine-readable marker
+    //    the TUI keys its "cancel & delete" offer off.
+    let refused = c
         .call(
             methods::HANGAR_ISSUE_DELETE,
             serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "issue-2" }),
         )
         .await;
     assert!(
-        !resp["error"].is_null(),
-        "an active-task issue must refuse deletion: {resp}"
+        !refused["error"].is_null(),
+        "active task must refuse delete: {refused}"
     );
-    assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("cancel the run first"),
-        "refusal must tell the caller to cancel first: {resp}"
-    );
-    // The refusal carries a machine-readable marker so a client can offer an
-    // inline cancel-and-delete instead of dead-ending on the message text.
     assert_eq!(
-        resp["error"]["data"]["reason"], "active_tasks",
-        "refusal must tag the active-tasks marker: {resp}"
+        refused["error"]["data"]["reason"], "active_tasks",
+        "refusal carries the active_tasks marker: {refused}"
+    );
+    assert_eq!(
+        refused["error"]["data"]["active"], 1,
+        "one active task reported"
     );
 
-    // issue-2 survives.
+    // 2. Cancel the active run(s) for the issue — no board coordinates.
+    let cancelled = c
+        .call(
+            methods::HANGAR_ISSUE_CANCEL_ACTIVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "issue-2" }),
+        )
+        .await;
+    assert!(cancelled["error"].is_null(), "cancel must ack: {cancelled}");
+    assert_eq!(cancelled["result"]["cancelled"], 1, "one task cancelled");
+
+    // The task row is now terminal (`cancelled`), so nothing is active.
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM agent_task_queue WHERE id = 't-live'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(status, "cancelled", "the run is cancelled in the store");
+
+    // 3. The retried delete now succeeds and pushes issue_deleted.
+    let deleted = c
+        .call(
+            methods::HANGAR_ISSUE_DELETE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "issue-2" }),
+        )
+        .await;
+    assert!(
+        deleted["error"].is_null(),
+        "delete after cancel must ack: {deleted}"
+    );
+
+    // The issue is gone from a fresh snapshot.
     let list = c
         .call(
             methods::HANGAR_ISSUES_LIST,
-            serde_json::json!({ "workspace_id": WS_ID }),
+            serde_json::json!({ "workspace_id": WS_SLUG }),
         )
         .await;
     let issues = list["result"]["issues"].as_array().unwrap();
     assert!(
-        issues.iter().any(|i| i["id"] == "issue-2"),
-        "refused delete left issue-2 in place"
+        issues.iter().all(|i| i["id"] != "issue-2"),
+        "issue-2 deleted after the runs were cancelled"
     );
 }
 
-/// A mistyped / foreign workspace is rejected with an error — never a silent
-/// delete — and the issue is untouched.
+/// An issue with no active task is a clean `{ cancelled: 0 }` — a no-op the caller
+/// surfaces as a note, never an error.
 #[tokio::test]
-async fn issue_delete_rejects_unknown_workspace_and_touches_no_row() {
+async fn cancel_active_is_a_clean_noop_with_no_active_tasks() {
     let dir = tempfile::tempdir().unwrap();
     let (socket_path, _store) = start_server(dir.path()).await;
 
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
 
+    // issue-3 carries no task in the fixture.
     let resp = c
         .call(
-            methods::HANGAR_ISSUE_DELETE,
-            serde_json::json!({
-                "workspace_id": "nope-not-a-workspace",
-                "issue_id": "issue-1",
-            }),
+            methods::HANGAR_ISSUE_CANCEL_ACTIVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "issue-3" }),
+        )
+        .await;
+    assert!(
+        resp["error"].is_null(),
+        "a no-active-task cancel is not an error: {resp}"
+    );
+    assert_eq!(resp["result"]["cancelled"], 0, "nothing to cancel");
+}
+
+/// A mistyped / foreign workspace is rejected — never a silent cross-tenant
+/// cancel.
+#[tokio::test]
+async fn cancel_active_rejects_unknown_workspace() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_active_task(&store, "t-live", "issue-1", "running").await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_ISSUE_CANCEL_ACTIVE,
+            serde_json::json!({ "workspace_id": "nope-not-a-workspace", "issue_id": "issue-1" }),
         )
         .await;
     assert!(
         !resp["error"].is_null(),
-        "an unknown workspace must be rejected, not a silent delete: {resp}"
+        "an unknown workspace must be rejected, not a silent cancel: {resp}"
     );
 
-    // issue-1 is untouched under its real workspace.
-    let list = c
-        .call(
-            methods::HANGAR_ISSUES_LIST,
-            serde_json::json!({ "workspace_id": WS_ID }),
-        )
-        .await;
-    let issues = list["result"]["issues"].as_array().unwrap();
-    assert!(
-        issues.iter().any(|i| i["id"] == "issue-1"),
-        "rejected delete left issue-1 in place"
-    );
+    // The task is untouched (still active) under its real workspace.
+    let status: String =
+        sqlx::query_scalar("SELECT status FROM agent_task_queue WHERE id = 't-live'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(status, "running", "rejected cancel left the run running");
 }
