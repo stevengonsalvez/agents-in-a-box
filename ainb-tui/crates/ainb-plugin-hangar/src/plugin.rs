@@ -234,6 +234,10 @@ const ISSUE_RUN_REQ_ID: i64 = 52;
 /// error (e.g. an active task) is surfaced as a transient issue-list note — never
 /// silent.
 const ISSUE_DELETE_REQ_ID: i64 = 53;
+/// JSON-RPC id for the `hangar/issue_cancel_active` mutation (board-less "cancel
+/// run(s) & delete"). On success the plugin retries the `issue_delete`; an error
+/// surfaces as a transient issue-list note.
+const ISSUE_CANCEL_ACTIVE_REQ_ID: i64 = 54;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -387,6 +391,14 @@ pub struct HangarPlugin {
     /// `issue_id` plus the stashed payload, awaiting the next `render` pass (host
     /// IO is safe there) to fire `issue_update` + `issue_run`. `None` when idle.
     pending_issue_dispatch: Option<(String, WizardDispatch)>,
+    /// The issue whose `hangar/issue_delete` is in flight, stashed so a delete
+    /// REFUSED for active tasks can re-target the "cancel run(s) & delete" overlay
+    /// at the right issue (the reply carries no issue id). `None` when idle.
+    delete_in_flight: Option<ainb_hangar_core::ids::IssueId>,
+    /// The issue whose `hangar/issue_cancel_active` is in flight, awaiting its
+    /// reply to arm the follow-up `hangar/issue_delete` retry (cancel commits
+    /// before the delete). `None` when idle.
+    cancel_delete_in_flight: Option<ainb_hangar_core::ids::IssueId>,
 }
 
 /// The Issues create-wizard fields that ride ALONGSIDE the `issue_create` call
@@ -463,6 +475,8 @@ impl Default for HangarPlugin {
             list_context_menu: None,
             wizard_dispatch_in_flight: None,
             pending_issue_dispatch: None,
+            delete_in_flight: None,
+            cancel_delete_in_flight: None,
         }
     }
 }
@@ -899,8 +913,38 @@ impl HangarPlugin {
             // already dropped the row, so nothing to fold; an error (e.g. an active
             // task) surfaces as an issue-list note, never silent.
             RpcId::Number(ISSUE_DELETE_REQ_ID) => {
+                let target = self.delete_in_flight.take();
                 if let Some(e) = &resp.error {
-                    self.screens.issue_list.set_note(format!("delete failed: {}", e.message));
+                    // A delete refused because the issue still has active run(s)
+                    // carries `data.reason = "active_tasks"`: offer the inline
+                    // "cancel run(s) & delete" instead of dead-ending on the text.
+                    let is_active_tasks = e
+                        .data
+                        .as_ref()
+                        .and_then(|d| d.get("reason"))
+                        .and_then(serde_json::Value::as_str)
+                        == Some("active_tasks");
+                    match (is_active_tasks, target) {
+                        (true, Some(id)) => self
+                            .screens
+                            .issue_list
+                            .open_confirm_cancel_delete_for(id.as_str()),
+                        _ => self.screens.issue_list.set_note(format!("delete failed: {}", e.message)),
+                    }
+                }
+                self.conn.on_event();
+            }
+            // The board-less cancel-active reply: on success retry the delete
+            // (cancel has committed server-side); on error surface a note and do
+            // NOT delete.
+            RpcId::Number(ISSUE_CANCEL_ACTIVE_REQ_ID) => {
+                let target = self.cancel_delete_in_flight.take();
+                if let Some(e) = &resp.error {
+                    self.screens.issue_list.set_note(format!("cancel failed: {}", e.message));
+                } else if let Some(id) = target {
+                    // Retry the delete now the run(s) are cancelled — armed as a
+                    // pending action the render pass drains + fires.
+                    self.screens.pending_delete_action = Some(id);
                 }
                 self.conn.on_event();
             }
@@ -2549,9 +2593,48 @@ impl HangarPlugin {
             self.screens.issue_list.set_note("delete failed: could not encode request");
             return;
         };
+        // Stash the target BEFORE the send so a delete refused for active tasks can
+        // re-target the "cancel run(s) & delete" overlay (the reply carries no id);
+        // a send failure clears it (nothing will answer).
+        self.delete_in_flight = Some(issue_id);
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            self.delete_in_flight = None;
             self.screens.issue_list.set_note(format!("delete failed: {e}"));
             let _ = host.log_info(format!("hangar: issue delete send failed: {e}")).await;
+        }
+    }
+
+    /// Fire the board-less "cancel run(s) & delete" first leg: encode + send one
+    /// `hangar/issue_cancel_active` over the daemon socket. On its success reply the
+    /// plugin retries the `issue_delete` (cancel commits before delete); an error —
+    /// or a send failure — surfaces as an issue-list note, never silent.
+    async fn apply_cancel_delete_action(
+        &mut self,
+        host: &HostClient,
+        issue_id: ainb_hangar_core::ids::IssueId,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            self.screens.issue_list.set_note("cancel failed: daemon link is down");
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws, "issue_id": issue_id.as_str()
+        });
+        let Ok(body) = encode_request(
+            ISSUE_CANCEL_ACTIVE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_CANCEL_ACTIVE,
+            params,
+        ) else {
+            self.screens.issue_list.set_note("cancel failed: could not encode request");
+            return;
+        };
+        // Stash the target so the reply can arm the follow-up delete retry.
+        self.cancel_delete_in_flight = Some(issue_id);
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            self.cancel_delete_in_flight = None;
+            self.screens.issue_list.set_note(format!("cancel failed: {e}"));
+            let _ = host.log_info(format!("hangar: issue cancel-active send failed: {e}")).await;
         }
     }
 
@@ -4141,6 +4224,12 @@ impl Plugin for HangarPlugin {
         if let Some(issue_id) = self.screens.take_pending_delete_action() {
             self.apply_delete_action(host, issue_id).await;
         }
+        // Drain a deferred "cancel run(s) & delete" (confirm on the active-tasks
+        // overlay) and fire `hangar/issue_cancel_active`; its reply retries the
+        // delete once the run(s) are cancelled.
+        if let Some(issue_id) = self.screens.take_pending_cancel_delete_action() {
+            self.apply_cancel_delete_action(host, issue_id).await;
+        }
         // Phase 5: drain a dispatch armed by a successful wizard `issue_create`
         // reply — fire `hangar/issue_update` (persist repo / agent / branches on
         // the new issue) then `hangar/issue_run` (the actual launch).
@@ -5481,6 +5570,116 @@ mod tests {
             p.screens.take_pending_delete_action().map(|id| id.as_str().to_string()),
             Some("card-b".to_string()),
             "confirming the overlay arms hangar/issue_delete for card-b"
+        );
+    }
+
+    /// A `hangar/issue_delete` refused with the `active_tasks` marker arms the
+    /// issue-list "cancel run(s) & delete" overlay for the in-flight issue —
+    /// instead of dead-ending on a note.
+    #[test]
+    fn delete_refused_for_active_tasks_arms_cancel_delete_overlay() {
+        let mut p = connected_plugin_with_two_cards();
+        // Simulate a delete of card-b in flight (as apply_delete_action would stash).
+        p.delete_in_flight = Some(ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap());
+
+        let resp = ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_DELETE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32602,
+                message: "1 active task(s) on this issue — cancel the run first, then delete"
+                    .into(),
+                data: Some(serde_json::json!({ "reason": "active_tasks", "active": 1 })),
+            }),
+        };
+        p.on_daemon_response(&resp);
+
+        assert!(
+            p.screens
+                .issue_list
+                .confirm_cancel_delete()
+                .is_some_and(|pd| pd.id.as_str() == "card-b"),
+            "an active-tasks refusal arms the cancel-delete overlay for card-b"
+        );
+        assert!(
+            p.delete_in_flight.is_none(),
+            "the in-flight marker is consumed"
+        );
+    }
+
+    /// A plain (non-active-tasks) delete error just surfaces a note — no overlay.
+    #[test]
+    fn delete_error_without_marker_only_notes() {
+        let mut p = connected_plugin_with_two_cards();
+        p.delete_in_flight = Some(ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap());
+        let resp = ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_DELETE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32603,
+                message: "store error: disk full".into(),
+                data: None,
+            }),
+        };
+        p.on_daemon_response(&resp);
+        assert!(
+            p.screens.issue_list.confirm_cancel_delete().is_none(),
+            "a non-active-tasks error opens no overlay"
+        );
+    }
+
+    /// A successful `hangar/issue_cancel_active` reply retries the delete: it arms
+    /// `pending_delete_action` for the in-flight issue (cancel committed → delete).
+    #[test]
+    fn cancel_active_success_retries_the_delete() {
+        let mut p = connected_plugin_with_two_cards();
+        p.cancel_delete_in_flight =
+            Some(ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap());
+
+        let resp = ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_CANCEL_ACTIVE_REQ_ID),
+            result: Some(serde_json::json!({ "cancelled": 1 })),
+            error: None,
+        };
+        p.on_daemon_response(&resp);
+
+        assert_eq!(
+            p.screens.take_pending_delete_action().map(|id| id.as_str().to_string()),
+            Some("card-b".to_string()),
+            "cancel success arms the delete retry for card-b (cancel before delete)"
+        );
+        assert!(
+            p.cancel_delete_in_flight.is_none(),
+            "the in-flight marker is consumed"
+        );
+    }
+
+    /// A failed `hangar/issue_cancel_active` reply does NOT delete — it surfaces a
+    /// note and leaves the issue intact.
+    #[test]
+    fn cancel_active_failure_does_not_delete() {
+        let mut p = connected_plugin_with_two_cards();
+        p.cancel_delete_in_flight =
+            Some(ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap());
+
+        let resp = ainb_hangar_proto::RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(ISSUE_CANCEL_ACTIVE_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32603,
+                message: "cancel partially failed: 1 task(s) still active".into(),
+                data: None,
+            }),
+        };
+        p.on_daemon_response(&resp);
+
+        assert!(
+            p.screens.pending_delete_action.is_none(),
+            "a failed cancel must NOT arm a delete"
         );
     }
 
