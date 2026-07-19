@@ -651,6 +651,7 @@ async fn handle(
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
         methods::HANGAR_ISSUE_DELETE => handle_issue_delete(pool, req, events).await,
+        methods::HANGAR_ISSUE_CANCEL_ACTIVE => handle_issue_cancel_active(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
@@ -1298,6 +1299,102 @@ async fn handle_issue_delete(
         .map_err(|e| invalid_params(&format!("malformed issue id: {e}")))?;
     events.emit(ws.as_str(), HangarEvent::IssueDeleted { issue_id });
     to_value(&serde_json::json!({}))
+}
+
+/// Dispatch `hangar/issue_cancel_active`: cancel EVERY active task on one issue,
+/// with no board coordinates — the Issues-screen "cancel the run(s) & delete"
+/// affordance.
+///
+/// The board-less sibling of [`handle_board_card_cancel`]: it resolves the issue's
+/// ENTIRE active set (a squad card fans out N tasks onto one issue, so there may be
+/// several) and cancels each via the idempotent `CancelTaskService` FSM edge,
+/// signalling each live run to KILL and pushing its terminal event. Per-task
+/// outcomes:
+/// - `Transitioned` — this call won the cancel: SIGNAL kill + push terminal.
+/// - `AlreadyTerminal` — an idempotent replay; counted, nothing more.
+/// - `TerminalMismatch` — that task finished naturally first; leave it.
+/// A per-task store fault is logged and the loop continues (a surviving sibling is
+/// worse than a clean error); it only surfaces if siblings remain active after the
+/// pass. An issue with no active task is a clean `{ cancelled: 0 }`, never an error.
+/// On any cancel the card's board placement (if any) is aggregate-auto-moved and
+/// its dependents re-evaluated, matching the card-cancel path.
+async fn handle_issue_cancel_active(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::task::TaskRepo;
+    use ainb_hangar_store::service::cancel::CancelTaskService;
+    use ainb_hangar_store::service::finalize::{FinalizeError, FinalizeOutcome};
+
+    let params: ainb_hangar_proto::snapshots::IssueCancelActiveParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.issue_id.trim().is_empty() {
+        return Err(invalid_params("issue_id must not be empty"));
+    }
+
+    // The issue's ENTIRE active set (newest first). Empty = nothing to cancel — a
+    // clean `{ cancelled: 0 }` the caller surfaces as a note, never an error. The
+    // newest task is the "primary" whose board card the post-drain reconcile keys off.
+    let active = TaskRepo::active_tasks_for_issue(pool, ws.as_str(), &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let Some(primary) = active.first().cloned() else {
+        return to_value(&ainb_hangar_proto::snapshots::IssueCancelActiveResult { cancelled: 0 });
+    };
+
+    let mut cancelled: u64 = 0;
+    let mut last_err: Option<String> = None;
+    for task in &active {
+        match CancelTaskService::cancel(pool, &task.id, &SystemClock).await {
+            Ok(FinalizeOutcome::Transitioned) => {
+                // `false` = no live run was registered (queued-but-unclaimed, or
+                // owned by another daemon) — the DB flip alone cancels it.
+                let signalled = crate::cancel::registry().signal(&task.id);
+                crate::run_loop::emit_task_finished(
+                    events,
+                    task,
+                    ainb_hangar_proto::events::TaskResult::Cancelled,
+                    &SystemClock,
+                );
+                tracing::info!(task_id = %task.id, signalled, issue = %params.issue_id, "issue cancel: task cancelled");
+                cancelled += 1;
+            }
+            Ok(FinalizeOutcome::AlreadyTerminal) => cancelled += 1,
+            Err(FinalizeError::TerminalMismatch { .. }) => {}
+            Err(e) => {
+                tracing::warn!(task_id = %task.id, error = %e, "issue cancel: a task cancel errored; continuing");
+                last_err = Some(e.to_string());
+            }
+        }
+    }
+
+    // Honesty guard: if any per-task cancel raised a store fault, the cancel may be
+    // PARTIAL — re-read the active set and surface an error while siblings survive,
+    // rather than reporting a clean success (which would let the caller's delete
+    // retry get refused again with no explanation).
+    if let Some(e) = last_err {
+        let residual = TaskRepo::active_tasks_for_issue(pool, ws.as_str(), &params.issue_id)
+            .await
+            .map_err(|e| store_err(&e))?;
+        if !residual.is_empty() {
+            return Err(internal(&format!(
+                "cancel partially failed: {} task(s) still active ({e})",
+                residual.len()
+            )));
+        }
+    }
+
+    if cancelled > 0 {
+        // Reconcile any board placement of this issue now the set has drained
+        // (best-effort + idempotent, matching the card-cancel path). Harmless when
+        // the issue is not on any board.
+        crate::board::auto_move_after_terminal(pool, &primary).await;
+        crate::board::unblock_dependents_after_terminal(pool, &primary).await;
+    }
+
+    to_value(&ainb_hangar_proto::snapshots::IssueCancelActiveResult { cancelled })
 }
 
 /// Dispatch `hangar/issue_update` (e38.8): edit one issue's fields, push the
