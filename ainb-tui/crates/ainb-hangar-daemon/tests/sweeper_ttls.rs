@@ -440,6 +440,34 @@ async fn sweep_stale_dispatched_reclaims_null_timestamp_row() {
     );
 }
 
+/// A NULL-`started_at` `running` row (a start that was never stamped) is failed
+/// by the running-TTL sweep instead of being skipped forever — the same
+/// immortality hole on the running side. Fails before the fix (swept = 0).
+#[tokio::test]
+async fn running_with_null_started_at_failed() {
+    let (_dir, store) = open_seeded().await;
+    // `running` with started_at left NULL (never stamped).
+    seed_task(store.pool(), "r-null", "running", BASE_MS, None).await;
+    let started_at: Option<i64> =
+        sqlx::query("SELECT started_at FROM agent_task_queue WHERE id = 'r-null'")
+            .fetch_one(store.pool())
+            .await
+            .expect("read started_at")
+            .try_get("started_at")
+            .unwrap();
+    assert_eq!(started_at, None, "seeded with NULL started_at");
+    let clock = FixedClock(BASE_MS + RUNNING_TTL.as_millis() as i64 + 1_000);
+
+    let swept = sweep_stale_running(store.pool(), &clock, &SweeperConfig::default())
+        .await
+        .expect("sweep ok");
+    assert_eq!(swept, 1, "the NULL-started_at running row is failed");
+
+    let (status, reason, _, _) = read_task(store.pool(), "r-null").await;
+    assert_eq!(status, "failed", "no longer immortal");
+    assert_eq!(reason.as_deref(), Some("timeout"));
+}
+
 // ---- running TTL (2.5h) ---------------------------------------------------
 
 /// `runtime_sweeper.go:40` — a running task older than 2.5h is failed with

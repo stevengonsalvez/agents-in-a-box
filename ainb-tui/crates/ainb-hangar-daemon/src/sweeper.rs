@@ -375,6 +375,13 @@ pub async fn reclaim_orphaned_on_startup(
 /// The `from_status` and `age_column` arguments are fixed string literals chosen
 /// by the three callers (never user input), so interpolating them into the SQL
 /// is injection-safe; the time bounds and batch cap are parameter-bound.
+///
+/// A NULL `age_column` is treated as *infinitely old* (`COALESCE(age_column, 0)`),
+/// so a `running` row whose `started_at` was never stamped — or a `dispatched`
+/// row with a NULL `dispatched_at` the reclaim step did not already redeliver — is
+/// failed rather than skipped forever. Without this a NULL-timestamp row is
+/// immortal (the old `IS NOT NULL` guard excluded it from every pass), which is
+/// exactly what strands a task and blocks its issue's delete.
 async fn fail_batch(
     pool: &SqlitePool,
     from_status: &str,
@@ -389,9 +396,8 @@ async fn fail_batch(
          WHERE id IN ( \
              SELECT id FROM agent_task_queue \
              WHERE status = '{from_status}' \
-               AND {age_column} IS NOT NULL \
-               AND {age_column} < ?2 \
-             ORDER BY {age_column} \
+               AND COALESCE({age_column}, 0) < ?2 \
+             ORDER BY COALESCE({age_column}, 0) \
              LIMIT ?3 \
          )"
     );
