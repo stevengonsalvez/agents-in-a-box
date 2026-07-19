@@ -1280,8 +1280,16 @@ async fn handle_issue_delete(
             IssueDeleteError::NotFound => {
                 invalid_params(&format!("no issue `{}` in this workspace", params.issue_id))
             }
-            // A live run blocks the delete — surface the "cancel first" message.
-            IssueDeleteError::ActiveTasks(_) => invalid_params(&e.to_string()),
+            // A live run blocks the delete — surface the "cancel first" message,
+            // tagged with a machine-readable marker so the TUI can offer an inline
+            // "cancel the run(s) & delete" instead of dead-ending on the text. The
+            // `data` field is append-only (an older client ignores it and still
+            // reads the human message).
+            IssueDeleteError::ActiveTasks(n) => RpcError {
+                code: INVALID_PARAMS,
+                message: e.to_string(),
+                data: Some(serde_json::json!({ "reason": "active_tasks", "active": n })),
+            },
             IssueDeleteError::Db(ref db) => store_err(db),
         })?;
     // A committed delete announces the removal so a subscribed issue list drops

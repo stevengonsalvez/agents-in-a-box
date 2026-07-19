@@ -252,6 +252,12 @@ async fn issue_delete_refuses_while_a_task_is_active() {
             .contains("cancel the run first"),
         "refusal must tell the caller to cancel first: {resp}"
     );
+    // The refusal carries a machine-readable marker so a client can offer an
+    // inline cancel-and-delete instead of dead-ending on the message text.
+    assert_eq!(
+        resp["error"]["data"]["reason"], "active_tasks",
+        "refusal must tag the active-tasks marker: {resp}"
+    );
 
     // issue-2 survives.
     let list = c
