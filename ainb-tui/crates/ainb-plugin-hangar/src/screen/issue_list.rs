@@ -2595,6 +2595,33 @@ mod tests {
         );
     }
 
+    /// A locator too wide for the field is truncated from the LEFT — the
+    /// disambiguating tail (the deepest path segments) is what survives, prefixed
+    /// with `…`. Keeping the head instead would collapse same-basename repos back
+    /// into indistinguishable prefixes, so this behaviour is load-bearing.
+    #[test]
+    fn left_truncate_keeps_the_disambiguating_tail() {
+        let path = "/Users/dev/very/long/workspace/path/to/rosetta";
+        let out = left_truncate(path, 12);
+        assert!(
+            out.starts_with('…'),
+            "truncated locator must lead with …: {out}"
+        );
+        assert!(out.ends_with("to/rosetta"), "must keep the tail: {out}");
+        assert!(
+            !out.contains("/Users/dev"),
+            "must NOT keep the non-disambiguating head: {out}"
+        );
+        // Exactly `max` chars wide (… + max-1 tail chars).
+        assert_eq!(
+            out.chars().count(),
+            12,
+            "truncated width must be `max`: {out}"
+        );
+        // A locator that already fits is returned untouched.
+        assert_eq!(left_truncate("short", 12), "short");
+    }
+
     /// The card GROWS while the dropdown is open (more painted rows) and returns to
     /// the compact height when it closes — measured by the span of painted rows.
     #[test]
