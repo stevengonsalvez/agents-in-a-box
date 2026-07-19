@@ -255,7 +255,7 @@ pub async fn reclaim_stale_dispatched(
                AND started_at IS NULL \
                AND ( dispatched_at IS NULL \
                      OR (dispatched_at < ?1 AND dispatched_at >= ?2) ) \
-             ORDER BY COALESCE(dispatched_at, 0) \
+             ORDER BY dispatched_at \
              LIMIT ?3 \
          )",
     )
@@ -376,8 +376,9 @@ pub async fn reclaim_orphaned_on_startup(
 /// by the three callers (never user input), so interpolating them into the SQL
 /// is injection-safe; the time bounds and batch cap are parameter-bound.
 ///
-/// A NULL `age_column` is treated as *infinitely old* (`COALESCE(age_column, 0)`),
-/// so a `running` row whose `started_at` was never stamped — or a `dispatched`
+/// A NULL `age_column` is treated as *infinitely old* (`age_column IS NULL` is
+/// matched explicitly, keeping the predicate index-friendly), so a `running` row
+/// whose `started_at` was never stamped — or a `dispatched`
 /// row with a NULL `dispatched_at` the reclaim step did not already redeliver — is
 /// failed rather than skipped forever. Without this a NULL-timestamp row is
 /// immortal (the old `IS NOT NULL` guard excluded it from every pass), which is
@@ -396,8 +397,8 @@ async fn fail_batch(
          WHERE id IN ( \
              SELECT id FROM agent_task_queue \
              WHERE status = '{from_status}' \
-               AND COALESCE({age_column}, 0) < ?2 \
-             ORDER BY COALESCE({age_column}, 0) \
+               AND ( {age_column} IS NULL OR {age_column} < ?2 ) \
+             ORDER BY {age_column} \
              LIMIT ?3 \
          )"
     );
