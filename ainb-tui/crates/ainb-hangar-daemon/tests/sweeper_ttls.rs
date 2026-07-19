@@ -382,6 +382,64 @@ async fn dispatched_with_started_at_not_reclaimed() {
     );
 }
 
+// ---- NULL-age immortality fix ---------------------------------------------
+
+/// **Regression for the immortal-dispatch bug.** A `dispatched` row whose
+/// `dispatched_at` was never stamped (NULL) used to be skipped by every
+/// time-based pass (the old `dispatched_at IS NOT NULL` guard), so it was
+/// immortal and blocked its issue's delete forever. It must now be reclaimed to
+/// `queued` — outside the protection window by definition (no timestamp to
+/// protect), a redelivery, not a retry. Fails before the fix (reclaimed = 0).
+#[tokio::test]
+async fn dispatched_with_null_dispatched_at_reclaimed() {
+    let (_dir, store) = open_seeded().await;
+    // A `dispatched` row with a NULL dispatch timestamp (the stranded-claim state).
+    seed_task(store.pool(), "z1", "dispatched", BASE_MS, None).await;
+    let (_, _, attempt_before, dispatched_before) = read_task(store.pool(), "z1").await;
+    assert_eq!(dispatched_before, None, "seeded with NULL dispatched_at");
+    // The clock value is irrelevant — a NULL-age row is reclaimable regardless.
+    let clock = FixedClock(BASE_MS + 5_000);
+
+    let reclaimed = reclaim_stale_dispatched(store.pool(), &clock, &SweeperConfig::default())
+        .await
+        .expect("reclaim ok");
+    assert_eq!(reclaimed, 1, "the NULL-dispatched_at row is reclaimed");
+
+    let (status, reason, attempt_after, dispatched_after) = read_task(store.pool(), "z1").await;
+    assert_eq!(status, "queued", "reclaimed back to queued, not stranded");
+    assert_eq!(reason, None, "reclaim records no failure");
+    assert_eq!(
+        attempt_after, attempt_before,
+        "attempt unchanged (redelivery)"
+    );
+    assert_eq!(dispatched_after, None, "dispatched_at stays clear");
+}
+
+/// The full dispatched sweep (`reclaim` then `fail`) redelivers a NULL-timestamp
+/// dispatch to `queued` — it is reclaimed, not failed — so it leaves the active
+/// set on the very next pass instead of stranding.
+#[tokio::test]
+async fn sweep_stale_dispatched_reclaims_null_timestamp_row() {
+    let (_dir, store) = open_seeded().await;
+    seed_task(store.pool(), "z1", "dispatched", BASE_MS, None).await;
+    let clock = FixedClock(BASE_MS + 5_000);
+
+    let outcome = sweep_stale_dispatched(store.pool(), &clock, &SweeperConfig::default())
+        .await
+        .expect("sweep ok");
+    assert_eq!(outcome.reclaimed, 1, "NULL dispatch reclaimed, not failed");
+    assert_eq!(
+        outcome.failed, 0,
+        "reclaim clears dispatched_at before the fail step"
+    );
+
+    let (status, ..) = read_task(store.pool(), "z1").await;
+    assert_eq!(
+        status, "queued",
+        "left the dispatched active set for queued"
+    );
+}
+
 // ---- running TTL (2.5h) ---------------------------------------------------
 
 /// `runtime_sweeper.go:40` — a running task older than 2.5h is failed with

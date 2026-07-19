@@ -212,6 +212,11 @@ pub async fn sweep_stale_running(
 /// stuck dispatch is failed by [`sweep_stale_dispatched`]. Mirrors the reference
 /// control plane `agent.sql.go:1979 ReclaimStaleDispatchedTaskForRuntime`.
 ///
+/// A `dispatched` row with a NULL `dispatched_at` (a claim whose timestamp was
+/// never stamped) is also reclaimed here: with no timestamp it cannot be inside
+/// the protection window, and leaving it would make it immortal — invisible to
+/// every time-based pass and thus a permanent block on its issue's delete.
+///
 /// Returns the number of rows reclaimed in this pass.
 ///
 /// # Errors
@@ -233,17 +238,24 @@ pub async fn reclaim_stale_dispatched(
     // `ReclaimStaleDispatchedTaskForRuntime`.)
     let window_cutoff = now - ms(cfg.reclaim_window);
     let ttl_cutoff = now - ms(cfg.dispatched_ttl);
+    // A NULL `dispatched_at` is a *stranded* claim: the row is `dispatched` but its
+    // dispatch timestamp was never stamped (a lost/never-recorded claim response),
+    // so the time-based band can never see it and it is immortal. Treat it as
+    // reclaimable — it is by definition outside the 90s protection window (there is
+    // no fresh in-flight timestamp to protect) — so it is redelivered to `queued`
+    // like any dispatch past the window. Stamped rows keep the exact band
+    // (`reclaim_window < age <= dispatched_ttl`): a fresh (<90s) dispatch stays
+    // protected and a past-TTL dispatch is still left to the fail step.
     let reclaimed = sqlx::query(
         "UPDATE agent_task_queue \
          SET status = 'queued', dispatched_at = NULL \
          WHERE id IN ( \
              SELECT id FROM agent_task_queue \
              WHERE status = 'dispatched' \
-               AND dispatched_at IS NOT NULL \
-               AND dispatched_at < ?1 \
-               AND dispatched_at >= ?2 \
                AND started_at IS NULL \
-             ORDER BY dispatched_at \
+               AND ( dispatched_at IS NULL \
+                     OR (dispatched_at < ?1 AND dispatched_at >= ?2) ) \
+             ORDER BY COALESCE(dispatched_at, 0) \
              LIMIT ?3 \
          )",
     )
