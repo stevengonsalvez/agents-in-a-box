@@ -1340,7 +1340,7 @@ async fn handle_issue_cancel_active(
     let active = TaskRepo::active_tasks_for_issue(pool, ws.as_str(), &params.issue_id)
         .await
         .map_err(|e| store_err(&e))?;
-    let Some(primary) = active.first().cloned() else {
+    let Some(primary) = active.first() else {
         return to_value(&ainb_hangar_proto::snapshots::IssueCancelActiveResult { cancelled: 0 });
     };
 
@@ -1390,8 +1390,8 @@ async fn handle_issue_cancel_active(
         // Reconcile any board placement of this issue now the set has drained
         // (best-effort + idempotent, matching the card-cancel path). Harmless when
         // the issue is not on any board.
-        crate::board::auto_move_after_terminal(pool, &primary).await;
-        crate::board::unblock_dependents_after_terminal(pool, &primary).await;
+        crate::board::auto_move_after_terminal(pool, primary).await;
+        crate::board::unblock_dependents_after_terminal(pool, primary).await;
     }
 
     to_value(&ainb_hangar_proto::snapshots::IssueCancelActiveResult { cancelled })
