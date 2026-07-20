@@ -141,8 +141,9 @@ fn open_wizard() -> IssueListState {
 fn ready_to_create() -> IssueListState {
     let s = open_wizard();
     let s = type_str(s, "Fix login");
-    // Move to Repo, open the dropdown (cursor at scratch), pick it.
-    let s = wiz(&s, WizardKey::Down).state;
+    // Move past Brief to Repo, open the dropdown (cursor at scratch), pick it.
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
     let s = wiz(&s, WizardKey::Char('@')).state;
     let s = wiz(&s, WizardKey::Enter).state; // pick scratch, dropdown closes
     // Land focus on the Agent row.
@@ -172,13 +173,16 @@ fn c_opens_wizard_focused_on_title() {
 }
 
 /// ↓ / Tab advance the focused row, ↑ / Shift+Tab retreat, both wrapping around
-/// the five rows (mirrors the host new-session Configure form).
+/// the six rows (Title → Brief → Repo → Source → Target → Agent; mirrors the host
+/// new-session Configure form).
 #[test]
 fn wizard_focus_moves_and_wraps() {
     let s = open_wizard();
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Title);
 
     let s = wiz(&s, WizardKey::Down).state;
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+    let s = wiz(&s, WizardKey::Tab).state;
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Repo);
     let s = wiz(&s, WizardKey::Tab).state;
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Source);
@@ -236,7 +240,8 @@ fn wizard_left_right_cycles_agent_only() {
 fn wizard_left_right_cycles_repo() {
     let s = open_wizard();
     let s = type_str(s, "Fix");
-    let s = wiz(&s, WizardKey::Down).state; // focus Repo
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
     assert_eq!(s.wizard().unwrap().repo_ref(), None);
 
     // → picks the first candidate (scratch is always index 0).
@@ -252,6 +257,7 @@ fn wizard_typing_edits_focused_text_row() {
     assert_eq!(s.wizard().unwrap().title(), "Title text");
 
     // Focus Source, clear the "main" prefill, type a custom ref.
+    let s = wiz(&s, WizardKey::Down).state; // Brief
     let s = wiz(&s, WizardKey::Down).state; // Repo
     let s = wiz(&s, WizardKey::Down).state; // Source
     let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
@@ -272,7 +278,8 @@ fn wizard_typing_edits_focused_text_row() {
 fn wizard_at_opens_repo_dropdown() {
     let s = open_wizard();
     let s = type_str(s, "Fix");
-    let s = wiz(&s, WizardKey::Down).state; // focus Repo
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
     assert_eq!(s.wizard().unwrap().repo_dropdown(), None);
 
     let s = wiz(&s, WizardKey::Char('@')).state;
@@ -291,7 +298,8 @@ fn wizard_at_opens_repo_dropdown() {
 fn wizard_tab_from_dropdown_commits_highlight() {
     let s = open_wizard();
     let s = type_str(s, "Fix");
-    let s = wiz(&s, WizardKey::Down).state; // focus Repo
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
     let s = wiz(&s, WizardKey::Char('@')).state; // open dropdown, cursor on scratch
 
     let out = wiz(&s, WizardKey::Tab);
@@ -356,6 +364,7 @@ fn wizard_complete_form_commits_create_and_run() {
         out.intent,
         Some(IssueListIntent::CreateAndRun {
             title: "Fix login".to_string(),
+            brief: None,
             repo_ref: "scratch".to_string(),
             source_branch: Some("main".to_string()),
             target_branch: Some("main".to_string()),
@@ -364,6 +373,121 @@ fn wizard_complete_form_commits_create_and_run() {
     );
     assert_eq!(out.state.mode(), IssueListMode::Normal);
     assert!(out.state.wizard().is_none());
+}
+
+/// Typing on the Brief row appends (including `/`, which must reach the agent
+/// verbatim), and Backspace edits — the multi-line editor idiom.
+#[test]
+fn wizard_brief_appends_and_backspaces() {
+    let s = open_wizard();
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+
+    let s = type_str(s, "run /fix now");
+    assert_eq!(
+        s.wizard().unwrap().brief(),
+        "run /fix now",
+        "printable chars (incl. `/`) append verbatim"
+    );
+
+    // Backspace deletes the last char.
+    let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
+    assert_eq!(s.wizard().unwrap().brief(), "run /fix");
+}
+
+/// Enter on the Brief inserts a NEWLINE and does NOT fire create — the wizard
+/// stays open and no intent is raised (create commits only from the other rows).
+#[test]
+fn wizard_brief_enter_inserts_newline_not_create() {
+    // Even a create-ready form (title + repo picked) must not commit from Brief.
+    let s = ready_to_create();
+    // Walk focus back to the Brief row (Agent → … → Brief).
+    let s = wiz(&s, WizardKey::Up).state; // Target
+    let s = wiz(&s, WizardKey::Up).state; // Source
+    let s = wiz(&s, WizardKey::Up).state; // Repo
+    let s = wiz(&s, WizardKey::Up).state; // Brief
+    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+
+    let s = type_str(s, "line one");
+    let out = wiz(&s, WizardKey::Enter);
+
+    assert!(out.intent.is_none(), "Enter on Brief must not create");
+    assert_eq!(out.state.mode(), IssueListMode::CreateInput);
+    let w = out.state.wizard().expect("wizard still open");
+    assert_eq!(w.brief(), "line one\n", "Enter inserted a newline");
+    assert_eq!(w.focus(), WizardRow::Brief, "focus stays on Brief");
+
+    // A second line then appends after the newline.
+    let s2 = type_str(out.state, "line two");
+    assert_eq!(s2.wizard().unwrap().brief(), "line one\nline two");
+}
+
+/// A brief typed in the wizard carries through to `CreateAndRun.brief` (which the
+/// glue maps to `issue.description` → the `claude -p` prompt).
+#[test]
+fn wizard_brief_carries_to_create_intent() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix login");
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = type_str(s, "Reproduce then patch");
+    // Move to Repo, pick scratch, then commit from the Repo row.
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
+    let s = wiz(&s, WizardKey::Right).state; // pick scratch
+
+    let out = wiz(&s, WizardKey::Enter);
+
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun { brief, title, .. }) => {
+            assert_eq!(title, "Fix login");
+            assert_eq!(brief, Some("Reproduce then patch".to_string()));
+        }
+        other => panic!("expected CreateAndRun carrying the brief, got {other:?}"),
+    }
+}
+
+/// The brief reaches the intent VERBATIM: a leading `/name` skill line, internal
+/// newlines, and a trailing newline all survive unchanged (no trim / escape /
+/// normalise), so a `claude --print` skill invocation in the brief executes as
+/// typed at dispatch.
+#[test]
+fn wizard_brief_preserved_verbatim_on_intent() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix login");
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    // Line 1: a skill command. Newline. Line 2: prose. Trailing newline.
+    let s = type_str(s, "/graphify the auth flow");
+    let s = wiz(&s, WizardKey::Enter).state; // newline (not create)
+    let s = type_str(s, "then summarise findings");
+    let s = wiz(&s, WizardKey::Enter).state; // trailing newline
+    // Commit from the Repo row.
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
+    let s = wiz(&s, WizardKey::Right).state; // pick scratch
+
+    let out = wiz(&s, WizardKey::Enter);
+
+    let expected = "/graphify the auth flow\nthen summarise findings\n";
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun { brief, .. }) => {
+            assert_eq!(
+                brief,
+                Some(expected.to_string()),
+                "brief must reach the intent byte-for-byte (slashes + newlines intact)"
+            );
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
+}
+
+/// A blank brief maps to `None` on the intent (title-only stubs stay allowed).
+#[test]
+fn wizard_blank_brief_is_none_on_intent() {
+    let out = wiz(&ready_to_create(), WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun { brief, .. }) => {
+            assert_eq!(brief, None, "an untouched Brief creates unchanged");
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
 }
 
 /// A blanked branch input means "unset" (`None` on the intent); a custom source
@@ -386,6 +510,7 @@ fn wizard_branch_edits_and_blanks_round_trip() {
         out.intent,
         Some(IssueListIntent::CreateAndRun {
             title: "Fix login".to_string(),
+            brief: None,
             repo_ref: "scratch".to_string(),
             source_branch: Some("feature/x".to_string()),
             target_branch: None,
@@ -405,7 +530,8 @@ fn wizard_required_guard_blocks_incomplete_creates() {
 
     // Repo only, no title → Enter never creates.
     let s = open_wizard();
-    let s = wiz(&s, WizardKey::Down).state; // Repo
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Repo
     let s = wiz(&s, WizardKey::Right).state; // pick scratch
     assert_eq!(s.wizard().unwrap().repo_ref(), Some("scratch"));
     assert!(wiz(&s, WizardKey::Enter).intent.is_none());
