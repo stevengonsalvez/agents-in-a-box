@@ -293,6 +293,11 @@ pub enum WizardRow {
     /// prompt. Enter here inserts a NEWLINE (never fires create); printable chars
     /// append, Backspace edits. A `/name` typed in it reaches the agent verbatim.
     Brief,
+    /// The linked-issue text row (OPTIONAL, single-line): a free-form upstream
+    /// reference (a URL or `owner/repo#123`) stored as `issue.external_ref` for
+    /// traceability and appended to the dispatched brief. Enter here commits like
+    /// the other single-line rows; blank is fine.
+    Link,
     /// The repo picker row (REQUIRED — `@` fuzzy dropdown or ←/→ cycle; a
     /// repo-less create is impossible).
     Repo,
@@ -305,11 +310,12 @@ pub enum WizardRow {
 }
 
 impl WizardRow {
-    /// The rows in render / focus-cycle order (Title → Brief → Repo → Source →
-    /// Target → Agent).
-    pub const ALL: [Self; 6] = [
+    /// The rows in render / focus-cycle order (Title → Brief → Link → Repo →
+    /// Source → Target → Agent).
+    pub const ALL: [Self; 7] = [
         Self::Title,
         Self::Brief,
+        Self::Link,
         Self::Repo,
         Self::Source,
         Self::Target,
@@ -341,6 +347,9 @@ pub struct CreateWizard {
     /// The multi-line brief typed so far (OPTIONAL): free text with embedded
     /// newlines, carried through to `issue.description`. Blank is allowed.
     brief: String,
+    /// The single-line linked-issue reference typed so far (OPTIONAL): a URL or
+    /// `owner/repo#123` carried through to `issue.external_ref`. Blank is allowed.
+    link: String,
     /// The picked repo's wire ref, or `None` until one is chosen (REQUIRED).
     repo_ref: Option<String>,
     /// The post-`@` fuzzy query filtering the repo dropdown.
@@ -363,6 +372,7 @@ impl Default for CreateWizard {
             focus: WizardRow::Title,
             title: String::new(),
             brief: String::new(),
+            link: String::new(),
             repo_ref: None,
             repo_query: String::new(),
             repo_dropdown: None,
@@ -391,6 +401,12 @@ impl CreateWizard {
     #[must_use]
     pub fn brief(&self) -> &str {
         &self.brief
+    }
+
+    /// The single-line linked-issue reference typed so far (may be empty).
+    #[must_use]
+    pub fn link(&self) -> &str {
+        &self.link
     }
 
     /// The picked repo ref, or `None` until one is chosen.
@@ -736,6 +752,7 @@ impl IssueListState {
                             assignee_initial: r.assignee.as_deref().and_then(|a| {
                                 a.split_once(':').map_or(a, |(_, id)| id).chars().next()
                             }),
+                            linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
                         })
                         .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
@@ -984,6 +1001,9 @@ pub enum IssueListIntent {
         /// The multi-line brief (OPTIONAL): free text carried through to
         /// `issue.description` and the `claude -p` prompt. `None` when blank.
         brief: Option<String>,
+        /// The linked-issue reference (OPTIONAL): a URL or `owner/repo#123` carried
+        /// through to `issue.external_ref` for traceability. `None` when blank.
+        external_ref: Option<String>,
         /// The repo picked in stage 2 (REQUIRED — an absolute path, `scratch`, or
         /// a remote indicator the daemon clones).
         repo_ref: String,
@@ -1321,14 +1341,18 @@ fn wizard_cycle_value(
         WizardRow::Agent => {
             wizard.agent_cursor = ring_step(wizard.agent_cursor, AgentChip::ALL.len(), forward);
         }
-        WizardRow::Title | WizardRow::Brief | WizardRow::Source | WizardRow::Target => {}
+        WizardRow::Title
+        | WizardRow::Brief
+        | WizardRow::Link
+        | WizardRow::Source
+        | WizardRow::Target => {}
     }
     set_wizard(state, wizard)
 }
 
 /// Type one char into the focused row: append to the focused text row (Title /
-/// Source / Target), or open the `@` repo dropdown on the Repo row. Any other key
-/// on a picker row is ignored.
+/// Brief / Link / Source / Target), or open the `@` repo dropdown on the Repo row.
+/// Any other key on a picker row is ignored.
 fn wizard_type_char(
     state: &IssueListState,
     mut wizard: CreateWizard,
@@ -1337,6 +1361,7 @@ fn wizard_type_char(
     match wizard.focus {
         WizardRow::Title => wizard.title.push(c),
         WizardRow::Brief => wizard.brief.push(c),
+        WizardRow::Link => wizard.link.push(c),
         WizardRow::Source => wizard.source_branch.push(c),
         WizardRow::Target => wizard.target_branch.push(c),
         WizardRow::Repo => {
@@ -1362,6 +1387,9 @@ fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueLi
         }
         WizardRow::Brief => {
             wizard.brief.pop();
+        }
+        WizardRow::Link => {
+            wizard.link.pop();
         }
         WizardRow::Source => {
             wizard.source_branch.pop();
@@ -1470,6 +1498,9 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
         IssueListIntent::CreateAndRun {
             title: wizard.title.trim().to_string(),
             brief,
+            // The linked-issue ref is trimmed (surrounding whitespace in a URL /
+            // `owner/repo#123` is never meaningful); blank collapses to `None`.
+            external_ref: opt(&wizard.link),
             repo_ref,
             source_branch: opt(&wizard.source_branch),
             target_branch: opt(&wizard.target_branch),
@@ -1732,12 +1763,13 @@ const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 const WIZARD_TITLE: &str = "✦ New task";
 /// The in-card footer hint naming the nav keys.
 const WIZARD_HINT: &str = "↑↓ row   ←→ value   Enter create   Esc cancel";
-/// The card's FIXED-row height: top border + the 5 single-line field rows
-/// (Title / Repo / Source / Target / Agent) + spacer + hint + bottom border. The
-/// multi-line Brief row adds `brief_rows` on top of this, and the `@` repo picker
-/// adds its visible dropdown rows while open (see [`render_wizard`]); the card is
-/// exactly this tall only in the degenerate all-empty single-line-brief case.
-const WIZARD_CARD_H: u16 = 9;
+/// The card's FIXED-row height: top border + the 6 single-line field rows
+/// (Title / Link / Repo / Source / Target / Agent) + spacer + hint + bottom
+/// border. The multi-line Brief row adds `brief_rows` on top of this, and the `@`
+/// repo picker adds its visible dropdown rows while open (see [`render_wizard`]);
+/// the card is exactly this tall only in the degenerate all-empty
+/// single-line-brief case.
+const WIZARD_CARD_H: u16 = 10;
 /// The most wrapped Brief lines the card shows at once; a longer brief
 /// scroll-follows the newest text within this window. Bounds card growth so the
 /// Brief never blows the viewport.
@@ -1969,6 +2001,7 @@ const fn wizard_row_label(row: WizardRow) -> &'static str {
     match row {
         WizardRow::Title => "Title",
         WizardRow::Brief => "Brief",
+        WizardRow::Link => "Linked",
         WizardRow::Repo => "Repo",
         WizardRow::Source => "Source",
         WizardRow::Target => "Target",
@@ -2007,6 +2040,22 @@ fn render_wizard_field(
         // The multi-line Brief is painted by [`render_brief`] (it spans several
         // rows), so the single-row path never routes here.
         WizardRow::Brief => {}
+        WizardRow::Link => {
+            let raw = wizard.link();
+            let shown = if focused {
+                text(raw)
+            } else if raw.is_empty() {
+                "(optional — link an upstream issue)".to_string()
+            } else {
+                raw.to_string()
+            };
+            let colour = if !focused && raw.is_empty() {
+                MUTED_GRAY
+            } else {
+                value_colour
+            };
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
         WizardRow::Repo => {
             // The open-dropdown case is painted by the caller ([`render_wizard`])
             // because it spans multiple rows; here the row is always CLOSED.
@@ -2331,6 +2380,7 @@ mod tests {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
@@ -2705,6 +2755,7 @@ mod tests {
         let s = type_into(&s, "Fix");
         // Move focus past Brief to the Repo row, then open the dropdown.
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
@@ -2750,6 +2801,7 @@ mod tests {
         let s = type_into(&s, "Fix");
         // Focus Repo (past Brief), cycle ←→ to pick `rosetta` (scratch=0, rosetta=1).
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // scratch
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // rosetta
@@ -2789,6 +2841,7 @@ mod tests {
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
@@ -2836,6 +2889,7 @@ mod tests {
         base.set_repos(repo_roster());
         let base = type_into(&base, "Fix");
         let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
         let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
 
         let painted_row_span = |s: &IssueListState| -> u16 {
@@ -2885,6 +2939,7 @@ mod tests {
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
 
