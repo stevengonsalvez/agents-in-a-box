@@ -2073,6 +2073,7 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
@@ -2436,6 +2437,7 @@ mod tests {
             agent: Some("codex".into()),
             source_branch: Some("develop".into()),
             target_branch: Some("main".into()),
+            external_ref: Some("acme/api#42".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<IssueUpdateParams>(&s).unwrap(), full);
