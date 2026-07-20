@@ -175,6 +175,9 @@ pub struct BoardCard {
     /// The assignee's initial glyph in the footer (the first char of the
     /// `type:id` assignee), or `None` when unassigned.
     pub assignee_initial: Option<char>,
+    /// Whether the issue links an upstream GitHub/Jira issue (`issue.external_ref`,
+    /// 0043): drives a subtle `⧉` glyph flush-right on the id line for traceability.
+    pub linked: bool,
 }
 
 /// One status column's input to the board.
@@ -546,15 +549,24 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
     let inner_w = inner_right.saturating_sub(inner_x);
 
     // Id line (muted slate-blue).
+    let id_y = rect.y.saturating_add(1);
     put_str_bg(
         buf,
         inner_x,
-        rect.y.saturating_add(1),
+        id_y,
         &clip(&card.display_id, inner_w),
         ID_ACCENT,
         fill,
         inner_right,
     );
+    // A subtle `⧉` flush-right on the id line marks a card that links an upstream
+    // issue (0043) — traceability at a glance without stealing a whole row.
+    if card.linked {
+        let glyph_x = inner_right.saturating_sub(1);
+        if glyph_x >= inner_x {
+            put_char_bg(buf, glyph_x, id_y, '⧉', ID_ACCENT, fill, inner_right);
+        }
+    }
 
     // Title, wrapped to exactly two lines with an ellipsis on overflow. The
     // selection reads off the heavy clay border, so the title keeps the same
@@ -883,6 +895,7 @@ mod tests {
             title: title.to_string(),
             priority,
             assignee_initial: assignee,
+            linked: false,
         }
     }
 
@@ -1004,6 +1017,29 @@ mod tests {
         assert!(
             has_red,
             "the urgent chip must be painted in the urgent colour"
+        );
+    }
+
+    /// A card that links an upstream issue (0043) paints a subtle `⧉` glyph on its
+    /// id line; a card with `linked: false` shows none.
+    #[test]
+    fn linked_card_shows_the_link_glyph() {
+        let mut linked = card("HGR-9", "Ship it", PriorityChip::Low, Some('a'));
+        linked.linked = true;
+        let cols = vec![column('☰', "Backlog", vec![linked])];
+        let mut buf = WireBuffer::new(120, 24);
+        let _ = render_card_board(&mut buf, 120, 0, 23, &cols, None);
+        assert!(
+            painted_text(&buf).contains('⧉'),
+            "linked card shows the ⧉ glyph"
+        );
+
+        // An unlinked card (the default) paints no glyph.
+        let mut buf = WireBuffer::new(120, 24);
+        let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
+        assert!(
+            !painted_text(&buf).contains('⧉'),
+            "unlinked cards show no link glyph"
         );
     }
 

@@ -1222,8 +1222,10 @@ async fn handle_issue_create(
     use ainb_hangar_proto::events::HangarEvent;
     use std::str::FromStr as _;
 
-    let params: ainb_hangar_proto::snapshots::IssueCreateParams =
-        parse_params(req, "{ workspace_id, title, description?, creator }")?;
+    let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
+        req,
+        "{ workspace_id, title, description?, creator, external_ref? }",
+    )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     // A blank title is a client error, not an empty row.
@@ -1235,6 +1237,8 @@ async fn handle_issue_create(
             "creator must be `agent:<id>` or `member:<id>`: {e}"
         ))
     })?;
+    // 0043: an upstream link is optional; a blank one links nothing (stored NULL).
+    let external_ref = params.external_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let row = snapshots::issue_create(
         pool,
         &SystemIdGen,
@@ -1243,6 +1247,7 @@ async fn handle_issue_create(
         &params.title,
         params.description.as_deref(),
         &creator,
+        external_ref,
     )
     .await
     .map_err(|e| store_err(&e))?;
@@ -1419,7 +1424,7 @@ async fn handle_issue_update(
 
     let params: ainb_hangar_proto::snapshots::IssueUpdateParams = parse_params(
         req,
-        "{ workspace_id, issue_id, state?, assignee?, priority?, due_date?, title?, repo_ref?, agent? }",
+        "{ workspace_id, issue_id, state?, assignee?, priority?, due_date?, title?, repo_ref?, agent?, external_ref? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -1431,7 +1436,9 @@ async fn handle_issue_update(
     // repo/agent edit is actually requested.
     let repo_ref = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let agent = params.agent.as_deref().and_then(AgentKind::parse);
-    let edits_card = repo_ref.is_some() || agent.is_some();
+    // 0043: an upstream-issue link edit (blank leaves it unchanged, not cleared).
+    let external_ref = params.external_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let edits_card = repo_ref.is_some() || agent.is_some() || external_ref.is_some();
 
     // Resolve (and, for the field edit, write) the refreshed row. A field edit runs
     // the scoped UPDATE + re-read; a repo/agent-ONLY edit changes no field-UPDATE
@@ -1465,9 +1472,21 @@ async fn handle_issue_update(
         CardParityRepo::set_issue_repo_agent(pool, ws.as_str(), &params.issue_id, repo_ref, agent)
             .await
             .map_err(|e| store_err(&e))?;
+        CardParityRepo::set_issue_external_ref(pool, ws.as_str(), &params.issue_id, external_ref)
+            .await
+            .map_err(|e| store_err(&e))?;
     }
 
-    // A committed edit announces the refreshed row to subscribers.
+    // A committed edit announces the refreshed row to subscribers. Re-read AFTER
+    // the card-parity writes so the pushed row reflects a just-set external_ref.
+    let row = if external_ref.is_some() {
+        snapshots::issue_row(pool, ws.as_str(), &params.issue_id)
+            .await
+            .map_err(|e| store_err(&e))?
+            .unwrap_or(row)
+    } else {
+        row
+    };
     events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
     to_value(&row)
 }
@@ -2780,6 +2799,20 @@ async fn handle_issue_run(
         .map_err(|e| store_err(&e))?
         .filter(|i| i.workspace_id == ws.as_str())
         .ok_or_else(|| invalid_params("no issue with that id in this workspace"))?;
+
+    // Brief-or-link required (0043): an Issues-screen dispatch of an issue with
+    // NEITHER a non-empty description NOR an upstream link would fall to the
+    // useless one-word/FALLBACK prompt (the title alone is not a brief). Refuse at
+    // the point it matters — create stays unblocked so title-only backlog stubs
+    // are fine. Scoped to this path (not the shared `run_card`) because a Kanban
+    // board card is created title-only through a wizard with no brief field.
+    let has_brief = issue.description.as_deref().is_some_and(|d| !d.trim().is_empty());
+    let has_link = issue.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty());
+    if !has_brief && !has_link {
+        return Err(invalid_params(
+            "add a brief or link an issue before running — an empty card would run a useless prompt",
+        ));
+    }
 
     let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
@@ -6304,6 +6337,179 @@ mod tests {
             !err.message.contains("999999"),
             "the rejection must not echo the payload back: {}",
             err.message
+        );
+    }
+
+    /// The 0043 issue-run dispatch guard: an `issue_run` of an issue with NEITHER a
+    /// brief nor an upstream link is refused; either one present clears the brief
+    /// guard (and then falls to the repo guard — a DIFFERENT refusal — proving the
+    /// brief guard let it through). Scoped to `issue_run`, not the shared board
+    /// path (a Kanban card is title-only by design).
+    #[tokio::test]
+    async fn issue_run_refuses_a_brief_less_and_ref_less_issue() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        let seed = |title: &'static str, desc: Option<&'static str>| {
+            let ws = ws.clone();
+            async move {
+                let id =
+                    ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+                IssueRepo::insert(
+                    pool,
+                    &NewIssue {
+                        id: id.clone(),
+                        workspace_id: ws,
+                        title: title.into(),
+                        description: desc.map(Into::into),
+                        state: "todo".into(),
+                        creator: ainb_hangar_core::actor::ActorRef::new(
+                            ainb_hangar_core::actor::ActorKind::Member,
+                            "stevie",
+                        )
+                        .unwrap(),
+                        created_at: 1,
+                        priority: 0,
+                        assignee: None,
+                        due_date: None,
+                        labels: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                id
+            }
+        };
+
+        let run = |issue_id: String| {
+            let ws = ws.clone();
+            async move {
+                dispatch(
+                    pool,
+                    &req(
+                        methods::HANGAR_ISSUE_RUN,
+                        serde_json::json!({
+                            "workspace_id": ws,
+                            "issue_id": issue_id,
+                            "mode": "headless",
+                        }),
+                    ),
+                    &health(),
+                    &sink(),
+                )
+                .await
+            }
+        };
+
+        // (1) Neither brief nor ref → refused with the brief-or-link message.
+        let bare = seed("just a title", None).await;
+        let err = run(bare).await.error.expect("a brief-less, ref-less run is refused");
+        assert_eq!(err.code, INVALID_PARAMS);
+        assert!(
+            err.message.contains("add a brief or link an issue"),
+            "the refusal names the brief-or-link requirement: {}",
+            err.message
+        );
+
+        // (2) A brief present → clears the brief guard (falls to the repo guard,
+        //     a DIFFERENT refusal, since no repo is pinned).
+        let briefed = seed("has a brief", Some("do the thing carefully")).await;
+        let err = run(briefed).await.error.expect("no repo is pinned, so it still cannot run");
+        assert!(
+            err.message.contains("repo is required"),
+            "a briefed issue passes the brief guard and stops at the repo guard: {}",
+            err.message
+        );
+
+        // (3) A linked ref present (no brief) → also clears the brief guard.
+        let linked = seed("linked only", None).await;
+        CardParityRepo::set_issue_external_ref(pool, &ws, &linked, Some("acme/api#7"))
+            .await
+            .unwrap();
+        let err = run(linked).await.error.expect("no repo is pinned, so it still cannot run");
+        assert!(
+            err.message.contains("repo is required"),
+            "a linked issue passes the brief guard and stops at the repo guard: {}",
+            err.message
+        );
+    }
+
+    /// The brief-or-link guard is scoped to `handle_issue_run` ONLY. The shared
+    /// [`run_card`] core — behind `board_card_run` and autopilot dispatch — must
+    /// NOT refuse a brief-less, ref-less issue, so a Kanban/board launch is
+    /// unaffected. This locks the path-scoping against a future refactor that
+    /// might move the check into the shared core (which would silently break
+    /// board dispatch).
+    #[tokio::test]
+    async fn run_card_does_not_apply_the_brief_or_link_guard() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // A brief-less, ref-less issue — exactly what `handle_issue_run` refuses.
+        let id = ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.clone(),
+                workspace_id: ws.clone(),
+                title: "just a title".into(),
+                description: None,
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let issue = IssueRepo::get_by_id(pool, &id).await.unwrap().unwrap();
+        let ws_id = WorkspaceId::from_str(&ws).unwrap();
+
+        // The shared core, called with a repo pinned + agent kind — it must launch
+        // (a Single task), never the brief-or-link refusal that lives only in
+        // `handle_issue_run`.
+        let outcome = run_card(
+            pool,
+            &ws_id,
+            None,
+            &issue,
+            "headless",
+            Some("scratch"),
+            ainb_hangar_core::agent_kind::AgentKind::parse("claude"),
+            None,
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "the shared run_card must launch a brief-less issue — no brief-or-link \
+             guard belongs in the shared path (board_card_run / autopilot use it)"
         );
     }
 }

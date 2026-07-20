@@ -1032,6 +1032,22 @@ fn render_detail_card(
     );
     row = row.saturating_add(1);
 
+    // --- Linked upstream issue (0043): only when the card links one, so an
+    //     unlinked card reads unchanged. `⧉` marks the traceability ref. ---
+    if let Some(link) = issue.external_ref.as_deref().filter(|l| !l.trim().is_empty()) {
+        card_field_row(
+            buf,
+            card_w,
+            row,
+            &[
+                ("Linked: ", CARD_LABEL),
+                ("⧉ ", CARD_LABEL),
+                (link, CARD_VALUE),
+            ],
+        );
+        row = row.saturating_add(1);
+    }
+
     // --- divider ---
     draw_card_divider(buf, row, card_w);
     row = row.saturating_add(1);
@@ -1257,6 +1273,7 @@ mod card_tests {
             agent: Some("codex".into()),
             source_branch: Some("main".into()),
             target_branch: Some("release".into()),
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
@@ -1325,6 +1342,31 @@ mod card_tests {
             "em-dash placeholder for unset repo/agent"
         );
         assert!(text.contains("no description"), "unset description");
+    }
+
+    /// A linked upstream issue (0043) renders a subtle `Linked: ⧉ <ref>` line on
+    /// the detail card; an unlinked issue shows no such line.
+    #[test]
+    fn detail_card_renders_linked_line_only_when_linked() {
+        // Linked: the ref + the ⧉ glyph appear.
+        let mut issue = full_issue();
+        issue.external_ref = Some("acme/api#42".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Linked: "), "linked label: {text}");
+        assert!(text.contains('⧉'), "link glyph");
+        assert!(text.contains("acme/api#42"), "linked ref value");
+
+        // Unlinked: no Linked line at all.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        assert!(
+            !painted_text(&buf).contains("Linked: "),
+            "an unlinked issue shows no Linked line"
+        );
     }
 
     /// An issue with run history renders the `Runs:` line below the card with the

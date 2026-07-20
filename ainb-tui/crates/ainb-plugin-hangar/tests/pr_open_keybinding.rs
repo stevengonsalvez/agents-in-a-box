@@ -40,6 +40,7 @@ fn issue(pr_url: Option<&str>) -> IssueRow {
         agent: None,
         source_branch: None,
         target_branch: None,
+        external_ref: None,
         run_count: 0,
         last_run_status: None,
         last_run_at: None,

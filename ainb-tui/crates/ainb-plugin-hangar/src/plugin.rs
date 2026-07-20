@@ -2533,6 +2533,7 @@ impl HangarPlugin {
         let IssueCreateAction::CreateAndRun {
             title,
             description,
+            external_ref,
             repo_ref,
             source_branch,
             target_branch,
@@ -2551,6 +2552,11 @@ impl HangarPlugin {
         });
         if let Some(brief) = description {
             params["description"] = serde_json::Value::String(brief);
+        }
+        // The linked-issue ref (0043) lands on `issue.external_ref` for traceability
+        // and is appended to the dispatched brief; omitted when blank.
+        if let Some(link) = external_ref {
+            params["external_ref"] = serde_json::Value::String(link);
         }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,
@@ -3507,6 +3513,7 @@ impl HangarPlugin {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
@@ -4878,6 +4885,7 @@ mod tests {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
@@ -5026,6 +5034,7 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
@@ -5049,6 +5058,7 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
@@ -5200,6 +5210,7 @@ mod tests {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
@@ -5283,6 +5294,7 @@ mod tests {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
@@ -5358,6 +5370,7 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
@@ -5437,6 +5450,7 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
@@ -5460,6 +5474,7 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
@@ -5880,6 +5895,7 @@ mod tests {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,

@@ -374,6 +374,9 @@ pub enum IssueCreateAction {
         /// The multi-line brief (OPTIONAL) persisted as `issue.description` and
         /// turned into the `claude -p` prompt by `build_prompt`. `None` when blank.
         description: Option<String>,
+        /// The linked-issue reference (OPTIONAL) persisted as `issue.external_ref`
+        /// for traceability and appended to the dispatched brief. `None` when blank.
+        external_ref: Option<String>,
         /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
         /// indicator the daemon clones.
         repo_ref: String,
@@ -1441,6 +1444,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         Some(IssueListIntent::CreateAndRun {
             title,
             brief,
+            external_ref,
             repo_ref,
             source_branch,
             target_branch,
@@ -1449,6 +1453,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             states.pending_create_action = Some(IssueCreateAction::CreateAndRun {
                 title,
                 description: brief,
+                external_ref,
                 repo_ref,
                 source_branch,
                 target_branch,

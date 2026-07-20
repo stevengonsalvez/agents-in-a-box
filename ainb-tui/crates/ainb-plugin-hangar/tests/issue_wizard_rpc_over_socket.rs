@@ -365,7 +365,8 @@ async fn wizard_commit_issues_create_update_and_run() {
         for ch in "second line".chars() {
             send_key(&mut host_write, KeyCode::Char { ch }).await;
         }
-        send_key(&mut host_write, KeyCode::Down).await; // Brief → Repo
+        send_key(&mut host_write, KeyCode::Down).await; // Brief → Link
+        send_key(&mut host_write, KeyCode::Down).await; // Link → Repo
         send_key(&mut host_write, KeyCode::Char { ch: '@' }).await;
         send_key(&mut host_write, KeyCode::Enter).await;
         send_key(&mut host_write, KeyCode::Enter).await;

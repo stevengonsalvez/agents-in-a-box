@@ -324,6 +324,16 @@ pub struct IssueRow {
     /// task-detail card's `Target:` line (63d). Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
+    /// The card's optional upstream-issue reference (`issue.external_ref`,
+    /// migration 0043): a URL or `owner/repo#123` linking this hangar issue to a
+    /// GitHub/Jira issue for traceability, or `None` when nothing is linked.
+    /// Drives the board card's link glyph + the task-detail card's `Linked:`
+    /// line, and is appended to the dispatched brief so the agent resolves the
+    /// link itself (ainb never fetches it). Omitted from the wire when `None`
+    /// (`skip_serializing_if`) so the shape only grows for a reader that supplies
+    /// it — a pre-0043 snapshot decodes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
     /// How many tasks (any lifecycle) have ever run against this issue (63d).
     /// `0` for a never-run issue. Drives the task-detail card's `Runs:` history
     /// line, shown only when non-zero. `#[serde(default)]` keeps a pre-63d snapshot
