@@ -1754,6 +1754,14 @@ async fn build_prompt(
                 brief.push_str("\n\n");
                 brief.push_str(&desc);
             }
+            // 0043: when the issue links an upstream GitHub/Jira issue, append it as
+            // a `Linked issue:` line so the agent resolves the link itself at
+            // runtime (ainb never fetches it). Appended even to a title-only brief,
+            // so a linked issue with no description still hands the agent the ref.
+            if let Some(ext) = issue.external_ref.filter(|e| !e.trim().is_empty()) {
+                brief.push_str("\n\nLinked issue: ");
+                brief.push_str(ext.trim());
+            }
             if !brief.trim().is_empty() {
                 return brief;
             }
@@ -2240,6 +2248,91 @@ mod tests {
             "a prompt is never empty"
         );
         assert_eq!(disp.invocation.prompt, FALLBACK_PROMPT);
+    }
+
+    /// A linked upstream issue (0043) appends a `Linked issue:` line to the brief so
+    /// the agent resolves the ref itself — appended even to a title-only brief, and
+    /// absent entirely when no ref is set.
+    #[tokio::test]
+    async fn dispatch_appends_linked_issue_when_external_ref_set() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        let seed = |title: &'static str, desc: Option<&'static str>| {
+            let ws = ws.clone();
+            async move {
+                let id =
+                    ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+                IssueRepo::insert(
+                    pool,
+                    &NewIssue {
+                        id: id.clone(),
+                        workspace_id: ws.clone(),
+                        title: title.into(),
+                        description: desc.map(Into::into),
+                        state: "open".into(),
+                        creator: ainb_hangar_core::actor::ActorRef::new(
+                            ainb_hangar_core::actor::ActorKind::Member,
+                            "stevie",
+                        )
+                        .unwrap(),
+                        created_at: 1,
+                        priority: 0,
+                        assignee: None,
+                        due_date: None,
+                        labels: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                id
+            }
+        };
+
+        // A brief WITH a linked ref: the ref appends as a trailing line.
+        let with_ref = seed("Fix login", Some("It 500s on empty password.")).await;
+        CardParityRepo::set_issue_external_ref(pool, &ws, &with_ref, Some("acme/api#42"))
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&with_ref), Mode::Headless)
+            .await
+            .unwrap();
+        assert_eq!(
+            disp.invocation.prompt,
+            "Fix login\n\nIt 500s on empty password.\n\nLinked issue: acme/api#42",
+            "a set external_ref appends the Linked issue line"
+        );
+
+        // The SAME issue with no ref set: the brief is unchanged (no trailing line).
+        let no_ref = seed("Fix login", Some("It 500s on empty password.")).await;
+        let disp = resolve_dispatch(pool, &agent.id, Some(&no_ref), Mode::Headless).await.unwrap();
+        assert_eq!(
+            disp.invocation.prompt, "Fix login\n\nIt 500s on empty password.",
+            "no external_ref → no Linked issue line"
+        );
+
+        // A title-only issue (no description) still gets the linked line.
+        let title_only = seed("Wire the webhook", None).await;
+        CardParityRepo::set_issue_external_ref(pool, &ws, &title_only, Some("https://x/y/1"))
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&title_only), Mode::Headless)
+            .await
+            .unwrap();
+        assert_eq!(
+            disp.invocation.prompt, "Wire the webhook\n\nLinked issue: https://x/y/1",
+            "a linked issue with no brief still hands the agent the ref"
+        );
     }
 
     /// A task row whose `mode` says "interactive" must never be handed a
