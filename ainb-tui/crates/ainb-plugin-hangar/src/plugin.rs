@@ -2532,6 +2532,7 @@ impl HangarPlugin {
         use crate::screen::IssueCreateAction;
         let IssueCreateAction::CreateAndRun {
             title,
+            description,
             repo_ref,
             source_branch,
             target_branch,
@@ -2542,9 +2543,15 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let params = serde_json::json!({
+        // `description` is the wizard Brief: it lands on `issue.description`, which
+        // `build_prompt` turns into the `claude -p` prompt. Omitted when blank so a
+        // title-only stub creates unchanged.
+        let mut params = serde_json::json!({
             "workspace_id": ws, "title": title, "creator": SELF_AUTHOR_REF
         });
+        if let Some(brief) = description {
+            params["description"] = serde_json::Value::String(brief);
+        }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,
             daemon_methods::HANGAR_ISSUE_CREATE,

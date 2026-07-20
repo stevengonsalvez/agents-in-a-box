@@ -288,6 +288,11 @@ pub enum WizardKey {
 pub enum WizardRow {
     /// The issue title text row (REQUIRED — a blank title blocks create).
     Title,
+    /// The multi-line brief text row (OPTIONAL): free-form task description that
+    /// becomes `issue.description` and, via `build_prompt`, the `claude -p`
+    /// prompt. Enter here inserts a NEWLINE (never fires create); printable chars
+    /// append, Backspace edits. A `/name` typed in it reaches the agent verbatim.
+    Brief,
     /// The repo picker row (REQUIRED — `@` fuzzy dropdown or ←/→ cycle; a
     /// repo-less create is impossible).
     Repo,
@@ -300,10 +305,11 @@ pub enum WizardRow {
 }
 
 impl WizardRow {
-    /// The rows in render / focus-cycle order (Title → Repo → Source → Target →
-    /// Agent).
-    pub const ALL: [Self; 5] = [
+    /// The rows in render / focus-cycle order (Title → Brief → Repo → Source →
+    /// Target → Agent).
+    pub const ALL: [Self; 6] = [
         Self::Title,
+        Self::Brief,
         Self::Repo,
         Self::Source,
         Self::Target,
@@ -332,6 +338,9 @@ pub struct CreateWizard {
     focus: WizardRow,
     /// The title typed so far (REQUIRED — trimmed-blank blocks create).
     title: String,
+    /// The multi-line brief typed so far (OPTIONAL): free text with embedded
+    /// newlines, carried through to `issue.description`. Blank is allowed.
+    brief: String,
     /// The picked repo's wire ref, or `None` until one is chosen (REQUIRED).
     repo_ref: Option<String>,
     /// The post-`@` fuzzy query filtering the repo dropdown.
@@ -353,6 +362,7 @@ impl Default for CreateWizard {
         Self {
             focus: WizardRow::Title,
             title: String::new(),
+            brief: String::new(),
             repo_ref: None,
             repo_query: String::new(),
             repo_dropdown: None,
@@ -374,6 +384,13 @@ impl CreateWizard {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The multi-line brief typed so far (may contain embedded newlines; may be
+    /// empty).
+    #[must_use]
+    pub fn brief(&self) -> &str {
+        &self.brief
     }
 
     /// The picked repo ref, or `None` until one is chosen.
@@ -964,6 +981,9 @@ pub enum IssueListIntent {
     CreateAndRun {
         /// The non-blank title typed in stage 1.
         title: String,
+        /// The multi-line brief (OPTIONAL): free text carried through to
+        /// `issue.description` and the `claude -p` prompt. `None` when blank.
+        brief: Option<String>,
         /// The repo picked in stage 2 (REQUIRED — an absolute path, `scratch`, or
         /// a remote indicator the daemon clones).
         repo_ref: String,
@@ -1216,7 +1236,7 @@ fn cancel_confirm_cancel_delete(state: &IssueListState) -> IssueListReduction {
 /// edits the focused text row, and Enter creates (or jumps to the missing
 /// required row). A wizard key with no wizard open is a no-op.
 fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReduction {
-    let Some(wizard) = state.wizard.clone() else {
+    let Some(mut wizard) = state.wizard.clone() else {
         return unchanged(state);
     };
     if key == WizardKey::Esc {
@@ -1228,6 +1248,12 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
         return wizard_dropdown_key(state, wizard, key);
     }
     match key {
+        // Enter on the Brief inserts a NEWLINE (multi-line editing) and must NOT
+        // fire create; every other row's Enter is the existing commit point.
+        WizardKey::Enter if wizard.focus == WizardRow::Brief => {
+            wizard.brief.push('\n');
+            set_wizard(state, wizard)
+        }
         WizardKey::Enter => wizard_try_create(state, wizard),
         WizardKey::Tab | WizardKey::Down => wizard_move_focus(state, wizard, true),
         WizardKey::BackTab | WizardKey::Up => wizard_move_focus(state, wizard, false),
@@ -1295,7 +1321,7 @@ fn wizard_cycle_value(
         WizardRow::Agent => {
             wizard.agent_cursor = ring_step(wizard.agent_cursor, AgentChip::ALL.len(), forward);
         }
-        WizardRow::Title | WizardRow::Source | WizardRow::Target => {}
+        WizardRow::Title | WizardRow::Brief | WizardRow::Source | WizardRow::Target => {}
     }
     set_wizard(state, wizard)
 }
@@ -1310,6 +1336,7 @@ fn wizard_type_char(
 ) -> IssueListReduction {
     match wizard.focus {
         WizardRow::Title => wizard.title.push(c),
+        WizardRow::Brief => wizard.brief.push(c),
         WizardRow::Source => wizard.source_branch.push(c),
         WizardRow::Target => wizard.target_branch.push(c),
         WizardRow::Repo => {
@@ -1332,6 +1359,9 @@ fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueLi
     match wizard.focus {
         WizardRow::Title => {
             wizard.title.pop();
+        }
+        WizardRow::Brief => {
+            wizard.brief.pop();
         }
         WizardRow::Source => {
             wizard.source_branch.pop();
@@ -1415,7 +1445,8 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
     let mut next = state.clone();
     next.mode = IssueListMode::Normal;
     next.wizard = None;
-    // Blank branch inputs mean "unset" — the daemon resolves the default.
+    // Blank branch inputs mean "unset" — the daemon resolves the default. Branch
+    // refs are trimmed (whitespace in a ref is never meaningful).
     let opt = |s: &str| {
         let t = s.trim();
         if t.is_empty() {
@@ -1424,10 +1455,21 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
             Some(t.to_string())
         }
     };
+    // The Brief is the opposite: it reaches `issue.description` VERBATIM (it may
+    // carry leading `/name` skill lines and embedded newlines that `claude -p`
+    // executes at dispatch). Only a wholly-blank brief collapses to `None`; a
+    // present brief is sent EXACTLY as typed — never trimmed, escaped, or
+    // normalised.
+    let brief = if wizard.brief.trim().is_empty() {
+        None
+    } else {
+        Some(wizard.brief.clone())
+    };
     with_intent(
         next,
         IssueListIntent::CreateAndRun {
             title: wizard.title.trim().to_string(),
+            brief,
             repo_ref,
             source_branch: opt(&wizard.source_branch),
             target_branch: opt(&wizard.target_branch),
@@ -1690,10 +1732,16 @@ const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 const WIZARD_TITLE: &str = "✦ New task";
 /// The in-card footer hint naming the nav keys.
 const WIZARD_HINT: &str = "↑↓ row   ←→ value   Enter create   Esc cancel";
-/// The card's COMPACT height (dropdown closed): top border + 5 field rows +
-/// spacer + hint + bottom border. The card grows past this by the number of
-/// visible dropdown rows while the `@` repo picker is open (see [`render_wizard`]).
+/// The card's FIXED-row height: top border + the 5 single-line field rows
+/// (Title / Repo / Source / Target / Agent) + spacer + hint + bottom border. The
+/// multi-line Brief row adds `brief_rows` on top of this, and the `@` repo picker
+/// adds its visible dropdown rows while open (see [`render_wizard`]); the card is
+/// exactly this tall only in the degenerate all-empty single-line-brief case.
 const WIZARD_CARD_H: u16 = 9;
+/// The most wrapped Brief lines the card shows at once; a longer brief
+/// scroll-follows the newest text within this window. Bounds card growth so the
+/// Brief never blows the viewport.
+const BRIEF_WINDOW: u16 = 5;
 /// The card's preferred width (clamped to the viewport minus insets).
 const WIZARD_CARD_W: u16 = 54;
 /// The most repo candidates the open `@` dropdown shows at once; a longer roster
@@ -1723,7 +1771,9 @@ fn render_wizard(
     let region_h = bottom.saturating_sub(top).saturating_add(1);
 
     // Degenerate viewport: paint at least the title + hint (never panic / empty).
-    if card_w < 24 || region_h < WIZARD_CARD_H {
+    // The Brief always adds at least one line, so the true minimum is one row
+    // taller than the fixed-row height.
+    if card_w < 24 || region_h < WIZARD_CARD_H + 1 {
         put_card_str(buf, 0, top, WIZARD_TITLE, GOLD, area_w, false);
         put_card_str(
             buf,
@@ -1737,12 +1787,20 @@ fn render_wizard(
         return;
     }
 
+    // The Brief row grows the card by its visible wrapped-line count (always >= 1).
+    // The value column starts 12 in from the card's left and the Brief marker eats
+    // a further 2, so the wrap width is `card_w - 15` (matched inside
+    // [`render_brief`] so the counted rows equal the painted lines).
+    let brief_value_w = card_w.saturating_sub(15);
+    let brief_rows = brief_visible_rows(wizard, brief_value_w, region_h);
     // While the `@` dropdown is open the card GROWS by the number of candidate
     // rows it shows (filter line reuses the Repo row itself). The window is capped
     // at [`REPO_DROPDOWN_WINDOW`] and further shrunk to whatever the viewport can
-    // hold, so the card never spills past `region_h` — compact again on close.
-    let dropdown_rows = repo_dropdown_visible_rows(wizard, repos, region_h);
-    let card_h = WIZARD_CARD_H + dropdown_rows;
+    // hold AFTER the Brief has taken its rows, so the card never spills past
+    // `region_h` — compact again on close.
+    let dropdown_rows =
+        repo_dropdown_visible_rows(wizard, repos, region_h.saturating_sub(brief_rows));
+    let card_h = WIZARD_CARD_H + brief_rows + dropdown_rows;
 
     let left = (area_w.saturating_sub(card_w)) / 2;
     let right = left + card_w; // exclusive
@@ -1774,6 +1832,11 @@ fn render_wizard(
         let label = wizard_row_label(field);
         let label_colour = if focused { GOLD } else { MUTED_GRAY };
         put_card_str(buf, label_x, y, label, label_colour, value_x, true);
+        if field == WizardRow::Brief {
+            render_brief(buf, value_x, y, text_right, wizard, brief_rows);
+            y = y.saturating_add(brief_rows);
+            continue;
+        }
         if field == WizardRow::Repo && wizard.repo_dropdown().is_some() {
             render_repo_dropdown(buf, value_x, y, text_right, wizard, repos, dropdown_rows);
             y = y.saturating_add(1 + dropdown_rows);
@@ -1811,10 +1874,101 @@ fn repo_dropdown_visible_rows(wizard: &CreateWizard, repos: &[RepoOption], regio
     want.min(budget)
 }
 
+/// How many wrapped lines the Brief row paints: the brief's wrapped-line count
+/// (at `value_w`), floored at 1 (the empty brief still shows one row for its
+/// placeholder / cursor), capped at [`BRIEF_WINDOW`], then shrunk so the grown
+/// card still fits `region_h` (the fixed frame plus these rows). Keeps the growth
+/// bounded and the small-viewport fallback intact.
+fn brief_visible_rows(wizard: &CreateWizard, value_w: u16, region_h: u16) -> u16 {
+    let lines = u16::try_from(wrap_text(wizard.brief(), value_w as usize).len())
+        .unwrap_or(u16::MAX)
+        .max(1);
+    let want = lines.min(BRIEF_WINDOW);
+    // The fixed rows always fit (the degenerate check guaranteed region_h >=
+    // WIZARD_CARD_H + 1), so the budget is at least 1.
+    let budget = region_h.saturating_sub(WIZARD_CARD_H).max(1);
+    want.min(budget)
+}
+
+/// Wrap `text` into display lines at most `width` chars wide, honouring embedded
+/// `\n` as hard breaks. Char-boundary wrapping (not word-aware) — a brief is
+/// free text and the cells are what the card must fit. Always returns at least
+/// one (possibly empty) line so the Brief row is never zero-height.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for segment in text.split('\n') {
+        let chars: Vec<char> = segment.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut i = 0;
+        while i < chars.len() {
+            let end = (i + width).min(chars.len());
+            out.push(chars[i..end].iter().collect());
+            i = end;
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// The placeholder shown on an empty, unfocused Brief row so the optional field
+/// reads as skippable rather than broken.
+const BRIEF_PLACEHOLDER: &str = "(optional — describe the task)";
+
+/// Render the multi-line Brief value at `(x, y)` over `rows` lines, clipped at
+/// `right`. The focused row gets a `▶` marker + green text and a block cursor on
+/// the last line; unfocused shows soft-white (or the muted placeholder when
+/// empty). A brief longer than `rows` scroll-follows its newest line (an editor
+/// caret stays visible while typing). The marker sits on the first painted line;
+/// continuation lines indent to align under it.
+fn render_brief(
+    buf: &mut WireBuffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    wizard: &CreateWizard,
+    rows: u16,
+) {
+    let focused = wizard.focus() == WizardRow::Brief;
+    let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
+    let marker = if focused { "▶ " } else { "  " };
+    let value_x = x.saturating_add(2);
+    let width = right.saturating_sub(value_x).max(1) as usize;
+    let raw = wizard.brief();
+    if raw.is_empty() && !focused {
+        put_card_str(buf, x, y, marker, value_colour, right, true);
+        put_card_str(buf, value_x, y, BRIEF_PLACEHOLDER, MUTED_GRAY, right, true);
+        return;
+    }
+    let mut lines = wrap_text(raw, width);
+    if focused {
+        // A block cursor on the newest line — appended after wrapping so it never
+        // forces an extra wrap.
+        if let Some(last) = lines.last_mut() {
+            last.push('\u{2588}');
+        }
+    }
+    // Show the LAST `rows` wrapped lines so the caret stays in view while typing.
+    let rows = rows.max(1) as usize;
+    let start = lines.len().saturating_sub(rows);
+    for (i, line) in lines[start..].iter().enumerate() {
+        let ly = y.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
+        let m = if i == 0 { marker } else { "  " };
+        let cx = put_card_str(buf, x, ly, m, value_colour, right, true);
+        put_card_str(buf, cx, ly, line, value_colour, right, true);
+    }
+}
+
 /// The label shown in the card's left column for `row`.
 const fn wizard_row_label(row: WizardRow) -> &'static str {
     match row {
         WizardRow::Title => "Title",
+        WizardRow::Brief => "Brief",
         WizardRow::Repo => "Repo",
         WizardRow::Source => "Source",
         WizardRow::Target => "Target",
@@ -1850,6 +2004,9 @@ fn render_wizard_field(
         WizardRow::Title => {
             put_card_str(buf, cx, y, &text(wizard.title()), value_colour, right, true);
         }
+        // The multi-line Brief is painted by [`render_brief`] (it spans several
+        // rows), so the single-row path never routes here.
+        WizardRow::Brief => {}
         WizardRow::Repo => {
             // The open-dropdown case is painted by the caller ([`render_wizard`])
             // because it spans multiple rows; here the row is always CLOSED.
@@ -2447,6 +2604,7 @@ mod tests {
         for needle in [
             "New task",
             "Title",
+            "Brief",
             "Repo",
             "Source",
             "Target",
@@ -2470,6 +2628,50 @@ mod tests {
         assert!(
             has_gold_corner,
             "card must have a gold rounded top-left corner"
+        );
+    }
+
+    /// A multi-line Brief renders its wrapped value inside the card AND grows the
+    /// card's painted-row span versus an empty Brief — the dynamic-height contract
+    /// the repo dropdown already established, reused for the Brief region.
+    #[test]
+    fn wizard_brief_renders_wrapped_and_grows_card() {
+        let painted_row_span = |s: &IssueListState| -> u16 {
+            let mut buf = WireBuffer::new(120, 24);
+            render_issue_list(&mut buf, 120, 1, 23, s, 0);
+            let ys: Vec<u16> = buf
+                .cells
+                .iter()
+                .filter(|(_, c)| c.fg == Some(GOLD) && (c.symbol == "│" || c.symbol == "╭"))
+                .map(|(coord, _)| coord.y)
+                .collect();
+            let (min, max) = (ys.iter().min().copied(), ys.iter().max().copied());
+            max.unwrap_or(0).saturating_sub(min.unwrap_or(0))
+        };
+
+        // Empty-Brief baseline card span.
+        let empty = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let empty_span = painted_row_span(&empty);
+
+        // Focus Brief, type enough to wrap onto several lines.
+        let s = reduce_issue_list(&empty, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+        let long = "reproduce the login 500 then patch the handler and add a regression test";
+        let s = type_into(&s, long);
+
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+        // A leading slice of the brief renders inside the card.
+        assert!(
+            painted.contains("reproduce the login"),
+            "wrapped brief value must render:\n{painted}"
+        );
+        // The card grew to make room for the wrapped brief lines.
+        assert!(
+            painted_row_span(&s) > empty_span,
+            "card must grow for a multi-line brief ({} !> {empty_span})",
+            painted_row_span(&s)
         );
     }
 
@@ -2501,8 +2703,9 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
-        // Move focus to the Repo row, then open the dropdown.
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        // Move focus past Brief to the Repo row, then open the dropdown.
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
@@ -2545,8 +2748,9 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
-        // Focus Repo, cycle ←→ to pick the `rosetta` scan (scratch=0, rosetta=1).
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        // Focus Repo (past Brief), cycle ←→ to pick `rosetta` (scratch=0, rosetta=1).
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // scratch
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // rosetta
         assert_eq!(
@@ -2584,7 +2788,8 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
@@ -2630,7 +2835,8 @@ mod tests {
             reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         base.set_repos(repo_roster());
         let base = type_into(&base, "Fix");
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
 
         let painted_row_span = |s: &IssueListState| -> u16 {
             let mut buf = WireBuffer::new(120, 24);
@@ -2678,7 +2884,8 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
 
         // At open the last repo is off-window (13 candidates incl. scratch, window 6).

@@ -345,15 +345,27 @@ async fn wizard_commit_issues_create_update_and_run() {
         .await;
 
         // Walk the single-form wizard: `c` opens it (focus Title); type the
-        // title; ↓ moves focus to the Repo row; `@` opens the dropdown (cursor at
-        // scratch); Enter picks scratch (closing the dropdown); Enter with the
-        // required fields satisfied (title + repo, branches prefilled `main`,
-        // agent defaulted to claude) commits `CreateAndRun`.
+        // title; ↓ moves focus to the Brief row; type a multi-line brief (Enter
+        // there inserts a newline, NOT a commit); ↓ moves to the Repo row; `@`
+        // opens the dropdown (cursor at scratch); Enter picks scratch (closing the
+        // dropdown); Enter with the required fields satisfied (title + repo,
+        // branches prefilled `main`, agent defaulted to claude) commits
+        // `CreateAndRun` carrying the brief as `description`.
         send_key(&mut host_write, KeyCode::Char { ch: 'c' }).await;
         for ch in "Wizard task".chars() {
             send_key(&mut host_write, KeyCode::Char { ch }).await;
         }
-        send_key(&mut host_write, KeyCode::Down).await;
+        send_key(&mut host_write, KeyCode::Down).await; // Title → Brief
+        // Lead with a `/name` skill line: `claude --print` executes a materialised
+        // skill, so the slash + newline must reach `description` verbatim.
+        for ch in "/graphify it".chars() {
+            send_key(&mut host_write, KeyCode::Char { ch }).await;
+        }
+        send_key(&mut host_write, KeyCode::Enter).await; // newline in the brief
+        for ch in "second line".chars() {
+            send_key(&mut host_write, KeyCode::Char { ch }).await;
+        }
+        send_key(&mut host_write, KeyCode::Down).await; // Brief → Repo
         send_key(&mut host_write, KeyCode::Char { ch: '@' }).await;
         send_key(&mut host_write, KeyCode::Enter).await;
         send_key(&mut host_write, KeyCode::Enter).await;
@@ -380,6 +392,11 @@ async fn wizard_commit_issues_create_update_and_run() {
             let created = calls.iter().any(|(m, p)| {
                 m == daemon_methods::HANGAR_ISSUE_CREATE
                     && s(p, "title").as_deref() == Some("Wizard task")
+                    // The Brief lands as `description` on the create call VERBATIM:
+                    // the leading `/name` slash and the embedded newline survive
+                    // unchanged (no trim / escape / normalise), so the skill runs
+                    // as typed at dispatch.
+                    && s(p, "description").as_deref() == Some("/graphify it\nsecond line")
             });
             let updated = calls.iter().any(|(m, p)| {
                 m == daemon_methods::HANGAR_ISSUE_UPDATE

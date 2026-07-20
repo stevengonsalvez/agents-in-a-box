@@ -371,6 +371,9 @@ pub enum IssueCreateAction {
     CreateAndRun {
         /// The new issue's title (non-blank).
         title: String,
+        /// The multi-line brief (OPTIONAL) persisted as `issue.description` and
+        /// turned into the `claude -p` prompt by `build_prompt`. `None` when blank.
+        description: Option<String>,
         /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
         /// indicator the daemon clones.
         repo_ref: String,
@@ -1437,6 +1440,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         // key router can't `await`).
         Some(IssueListIntent::CreateAndRun {
             title,
+            brief,
             repo_ref,
             source_branch,
             target_branch,
@@ -1444,6 +1448,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         }) => {
             states.pending_create_action = Some(IssueCreateAction::CreateAndRun {
                 title,
+                description: brief,
                 repo_ref,
                 source_branch,
                 target_branch,
