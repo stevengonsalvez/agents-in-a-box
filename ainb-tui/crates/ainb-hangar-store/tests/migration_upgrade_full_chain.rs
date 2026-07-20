@@ -375,6 +375,17 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "0032 issue.agent_kind defaults NULL"
     );
 
+    // 0043 issue.external_ref defaults NULL on a pre-existing row (no upstream link).
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT external_ref FROM issue WHERE id = ?")
+            .bind("issue-1")
+            .fetch_one(pool)
+            .await
+            .expect("issue 0043 external_ref column"),
+        None,
+        "0043 issue.external_ref defaults NULL"
+    );
+
     // 0033 (tcp T2): the run's produced worktree branch defaults NULL on a
     // pre-existing task row (recorded only at finalize when the run committed).
     // 0039 (tcp 8ln): the run generation defaults to 0 on a pre-existing row, so
@@ -582,7 +593,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 42, "head is migration 0042");
+    assert_eq!(head_version, 43, "head is migration 0043");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
