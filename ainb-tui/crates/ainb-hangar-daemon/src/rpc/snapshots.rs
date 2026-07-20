@@ -122,6 +122,7 @@ pub async fn issues_list(
                 agent: extras.agent,
                 source_branch: extras.source_branch,
                 target_branch: extras.target_branch,
+                external_ref: issue.external_ref,
                 run_count: extras.run_count,
                 last_run_status: extras.last_run_status,
                 last_run_at: extras.last_run_at,
@@ -259,6 +260,7 @@ pub async fn issues_search(
             agent: extras.agent,
             source_branch: extras.source_branch,
             target_branch: extras.target_branch,
+            external_ref: issue.external_ref,
             run_count: extras.run_count,
             last_run_status: extras.last_run_status,
             last_run_at: extras.last_run_at,
@@ -1522,6 +1524,7 @@ pub async fn issue_row(
         agent: extras.agent,
         source_branch: extras.source_branch,
         target_branch: extras.target_branch,
+        external_ref: issue.external_ref,
         run_count: extras.run_count,
         last_run_status: extras.last_run_status,
         last_run_at: extras.last_run_at,
@@ -1623,6 +1626,7 @@ async fn read_issue_row(
         agent: extras.agent,
         source_branch: extras.source_branch,
         target_branch: extras.target_branch,
+        external_ref: issue.external_ref,
         run_count: extras.run_count,
         last_run_status: extras.last_run_status,
         last_run_at: extras.last_run_at,
@@ -1710,7 +1714,9 @@ pub async fn issue_create(
     title: &str,
     description: Option<&str>,
     creator: &ActorRef,
+    external_ref: Option<&str>,
 ) -> Result<IssueRow, sqlx::Error> {
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::issue::NewIssue;
 
     let id = idgen.new_ulid();
@@ -1738,6 +1744,10 @@ pub async fn issue_create(
         },
     )
     .await?;
+    // 0043: persist the optional upstream-issue link AFTER the insert (the same
+    // post-insert card-parity pattern as source/target branches). A `None` /
+    // blank ref is a no-op, so a link-less create leaves `external_ref` NULL.
+    CardParityRepo::set_issue_external_ref(pool, workspace_id, &id, external_ref).await?;
     let issue_id = IssueId::from_str(id.clone()).map_err(|e| sqlx::Error::ColumnDecode {
         index: "id".to_string(),
         source: format!("malformed issue id {id:?}: {e}").into(),
@@ -1768,6 +1778,9 @@ pub async fn issue_create(
         agent: None,
         source_branch: None,
         target_branch: None,
+        // The upstream link the create captured (trimmed to `None` when blank),
+        // so the response + pushed IssueCreated event carry it.
+        external_ref: external_ref.map(str::to_string),
         // A freshly-created issue has never run.
         run_count: 0,
         last_run_status: None,

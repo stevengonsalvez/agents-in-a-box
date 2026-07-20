@@ -955,6 +955,11 @@ pub struct IssueUpdateParams {
     /// it. Stored now, consumed by later PR automation. Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
+    /// New upstream-issue reference (a URL or `owner/repo#123`, migration 0043);
+    /// `None` leaves it unchanged. Persisted on the issue for traceability and
+    /// appended to the dispatched brief. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LABEL_ATTACH`] /
@@ -1000,6 +1005,13 @@ pub struct IssueCreateParams {
     pub description: Option<String>,
     /// The creating actor in canonical `member:<id>` / `agent:<id>` form.
     pub creator: String,
+    /// Optional upstream-issue reference (a URL or `owner/repo#123`) linking this
+    /// hangar issue to a GitHub/Jira issue for traceability (migration 0043);
+    /// omitted when unset. Persisted on the created issue and appended to the
+    /// dispatched brief so the agent resolves the link itself (ainb never fetches
+    /// it). Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
