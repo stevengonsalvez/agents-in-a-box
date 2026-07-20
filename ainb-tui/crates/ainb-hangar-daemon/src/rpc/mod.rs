@@ -6443,4 +6443,73 @@ mod tests {
             err.message
         );
     }
+
+    /// The brief-or-link guard is scoped to `handle_issue_run` ONLY. The shared
+    /// [`run_card`] core — behind `board_card_run` and autopilot dispatch — must
+    /// NOT refuse a brief-less, ref-less issue, so a Kanban/board launch is
+    /// unaffected. This locks the path-scoping against a future refactor that
+    /// might move the check into the shared core (which would silently break
+    /// board dispatch).
+    #[tokio::test]
+    async fn run_card_does_not_apply_the_brief_or_link_guard() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // A brief-less, ref-less issue — exactly what `handle_issue_run` refuses.
+        let id = ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.clone(),
+                workspace_id: ws.clone(),
+                title: "just a title".into(),
+                description: None,
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let issue = IssueRepo::get_by_id(pool, &id).await.unwrap().unwrap();
+        let ws_id = WorkspaceId::from_str(&ws).unwrap();
+
+        // The shared core, called with a repo pinned + agent kind — it must launch
+        // (a Single task), never the brief-or-link refusal that lives only in
+        // `handle_issue_run`.
+        let outcome = run_card(
+            pool,
+            &ws_id,
+            None,
+            &issue,
+            "headless",
+            Some("scratch"),
+            ainb_hangar_core::agent_kind::AgentKind::parse("claude"),
+            None,
+        )
+        .await;
+
+        assert!(
+            outcome.is_ok(),
+            "the shared run_card must launch a brief-less issue — no brief-or-link \
+             guard belongs in the shared path (board_card_run / autopilot use it)"
+        );
+    }
 }
