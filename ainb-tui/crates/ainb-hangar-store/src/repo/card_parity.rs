@@ -174,6 +174,37 @@ impl CardParityRepo {
         .await
     }
 
+    /// Persist a card's upstream-issue reference onto its issue row (migration
+    /// 0043), workspace-scoped like [`Self::set_issue_branches`].
+    ///
+    /// PARTIAL update with the same contract: a `None` `external_ref` is a no-op
+    /// (`Ok(false)`, the field is left unchanged, never cleared). The value is the
+    /// free-form upstream ref (a URL or `owner/repo#123`) shown for traceability
+    /// and appended to the dispatched brief; ainb never fetches it.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault. `Ok(false)` when no
+    /// `(issue_id, workspace_id)` row matched or `external_ref` was `None`.
+    pub async fn set_issue_external_ref(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+        external_ref: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        let Some(external_ref) = external_ref else {
+            return Ok(false);
+        };
+        let res =
+            sqlx::query("UPDATE issue SET external_ref = ? WHERE id = ? AND workspace_id = ?")
+                .bind(external_ref)
+                .bind(issue_id)
+                .bind(workspace_id)
+                .execute(pool)
+                .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Persist the resolved SOURCE branch onto a task row, WITHIN the enqueue
     /// transaction (migration 0042) — same atomicity contract as
     /// [`Self::set_task_repo_agent_in_tx`]: the claim loop can never observe a
@@ -759,6 +790,66 @@ mod tests {
         tx.commit().await.unwrap();
         let task = crate::repo::task::TaskRepo::get_by_id(pool, "t1").await.unwrap().unwrap();
         assert_eq!(task.source_branch.as_deref(), Some("feature/x"));
+    }
+
+    /// The 0043 external_ref field round-trips: it defaults NULL, a set persists +
+    /// reads back through `IssueRepo::get_by_id`, a `None` write is a no-op (never
+    /// clears), and a cross-tenant write misses.
+    #[tokio::test]
+    async fn issue_external_ref_round_trip() {
+        use crate::repo::issue::IssueRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        // Unset by default.
+        assert_eq!(
+            IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap().external_ref,
+            None
+        );
+
+        // A set persists and reads back on the issue.
+        assert!(
+            CardParityRepo::set_issue_external_ref(pool, "ws-a", "issue-1", Some("acme/api#42"))
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            IssueRepo::get_by_id(pool, "issue-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .external_ref
+                .as_deref(),
+            Some("acme/api#42")
+        );
+
+        // A `None` write is a no-op and must NOT clear the stored ref.
+        assert!(
+            !CardParityRepo::set_issue_external_ref(pool, "ws-a", "issue-1", None)
+                .await
+                .unwrap()
+        );
+        assert_eq!(
+            IssueRepo::get_by_id(pool, "issue-1")
+                .await
+                .unwrap()
+                .unwrap()
+                .external_ref
+                .as_deref(),
+            Some("acme/api#42"),
+            "a None edit leaves the ref unchanged"
+        );
+
+        // A cross-tenant write misses (workspace-scoped).
+        assert!(
+            !CardParityRepo::set_issue_external_ref(pool, "ws-b", "issue-1", Some("hax#1"))
+                .await
+                .unwrap()
+        );
     }
 
     /// A card's squad assignment round-trips, defaults None, clears with None, and

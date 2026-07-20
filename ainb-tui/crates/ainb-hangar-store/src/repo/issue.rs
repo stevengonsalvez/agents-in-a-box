@@ -78,6 +78,9 @@ pub struct Issue {
     pub due_date: Option<i64>,
     /// Free-form labels, re-assembled from the JSON-array `labels` column.
     pub labels: Vec<String>,
+    /// Optional upstream-issue reference (URL or `owner/repo#123`), or `None`
+    /// (migration 0043).
+    pub external_ref: Option<String>,
 }
 
 /// A partial-edit instruction for one issue's mutable fields (e38.8).
@@ -272,7 +275,7 @@ impl IssueRepo {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels \
+             priority, due_date, labels, external_ref \
              FROM issue WHERE id = ?",
         )
         .bind(id)
@@ -393,7 +396,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels \
+             priority, due_date, labels, external_ref \
              FROM issue WHERE workspace_id = ? AND state = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -498,7 +501,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT i.id, i.workspace_id, i.title, i.description, i.state, \
              i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.created_at, \
-             i.priority, i.due_date, i.labels, \
+             i.priority, i.due_date, i.labels, i.external_ref, \
              MAX(CASE \
                  WHEN LOWER(i.title) LIKE ?2 ESCAPE '\\' THEN 3 \
                  WHEN LOWER(i.description) LIKE ?2 ESCAPE '\\' THEN 2 \
@@ -799,6 +802,7 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         priority: row.try_get("priority")?,
         due_date: row.try_get("due_date")?,
         labels,
+        external_ref: row.try_get("external_ref")?,
     })
 }
 
