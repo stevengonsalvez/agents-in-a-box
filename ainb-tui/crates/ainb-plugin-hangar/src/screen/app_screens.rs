@@ -32,6 +32,10 @@ use super::control_center::{
     ControlCenterEvent, ControlCenterIntent, ControlCenterState, reduce_control_center,
 };
 use super::daemon_health::DaemonHealthState;
+use super::fleet::{
+    FleetAction, FleetEvent, FleetFilter, FleetIntent, FleetKey, FleetPaneState, reduce_fleet,
+    selected_approval_action,
+};
 use super::inbox::InboxState;
 use super::issue_list::{IssueListEvent, IssueListIntent, IssueListState, reduce_issue_list};
 use super::kanban::{KanbanEvent, KanbanIntent, KanbanState, reduce_kanban};
@@ -487,6 +491,9 @@ pub struct ScreenStates {
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
+    /// Authoritative Fleet registry pane, fed by `fleet/subscribe` and
+    /// reconciled from `fleet/snapshot` after stream gaps.
+    pub fleet: FleetPaneState,
     /// Squads screen cache (P7 / D17), built from `hangar/squads_list` with each
     /// leader/member resolved against the cached actor snapshot for live status.
     pub squads: SquadsState,
@@ -587,6 +594,8 @@ pub struct ScreenStates {
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
     pub pending_answer_action: Option<AttentionAnswerAction>,
+    /// Fleet socket or attach intent raised by the pure Fleet reducer.
+    pub pending_fleet_intent: Option<FleetIntent>,
     /// A board mutation RPC raised by the Boards screen (`⇧←/→`, `x`, `n`, `m`),
     /// awaiting the `render` pass to fire the matching `hangar/board_*` over the
     /// daemon socket (P4). `None` when idle.
@@ -980,6 +989,11 @@ impl ScreenStates {
     pub const fn take_pending_palette_action(&mut self) -> Option<PaletteAction> {
         self.pending_palette_action.take()
     }
+
+    /// Take one deferred Fleet action, broadcast, or attach intent.
+    pub const fn take_pending_fleet_intent(&mut self) -> Option<FleetIntent> {
+        self.pending_fleet_intent.take()
+    }
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
@@ -1113,6 +1127,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 &states.control_center,
                 now_ms(),
             );
+        }
+        Screen::Fleet => {
+            super::fleet::render_fleet(buf, w, top, bottom, &states.fleet);
         }
         Screen::Squads => {
             super::squads::render_squads(buf, w, top, bottom, &states.squads);
@@ -1385,6 +1402,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             route_control_center(states, key);
             None
         }
+        Screen::Fleet => {
+            route_fleet(states, key);
+            None
+        }
         Screen::Squads => {
             route_squads(states, key);
             None
@@ -1398,6 +1419,72 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         // `D`/`U`/`?` tab-switch + global keys are handled by the router before
         // reaching here).
         Screen::DaemonHealth | Screen::Usage | Screen::Help => None,
+    }
+}
+
+/// Fleet pane key routing. Filters and lifecycle verbs lift into the same pure
+/// reducer as navigation, broadcast, attach, and confirmation modal keys.
+fn route_fleet(states: &mut ScreenStates, key: &KeyEvent) {
+    let event = if states.fleet.is_modal_open() {
+        fleet_key(key).map(FleetEvent::Key)
+    } else {
+        match &key.code {
+            KeyCode::Char { ch: 'f' } => Some(FleetEvent::SetFilter(FleetFilter::Focus)),
+            KeyCode::Char { ch: 'o' } => Some(FleetEvent::SetFilter(FleetFilter::Actionable)),
+            KeyCode::Char { ch: 'm' } => Some(FleetEvent::SetFilter(FleetFilter::Managed)),
+            KeyCode::Char { ch: 'd' } => Some(FleetEvent::SetFilter(FleetFilter::Degraded)),
+            KeyCode::Char { ch: 'c' } => Some(FleetEvent::SetFilter(FleetFilter::Claude)),
+            KeyCode::Char { ch: 'x' } => Some(FleetEvent::SetFilter(FleetFilter::Codex)),
+            KeyCode::Char { ch: 'v' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
+            KeyCode::Char { ch: 's' } => Some(FleetEvent::RequestAction(FleetAction::Stop)),
+            KeyCode::Char { ch: 'r' } => Some(FleetEvent::RequestAction(FleetAction::Restart)),
+            KeyCode::Char { ch: 'i' } => Some(FleetEvent::RequestAction(FleetAction::Interrupt)),
+            KeyCode::Char { ch: 'n' } => {
+                Some(approval_event(&states.fleet, false, FleetAction::Continue))
+            }
+            KeyCode::Char { ch: 'y' } => {
+                Some(approval_event(&states.fleet, true, FleetAction::Retry))
+            }
+            KeyCode::Char { ch: '!' } => Some(FleetEvent::RequestAction(FleetAction::Kill)),
+            KeyCode::Char { ch: '#' } => Some(FleetEvent::RequestAction(FleetAction::Archive)),
+            _ => fleet_key(key).map(FleetEvent::Key),
+        }
+    };
+    let Some(event) = event else {
+        return;
+    };
+    let out = reduce_fleet(&states.fleet, event);
+    states.fleet = out.state;
+    if out.intent.is_some() {
+        states.pending_fleet_intent = out.intent;
+    }
+}
+
+fn approval_event(state: &FleetPaneState, approve: bool, fallback: FleetAction) -> FleetEvent {
+    let is_approval = state
+        .selected_session()
+        .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("APPROVAL"));
+    if !is_approval {
+        return FleetEvent::RequestAction(fallback);
+    }
+    match selected_approval_action(state, approve) {
+        Ok(action) => FleetEvent::RequestAction(action),
+        Err(detail) => FleetEvent::Feedback(detail),
+    }
+}
+
+fn fleet_key(key: &KeyEvent) -> Option<FleetKey> {
+    match &key.code {
+        KeyCode::Char { ch: ' ' } => Some(FleetKey::Space),
+        KeyCode::Char { ch } => Some(FleetKey::Char(*ch)),
+        KeyCode::Enter => Some(FleetKey::Enter),
+        KeyCode::Esc => Some(FleetKey::Esc),
+        KeyCode::Backspace => Some(FleetKey::Backspace),
+        KeyCode::Up => Some(FleetKey::Up),
+        KeyCode::Down => Some(FleetKey::Down),
+        KeyCode::Left => Some(FleetKey::Left),
+        KeyCode::Right => Some(FleetKey::Right),
+        _ => None,
     }
 }
 
@@ -2006,5 +2093,141 @@ fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<Na
         Some(NavIntent::CloseModal)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod fleet_routing_tests {
+    use std::collections::BTreeMap;
+
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    use super::*;
+    use crate::screen::fleet::{FleetCapabilities, FleetSessionRow};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn app() -> AppState {
+        let mut app = AppState::new(WorkspaceId::from_str("default").unwrap());
+        app.screen = Screen::Fleet;
+        app
+    }
+
+    fn row(attention: &str) -> FleetSessionRow {
+        FleetSessionRow {
+            session_key: "claude:one".into(),
+            provider: "claude".into(),
+            provider_session_id: Some("one".into()),
+            current_request_fingerprint: Some("fingerprint".into()),
+            current_request: Some(serde_json::json!({
+                "tool_use_id": "request-1",
+                "questions": [{
+                    "id": "q1",
+                    "question": "Proceed?",
+                    "options": [{"label": "Yes"}, {"label": "No"}]
+                }]
+            })),
+            lifecycle_state: "IDLE".into(),
+            attention_state: attention.into(),
+            management_state: "MANAGED".into(),
+            provenance: "hangar-authoritative".into(),
+            confidence: "HIGH".into(),
+            transport_health: "HEALTHY".into(),
+            capabilities: FleetCapabilities::Flags(BTreeMap::from([
+                ("structured_answer".into(), true),
+                ("approvals".into(), true),
+                ("send_prompt".into(), true),
+                ("start".into(), true),
+            ])),
+            version: 9,
+            cwd: "/work/one".into(),
+            tmux_target: Some("one:0.0".into()),
+            display_name: Some("one".into()),
+            discovered_at: 1,
+            last_observed_at: 2,
+            metadata_updated_at: 2,
+            lifecycle_updated_at: 2,
+            attention_updated_at: 2,
+            transport_updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn fleet_routes_structured_answer_prompt_and_start_into_intents() {
+        let app = app();
+        let mut states = ScreenStates::default();
+        states.fleet.set_sessions(vec![row("ASK")]);
+
+        route_key(&app, &mut states, &key(KeyCode::Enter));
+        route_key(&app, &mut states, &key(KeyCode::Enter));
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                action: FleetAction::StructuredAnswer { .. },
+                ..
+            })
+        ));
+
+        route_key(&app, &mut states, &key(KeyCode::Char { ch: 'p' }));
+        for ch in "status".chars() {
+            route_key(&app, &mut states, &key(KeyCode::Char { ch }));
+        }
+        route_key(&app, &mut states, &key(KeyCode::Enter));
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                action: FleetAction::SendText { text },
+                ..
+            }) if text == "status"
+        ));
+
+        route_key(&app, &mut states, &key(KeyCode::Char { ch: 't' }));
+        for ch in "/work/new".chars() {
+            route_key(&app, &mut states, &key(KeyCode::Char { ch }));
+        }
+        route_key(&app, &mut states, &key(KeyCode::Enter));
+        for ch in "inspect failures".chars() {
+            route_key(&app, &mut states, &key(KeyCode::Char { ch }));
+        }
+        route_key(&app, &mut states, &key(KeyCode::Enter));
+        assert_eq!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Start {
+                provider: ainb_hangar_proto::fleet::FleetProvider::Codex,
+                cwd: "/work/new".into(),
+                prompt: Some("inspect failures".into()),
+            })
+        );
+    }
+
+    #[test]
+    fn fleet_routes_approval_keys_with_exact_request_identity() {
+        let app = app();
+        let mut states = ScreenStates::default();
+        states.fleet.set_sessions(vec![row("APPROVAL")]);
+
+        route_key(&app, &mut states, &key(KeyCode::Char { ch: 'y' }));
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                action: FleetAction::Approve { .. },
+                ..
+            })
+        ));
+        route_key(&app, &mut states, &key(KeyCode::Char { ch: 'n' }));
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                action: FleetAction::Deny { .. },
+                ..
+            })
+        ));
     }
 }

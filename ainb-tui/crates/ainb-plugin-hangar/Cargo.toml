@@ -38,6 +38,7 @@ serde_json = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 # P5.6: the first-run danger-full-access flow reads/writes the `warnings_ack`
 # array of `~/.agents-in-a-box/hangar/state.toml`, preserving foreign keys (TOML round-trip).
 toml = { workspace = true }

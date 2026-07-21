@@ -238,6 +238,14 @@ const ISSUE_DELETE_REQ_ID: i64 = 53;
 /// run(s) & delete"). On success the plugin retries the `issue_delete`; an error
 /// surfaces as a transient issue-list note.
 const ISSUE_CANCEL_ACTIVE_REQ_ID: i64 = 54;
+/// Authoritative Fleet registry snapshot.
+const FLEET_SNAPSHOT_REQ_ID: i64 = 55;
+/// Gapless Fleet revision subscription.
+const FLEET_SUBSCRIBE_REQ_ID: i64 = 56;
+/// One versioned Fleet control action.
+const FLEET_ACTION_REQ_ID: i64 = 57;
+/// Explicit-recipient Fleet broadcast.
+const FLEET_BROADCAST_REQ_ID: i64 = 58;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -266,6 +274,11 @@ pub struct HangarPlugin {
     /// Set when a subscribe ack just arrived, so `handle_event` knows to fire
     /// the snapshot fetches (it has the `host` the sync decode path lacks).
     fetch_pending: bool,
+    /// A Fleet event or lag notification requested a focused snapshot refresh.
+    fleet_fetch_pending: bool,
+    /// The workspace handshake or a lag notification requested a new gapless
+    /// Fleet subscription.
+    fleet_subscribe_pending: bool,
     /// The first-run danger-full-access modal (P5.6). `Showing` over the landing
     /// screen on a fresh machine until the user accepts (`y`), then `Dismissed`.
     /// Initialised from the recorded `warnings_ack` on `plugin/init`.
@@ -442,6 +455,67 @@ fn now_ms_clock() -> i64 {
         .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
+/// Open an exact tmux target in a popup owned by the current tmux client.
+/// Closing the nested client restores the unchanged Fleet pane state.
+fn launch_fleet_tmux_popup(target: &str, fullscreen: bool) -> std::io::Result<()> {
+    if std::env::var_os("TMUX").is_none() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::NotConnected,
+            "Fleet attach requires tmux host",
+        ));
+    }
+    let width = if fullscreen { "100%" } else { "90%" };
+    let height = if fullscreen { "100%" } else { "90%" };
+    let command = fleet_tmux_attach_command(target);
+    std::process::Command::new("tmux")
+        .args(["display-popup", "-E", "-w", width, "-h", height, &command])
+        .spawn()
+        .map(|_| ())
+}
+
+fn fleet_tmux_attach_command(target: &str) -> String {
+    let quoted_target = shell_quote(target);
+    let session = target.split_once(':').map_or(target, |(session, _)| session);
+    let quoted_session = shell_quote(session);
+    if target.contains(':') {
+        format!(
+            "tmux select-window -t {quoted_target} && tmux select-pane -t {quoted_target} && exec env -u TMUX tmux attach-session -t {quoted_session}"
+        )
+    } else {
+        format!("exec env -u TMUX tmux attach-session -t {quoted_session}")
+    }
+}
+
+fn shell_quote(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "'\"'\"'"))
+}
+
+fn fleet_request_id(kind: &str) -> String {
+    format!("fleet-ui-{kind}-{}", uuid::Uuid::new_v4())
+}
+
+fn fleet_start_params(
+    provider: ainb_hangar_proto::fleet::FleetProvider,
+    cwd: String,
+    prompt: Option<String>,
+) -> ainb_hangar_proto::fleet::FleetActionParams {
+    let session_key = match provider {
+        ainb_hangar_proto::fleet::FleetProvider::Codex => "start:codex",
+        ainb_hangar_proto::fleet::FleetProvider::Claude => "start:claude",
+        ainb_hangar_proto::fleet::FleetProvider::Unknown => "start:unknown",
+    };
+    ainb_hangar_proto::fleet::FleetActionParams {
+        session_key: session_key.to_string(),
+        expected_version: 1,
+        request_id: fleet_request_id("start"),
+        action: ainb_hangar_proto::fleet::ControlAction::Start {
+            provider,
+            cwd,
+            prompt,
+        },
+    }
+}
+
 impl Default for HangarPlugin {
     fn default() -> Self {
         Self {
@@ -450,6 +524,8 @@ impl Default for HangarPlugin {
             app: None,
             screens: ScreenStates::default(),
             fetch_pending: false,
+            fleet_fetch_pending: false,
+            fleet_subscribe_pending: false,
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
@@ -660,6 +736,8 @@ impl HangarPlugin {
     /// crashing the plugin.
     async fn connect(&mut self, host: &HostClient) {
         self.decoder = FrameDecoder::new();
+        self.fleet_subscribe_pending = false;
+        self.fleet_fetch_pending = false;
         self.conn.dialing();
 
         let dial = match host.unix_socket_dial(daemon_socket_path()).await {
@@ -782,7 +860,26 @@ impl HangarPlugin {
     /// next snapshot re-pull reconciles. Keeps the link `Connected`.
     fn on_daemon_event(&mut self, value: &serde_json::Value) {
         use ainb_hangar_proto::events::EVENT_METHOD;
-        if value.get("method").and_then(serde_json::Value::as_str) != Some(EVENT_METHOD) {
+        let method = value.get("method").and_then(serde_json::Value::as_str);
+        if method == Some("fleet/event") {
+            if let Some(params) = value.get("params") {
+                if let Ok(event) =
+                    serde_json::from_value::<ainb_hangar_proto::fleet::FleetEvent>(params.clone())
+                {
+                    self.screens.fleet.observe_revision(event.revision);
+                    self.fleet_fetch_pending = true;
+                    self.conn.on_event();
+                }
+            }
+            return;
+        }
+        if method == Some("fleet/resync_required") {
+            self.fleet_fetch_pending = true;
+            self.fleet_subscribe_pending = true;
+            self.conn.on_event();
+            return;
+        }
+        if method != Some(EVENT_METHOD) {
             return;
         }
         let Some(params) = value.get("params") else {
@@ -853,6 +950,8 @@ impl HangarPlugin {
                 } else {
                     self.conn.on_subscribe_ack();
                     self.fetch_pending = true;
+                    self.fleet_fetch_pending = true;
+                    self.fleet_subscribe_pending = true;
                 }
             }
             RpcId::Number(ISSUES_REQ_ID) => self.apply_issues(resp),
@@ -952,6 +1051,10 @@ impl HangarPlugin {
             // The attention/subscribe ack carries the open-attention snapshot that
             // seeds the control-center board.
             RpcId::Number(ATTENTION_SUBSCRIBE_REQ_ID) => self.apply_attention(resp),
+            RpcId::Number(FLEET_SNAPSHOT_REQ_ID) => self.apply_fleet_snapshot(resp),
+            RpcId::Number(FLEET_SUBSCRIBE_REQ_ID) => self.apply_fleet_subscription(resp),
+            RpcId::Number(FLEET_ACTION_REQ_ID) => self.apply_fleet_action_result(resp),
+            RpcId::Number(FLEET_BROADCAST_REQ_ID) => self.apply_fleet_broadcast_result(resp),
             RpcId::Number(SEARCH_REQ_ID) => self.apply_search(resp),
             // P5: the profile-editor roster + the per-selection detail/previews.
             RpcId::Number(PROFILE_LIST_REQ_ID) => self.apply_profiles(resp),
@@ -1752,6 +1855,138 @@ impl HangarPlugin {
         }
     }
 
+    /// Replace Fleet pane rows from one authoritative snapshot while preserving
+    /// selection by stable session key.
+    fn apply_fleet_snapshot(&mut self, resp: &RpcResponse) {
+        let Some(result) = &resp.result else {
+            return;
+        };
+        let Ok(snapshot) =
+            serde_json::from_value::<ainb_hangar_proto::fleet::FleetSnapshot>(result.clone())
+        else {
+            return;
+        };
+        let rows = snapshot.sessions.into_iter().map(Into::into).collect();
+        self.screens.fleet.apply_snapshot(snapshot.head_revision, rows);
+        self.conn.on_event();
+    }
+
+    /// Seed Fleet from the race-free subscribe acknowledgement, then record all
+    /// replay revisions. Live events trigger focused snapshot reconciliation.
+    fn apply_fleet_subscription(&mut self, resp: &RpcResponse) {
+        if let Some(error) = &resp.error {
+            let out = crate::screen::fleet::reduce_fleet(
+                &self.screens.fleet,
+                crate::screen::fleet::FleetEvent::ActionFailed {
+                    session_key: "fleet".into(),
+                    detail: format!("subscribe failed: {}", error.message),
+                },
+            );
+            self.screens.fleet = out.state;
+            return;
+        }
+        let Some(result) = &resp.result else {
+            return;
+        };
+        let Ok(subscription) = serde_json::from_value::<
+            ainb_hangar_proto::fleet::FleetSubscribeResult,
+        >(result.clone()) else {
+            return;
+        };
+        let rows = subscription.snapshot.sessions.into_iter().map(Into::into).collect();
+        self.screens.fleet.apply_snapshot(subscription.snapshot.head_revision, rows);
+        for event in subscription.replay {
+            self.screens.fleet.observe_revision(event.revision);
+        }
+        self.conn.on_event();
+    }
+
+    fn apply_fleet_action_result(&mut self, resp: &RpcResponse) {
+        use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetActionResult};
+        let result = resp
+            .result
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<FleetActionResult>(value.clone()).ok());
+        let event = match (result, &resp.error) {
+            (Some(result), _) if result.receipt.status == ActionReceiptStatus::Delivered => {
+                crate::screen::fleet::FleetEvent::ActionSucceeded {
+                    session_key: result.receipt.session_key,
+                }
+            }
+            (Some(result), _) => crate::screen::fleet::FleetEvent::ActionFailed {
+                session_key: result.receipt.session_key,
+                detail: result
+                    .receipt
+                    .detail
+                    .unwrap_or_else(|| format!("{:?}", result.receipt.status)),
+            },
+            (None, Some(error)) => crate::screen::fleet::FleetEvent::ActionFailed {
+                session_key: "fleet".into(),
+                detail: error.message.clone(),
+            },
+            (None, None) => return,
+        };
+        let out = crate::screen::fleet::reduce_fleet(&self.screens.fleet, event);
+        self.screens.fleet = out.state;
+        self.fleet_fetch_pending = true;
+        self.conn.on_event();
+    }
+
+    fn apply_fleet_broadcast_result(&mut self, resp: &RpcResponse) {
+        use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetBroadcastResult};
+        if let Some(error) = &resp.error {
+            let out = crate::screen::fleet::reduce_fleet(
+                &self.screens.fleet,
+                crate::screen::fleet::FleetEvent::BroadcastFailed {
+                    detail: error.message.clone(),
+                },
+            );
+            self.screens.fleet = out.state;
+            self.conn.on_event();
+            return;
+        }
+        let Some(result) = resp
+            .result
+            .as_ref()
+            .and_then(|value| serde_json::from_value::<FleetBroadcastResult>(value.clone()).ok())
+        else {
+            let out = crate::screen::fleet::reduce_fleet(
+                &self.screens.fleet,
+                crate::screen::fleet::FleetEvent::BroadcastFailed {
+                    detail: "invalid fleet/broadcast response".into(),
+                },
+            );
+            self.screens.fleet = out.state;
+            self.conn.on_event();
+            return;
+        };
+        let receipts = result
+            .receipts
+            .into_iter()
+            .map(|receipt| crate::screen::fleet::BroadcastReceipt {
+                session_key: receipt.session_key,
+                status: match receipt.status {
+                    ActionReceiptStatus::Delivered => {
+                        crate::screen::fleet::ReceiptStatus::Delivered
+                    }
+                    ActionReceiptStatus::Failed | ActionReceiptStatus::Rejected => {
+                        crate::screen::fleet::ReceiptStatus::Failed
+                    }
+                    ActionReceiptStatus::Pending | ActionReceiptStatus::Unknown => {
+                        crate::screen::fleet::ReceiptStatus::Unknown
+                    }
+                },
+                detail: receipt.detail,
+            })
+            .collect();
+        let out = crate::screen::fleet::reduce_fleet(
+            &self.screens.fleet,
+            crate::screen::fleet::FleetEvent::BroadcastReceipts(receipts),
+        );
+        self.screens.fleet = out.state;
+        self.conn.on_event();
+    }
+
     /// Fire every `hangar/*` snapshot request over the daemon stream, framed for
     /// the cap (one per landing screen — issues, agents, skills, autopilots,
     /// tasks, daemon-health, usage, members, health). A send failure is logged but
@@ -1872,6 +2107,192 @@ impl HangarPlugin {
                 let _ = host.log_info(format!("hangar: snapshot send failed: {e}")).await;
             }
         }
+    }
+
+    async fn fetch_fleet_snapshot(&mut self, host: &HostClient) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Ok(body) = encode_request(
+            FLEET_SNAPSHOT_REQ_ID,
+            daemon_methods::FLEET_SNAPSHOT,
+            serde_json::json!({}),
+        ) else {
+            return;
+        };
+        if let Err(error) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: fleet snapshot send failed: {error}")).await;
+        }
+    }
+
+    async fn subscribe_fleet(&mut self, host: &HostClient) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Ok(body) = encode_request(
+            FLEET_SUBSCRIBE_REQ_ID,
+            daemon_methods::FLEET_SUBSCRIBE,
+            serde_json::json!({ "after_revision": self.screens.fleet.head_revision() }),
+        ) else {
+            return;
+        };
+        if let Err(error) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: fleet subscribe send failed: {error}")).await;
+        }
+    }
+
+    async fn apply_fleet_intent(
+        &mut self,
+        host: &HostClient,
+        intent: crate::screen::fleet::FleetIntent,
+    ) {
+        use crate::screen::fleet::{FleetEvent, FleetIntent, reduce_fleet};
+        match intent {
+            FleetIntent::Execute {
+                session_key,
+                expected_version,
+                action,
+            } => {
+                if Self::is_offline(self.conn.state()) && action.is_high_risk() {
+                    let out = reduce_fleet(
+                        &self.screens.fleet,
+                        FleetEvent::ActionFailed {
+                            session_key,
+                            detail: "daemon unavailable; high-risk action disabled".into(),
+                        },
+                    );
+                    self.screens.fleet = out.state;
+                    return;
+                }
+                let action = match self.fleet_control_action(&session_key, action) {
+                    Ok(action) => action,
+                    Err(detail) => {
+                        let out = reduce_fleet(
+                            &self.screens.fleet,
+                            FleetEvent::ActionFailed {
+                                session_key,
+                                detail,
+                            },
+                        );
+                        self.screens.fleet = out.state;
+                        return;
+                    }
+                };
+                let request_id = fleet_request_id("action");
+                let params = ainb_hangar_proto::fleet::FleetActionParams {
+                    session_key: session_key.clone(),
+                    expected_version,
+                    request_id,
+                    action,
+                };
+                self.send_fleet_rpc(
+                    host,
+                    FLEET_ACTION_REQ_ID,
+                    daemon_methods::FLEET_ACTION,
+                    params,
+                    &session_key,
+                )
+                .await;
+            }
+            FleetIntent::Broadcast {
+                text,
+                recipient_keys,
+                idempotency_key,
+                max_parallel: _,
+                retry_failures_only: _,
+            } => {
+                let params = ainb_hangar_proto::fleet::FleetBroadcastParams {
+                    target_keys: recipient_keys,
+                    text,
+                    idempotency_key,
+                };
+                self.send_fleet_rpc(
+                    host,
+                    FLEET_BROADCAST_REQ_ID,
+                    daemon_methods::FLEET_BROADCAST,
+                    params,
+                    "broadcast",
+                )
+                .await;
+            }
+            FleetIntent::Start {
+                provider,
+                cwd,
+                prompt,
+            } => {
+                let params = fleet_start_params(provider, cwd, prompt);
+                let target = params.session_key.clone();
+                self.send_fleet_rpc(
+                    host,
+                    FLEET_ACTION_REQ_ID,
+                    daemon_methods::FLEET_ACTION,
+                    params,
+                    &target,
+                )
+                .await;
+            }
+            FleetIntent::AttachEmbedded {
+                session_key,
+                tmux_target,
+            } => self.apply_fleet_attach(session_key, tmux_target, false),
+            FleetIntent::AttachFullscreen {
+                session_key,
+                tmux_target,
+            } => self.apply_fleet_attach(session_key, tmux_target, true),
+        }
+    }
+
+    fn fleet_control_action(
+        &self,
+        _session_key: &str,
+        action: crate::screen::fleet::FleetAction,
+    ) -> std::result::Result<ainb_hangar_proto::fleet::ControlAction, String> {
+        action.into_control_action()
+    }
+
+    async fn send_fleet_rpc<T: serde::Serialize>(
+        &mut self,
+        host: &HostClient,
+        id: i64,
+        method: &str,
+        params: T,
+        target: &str,
+    ) {
+        use crate::screen::fleet::{FleetEvent, reduce_fleet};
+        let send_result = async {
+            let stream_id = self
+                .conn
+                .stream_id()
+                .map(ToString::to_string)
+                .ok_or_else(|| "daemon unavailable".to_string())?;
+            let params = serde_json::to_value(params).map_err(|error| error.to_string())?;
+            let body = encode_request(id, method, params).map_err(|error| error.to_string())?;
+            host.unix_socket_send(stream_id, body).await.map_err(|error| error.to_string())
+        }
+        .await;
+        if let Err(detail) = send_result {
+            let event = if method == daemon_methods::FLEET_BROADCAST {
+                FleetEvent::BroadcastFailed { detail }
+            } else {
+                FleetEvent::ActionFailed {
+                    session_key: target.to_string(),
+                    detail,
+                }
+            };
+            let out = reduce_fleet(&self.screens.fleet, event);
+            self.screens.fleet = out.state;
+        }
+    }
+
+    fn apply_fleet_attach(&mut self, session_key: String, tmux_target: String, fullscreen: bool) {
+        use crate::screen::fleet::{FleetEvent, reduce_fleet};
+        let result = launch_fleet_tmux_popup(&tmux_target, fullscreen);
+        let message = match result {
+            Ok(()) => format!("attached {session_key}; exit returns to Fleet"),
+            Err(error) => format!("attach failed: {error}"),
+        };
+        let out = reduce_fleet(&self.screens.fleet, FleetEvent::Feedback(message));
+        self.screens.fleet = out.state;
     }
 
     /// Fire a deferred skill RPC raised by the skill-manager screen (P6.5).
@@ -2887,13 +3308,17 @@ impl HangarPlugin {
         // against the empty board.
         let starting = self.daemon_start_redial_until.is_some();
         if Self::is_offline(self.conn.state()) || starting {
-            crate::widgets::offline_empty_state::render_offline_empty_state(
-                &mut buf,
-                w,
-                h,
-                self.daemon_start_error.as_deref(),
-                starting.then_some("⟳ starting daemon…"),
-            );
+            if matches!(app.screen, Screen::Fleet) && !starting {
+                crate::screen::fleet::render_degraded_banner(&mut buf, w, 1);
+            } else {
+                crate::widgets::offline_empty_state::render_offline_empty_state(
+                    &mut buf,
+                    w,
+                    h,
+                    self.daemon_start_error.as_deref(),
+                    starting.then_some("⟳ starting daemon…"),
+                );
+            }
         }
         // 63l.5: the right-click context menu floats over the board, anchored at
         // the click. It sits ABOVE the body but BELOW the first-run modal (which
@@ -3051,6 +3476,12 @@ impl HangarPlugin {
         // input, not a nav key (a card titled `Cardrun` must not switch to Control
         // on its `C`). Route straight to the boards reducer, which owns Esc-cancel.
         if matches!(app.screen, Screen::Boards) && self.screens.boards.overlay().is_some() {
+            let _ = route_key(&app, &mut self.screens, key);
+            return;
+        }
+        // Fleet broadcast and confirmation modes own every key. This keeps text
+        // and typed confirmations from leaking into global tab or quit routing.
+        if matches!(app.screen, Screen::Fleet) && self.screens.fleet.is_modal_open() {
             let _ = route_key(&app, &mut self.screens, key);
             return;
         }
@@ -3980,7 +4411,7 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
             // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'S' | 'P' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'F' | 'S' | 'P' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))
@@ -4029,6 +4460,12 @@ impl Plugin for HangarPlugin {
         // that we hold the host. One fetch per subscribe.
         if std::mem::take(&mut self.fetch_pending) {
             self.fetch_snapshots(host).await;
+        }
+        if std::mem::take(&mut self.fleet_fetch_pending) {
+            self.fetch_fleet_snapshot(host).await;
+        }
+        if std::mem::take(&mut self.fleet_subscribe_pending) {
+            self.subscribe_fleet(host).await;
         }
         Ok(())
     }
@@ -4099,6 +4536,7 @@ impl Plugin for HangarPlugin {
             // render to fire its `issue_update` + `issue_run` (host IO is only
             // safe there). Consumed (taken) by that render, so not level-held.
             || self.pending_issue_dispatch.is_some()
+            || self.screens.pending_fleet_intent.is_some()
     }
 
     fn captures_text(&self) -> bool {
@@ -4141,11 +4579,15 @@ impl Plugin for HangarPlugin {
             // Every open Boards overlay (create-title / profile-pick / column
             // rename / `Run ▾`) consumes all keys as input, per its routing guard.
             Screen::Boards => self.screens.boards.overlay().is_some(),
+            Screen::Fleet => self.screens.fleet.is_capturing_text(),
             _ => false,
         }
     }
 
     async fn render(&mut self, host: &HostClient, params: RenderParams) -> Result<WireBuffer> {
+        if let Some(intent) = self.screens.take_pending_fleet_intent() {
+            self.apply_fleet_intent(host, intent).await;
+        }
         // Drain any deferred Workspace-pane action here: `plugin/render` is
         // dispatched on a SPAWNED task (unlike the inline `handle_key`/
         // `handle_event`), so the SDK reader loop stays free to deliver the
@@ -6117,5 +6559,259 @@ mod tests {
             "Esc cancels the overlay in a single press"
         );
         assert!(!p.captures_text(), "capture is released with the overlay");
+    }
+
+    #[test]
+    fn fleet_hotkey_routes_to_dedicated_pane() {
+        let app =
+            AppState::new(WorkspaceId::from_str("default").expect("valid default workspace id"));
+        let event = routing_event(&char_press('F'), &app).expect("Fleet route event");
+        let out = crate::screen::reduce(&app, event);
+        assert_eq!(out.state.screen, Screen::Fleet);
+    }
+
+    #[test]
+    fn fleet_live_event_advances_cursor_and_arms_focused_reconcile() {
+        let mut plugin = HangarPlugin::new();
+        let event = ainb_hangar_proto::fleet::FleetEvent {
+            revision: 12,
+            event_id: "evt-12".into(),
+            session_key: "codex:thread-1".into(),
+            observed_at: 100,
+            provenance: ainb_hangar_proto::fleet::FleetProvenance::Authoritative,
+            event_type: "turn_started".into(),
+            payload: serde_json::json!({}),
+            session_version: 3,
+            applied: true,
+        };
+        plugin.on_daemon_event(&serde_json::json!({
+            "method": "fleet/event",
+            "params": event,
+        }));
+        assert_eq!(plugin.screens.fleet.head_revision(), 12);
+        assert!(plugin.fleet_fetch_pending);
+    }
+
+    #[test]
+    fn fleet_subscribe_ack_seeds_complete_snapshot_and_replay_cursor() {
+        let mut plugin = HangarPlugin::new();
+        let session = serde_json::json!({
+            "session_key": "codex:thread-1",
+            "provider": "codex",
+            "provider_session_id": "thread-1",
+            "tmux_target": "codex-1:0.0",
+            "process_start_fingerprint": null,
+            "cwd": "/work/shared",
+            "display_name": "codex-1",
+            "lifecycle": "IDLE",
+            "attention": "ASK",
+            "current_request_fingerprint": "fingerprint",
+            "current_request": {
+                "questions": [{
+                    "id": "q1",
+                    "header": "Tool",
+                    "question": "Pick tools",
+                    "options": [
+                        {"label": "rg", "description": "Text"},
+                        {"label": "ast-grep", "description": "Syntax"}
+                    ],
+                    "multiSelect": true
+                }]
+            },
+            "management": "MANAGED",
+            "transport_health": "HEALTHY",
+            "capabilities": {"structured_answer": true, "tmux_attach": true},
+            "provenance": "authoritative",
+            "confidence": "HIGH",
+            "discovered_at": 1,
+            "last_observed_at": 2,
+            "lifecycle_updated_at": 2,
+            "attention_updated_at": 2,
+            "version": 4,
+            "updated_revision": 7
+        });
+        let response = RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(FLEET_SUBSCRIBE_REQ_ID),
+            result: Some(serde_json::json!({
+                "snapshot": {"head_revision": 7, "sessions": [session]},
+                "replay": [{
+                    "revision": 8,
+                    "event_id": "evt-8",
+                    "session_key": "codex:thread-1",
+                    "observed_at": 3,
+                    "provenance": "authoritative",
+                    "event_type": "AskUserQuestion",
+                    "payload": {},
+                    "session_version": 4,
+                    "applied": false
+                }]
+            })),
+            error: None,
+        };
+        plugin.on_daemon_response(&response);
+        assert_eq!(plugin.screens.fleet.head_revision(), 8);
+        let selected = plugin.screens.fleet.selected_session().expect("Fleet row");
+        assert_eq!(selected.session_key, "codex:thread-1");
+        let questions = selected
+            .current_request
+            .as_ref()
+            .and_then(|request| request.get("questions"))
+            .and_then(serde_json::Value::as_array)
+            .expect("complete questions");
+        assert_eq!(questions[0]["options"].as_array().unwrap().len(), 2);
+        assert_eq!(questions[0]["multiSelect"], true);
+    }
+
+    #[test]
+    fn fleet_structured_action_preserves_exact_request_identity() {
+        use ainb_hangar_proto::fleet::{ControlAction, FleetQuestionAnswer, FleetRequestIdentity};
+        let plugin = HangarPlugin::new();
+        let identity = FleetRequestIdentity {
+            request_id: serde_json::json!(42),
+            thread_id: "thread-1".into(),
+            turn_id: "turn-2".into(),
+            item_id: "item-3".into(),
+        };
+        let answers = vec![FleetQuestionAnswer {
+            question_id: "question-1".into(),
+            selected_options: vec!["yes".into()],
+            text: None,
+        }];
+        let action = plugin
+            .fleet_control_action(
+                "codex:thread-1",
+                crate::screen::fleet::FleetAction::StructuredAnswer {
+                    request_fingerprint: "fingerprint".into(),
+                    request_identity: Some(identity.clone()),
+                    answers: answers.clone(),
+                },
+            )
+            .expect("structured action maps");
+        assert_eq!(
+            action,
+            ControlAction::StructuredAnswer {
+                request_fingerprint: "fingerprint".into(),
+                request_identity: Some(identity),
+                answers,
+            }
+        );
+    }
+
+    #[test]
+    fn fleet_verified_picker_preserves_exact_request_identity_and_key() {
+        use ainb_hangar_proto::fleet::ControlAction;
+
+        let plugin = HangarPlugin::new();
+        let action = plugin
+            .fleet_control_action(
+                "legacy:tmux",
+                crate::screen::fleet::FleetAction::VerifiedPicker {
+                    request_fingerprint: "request-fingerprint".into(),
+                    key: "1".into(),
+                },
+            )
+            .expect("picker maps to typed daemon action");
+        assert_eq!(
+            action,
+            ControlAction::VerifiedPicker {
+                request_fingerprint: "request-fingerprint".into(),
+                key: "1".into(),
+            }
+        );
+    }
+
+    #[test]
+    fn fleet_request_ids_do_not_collide_across_plugin_boots() {
+        let first = fleet_request_id("action");
+        let second = fleet_request_id("action");
+        assert_ne!(first, second);
+        assert!(first.starts_with("fleet-ui-action-"));
+    }
+
+    #[test]
+    fn fleet_broadcast_rpc_error_restores_confirmation_for_retry() {
+        use crate::screen::fleet::{
+            FleetEvent, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
+        };
+
+        let mut plugin = HangarPlugin::new();
+        let row: FleetSessionRow = serde_json::from_value(serde_json::json!({
+            "session_key": "codex:thread-1",
+            "provider": "codex",
+            "lifecycle": "IDLE",
+            "attention": "NONE",
+            "management": "MANAGED",
+            "provenance": "authoritative",
+            "confidence": "HIGH",
+            "transport_health": "HEALTHY",
+            "version": 1
+        }))
+        .expect("Fleet row");
+        plugin.screens.fleet =
+            reduce_fleet(&plugin.screens.fleet, FleetEvent::Snapshot(vec![row])).state;
+        for event in [
+            FleetEvent::Key(FleetKey::Char('b')),
+            FleetEvent::Key(FleetKey::Char('x')),
+            FleetEvent::Key(FleetKey::Enter),
+            FleetEvent::Key(FleetKey::Space),
+            FleetEvent::Key(FleetKey::Enter),
+        ] {
+            plugin.screens.fleet = reduce_fleet(&plugin.screens.fleet, event).state;
+        }
+        let sent = reduce_fleet(&plugin.screens.fleet, FleetEvent::Key(FleetKey::Enter));
+        assert!(matches!(sent.intent, Some(FleetIntent::Broadcast { .. })));
+        plugin.screens.fleet = sent.state;
+
+        plugin.apply_fleet_broadcast_result(&RpcResponse {
+            jsonrpc: "2.0".into(),
+            id: RpcId::Number(FLEET_BROADCAST_REQ_ID),
+            result: None,
+            error: Some(ainb_hangar_proto::RpcError {
+                code: -32000,
+                message: "transport closed".into(),
+                data: None,
+            }),
+        });
+
+        assert_eq!(
+            plugin.screens.fleet.feedback(),
+            Some("broadcast failed: transport closed")
+        );
+        let retried = reduce_fleet(&plugin.screens.fleet, FleetEvent::Key(FleetKey::Enter));
+        assert!(matches!(
+            retried.intent,
+            Some(FleetIntent::Broadcast { .. })
+        ));
+    }
+
+    #[test]
+    fn fleet_start_mapping_preserves_exact_global_params() {
+        use ainb_hangar_proto::fleet::{ControlAction, FleetProvider};
+
+        let params = fleet_start_params(
+            FleetProvider::Codex,
+            "/work/new".into(),
+            Some("inspect failures".into()),
+        );
+        assert_eq!(params.session_key, "start:codex");
+        assert_eq!(params.expected_version, 1);
+        assert!(params.request_id.starts_with("fleet-ui-start-"));
+        assert_eq!(
+            params.action,
+            ControlAction::Start {
+                provider: FleetProvider::Codex,
+                cwd: "/work/new".into(),
+                prompt: Some("inspect failures".into()),
+            }
+        );
+    }
+
+    #[test]
+    fn fleet_attach_selects_exact_window_and_pane_before_attach() {
+        let command = fleet_tmux_attach_command("fleet-alpha:3.7");
+        assert!(command.contains("tmux select-window -t 'fleet-alpha:3.7'"));
+        assert!(command.contains("tmux select-pane -t 'fleet-alpha:3.7'"));
+        assert!(command.ends_with("tmux attach-session -t 'fleet-alpha'"));
     }
 }

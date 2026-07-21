@@ -42,7 +42,7 @@ const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 /// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
 /// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
 /// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 14] = [
+const PRIMARY_TABS: [(char, &str); 15] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('3', "Skills"),
@@ -54,6 +54,7 @@ const PRIMARY_TABS: [(char, &str); 14] = [
     ('L', "Logs"),
     ('I', "Inbox"),
     ('C', "Control"),
+    ('F', "Fleet"),
     ('S', "Squads"),
     ('P', "Profiles"),
     (',', "Settings"),
@@ -196,6 +197,12 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         // The control center: navigate sessions + answer an ASK inline (P2). The
         // option / number-key answer hints render in the body next to the options.
         Screen::ControlCenter => vec![("j/k", "sessions"), ("enter", "answer")],
+        Screen::Fleet => vec![
+            ("j/k", "sessions"),
+            ("b", "broadcast"),
+            ("→/A", "attach"),
+            ("s/r", "stop/restart"),
+        ],
         // The squads screen: create a squad + edit membership + assign an issue
         // (P7). The `[c]/[a]/[d]/[x]` hints also render on the screen header row.
         Screen::Squads => vec![
@@ -241,6 +248,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         'L' => matches!(active, Screen::Logs),
         'I' => matches!(active, Screen::Inbox),
         'C' => matches!(active, Screen::ControlCenter),
+        'F' => matches!(active, Screen::Fleet),
         'S' => matches!(active, Screen::Squads),
         'P' => matches!(active, Screen::Profiles),
         ',' => matches!(active, Screen::Settings),

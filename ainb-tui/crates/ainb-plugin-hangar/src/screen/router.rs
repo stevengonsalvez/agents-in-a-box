@@ -62,6 +62,8 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'I' => switch_tab(state, Screen::Inbox),
         // `C` (capital) opens the fleet-wide control center from anywhere (P2).
         'C' => switch_tab(state, Screen::ControlCenter),
+        // `F` opens the authoritative Fleet registry and control pane.
+        'F' => switch_tab(state, Screen::Fleet),
         // `S` (capital) opens the Squads screen from anywhere (P7).
         'S' => switch_tab(state, Screen::Squads),
         // `P` (capital) opens the profile editor from anywhere (P5).

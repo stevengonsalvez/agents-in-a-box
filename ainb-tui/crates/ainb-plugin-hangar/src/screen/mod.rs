@@ -22,6 +22,7 @@ pub mod command_palette;
 pub mod context_menu;
 pub mod control_center;
 pub mod daemon_health;
+pub mod fleet;
 pub mod inbox;
 pub mod issue_list;
 pub mod kanban;
@@ -84,6 +85,9 @@ pub enum Screen {
     /// board, backed by the P2 attention feed (`attention/list` +
     /// `attention/subscribe`) with inline answering via `attention/answer`.
     ControlCenter,
+    /// Fleet super-control pane (hotkey `F`), backed by authoritative registry
+    /// snapshots and revisioned live updates.
+    Fleet,
     /// Squads (hotkey `S`) — the daemon-native team primitive (D17): squads with
     /// a leader + members, live per-member status, and issue-assign leader-routing
     /// dispatch, backed by `hangar/squads_list` + the squad mutation RPCs (P7).
@@ -121,6 +125,7 @@ impl Screen {
             Self::Logs => "Logs",
             Self::Inbox => "Inbox",
             Self::ControlCenter => "Control",
+            Self::Fleet => "Fleet",
             Self::Squads => "Squads",
             Self::Profiles => "Profiles",
             Self::Settings => "Settings",
