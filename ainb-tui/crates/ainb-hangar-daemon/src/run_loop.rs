@@ -1426,7 +1426,21 @@ async fn finalize_failure(
     // Persist the session id (if any) before failing so a retry can resume the
     // provider conversation.
     persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
-    match FailTaskService::fail(pool, &task.id, reason, clock).await {
+    // When the runner captured a stderr tail (a crashed / gave-up provider),
+    // persist it into the `result` column (in the TaskResult `{"content": ...}`
+    // shape the detail surface renders) so the failure is diagnosable from stored
+    // evidence alone. The bare `fail` path left `result` blank, making every
+    // `agent_error` crash undiagnosable from the DB. No tail → the plain `fail`.
+    let fail_outcome = {
+        let tail = result.stderr_tail.trim();
+        if tail.is_empty() {
+            FailTaskService::fail(pool, &task.id, reason, clock).await
+        } else {
+            let detail = format!("run failed ({}):\n\n{tail}", reason.as_db_str());
+            FailTaskService::fail_with_detail(pool, &task.id, reason, &detail, clock).await
+        }
+    };
+    match fail_outcome {
         Ok(_) => {}
         // tcp T3 / F6: a human cancel (`running -> cancelled`) beat this failure to
         // the conditional finalize. Cancelled wins — skip the failure side-effects
@@ -1507,7 +1521,7 @@ async fn finalize_failure(
         progress_comment::Checkpoint::Failed { reason },
     )
     .await;
-    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
+    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), stderr_tail = %result.stderr_tail, "task failed");
     // F5: tear down the run's provisioned worktree (keep-if-dirty). A failed run
     // that left a dirty checkout keeps it (the partial work is preserved for a
     // rerun / inspection); a clean one is removed. Done BEFORE the retry spawn so
