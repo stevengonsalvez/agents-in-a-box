@@ -2751,6 +2751,7 @@ async fn handle_board_card_run(
         run_override,
         agent_override,
         params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        None, // a board card runs under the card's own assignee (no wizard override)
     )
     .await
     .map_err(card_run_err)?;
@@ -2852,6 +2853,16 @@ async fn handle_issue_run(
     let run_override = run_override_owned.as_deref();
     let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
     let source_override = params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // V3-F3: a run-time assignee override names the NAMED workspace agent the run
+    // dispatches under. A malformed ref is dropped (the run then resolves the
+    // agent from the issue's persisted assignee) rather than failing the run — the
+    // wire stays forward-compatible, matching the `agent`-token drop above.
+    let assignee_override = params
+        .assignee
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .and_then(|s| s.parse::<ainb_hangar_core::actor::ActorRef>().ok());
     let outcome = run_card(
         pool,
         &ws,
@@ -2861,6 +2872,7 @@ async fn handle_issue_run(
         run_override,
         agent_override,
         source_override,
+        assignee_override.as_ref(),
     )
     .await
     .map_err(card_run_err)?;
@@ -3029,6 +3041,7 @@ pub(crate) async fn run_card(
     repo_override: Option<&str>,
     agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
     source_branch_override: Option<&str>,
+    assignee_override: Option<&ainb_hangar_core::actor::ActorRef>,
 ) -> Result<CardRunOutcome, CardRunError> {
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
@@ -3146,7 +3159,11 @@ pub(crate) async fn run_card(
 
     // Single-agent: resolve the assignee agent (D16), then enqueue one task keyed
     // to its `(agent_id, runtime_id)` + the resolved repo/agent-kind, in ONE tx.
-    let agent = resolve_run_agent_opt(pool, ws, issue.assignee.as_ref())
+    // A run-time `assignee_override` (V3-F3: the create wizard targeting a named
+    // agent) WINS over the issue's persisted assignee, so a run dispatches under
+    // the picked agent even if the persisting `issue_update` has not landed yet.
+    let assignee = assignee_override.or(issue.assignee.as_ref());
+    let agent = resolve_run_agent_opt(pool, ws, assignee)
         .await
         .map_err(CardRunError::Db)?
         .ok_or(CardRunError::NoAgent)?;
@@ -6669,6 +6686,7 @@ mod tests {
             Some("scratch"),
             ainb_hangar_core::agent_kind::AgentKind::parse("claude"),
             None,
+            None,
         )
         .await;
 
@@ -6677,5 +6695,166 @@ mod tests {
             "the shared run_card must launch a brief-less issue — no brief-or-link \
              guard belongs in the shared path (board_card_run / autopilot use it)"
         );
+    }
+
+    /// V3-F3 core: a run-time `assignee_override` routes the run to the NAMED
+    /// agent it names, NOT the workspace's alphabetically-first agent (the
+    /// fallback the create wizard hit before it could target a named agent).
+    ///
+    /// The mutation-provable heart of the fix: two agents `alpha` (first by name)
+    /// and `omega` (last) exist, the issue carries NO persisted assignee, and the
+    /// run is dispatched with `assignee_override = agent:<omega>`. It must launch
+    /// under `omega`. Break the override plumbing (drop the param, or prefer the
+    /// issue's `None` assignee) → resolution falls to `alpha` → this test goes red.
+    #[tokio::test]
+    async fn run_card_assignee_override_beats_alphabetical_fallback() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        // Two named agents; `alpha` sorts first so a fallback (ORDER BY name) picks
+        // it. The override must select `omega` regardless.
+        let alpha = bootstrap::create_agent(pool, &ws, "alpha", "claude", None).await.unwrap();
+        let omega = bootstrap::create_agent(pool, &ws, "omega", "claude", None).await.unwrap();
+        assert_ne!(alpha.id, omega.id);
+
+        // Issue with NO persisted assignee — the override is the ONLY signal.
+        let id = ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.clone(),
+                workspace_id: ws.clone(),
+                title: "hand this to omega".into(),
+                description: Some("do the work".into()),
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let issue = IssueRepo::get_by_id(pool, &id).await.unwrap().unwrap();
+        let ws_id = WorkspaceId::from_str(&ws).unwrap();
+
+        let override_ref = ainb_hangar_core::actor::ActorRef::new(
+            ainb_hangar_core::actor::ActorKind::Agent,
+            omega.id.clone(),
+        )
+        .unwrap();
+
+        let outcome = run_card(
+            pool,
+            &ws_id,
+            None,
+            &issue,
+            "headless",
+            Some("scratch"),
+            None, // no provider override — the named agent's own provider drives spawn
+            None,
+            Some(&override_ref),
+        )
+        .await;
+
+        match outcome {
+            Ok(CardRunOutcome::Single { agent_id, .. }) => {
+                assert_eq!(
+                    agent_id, omega.id,
+                    "the run must dispatch under the OVERRIDE agent (omega), not the \
+                     alphabetical fallback (alpha)"
+                );
+                assert_ne!(
+                    agent_id, alpha.id,
+                    "alpha is the fallback the override must beat"
+                );
+            }
+            Ok(CardRunOutcome::Squad { .. }) => panic!("a non-squad issue must run as Single"),
+            Err(_) => panic!("the run must launch under the override agent"),
+        }
+    }
+
+    /// The override is optional: with NO `assignee_override` and NO persisted
+    /// assignee, the run still launches under the workspace's first agent (the
+    /// deterministic fallback the provider-chip wizard path relies on). This locks
+    /// the fallback so the override plumbing never silently makes a run un-runnable
+    /// when no named agent is targeted.
+    #[tokio::test]
+    async fn run_card_without_assignee_override_falls_back_to_first_agent() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let alpha = bootstrap::create_agent(pool, &ws, "alpha", "claude", None).await.unwrap();
+        bootstrap::create_agent(pool, &ws, "omega", "claude", None).await.unwrap();
+
+        let id = ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.clone(),
+                workspace_id: ws.clone(),
+                title: "no target".into(),
+                description: Some("do the work".into()),
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        let issue = IssueRepo::get_by_id(pool, &id).await.unwrap().unwrap();
+        let ws_id = WorkspaceId::from_str(&ws).unwrap();
+
+        let outcome = run_card(
+            pool,
+            &ws_id,
+            None,
+            &issue,
+            "headless",
+            Some("scratch"),
+            None,
+            None,
+            None,
+        )
+        .await;
+
+        match outcome {
+            Ok(CardRunOutcome::Single { agent_id, .. }) => {
+                assert_eq!(
+                    agent_id, alpha.id,
+                    "the fallback picks the first agent by name"
+                );
+            }
+            Ok(CardRunOutcome::Squad { .. }) => panic!("a non-squad issue must run as Single"),
+            Err(_) => panic!("the run must launch on the fallback agent"),
+        }
     }
 }
