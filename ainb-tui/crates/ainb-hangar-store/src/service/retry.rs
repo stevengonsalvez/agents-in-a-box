@@ -254,6 +254,7 @@ impl RetryService {
             | FailureReason::UserCancel
             | FailureReason::Timeout
             | FailureReason::SpawnError
+            | FailureReason::SpawnTimeout
             | FailureReason::ProviderContractDrift
             // A provisioning setup fault (bad repo_ref / execenv) is deterministic:
             // it re-fails identically on re-dispatch, so a retry only burns the
@@ -291,6 +292,7 @@ const FAILURE_REASONS: &[FailureReason] = &[
     FailureReason::SpawnError,
     FailureReason::ProviderContractDrift,
     FailureReason::ProvisionError,
+    FailureReason::SpawnTimeout,
     FailureReason::Unknown,
 ];
 
@@ -317,6 +319,7 @@ mod tests {
             FailureReason::SpawnError,
             FailureReason::ProviderContractDrift,
             FailureReason::ProvisionError,
+            FailureReason::SpawnTimeout,
             FailureReason::Unknown,
         ] {
             assert!(
@@ -326,7 +329,7 @@ mod tests {
         }
         assert_eq!(
             FAILURE_REASONS.len(),
-            12,
+            13,
             "FAILURE_REASONS length drifted from the FailureReason variant count",
         );
     }
@@ -361,6 +364,9 @@ mod tests {
             NoRetry
         );
         assert_eq!(RetryService::retry_disposition(ProvisionError), NoRetry);
+        // A wedged setup must NOT retry: a re-dispatch into the same daemon /
+        // environment would only re-wedge, looping the chain invisibly.
+        assert_eq!(RetryService::retry_disposition(SpawnTimeout), NoRetry);
         assert_eq!(RetryService::retry_disposition(Unknown), NoRetry);
     }
 }

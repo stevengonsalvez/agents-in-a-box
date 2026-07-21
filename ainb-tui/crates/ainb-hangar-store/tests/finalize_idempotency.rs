@@ -332,6 +332,31 @@ async fn fail_running_with_reason() {
 }
 
 #[tokio::test]
+async fn fail_running_with_spawn_timeout_terminalizes() {
+    // Doctrine hardening (D-e2e-3): when the `running -> provider spawn` setup
+    // phase wedges past its umbrella bound, the daemon terminalises the row
+    // `running -> failed` with `SpawnTimeout` — the SAME finalize path a real
+    // spawn failure takes — so a wedged setup becomes a loud, terminal, attributed
+    // failure instead of a forever-`running` row that only the multi-hour running
+    // TTL would ever relabel (and then only as a causeless `timeout`).
+    let (_dir, store) = open_seeded().await;
+    seed_task_in_state(&store, "t1", "running").await;
+    let clock = FixedClock(NOW_MS);
+
+    let outcome = FailTaskService::fail(store.pool(), "t1", FailureReason::SpawnTimeout, &clock)
+        .await
+        .expect("fail ok");
+    assert_eq!(outcome, FinalizeOutcome::Transitioned);
+
+    let row = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
+    assert_eq!(row.status, "failed");
+    // The cause is persisted and distinct from a causeless TTL `timeout`, so the
+    // board + detail can show WHY the setup wedged.
+    assert_eq!(row.failure_reason.as_deref(), Some("spawn_timeout"));
+    assert_eq!(row.finished_at, Some(NOW_MS));
+}
+
+#[tokio::test]
 async fn fail_reason_serializes_snake_case() {
     // FailureReason serializes to the snake_case tokens the reference's
     // failure_reason column uses.
