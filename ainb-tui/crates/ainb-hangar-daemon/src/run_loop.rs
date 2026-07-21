@@ -65,6 +65,15 @@ use crate::sweeper::{
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
 const DEFAULT_POLL_MS: u64 = 1_000;
+/// How long the daemon waits for the claude credential read before giving up.
+///
+/// The legacy macOS `SecKeychain` read presents a BLOCKING GUI auth prompt when
+/// the calling binary is absent from the keychain item's ACL trusted-app list
+/// (e.g. a rebuilt debug binary whose signature invalidated the ACL). On a
+/// headless daemon that prompt is never answered, so a synchronous read wedges
+/// the async worker forever and the task freezes at `running`. Bounding the read
+/// converts that indefinite hang into a clean "dispatch without a token" fallback.
+const CRED_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Provider runtime deadline (reference running TTL: 2.5h).
 const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
@@ -387,7 +396,7 @@ pub async fn run(
                 runs.spawn(async move {
                     let clock = SystemClock;
                     if let Err(e) =
-                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive, secrets.as_ref())
+                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive, secrets)
                             .await
                     {
                         tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
@@ -535,6 +544,57 @@ pub fn spawn_gc_sweeper(
     })
 }
 
+/// Resolve the claude credential env for `backend`, bounded and off the async
+/// worker.
+///
+/// The keychain read ([`claude_cred::keys_for_backend`] →
+/// `MacKeychainBackend::get`) is a synchronous, unbounded external call that can
+/// present a BLOCKING GUI auth prompt on a headless daemon (legacy `SecKeychain`
+/// ACL trust invalidated by a rebuilt binary). Answered by nobody, it wedges the
+/// calling async worker forever, freezing the task at `running` (the
+/// zombie-dispatch defect). We run it on [`tokio::task::spawn_blocking`] (same
+/// pattern as [`cap_parent_inbox`]) and race it against `timeout`.
+///
+/// On timeout OR a join error we log a clear warning and return an EMPTY env, so
+/// the dispatch proceeds without an injected `CLAUDE_CODE_OAUTH_TOKEN`: the run
+/// then either succeeds (env-override / no-ACL path) or reaches claude and fails
+/// loudly + actionably (the `finalize_failure` seam turns that into a terminal
+/// `FAILED`) instead of hanging at `running` indefinitely.
+///
+/// The `info!` on entry and exit close the ~29-min silent span that made the
+/// original hang un-observable (the black hole was itself a defect).
+async fn resolve_cred_env(
+    backend: Backend,
+    secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
+    daemon_env: std::collections::HashMap<String, String>,
+    timeout: Duration,
+) -> Vec<(String, String)> {
+    tracing::info!(backend = backend.name(), "resolving claude credential");
+    let read = tokio::task::spawn_blocking(move || {
+        crate::claude_cred::keys_for_backend(backend, secrets.as_ref(), &daemon_env)
+    });
+    match tokio::time::timeout(timeout, read).await {
+        Ok(Ok(env)) => {
+            tracing::info!(injected = env.len(), "claude credential resolved");
+            env
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                error = %e,
+                "keychain credential read task failed; dispatching without injected CLAUDE_CODE_OAUTH_TOKEN"
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "keychain credential read timed out; dispatching without injected CLAUDE_CODE_OAUTH_TOKEN"
+            );
+            Vec::new()
+        }
+    }
+}
+
 /// Walk one claimed task through `dispatched -> running -> done|failed`.
 ///
 /// Re-reads the full row (for `workspace_id` / `issue_id`), resolves the
@@ -559,7 +619,7 @@ async fn execute_claimed(
     stats: &HealthStats,
     events: &EventSink,
     interactive: &InteractiveSessions,
-    secrets: &(dyn ainb_hangar_secrets::SecretBackend + Send + Sync),
+    secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
@@ -757,7 +817,19 @@ async fn execute_claimed(
     // *resolved* value reaches a claude child only. `keys_for_backend` returns an
     // empty vec for codex/copilot, so a claude token can never leak into their
     // children even though every backend shares this seam.
-    let cred_env = crate::claude_cred::keys_for_backend(dispatch.backend, secrets, &daemon_env);
+    //
+    // The read is bounded + moved off the async worker (`resolve_cred_env`): a
+    // legacy keychain GUI auth prompt on a headless daemon would otherwise wedge
+    // this future forever and freeze the task at `running` (the zombie-dispatch
+    // black hole). On timeout we proceed with NO injected token so the run either
+    // succeeds (env-override / no-ACL path) or reaches claude and fails loudly.
+    let cred_env = resolve_cred_env(
+        dispatch.backend,
+        secrets.clone(),
+        daemon_env.clone(),
+        CRED_READ_TIMEOUT,
+    )
+    .await;
 
     // ccc / D11: mark this daemon-spawned session as a legitimate fleet member by
     // stamping AINB_PARENT_SESSION into the provider's child env. The lifecycle
@@ -2204,6 +2276,98 @@ fn warn_danger_access(task: &Task, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A secret backend whose `get` blocks far longer than any test timeout.
+    /// Stands in for the headless keychain GUI-prompt hang that wedged dispatch.
+    struct HangingBackend;
+    impl ainb_hangar_secrets::SecretBackend for HangingBackend {
+        fn get(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<Option<ainb_hangar_secrets::SecretBytes>> {
+            // The real hang is unbounded (a GUI prompt nobody answers); 3s is
+            // 30x the sub-second test timeout ("effectively forever" for the
+            // assertion), without making the leaked blocking thread stall process
+            // exit for long.
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(Some(ainb_hangar_secrets::SecretBytes::from(
+                b"tok".as_slice(),
+            )))
+        }
+        fn put(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+            _: &[u8],
+        ) -> ainb_hangar_secrets::Result<()> {
+            unreachable!("the hang test never writes")
+        }
+        fn delete(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<()> {
+            unreachable!("the hang test never deletes")
+        }
+    }
+
+    /// The zombie-dispatch regression: a keychain read that never returns must
+    /// NOT wedge dispatch. `resolve_cred_env` bounds it, so a hung read yields an
+    /// empty env within the timeout instead of blocking the async worker forever.
+    #[tokio::test]
+    async fn cred_read_times_out_instead_of_wedging_dispatch() {
+        let started = std::time::Instant::now();
+        let env = resolve_cred_env(
+            Backend::Claude,
+            Arc::new(HangingBackend),
+            std::collections::HashMap::new(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(
+            env.is_empty(),
+            "a wedged keychain read must inject no token (got {env:?})"
+        );
+        // Generous bound: the point is it returned at all, near the 100ms timeout
+        // rather than after the 3s sleep. Before the fix this call never returns.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "resolve_cred_env blocked on the hung read for {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The happy path still works: a fast backend's token is resolved and injected
+    /// as `CLAUDE_CODE_OAUTH_TOKEN` (the bounding must not drop a real credential).
+    #[tokio::test]
+    async fn cred_read_returns_token_when_fast() {
+        use ainb_hangar_secrets::SecretBackend as _;
+        let b = ainb_hangar_secrets::InMemoryBackend::new();
+        b.put(
+            &ainb_hangar_secrets::Scope::Global,
+            crate::claude_cred::SECRET_KEY,
+            b"tok",
+        )
+        .unwrap();
+
+        let env = resolve_cred_env(
+            Backend::Claude,
+            Arc::new(b),
+            std::collections::HashMap::new(),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(
+            env,
+            vec![(
+                crate::claude_cred::CHILD_ENV_VAR.to_string(),
+                "tok".to_string()
+            )]
+        );
+    }
 
     /// The shutdown-reap tracker records a live interactive session and hands
     /// it back exactly once on drain, so `Ctrl-C` kills every live session
