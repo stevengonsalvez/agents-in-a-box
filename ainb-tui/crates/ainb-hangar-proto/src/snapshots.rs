@@ -1644,6 +1644,15 @@ pub struct IssueRunParams {
     /// persisted `source_branch`, else the repo's default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_branch: Option<String>,
+    /// A run-time ASSIGNEE override (`agent:<id>`) naming the NAMED workspace
+    /// agent the run dispatches under (V3-F3). APPEND-ONLY: omitted (`None`)
+    /// resolves the run agent from the issue's persisted `assignee`, else the
+    /// workspace's alphabetically-first agent. Passed ALONGSIDE the persisting
+    /// `issue_update{assignee}` (mirroring the repo/branch override discipline) so
+    /// dispatch never depends on the persist landing first — the create wizard
+    /// targets a named agent by carrying it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_DELETE`] (63d): delete one issue and
