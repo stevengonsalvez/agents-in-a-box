@@ -172,6 +172,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
                 ("c", "create"),
                 ("x", "delete"),
                 ("/", "filter"),
+                ("tab", "chip"),
             ]
         }
         Screen::TaskDetail(_) => vec![("R", "retry"), ("X", "cancel"), ("x", "delete")],

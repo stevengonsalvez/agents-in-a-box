@@ -176,6 +176,30 @@ impl FilterChip {
         [Self::All, Self::Members, Self::Agents, Self::Mine]
     }
 
+    /// The next chip in display order, wrapping `Mine → All`. Drives the
+    /// `Tab` chip-cycle binding on the Issues screen.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Members,
+            Self::Members => Self::Agents,
+            Self::Agents => Self::Mine,
+            Self::Mine => Self::All,
+        }
+    }
+
+    /// The previous chip in display order, wrapping `All → Mine`. Drives the
+    /// `Shift+Tab` chip-cycle binding on the Issues screen.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::All => Self::Mine,
+            Self::Members => Self::All,
+            Self::Agents => Self::Members,
+            Self::Mine => Self::Agents,
+        }
+    }
+
     /// Whether `row` passes this filter.
     ///
     /// An unassigned row passes only the [`FilterChip::All`] / [`FilterChip::Mine`]

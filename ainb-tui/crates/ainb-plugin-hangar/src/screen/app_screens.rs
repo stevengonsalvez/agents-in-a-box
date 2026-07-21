@@ -33,7 +33,9 @@ use super::control_center::{
 };
 use super::daemon_health::DaemonHealthState;
 use super::inbox::InboxState;
-use super::issue_list::{IssueListEvent, IssueListIntent, IssueListState, reduce_issue_list};
+use super::issue_list::{
+    IssueListEvent, IssueListIntent, IssueListMode, IssueListState, reduce_issue_list,
+};
 use super::kanban::{KanbanEvent, KanbanIntent, KanbanState, reduce_kanban};
 use super::logs::LogsState;
 use super::profiles::{ProfilesEvent, ProfilesIntent, ProfilesState, reduce_profiles};
@@ -1452,7 +1454,19 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
         };
         IssueListEvent::Wizard(k)
     } else {
-        IssueListEvent::Key(key_char(key)?)
+        // Normal-mode Tab / Shift+Tab cycle the filter-chip bar
+        // (All → Members → Agents → Mine → All). Guarded on Normal mode so the
+        // binding never hijacks Tab while the `/` filter-query input or a confirm
+        // overlay is focused; those still fall through to the plain-char path.
+        match &key.code {
+            KeyCode::Tab if states.issue_list.mode() == IssueListMode::Normal => {
+                IssueListEvent::SetFilter(states.issue_list.filter().next())
+            }
+            KeyCode::BackTab if states.issue_list.mode() == IssueListMode::Normal => {
+                IssueListEvent::SetFilter(states.issue_list.filter().prev())
+            }
+            _ => IssueListEvent::Key(key_char(key)?),
+        }
     };
     let out = reduce_issue_list(&states.issue_list, ev);
     states.issue_list = out.state;
@@ -2039,5 +2053,52 @@ fn route_command_palette(states: &mut ScreenStates, key: &KeyEvent) -> Option<Na
         Some(NavIntent::CloseModal)
     } else {
         None
+    }
+}
+
+#[cfg(test)]
+mod filter_chip_route_tests {
+    use super::*;
+    use crate::screen::issue_list::FilterChip;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// Tab cycles the Issues filter chip forward through the whole ring
+    /// (All → Members → Agents → Mine → All). Regression guard for
+    /// `issue-list-filter-chip-unreachable`: before this binding the chip bar was
+    /// rendered but had no keyboard input path, so the filter was permanently
+    /// stuck on `All`. RED before the `KeyCode::Tab` arm in `route_issue_list`.
+    #[test]
+    fn tab_cycles_filter_chip_forward() {
+        let mut states = ScreenStates::default();
+        assert_eq!(states.issue_list.filter(), FilterChip::All);
+
+        for expected in [
+            FilterChip::Members,
+            FilterChip::Agents,
+            FilterChip::Mine,
+            FilterChip::All,
+        ] {
+            let intent = route_issue_list(&mut states, &key(KeyCode::Tab));
+            assert!(intent.is_none(), "a chip cycle raises no cross-screen nav");
+            assert_eq!(states.issue_list.filter(), expected);
+        }
+    }
+
+    /// Shift+Tab (BackTab) cycles the chip backward (All → Mine → Agents → …).
+    #[test]
+    fn back_tab_cycles_filter_chip_backward() {
+        let mut states = ScreenStates::default();
+        route_issue_list(&mut states, &key(KeyCode::BackTab));
+        assert_eq!(states.issue_list.filter(), FilterChip::Mine);
+        route_issue_list(&mut states, &key(KeyCode::BackTab));
+        assert_eq!(states.issue_list.filter(), FilterChip::Agents);
     }
 }
