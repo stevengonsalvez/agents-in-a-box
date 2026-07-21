@@ -23,6 +23,7 @@
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
 //! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | reference running TTL (2.5h) |
+//! | `HANGAR_SPAWN_SETUP_TIMEOUT_MS` | running→spawn setup-phase umbrella override (tests) | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
@@ -74,6 +75,29 @@ const DEFAULT_POLL_MS: u64 = 1_000;
 /// the async worker forever and the task freezes at `running`. Bounding the read
 /// converts that indefinite hang into a clean "dispatch without a token" fallback.
 const CRED_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Umbrella bound on the ENTIRE `running -> provider spawn` setup phase (doctrine
+/// hardening, D-e2e-3).
+///
+/// [`CRED_READ_TIMEOUT`] bounds only the keychain read; this bounds EVERY await
+/// between the `dispatched -> running` commit and the provider spawn as ONE unit:
+/// the `running` board auto-move + the "started" progress comment (both DB
+/// writes) and [`prepare_spawn_inputs`] (env build, cred read, skills/profile
+/// materialise). No await in that span — a wedged DB write, a future blocking
+/// call added here, a pool deadlock, a materialise hang — can freeze a `running`
+/// row forever: on expiry the run is terminalised `running -> failed`
+/// ([`FailureReason::SpawnTimeout`]) with the real cause logged, rather than left
+/// to the multi-hour running-TTL sweep. Defense-in-depth behind the per-step
+/// bounds: the sanctioned slow step is the 5s cred read, so 60s means "genuinely
+/// wedged", never "merely slow". Overridable via [`spawn_setup_timeout`].
+const SPAWN_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The active setup-phase umbrella bound, honouring the test-only
+/// `HANGAR_SPAWN_SETUP_TIMEOUT_MS` override (mirrors `HANGAR_PROVIDER_MAX_RUNTIME_MS`)
+/// so an e2e / unit test can drive the wedge terminalise within a bounded budget.
+/// Defaults to [`SPAWN_SETUP_TIMEOUT`].
+fn spawn_setup_timeout() -> Duration {
+    env_u64_opt("HANGAR_SPAWN_SETUP_TIMEOUT_MS").map_or(SPAWN_SETUP_TIMEOUT, Duration::from_millis)
+}
 /// Provider runtime deadline (reference running TTL: 2.5h).
 const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
@@ -595,6 +619,78 @@ async fn resolve_cred_env(
     }
 }
 
+/// Build the provider's child env + resolved credential for a `running` task —
+/// the env / cred / skills-materialise portion of the pre-spawn preamble. Its
+/// caller runs it INSIDE the [`SPAWN_SETUP_TIMEOUT`] umbrella (alongside the
+/// started-side DB writes) so a wedge in any of these steps terminalises the run
+/// rather than freezing it; see [`execute_claimed`].
+///
+/// Returns `(task_env, cred_env)`: the allowlist-filtered, skills/profile-augmented
+/// child env, and the daemon-resolved claude credential that rides `extra_env`
+/// (claude children only). Every step is best-effort — a materialise or cred
+/// fault degrades the run (no skills / no token) but never fails it. The hard
+/// guarantee is the caller's timeout, which turns a WEDGED step (not a slow one)
+/// into a terminal `spawn_timeout` instead of a forever-`running` row.
+async fn prepare_spawn_inputs(
+    pool: &SqlitePool,
+    task: &Task,
+    env: &crate::execenv::ExecEnv,
+    backend: Backend,
+    secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
+    cred_timeout: Duration,
+) -> (
+    std::collections::HashMap<String, String>,
+    Vec<(String, String)>,
+) {
+    // Snapshot the daemon's env into an owned map *before* any await: the
+    // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
+    // make this future non-`Send`. P5.3: apply the configurable env-allowlist
+    // policy here (the authoritative pass), layering keychain-resident API keys
+    // on top via `dispatch::build_task_env`.
+    let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let policy = load_env_policy();
+    let mut task_env = crate::dispatch::build_task_env(&daemon_env, std::iter::empty(), &policy);
+
+    // The daemon-resolved claude credential rides `extra_env` (the unfiltered
+    // append), NOT `task_env` — so it bypasses the deny-by-default allowlist and
+    // reaches a claude child only (`keys_for_backend` is empty for codex/copilot).
+    // The read is bounded + moved off the async worker (`resolve_cred_env`): a
+    // legacy keychain GUI auth prompt on a headless daemon would otherwise wedge
+    // this future and freeze the task at `running`. On timeout we proceed with NO
+    // token so the run reaches claude and fails loudly rather than hanging.
+    let cred_env = resolve_cred_env(backend, secrets, daemon_env.clone(), cred_timeout).await;
+
+    // ccc / D11: name the hangar daemon as the child's parent session so the run
+    // is a legitimate fleet member (its AskUserQuestion reaches the attention
+    // pipeline). The runner allowlists this key so it survives the deny-by-default
+    // filter; set AFTER `build_task_env` so the daemon's value wins over any
+    // ambient one.
+    task_env.insert(
+        ainb_fleet_core::session_registry::PARENT_ENV.to_string(),
+        HANGAR_PARENT_SESSION.to_string(),
+    );
+
+    // P6.4: materialise the agent's attached skills into the provider's layout,
+    // forwarding the `*_HOME` pointer via `task_env`. Non-fatal — a task must
+    // still dispatch even if a skill bundle cannot be written.
+    if let Some((key, path)) = materialise_skills(pool, task, env).await {
+        task_env.insert(key, path.to_string_lossy().into_owned());
+    }
+
+    // P5 (D16): compile-on-dispatch — if a profile master matches this task's
+    // agent slug, materialise its resolved tool-native files and forward the same
+    // `*_HOME` pointer (idempotent when both wrote one). Non-fatal.
+    if let Some((key, path)) = materialise_agent_profile(pool, task, env, backend.name()).await {
+        task_env.insert(key, path.to_string_lossy().into_owned());
+    }
+
+    // P5.6: warn about `danger-full-access` on the first invocation of this
+    // provider in this session. Non-fatal — never block a dispatch on it.
+    warn_danger_access(task, backend.name());
+
+    (task_env, cred_env)
+}
+
 /// Walk one claimed task through `dispatched -> running -> done|failed`.
 ///
 /// Re-reads the full row (for `workspace_id` / `issue_id`), resolves the
@@ -779,107 +875,87 @@ async fn execute_claimed(
     // race is greppable in the daemon log next to the store's `task.start` span.
     tracing::info!(task_id = %task.id, lifecycle = lifecycle.state().as_db_str(), "task running");
     // e38.2: announce the start to subscribed plugins (best-effort push; the
-    // next snapshot pull reconciles if no subscriber is connected).
+    // next snapshot pull reconciles if no subscriber is connected). This is a
+    // non-blocking channel push (not awaited), so it stays outside the umbrella.
     emit_task_started(events, &task, clock);
-    // P4 / D8: auto-move the task's issue card into any board's `running`
-    // auto-move column (best-effort; never blocks the FSM).
-    crate::board::auto_move_after_transition(pool, &task, "running").await;
-    // e38.6: write a durable, agent-authored "started" comment to the task's
-    // issue so the agent's activity survives beyond the bounded transcript
-    // buffer. A NULL-issue chat task writes nothing; a write fault is logged,
-    // never blocks the FSM (the `running` transition has already committed).
-    progress_comment::emit_checkpoint(
-        pool,
-        &SystemIdGen,
-        clock,
-        &task,
-        progress_comment::Checkpoint::Started,
-    )
+
+    // P10 / D19: the provider that executed this run, recorded on the run-history
+    // row + the OTLP task->run span. Captured up front (a `&'static str`) so the
+    // spawn-timeout terminalise below can attribute the failed run, and BEFORE
+    // `provider_run` moves `dispatch` (the async block takes `dispatch.agent_env`
+    // by value). The `cancel_guard` was registered up front (before the start).
+    let provider = dispatch.backend.name();
+
+    // Doctrine hardening (D-e2e-3): bound EVERY await between the `running` commit
+    // and the provider spawn as ONE unit. `resolve_cred_env` already bounds the
+    // keychain read (the known zombie-dispatch wedge), but the `running` board
+    // auto-move + the "started" progress comment are ALSO post-`running` DB awaits
+    // — a wedge in either (a pool deadlock, a contended writer) is the exact
+    // forever-`running` black hole, merely relocated past the cred read. So the
+    // umbrella opens the instant the row is `running` and closes only once the
+    // spawn inputs are built: the two started-side DB writes AND
+    // [`prepare_spawn_inputs`] all run inside it. On expiry we terminalise
+    // `running -> failed` with the real cause logged, so a wedge ANYWHERE in the
+    // span is a loud, immediate, terminal failure — never a silent forever-run.
+    //
+    // The two DB writes stay best-effort INSIDE the block (a write fault is
+    // logged, never blocks the FSM); only an unbounded HANG is caught by the
+    // timeout, which is exactly the wedge class this guards.
+    let setup = tokio::time::timeout(spawn_setup_timeout(), async {
+        // P4 / D8: auto-move the task's issue card into any board's `running`
+        // auto-move column.
+        crate::board::auto_move_after_transition(pool, &task, "running").await;
+        // e38.6: write a durable, agent-authored "started" comment to the task's
+        // issue so the agent's activity survives beyond the bounded transcript
+        // buffer. A NULL-issue chat task writes nothing.
+        progress_comment::emit_checkpoint(
+            pool,
+            &SystemIdGen,
+            clock,
+            &task,
+            progress_comment::Checkpoint::Started,
+        )
+        .await;
+        prepare_spawn_inputs(
+            pool,
+            &task,
+            &env,
+            dispatch.backend,
+            secrets.clone(),
+            CRED_READ_TIMEOUT,
+        )
+        .await
+    })
     .await;
 
-    // Snapshot the daemon's env into an owned map *before* the await: the
-    // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
-    // make this future non-`Send` and unusable on the multi-thread runtime.
-    //
-    // P5.3: apply the configurable env-allowlist policy here (the authoritative
-    // pass), layering keychain-resident API keys on top via
-    // `dispatch::build_task_env`. The policy is loaded from
-    // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent).
-    let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    let policy = load_env_policy();
-    let mut task_env = crate::dispatch::build_task_env(&daemon_env, std::iter::empty(), &policy);
-
-    // The daemon-resolved claude credential. It rides `extra_env` (the unfiltered
-    // append below), NOT `task_env`/`source_env` — so it does not go through, and
-    // does not have to widen, the deny-by-default allowlist. An *ambient*
-    // `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own env stays dropped for every
-    // provider (it is not on the runner's exact-match allowlist), while the
-    // *resolved* value reaches a claude child only. `keys_for_backend` returns an
-    // empty vec for codex/copilot, so a claude token can never leak into their
-    // children even though every backend shares this seam.
-    //
-    // The read is bounded + moved off the async worker (`resolve_cred_env`): a
-    // legacy keychain GUI auth prompt on a headless daemon would otherwise wedge
-    // this future forever and freeze the task at `running` (the zombie-dispatch
-    // black hole). On timeout we proceed with NO injected token so the run either
-    // succeeds (env-override / no-ACL path) or reaches claude and fails loudly.
-    let cred_env = resolve_cred_env(
-        dispatch.backend,
-        secrets.clone(),
-        daemon_env.clone(),
-        CRED_READ_TIMEOUT,
-    )
-    .await;
-
-    // ccc / D11: mark this daemon-spawned session as a legitimate fleet member by
-    // stamping AINB_PARENT_SESSION into the provider's child env. The lifecycle
-    // hook gates its `events.jsonl` append on fleet membership (resolvable parent
-    // | non-empty inbox | ATC cwd); a card run has none, so its AskUserQuestion
-    // never reached the attention pipeline (the control centre showed "0 need you"
-    // with the picker open — INV-3 / D11). Naming the hangar daemon as the parent
-    // resolves membership for BOTH provider paths at once: the headless
-    // (`run_claude` / `run_codex_with_env`) and interactive (`run_interactive`)
-    // spawns each compose their child env from `task_env`, and the runner
-    // allowlists this key so it survives the deny-by-default filter. It is set
-    // AFTER `build_task_env` so the daemon's own value always wins over any
-    // ambient one.
-    task_env.insert(
-        ainb_fleet_core::session_registry::PARENT_ENV.to_string(),
-        HANGAR_PARENT_SESSION.to_string(),
-    );
-
-    // P6.4: materialise the agent's attached skills into the provider's layout
-    // before spawning. Home-style providers (claude/codex/cursor) land their
-    // skills under the *task root* (sibling of `workdir`, so the git worktree
-    // stays clean) and are pointed there via a `*_HOME` env var, which is
-    // folded into `task_env` here so the runner forwards it. A materialisation
-    // fault is non-fatal — a task must still dispatch even if a skill bundle
-    // cannot be written (the agent simply runs without its skills).
-    if let Some((key, path)) = materialise_skills(pool, &task, &env).await {
-        task_env.insert(key, path.to_string_lossy().into_owned());
-    }
-
-    // P5 (D16): compile-on-dispatch — if a profile master matches this task's
-    // agent slug, materialise the resolved tool-native files (Claude `.md` /
-    // Codex config+prompt) into the task's execution env and forward the same
-    // `*_HOME` pointer the skills layout uses (idempotent when both wrote one).
-    // Best-effort: a missing profile or a write fault is logged and skipped — a
-    // task must still dispatch without its profile.
-    if let Some((key, path)) =
-        materialise_agent_profile(pool, &task, &env, dispatch.backend.name()).await
-    {
-        task_env.insert(key, path.to_string_lossy().into_owned());
-    }
-
-    // P5.6: warn about `danger-full-access` on the first invocation of this
-    // provider in this session. The decision + ack persistence are authoritative
-    // here (a task may be dispatched from the CLI with no TUI attached); a
-    // re-dispatch in the same session is suppressed, a fresh session re-warns.
-    // The "session" is the resumed provider session id when present, else the
-    // task id (a fresh run is a fresh warning surface). A warning-IO fault is
-    // non-fatal — never block a dispatch on it. e38.16: keyed on the resolved
-    // backend, so a codex task warns under `codex` rather than always `claude`.
-    warn_danger_access(&task, dispatch.backend.name());
+    let (task_env, cred_env) = match setup {
+        Ok(inputs) => inputs,
+        Err(_elapsed) => {
+            tracing::error!(
+                task_id = %task.id,
+                timeout_ms = u64::try_from(spawn_setup_timeout().as_millis()).unwrap_or(u64::MAX),
+                "run setup wedged before provider spawn; failing task"
+            );
+            // running -> failed: type the terminal edge before the store finalize,
+            // then flow through the SAME `finalize_failure` seam the provider-spawn
+            // failure uses (teardown / run-history / event). `SpawnTimeout` is
+            // `NoRetry`: a wedged setup will not self-heal on a re-dispatch.
+            lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
+            finalize_failure(
+                pool,
+                &task,
+                &run_wd,
+                ainb_hangar_store::service::fail::FailureReason::SpawnTimeout,
+                crate::runner::RunnerResult::default(),
+                provider,
+                clock,
+                stats,
+                events,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     // ccc / D6: an `interactive` task launches the provider inside a REAL,
     // attachable tmux session (not the headless pipe-capture path). The session
@@ -900,12 +976,9 @@ async fn execute_claimed(
     // kill) is torn down by its exact name below. Both settle as
     // `RunOutcome::Cancelled`, finalised through the dedicated cancelled seam
     // (never the failure path, so a cancel neither auto-moves to `failed` nor
-    // spawns a retry child).
-    // P10 / D19: the provider that executed this run, recorded on the run-history
-    // row + the OTLP task->run span. Captured BEFORE `provider_run` moves
-    // `dispatch` (the async block takes `dispatch.agent_env` by value). The
-    // `cancel_guard` was registered up front (before the start transition).
-    let provider = dispatch.backend.name();
+    // spawns a retry child). `provider` was captured up front (before the setup
+    // umbrella) so both the timeout terminalise and this run attribute the same
+    // backend.
     let provider_run = async {
         if mode == Mode::Interactive {
             // The interactive path is DELIBERATELY unsandboxed (see
@@ -2366,6 +2439,195 @@ mod tests {
                 crate::claude_cred::CHILD_ENV_VAR.to_string(),
                 "tok".to_string()
             )]
+        );
+    }
+
+    /// Doctrine hardening (D-e2e-3): the WHOLE `running -> provider spawn` preamble
+    /// is bounded as ONE unit, not just the keychain read. A setup step that wedges
+    /// — here a keychain backend that never returns, with the INNER cred timeout
+    /// set far above the umbrella so only the outer bound can cut it — must be cut
+    /// off promptly and surface as a timeout, never run to the inner bound and
+    /// never forever. This is what turns a wedged setup into a terminal
+    /// `spawn_timeout` in `execute_claimed` instead of a forever-`running` row.
+    #[tokio::test]
+    async fn spawn_setup_preamble_is_bounded_as_one_unit() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // A real queued task, read back as a `Task` so the preamble's agent /
+        // workspace lookups resolve against real rows.
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: bootstrap::default_runtime_id(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        // A throwaway execenv rooted in the tempdir (the wedge fires in the cred
+        // read, before any materialise step touches these paths).
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+
+        // Inner cred timeout (30s) far above the umbrella (300ms): ONLY the outer
+        // umbrella can cut off the hung keychain read.
+        let started = std::time::Instant::now();
+        let bounded = tokio::time::timeout(
+            Duration::from_millis(300),
+            prepare_spawn_inputs(
+                pool,
+                &task,
+                &env,
+                Backend::Claude,
+                Arc::new(HangingBackend),
+                Duration::from_secs(30),
+            ),
+        )
+        .await;
+
+        assert!(
+            bounded.is_err(),
+            "a wedged preamble must be cut off by the umbrella, not run to the inner cred bound"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the umbrella must bound the wedge promptly (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    /// Real-path mutation guard for the umbrella: drive the ACTUAL
+    /// `execute_claimed` seam (not `prepare_spawn_inputs` in isolation) with a
+    /// wedged keychain read and the umbrella tightened via
+    /// `HANGAR_SPAWN_SETUP_TIMEOUT_MS`. The row MUST terminalise
+    /// `running -> failed` with `spawn_timeout`. Deleting the `tokio::time::timeout`
+    /// wrap in `execute_claimed` turns this RED: the bounded (5s) cred read then
+    /// returns, the run reaches a provider spawn against a non-existent binary, and
+    /// the row lands `failed`/`spawn_error` (or hangs) — never `spawn_timeout`.
+    #[tokio::test]
+    async fn execute_claimed_terminalizes_a_wedged_setup_via_the_umbrella() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+        use ainb_hangar_store::service::claim::ClaimTaskService;
+
+        // Serialise with every other `$AINB_HANGAR_HOME`-mutating test, and set a
+        // tiny umbrella so the 3s wedged cred read blows the bound deterministically.
+        let _env = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hangar-home");
+        let prior_home = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        let prior_to = std::env::var_os("HANGAR_SPAWN_SETUP_TIMEOUT_MS");
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+        std::env::set_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS", "50");
+
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let clock = SystemClock;
+        let claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the queued task must claim");
+
+        // Provider paths that do not resolve: under the mutation (no umbrella) the
+        // run would reach a spawn that ENOENT-fails as `spawn_error` — a DIFFERENT
+        // reason than the `spawn_timeout` asserted below.
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "/nonexistent/hangar-test-claude".into(),
+            codex_path: "/nonexistent/hangar-test-codex".into(),
+            copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+        let interactive = InteractiveSessions::default();
+
+        let outcome = execute_claimed(
+            pool,
+            &runner,
+            &claimed,
+            &clock,
+            &stats,
+            &events,
+            &interactive,
+            Arc::new(HangingBackend),
+        )
+        .await;
+
+        // Restore env BEFORE asserting so a failed assertion never leaks it.
+        match prior_home {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+        match prior_to {
+            Some(v) => std::env::set_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS", v),
+            None => std::env::remove_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS"),
+        }
+
+        outcome.expect("execute_claimed handles the wedge internally (never Err)");
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "failed",
+            "a wedged setup must terminalise, not stay running"
+        );
+        assert_eq!(
+            row.failure_reason.as_deref(),
+            Some("spawn_timeout"),
+            "the umbrella must attribute the wedge as spawn_timeout (got {:?})",
+            row.failure_reason
         );
     }
 

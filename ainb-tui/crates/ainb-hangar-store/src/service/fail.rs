@@ -89,6 +89,17 @@ pub enum FailureReason {
     /// 90s window, re-dispatched, and re-failing invisibly until the 5min dispatch
     /// TTL relabelled it `timeout` with no cause recorded.
     ProvisionError,
+    /// The `running -> provider spawn` setup phase WEDGED past its umbrella bound
+    /// (`SPAWN_SETUP_TIMEOUT`) — a step between marking the row `running` and
+    /// spawning the provider (e.g. a headless keychain read that never returns, a
+    /// pool deadlock, a materialise hang) blocked the run indefinitely. Distinct
+    /// from [`Self::SpawnError`] (the provider binary is missing / unspawnable —
+    /// the setup finished but the OS exec failed) and [`Self::Timeout`] (a TTL
+    /// sweeper relabelled a stalled row with no cause): here the daemon caught the
+    /// wedge itself, at the bound, and recorded WHY — so a forever-`running` black
+    /// hole becomes a loud, immediate terminal. Terminal (no retry): a wedged
+    /// environment does not self-heal on a re-dispatch with the same daemon.
+    SpawnTimeout,
     /// An unclassified failure.
     Unknown,
 }
@@ -114,6 +125,7 @@ impl FailureReason {
             Self::SpawnError => "spawn_error",
             Self::ProviderContractDrift => "provider_contract_drift",
             Self::ProvisionError => "provision_error",
+            Self::SpawnTimeout => "spawn_timeout",
             Self::Unknown => "unknown",
         }
     }
@@ -244,6 +256,7 @@ mod tests {
             FailureReason::SpawnError,
             FailureReason::ProviderContractDrift,
             FailureReason::ProvisionError,
+            FailureReason::SpawnTimeout,
             FailureReason::Unknown,
         ] {
             let serde_token = serde_json::to_value(reason)
