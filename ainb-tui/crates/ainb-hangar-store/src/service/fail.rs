@@ -77,6 +77,18 @@ pub enum FailureReason {
     /// identically, so a retry only burns the chain — the fix is updating the
     /// parser, not re-running.
     ProviderContractDrift,
+    /// A PRE-START setup fault stranded the run before the provider ever ran:
+    /// preparing the isolated execenv (`prepare_env`) or provisioning the run's
+    /// working directory (`workdir_provision::provision` — e.g. a bad / unclonable
+    /// `repo_ref`) faulted while the row was still `dispatched`. Distinct from
+    /// [`Self::SpawnError`] (the workdir was ready and the *provider binary* would
+    /// not spawn) and [`Self::AgentError`] (the agent ran and gave up): here
+    /// neither the workdir nor the agent ever came up. Classed as INFRASTRUCTURE
+    /// (retryable, bounded by `max_attempts`) because a setup fault is often
+    /// transient (a network blip cloning, momentary disk / runtime pressure); the
+    /// deterministic case (a permanently-bad repo) simply burns the retry chain to
+    /// exhaustion and lands terminal `failed` rather than reclaiming forever.
+    SetupError,
     /// An unclassified failure.
     Unknown,
 }
@@ -101,6 +113,7 @@ impl FailureReason {
             Self::SemanticInactivity => "semantic_inactivity",
             Self::SpawnError => "spawn_error",
             Self::ProviderContractDrift => "provider_contract_drift",
+            Self::SetupError => "setup_error",
             Self::Unknown => "unknown",
         }
     }
@@ -166,6 +179,7 @@ mod tests {
             FailureReason::SemanticInactivity,
             FailureReason::SpawnError,
             FailureReason::ProviderContractDrift,
+            FailureReason::SetupError,
             FailureReason::Unknown,
         ] {
             let serde_token = serde_json::to_value(reason)

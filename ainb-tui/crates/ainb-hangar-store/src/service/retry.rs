@@ -16,9 +16,11 @@
 //! [`RetryDisposition`]s ([`RetryService::retry_disposition`]):
 //!
 //! - **[`RetryDisposition::ResumeRetry`]** —
-//!   [`FailureReason::RuntimeOffline`] / [`FailureReason::RuntimeRecovery`]: the
-//!   *infrastructure* failed, not the agent, so the retry **resumes** the
-//!   parent's provider session (`session_id` is carried onto the child).
+//!   [`FailureReason::RuntimeOffline`] / [`FailureReason::RuntimeRecovery`] /
+//!   [`FailureReason::SetupError`]: the *infrastructure* failed, not the agent, so
+//!   the retry **resumes** the parent's provider session (`session_id` is carried
+//!   onto the child). A `SetupError` never ran an agent, so its inherited
+//!   `session_id` is NULL and the retry simply starts fresh.
 //! - **[`RetryDisposition::FreshRetry`]** — the conversation-poisoning terminals
 //!   [`FailureReason::IterationLimit`] / [`FailureReason::ApiInvalidRequest`] /
 //!   [`FailureReason::SemanticInactivity`]: the model wedged on its own context,
@@ -238,9 +240,16 @@ impl RetryService {
     pub const fn retry_disposition(reason: FailureReason) -> RetryDisposition {
         match reason {
             // Infrastructure failed, not the agent — resume the conversation.
-            FailureReason::RuntimeOffline | FailureReason::RuntimeRecovery => {
-                RetryDisposition::ResumeRetry
-            }
+            // `SetupError` is a PRE-START setup fault (execenv prep / workdir
+            // provision): infrastructure, not the agent, and often transient, so it
+            // retries — bounded by `max_attempts`. It never ran an agent, so there
+            // is no session to resume (the child's `session_id` inherits NULL and a
+            // fresh attempt begins naturally); `ResumeRetry` is the honest class
+            // ("infra failed, not the agent"), and the missing session makes the
+            // resume-vs-fresh distinction moot here.
+            FailureReason::RuntimeOffline
+            | FailureReason::RuntimeRecovery
+            | FailureReason::SetupError => RetryDisposition::ResumeRetry,
             // Conversation-poisoning terminals — retry, but in a fresh session.
             FailureReason::IterationLimit
             | FailureReason::ApiInvalidRequest
@@ -286,6 +295,7 @@ const FAILURE_REASONS: &[FailureReason] = &[
     FailureReason::SemanticInactivity,
     FailureReason::SpawnError,
     FailureReason::ProviderContractDrift,
+    FailureReason::SetupError,
     FailureReason::Unknown,
 ];
 
@@ -311,6 +321,7 @@ mod tests {
             FailureReason::SemanticInactivity,
             FailureReason::SpawnError,
             FailureReason::ProviderContractDrift,
+            FailureReason::SetupError,
             FailureReason::Unknown,
         ] {
             assert!(
@@ -320,7 +331,7 @@ mod tests {
         }
         assert_eq!(
             FAILURE_REASONS.len(),
-            11,
+            12,
             "FAILURE_REASONS length drifted from the FailureReason variant count",
         );
     }
@@ -354,6 +365,7 @@ mod tests {
             RetryService::retry_disposition(ProviderContractDrift),
             NoRetry
         );
+        assert_eq!(RetryService::retry_disposition(SetupError), ResumeRetry);
         assert_eq!(RetryService::retry_disposition(Unknown), NoRetry);
     }
 }
