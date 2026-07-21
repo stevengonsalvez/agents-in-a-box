@@ -566,7 +566,18 @@ async fn execute_claimed(
         .ok_or_else(|| anyhow::anyhow!("claimed task {} vanished", claimed.id))?;
     let ws_slug = workspace_slug(pool, &task.workspace_id).await?;
     let home = hangar_home();
-    let env = prepare_env(&task, &ws_slug, &home, clock)?;
+    // A `prepare_env` fault is a PRE-START setup fault: the row is still
+    // `dispatched` (the `dispatched -> running` transition is far below). Returning
+    // it via `?` would leave the row `dispatched` for the stale-dispatch sweeper to
+    // reclaim forever (fresh `dispatched_at`, unchanged `attempt`) — the
+    // zombie-dispatch bug. Instead drive it terminal through the shared fail seam.
+    let env = match prepare_env(&task, &ws_slug, &home, clock) {
+        Ok(env) => env,
+        Err(e) => {
+            tracing::error!(task_id = %task.id, error = %e, "prepare_env failed pre-start; failing task");
+            return finalize_pre_start_failure(pool, &task, None, clock, stats, events).await;
+        }
+    };
 
     // e38.21: inject the workspace's context prompt into the task's execenv as a
     // `CLAUDE.md` so the agent run actually sees the per-workspace context (the
@@ -619,12 +630,16 @@ async fn execute_claimed(
     // scratch repo; a chat / autopilot task has no `repo_ref` and runs in the
     // in-tree fallback workdir (the pre-F5 behaviour). The short-id slug is unique
     // per task, so N cards on ONE repo provision N distinct worktrees that never
-    // collide (the F5 concurrency guarantee). A provision fault is treated like
-    // any other setup fault (`prepare_env` above): it propagates so the row stays
-    // `dispatched` and the stale-dispatch sweeper reclaims + re-queues it, rather
-    // than dispatching a run into an unprovisioned dir. The injected `CLAUDE.md`
-    // (above) + skills stay in the task tree, NOT the worktree, so teardown's
-    // keep-if-dirty check sees only genuine agent work.
+    // collide (the F5 concurrency guarantee). A provision fault (e.g. a bad /
+    // unclonable `repo_ref`) is a PRE-START setup fault, like `prepare_env` above:
+    // it is FINALISED terminal through `finalize_pre_start_failure` (a
+    // `SetupError`, bounded by `max_attempts` via the F06 retry chain), NOT
+    // returned via `?`. Returning it would leave the row `dispatched`, where the
+    // stale-dispatch sweeper redelivers it every reclaim window with a fresh
+    // `dispatched_at` and an unchanged `attempt` — so it never ages past the
+    // dispatch TTL for the fail step and reclaims forever (the zombie-dispatch
+    // bug). The injected `CLAUDE.md` (above) + skills stay in the task tree, NOT
+    // the worktree, so teardown's keep-if-dirty check sees only genuine agent work.
     //
     // tcp 19n: the repo is read straight off the claimed `Task` (which now carries
     // `repo_ref` verbatim from the row) rather than a second `card_parity` query.
@@ -647,14 +662,23 @@ async fn execute_claimed(
         || run_slug.clone(),
         |issue| format!("{}-{}", issue, task.agent_id),
     );
-    let run_wd = crate::workdir_provision::provision(
+    let run_wd = match crate::workdir_provision::provision(
         task.repo_ref.as_deref(),
         &run_slug,
         &scratch_slug,
         &home,
         &env.workdir,
         task.source_branch.as_deref(),
-    )?;
+    ) {
+        Ok(wd) => wd,
+        Err(e) => {
+            tracing::error!(task_id = %task.id, error = %e, "workdir provision failed pre-start; failing task");
+            // No `RunWorkdir` handle exists (provision faulted); any partial
+            // checkout is reclaimed by the worktree-GC sweeper. Drive the row
+            // terminal instead of stranding it `dispatched`.
+            return finalize_pre_start_failure(pool, &task, None, clock, stats, events).await;
+        }
+    };
     let location = run_location_for(&run_wd);
     tracing::info!(task_id = %task.id, cwd = %run_wd.path().display(), "run workdir provisioned");
 
@@ -1355,6 +1379,121 @@ async fn finalize_failure(
     // can collide with the per-issue pending-unique index — that is a benign
     // already-pending outcome (a sibling holds the slot), logged not propagated,
     // so one failed retry never downs the claim loop.
+    maybe_spawn_retry(pool, &task.id, clock).await;
+    Ok(())
+}
+
+/// Finalise a PRE-START setup fault — `prepare_env` or
+/// `workdir_provision::provision` faulted while the row was still `dispatched`,
+/// so the run never reached `running`.
+///
+/// Left unhandled, such a fault returned via `?` to the claim loop, which only
+/// logged `task execution errored`. The row stayed `dispatched`, and the
+/// stale-dispatch sweeper redelivered it every reclaim window with a FRESH
+/// `dispatched_at` and an UNCHANGED `attempt` — so it never aged past the
+/// dispatch TTL for `sweep_stale_dispatched`'s fail step, never consumed
+/// `max_attempts`, and reclaimed forever: a zombie dispatch, never terminal, its
+/// card stuck in Todo with no failure badge. This drives the row TERMINAL
+/// instead, so a deterministic setup fault (e.g. a bad `repo_ref`) burns the F06
+/// retry chain to exhaustion and lands `failed` rather than looping.
+///
+/// The row is walked `dispatched -> running -> failed` through the two legal FSM
+/// edges — [`FailTaskService::fail`] accepts only `running` / `queued`, so the
+/// `running` hop is required — with reason [`FailureReason::SetupError`], then the
+/// same terminal side-effects the runner-failure path drives: the health tick,
+/// the `TaskFinished(Failure)` event, the card auto-move (out of Todo into the
+/// board's failed column), dependent unblocking, the durable blocker comment,
+/// worktree teardown (if a handle exists), and [`maybe_spawn_retry`] — so the F06
+/// chain bounds the retries by `max_attempts` and lands the chain terminal
+/// `failed` on exhaustion. The per-run artifacts a never-run task has none of
+/// (session id, usage, branch, run-history) are simply omitted.
+///
+/// `run_wd` is the provisioned worktree when one exists. It never does for the
+/// two current callers (a `prepare_env` fault precedes provisioning, and a
+/// `provision` fault yields no handle — any partial checkout is reclaimed by the
+/// worktree-GC sweeper), but the parameter keeps the seam honest for a future
+/// pre-`running` fault that already holds a checkout.
+///
+/// # Errors
+///
+/// Propagates a genuine DB fault from the `start` / `fail` transitions. A cancel
+/// that beat the transition is honored (teardown + `Ok`), never surfaced as an
+/// error.
+async fn finalize_pre_start_failure(
+    pool: &SqlitePool,
+    task: &Task,
+    run_wd: Option<&crate::workdir_provision::RunWorkdir>,
+    clock: &dyn HangarClock,
+    stats: &HealthStats,
+    events: &EventSink,
+) -> anyhow::Result<()> {
+    use ainb_hangar_store::service::fail::FailureReason;
+
+    let reason = FailureReason::SetupError;
+    let mut lifecycle = crate::fsm::LifecycleGuard::claimed();
+
+    // dispatched -> running: the terminal `running -> failed` edge below needs the
+    // row in `running` (FailTaskService::fail rejects `dispatched`). A cancel that
+    // flipped the row `-> cancelled` first wins — honor it (teardown + return).
+    lifecycle.fire(crate::fsm::LifecycleEvent::Start)?;
+    match StartTaskService::start(pool, &task.id, clock).await {
+        Ok(_) => {}
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "cancelled before setup-fail; tearing down without failing");
+            if let Some(wd) = run_wd {
+                teardown_workdir(wd, &task.id);
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    // running -> failed with the setup reason.
+    lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
+    match FailTaskService::fail(pool, &task.id, reason, clock).await {
+        Ok(_) => {}
+        // A human cancel beat the fail — honor it (mirrors `finalize_failure`).
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "setup fault but cancelled first; honoring cancel");
+            if let Some(wd) = run_wd {
+                teardown_workdir(wd, &task.id);
+            }
+            return Ok(());
+        }
+        Err(e) => return Err(e.into()),
+    }
+
+    stats.record_failed(clock.now_ms() / 1_000);
+    emit_task_finished(
+        events,
+        task,
+        ainb_hangar_proto::events::TaskResult::Failure,
+        clock,
+    );
+    crate::board::auto_move_after_terminal(pool, task).await;
+    crate::board::unblock_dependents_after_terminal(pool, task).await;
+    progress_comment::emit_checkpoint(
+        pool,
+        &SystemIdGen,
+        clock,
+        task,
+        progress_comment::Checkpoint::Failed { reason },
+    )
+    .await;
+    if let Some(wd) = run_wd {
+        teardown_workdir(wd, &task.id);
+    }
+    tracing::warn!(
+        task_id = %task.id,
+        reason = reason.as_db_str(),
+        "task failed (pre-start setup fault)"
+    );
     maybe_spawn_retry(pool, &task.id, clock).await;
     Ok(())
 }
