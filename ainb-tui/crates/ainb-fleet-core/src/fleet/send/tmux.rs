@@ -45,6 +45,30 @@ fn send_keys_literal_args<'a>(tmux_session: &'a str, text: &'a str) -> [&'a str;
     ["send-keys", "-t", tmux_session, "-l", "--", text]
 }
 
+fn picker_key_args<'a>(tmux_session: &'a str, key: &'a str) -> Option<[&'a str; 4]> {
+    let allowed = matches!(
+        key,
+        "0" | "1"
+            | "2"
+            | "3"
+            | "4"
+            | "5"
+            | "6"
+            | "7"
+            | "8"
+            | "9"
+            | "Enter"
+            | "Up"
+            | "Down"
+            | "Left"
+            | "Right"
+            | "Space"
+            | "Tab"
+            | "BTab"
+    );
+    allowed.then_some(["send-keys", "-t", tmux_session, key])
+}
+
 pub async fn tmux_send(tmux_session: &str, text: &str) -> Result<()> {
     let status = Command::new("tmux")
         .args(send_keys_literal_args(tmux_session, text))
@@ -90,6 +114,21 @@ pub async fn tmux_press_enter(tmux_session: &str) -> Result<()> {
         .context("invoking tmux send-keys Enter")?;
     if !enter.success() {
         anyhow::bail!("tmux send-keys Enter exited {}", enter);
+    }
+    Ok(())
+}
+
+/// Route one constrained picker key without converting it to generic text.
+pub async fn tmux_send_picker_key(tmux_session: &str, key: &str) -> Result<()> {
+    let args = picker_key_args(tmux_session, key)
+        .ok_or_else(|| anyhow::anyhow!("unsupported verified picker key: {key}"))?;
+    let status = Command::new("tmux")
+        .args(args)
+        .status()
+        .await
+        .context("invoking tmux send-keys for verified picker")?;
+    if !status.success() {
+        anyhow::bail!("tmux verified picker send-keys exited {status}");
     }
     Ok(())
 }
@@ -141,7 +180,7 @@ pub async fn tmux_session_exists(name: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{composer_pending, send_keys_literal_args};
+    use super::{composer_pending, picker_key_args, send_keys_literal_args};
 
     #[test]
     fn dash_prefixed_payload_sits_after_the_terminator() {
@@ -162,6 +201,20 @@ mod tests {
             args,
             ["send-keys", "-t", "sess", "-l", "--", "ship to prod"]
         );
+    }
+
+    #[test]
+    fn picker_keys_use_non_literal_constrained_routing() {
+        assert_eq!(
+            picker_key_args("sess:0.0", "1"),
+            Some(["send-keys", "-t", "sess:0.0", "1"])
+        );
+        assert_eq!(
+            picker_key_args("sess:0.0", "Enter"),
+            Some(["send-keys", "-t", "sess:0.0", "Enter"])
+        );
+        assert_eq!(picker_key_args("sess:0.0", "option label"), None);
+        assert_eq!(picker_key_args("sess:0.0", "C-c"), None);
     }
 
     #[test]

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 
 pub mod auth;
 pub mod events;
+pub mod fleet;
 pub mod lifecycle;
 pub mod methods;
 pub mod pr_status;

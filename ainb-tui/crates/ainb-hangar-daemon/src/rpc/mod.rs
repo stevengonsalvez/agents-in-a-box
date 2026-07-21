@@ -41,6 +41,8 @@ pub mod snapshots;
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+#[cfg(any(test, feature = "test-support"))]
+use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
@@ -48,10 +50,12 @@ use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
+use futures_util::future::join_all;
 use sqlx::SqlitePool;
 
 use crate::events::{
     EventBroker, EventSink, ScopedEvent, encode_event_frame, encode_event_frame_payload,
+    encode_notification_frame,
 };
 use crate::health_stats::HealthStats;
 use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
@@ -66,6 +70,18 @@ const INVALID_PARAMS: i32 = -32602;
 const INTERNAL_ERROR: i32 = -32603;
 /// Soft cap on one request body. Snapshot requests are tiny.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+#[cfg(any(test, feature = "test-support"))]
+static APPROVE_SOCKET_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
+
+/// Override Claude broker socket for isolated integration tests.
+#[cfg(any(test, feature = "test-support"))]
+pub fn set_approve_socket_for_test(path: Option<PathBuf>) {
+    *APPROVE_SOCKET_OVERRIDE
+        .get_or_init(|| RwLock::new(None))
+        .write()
+        .unwrap_or_else(|poisoned| poisoned.into_inner()) = path;
+}
 
 /// Immutable daemon facts the `hangar/health` snapshot reports.
 ///
@@ -251,6 +267,9 @@ async fn serve_conn(
     // of the workspace forwarder: a connection may hold both (workspace events +
     // attention nudges) or either. A re-subscribe replaces it.
     let mut attention_forwarder: Option<tokio::task::JoinHandle<()>> = None;
+    // Fleet uses a durable global revision stream, independent from workspace
+    // and attention subscriptions. Re-subscribing replaces the prior cursor.
+    let mut fleet_forwarder: Option<tokio::task::JoinHandle<()>> = None;
 
     // Idle read timeout so an abandoned / half-open client connection cannot pin
     // this per-connection task (and its fd) forever. The RPC is request/response
@@ -268,6 +287,17 @@ async fn serve_conn(
             }
         {
             let req = serde_json::from_slice::<RpcRequest>(&body);
+            // Subscribe before dispatch reads the snapshot. Events raised while
+            // the snapshot query runs stay buffered in this receiver and are
+            // drained after the acknowledgement, closing the snapshot-to-live
+            // handoff gap without allowing an event to precede the response.
+            let pending_attention_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::ATTENTION_SUBSCRIBE)
+                    .then(|| broker.subscribe_attention())
+            });
+            let pending_fleet_rx = req.as_ref().ok().and_then(|request| {
+                (request.method == methods::FLEET_SUBSCRIBE).then(|| broker.subscribe_fleet())
+            });
             let resp = match &req {
                 Ok(req) => dispatch(&pool, req, &health, &events).await,
                 Err(e) => RpcResponse {
@@ -326,9 +356,25 @@ async fn serve_conn(
                         old.abort();
                     }
                     let filter = attention_subscribe_filter(req);
-                    attention_forwarder = Some(spawn_attention_forwarder(
-                        broker.subscribe_attention(),
-                        filter,
+                    let rx = pending_attention_rx.unwrap_or_else(|| broker.subscribe_attention());
+                    attention_forwarder =
+                        Some(spawn_attention_forwarder(rx, filter, out_tx.clone()));
+                } else if acked && req.method == methods::FLEET_SUBSCRIBE {
+                    if let Some(old) = fleet_forwarder.take() {
+                        old.abort();
+                    }
+                    let head_revision = resp
+                        .result
+                        .as_ref()
+                        .and_then(|value| value.get("snapshot"))
+                        .and_then(|value| value.get("head_revision"))
+                        .and_then(serde_json::Value::as_i64)
+                        .unwrap_or_default();
+                    let rx = pending_fleet_rx.unwrap_or_else(|| broker.subscribe_fleet());
+                    fleet_forwarder = Some(spawn_fleet_forwarder(
+                        pool.clone(),
+                        rx,
+                        head_revision,
                         out_tx.clone(),
                     ));
                 }
@@ -342,6 +388,9 @@ async fn serve_conn(
         f.abort();
     }
     if let Some(f) = attention_forwarder {
+        f.abort();
+    }
+    if let Some(f) = fleet_forwarder {
         f.abort();
     }
     drop(out_tx);
@@ -438,6 +487,57 @@ fn spawn_attention_forwarder(
                     tracing::debug!(missed, "attention stream lagged; nudges dropped");
                 }
                 Err(broadcast::error::RecvError::Closed) => break,
+            }
+        }
+    })
+}
+
+/// Spawn a gapless durable Fleet revision forwarder.
+///
+/// Receiver registration happens before snapshot read. After the snapshot ack
+/// is queued, this task drains every durable row after that snapshot head, then
+/// uses broadcast revisions only as wakeups. Lag asks the client to reconcile
+/// from a fresh snapshot instead of silently claiming a complete stream.
+fn spawn_fleet_forwarder(
+    pool: SqlitePool,
+    mut rx: broadcast::Receiver<i64>,
+    mut cursor: i64,
+    out: mpsc::Sender<Vec<u8>>,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        loop {
+            let events = match crate::fleet::events_after_wire(&pool, cursor, REPLAY_BATCH).await {
+                Ok(events) => events,
+                Err(error) => {
+                    tracing::warn!(error = %error, "fleet event replay read failed");
+                    return;
+                }
+            };
+            if !events.is_empty() {
+                for event in events {
+                    cursor = event.revision;
+                    let Ok(params) = serde_json::to_value(&event) else {
+                        continue;
+                    };
+                    if out.send(encode_notification_frame("fleet/event", &params)).await.is_err() {
+                        return;
+                    }
+                }
+                continue;
+            }
+
+            match rx.recv().await {
+                Ok(_revision) => {}
+                Err(broadcast::error::RecvError::Lagged(missed)) => {
+                    let params = serde_json::json!({
+                        "after_revision": cursor,
+                        "missed": missed,
+                    });
+                    let _ =
+                        out.send(encode_notification_frame("fleet/resync_required", &params)).await;
+                    return;
+                }
+                Err(broadcast::error::RecvError::Closed) => return,
             }
         }
     })
@@ -697,6 +797,13 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_DEP_REMOVE => handle_board_card_dep(pool, req, false).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
+        methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
+        // Receiver registration occurs in `serve_conn` before this snapshot is
+        // read. The ack carries its exact head, then the forwarder drains rows
+        // committed after that head before waiting for live wakeups.
+        methods::FLEET_SUBSCRIBE => handle_fleet_subscribe(pool, req).await,
+        methods::FLEET_ACTION => handle_fleet_action(pool, req, events).await,
+        methods::FLEET_BROADCAST => handle_fleet_broadcast(pool, req, events).await,
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -719,6 +826,1679 @@ async fn handle(
             message: format!("unknown method: {other}"),
             data: None,
         }),
+    }
+}
+
+/// Return the authoritative host Fleet snapshot.
+async fn handle_fleet_snapshot(pool: &SqlitePool) -> Result<serde_json::Value, RpcError> {
+    let snapshot = crate::fleet::snapshot_wire(pool).await.map_err(|error| store_err(&error))?;
+    to_value(&snapshot)
+}
+
+/// Register a revision cursor and return the snapshot head paired with it.
+async fn handle_fleet_subscribe(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::fleet::FleetSubscribeParams =
+        parse_params(req, "{ after_revision }")?;
+    if params.after_revision < 0 {
+        return Err(invalid_params("after_revision must be non-negative"));
+    }
+    let snapshot = crate::fleet::snapshot_wire(pool).await.map_err(|error| store_err(&error))?;
+    to_value(&ainb_hangar_proto::fleet::FleetSubscribeResult {
+        snapshot,
+        replay: Vec::new(),
+    })
+}
+
+/// Execute one optimistic, idempotent Fleet action.
+async fn handle_fleet_action(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::fleet::FleetActionParams =
+        parse_params(req, "{ session_key, expected_version, request_id, action }")?;
+    let receipt = execute_fleet_action(pool, params, None, events).await?;
+    to_value(&ainb_hangar_proto::fleet::FleetActionResult { receipt })
+}
+
+/// Deliver one text prompt to explicit stable recipients with bounded fanout.
+async fn handle_fleet_broadcast(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use std::collections::HashSet;
+    use tokio::sync::Semaphore;
+
+    let params: ainb_hangar_proto::fleet::FleetBroadcastParams =
+        parse_params(req, "{ target_keys, text, idempotency_key }")?;
+    if params.text.trim().is_empty() {
+        return Err(invalid_params("broadcast text must not be empty"));
+    }
+    if params.idempotency_key.trim().is_empty() {
+        return Err(invalid_params("idempotency_key must not be empty"));
+    }
+
+    let mut seen = HashSet::new();
+    let targets: Vec<_> = params
+        .target_keys
+        .into_iter()
+        .filter(|key| !key.is_empty() && seen.insert(key.clone()))
+        .collect();
+    let limit = Arc::new(Semaphore::new(8));
+    let mut tasks = Vec::new();
+    for (index, session_key) in targets.into_iter().enumerate() {
+        let pool = pool.clone();
+        let text = params.text.clone();
+        let idempotency_key = params.idempotency_key.clone();
+        let limit = limit.clone();
+        let events = events.clone();
+        tasks.push(async move {
+            let request_id = format!(
+                "broadcast:{}",
+                stable_fingerprint(&format!("{idempotency_key}\u{0}{session_key}"))
+            );
+            let fallback_request_id = request_id.clone();
+            let fallback_session_key = session_key.clone();
+            let fallback_idempotency_key = idempotency_key.clone();
+            let _permit = match limit.acquire_owned().await {
+                Ok(permit) => permit,
+                Err(error) => {
+                    let now = SystemClock.now_ms();
+                    return (
+                        index,
+                        ainb_hangar_proto::fleet::FleetActionReceipt {
+                            request_id: fallback_request_id,
+                            session_key: fallback_session_key,
+                            action_kind: "send_prompt".to_string(),
+                            action_fingerprint: stable_fingerprint(&error.to_string()),
+                            expected_version: 1,
+                            idempotency_key: Some(fallback_idempotency_key),
+                            status: ainb_hangar_proto::fleet::ActionReceiptStatus::Failed,
+                            detail: Some(error.to_string()),
+                            session_version: None,
+                            created_at: now,
+                            updated_at: now,
+                        },
+                    );
+                }
+            };
+            let receipt =
+                match ainb_hangar_store::repo::fleet::FleetRepo::get_session(&pool, &session_key)
+                    .await
+                {
+                    Ok(Some(session)) => {
+                        execute_fleet_action(
+                            &pool,
+                            ainb_hangar_proto::fleet::FleetActionParams {
+                                session_key,
+                                expected_version: session.version,
+                                request_id,
+                                action: ainb_hangar_proto::fleet::ControlAction::SendPrompt {
+                                    text,
+                                },
+                            },
+                            Some(idempotency_key),
+                            &events,
+                        )
+                        .await
+                    }
+                    Ok(None) => {
+                        rejected_broadcast_receipt(
+                            &pool,
+                            request_id,
+                            session_key,
+                            idempotency_key,
+                            "session not found",
+                        )
+                        .await
+                    }
+                    Err(error) => Err(store_err(&error)),
+                };
+            let receipt = receipt.unwrap_or_else(|error| {
+                let now = SystemClock.now_ms();
+                ainb_hangar_proto::fleet::FleetActionReceipt {
+                    request_id: fallback_request_id,
+                    session_key: fallback_session_key,
+                    action_kind: "send_prompt".to_string(),
+                    action_fingerprint: stable_fingerprint(&error.message),
+                    expected_version: 1,
+                    idempotency_key: Some(fallback_idempotency_key),
+                    status: ainb_hangar_proto::fleet::ActionReceiptStatus::Failed,
+                    detail: Some(error.message),
+                    session_version: None,
+                    created_at: now,
+                    updated_at: now,
+                }
+            });
+            (index, receipt)
+        });
+    }
+
+    let mut receipts = join_all(tasks).await;
+    receipts.sort_by_key(|(index, _)| *index);
+    to_value(&ainb_hangar_proto::fleet::FleetBroadcastResult {
+        receipts: receipts.into_iter().map(|(_, receipt)| receipt).collect(),
+    })
+}
+
+async fn rejected_broadcast_receipt(
+    pool: &SqlitePool,
+    request_id: String,
+    session_key: String,
+    idempotency_key: String,
+    detail: &str,
+) -> Result<ainb_hangar_proto::fleet::FleetActionReceipt, RpcError> {
+    let now = SystemClock.now_ms();
+    let row = ainb_hangar_store::repo::fleet::FleetRepo::upsert_action_receipt(
+        pool,
+        &ainb_hangar_store::repo::fleet::NewActionReceipt {
+            request_id,
+            session_key,
+            action_kind: "send_prompt".to_string(),
+            action_fingerprint: stable_fingerprint(detail),
+            expected_version: 1,
+            idempotency_key: Some(idempotency_key),
+            status: "REJECTED".to_string(),
+            detail: Some(detail.to_string()),
+            session_version: None,
+            created_at: now,
+            updated_at: now,
+        },
+    )
+    .await
+    .map_err(fleet_repo_err)?;
+    Ok(action_receipt_wire(&row))
+}
+
+async fn execute_fleet_action(
+    pool: &SqlitePool,
+    params: ainb_hangar_proto::fleet::FleetActionParams,
+    idempotency_key: Option<String>,
+    events: &EventSink,
+) -> Result<ainb_hangar_proto::fleet::FleetActionReceipt, RpcError> {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction};
+    use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
+
+    if params.session_key.is_empty() || params.request_id.is_empty() {
+        return Err(invalid_params(
+            "session_key and request_id must not be empty",
+        ));
+    }
+    if params.expected_version < 1 {
+        return Err(invalid_params("expected_version must be positive"));
+    }
+    let action_json = serde_json::to_string(&params.action)
+        .map_err(|error| internal(&format!("serialize action: {error}")))?;
+    let action_fingerprint = stable_fingerprint(&action_json);
+
+    if let Some(existing) = FleetRepo::get_action_receipt(pool, &params.request_id)
+        .await
+        .map_err(|error| store_err(&error))?
+    {
+        if existing.session_key != params.session_key
+            || existing.action_kind != params.action.kind()
+            || existing.action_fingerprint != action_fingerprint
+            || existing.expected_version != params.expected_version
+            || existing.idempotency_key != idempotency_key
+        {
+            return Err(invalid_params(
+                "request_id was reused for a different Fleet action",
+            ));
+        }
+        return Ok(action_receipt_wire(&existing));
+    }
+
+    if matches!(&params.action, ControlAction::Start { .. }) {
+        return execute_fleet_start(pool, params, idempotency_key, action_fingerprint, events)
+            .await;
+    }
+
+    let request_fingerprint = match &params.action {
+        ControlAction::StructuredAnswer {
+            request_fingerprint,
+            ..
+        }
+        | ControlAction::Approve {
+            request_fingerprint,
+            ..
+        }
+        | ControlAction::Deny {
+            request_fingerprint,
+            ..
+        }
+        | ControlAction::VerifiedPicker {
+            request_fingerprint,
+            ..
+        } => Some(request_fingerprint.as_str()),
+        _ => None,
+    };
+    let session = FleetRepo::validate_action_target(
+        pool,
+        &params.session_key,
+        params.expected_version,
+        request_fingerprint,
+    )
+    .await
+    .map_err(fleet_repo_err)?;
+    let capabilities: ainb_hangar_proto::fleet::FleetCapabilities =
+        serde_json::from_str(&session.capabilities).unwrap_or_default();
+
+    let now = SystemClock.now_ms();
+    let pending = NewActionReceipt {
+        request_id: params.request_id.clone(),
+        session_key: params.session_key.clone(),
+        action_kind: params.action.kind().to_string(),
+        action_fingerprint,
+        expected_version: params.expected_version,
+        idempotency_key,
+        status: "PENDING".to_string(),
+        detail: None,
+        session_version: Some(session.version),
+        created_at: now,
+        updated_at: now,
+    };
+    let claimed = sqlx::query(
+        "INSERT INTO fleet_action_receipt \
+         (request_id, session_key, action_kind, action_fingerprint, expected_version, \
+          idempotency_key, status, detail, session_version, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING",
+    )
+    .bind(&pending.request_id)
+    .bind(&pending.session_key)
+    .bind(&pending.action_kind)
+    .bind(&pending.action_fingerprint)
+    .bind(pending.expected_version)
+    .bind(&pending.idempotency_key)
+    .bind(&pending.status)
+    .bind(&pending.detail)
+    .bind(pending.session_version)
+    .bind(pending.created_at)
+    .bind(pending.updated_at)
+    .execute(pool)
+    .await
+    .map_err(|error| store_err(&error))?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        let existing = FleetRepo::get_action_receipt(pool, &params.request_id)
+            .await
+            .map_err(|error| store_err(&error))?
+            .ok_or_else(|| internal("Fleet action receipt claim disappeared"))?;
+        if existing.session_key != params.session_key
+            || existing.action_kind != params.action.kind()
+            || existing.action_fingerprint != pending.action_fingerprint
+            || existing.expected_version != params.expected_version
+            || existing.idempotency_key != pending.idempotency_key
+        {
+            return Err(invalid_params(
+                "request_id was reused for a different Fleet action",
+            ));
+        }
+        return Ok(action_receipt_wire(&existing));
+    }
+
+    let (status, detail) = if !action_capability(&capabilities, &params.action) {
+        (
+            ActionReceiptStatus::Rejected,
+            Some("action unavailable for current session capabilities".to_string()),
+        )
+    } else if let ControlAction::VerifiedPicker {
+        request_fingerprint,
+        key,
+    } = &params.action
+    {
+        verified_tmux_picker(
+            pool,
+            &session,
+            params.expected_version,
+            request_fingerprint,
+            key,
+        )
+        .await
+    } else {
+        if session.provider == "codex" {
+            match crate::fleet_provider::codex_manager::active_handle().await {
+                Some(manager) => {
+                    execute_codex_action(pool, events, &session, &params.action, &manager).await
+                }
+                None => match &params.action {
+                    ControlAction::SendPrompt { text } => verified_tmux_send(&session, text).await,
+                    _ => (
+                        ActionReceiptStatus::Unknown,
+                        Some("Codex managed transport is not active".to_string()),
+                    ),
+                },
+            }
+        } else {
+            match &params.action {
+                ControlAction::SendPrompt { text } if text.trim().is_empty() => (
+                    ActionReceiptStatus::Rejected,
+                    Some("prompt text must not be empty".to_string()),
+                ),
+                ControlAction::SendPrompt { text } => verified_tmux_send(&session, text).await,
+                ControlAction::StructuredAnswer {
+                    request_fingerprint,
+                    answers,
+                    ..
+                } if session.provider == "claude" => {
+                    execute_claude_structured(pool, &session, request_fingerprint, answers).await
+                }
+                ControlAction::Approve {
+                    request_fingerprint,
+                    ..
+                }
+                | ControlAction::Deny {
+                    request_fingerprint,
+                    ..
+                } if session.provider == "claude" => {
+                    let approve = matches!(&params.action, ControlAction::Approve { .. });
+                    match claude_broker_decide(
+                        session.provider_session_id.as_deref().unwrap_or_default(),
+                        request_fingerprint,
+                        approve,
+                    )
+                    .await
+                    {
+                        Ok(true) => (
+                            ActionReceiptStatus::Delivered,
+                            Some("claude blocking hook broker".to_string()),
+                        ),
+                        Ok(false) => (
+                            ActionReceiptStatus::Failed,
+                            Some("Claude request no longer waiting".to_string()),
+                        ),
+                        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+                    }
+                }
+                ControlAction::StructuredAnswer { .. }
+                | ControlAction::Approve { .. }
+                | ControlAction::Deny { .. } => (
+                    ActionReceiptStatus::Unknown,
+                    Some("authoritative provider request transport is not active".to_string()),
+                ),
+                _ => (
+                    ActionReceiptStatus::Unknown,
+                    Some("authoritative provider lifecycle transport is not active".to_string()),
+                ),
+            }
+        }
+    };
+
+    let mut completed = pending;
+    completed.status = receipt_status_token(status).to_string();
+    completed.detail = detail;
+    completed.updated_at = SystemClock.now_ms();
+    let row = FleetRepo::upsert_action_receipt(pool, &completed)
+        .await
+        .map_err(fleet_repo_err)?;
+    Ok(action_receipt_wire(&row))
+}
+
+async fn execute_fleet_start(
+    pool: &SqlitePool,
+    params: ainb_hangar_proto::fleet::FleetActionParams,
+    idempotency_key: Option<String>,
+    action_fingerprint: String,
+    events: &EventSink,
+) -> Result<ainb_hangar_proto::fleet::FleetActionReceipt, RpcError> {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetProvider};
+    use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
+
+    let now = SystemClock.now_ms();
+    let mut receipt = NewActionReceipt {
+        request_id: params.request_id.clone(),
+        session_key: params.session_key.clone(),
+        action_kind: params.action.kind().to_string(),
+        action_fingerprint,
+        expected_version: params.expected_version,
+        idempotency_key,
+        status: "PENDING".to_string(),
+        detail: None,
+        session_version: None,
+        created_at: now,
+        updated_at: now,
+    };
+    let claimed = sqlx::query(
+        "INSERT INTO fleet_action_receipt \
+         (request_id, session_key, action_kind, action_fingerprint, expected_version, \
+          idempotency_key, status, detail, session_version, created_at, updated_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(request_id) DO NOTHING",
+    )
+    .bind(&receipt.request_id)
+    .bind(&receipt.session_key)
+    .bind(&receipt.action_kind)
+    .bind(&receipt.action_fingerprint)
+    .bind(receipt.expected_version)
+    .bind(&receipt.idempotency_key)
+    .bind(&receipt.status)
+    .bind(&receipt.detail)
+    .bind(receipt.session_version)
+    .bind(receipt.created_at)
+    .bind(receipt.updated_at)
+    .execute(pool)
+    .await
+    .map_err(|error| store_err(&error))?
+    .rows_affected()
+        == 1;
+    if !claimed {
+        let existing = FleetRepo::get_action_receipt(pool, &params.request_id)
+            .await
+            .map_err(|error| store_err(&error))?
+            .ok_or_else(|| internal("Fleet start receipt claim disappeared"))?;
+        if existing.session_key != params.session_key
+            || existing.action_kind != params.action.kind()
+            || existing.action_fingerprint != receipt.action_fingerprint
+            || existing.expected_version != params.expected_version
+            || existing.idempotency_key != receipt.idempotency_key
+        {
+            return Err(invalid_params(
+                "request_id was reused for a different Fleet action",
+            ));
+        }
+        return Ok(action_receipt_wire(&existing));
+    }
+
+    let (status, detail) = match &params.action {
+        ControlAction::Start {
+            provider: FleetProvider::Codex,
+            cwd,
+            prompt,
+        } => match crate::fleet_provider::codex_manager::active_handle().await {
+            Some(manager) => match manager.thread_start(Path::new(cwd), None).await {
+                Ok(thread) => match launch_managed_codex_tui(&manager, &thread, cwd).await {
+                    Ok((tmux_name, tmux_session)) => {
+                        match crate::fleet::register_managed_codex_tmux(
+                            pool,
+                            events,
+                            &thread,
+                            cwd,
+                            &tmux_session,
+                            manager.capabilities(),
+                            SystemClock.now_ms(),
+                        )
+                        .await
+                        {
+                            Ok(_) => {
+                                let turn = match prompt
+                                    .as_deref()
+                                    .filter(|prompt| !prompt.trim().is_empty())
+                                {
+                                    Some(prompt) => {
+                                        manager.turn_start(&thread, prompt).await.map(|_| ())
+                                    }
+                                    None => Ok(()),
+                                };
+                                match turn {
+                                    Ok(()) => (
+                                        ActionReceiptStatus::Delivered,
+                                        Some(format!(
+                                            "codex thread {thread}, tmux {}",
+                                            tmux_session
+                                                .exact_tmux_target
+                                                .as_deref()
+                                                .unwrap_or(&tmux_name)
+                                        )),
+                                    ),
+                                    Err(error) => (
+                                        ActionReceiptStatus::Failed,
+                                        Some(format!(
+                                            "Codex thread {thread} launched in tmux {tmux_name}, initial prompt failed: {error}"
+                                        )),
+                                    ),
+                                }
+                            }
+                            Err(error) => {
+                                let _ = kill_tmux_session_exact(&tmux_name).await;
+                                (ActionReceiptStatus::Failed, Some(error.to_string()))
+                            }
+                        }
+                    }
+                    Err(error) => (ActionReceiptStatus::Failed, Some(error)),
+                },
+                Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+            },
+            None => (
+                ActionReceiptStatus::Unknown,
+                Some("Codex managed transport is not active".to_string()),
+            ),
+        },
+        ControlAction::Start { .. } => (
+            ActionReceiptStatus::Rejected,
+            Some("provider start transport is unavailable".to_string()),
+        ),
+        _ => unreachable!("start handler only receives start actions"),
+    };
+    receipt.status = receipt_status_token(status).to_string();
+    receipt.detail = detail;
+    receipt.updated_at = SystemClock.now_ms();
+    let row = FleetRepo::upsert_action_receipt(pool, &receipt).await.map_err(fleet_repo_err)?;
+    Ok(action_receipt_wire(&row))
+}
+
+async fn launch_managed_codex_tui(
+    manager: &crate::fleet_provider::codex_manager::CodexManagerHandle,
+    thread_id: &str,
+    cwd: &str,
+) -> Result<(String, ainb_fleet_core::types::FleetSession), String> {
+    let tmux_name = managed_codex_tmux_name(thread_id, SystemClock.now_ms());
+    let codex_binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
+    let tmux_binary = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let command = manager.managed_tui_command(
+        &codex_binary,
+        [
+            std::ffi::OsString::from("resume"),
+            std::ffi::OsString::from(thread_id),
+        ],
+    );
+    let tmux_args = managed_codex_tmux_args(&tmux_name, cwd, &command);
+    let output = tokio::process::Command::new(&tmux_binary)
+        .args(tmux_args)
+        .output()
+        .await
+        .map_err(|error| format!("tmux managed Codex launch failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "tmux managed Codex launch exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+        match ainb_fleet_core::discover::discover_from_tmux().await {
+            Ok(sessions) => {
+                if let Some(session) = sessions.into_iter().find(|session| {
+                    session
+                        .exact_tmux_target
+                        .as_deref()
+                        .is_some_and(|target| target.starts_with(&format!("{tmux_name}:")))
+                }) {
+                    if session.process_start_fingerprint.is_some() {
+                        return Ok((tmux_name, session));
+                    }
+                }
+            }
+            Err(error) => {
+                let _ = kill_tmux_session_exact(&tmux_name).await;
+                return Err(format!(
+                    "managed Codex tmux identity lookup failed: {error}"
+                ));
+            }
+        }
+        if tokio::time::Instant::now() >= deadline {
+            let _ = kill_tmux_session_exact(&tmux_name).await;
+            return Err("managed Codex tmux identity lookup timed out".to_string());
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
+}
+
+fn managed_codex_tmux_args(
+    session_name: &str,
+    cwd: &str,
+    command: &crate::fleet_provider::codex::CommandSpec,
+) -> Vec<std::ffi::OsString> {
+    let mut args = ["new-session", "-d", "-s", session_name, "-c", cwd, "--"]
+        .into_iter()
+        .map(std::ffi::OsString::from)
+        .collect::<Vec<_>>();
+    args.push(command.program.clone());
+    args.extend(command.args.iter().cloned());
+    args
+}
+
+fn managed_codex_tmux_name(thread_id: &str, now_ms: i64) -> String {
+    let safe = thread_id
+        .chars()
+        .filter(|character| character.is_ascii_alphanumeric() || matches!(character, '-' | '_'))
+        .take(24)
+        .collect::<String>();
+    let safe = if safe.is_empty() { "thread" } else { &safe };
+    format!("fleet-codex-{safe}-{now_ms}")
+}
+
+async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
+    let tmux_binary = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let output = tokio::process::Command::new(tmux_binary)
+        .args(["kill-session", "-t", session_name])
+        .output()
+        .await
+        .map_err(|error| format!("exact tmux stop failed: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "exact tmux stop exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod fleet_launch_tests {
+    use super::{managed_codex_tmux_args, managed_codex_tmux_name, verify_picker_pane};
+    use std::ffi::{OsStr, OsString};
+    use std::path::Path;
+
+    #[test]
+    fn managed_codex_tmux_name_is_unique_and_shell_safe() {
+        let first = managed_codex_tmux_name("thread/$ unsafe", 100);
+        let second = managed_codex_tmux_name("thread/$ unsafe", 101);
+        assert_eq!(first, "fleet-codex-threadunsafe-100");
+        assert_ne!(first, second);
+        assert!(
+            first
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '-')
+        );
+    }
+
+    #[test]
+    fn managed_codex_launch_runs_remote_tui_in_exact_tmux_session() {
+        let command = crate::fleet_provider::codex::managed_tui_command(
+            OsStr::new("codex"),
+            Path::new("/tmp/codex.sock"),
+            [OsString::from("resume"), OsString::from("thread-1")],
+        );
+        let args = managed_codex_tmux_args("fleet-codex-thread-1", "/repo", &command);
+        assert_eq!(
+            args,
+            [
+                "new-session",
+                "-d",
+                "-s",
+                "fleet-codex-thread-1",
+                "-c",
+                "/repo",
+                "--",
+                "codex",
+                "--remote",
+                "unix:///tmp/codex.sock",
+                "resume",
+                "thread-1",
+            ]
+            .into_iter()
+            .map(OsString::from)
+            .collect::<Vec<_>>()
+        );
+    }
+
+    fn picker_request() -> serde_json::Value {
+        serde_json::json!({
+            "payload": {
+                "tool_input": {
+                    "questions": [{
+                        "question": "Deploy to which region?",
+                        "options": [
+                            {"label": "Europe", "description": "EU region"},
+                            {"label": "United States", "description": "US region"}
+                        ]
+                    }]
+                }
+            }
+        })
+    }
+
+    #[test]
+    fn verified_picker_accepts_matching_prompt_and_ordered_options() {
+        let pane = "Claude Code\n\
+                    ╭──────────────────────────────╮\n\
+                    │ Deploy to which region?      │\n\
+                    │ 1. Europe                    │\n\
+                    │ 2. United States             │\n\
+                    ╰──────────────────────────────╯\n\
+                    Press ? for help";
+        assert_eq!(
+            verify_picker_pane("claude", &picker_request(), pane),
+            Ok(())
+        );
+    }
+
+    #[test]
+    fn verified_picker_rejects_prompt_mismatch() {
+        let pane = "Claude Code\nChoose release channel\n1. Europe\n2. United States";
+        let error = verify_picker_pane("claude", &picker_request(), pane).unwrap_err();
+        assert!(error.contains("prompt"));
+    }
+
+    #[test]
+    fn verified_picker_rejects_option_order_mismatch() {
+        let pane = "Codex\nDeploy to which region?\n1. United States\n2. Europe";
+        let error = verify_picker_pane("codex", &picker_request(), pane).unwrap_err();
+        assert!(error.contains("option order"));
+    }
+
+    #[test]
+    fn verified_picker_rejects_old_match_above_newer_picker() {
+        let pane = "Claude Code\n\
+                    Deploy to which region?\n\
+                    1. Europe\n\
+                    2. United States\n\
+                    Choose release channel?\n\
+                    1. Stable\n\
+                    2. Preview";
+        let error = verify_picker_pane("claude", &picker_request(), pane).unwrap_err();
+        assert!(error.contains("newer picker"));
+    }
+
+    #[test]
+    fn verified_picker_does_not_reanchor_to_newer_shared_final_label() {
+        let request = serde_json::json!({
+            "questions": [{
+                "question": "Deploy now?",
+                "options": ["Yes", "No"]
+            }]
+        });
+        let pane = "Claude Code\n\
+                    Deploy now?\n\
+                    1. Yes\n\
+                    2. No\n\
+                    Delete deployment?\n\
+                    1. Keep\n\
+                    2. No";
+        let error = verify_picker_pane("claude", &request, pane).unwrap_err();
+        assert!(error.contains("newer picker"));
+    }
+}
+
+async fn claude_broker_decide(
+    session_id: &str,
+    request_fingerprint: &str,
+    approve: bool,
+) -> std::io::Result<bool> {
+    if session_id.is_empty() {
+        return Ok(false);
+    }
+    let socket = approve_socket_path()?;
+    let session_id = session_id.to_string();
+    let request_fingerprint = request_fingerprint.to_string();
+    tokio::task::spawn_blocking(move || {
+        ainb_plugin_notifyd::broker::client_decide_exact(
+            &socket,
+            &session_id,
+            Some(&request_fingerprint),
+            if approve {
+                ainb_plugin_notifyd::broker::DecisionKind::Approve
+            } else {
+                ainb_plugin_notifyd::broker::DecisionKind::Deny
+            },
+            "Fleet control plane",
+        )
+    })
+    .await
+    .map_err(std::io::Error::other)?
+}
+
+async fn execute_codex_action(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    action: &ainb_hangar_proto::fleet::ControlAction,
+    manager: &crate::fleet_provider::codex_manager::CodexManagerHandle,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use crate::fleet_provider::{ApprovalDecision, QuestionAnswer};
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetProvider};
+
+    let thread_id = session.provider_session_id.as_deref().unwrap_or_default();
+    let result: Result<String, crate::fleet_provider::ProviderError> = async {
+        match action {
+            ControlAction::StructuredAnswer {
+                request_identity,
+                answers,
+                ..
+            } => {
+                let request =
+                    match crate::fleet::current_request_wire(pool, &session.session_key).await {
+                        Ok(Some(value)) => serde_json::from_value::<
+                            crate::fleet_provider::codex::CodexQuestionRequest,
+                        >(value)
+                        .map_err(crate::fleet_provider::ProviderError::from),
+                        Ok(None) => Err(crate::fleet_provider::ProviderError::Stale(
+                            "current Codex question is absent".to_string(),
+                        )),
+                        Err(error) => Err(crate::fleet_provider::ProviderError::Transport(
+                            error.to_string(),
+                        )),
+                    }?;
+                require_codex_identity(request_identity.as_ref(), &request.identity)?;
+                let answers = answers
+                    .iter()
+                    .map(|answer| {
+                        let mut values = answer.selected_options.clone();
+                        if let Some(text) = answer.text.as_deref().filter(|text| !text.is_empty()) {
+                            values.push(text.to_string());
+                        }
+                        QuestionAnswer {
+                            question_id: answer.question_id.clone(),
+                            answers: values,
+                        }
+                    })
+                    .collect::<Vec<_>>();
+                manager
+                    .answer_request_user_input(&request, &answers)
+                    .await
+                    .map(|receipt| receipt.transport.to_string())
+            }
+            ControlAction::Approve {
+                request_identity, ..
+            }
+            | ControlAction::Deny {
+                request_identity, ..
+            } => {
+                let request = load_codex_approval(pool, &session.session_key).await?;
+                require_codex_identity(request_identity.as_ref(), &request.identity)?;
+                let decision = if matches!(action, ControlAction::Approve { .. }) {
+                    ApprovalDecision::Approve
+                } else {
+                    ApprovalDecision::Deny
+                };
+                manager
+                    .decide_approval(&request, decision)
+                    .await
+                    .map(|receipt| receipt.transport.to_string())
+            }
+            ControlAction::SendPrompt { text } => {
+                manager.thread_read(thread_id).await?;
+                manager
+                    .turn_start(thread_id, text)
+                    .await
+                    .map(|turn| format!("codex turn {turn}"))
+            }
+            ControlAction::Continue => {
+                manager.thread_read(thread_id).await?;
+                manager
+                    .turn_start(thread_id, "continue")
+                    .await
+                    .map(|turn| format!("codex turn {turn}"))
+            }
+            ControlAction::Retry => {
+                manager.thread_read(thread_id).await?;
+                manager
+                    .turn_start(thread_id, "retry")
+                    .await
+                    .map(|turn| format!("codex turn {turn}"))
+            }
+            ControlAction::Interrupt => {
+                manager.thread_read(thread_id).await?;
+                let turn_id = latest_codex_turn_id(pool, &session.session_key)
+                    .await
+                    .map_err(|error| {
+                        crate::fleet_provider::ProviderError::Transport(error.to_string())
+                    })?
+                    .ok_or_else(|| {
+                        crate::fleet_provider::ProviderError::Stale(
+                            "active Codex turn identity is absent".to_string(),
+                        )
+                    })?;
+                manager
+                    .turn_interrupt(thread_id, &turn_id)
+                    .await
+                    .map(|_| format!("codex turn {turn_id} interrupted"))
+            }
+            ControlAction::Stop => {
+                manager.thread_read(thread_id).await?;
+                let tmux_name = exact_live_tmux_session_name(session).await?;
+                if session.lifecycle_state == "RUNNING" {
+                    let turn_id = latest_codex_turn_id(pool, &session.session_key)
+                        .await
+                        .map_err(|error| {
+                            crate::fleet_provider::ProviderError::Transport(error.to_string())
+                        })?
+                        .ok_or_else(|| {
+                            crate::fleet_provider::ProviderError::Stale(
+                                "active Codex turn identity is absent".to_string(),
+                            )
+                        })?;
+                    manager.turn_interrupt(thread_id, &turn_id).await?;
+                }
+                kill_tmux_session_exact(&tmux_name)
+                    .await
+                    .map_err(crate::fleet_provider::ProviderError::Transport)?;
+                persist_codex_exit(pool, events, session, manager, "codex_stopped").await?;
+                Ok(format!(
+                    "codex thread {thread_id} stopped in tmux {tmux_name}"
+                ))
+            }
+            ControlAction::Restart => {
+                manager.thread_read(thread_id).await?;
+                let tmux_name = exact_live_tmux_session_name(session).await?;
+                kill_tmux_session_exact(&tmux_name)
+                    .await
+                    .map_err(crate::fleet_provider::ProviderError::Transport)?;
+                let (new_tmux_name, tmux_session) =
+                    match launch_managed_codex_tui(manager, thread_id, &session.cwd).await {
+                        Ok(launched) => launched,
+                        Err(error) => {
+                            persist_codex_exit(
+                                pool,
+                                events,
+                                session,
+                                manager,
+                                "codex_restart_failed",
+                            )
+                            .await?;
+                            return Err(crate::fleet_provider::ProviderError::Transport(error));
+                        }
+                    };
+                if let Err(error) = crate::fleet::register_managed_codex_tmux(
+                    pool,
+                    events,
+                    thread_id,
+                    &session.cwd,
+                    &tmux_session,
+                    manager.capabilities(),
+                    SystemClock.now_ms(),
+                )
+                .await
+                {
+                    let _ = kill_tmux_session_exact(&new_tmux_name).await;
+                    persist_codex_exit(pool, events, session, manager, "codex_restart_failed")
+                        .await?;
+                    return Err(crate::fleet_provider::ProviderError::Transport(
+                        error.to_string(),
+                    ));
+                }
+                Ok(format!(
+                    "codex thread {thread_id} restarted from tmux {tmux_name} into {new_tmux_name}"
+                ))
+            }
+            ControlAction::Kill => {
+                manager.thread_read(thread_id).await?;
+                let tmux_name = exact_live_tmux_session_name(session).await?;
+                if session.lifecycle_state == "RUNNING" {
+                    let turn_id = latest_codex_turn_id(pool, &session.session_key)
+                        .await
+                        .map_err(|error| {
+                            crate::fleet_provider::ProviderError::Transport(error.to_string())
+                        })?
+                        .ok_or_else(|| {
+                            crate::fleet_provider::ProviderError::Stale(
+                                "active Codex turn identity is absent".to_string(),
+                            )
+                        })?;
+                    manager.turn_interrupt(thread_id, &turn_id).await?;
+                }
+                kill_tmux_session_exact(&tmux_name)
+                    .await
+                    .map_err(crate::fleet_provider::ProviderError::Transport)?;
+                persist_codex_exit(pool, events, session, manager, "codex_killed").await?;
+                Ok(format!(
+                    "codex thread {thread_id} killed in tmux {tmux_name}"
+                ))
+            }
+            ControlAction::Archive => {
+                manager.thread_read(thread_id).await?;
+                let tmux_name = exact_live_tmux_session_name(session).await?;
+                kill_tmux_session_exact(&tmux_name)
+                    .await
+                    .map_err(crate::fleet_provider::ProviderError::Transport)?;
+                if let Err(error) = manager.thread_archive(thread_id).await {
+                    persist_codex_exit(pool, events, session, manager, "codex_archive_failed")
+                        .await?;
+                    return Err(error);
+                }
+                persist_codex_exit(pool, events, session, manager, "codex_archived").await?;
+                Ok(format!(
+                    "codex thread {thread_id} archived after tmux {tmux_name} stop"
+                ))
+            }
+            ControlAction::Start {
+                provider,
+                cwd,
+                prompt,
+            } if *provider == FleetProvider::Codex => {
+                let thread = manager.thread_start(Path::new(cwd), None).await?;
+                if let Some(prompt) = prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
+                    manager.turn_start(&thread, prompt).await?;
+                }
+                Ok(format!("codex thread {thread}"))
+            }
+            _ => Err(crate::fleet_provider::ProviderError::Unsupported(
+                "Codex action is not available through app-server".to_string(),
+            )),
+        }
+    }
+    .await;
+
+    match result {
+        Ok(detail) => (ActionReceiptStatus::Delivered, Some(detail)),
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
+async fn exact_live_tmux_session_name(
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+) -> Result<String, crate::fleet_provider::ProviderError> {
+    if session.management_state != "MANAGED" {
+        return Err(crate::fleet_provider::ProviderError::Stale(
+            "managed Codex identity is required".to_string(),
+        ));
+    }
+    let target = session.tmux_target.as_deref().ok_or_else(|| {
+        crate::fleet_provider::ProviderError::Stale("exact tmux target is unavailable".to_string())
+    })?;
+    let fingerprint = session.process_start_fingerprint.as_deref().ok_or_else(|| {
+        crate::fleet_provider::ProviderError::Stale(
+            "exact tmux process identity is unavailable".to_string(),
+        )
+    })?;
+    let discovered = ainb_fleet_core::discover::discover_from_tmux()
+        .await
+        .map_err(|error| crate::fleet_provider::ProviderError::Transport(error.to_string()))?;
+    if !discovered.iter().any(|candidate| {
+        candidate.exact_tmux_target.as_deref() == Some(target)
+            && candidate.process_start_fingerprint.as_deref() == Some(fingerprint)
+    }) {
+        return Err(crate::fleet_provider::ProviderError::Stale(
+            "tmux process identity changed".to_string(),
+        ));
+    }
+    target
+        .split_once(':')
+        .map(|(session_name, _)| session_name)
+        .filter(|session_name| !session_name.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            crate::fleet_provider::ProviderError::Protocol(
+                "exact tmux target has no session name".to_string(),
+            )
+        })
+}
+
+async fn persist_codex_exit(
+    pool: &SqlitePool,
+    events: &EventSink,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    manager: &crate::fleet_provider::codex_manager::CodexManagerHandle,
+    event_type: &str,
+) -> Result<(), crate::fleet_provider::ProviderError> {
+    crate::fleet::mark_managed_codex_exited(
+        pool,
+        events,
+        &session.session_key,
+        event_type,
+        manager.capabilities(),
+        SystemClock.now_ms(),
+    )
+    .await
+    .map(|_| ())
+    .map_err(|error| crate::fleet_provider::ProviderError::Transport(error.to_string()))
+}
+
+fn require_codex_identity(
+    supplied: Option<&ainb_hangar_proto::fleet::FleetRequestIdentity>,
+    canonical: &crate::fleet_provider::codex::CodexItemRequestIdentity,
+) -> Result<(), crate::fleet_provider::ProviderError> {
+    let supplied = supplied.ok_or_else(|| {
+        crate::fleet_provider::ProviderError::Stale(
+            "exact Codex request identity is required".to_string(),
+        )
+    })?;
+    if supplied.request_id != *canonical.request_id.as_value()
+        || supplied.thread_id != canonical.thread_id
+        || supplied.turn_id != canonical.turn_id
+        || supplied.item_id != canonical.item_id
+    {
+        return Err(crate::fleet_provider::ProviderError::Stale(
+            "Codex request identity changed".to_string(),
+        ));
+    }
+    Ok(())
+}
+
+async fn load_codex_approval(
+    pool: &SqlitePool,
+    session_key: &str,
+) -> Result<crate::fleet_provider::codex::CodexApprovalRequest, crate::fleet_provider::ProviderError>
+{
+    use crate::fleet_provider::codex::{
+        CodexApprovalKind, CodexApprovalRequest, CodexItemRequestIdentity, RpcRequestId,
+    };
+    let value = crate::fleet::current_request_wire(pool, session_key)
+        .await
+        .map_err(|error| crate::fleet_provider::ProviderError::Transport(error.to_string()))?
+        .ok_or_else(|| {
+            crate::fleet_provider::ProviderError::Stale(
+                "current Codex approval is absent".to_string(),
+            )
+        })?;
+    let identity = value.get("identity").ok_or_else(|| {
+        crate::fleet_provider::ProviderError::Protocol(
+            "stored Codex approval identity is absent".to_string(),
+        )
+    })?;
+    let required = |field: &str| {
+        identity
+            .get(field)
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+            .ok_or_else(|| {
+                crate::fleet_provider::ProviderError::Protocol(format!(
+                    "stored Codex approval {field} is absent"
+                ))
+            })
+    };
+    let kind = match value.get("kind").and_then(serde_json::Value::as_str) {
+        Some("commandExecution") => CodexApprovalKind::CommandExecution,
+        Some("fileChange") => CodexApprovalKind::FileChange,
+        Some("permissions") => CodexApprovalKind::Permissions,
+        _ => {
+            return Err(crate::fleet_provider::ProviderError::Protocol(
+                "stored Codex approval kind is invalid".to_string(),
+            ));
+        }
+    };
+    Ok(CodexApprovalRequest {
+        identity: CodexItemRequestIdentity {
+            request_id: RpcRequestId::new(
+                identity.get("requestId").cloned().unwrap_or(serde_json::Value::Null),
+            )?,
+            thread_id: required("threadId")?,
+            turn_id: required("turnId")?,
+            item_id: required("itemId")?,
+        },
+        kind,
+        params: value.get("params").cloned().unwrap_or(serde_json::Value::Null),
+    })
+}
+
+async fn latest_codex_turn_id(
+    pool: &SqlitePool,
+    session_key: &str,
+) -> Result<Option<String>, sqlx::Error> {
+    let payloads = sqlx::query_scalar::<_, String>(
+        "SELECT payload FROM fleet_event WHERE session_key = ? AND applied = 1 \
+         ORDER BY revision DESC LIMIT 32",
+    )
+    .bind(session_key)
+    .fetch_all(pool)
+    .await?;
+    Ok(payloads.into_iter().find_map(|payload| {
+        let value: serde_json::Value = serde_json::from_str(&payload).ok()?;
+        value
+            .get("turnId")
+            .or_else(|| value.get("turn_id"))
+            .or_else(|| value.pointer("/identity/turnId"))
+            .or_else(|| value.pointer("/turn/id"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    }))
+}
+
+async fn execute_claude_structured(
+    pool: &SqlitePool,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    request_fingerprint: &str,
+    answers: &[ainb_hangar_proto::fleet::FleetQuestionAnswer],
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    let request = match crate::fleet::current_request_wire(pool, &session.session_key).await {
+        Ok(Some(request)) => request,
+        Ok(None) => {
+            return (
+                ActionReceiptStatus::Failed,
+                Some("current Claude question is absent".to_string()),
+            );
+        }
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let hook = request.get("payload").unwrap_or(&request);
+    let input = hook.get("tool_input").or_else(|| hook.get("input")).unwrap_or(hook);
+    let Some(questions) = input.get("questions").and_then(serde_json::Value::as_array) else {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("stored Claude question payload is invalid".to_string()),
+        );
+    };
+    let mut mapped = Vec::with_capacity(answers.len());
+    for answer in answers {
+        let question = questions.iter().enumerate().find_map(|(index, question)| {
+            let id = question
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_string)
+                .unwrap_or_else(|| index.to_string());
+            (id == answer.question_id).then_some(question)
+        });
+        let Some(question) = question else {
+            return (
+                ActionReceiptStatus::Failed,
+                Some(format!(
+                    "Claude question id {} is stale",
+                    answer.question_id
+                )),
+            );
+        };
+        let Some(question_text) = question.get("question").and_then(serde_json::Value::as_str)
+        else {
+            return (
+                ActionReceiptStatus::Failed,
+                Some("Claude question text is absent".to_string()),
+            );
+        };
+        let mut values = answer.selected_options.clone();
+        if let Some(text) = answer.text.as_deref().filter(|text| !text.is_empty()) {
+            values.push(text.to_string());
+        }
+        mapped.push(ainb_plugin_notifyd::broker::StructuredQuestionAnswer {
+            question: question_text.to_string(),
+            selected_options: values,
+        });
+    }
+    let session_id = session.provider_session_id.clone().unwrap_or_default();
+    let fingerprint = request_fingerprint.to_string();
+    let socket = match approve_socket_path() {
+        Ok(socket) => socket,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    match tokio::task::spawn_blocking(move || {
+        ainb_plugin_notifyd::broker::client_answer_structured(
+            &socket,
+            &session_id,
+            &fingerprint,
+            &mapped,
+        )
+    })
+    .await
+    {
+        Ok(Ok(ack)) if ack.matched => (
+            ActionReceiptStatus::Delivered,
+            Some("claude structured hook broker".to_string()),
+        ),
+        Ok(Ok(ack)) if ack.stale => (
+            ActionReceiptStatus::Failed,
+            Some("Claude structured request is stale".to_string()),
+        ),
+        Ok(Ok(ack)) => (
+            ActionReceiptStatus::Failed,
+            ack.error.or_else(|| Some("Claude request no longer waiting".to_string())),
+        ),
+        Ok(Err(error)) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
+fn approve_socket_path() -> std::io::Result<PathBuf> {
+    #[cfg(any(test, feature = "test-support"))]
+    if let Some(path) = APPROVE_SOCKET_OVERRIDE
+        .get_or_init(|| RwLock::new(None))
+        .read()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .clone()
+    {
+        return Ok(path);
+    }
+    std::env::var_os("AINB_HOME")
+        .filter(|value| !value.is_empty())
+        .map(PathBuf::from)
+        .or_else(|| dirs::home_dir().map(|home| home.join(".agents-in-a-box")))
+        .map(|base| base.join("approve.sock"))
+        .ok_or_else(|| std::io::Error::other("cannot resolve approve socket"))
+}
+
+async fn verified_tmux_send(
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    text: &str,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    let (Some(target), Some(fingerprint)) = (
+        session.tmux_target.as_deref(),
+        session.process_start_fingerprint.as_deref(),
+    ) else {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some("exact tmux process identity is unavailable".to_string()),
+        );
+    };
+    let discovered = match ainb_fleet_core::discover::discover_from_tmux().await {
+        Ok(discovered) => discovered,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let live = discovered.iter().any(|candidate| {
+        candidate.exact_tmux_target.as_deref() == Some(target)
+            && candidate.process_start_fingerprint.as_deref() == Some(fingerprint)
+    });
+    if !live {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("tmux process identity changed".to_string()),
+        );
+    }
+    match ainb_fleet_core::send::tmux_send(target, text).await {
+        Ok(()) => (
+            ActionReceiptStatus::Delivered,
+            Some(format!("tmux ({target})")),
+        ),
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
+async fn verified_tmux_picker(
+    pool: &SqlitePool,
+    session: &ainb_hangar_store::repo::fleet::FleetSessionRow,
+    expected_version: i64,
+    request_fingerprint: &str,
+    key: &str,
+) -> (
+    ainb_hangar_proto::fleet::ActionReceiptStatus,
+    Option<String>,
+) {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    let (Some(target), Some(fingerprint)) = (
+        session.tmux_target.as_deref(),
+        session.process_start_fingerprint.as_deref(),
+    ) else {
+        return (
+            ActionReceiptStatus::Unknown,
+            Some("exact tmux process identity is unavailable".to_string()),
+        );
+    };
+    let discovered = match ainb_fleet_core::discover::discover_from_tmux().await {
+        Ok(discovered) => discovered,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let live = discovered.iter().any(|candidate| {
+        candidate.exact_tmux_target.as_deref() == Some(target)
+            && candidate.process_start_fingerprint.as_deref() == Some(fingerprint)
+            && candidate.provider.as_str() == session.provider
+    });
+    if !live {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("tmux provider or process identity changed".to_string()),
+        );
+    }
+    let request = match crate::fleet::current_request_wire(pool, &session.session_key).await {
+        Ok(Some(request)) => request,
+        Ok(None) => {
+            return (
+                ActionReceiptStatus::Failed,
+                Some("current structured picker request is absent".to_string()),
+            );
+        }
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    let pane = match ainb_fleet_core::read::capture_pane(target, 0).await {
+        Ok(pane) => pane,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    if let Err(error) = verify_picker_pane(&session.provider, &request, &pane) {
+        return (ActionReceiptStatus::Failed, Some(error));
+    }
+    let refreshed = match ainb_hangar_store::repo::fleet::FleetRepo::validate_action_target(
+        pool,
+        &session.session_key,
+        expected_version,
+        Some(request_fingerprint),
+    )
+    .await
+    {
+        Ok(refreshed) => refreshed,
+        Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
+    };
+    if refreshed.provider != session.provider
+        || refreshed.tmux_target != session.tmux_target
+        || refreshed.process_start_fingerprint != session.process_start_fingerprint
+    {
+        return (
+            ActionReceiptStatus::Failed,
+            Some("tmux picker identity changed during verification".to_string()),
+        );
+    }
+    match ainb_fleet_core::send::tmux_send_picker_key(target, key).await {
+        Ok(()) => (
+            ActionReceiptStatus::Delivered,
+            Some(format!("verified tmux picker ({target})")),
+        ),
+        Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PickerQuestionEvidence {
+    prompt: String,
+    option_labels: Vec<String>,
+}
+
+const MAX_ACTIVE_PICKER_TRAILING_CHARS: usize = 512;
+
+fn verify_picker_pane(
+    provider: &str,
+    request: &serde_json::Value,
+    pane: &str,
+) -> Result<(), String> {
+    let questions = picker_question_evidence(provider, request)?;
+    let visible = normalize_picker_text(pane);
+    let mut cursor = 0;
+    for (question_index, question) in questions.into_iter().enumerate() {
+        let prompt = normalize_picker_text(&question.prompt);
+        let prompt_offset = if question_index == 0 {
+            visible[cursor..].rfind(&prompt)
+        } else {
+            visible[cursor..].find(&prompt)
+        }
+        .ok_or_else(|| "visible picker prompt does not match current request".to_string())?;
+        cursor += prompt_offset + prompt.len();
+        for label in question.option_labels {
+            let label = normalize_picker_text(&label);
+            let label_offset = visible[cursor..].find(&label).ok_or_else(|| {
+                "visible picker option order does not match current request".to_string()
+            })?;
+            cursor += label_offset + label.len();
+        }
+    }
+    let trailing = &visible[cursor..];
+    if has_later_picker_candidate(pane, cursor) {
+        return Err("visible picker is stale because a newer picker follows it".to_string());
+    }
+    if trailing.chars().count() > MAX_ACTIVE_PICKER_TRAILING_CHARS {
+        return Err("visible picker is not active at terminal input".to_string());
+    }
+    Ok(())
+}
+
+fn has_later_picker_candidate(pane: &str, matched_end: usize) -> bool {
+    let lines = pane
+        .lines()
+        .map(normalize_picker_text)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>();
+    let mut offset = 0;
+    let mut anchor = None;
+    for (index, line) in lines.iter().enumerate() {
+        if index > 0 {
+            offset += 1;
+        }
+        let line_end = offset + line.len();
+        if matched_end <= line_end {
+            anchor = Some(index);
+            break;
+        }
+        offset = line_end;
+    }
+    let Some(anchor) = anchor else {
+        return true;
+    };
+    lines[anchor + 1..].iter().any(|line| {
+        line.trim_end().ends_with('?') || line.split_whitespace().any(is_numbered_picker_token)
+    })
+}
+
+fn is_numbered_picker_token(token: &str) -> bool {
+    let token = token.trim_start_matches(['>', '›', '❯', '○', '●', '◉']);
+    let digits = token.chars().take_while(char::is_ascii_digit).count();
+    digits > 0 && matches!(&token[digits..], "." | ")")
+}
+
+fn picker_question_evidence(
+    provider: &str,
+    request: &serde_json::Value,
+) -> Result<Vec<PickerQuestionEvidence>, String> {
+    if !matches!(provider, "claude" | "codex") {
+        return Err("verified picker provider is unsupported".to_string());
+    }
+    let hook = request.get("payload").unwrap_or(request);
+    let input = hook.get("tool_input").or_else(|| hook.get("input")).unwrap_or(hook);
+    let questions = input
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .filter(|questions| !questions.is_empty())
+        .ok_or_else(|| "stored picker request has no structured questions".to_string())?;
+    questions
+        .iter()
+        .map(|question| {
+            let prompt = question
+                .get("question")
+                .and_then(serde_json::Value::as_str)
+                .filter(|prompt| !prompt.trim().is_empty())
+                .ok_or_else(|| "stored picker question prompt is absent".to_string())?;
+            let options = question
+                .get("options")
+                .and_then(serde_json::Value::as_array)
+                .filter(|options| !options.is_empty())
+                .ok_or_else(|| "stored picker question has no ordered options".to_string())?;
+            let option_labels = options
+                .iter()
+                .map(|option| {
+                    option
+                        .as_str()
+                        .or_else(|| option.get("label").and_then(serde_json::Value::as_str))
+                        .filter(|label| !label.trim().is_empty())
+                        .map(str::to_string)
+                        .ok_or_else(|| "stored picker option label is absent".to_string())
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            Ok(PickerQuestionEvidence {
+                prompt: prompt.to_string(),
+                option_labels,
+            })
+        })
+        .collect()
+}
+
+fn normalize_picker_text(value: &str) -> String {
+    value
+        .chars()
+        .map(|character| {
+            if character.is_whitespace()
+                || matches!(
+                    character,
+                    '│' | '─'
+                        | '┌'
+                        | '┐'
+                        | '└'
+                        | '┘'
+                        | '├'
+                        | '┤'
+                        | '┬'
+                        | '┴'
+                        | '┼'
+                        | '╭'
+                        | '╮'
+                        | '╯'
+                        | '╰'
+                )
+            {
+                ' '
+            } else {
+                character
+            }
+        })
+        .collect::<String>()
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ")
+}
+
+fn action_capability(
+    capabilities: &ainb_hangar_proto::fleet::FleetCapabilities,
+    action: &ainb_hangar_proto::fleet::ControlAction,
+) -> bool {
+    use ainb_hangar_proto::fleet::ControlAction;
+    match action {
+        ControlAction::StructuredAnswer { .. } => capabilities.structured_answer,
+        ControlAction::Approve { .. } | ControlAction::Deny { .. } => capabilities.approvals,
+        ControlAction::VerifiedPicker { .. } => capabilities.verified_picker,
+        ControlAction::SendPrompt { .. } => capabilities.send_prompt || capabilities.tmux_text,
+        ControlAction::Continue => capabilities.continue_turn,
+        ControlAction::Retry => capabilities.retry,
+        ControlAction::Interrupt => capabilities.interrupt,
+        ControlAction::Start { .. } => capabilities.start,
+        ControlAction::Restart => capabilities.restart,
+        ControlAction::Stop => capabilities.stop,
+        ControlAction::Kill => capabilities.kill,
+        ControlAction::Archive => capabilities.archive,
+    }
+}
+
+fn stable_fingerprint(value: &str) -> String {
+    let hash = value.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!("fnv1a64:{hash:016x}")
+}
+
+const fn receipt_status_token(
+    status: ainb_hangar_proto::fleet::ActionReceiptStatus,
+) -> &'static str {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    match status {
+        ActionReceiptStatus::Pending => "PENDING",
+        ActionReceiptStatus::Delivered => "DELIVERED",
+        ActionReceiptStatus::Failed => "FAILED",
+        ActionReceiptStatus::Unknown => "UNKNOWN",
+        ActionReceiptStatus::Rejected => "REJECTED",
+    }
+}
+
+fn action_receipt_wire(
+    row: &ainb_hangar_store::repo::fleet::ActionReceiptRow,
+) -> ainb_hangar_proto::fleet::FleetActionReceipt {
+    use ainb_hangar_proto::fleet::ActionReceiptStatus;
+    ainb_hangar_proto::fleet::FleetActionReceipt {
+        request_id: row.request_id.clone(),
+        session_key: row.session_key.clone(),
+        action_kind: row.action_kind.clone(),
+        action_fingerprint: row.action_fingerprint.clone(),
+        expected_version: row.expected_version,
+        idempotency_key: row.idempotency_key.clone(),
+        status: match row.status.as_str() {
+            "PENDING" => ActionReceiptStatus::Pending,
+            "DELIVERED" => ActionReceiptStatus::Delivered,
+            "FAILED" => ActionReceiptStatus::Failed,
+            "REJECTED" => ActionReceiptStatus::Rejected,
+            _ => ActionReceiptStatus::Unknown,
+        },
+        detail: row.detail.clone(),
+        session_version: row.session_version,
+        created_at: row.created_at,
+        updated_at: row.updated_at,
+    }
+}
+
+fn fleet_repo_err(error: ainb_hangar_store::repo::fleet::FleetRepoError) -> RpcError {
+    use ainb_hangar_store::repo::fleet::FleetRepoError;
+    match error {
+        FleetRepoError::Sql(error) => store_err(&error),
+        FleetRepoError::SessionNotFound { .. }
+        | FleetRepoError::StaleVersion { .. }
+        | FleetRepoError::RequestFingerprintMismatch { .. }
+        | FleetRepoError::ReceiptCollision { .. }
+        | FleetRepoError::EventIdCollision { .. } => invalid_params(&error.to_string()),
     }
 }
 

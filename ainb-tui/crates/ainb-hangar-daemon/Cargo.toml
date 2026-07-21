@@ -64,6 +64,9 @@ ainb-fleet-core = { path = "../ainb-fleet-core" }
 # Shared JSON-RPC envelope + the P4 snapshot wire row types the RPC server
 # serialises over the unix socket (P4.10). Pure data — no host deps leak in.
 ainb-hangar-proto = { path = "../ainb-hangar-proto" }
+# Claude's blocking broker owns exact structured-question and permission
+# delivery. Hangar calls its public wire client and never reads notifyd state.
+ainb-plugin-notifyd = { path = "../ainb-plugin-notifyd" }
 # e38.23 OS-level agent confinement: wraps the provider spawn in a Seatbelt
 # (macOS) / Landlock (Linux) FS sandbox so the agent subprocess can only
 # read/write the task's isolated roots. Gates the non-claude providers (e38.16).
@@ -97,6 +100,7 @@ anyhow = { workspace = true }
 thiserror = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+futures-util = { workspace = true }
 # P6.2 skill importer: parse the YAML frontmatter block of each `SKILL.md`
 # (`name:` / `description:`) when syncing `toolkit/packages/skills/`.
 serde_yaml = { workspace = true }
