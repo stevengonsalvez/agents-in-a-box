@@ -62,7 +62,9 @@ pub enum Target {
     /// rects sit *inside* this rect, so the hit-test resolves a card first and a
     /// bare drop-zone only on the column background.
     DropZone(IssueLifecycle),
-    /// A top tab-bar entry, tagged with the 0-based view index it switches to.
+    /// A filter-chip-bar entry, tagged with the 0-based chip index it selects
+    /// (`All` / `Members` / `Agents` / `Mine`). Sits on the chip row above the
+    /// board, so it never overlaps a card/column target.
     Tab(usize),
 }
 
@@ -97,8 +99,8 @@ impl HitMap {
     /// is skipped rather than panicking. Cards are pushed LAST so they win the
     /// priority tie against the drop zone they sit inside (see [`hit_test`]).
     ///
-    /// The top tab bar is added separately by the caller (it is chrome, not part
-    /// of the board layout) via [`HitMap::push`] with a [`Target::Tab`].
+    /// The filter-chip bar is added separately by the caller (it is chrome, not
+    /// part of the board layout) via [`HitMap::push`] with a [`Target::Tab`].
     ///
     /// [`hit_test`]: HitMap::hit_test
     #[must_use]
@@ -316,7 +318,8 @@ pub enum MouseIntent {
     NewIssue(IssueLifecycle),
     /// Focus a column (a column-header / column-background click).
     FocusColumn(IssueLifecycle),
-    /// Switch to a top-bar tab by its 0-based view index (a tab click).
+    /// Select a filter chip by its 0-based index (a chip-bar click): the plugin
+    /// glue maps it onto `IssueListEvent::SetFilter(FilterChip::all()[idx])`.
     SwitchTab(usize),
 }
 

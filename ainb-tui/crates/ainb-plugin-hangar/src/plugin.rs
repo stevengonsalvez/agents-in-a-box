@@ -3273,6 +3273,29 @@ impl HangarPlugin {
                 );
                 // The issue board uses the lifecycle-typed FSM hit-map.
                 self.hit_map = HitMap::from_board_layout(&layout);
+                // The filter-chip bar sits on the row above the board (chip row
+                // = body top, i.e. board `top - 1`). Record one `Target::Tab` per
+                // chip so a click selects that filter — the chip bar is chrome,
+                // not part of the board layout, so it is pushed here. Geometry
+                // mirrors `render_chip_bar`: each chip is `[Label] ` starting at
+                // x=0, the clickable span being `[Label]` (bracket + label +
+                // bracket) with a one-column trailing gap.
+                let chip_row = top.saturating_sub(1);
+                let mut chip_x = 0u16;
+                for (idx, chip) in
+                    crate::screen::issue_list::FilterChip::all().into_iter().enumerate()
+                {
+                    if chip_x >= w {
+                        break;
+                    }
+                    let span =
+                        u16::try_from(chip.label().chars().count()).unwrap_or(0).saturating_add(2);
+                    self.hit_map.push(
+                        crate::mouse::Rect::new(chip_x, chip_row, span, 1),
+                        crate::mouse::Target::Tab(idx),
+                    );
+                    chip_x = chip_x.saturating_add(span).saturating_add(1);
+                }
             }
             // 63l.6: the Kanban / Autopilots / Skills list screens record the
             // card-board layout the lifecycle-free `fold_board_mouse` hit-tests
@@ -3353,9 +3376,10 @@ impl HangarPlugin {
     ///   anchored at the click, seeded with the issue's current state/priority + the
     ///   cached actor snapshot.
     ///
-    /// The remaining intents (`NewIssue`, `FocusColumn`, `PanColumns`, `SwitchTab`)
-    /// land in later board sub-beads (the seeded create flow); they are consumed
-    /// here so they never accumulate.
+    /// `SwitchTab` selects the clicked filter chip (via the issue-list
+    /// `SetFilter` reducer). The remaining intents (`NewIssue`, `FocusColumn`,
+    /// `PanColumns`) land in later board sub-beads (the seeded create flow); they
+    /// are consumed here so they never accumulate.
     fn drain_mouse_intents(&mut self) {
         use crate::mouse::MouseIntent;
         use crate::screen::issue_list::IssueColumn;
@@ -3405,11 +3429,25 @@ impl HangarPlugin {
                 MouseIntent::OpenContextMenu { issue_id, at } => {
                     self.open_context_menu(&issue_id, at);
                 }
+                // A chip-bar click selects that filter chip (All / Members /
+                // Agents / Mine) — fold it through the issue-list reducer so the
+                // keyboard `Tab` path and the mouse path converge on `SetFilter`.
+                MouseIntent::SwitchTab(idx) => {
+                    use crate::screen::issue_list::{
+                        FilterChip, IssueListEvent, reduce_issue_list,
+                    };
+                    if let Some(chip) = FilterChip::all().get(idx).copied() {
+                        let out = reduce_issue_list(
+                            &self.screens.issue_list,
+                            IssueListEvent::SetFilter(chip),
+                        );
+                        self.screens.issue_list = out.state;
+                    }
+                }
                 // The remaining intents land in later board sub-beads.
                 MouseIntent::NewIssue(_)
                 | MouseIntent::FocusColumn(_)
-                | MouseIntent::PanColumns { .. }
-                | MouseIntent::SwitchTab(_) => {}
+                | MouseIntent::PanColumns { .. } => {}
             }
         }
     }
@@ -5198,6 +5236,39 @@ mod tests {
         assert_eq!(
             before, after,
             "empty-space press leaves the selection alone"
+        );
+    }
+
+    /// USER-VISIBLE PROOF (issue-list-filter-chip-unreachable): a left-click on a
+    /// filter chip in the chip bar selects that filter. Before this fix the chip
+    /// row had no mouse hit-test target (`Target::Tab` was never pushed and
+    /// `SwitchTab` was a no-op), so a click fell through and the filter stayed on
+    /// `All`. Drives the REAL plugin mouse path (`on_mouse` → FSM → intent stash
+    /// → `drain_mouse_intents`).
+    #[test]
+    fn clicking_a_filter_chip_selects_it() {
+        use crate::screen::issue_list::FilterChip;
+        use ainb_plugin_sdk::{MouseButton, MouseKind};
+
+        let mut p = connected_plugin_with_issue();
+        p.rebuild_hit_map(120, 24);
+        assert_eq!(p.screens.issue_list.filter(), FilterChip::All);
+
+        // The chip bar renders on row 1 (board top - 1). `render_chip_bar` paints
+        // "[All] [Members] …": the `[All] ` chip occupies cols 0..=5, so the
+        // `[Members]` chip starts at col 6 — a click at col 7 lands inside it.
+        p.on_mouse(mouse_at(
+            MouseKind::Down {
+                button: MouseButton::Left,
+            },
+            7,
+            1,
+        ));
+        p.drain_mouse_intents();
+        assert_eq!(
+            p.screens.issue_list.filter(),
+            FilterChip::Members,
+            "a click on the Members chip must select the Members filter"
         );
     }
 
