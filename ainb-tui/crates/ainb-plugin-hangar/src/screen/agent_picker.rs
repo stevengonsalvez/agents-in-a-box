@@ -26,6 +26,11 @@ const BORDER: Color = Color::rgb(100, 149, 237);
 const TITLE: Color = Color::rgb(255, 215, 0);
 /// Muted section-header text (`RECENT`).
 const SECTION: Color = Color::rgb(120, 120, 140);
+/// Opaque panel background painted across the whole modal rect. The host
+/// composites the plugin buffer as a *sparse* overlay, so any interior coord the
+/// picker doesn't explicitly write keeps the underlying board draw and bleeds
+/// through. Filling every cell with this bg makes the modal opaque.
+const PANEL_BG: Color = Color::rgb(30, 30, 40);
 
 /// The render-state cache for the agent-picker modal.
 ///
@@ -284,11 +289,11 @@ pub fn render_agent_picker(
     area_h: u16,
     state: &AgentPickerState,
 ) {
-    let modal_w = (area_w * 6 / 10).clamp(40, area_w);
-    let modal_h = (area_h * 7 / 10).clamp(8, area_h);
-    let x0 = (area_w.saturating_sub(modal_w)) / 2;
-    let y0 = (area_h.saturating_sub(modal_h)) / 2;
+    let (x0, y0, modal_w, modal_h) = modal_rect(area_w, area_h);
 
+    // Paint an opaque background across the whole modal first so the sparse
+    // overlay can't leak the underlying board through the border/title/row gaps.
+    fill_background(buf, x0, y0, modal_w, modal_h);
     draw_border(buf, x0, y0, modal_w, modal_h);
     // Title.
     put_str(buf, x0 + 2, y0, " Pick assignee ", TITLE, x0 + modal_w);
@@ -315,6 +320,31 @@ pub fn render_agent_picker(
         }
         render_actor_row(buf, inner_x, row, inner_w, actor, i == state.selected);
         row += 1;
+    }
+}
+
+/// The centred modal geometry `(x0, y0, w, h)` for an `area_w` × `area_h` area:
+/// ~60% wide / ~70% tall, clamped to the 40×8 floor and the area ceiling.
+fn modal_rect(area_w: u16, area_h: u16) -> (u16, u16, u16, u16) {
+    let modal_w = (area_w * 6 / 10).clamp(40, area_w);
+    let modal_h = (area_h * 7 / 10).clamp(8, area_h);
+    let x0 = (area_w.saturating_sub(modal_w)) / 2;
+    let y0 = (area_h.saturating_sub(modal_h)) / 2;
+    (x0, y0, modal_w, modal_h)
+}
+
+/// Fill every cell of the `w` × `h` rect at `(x0, y0)` with an opaque space
+/// carrying [`PANEL_BG`], so the host's sparse overlay composite can't leak the
+/// board through any coord the border/title/rows don't cover.
+fn fill_background(buf: &mut WireBuffer, x0: u16, y0: u16, w: u16, h: u16) {
+    let x1 = x0 + w - 1;
+    let y1 = y0 + h - 1;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let mut cell = Cell::new(" ");
+            cell.bg = Some(PANEL_BG);
+            buf.push(Coord::new(x, y), cell);
+        }
     }
 }
 
@@ -355,4 +385,102 @@ fn put_char(buf: &mut WireBuffer, x: u16, row: u16, ch: char, color: Color) {
     let mut cell = Cell::new(ch.to_string());
     cell.fg = Some(color);
     buf.push(Coord::new(x, row), cell);
+}
+
+#[cfg(test)]
+mod render_tests {
+    use super::*;
+    use ainb_hangar_proto::events::PresenceState;
+    use std::collections::HashMap;
+
+    fn actor(name: &str, is_agent: bool, recent_rank: Option<u32>) -> ActorRow {
+        ActorRow {
+            actor_ref: if is_agent {
+                format!("agent:{name}")
+            } else {
+                format!("member:{name}")
+            },
+            display_name: name.to_string(),
+            subtitle: "sub".into(),
+            presence: PresenceState::Online,
+            is_agent,
+            recent_rank,
+        }
+    }
+
+    fn picker() -> AgentPickerState {
+        AgentPickerState::new(
+            IssueId::from_str("i1").expect("valid id"),
+            vec![
+                actor("dev", true, Some(0)),
+                actor("reviewer", true, None),
+                actor("Stevie", false, None),
+            ],
+        )
+    }
+
+    /// The modal must paint an **opaque** rectangle: every interior coord of the
+    /// modal rect has to be written by the picker so the host's sparse overlay
+    /// can never leak the underlying board draw through the gaps.
+    ///
+    /// Regression: before the background fill, `render_agent_picker` wrote only
+    /// the border, title, and one glyph-cell per actor row, leaving the gaps
+    /// between/around rows unwritten — the kanban board bled through them.
+    #[test]
+    fn modal_paints_every_interior_coord_opaque() {
+        let area_w = 80;
+        let area_h = 24;
+        let state = picker();
+
+        let mut buf = WireBuffer::new(area_w, area_h);
+        render_agent_picker(&mut buf, area_w, area_h, &state);
+
+        // Effective (last-write-wins) cell per coord, mirroring host composite.
+        let mut painted: HashMap<(u16, u16), &Cell> = HashMap::new();
+        for (coord, cell) in &buf.cells {
+            painted.insert((coord.x, coord.y), cell);
+        }
+
+        let (x0, y0, w, h) = modal_rect(area_w, area_h);
+        let (x1, y1) = (x0 + w - 1, y0 + h - 1);
+
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                assert!(
+                    painted.contains_key(&(x, y)),
+                    "modal coord ({x},{y}) is unpainted — the board would bleed \
+                     through the sparse overlay here"
+                );
+            }
+        }
+    }
+
+    /// Every cell the fill lays down under the modal carries the opaque panel
+    /// background, so the underlying board colour is fully replaced (not just
+    /// its glyph). Border/title/rows drawn on top may override individual cells,
+    /// but no interior gap is left transparent.
+    #[test]
+    fn interior_gaps_carry_opaque_background() {
+        let area_w = 80;
+        let area_h = 24;
+        let state = picker();
+
+        let mut buf = WireBuffer::new(area_w, area_h);
+        render_agent_picker(&mut buf, area_w, area_h, &state);
+
+        let mut painted: HashMap<(u16, u16), Cell> = HashMap::new();
+        for (coord, cell) in &buf.cells {
+            painted.insert((coord.x, coord.y), cell.clone());
+        }
+
+        let (x0, y0, _w, h) = modal_rect(area_w, area_h);
+        // An empty interior coord well inside the modal, below the rows.
+        let gap = painted.get(&(x0 + 5, y0 + h - 2)).expect("interior gap coord must be painted");
+        assert_eq!(gap.symbol, " ", "gap should be a space, not a board glyph");
+        assert_eq!(
+            gap.bg,
+            Some(PANEL_BG),
+            "gap cell must carry the opaque panel background"
+        );
+    }
 }
