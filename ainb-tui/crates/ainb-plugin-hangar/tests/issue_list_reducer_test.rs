@@ -11,7 +11,7 @@ use ainb_hangar_core::ids::{AgentId, IssueId, TaskId};
 use ainb_hangar_proto::events::{HangarEvent, IssueRow};
 use ainb_plugin_hangar::screen::issue_list::{
     FilterChip, IssueColumn, IssueListEvent, IssueListIntent, IssueListMode, IssueListState,
-    WizardKey, WizardRow, reduce_issue_list,
+    WizardAgent, WizardKey, WizardRow, reduce_issue_list,
 };
 
 /// A wire `IssueRow` for tests. `state` drives column grouping (`open` → Todo,
@@ -377,7 +377,9 @@ fn wizard_complete_form_commits_create_and_run() {
             repo_ref: "scratch".to_string(),
             source_branch: Some("main".to_string()),
             target_branch: Some("main".to_string()),
-            agent: "codex".to_string(),
+            // No named-agent roster injected → provider-chip fallback (no assignee).
+            agent: Some("codex".to_string()),
+            assignee: None,
         })
     );
     assert_eq!(out.state.mode(), IssueListMode::Normal);
@@ -577,7 +579,9 @@ fn wizard_branch_edits_and_blanks_round_trip() {
             repo_ref: "scratch".to_string(),
             source_branch: Some("feature/x".to_string()),
             target_branch: None,
-            agent: "claude".to_string(),
+            // No named-agent roster injected → provider-chip fallback (no assignee).
+            agent: Some("claude".to_string()),
+            assignee: None,
         })
     );
 }
@@ -600,11 +604,16 @@ fn wizard_required_guard_blocks_incomplete_creates() {
     assert_eq!(s.wizard().unwrap().repo_ref(), Some("scratch"));
     assert!(wiz(&s, WizardKey::Enter).intent.is_none());
 
-    // Both present → the ONLY path that creates, always with a real agent token.
+    // Both present → the ONLY path that creates. With no named-agent roster the
+    // Agent row falls back to a real provider token (and carries no assignee).
     let out = wiz(&ready_to_create(), WizardKey::Enter);
     match out.intent {
-        Some(IssueListIntent::CreateAndRun { agent, .. }) => {
+        Some(IssueListIntent::CreateAndRun {
+            agent, assignee, ..
+        }) => {
+            let agent = agent.expect("provider-chip fallback carries a token");
             assert!(["claude", "codex", "copilot"].contains(&agent.as_str()));
+            assert!(assignee.is_none(), "no named agent targeted → no assignee");
         }
         other => panic!("complete form must commit CreateAndRun, got {other:?}"),
     }
@@ -680,4 +689,122 @@ fn event_task_started_promotes_issue_to_in_progress() {
         .map(|r| r.id.as_str())
         .collect();
     assert_eq!(in_prog, vec!["i1"]);
+}
+
+// ---------------------------------------------------------------------------
+// V3-F3: the create wizard's Agent row targets a NAMED workspace agent.
+// ---------------------------------------------------------------------------
+
+/// A `ready_to_create` wizard with a NAMED-agent roster injected, focus on the
+/// Agent row (so ←/→ cycles the roster and Enter commits).
+fn ready_to_create_with_agents(agents: Vec<WizardAgent>) -> IssueListState {
+    let mut s = ready_to_create();
+    s.set_agents(agents);
+    s
+}
+
+fn agent(actor_ref: &str, label: &str) -> WizardAgent {
+    WizardAgent {
+        actor_ref: actor_ref.to_string(),
+        label: label.to_string(),
+    }
+}
+
+/// With a named-agent roster injected, Enter commits `CreateAndRun` carrying the
+/// picked agent's `agent:<id>` ref as the assignee (and NO provider token — the
+/// named agent's own provider drives the run).
+#[test]
+fn wizard_targets_named_agent_as_assignee() {
+    let s = ready_to_create_with_agents(vec![
+        agent("agent:dev-id", "dev"),
+        agent("agent:reviewer-id", "reviewer"),
+    ]);
+    // Cursor starts at 0 (the first named agent, "dev").
+    let out = wiz(&s, WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            agent, assignee, ..
+        }) => {
+            assert_eq!(
+                assignee,
+                Some("agent:dev-id".to_string()),
+                "targets the named agent"
+            );
+            assert!(agent.is_none(), "a named target carries no provider token");
+        }
+        other => panic!("expected CreateAndRun targeting a named agent, got {other:?}"),
+    }
+}
+
+/// ←/→ on the Agent row cycles the NAMED roster (not the provider chips) when a
+/// roster is injected, and the picked agent round-trips to the assignee.
+#[test]
+fn wizard_agent_row_cycles_named_roster() {
+    let s = ready_to_create_with_agents(vec![
+        agent("agent:dev-id", "dev"),
+        agent("agent:reviewer-id", "reviewer"),
+    ]);
+    // → advances from "dev" (0) to "reviewer" (1).
+    let s = wiz(&s, WizardKey::Right).state;
+    let out = wiz(&s, WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun { assignee, .. }) => {
+            assert_eq!(assignee, Some("agent:reviewer-id".to_string()));
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
+
+    // → wraps the two-agent roster back to "dev".
+    let s = ready_to_create_with_agents(vec![
+        agent("agent:dev-id", "dev"),
+        agent("agent:reviewer-id", "reviewer"),
+    ]);
+    let s = wiz(&s, WizardKey::Right).state; // reviewer
+    let s = wiz(&s, WizardKey::Right).state; // wrap → dev
+    let out = wiz(&s, WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun { assignee, .. }) => {
+            assert_eq!(
+                assignee,
+                Some("agent:dev-id".to_string()),
+                "two-agent roster wraps"
+            );
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
+}
+
+/// With an EMPTY named-agent roster the Agent row falls back to the provider
+/// chips: Enter commits a provider token and NO assignee (the pre-fix behaviour,
+/// which dispatches deterministically to the workspace's first agent).
+#[test]
+fn wizard_agent_row_falls_back_to_provider_chips_when_roster_empty() {
+    // ready_to_create injects no agents, so the roster is empty.
+    let out = wiz(&ready_to_create(), WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            agent, assignee, ..
+        }) => {
+            assert_eq!(
+                agent,
+                Some("claude".to_string()),
+                "provider-chip fallback token"
+            );
+            assert!(assignee.is_none(), "no named target → no assignee");
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
+
+    // And ←/→ cycles the PROVIDER chips (claude → codex), not a named roster.
+    let s = wiz(&ready_to_create(), WizardKey::Right).state;
+    let out = wiz(&s, WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            agent, assignee, ..
+        }) => {
+            assert_eq!(agent, Some("codex".to_string()));
+            assert!(assignee.is_none());
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
 }

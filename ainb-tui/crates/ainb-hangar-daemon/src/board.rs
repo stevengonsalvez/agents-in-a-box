@@ -201,7 +201,7 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
     };
     // Board-agnostic (the auto-run seam does not know which board); the F4 board
     // tier is skipped, the cascade still resolves the agent. Headless run.
-    match crate::rpc::run_card(pool, ws, None, &issue, "headless", None, None, None).await {
+    match crate::rpc::run_card(pool, ws, None, &issue, "headless", None, None, None, None).await {
         Ok(_) => tracing::info!(issue = %issue_id, "card auto-run launched (last blocker done)"),
         Err(crate::rpc::CardRunError::Blocked(_) | crate::rpc::CardRunError::ActiveRun(_)) => {
             tracing::debug!(issue = %issue_id, "auto-run skipped (not launchable right now)");

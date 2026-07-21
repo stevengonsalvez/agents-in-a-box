@@ -428,6 +428,25 @@ async fn wizard_commit_issues_create_update_and_run() {
             seen.lock().unwrap()
         );
 
+        // Ordering discipline (V3-F3 depends on it): the persisting `issue_update`
+        // must reach the daemon BEFORE the `issue_run`, so a run that resolves the
+        // issue's persisted assignee (the named-agent target) never races the
+        // write. The daemon serves one connection's frames in order, so send order
+        // == apply order.
+        let calls = seen.lock().unwrap().clone();
+        let update_ix = calls
+            .iter()
+            .position(|(m, _)| m == daemon_methods::HANGAR_ISSUE_UPDATE)
+            .expect("issue_update was sent");
+        let run_ix = calls
+            .iter()
+            .position(|(m, _)| m == daemon_methods::HANGAR_ISSUE_RUN)
+            .expect("issue_run was sent");
+        assert!(
+            update_ix < run_ix,
+            "issue_update must precede issue_run (update @ {update_ix}, run @ {run_ix})"
+        );
+
         drop(host_write);
         server.abort();
     };

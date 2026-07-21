@@ -384,8 +384,14 @@ pub enum IssueCreateAction {
         source_branch: Option<String>,
         /// The target branch a future PR lands INTO; `None` = unset.
         target_branch: Option<String>,
-        /// The provider agent wire token (`claude` / `codex` / `copilot`).
-        agent: String,
+        /// The provider agent wire token (`claude` / `codex` / `copilot`) when the
+        /// Agent row fell back to provider chips; `None` when a NAMED agent was
+        /// targeted (its own provider drives the run — see [`Self::assignee`]).
+        agent: Option<String>,
+        /// The NAMED workspace agent targeted by the Agent row as its `agent:<id>`
+        /// ref (V3-F3): persisted as the new issue's assignee AND carried as the
+        /// run's assignee override. `None` when a provider chip was chosen instead.
+        assignee: Option<String>,
     },
 }
 
@@ -817,7 +823,22 @@ impl ScreenStates {
     }
 
     /// Cache the agent snapshot rows; the picker is rebuilt from them on open.
+    ///
+    /// Also fans the NAMED workspace agents (agent actors, members filtered out)
+    /// into the Issues create wizard's Agent-row roster (V3-F3), so the wizard can
+    /// TARGET a named agent — the same `hangar/agents_list` snapshot that feeds the
+    /// `a` assign picker. An empty roster leaves the wizard on the provider-chip
+    /// fallback.
     pub fn set_actors(&mut self, actors: Vec<ActorRow>) {
+        let named: Vec<super::issue_list::WizardAgent> = actors
+            .iter()
+            .filter(|a| a.is_agent)
+            .map(|a| super::issue_list::WizardAgent {
+                actor_ref: a.actor_ref.clone(),
+                label: a.display_name.clone(),
+            })
+            .collect();
+        self.issue_list.set_agents(named);
         self.actors = actors;
     }
 
@@ -1449,6 +1470,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             source_branch,
             target_branch,
             agent,
+            assignee,
         }) => {
             states.pending_create_action = Some(IssueCreateAction::CreateAndRun {
                 title,
@@ -1458,6 +1480,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
                 source_branch,
                 target_branch,
                 agent,
+                assignee,
             });
             None
         }
