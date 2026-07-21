@@ -564,9 +564,22 @@ async fn execute_claimed(
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("claimed task {} vanished", claimed.id))?;
-    let ws_slug = workspace_slug(pool, &task.workspace_id).await?;
+    // Pre-run setup faults (slug lookup / execenv prep / F5 provision below) must
+    // TERMINALISE the still-`dispatched` task as failed rather than propagate: a
+    // propagated setup error left the row `dispatched`, and the stale-dispatch
+    // sweeper reclaimed + re-dispatched it into the SAME fault, looping invisibly
+    // (the board card never leaves Todo, the detail never shows an error) until
+    // the 5min dispatch TTL relabelled it `timeout` with no cause. See
+    // `finalize_setup_failure`.
+    let ws_slug = match workspace_slug(pool, &task.workspace_id).await {
+        Ok(s) => s,
+        Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
+    };
     let home = hangar_home();
-    let env = prepare_env(&task, &ws_slug, &home, clock)?;
+    let env = match prepare_env(&task, &ws_slug, &home, clock) {
+        Ok(env) => env,
+        Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
+    };
 
     // e38.21: inject the workspace's context prompt into the task's execenv as a
     // `CLAUDE.md` so the agent run actually sees the per-workspace context (the
@@ -647,14 +660,22 @@ async fn execute_claimed(
         || run_slug.clone(),
         |issue| format!("{}-{}", issue, task.agent_id),
     );
-    let run_wd = crate::workdir_provision::provision(
+    let run_wd = match crate::workdir_provision::provision(
         task.repo_ref.as_deref(),
         &run_slug,
         &scratch_slug,
         &home,
         &env.workdir,
         task.source_branch.as_deref(),
-    )?;
+    ) {
+        Ok(wd) => wd,
+        // F5 provision failed (e.g. the card's `repo_ref` could not be
+        // worktree-added) while the row is still `dispatched`. Terminalise it as
+        // failed with the real error instead of propagating — the propagate path
+        // left it `dispatched` to be reclaimed + re-dispatched into the same fault
+        // forever, invisible to the board/detail.
+        Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
+    };
     let location = run_location_for(&run_wd);
     tracing::info!(task_id = %task.id, cwd = %run_wd.path().display(), "run workdir provisioned");
 
@@ -1356,6 +1377,89 @@ async fn finalize_failure(
     // already-pending outcome (a sibling holds the slot), logged not propagated,
     // so one failed retry never downs the claim loop.
     maybe_spawn_retry(pool, &task.id, clock).await;
+    Ok(())
+}
+
+/// Terminalise a task that faulted during PRE-RUN setup — before the
+/// `dispatched -> running` start transition — as `failed`, surfacing the real
+/// error instead of stranding the row.
+///
+/// The claim loop resolves the workspace slug, prepares the isolated execenv,
+/// and provisions the run's working directory (F5) while the row is still
+/// `dispatched`. A fault in that window (a `repo_ref` that will not clone, an
+/// execenv that cannot be built) used to propagate out of [`execute_claimed`]
+/// with the row left `dispatched`: the stale-dispatch sweeper then reclaimed it
+/// past the 90s window and re-dispatched it into the SAME fault, looping
+/// invisibly — the board card never left Todo and the detail never showed an
+/// error — until the 5min dispatch TTL relabelled it `timeout` with no cause.
+///
+/// This seam finalises the row to `failed` AT ONCE, from `dispatched`, recording
+/// the real error (persisted into `result` so the detail renders it) under the
+/// terminal, no-retry
+/// [`FailureReason::ProvisionError`](ainb_hangar_store::service::fail::FailureReason::ProvisionError) —
+/// so the failure is terminal, attributed, and visible on the board + detail. The
+/// side-effects (stats / event / card auto-move / comment) mirror
+/// [`finalize_failure`], minus teardown + retry: there is no worktree to reclaim
+/// and a deterministic setup fault does not warrant a retry.
+///
+/// Always returns `Ok(())` so the claim loop treats the fault as HANDLED and
+/// never re-logs it as an unhandled execution error. A concurrent cancel that won
+/// the row (`dispatched -> cancelled`) is honoured (failure side-effects skipped),
+/// and a terminalise that itself faults (row vanished / DB error) is left to the
+/// dispatch-TTL sweeper backstop rather than looping.
+async fn finalize_setup_failure(
+    pool: &SqlitePool,
+    task: &Task,
+    // `Send + Sync` so the enclosing claim-loop future stays `Send` across the
+    // `.await`s below (a bare `&dyn Display` would make it un-spawnable).
+    error: &(dyn std::fmt::Display + Send + Sync),
+    clock: &dyn HangarClock,
+    stats: &HealthStats,
+    events: &EventSink,
+) -> anyhow::Result<()> {
+    use ainb_hangar_store::service::fail::FailureReason;
+    let reason = FailureReason::ProvisionError;
+    let message = format!("run setup failed before the agent started: {error}");
+    tracing::error!(task_id = %task.id, error = %error, "task setup failed before run; failing task");
+    match FailTaskService::fail_setup(pool, &task.id, reason, &message, clock).await {
+        Ok(_) => {}
+        // A human cancel won the row first (`dispatched -> cancelled`). Honour it:
+        // skip the failure side-effects and do not log a benign race as an error.
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "setup failed but task was cancelled first; honoring cancel");
+            return Ok(());
+        }
+        // Could not terminalise (row vanished / already moved / DB fault). The
+        // dispatch-TTL sweeper is the backstop; do not loop-log as an execution error.
+        Err(e) => {
+            tracing::warn!(task_id = %task.id, error = %e, "could not terminalize setup failure; leaving to sweeper backstop");
+            return Ok(());
+        }
+    }
+    // The row is terminal: record the outcome, push the terminal event, and
+    // auto-move the card so the board and detail surface the failure (the whole
+    // point of the fix). All best-effort, never blocking the claim loop.
+    stats.record_failed(clock.now_ms() / 1_000);
+    emit_task_finished(
+        events,
+        task,
+        ainb_hangar_proto::events::TaskResult::Failure,
+        clock,
+    );
+    crate::board::auto_move_after_terminal(pool, task).await;
+    crate::board::unblock_dependents_after_terminal(pool, task).await;
+    progress_comment::emit_checkpoint(
+        pool,
+        &SystemIdGen,
+        clock,
+        task,
+        progress_comment::Checkpoint::Failed { reason },
+    )
+    .await;
+    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed during setup");
     Ok(())
 }
 
