@@ -23,6 +23,7 @@
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
 //! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | reference running TTL (2.5h) |
+//! | `HANGAR_SPAWN_SETUP_TIMEOUT_MS` | running→spawn setup-phase umbrella override (tests) | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
 //! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
@@ -77,15 +78,26 @@ const CRED_READ_TIMEOUT: Duration = Duration::from_secs(5);
 /// Umbrella bound on the ENTIRE `running -> provider spawn` setup phase (doctrine
 /// hardening, D-e2e-3).
 ///
-/// [`CRED_READ_TIMEOUT`] bounds only the keychain read; this bounds the WHOLE
-/// preamble ([`prepare_spawn_inputs`]: env build, cred read, skills/profile
-/// materialise) as one unit, so no setup step — including a future blocking call
-/// added here — can ever freeze a `running` row forever. On expiry the run is
-/// terminalised `running -> failed` ([`FailureReason::SpawnTimeout`]) with the
-/// real cause logged, rather than left to the multi-hour running-TTL sweep. This
-/// is defense-in-depth behind the per-step bounds: the sanctioned slow step is
-/// the 5s cred read, so 60s means "genuinely wedged", never "merely slow".
+/// [`CRED_READ_TIMEOUT`] bounds only the keychain read; this bounds EVERY await
+/// between the `dispatched -> running` commit and the provider spawn as ONE unit:
+/// the `running` board auto-move + the "started" progress comment (both DB
+/// writes) and [`prepare_spawn_inputs`] (env build, cred read, skills/profile
+/// materialise). No await in that span — a wedged DB write, a future blocking
+/// call added here, a pool deadlock, a materialise hang — can freeze a `running`
+/// row forever: on expiry the run is terminalised `running -> failed`
+/// ([`FailureReason::SpawnTimeout`]) with the real cause logged, rather than left
+/// to the multi-hour running-TTL sweep. Defense-in-depth behind the per-step
+/// bounds: the sanctioned slow step is the 5s cred read, so 60s means "genuinely
+/// wedged", never "merely slow". Overridable via [`spawn_setup_timeout`].
 const SPAWN_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The active setup-phase umbrella bound, honouring the test-only
+/// `HANGAR_SPAWN_SETUP_TIMEOUT_MS` override (mirrors `HANGAR_PROVIDER_MAX_RUNTIME_MS`)
+/// so an e2e / unit test can drive the wedge terminalise within a bounded budget.
+/// Defaults to [`SPAWN_SETUP_TIMEOUT`].
+fn spawn_setup_timeout() -> Duration {
+    env_u64_opt("HANGAR_SPAWN_SETUP_TIMEOUT_MS").map_or(SPAWN_SETUP_TIMEOUT, Duration::from_millis)
+}
 /// Provider runtime deadline (reference running TTL: 2.5h).
 const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
@@ -608,8 +620,10 @@ async fn resolve_cred_env(
 }
 
 /// Build the provider's child env + resolved credential for a `running` task —
-/// the whole pre-spawn preamble, bounded as one unit by [`SPAWN_SETUP_TIMEOUT`]
-/// in [`execute_claimed`].
+/// the env / cred / skills-materialise portion of the pre-spawn preamble. Its
+/// caller runs it INSIDE the [`SPAWN_SETUP_TIMEOUT`] umbrella (alongside the
+/// started-side DB writes) so a wedge in any of these steps terminalises the run
+/// rather than freezing it; see [`execute_claimed`].
 ///
 /// Returns `(task_env, cred_env)`: the allowlist-filtered, skills/profile-augmented
 /// child env, and the daemon-resolved claude credential that rides `extra_env`
@@ -861,23 +875,9 @@ async fn execute_claimed(
     // race is greppable in the daemon log next to the store's `task.start` span.
     tracing::info!(task_id = %task.id, lifecycle = lifecycle.state().as_db_str(), "task running");
     // e38.2: announce the start to subscribed plugins (best-effort push; the
-    // next snapshot pull reconciles if no subscriber is connected).
+    // next snapshot pull reconciles if no subscriber is connected). This is a
+    // non-blocking channel push (not awaited), so it stays outside the umbrella.
     emit_task_started(events, &task, clock);
-    // P4 / D8: auto-move the task's issue card into any board's `running`
-    // auto-move column (best-effort; never blocks the FSM).
-    crate::board::auto_move_after_transition(pool, &task, "running").await;
-    // e38.6: write a durable, agent-authored "started" comment to the task's
-    // issue so the agent's activity survives beyond the bounded transcript
-    // buffer. A NULL-issue chat task writes nothing; a write fault is logged,
-    // never blocks the FSM (the `running` transition has already committed).
-    progress_comment::emit_checkpoint(
-        pool,
-        &SystemIdGen,
-        clock,
-        &task,
-        progress_comment::Checkpoint::Started,
-    )
-    .await;
 
     // P10 / D19: the provider that executed this run, recorded on the run-history
     // row + the OTLP task->run span. Captured up front (a `&'static str`) so the
@@ -886,17 +886,36 @@ async fn execute_claimed(
     // by value). The `cancel_guard` was registered up front (before the start).
     let provider = dispatch.backend.name();
 
-    // Doctrine hardening (D-e2e-3): bound the ENTIRE `running -> provider spawn`
-    // preamble as one unit. `resolve_cred_env` already bounds the keychain read
-    // (the known zombie-dispatch wedge), but a wedge in ANY other setup step — a
-    // future blocking call added here, a pool deadlock, a materialise hang —
-    // would otherwise freeze the row at `running` until the multi-hour running-TTL
-    // sweep, invisibly (a real `started_at`, so every earlier sweep skips it). On
-    // expiry we terminalise `running -> failed` with the real cause logged, so a
-    // wedged setup is a loud, immediate, terminal failure — never a silent
-    // forever-`running` black hole.
-    let (task_env, cred_env) = match tokio::time::timeout(
-        SPAWN_SETUP_TIMEOUT,
+    // Doctrine hardening (D-e2e-3): bound EVERY await between the `running` commit
+    // and the provider spawn as ONE unit. `resolve_cred_env` already bounds the
+    // keychain read (the known zombie-dispatch wedge), but the `running` board
+    // auto-move + the "started" progress comment are ALSO post-`running` DB awaits
+    // — a wedge in either (a pool deadlock, a contended writer) is the exact
+    // forever-`running` black hole, merely relocated past the cred read. So the
+    // umbrella opens the instant the row is `running` and closes only once the
+    // spawn inputs are built: the two started-side DB writes AND
+    // [`prepare_spawn_inputs`] all run inside it. On expiry we terminalise
+    // `running -> failed` with the real cause logged, so a wedge ANYWHERE in the
+    // span is a loud, immediate, terminal failure — never a silent forever-run.
+    //
+    // The two DB writes stay best-effort INSIDE the block (a write fault is
+    // logged, never blocks the FSM); only an unbounded HANG is caught by the
+    // timeout, which is exactly the wedge class this guards.
+    let setup = tokio::time::timeout(spawn_setup_timeout(), async {
+        // P4 / D8: auto-move the task's issue card into any board's `running`
+        // auto-move column.
+        crate::board::auto_move_after_transition(pool, &task, "running").await;
+        // e38.6: write a durable, agent-authored "started" comment to the task's
+        // issue so the agent's activity survives beyond the bounded transcript
+        // buffer. A NULL-issue chat task writes nothing.
+        progress_comment::emit_checkpoint(
+            pool,
+            &SystemIdGen,
+            clock,
+            &task,
+            progress_comment::Checkpoint::Started,
+        )
+        .await;
         prepare_spawn_inputs(
             pool,
             &task,
@@ -904,15 +923,17 @@ async fn execute_claimed(
             dispatch.backend,
             secrets.clone(),
             CRED_READ_TIMEOUT,
-        ),
-    )
-    .await
-    {
+        )
+        .await
+    })
+    .await;
+
+    let (task_env, cred_env) = match setup {
         Ok(inputs) => inputs,
         Err(_elapsed) => {
             tracing::error!(
                 task_id = %task.id,
-                timeout_secs = SPAWN_SETUP_TIMEOUT.as_secs(),
+                timeout_ms = u64::try_from(spawn_setup_timeout().as_millis()).unwrap_or(u64::MAX),
                 "run setup wedged before provider spawn; failing task"
             );
             // running -> failed: type the terminal edge before the store finalize,
@@ -2499,6 +2520,114 @@ mod tests {
             started.elapsed() < Duration::from_secs(5),
             "the umbrella must bound the wedge promptly (took {:?})",
             started.elapsed()
+        );
+    }
+
+    /// Real-path mutation guard for the umbrella: drive the ACTUAL
+    /// `execute_claimed` seam (not `prepare_spawn_inputs` in isolation) with a
+    /// wedged keychain read and the umbrella tightened via
+    /// `HANGAR_SPAWN_SETUP_TIMEOUT_MS`. The row MUST terminalise
+    /// `running -> failed` with `spawn_timeout`. Deleting the `tokio::time::timeout`
+    /// wrap in `execute_claimed` turns this RED: the bounded (5s) cred read then
+    /// returns, the run reaches a provider spawn against a non-existent binary, and
+    /// the row lands `failed`/`spawn_error` (or hangs) — never `spawn_timeout`.
+    #[tokio::test]
+    async fn execute_claimed_terminalizes_a_wedged_setup_via_the_umbrella() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+        use ainb_hangar_store::service::claim::ClaimTaskService;
+
+        // Serialise with every other `$AINB_HANGAR_HOME`-mutating test, and set a
+        // tiny umbrella so the 3s wedged cred read blows the bound deterministically.
+        let _env = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hangar-home");
+        let prior_home = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        let prior_to = std::env::var_os("HANGAR_SPAWN_SETUP_TIMEOUT_MS");
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+        std::env::set_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS", "50");
+
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let clock = SystemClock;
+        let claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the queued task must claim");
+
+        // Provider paths that do not resolve: under the mutation (no umbrella) the
+        // run would reach a spawn that ENOENT-fails as `spawn_error` — a DIFFERENT
+        // reason than the `spawn_timeout` asserted below.
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "/nonexistent/hangar-test-claude".into(),
+            codex_path: "/nonexistent/hangar-test-codex".into(),
+            copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+        let interactive = InteractiveSessions::default();
+
+        let outcome = execute_claimed(
+            pool,
+            &runner,
+            &claimed,
+            &clock,
+            &stats,
+            &events,
+            &interactive,
+            Arc::new(HangingBackend),
+        )
+        .await;
+
+        // Restore env BEFORE asserting so a failed assertion never leaks it.
+        match prior_home {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+        match prior_to {
+            Some(v) => std::env::set_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS", v),
+            None => std::env::remove_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS"),
+        }
+
+        outcome.expect("execute_claimed handles the wedge internally (never Err)");
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "failed",
+            "a wedged setup must terminalise, not stay running"
+        );
+        assert_eq!(
+            row.failure_reason.as_deref(),
+            Some("spawn_timeout"),
+            "the umbrella must attribute the wedge as spawn_timeout (got {:?})",
+            row.failure_reason
         );
     }
 
