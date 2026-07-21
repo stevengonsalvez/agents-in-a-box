@@ -1469,9 +1469,30 @@ async fn handle_issue_update(
     // task captured its repo + agent at ENQUEUE (`set_task_repo_agent_in_tx`), so an
     // edit only steers the NEXT run — never mutates a task already dispatched.
     if edits_card {
-        CardParityRepo::set_issue_repo_agent(pool, ws.as_str(), &params.issue_id, repo_ref, agent)
-            .await
-            .map_err(|e| store_err(&e))?;
+        // bead pv8 parity with `board_card_create`: a remote-only favorite pick
+        // arrives as its REMOTE indicator (`owner/repo`, a URL) — not an absolute
+        // path, not `scratch`. Resolve it to a LOCAL clone path BEFORE persisting so
+        // the run/provision path (which only understands a path or `scratch`) never
+        // sees a bare remote it would mistake for a filesystem path. A path /
+        // `scratch` passes through untouched; the clone runs once, idempotently.
+        let resolved_repo_ref = match repo_ref {
+            Some(r) => {
+                let ainb_dir = ainb_hangar_core::hangar_home().ok_or_else(|| {
+                    internal("cannot resolve hangar home to clone a remote favorite")
+                })?;
+                Some(resolve_card_repo_ref(&ainb_dir, r).await?)
+            }
+            None => None,
+        };
+        CardParityRepo::set_issue_repo_agent(
+            pool,
+            ws.as_str(),
+            &params.issue_id,
+            resolved_repo_ref.as_deref(),
+            agent,
+        )
+        .await
+        .map_err(|e| store_err(&e))?;
         CardParityRepo::set_issue_external_ref(pool, ws.as_str(), &params.issue_id, external_ref)
             .await
             .map_err(|e| store_err(&e))?;
@@ -2814,7 +2835,21 @@ async fn handle_issue_run(
         ));
     }
 
-    let run_override = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let run_override_raw = params.repo_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // bead pv8 parity: resolve a remote-only favorite (`owner/repo`, a URL) to a
+    // LOCAL clone path before dispatch, exactly as `board_card_create` /
+    // `handle_issue_update` do — the run/provision path only understands a path or
+    // `scratch`. Idempotent: a pre-resolved path (from the card edit above or the
+    // board path) double-passes harmlessly; a path / `scratch` is untouched.
+    let run_override_owned = match run_override_raw {
+        Some(r) => {
+            let ainb_dir = ainb_hangar_core::hangar_home()
+                .ok_or_else(|| internal("cannot resolve hangar home to clone a remote favorite"))?;
+            Some(resolve_card_repo_ref(&ainb_dir, r).await?)
+        }
+        None => None,
+    };
+    let run_override = run_override_owned.as_deref();
     let agent_override = params.agent.as_deref().and_then(AgentKind::parse);
     let source_override = params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let outcome = run_card(
@@ -5669,6 +5704,137 @@ mod tests {
         assert!(
             err.is_err(),
             "an unclonable remote is an error, not a bogus repo_ref"
+        );
+    }
+
+    /// The Issues-wizard EDIT path (`handle_issue_update`) resolves a remote-only
+    /// favorite pick (`owner/repo`, a URL) to a LOCAL clone path before persisting
+    /// it on the card — mirroring `board_card_create` (bead pv8). Without this the
+    /// card holds a bare remote the provision path mistakes for a filesystem path,
+    /// and no clone/worktree is ever created (issue-wizard-repo-ref-no-clone).
+    #[tokio::test]
+    async fn issue_update_clones_remote_only_repo_ref() {
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
+        // Hold the SHARED home-env lock across the whole set_var → dispatch → restore
+        // window so a sibling `with_isolated_home` test cannot clobber
+        // `$AINB_HANGAR_HOME` mid-dispatch (where the clone dir is resolved).
+        let _guard = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        // Point the daemon's hangar home (where clones land) at a scratch dir so the
+        // test never writes under the real `~/.agents-in-a-box`.
+        let home = dir.path().join("hangar-home");
+        let prior = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+        let remote = make_file_remote(dir.path());
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "issue-1",
+                    "repo_ref": remote,
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+
+        match prior {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+
+        assert!(resp.error.is_none(), "{resp:?}");
+        let (repo, _agent) = CardParityRepo::get_issue_repo_agent(store.pool(), "issue-1")
+            .await
+            .unwrap()
+            .expect("issue-1 exists");
+        let repo = repo.expect("a repo_ref was persisted on the card");
+        assert_ne!(
+            repo, remote,
+            "the raw remote must NOT be persisted verbatim"
+        );
+        let path = std::path::Path::new(&repo);
+        assert!(
+            path.is_absolute() && path.join(".git").exists(),
+            "the card holds a LOCAL clone checkout, not a bare remote: {repo}"
+        );
+        assert!(
+            path.starts_with(home.join("clones")),
+            "the clone lives under the hangar-home managed clones dir: {repo}"
+        );
+    }
+
+    /// The Issues-wizard RUN path (`handle_issue_run`) resolves a run-time
+    /// remote-only `repo_ref` override to a LOCAL clone path before dispatch, so
+    /// the enqueued task captures a checkout path — never the raw `owner/repo` the
+    /// provision path would treat as a bogus filesystem path
+    /// (issue-wizard-repo-ref-no-clone).
+    #[tokio::test]
+    async fn issue_run_clones_remote_only_repo_ref_override() {
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
+        // Shared home-env lock (see the update test above) — serialises against
+        // every other `$AINB_HANGAR_HOME`-mutating daemon test.
+        let _guard = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let home = dir.path().join("hangar-home");
+        let prior = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+        let remote = make_file_remote(dir.path());
+
+        // issue-2 has a seeded brief (satisfying the brief-or-link guard) and no
+        // active task (so the one-active-run guard lets it launch).
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_ISSUE_RUN,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "issue_id": "issue-2",
+                    "mode": "headless",
+                    "repo_ref": remote,
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+
+        match prior {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+
+        assert!(resp.error.is_none(), "{resp:?}");
+        let task_id = resp.result.unwrap()["task_id"].as_str().unwrap().to_string();
+        let (repo, _agent) = CardParityRepo::get_task_repo_agent(store.pool(), &task_id)
+            .await
+            .unwrap()
+            .expect("the run enqueued a task");
+        let repo = repo.expect("the enqueued task captured a repo_ref");
+        assert_ne!(
+            repo, remote,
+            "the dispatched task must NOT carry the raw remote override"
+        );
+        let path = std::path::Path::new(&repo);
+        assert!(
+            path.is_absolute() && path.join(".git").exists(),
+            "the task's repo_ref is a LOCAL clone checkout, not a bare remote: {repo}"
+        );
+        assert!(
+            path.starts_with(home.join("clones")),
+            "the clone lives under the hangar-home managed clones dir: {repo}"
         );
     }
 
