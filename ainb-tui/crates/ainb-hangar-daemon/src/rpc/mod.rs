@@ -1508,6 +1508,53 @@ async fn handle_issue_update(
     } else {
         row
     };
+
+    // In-product recovery from a dead end: an assignment that names an AGENT
+    // re-dispatches the issue through the shared `run_card` launch core, mirroring
+    // the create-time dispatch. `agent_error` is terminal + non-retryable, so
+    // without this a stuck issue had no in-product path back to work short of
+    // filing a brand-new one — the TUI `a` picker and `issue_update --assign` both
+    // route here. Reusing `run_card` reads the card's persisted repo/branch/agent,
+    // mints a fresh run generation, and — via the one-active-run guard — never
+    // double-dispatches (a re-assign only re-runs once the prior run is terminal).
+    // Best-effort: a launch guard (no repo, a run already active, an unfinished
+    // blocker, a not-yet-dispatchable provider) leaves the assignee edit committed
+    // without a new run rather than failing the edit; only a store fault propagates.
+    if let Some(Some(actor)) = update.assignee.as_ref() {
+        if actor.kind() == ainb_hangar_core::actor::ActorKind::Agent {
+            if let Some(issue) =
+                ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+                    .await
+                    .map_err(|e| store_err(&e))?
+                    .filter(|i| i.workspace_id == ws.as_str())
+            {
+                match run_card(
+                    pool,
+                    &ws,
+                    None,
+                    &issue,
+                    "headless",
+                    None,
+                    None,
+                    None,
+                    Some(actor),
+                )
+                .await
+                {
+                    Ok(_) => {}
+                    Err(CardRunError::Db(e)) => return Err(store_err(&e)),
+                    Err(other) => {
+                        tracing::info!(
+                            issue = %params.issue_id,
+                            reason = %card_run_err(other).message,
+                            "issue_update: assignee set but re-dispatch skipped",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
     to_value(&row)
 }
@@ -6856,5 +6903,111 @@ mod tests {
             Ok(CardRunOutcome::Squad { .. }) => panic!("a non-squad issue must run as Single"),
             Err(_) => panic!("the run must launch on the fallback agent"),
         }
+    }
+
+    /// In-product recovery: assigning an AGENT to an issue via `hangar/issue_update`
+    /// (the TUI `a` picker + `issue update --assign` both route here) re-dispatches
+    /// the issue — it inserts exactly ONE `agent_task_queue` row keyed to that
+    /// agent, so a stuck / unassigned issue is no longer a dead end.
+    ///
+    /// Mutation-provable heart of the fix: the issue starts with NO tasks; the
+    /// only mutation is the assignee edit. Drop the `run_card` re-dispatch from
+    /// `handle_issue_update` → zero task rows → this test goes red.
+    #[tokio::test]
+    async fn issue_update_assign_to_agent_enqueues_one_task() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // An unassigned issue that already carries a repo (the create path persists
+        // it) — exactly the shape a failed/agent_error issue has when a user
+        // re-assigns it to recover.
+        let id = ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.clone(),
+                workspace_id: ws.clone(),
+                title: "recover me".into(),
+                description: Some("do the work".into()),
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        CardParityRepo::set_issue_repo_agent(pool, &ws, &id, Some("scratch"), None)
+            .await
+            .unwrap();
+
+        // Baseline: no tasks yet.
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(before, 0, "no task exists before the assignment");
+
+        // Assign the agent through the real RPC seam the TUI picker fires.
+        let resp = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "issue_id": id,
+                    "assignee": format!("agent:{}", agent.id),
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "the assign RPC must succeed: {:?}",
+            resp.error
+        );
+
+        // Exactly ONE task, keyed to the assigned agent, on this issue.
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "assigning an agent enqueues exactly one recovery task"
+        );
+        let (task_agent, task_issue): (String, Option<String>) =
+            sqlx::query_as("SELECT agent_id, issue_id FROM agent_task_queue LIMIT 1")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(
+            task_agent, agent.id,
+            "the task routes to the assigned agent"
+        );
+        assert_eq!(
+            task_issue.as_deref(),
+            Some(id.as_str()),
+            "the task carries the issue"
+        );
     }
 }

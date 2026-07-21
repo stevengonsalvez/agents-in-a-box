@@ -2819,12 +2819,128 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
         .await
         .with_context(|| format!("update issue {}", args.id))?;
-    if touched {
-        println!("updated issue {}", args.id);
-    } else {
+    if !touched {
         anyhow::bail!("no issue with id {} in this workspace", args.id);
     }
+    println!("updated issue {}", args.id);
+
+    // In-product recovery from a dead end: a post-creation assignment that names an
+    // AGENT re-dispatches the issue, mirroring the create-time enqueue. Without
+    // this an issue stuck in `agent_error` (terminal, non-retryable) had no
+    // in-product path back to work short of filing a brand-new issue. The task
+    // reads the issue card's persisted repo/branch/agent, and the one-active-run
+    // guard means a re-assign while a run is in flight never double-dispatches.
+    if let Some(agent_id) = args.assign.as_deref() {
+        if let Some(task_id) =
+            enqueue_assigned_task(store.pool(), &workspace_id, &args.id, agent_id).await?
+        {
+            println!("queued task {task_id}");
+        }
+    }
     Ok(())
+}
+
+/// Enqueue one `queued` task for `agent_id` on `issue_id`, mirroring the daemon's
+/// [`run_card`] single-agent launch: read the issue card's persisted repo (the
+/// path dispatch provisions from), source branch, and provider, then insert the
+/// task keyed to the agent's runtime in one transaction.
+///
+/// Best-effort recovery: returns `Ok(None)` (no task, the assignee edit still
+/// stands) when the issue already has a live run — the one-active-run guard, so a
+/// re-assign never double-dispatches — or when the card carries no repo (nothing
+/// for dispatch to provision). Returns the new task id when a task was enqueued.
+///
+/// [`run_card`]: ainb_hangar_daemon::rpc::run_card
+async fn enqueue_assigned_task(
+    pool: &sqlx::SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    agent_id: &str,
+) -> Result<Option<String>> {
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+    use ainb_hangar_store::repo::task::NewTask;
+
+    // One active run per card: an in-flight (queued/dispatched/running) task keeps
+    // the issue; recovery only re-dispatches once the prior run is terminal.
+    if TaskRepo::active_task_for_issue(pool, workspace_id, issue_id)
+        .await
+        .context("check for an active run before re-dispatch")?
+        .is_some()
+    {
+        return Ok(None);
+    }
+
+    // The runtime the task must key to (resolved from the agent, not supplied) —
+    // rejects an unknown / foreign-tenant agent id before any write.
+    let assignment = resolve_agent_runtime(pool, workspace_id, agent_id).await?;
+
+    // The card's persisted repo is what dispatch provisions from. No repo → nothing
+    // to run: leave the assignee committed without a task rather than enqueue a row
+    // that would run a useless in-tree prompt.
+    let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, issue_id)
+        .await
+        .context("read issue repo/agent for re-dispatch")?
+        .unwrap_or((None, None));
+    let Some(repo_ref) = card_repo else {
+        return Ok(None);
+    };
+    let source_branch = CardParityRepo::get_issue_branches(pool, issue_id)
+        .await
+        .context("read issue source branch for re-dispatch")?
+        .and_then(|(source, _target)| source);
+
+    // The task's agent_kind mirrors the assignee's provider (a codex agent's task
+    // must not read back as the claude column default), preferring the card's
+    // persisted agent when set.
+    let provider: Option<Option<String>> =
+        sqlx::query_scalar("SELECT provider FROM agent WHERE id = ?")
+            .bind(&assignment.agent_id)
+            .fetch_optional(pool)
+            .await
+            .context("read agent provider for re-dispatch")?;
+    let agent_kind = card_agent
+        .or_else(|| {
+            provider
+                .flatten()
+                .as_deref()
+                .and_then(ainb_hangar_core::agent_kind::AgentKind::parse)
+        })
+        .unwrap_or(ainb_hangar_core::agent_kind::AgentKind::DEFAULT);
+
+    // Scope the task to the issue's NEXT run generation (migration 0039), matching
+    // the create + daemon launch seams so a prior run's terminal rows never poison
+    // this recovery run.
+    let generation = TaskRepo::next_generation_for_issue(pool, issue_id)
+        .await
+        .context("compute run generation for re-dispatched task")?;
+    let task_id = SystemIdGen.new_ulid();
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    let mut tx = pool.begin().await.context("begin re-dispatch tx")?;
+    TaskRepo::insert_in_tx(
+        &mut tx,
+        &NewTask {
+            id: task_id.clone(),
+            workspace_id: workspace_id.to_string(),
+            runtime_id: assignment.runtime_id,
+            agent_id: assignment.agent_id,
+            issue_id: Some(issue_id.to_string()),
+            work_dir: None,
+            priority: 0,
+            created_at: now,
+            autopilot_run_id: None,
+            generation,
+        },
+    )
+    .await
+    .context("enqueue re-dispatched task for assigned agent")?;
+    CardParityRepo::set_task_repo_agent_in_tx(&mut tx, &task_id, Some(&repo_ref), agent_kind)
+        .await
+        .context("persist re-dispatched task repo")?;
+    CardParityRepo::set_task_source_branch_in_tx(&mut tx, &task_id, source_branch.as_deref())
+        .await
+        .context("persist re-dispatched task source branch")?;
+    tx.commit().await.context("commit re-dispatch tx")?;
+    Ok(Some(task_id))
 }
 
 /// `hangar issue create`: bootstrap a workspace if absent, then insert.
@@ -5055,6 +5171,91 @@ mod tests {
         assert!(
             json.contains("\"labels\":[\"bug\",\"p0\"]"),
             "json shows labels array: {json}"
+        );
+    }
+
+    /// In-product recovery: `issue update --assign <agent>` on an unassigned issue
+    /// that already carries a repo enqueues exactly ONE task for that agent — the
+    /// CLI counterpart of the daemon assign seam, so a stuck issue is recoverable
+    /// without filing a brand-new one.
+    ///
+    /// Mutation-provable: the issue starts with zero tasks and the only mutation is
+    /// the assign edit. Strip the `enqueue_assigned_task` call from
+    /// `run_issue_update` → zero task rows → this test goes red.
+    #[tokio::test]
+    async fn issue_update_assign_enqueues_recovery_task() {
+        use ainb_hangar_store::bootstrap;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        bootstrap::ensure_runtime(store.pool(), &bootstrap::default_runtime_id(), 1)
+            .await
+            .expect("ensure runtime");
+        let agent = bootstrap::create_agent(store.pool(), &ws, "worker", "claude", None)
+            .await
+            .expect("create agent");
+
+        // An UNASSIGNED issue that carries a repo (create persists it) — the shape
+        // of a failed/agent_error issue a user re-assigns to recover.
+        let HangarCommand::Issue(IssueCommand::Create(cargs)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "recover me",
+            "--repo",
+            "scratch",
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, cargs).await.expect("create issue");
+        let issue = IssueRepo::list_by_workspace_state(store.pool(), &ws, DEFAULT_ISSUE_STATE)
+            .await
+            .expect("list issues")
+            .into_iter()
+            .find(|i| i.title == "recover me")
+            .expect("created issue present");
+
+        let before: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .expect("count before");
+        assert_eq!(before, 0, "no task exists before the assignment");
+
+        // Post-creation assign — the seam the bug said only wrote the assignee.
+        let HangarCommand::Issue(IssueCommand::Update(uargs)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "update",
+            issue.id.as_str(),
+            "--assign",
+            agent.id.as_str(),
+        ]) else {
+            panic!("expected issue update");
+        };
+        run_issue_update(&store, uargs).await.expect("assign agent");
+
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .expect("count after");
+        assert_eq!(
+            count, 1,
+            "assigning an agent enqueues exactly one recovery task"
+        );
+        let task_agent: String =
+            sqlx::query_scalar("SELECT agent_id FROM agent_task_queue LIMIT 1")
+                .fetch_one(store.pool())
+                .await
+                .expect("read task agent");
+        assert_eq!(
+            task_agent, agent.id,
+            "the task routes to the assigned agent"
         );
     }
 
