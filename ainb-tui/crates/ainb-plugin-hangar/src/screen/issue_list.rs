@@ -328,6 +328,24 @@ impl WizardRow {
     }
 }
 
+/// One NAMED workspace agent the create wizard's Agent row can target (V3-F3).
+///
+/// Injected by the glue from the same `hangar/agents_list` snapshot the `a`
+/// assign picker uses (agent actors only — members are filtered out). `actor_ref`
+/// is the canonical `agent:<id>` form persisted as the new issue's assignee and
+/// carried as the run's assignee override, so the dispatch routes to THIS agent
+/// (not the alphabetically-first fallback). `label` is the display name.
+///
+/// When the roster is empty (a workspace with no named agents yet) the Agent row
+/// falls back to the [`AgentChip`] provider chips, so a create is never blocked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WizardAgent {
+    /// Canonical `agent:<id>` reference (the assignee wire form).
+    pub actor_ref: String,
+    /// Human-readable agent name shown on the row.
+    pub label: String,
+}
+
 /// The Issues create wizard (Phase 5): a single centered form showing every field
 /// at once — Title / Repo / Source / Target / Agent — with a focused-row cursor.
 ///
@@ -474,6 +492,11 @@ pub struct IssueListState {
     /// (favorites-first + recency order preserved). `scratch` is NOT in here —
     /// [`repo_candidates`] prepends it always.
     repos: Vec<RepoOption>,
+    /// The NAMED workspace-agent roster the wizard's Agent row cycles (V3-F3),
+    /// injected by the glue from the same `hangar/agents_list` snapshot the `a`
+    /// assign picker uses (agent actors only). Empty on a workspace with no named
+    /// agents, in which case the Agent row falls back to the provider chips.
+    agents: Vec<WizardAgent>,
     /// A transient status note (create/run dispatch feedback or failure),
     /// rendered on the bottom row and replaced by the next note / cleared when a
     /// new wizard opens. Errors surface HERE, never silently dropped.
@@ -511,6 +534,7 @@ impl Default for IssueListState {
             mode: IssueListMode::Normal,
             wizard: None,
             repos: Vec::new(),
+            agents: Vec::new(),
             note: None,
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
@@ -688,6 +712,19 @@ impl IssueListState {
     /// card-create dropdown draws from).
     pub fn set_repos(&mut self, repos: Vec<RepoOption>) {
         self.repos = repos;
+    }
+
+    /// Inject the NAMED workspace-agent roster the wizard's Agent row targets
+    /// (V3-F3), from the glue's cached `hangar/agents_list` snapshot (agent actors
+    /// only). Empty leaves the Agent row on the provider-chip fallback.
+    pub fn set_agents(&mut self, agents: Vec<WizardAgent>) {
+        self.agents = agents;
+    }
+
+    /// The NAMED workspace-agent roster the wizard's Agent row cycles (V3-F3).
+    #[must_use]
+    pub fn agents(&self) -> &[WizardAgent] {
+        &self.agents
     }
 
     /// The transient status note (dispatch feedback / failure), if any.
@@ -1011,9 +1048,16 @@ pub enum IssueListIntent {
         source_branch: Option<String>,
         /// The target branch a future PR lands INTO; `None` = unset.
         target_branch: Option<String>,
-        /// The provider agent wire token (`claude` / `codex` / `copilot`) —
-        /// always a real token, never empty.
-        agent: String,
+        /// The provider agent wire token (`claude` / `codex` / `copilot`) when the
+        /// Agent row fell back to the provider chips (no named agents in the
+        /// workspace); `None` when a NAMED agent was targeted instead (its own
+        /// provider drives the run — see [`Self::CreateAndRun::assignee`]).
+        agent: Option<String>,
+        /// The NAMED workspace agent targeted by the Agent row, as its canonical
+        /// `agent:<id>` ref (V3-F3): persisted as the new issue's assignee AND
+        /// carried as the run's assignee override so the dispatch routes to it.
+        /// `None` when the roster was empty and a provider chip was chosen instead.
+        assignee: Option<String>,
     },
     /// Delete the confirmed issue (63d): raised ONLY by Enter on the `x` RED
     /// confirm overlay. The plugin glue lifts it into `hangar/issue_delete`; the
@@ -1339,7 +1383,16 @@ fn wizard_cycle_value(
             wizard.repo_ref = Some(candidates[next].repo_ref.clone());
         }
         WizardRow::Agent => {
-            wizard.agent_cursor = ring_step(wizard.agent_cursor, AgentChip::ALL.len(), forward);
+            // Cycle the NAMED workspace-agent roster when the glue injected one
+            // (V3-F3); otherwise cycle the provider chips (the fallback for a
+            // workspace with no named agents). `agent_cursor` indexes whichever is
+            // active — the fixed roster length keeps the cursor in range.
+            let n = if state.agents.is_empty() {
+                AgentChip::ALL.len()
+            } else {
+                state.agents.len()
+            };
+            wizard.agent_cursor = ring_step(wizard.agent_cursor, n, forward);
         }
         WizardRow::Title
         | WizardRow::Brief
@@ -1493,6 +1546,18 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
     } else {
         Some(wizard.brief.clone())
     };
+    // The Agent row resolves to EITHER a named workspace agent (its `agent:<id>`
+    // ref becomes the issue's assignee + the run's assignee override, so dispatch
+    // routes to it) OR — when the roster is empty — a provider chip (today's
+    // deterministic fallback: no assignee, so the daemon resolves the workspace's
+    // first agent under the chosen provider). Exactly one of the two is set.
+    let (agent, assignee) = match state.agents.get(wizard.agent_cursor) {
+        Some(named) => (None, Some(named.actor_ref.clone())),
+        None => (
+            Some(AgentChip::at(wizard.agent_cursor).wire().to_string()),
+            None,
+        ),
+    };
     with_intent(
         next,
         IssueListIntent::CreateAndRun {
@@ -1504,7 +1569,8 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
             repo_ref,
             source_branch: opt(&wizard.source_branch),
             target_branch: opt(&wizard.target_branch),
-            agent: AgentChip::at(wizard.agent_cursor).wire().to_string(),
+            agent,
+            assignee,
         },
     )
 }
@@ -1645,7 +1711,15 @@ pub fn render_issue_list(
     // otherwise a transient dispatch note (launch feedback / failure) paints on
     // the bottom row.
     if let Some(wizard) = state.wizard() {
-        render_wizard(buf, area_w, col_top, bottom, wizard, &state.repos);
+        render_wizard(
+            buf,
+            area_w,
+            col_top,
+            bottom,
+            wizard,
+            &state.repos,
+            &state.agents,
+        );
     } else if let Some(pending) = state.confirm_delete() {
         // 63d: the RED delete-confirm overlay on the two bottom rows.
         render_confirm_delete(
@@ -1796,6 +1870,7 @@ fn render_wizard(
     bottom: u16,
     wizard: &CreateWizard,
     repos: &[RepoOption],
+    agents: &[WizardAgent],
 ) {
     let inset: u16 = 2;
     let max_w = area_w.saturating_sub(inset * 2);
@@ -1874,7 +1949,7 @@ fn render_wizard(
             y = y.saturating_add(1 + dropdown_rows);
             continue;
         }
-        render_wizard_field(buf, value_x, y, text_right, field, wizard, repos);
+        render_wizard_field(buf, value_x, y, text_right, field, wizard, repos, agents);
         y = y.saturating_add(1);
     }
 
@@ -2013,6 +2088,7 @@ const fn wizard_row_label(row: WizardRow) -> &'static str {
 /// row gets a `▶` marker + green value; the others a blank marker + soft-white.
 /// The Repo row expands the inline `@` dropdown when it is open; the Target row
 /// shows `(unset)` only when blank + unfocused.
+#[allow(clippy::too_many_arguments)]
 fn render_wizard_field(
     buf: &mut WireBuffer,
     x: u16,
@@ -2021,6 +2097,7 @@ fn render_wizard_field(
     row: WizardRow,
     wizard: &CreateWizard,
     repos: &[RepoOption],
+    agents: &[WizardAgent],
 ) {
     let focused = wizard.focus() == row;
     let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
@@ -2084,7 +2161,13 @@ fn render_wizard_field(
             put_card_str(buf, cx, y, &shown, value_colour, right, true);
         }
         WizardRow::Agent => {
-            let label = AgentChip::at(wizard.agent_cursor()).label();
+            // A named workspace agent when the roster is injected (V3-F3), else the
+            // provider-chip fallback label. `agent_cursor` indexes whichever list
+            // is active; an out-of-range cursor degrades to the provider chip.
+            let label = agents.get(wizard.agent_cursor()).map_or_else(
+                || AgentChip::at(wizard.agent_cursor()).label(),
+                |named| named.label.as_str(),
+            );
             put_card_str(buf, cx, y, label, value_colour, right, true);
         }
     }

@@ -409,8 +409,15 @@ pub struct HangarPlugin {
 struct WizardDispatch {
     /// The picked repo (REQUIRED): absolute path, `scratch`, or a remote ref.
     repo_ref: String,
-    /// The provider agent wire token (`claude` / `codex` / `copilot`).
-    agent: String,
+    /// The provider agent wire token (`claude` / `codex` / `copilot`) when the
+    /// Agent row fell back to provider chips; `None` when a NAMED agent was
+    /// targeted (its own provider drives the run — see [`Self::assignee`]).
+    agent: Option<String>,
+    /// The NAMED workspace agent targeted by the Agent row as its `agent:<id>`
+    /// ref (V3-F3): set on the `issue_update` assignee AND carried as the
+    /// `issue_run` assignee override, so the dispatch routes to it regardless of
+    /// which leg lands first. `None` when a provider chip was chosen instead.
+    assignee: Option<String>,
     /// The source branch the run branches FROM; `None` = repo default.
     source_branch: Option<String>,
     /// The target branch a future PR lands INTO; `None` = unset.
@@ -2538,6 +2545,7 @@ impl HangarPlugin {
             source_branch,
             target_branch,
             agent,
+            assignee,
         } = action;
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             self.screens.issue_list.set_note("create failed: daemon link is down");
@@ -2571,6 +2579,7 @@ impl HangarPlugin {
         self.wizard_dispatch_in_flight = Some(WizardDispatch {
             repo_ref,
             agent,
+            assignee,
             source_branch,
             target_branch,
         });
@@ -2684,11 +2693,21 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
+        // V3-F3: a NAMED-agent target persists as the issue's assignee (so the card
+        // shows the right owner and a later manual re-run resolves it) via
+        // `issue_update`, AND rides the `issue_run` as an explicit override, so the
+        // dispatch routes to it even though the daemon processes the two legs in
+        // order (same belt-and-suspenders discipline as the repo/branch overrides).
+        let assignee_update = dispatch.assignee.as_ref().map_or(
+            ainb_hangar_proto::snapshots::FieldUpdate::Keep,
+            |actor_ref| ainb_hangar_proto::snapshots::FieldUpdate::Set(actor_ref.clone()),
+        );
         let update = ainb_hangar_proto::snapshots::IssueUpdateParams {
             workspace_id: ws.clone(),
             issue_id: issue_id.clone(),
             repo_ref: Some(dispatch.repo_ref.clone()),
-            agent: Some(dispatch.agent.clone()),
+            agent: dispatch.agent.clone(),
+            assignee: assignee_update,
             source_branch: dispatch.source_branch.clone(),
             target_branch: dispatch.target_branch.clone(),
             ..Default::default()
@@ -2698,8 +2717,9 @@ impl HangarPlugin {
             issue_id,
             mode: "headless".to_string(),
             repo_ref: Some(dispatch.repo_ref),
-            agent: Some(dispatch.agent),
+            agent: dispatch.agent,
             source_branch: dispatch.source_branch,
+            assignee: dispatch.assignee,
         };
         for (id, method, params) in [
             (
