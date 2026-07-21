@@ -37,7 +37,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -172,12 +172,29 @@ impl DaemonConfig {
         // bound to it, so the claim loop (run_loop.rs, skipped when `None`) is
         // enabled out of the box. `HANGAR_DAEMON_RUNTIME_ID` still overrides.
         let runtime_id = Some(ainb_hangar_store::bootstrap::default_runtime_id());
-        let claude_path = std::env::var_os("HANGAR_CLAUDE_PATH")
-            .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
-        let codex_path = std::env::var_os("HANGAR_CODEX_PATH")
-            .map_or_else(|| PathBuf::from("codex"), PathBuf::from);
-        let copilot_path = std::env::var_os("HANGAR_COPILOT_PATH")
-            .map_or_else(|| PathBuf::from("copilot"), PathBuf::from);
+        // Resolve each provider path to an absolute, symlink-canonicalized
+        // binary ONCE here, before it ever reaches `RunnerConfig` and the
+        // sandbox profile generator. A bare default (`claude`/`codex`/`copilot`)
+        // is otherwise emitted into the Seatbelt profile as a meaningless
+        // `(literal "claude")` rule that the kernel never matches, so the OS
+        // sandbox denies exec of the real PATH-resolved binary (e.g. a
+        // `~/.local/bin/claude` symlink outside every system read root) and the
+        // task finalizes `failed` in milliseconds with an empty transcript.
+        let claude_path = resolve_provider_path(
+            std::env::var_os("HANGAR_CLAUDE_PATH")
+                .map_or_else(|| PathBuf::from("claude"), PathBuf::from),
+            "claude",
+        );
+        let codex_path = resolve_provider_path(
+            std::env::var_os("HANGAR_CODEX_PATH")
+                .map_or_else(|| PathBuf::from("codex"), PathBuf::from),
+            "codex",
+        );
+        let copilot_path = resolve_provider_path(
+            std::env::var_os("HANGAR_COPILOT_PATH")
+                .map_or_else(|| PathBuf::from("copilot"), PathBuf::from),
+            "copilot",
+        );
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
         let provider_max_runtime = env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
@@ -253,6 +270,50 @@ impl DaemonConfig {
     #[cfg(not(target_os = "macos"))]
     const fn default_sandbox() -> bool {
         true
+    }
+}
+
+/// Resolve a provider binary to an absolute, symlink-canonicalized path once at
+/// daemon startup, before it flows into [`RunnerConfig`] and the sandbox profile
+/// generator ([`ainb_hangar_sandbox`]).
+///
+/// A bare name (no path separator, the default `claude`/`codex`/`copilot`) is
+/// located on `$PATH`; an explicit `HANGAR_*_PATH` override is honored as given.
+/// Either way the result is canonicalized so the Seatbelt/Landlock profile
+/// references the real binary the OS will exec (e.g. a `~/.local/bin/claude`
+/// symlink into `~/.local/share/claude/versions/…`), which no system read root
+/// covers. If a bare name resolves nowhere on `$PATH`, falls back to the bare
+/// name and logs a warning so the otherwise-silent sandbox denial is
+/// diagnosable rather than a 40ms `agent_error` with an empty transcript.
+fn resolve_provider_path(raw: PathBuf, provider: &str) -> PathBuf {
+    let is_bare = raw.parent() == Some(Path::new(""));
+    let located = if is_bare {
+        match ainb_hangar_sandbox::find_on_path(&raw) {
+            Some(found) => found,
+            None => {
+                tracing::warn!(
+                    provider,
+                    name = %raw.display(),
+                    "provider binary not found on PATH; the OS sandbox will likely deny \
+                     exec; set the HANGAR_*_PATH override to an absolute binary path"
+                );
+                raw
+            }
+        }
+    } else {
+        raw
+    };
+    match std::fs::canonicalize(&located) {
+        Ok(abs) => abs,
+        Err(e) => {
+            tracing::warn!(
+                provider,
+                path = %located.display(),
+                error = %e,
+                "failed to canonicalize provider path; using as given"
+            );
+            located
+        }
     }
 }
 
@@ -2463,6 +2524,60 @@ mod tests {
         assert!(
             posture,
             "non-macOS: headless sandbox must default ON (Landlock runs the CLI fine)"
+        );
+    }
+
+    /// A bare provider name is resolved to an absolute binary via `$PATH`:
+    /// `sh` stands in for `claude`, reliably present on `$PATH` on any unix host.
+    /// Before this fix the bare `PathBuf::from("claude")` flowed unresolved into
+    /// the sandbox profile as a `(literal "claude")` rule the kernel never
+    /// matched.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_provider_path_resolves_bare_name_to_absolute() {
+        let resolved = resolve_provider_path(PathBuf::from("sh"), "claude");
+        assert!(
+            resolved.is_absolute(),
+            "bare provider name must resolve to an absolute path: {resolved:?}"
+        );
+        assert!(
+            resolved.is_file(),
+            "resolved provider path must be a real file: {resolved:?}"
+        );
+    }
+
+    /// An explicit override path is canonicalized (symlink-resolved) so the
+    /// profile references the real target the OS execs.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_provider_path_canonicalizes_explicit_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-claude");
+        std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join("claude-link");
+        symlink(&real, &link).unwrap();
+
+        let resolved = resolve_provider_path(link.clone(), "claude");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&real).unwrap(),
+            "explicit path must be symlink-canonicalized to its real target"
+        );
+        assert!(resolved.is_absolute());
+    }
+
+    /// A bare name absent from `$PATH` falls back to the bare name (and warns) so
+    /// the daemon still boots; the sandbox denial is diagnosable, not a panic.
+    #[test]
+    fn resolve_provider_path_falls_back_when_absent() {
+        let bare = PathBuf::from("definitely-not-a-real-provider-xyz123");
+        let resolved = resolve_provider_path(bare.clone(), "claude");
+        assert_eq!(
+            resolved, bare,
+            "an unresolvable bare name is returned as-is"
         );
     }
 
