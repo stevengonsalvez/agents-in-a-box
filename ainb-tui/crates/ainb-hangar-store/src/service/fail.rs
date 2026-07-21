@@ -171,6 +171,60 @@ impl FailTaskService {
         .await
     }
 
+    /// Transition `task_id` to `failed` like [`Self::fail`], additionally
+    /// persisting a human-readable `detail` into the `result` column so the
+    /// task-detail surface renders WHY the run failed. Legal source states are
+    /// `running` (runner failure) and `queued` (queued-TTL sweep) — the same set
+    /// [`Self::fail`] accepts.
+    ///
+    /// Where [`Self::fail`] records only the terminal + `reason`, this variant also
+    /// captures a diagnostic (e.g. the provider's captured stderr tail) so an
+    /// `agent_error` crash is diagnosable from stored evidence alone instead of
+    /// leaving `result` blank. The `detail` rides the `result` column as
+    /// `{"content": detail}` — the same
+    /// [`TaskResult`](ainb_hangar_core::result::TaskResult) shape a completed run
+    /// (and [`Self::fail_setup`]) writes — so the existing detail rendering
+    /// surfaces it with no special-casing.
+    ///
+    /// Idempotent, like [`Self::fail`].
+    ///
+    /// # Errors
+    ///
+    /// - [`FinalizeError::TerminalMismatch`] if the row is already `done` /
+    ///   `cancelled`.
+    /// - [`FinalizeError::IllegalState`] if the row is `dispatched` or absent.
+    /// - [`FinalizeError::Db`] on an underlying database error.
+    #[tracing::instrument(
+        name = "task.fail_with_detail",
+        skip(pool, detail, clock),
+        fields(task_id = %task_id, failure_reason = reason.as_db_str())
+    )]
+    pub async fn fail_with_detail(
+        pool: &SqlitePool,
+        task_id: &str,
+        reason: FailureReason,
+        detail: &str,
+        clock: &dyn HangarClock,
+    ) -> Result<FinalizeOutcome, FinalizeError> {
+        let now = clock.now_ms();
+        let reason_str = reason.as_db_str();
+        // Persist the diagnostic into `result` in the TaskResult shape so the
+        // task-detail surface renders it (a `content`-only JSON is a legal,
+        // round-tripping TaskResult).
+        let result_json = serde_json::json!({ "content": detail }).to_string();
+        finalize_idempotent(
+            pool,
+            task_id,
+            TaskState::Failed,
+            &[TaskState::Running, TaskState::Queued],
+            "UPDATE agent_task_queue \
+             SET status = 'failed', failure_reason = ?1, result = ?2, finished_at = ?3 \
+             WHERE id = ?4 AND status IN ('running','queued')",
+            move |q| q.bind(reason_str).bind(result_json).bind(now).bind(task_id),
+        )
+        .await
+    }
+
     /// Terminalise a task that faulted during PRE-RUN setup: `dispatched ->
     /// failed`, recording `reason`, a human-readable `message` (persisted into the
     /// `result` column so the task-detail surface shows WHY), and

@@ -215,6 +215,57 @@ fn agent_error_failure_does_not_spawn_a_child() {
 }
 
 // ---------------------------------------------------------------------------
+// STDERR-TAIL-IN-RESULT (REGRESSION): an agent_error crash persists the runner's
+// captured stderr tail into the `result` column, so the failure is diagnosable
+// from stored evidence alone. Before the fix `finalize_failure` called the
+// no-message `FailTaskService::fail`, leaving `result` blank for every crash.
+// ---------------------------------------------------------------------------
+
+#[test]
+fn agent_error_persists_captured_stderr_tail_into_result() {
+    if !can_run_tripwire() {
+        skip("retry/timeout e2e tripwire (stderr-tail leg)");
+        return;
+    }
+
+    let daemon = spawn_seeded_daemon(&write_stderr_marker_fake_claude, &[]);
+    let hangar_dir = daemon.hangar_dir();
+    let task_id = "agent-error-stderr-e2e-task";
+    enqueue_queued_task(&hangar_dir, task_id);
+
+    // Wait for the row to fail with reason = agent_error (exit 1, no success
+    // terminal), then assert the runner's captured stderr survived into `result`.
+    let reason = poll(
+        &hangar_dir,
+        Instant::now() + Duration::from_secs(60),
+        |pool_dir| {
+            let (status, reason) = status_and_reason(pool_dir, task_id);
+            (status.as_deref() == Some("failed")).then_some(reason)
+        },
+    )
+    .unwrap_or_else(|| {
+        panic!(
+            "stderr-marker task never reached `failed`; last = {:?}",
+            status_and_reason(&hangar_dir, task_id)
+        )
+    });
+    assert_eq!(
+        reason.as_deref(),
+        Some("agent_error"),
+        "the fake exits 1 with no success terminal → agent_error"
+    );
+
+    // REGRESSION: the finalize seam must persist the captured stderr into `result`
+    // so the crash is diagnosable from the DB alone. Before the fix `result` was
+    // blank for the agent_error path.
+    let result = read_result(&hangar_dir, task_id);
+    assert!(
+        result.as_deref().is_some_and(|r| r.contains(STDERR_MARKER)),
+        "the failed row's `result` must carry the captured stderr marker {STDERR_MARKER:?}, got {result:?}"
+    );
+}
+
+// ---------------------------------------------------------------------------
 // TIMEOUT (POSITIVE): a provider that sleeps past the deadline is killed and the
 // row is failed with reason = timeout, within a bounded budget.
 // ---------------------------------------------------------------------------
@@ -411,6 +462,25 @@ fn write_agent_error_fake_claude(dir: &Path) -> PathBuf {
     )
 }
 
+/// A distinctive marker the stderr-tail fake writes to STDERR; the regression
+/// test asserts it survives into the failed row's `result` column. Contains no
+/// single-quote so it embeds cleanly into the single-quoted `/bin/sh` echo.
+const STDERR_MARKER: &str = "STDERR_MARKER_9f3a2b: claude panicked at src/foo.rs:42";
+
+/// Write an executable fake `claude` that prints [`STDERR_MARKER`] to STDERR then
+/// exits 1 with no success terminal (agent_error). The runner must capture that
+/// stderr tail and the finalize seam must persist it into `result`.
+fn write_stderr_marker_fake_claude(dir: &Path) -> PathBuf {
+    let body = format!(
+        "#!/bin/sh\n\
+         echo '{{\"type\":\"system\",\"session_id\":\"stderr-marker\"}}'\n\
+         echo '{STDERR_MARKER}' >&2\n\
+         echo '{{\"type\":\"result\",\"content\":\"i give up\"}}'\n\
+         exit 1\n"
+    );
+    write_executable(dir, "fake-claude-stderr-marker.sh", &body)
+}
+
 /// Write an executable fake `claude` that echoes a system line then blocks well
 /// past any test-sane provider deadline, so the daemon must kill it on timeout.
 fn write_blocking_fake_claude(dir: &Path) -> PathBuf {
@@ -444,6 +514,20 @@ fn read_status(hangar_dir: &Path, task_id: &str) -> Option<String> {
             .fetch_optional(store.pool())
             .await
             .expect("query task status")
+    })
+}
+
+/// Read the `result` column for `task_id`, or `None` if the row is absent or the
+/// column is NULL. Opens a fresh pool each call.
+fn read_result(hangar_dir: &Path, task_id: &str) -> Option<String> {
+    block_on(async {
+        let store = ainb_hangar_store::Store::open_in(hangar_dir).await.expect("open result store");
+        sqlx::query_scalar::<_, Option<String>>("SELECT result FROM agent_task_queue WHERE id = ?")
+            .bind(task_id)
+            .fetch_optional(store.pool())
+            .await
+            .expect("query task result")
+            .flatten()
     })
 }
 
