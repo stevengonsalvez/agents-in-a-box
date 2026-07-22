@@ -1338,8 +1338,16 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
     match key {
         // Enter on the Brief inserts a NEWLINE (multi-line editing) and must NOT
         // fire create; every other row's Enter is the existing commit point.
+        // Guard the empty buffer: Enter with nothing typed is a no-op, never a
+        // seeded leading `\n`. That newline would otherwise reach
+        // `issue.description` byte-verbatim (see `wizard_try_create`, which sends
+        // the brief EXACTLY as typed and only trims to detect all-blank),
+        // displacing any leading `/name` skill line off position 0 and breaking
+        // headless dispatch under `claude -p`.
         WizardKey::Enter if wizard.focus == WizardRow::Brief => {
-            wizard.brief.push('\n');
+            if !wizard.brief.is_empty() {
+                wizard.brief.push('\n');
+            }
             set_wizard(state, wizard)
         }
         WizardKey::Enter => wizard_try_create(state, wizard),
@@ -2829,6 +2837,44 @@ mod tests {
             painted_row_span(&s) > empty_span,
             "card must grow for a multi-line brief ({} !> {empty_span})",
             painted_row_span(&s)
+        );
+    }
+
+    /// Enter on an EMPTY Brief must be a no-op — never seed a leading `\n`. That
+    /// stray newline would flow byte-verbatim into `issue.description` and shove a
+    /// leading `/name` skill line off position 0, breaking headless `claude -p`
+    /// dispatch. Enter AFTER typed text still inserts a newline for genuine
+    /// multi-line editing, and no leading newline ever appears.
+    #[test]
+    fn wizard_brief_enter_on_empty_does_not_seed_leading_newline() {
+        // Open the wizard, focus the Brief row.
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+
+        // Enter on the empty buffer: no-op (RED before the fix — would be "\n").
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_eq!(
+            s.wizard().unwrap().brief(),
+            "",
+            "Enter on an empty Brief must not seed a leading newline"
+        );
+        // Enter still does NOT fire create — the wizard is still open.
+        assert!(s.wizard().is_some(), "Enter on Brief must not create");
+
+        // Type text, Enter (inserts a newline), type more: the embedded newline is
+        // preserved and there is no leading newline.
+        let s = type_into(&s, "Read");
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        let s = type_into(&s, "the docs");
+        assert_eq!(
+            s.wizard().unwrap().brief(),
+            "Read\nthe docs",
+            "mid-content Enter must preserve embedded newlines with no leading \\n"
+        );
+        assert!(
+            !s.wizard().unwrap().brief().starts_with('\n'),
+            "brief must never begin with a newline"
         );
     }
 
