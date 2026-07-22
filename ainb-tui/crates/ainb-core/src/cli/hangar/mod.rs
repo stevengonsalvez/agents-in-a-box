@@ -3361,11 +3361,55 @@ fn resolve_daemon_launch() -> (std::path::PathBuf, Vec<&'static str>) {
     if let Some(p) = std::env::var_os(DAEMON_BIN_ENV).filter(|p| !p.is_empty()) {
         return (std::path::PathBuf::from(p), Vec::new());
     }
-    if let Ok(exe) = std::env::current_exe() {
+    let exe = std::env::current_exe().ok();
+    resolve_daemon_launch_for(exe.as_deref())
+}
+
+/// Modification time of `path`, or `None` if it can't be read.
+fn file_mtime(path: &std::path::Path) -> Option<std::time::SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// Is a sibling `ainb-hangar-daemon` fresh enough to prefer over the self-exec
+/// fallback, given the sibling's and this `ainb`'s modification times?
+///
+/// The daemon library is compiled INTO `ainb`, so the self-exec fallback
+/// (`ainb hangar daemon run`) always executes code exactly as fresh as this
+/// binary. The standalone sibling is therefore only a nicety — and a *stale*
+/// one is actively harmful: a plain `cargo build` (default-members) historically
+/// rebuilt only `ainb`, leaving an older `ainb-hangar-daemon` beside it, so
+/// `start` silently launched pre-fix daemon code. We consequently prefer the
+/// sibling ONLY when it is at least as new as `ainb`; an older sibling is
+/// treated as a stale build and skipped in favour of the fresh embedded daemon.
+/// When either mtime is unreadable we degrade to trusting the sibling, preserving
+/// the prior behaviour for layouts where file times are unavailable.
+fn sibling_daemon_is_fresh(
+    sibling_mtime: Option<std::time::SystemTime>,
+    exe_mtime: Option<std::time::SystemTime>,
+) -> bool {
+    match (sibling_mtime, exe_mtime) {
+        (Some(sibling), Some(exe)) => sibling >= exe,
+        _ => true,
+    }
+}
+
+/// The `current_exe`-parameterised core of [`resolve_daemon_launch`], split out
+/// so the sibling-vs-self-exec decision is unit-testable without depending on
+/// the test runner's own executable path. `exe` is the resolved path of the
+/// running `ainb` (`None` iff `current_exe` failed).
+fn resolve_daemon_launch_for(
+    exe: Option<&std::path::Path>,
+) -> (std::path::PathBuf, Vec<&'static str>) {
+    if let Some(exe) = exe {
         if let Some(dir) = exe.parent() {
             let sibling = dir.join("ainb-hangar-daemon");
             if sibling.exists() {
-                return (sibling, Vec::new());
+                if sibling_daemon_is_fresh(file_mtime(&sibling), file_mtime(exe)) {
+                    return (sibling, Vec::new());
+                }
+                // Stale sibling (older than this `ainb`): don't silently launch
+                // pre-fix daemon code. Self-exec the fresh embedded daemon.
+                return (exe.to_path_buf(), vec!["hangar", "daemon", "run"]);
             }
         }
     }
@@ -3374,7 +3418,10 @@ fn resolve_daemon_launch() -> (std::path::PathBuf, Vec<&'static str>) {
     }
     // Self-exec fallback. `current_exe` failing is effectively unreachable;
     // degrade to the bare `ainb` name resolved by the OS if it does.
-    let me = std::env::current_exe().unwrap_or_else(|_| std::path::PathBuf::from("ainb"));
+    let me = exe.map_or_else(
+        || std::path::PathBuf::from("ainb"),
+        std::path::Path::to_path_buf,
+    );
     (me, vec!["hangar", "daemon", "run"])
 }
 
@@ -4961,6 +5008,83 @@ mod tests {
         assert_eq!(daemon_version_skew(Some("1.16.0"), "1.16.0"), None);
         assert_eq!(daemon_version_skew(None, "1.16.0"), None);
         assert_eq!(daemon_version_skew(Some(""), "1.16.0"), None);
+    }
+
+    /// The freshness predicate: a sibling at least as new as `ainb` is fresh; an
+    /// older sibling is stale; an unreadable mtime degrades to trusting it.
+    #[test]
+    fn sibling_daemon_freshness_prefers_a_sibling_no_older_than_ainb() {
+        use std::time::{Duration, SystemTime};
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        let newer = base + Duration::from_secs(3600);
+        // Sibling newer or equal → fresh.
+        assert!(sibling_daemon_is_fresh(Some(newer), Some(base)));
+        assert!(sibling_daemon_is_fresh(Some(base), Some(base)));
+        // Sibling older than ainb → stale.
+        assert!(!sibling_daemon_is_fresh(Some(base), Some(newer)));
+        // Either mtime unknown → degrade to trusting the sibling.
+        assert!(sibling_daemon_is_fresh(None, Some(base)));
+        assert!(sibling_daemon_is_fresh(Some(base), None));
+    }
+
+    /// Set a file's mtime to an absolute instant (Rust 1.75+ `set_modified`).
+    fn set_mtime(path: &std::path::Path, when: std::time::SystemTime) {
+        std::fs::File::options()
+            .write(true)
+            .open(path)
+            .unwrap()
+            .set_modified(when)
+            .unwrap();
+    }
+
+    /// The build-skew guard: with a sibling `ainb-hangar-daemon` OLDER than the
+    /// spawning `ainb` present, `start`'s launch resolution must NOT run it — it
+    /// falls back to self-exec (`ainb hangar daemon run`, the fresh embedded
+    /// daemon) instead of the stale sibling. This is the regression that let
+    /// pre-#441 daemon code keep serving after a plain `cargo build`.
+    #[test]
+    fn resolve_daemon_launch_skips_a_sibling_older_than_ainb() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("ainb");
+        let sibling = dir.path().join("ainb-hangar-daemon");
+        std::fs::write(&exe, b"ainb").unwrap();
+        std::fs::write(&sibling, b"daemon").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        // Sibling built BEFORE ainb — the stale-build signature.
+        set_mtime(&sibling, base);
+        set_mtime(&exe, base + Duration::from_secs(3600));
+
+        let (bin, args) = resolve_daemon_launch_for(Some(&exe));
+        assert_eq!(
+            args,
+            vec!["hangar", "daemon", "run"],
+            "a sibling older than ainb must not be launched"
+        );
+        assert_eq!(bin, exe, "self-exec must run this very ainb binary");
+    }
+
+    /// The companion: a sibling at least as new as `ainb` IS launched directly
+    /// (empty argv), so the freshness guard doesn't defeat the standalone binary
+    /// on a clean co-build.
+    #[test]
+    fn resolve_daemon_launch_uses_a_sibling_no_older_than_ainb() {
+        use std::time::{Duration, SystemTime};
+        let dir = tempfile::tempdir().unwrap();
+        let exe = dir.path().join("ainb");
+        let sibling = dir.path().join("ainb-hangar-daemon");
+        std::fs::write(&exe, b"ainb").unwrap();
+        std::fs::write(&sibling, b"daemon").unwrap();
+        let base = SystemTime::UNIX_EPOCH + Duration::from_secs(1_000_000);
+        set_mtime(&exe, base);
+        set_mtime(&sibling, base + Duration::from_secs(3600));
+
+        let (bin, args) = resolve_daemon_launch_for(Some(&exe));
+        assert!(
+            args.is_empty(),
+            "a fresh sibling should be launched directly"
+        );
+        assert_eq!(bin, sibling);
     }
 
     /// Build the real `ainb` clap surface (root + every registered command,

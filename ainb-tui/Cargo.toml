@@ -32,7 +32,11 @@ members = [
     "crates/ainb-plugin-hangar",
     "xtask",
 ]
-default-members = ["crates/ainb-core"]
+# `ainb hangar daemon start` launches the sibling `ainb-hangar-daemon` binary
+# (built beside `ainb` in the same target dir). It MUST be in default-members so
+# a plain `cargo build` rebuilds it alongside `ainb` — otherwise the sibling
+# goes stale and `start` silently runs pre-fix daemon code (the build-skew bug).
+default-members = ["crates/ainb-core", "crates/ainb-hangar-daemon"]
 # Phase 7c: burndown returns as a subprocess plugin (native binary,
 # stdio JSON-RPC over the SDK). session-reader is being re-shipped in
 # parallel under agents-in-a-box-4is.
