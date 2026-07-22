@@ -1596,7 +1596,19 @@ fn finalize_outcome(
                 }
             }
             _ => {
-                tracing::warn!(provider = backend.name(), reason = "agent_error", exit_code = ?exit_code, "runner_failed");
+                // hangar-e2e-5: surface BOTH captured tails on the generic
+                // agent-error arm. A confinement-killed headless run (exit 65)
+                // often produces an empty structured transcript, so the tails are
+                // the only forensic trail; logging just `exit_code` here left
+                // triage blind whenever the failure had no structured terminal.
+                tracing::warn!(
+                    provider = backend.name(),
+                    reason = "agent_error",
+                    exit_code = ?exit_code,
+                    stderr_tail = %result.stderr_tail,
+                    stdout_tail = %result.stdout_tail,
+                    "runner_failed"
+                );
                 RunOutcome::Failed {
                     reason: FailureReason::AgentError,
                     result,
