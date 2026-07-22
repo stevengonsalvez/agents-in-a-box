@@ -1351,6 +1351,29 @@ impl Runner {
     {
         let child_env = compose_child_env(source_env, extra_env);
 
+        // hangar-e2e-6 observability: record WHAT is about to spawn — the
+        // RESOLVED provider binary, the cwd, and the child-env KEY SET — before
+        // the process runs. A failure that destroys all output (claude exiting
+        // 65 in 36ms with zero stdout/stderr) is otherwise unattributable: there
+        // is no record of which binary ran, where, or whether the auth env was
+        // injected. Values are NEVER logged (the secret-leak boundary
+        // `compose_child_env` enforces); only key NAMES, plus explicit presence
+        // flags for the two auth vars whose absence is the usual headless-dispatch
+        // failure mode.
+        let env_keys: Vec<&str> = child_env.iter().map(|(k, _)| k.as_str()).collect();
+        let has_claude_home = child_env.iter().any(|(k, _)| k == "CLAUDE_HOME");
+        let has_claude_code_oauth_token =
+            child_env.iter().any(|(k, _)| k == "CLAUDE_CODE_OAUTH_TOKEN");
+        tracing::info!(
+            provider = spec.backend.name(),
+            binary = %program.display(),
+            cwd = %location.cwd.display(),
+            env_keys = ?env_keys,
+            has_claude_home,
+            has_claude_code_oauth_token,
+            "provider_spawn: resolved binary + cwd + child-env key set"
+        );
+
         let log_path = env.logs.join(spec.log_file);
         let log_file = std::fs::OpenOptions::new()
             .create(true)
@@ -1546,7 +1569,7 @@ fn finalize_outcome(
             if reason == FailureReason::ProviderContractDrift {
                 log_contract_drift(backend, "unrecognised result subtype", &result.stdout_tail);
             } else {
-                tracing::warn!(provider = backend.name(), ?reason, exit_code = ?exit_code, "runner_failed_structured");
+                tracing::warn!(provider = backend.name(), ?reason, exit_code = ?exit_code, stdout_tail = %result.stdout_tail, stderr_tail = %result.stderr_tail, "runner_failed_structured");
             }
             RunOutcome::Failed { reason, result }
         }
@@ -1577,6 +1600,8 @@ fn finalize_outcome(
                         provider = backend.name(),
                         ?reason,
                         reason_detail = "no_success_terminal",
+                        stdout_tail = %result.stdout_tail,
+                        stderr_tail = %result.stderr_tail,
                         "runner_failed"
                     );
                 }
@@ -1588,6 +1613,8 @@ fn finalize_outcome(
                 tracing::warn!(
                     provider = backend.name(),
                     reason = "runtime_offline",
+                    stdout_tail = %result.stdout_tail,
+                    stderr_tail = %result.stderr_tail,
                     "runner_failed"
                 );
                 RunOutcome::Failed {

@@ -1080,6 +1080,7 @@ async fn execute_claimed(
                 pool,
                 &task,
                 &run_wd,
+                &env,
                 ainb_hangar_store::service::fail::FailureReason::SpawnTimeout,
                 crate::runner::RunnerResult::default(),
                 provider,
@@ -1230,7 +1231,7 @@ async fn execute_claimed(
             // running -> failed: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
             finalize_failure(
-                pool, &task, &run_wd, reason, result, provider, clock, stats, events,
+                pool, &task, &run_wd, &env, reason, result, provider, clock, stats, events,
             )
             .await?;
         }
@@ -1551,10 +1552,52 @@ async fn finalize_success(
 ///
 /// Propagates a [`persist_session_id`] or [`FailTaskService`] FSM/DB fault. The
 /// progress comment and the retry evaluation are best-effort and never error.
+/// Compose the human-readable `result`-column detail for a failed run from the
+/// runner's captured output tails, or `None` when the runner captured NOTHING
+/// (the bare `fail` path with no stored detail).
+///
+/// BOTH tails are folded, each under its own labelled section, because the two
+/// providers surface their terminal error on different streams: `claude
+/// --output-format stream-json` writes the failing `{"type":"result",...}` line
+/// to STDOUT, while a crashed CLI or a shell wrapper writes to STDERR. Persisting
+/// only stderr (the previous behaviour) therefore dropped exactly the evidence an
+/// exit-65 claude agent_error leaves behind, making it undiagnosable from the DB.
+fn failure_detail(
+    reason: ainb_hangar_store::service::fail::FailureReason,
+    stdout_tail: &str,
+    stderr_tail: &str,
+) -> Option<String> {
+    let stdout = stdout_tail.trim();
+    let stderr = stderr_tail.trim();
+    if stdout.is_empty() && stderr.is_empty() {
+        return None;
+    }
+    let mut detail = format!("run failed ({}):", reason.as_db_str());
+    if !stdout.is_empty() {
+        detail.push_str("\n\nstdout:\n");
+        detail.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        detail.push_str("\n\nstderr:\n");
+        detail.push_str(stderr);
+    }
+    Some(detail)
+}
+
+/// hangar-e2e-6 escape hatch: when `HANGAR_KEEP_FAILED_RUNS=1` the daemon
+/// PRESERVES a failed run's worktree + provider-log dir instead of tearing the
+/// clean worktree down, so the e2e loop can inspect the transcript
+/// (`{logs}/claude.jsonl`) of a zero-output failure. Off by default — production
+/// keeps the keep-if-dirty teardown so a clean failed run never leaks disk.
+fn keep_failed_runs() -> bool {
+    std::env::var_os("HANGAR_KEEP_FAILED_RUNS").is_some_and(|v| v == "1")
+}
+
 async fn finalize_failure(
     pool: &SqlitePool,
     task: &Task,
     run_wd: &crate::workdir_provision::RunWorkdir,
+    env: &crate::execenv::ExecEnv,
     reason: ainb_hangar_store::service::fail::FailureReason,
     result: crate::runner::RunnerResult,
     provider: &str,
@@ -1565,17 +1608,17 @@ async fn finalize_failure(
     // Persist the session id (if any) before failing so a retry can resume the
     // provider conversation.
     persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
-    // When the runner captured a stderr tail (a crashed / gave-up provider),
+    // When the runner captured any output tail (a crashed / gave-up provider),
     // persist it into the `result` column (in the TaskResult `{"content": ...}`
     // shape the detail surface renders) so the failure is diagnosable from stored
     // evidence alone. The bare `fail` path left `result` blank, making every
-    // `agent_error` crash undiagnosable from the DB. No tail → the plain `fail`.
-    let fail_outcome = {
-        let tail = result.stderr_tail.trim();
-        if tail.is_empty() {
-            FailTaskService::fail(pool, &task.id, reason, clock).await
-        } else {
-            let detail = format!("run failed ({}):\n\n{tail}", reason.as_db_str());
+    // `agent_error` crash undiagnosable from the DB. Both tails are folded:
+    // `claude --output-format stream-json` writes its terminal ERROR line to
+    // STDOUT, so persisting only stderr dropped exactly the evidence an exit-65
+    // agent_error leaves behind. Neither tail → the plain `fail`.
+    let fail_outcome = match failure_detail(reason, &result.stdout_tail, &result.stderr_tail) {
+        None => FailTaskService::fail(pool, &task.id, reason, clock).await,
+        Some(detail) => {
             FailTaskService::fail_with_detail(pool, &task.id, reason, &detail, clock).await
         }
     };
@@ -1670,7 +1713,23 @@ async fn finalize_failure(
     // rerun / inspection); a clean one is removed. Done BEFORE the retry spawn so
     // a retryable failure's fresh child re-provisions a clean worktree rather than
     // resuming into this run's residue.
-    teardown_workdir(run_wd, &task.id);
+    //
+    // hangar-e2e-6: the escape hatch preserves BOTH the worktree AND the
+    // provider-log dir for a clean (zero-work) failure so the e2e loop can read
+    // `{logs}/claude.jsonl` — the transcript a 36ms exit-65 crash would otherwise
+    // lose to keep-if-dirty teardown. The retry child is a NEW task row with a
+    // NEW full-id-keyed worktree, so keeping this run's residue never collides.
+    if keep_failed_runs() {
+        tracing::warn!(
+            task_id = %task.id,
+            reason = reason.as_db_str(),
+            worktree = %run_wd.path().display(),
+            logs_dir = %env.logs.display(),
+            "HANGAR_KEEP_FAILED_RUNS=1: preserving failed run's worktree + provider logs for inspection"
+        );
+    } else {
+        teardown_workdir(run_wd, &task.id);
+    }
     // F06 retry chain: a retryable (infra) failure with attempts remaining
     // spawns a fresh `queued` child carrying `parent_task_id`, which the next
     // claim pass re-dispatches. A terminal reason (`agent_error` / `user_cancel`
@@ -2509,6 +2568,65 @@ fn warn_danger_access(task: &Task, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// hangar-e2e-6: a failed run whose runner captured BOTH stdout and stderr
+    /// tails must surface BOTH in the persisted failure detail. This is the core
+    /// observability fix: `claude --output-format stream-json` writes its terminal
+    /// error line to STDOUT, so the previous stderr-only detail left an exit-65
+    /// `agent_error` diagnosable ONLY if the crash happened to also write stderr —
+    /// which the 36ms zero-output failure did not.
+    #[test]
+    fn failure_detail_folds_both_stdout_and_stderr_tails() {
+        use ainb_hangar_store::service::fail::FailureReason;
+        let detail = failure_detail(
+            FailureReason::AgentError,
+            r#"{"type":"result","subtype":"error_during_execution","error":"boom"}"#,
+            "node: fatal: could not start",
+        )
+        .expect("both tails present → a Some detail");
+        assert!(
+            detail.contains("agent_error"),
+            "detail must name the reason: {detail}"
+        );
+        assert!(
+            detail.contains("boom"),
+            "detail must carry the STDOUT tail (claude writes its error there): {detail}"
+        );
+        assert!(
+            detail.contains("node: fatal: could not start"),
+            "detail must carry the STDERR tail: {detail}"
+        );
+    }
+
+    /// The regression this fix closes: a failure with output ONLY on stdout (the
+    /// exit-65 claude shape — a stream-json error line, empty stderr) must still
+    /// produce a stored detail. The old code keyed solely on the stderr tail and
+    /// returned the blank `fail` for exactly this case.
+    #[test]
+    fn failure_detail_surfaces_stdout_only_failures() {
+        use ainb_hangar_store::service::fail::FailureReason;
+        let detail = failure_detail(
+            FailureReason::AgentError,
+            r#"{"type":"result","subtype":"error","error":"exit 65"}"#,
+            "   ",
+        )
+        .expect("a stdout-only failure must still produce a detail");
+        assert!(
+            detail.contains("exit 65"),
+            "the stdout error line must survive into the detail: {detail}"
+        );
+    }
+
+    /// No captured output on EITHER stream → `None` (the bare `fail` with no
+    /// stored detail), and whitespace-only tails count as empty.
+    #[test]
+    fn failure_detail_is_none_when_no_output_captured() {
+        use ainb_hangar_store::service::fail::FailureReason;
+        assert!(
+            failure_detail(FailureReason::AgentError, "   ", "\n\t").is_none(),
+            "whitespace-only tails must be treated as no captured evidence"
+        );
+    }
 
     /// hangar-e2e-4: the `HANGAR_DAEMON_DISABLE_SANDBOX` override wins in both
     /// directions regardless of platform default — `=1` forces the headless OS
