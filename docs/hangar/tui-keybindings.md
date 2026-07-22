@@ -118,10 +118,24 @@ pair (`hangar/skill_attach` returns an error).
 
 ## Settings (`,`)
 
+Six stacked sections: Daemon, Providers, Keys, Workspaces, Members,
+Notifications. `j` / `k` switch sections; `J` / `K` (and `↑` / `↓`) move the
+row cursor within the focused section.
+
 | Key | Action |
 |-----|--------|
-| `j` / `k` | Move between sections / rows |
-| `Enter` / `Space` | Edit / toggle the selected row (section-dependent) |
+| `j` / `k` | Move between sections |
+| `J` / `K` / `↑` / `↓` | Move the row cursor within the section |
+| `Enter` / `Space` | Edit / toggle the focused row — Daemon only |
+| `Space` / `t` | Toggle the selected kind×channel cell — Notifications only |
+
+Edit/toggle is section-scoped. On **Daemon**, `Enter` or `Space` acts on the
+focused config knob by type: toggle a bool, cycle an enum, or open the numeric
+overlay for an int. On **Notifications**, `Space` / `t` toggles the selected
+kind×channel cell (`h` / `l` move the channel column; `g` flips the edit scope
+between the host-wide global rule and the active-workspace override). The
+Providers, Keys, Workspaces, and Members panes are read-only here (their
+mutations are CLI-first, e.g. `ainb hangar member set-role`).
 
 ## Agent picker (modal)
 
