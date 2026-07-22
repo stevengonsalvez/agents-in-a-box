@@ -238,6 +238,9 @@ const ISSUE_DELETE_REQ_ID: i64 = 53;
 /// run(s) & delete"). On success the plugin retries the `issue_delete`; an error
 /// surfaces as a transient issue-list note.
 const ISSUE_CANCEL_ACTIVE_REQ_ID: i64 = 54;
+/// JSON-RPC id for the `hangar/task_retry` force-requeue raised by the Task Kanban
+/// failed-column / task-detail `R` (a human override of the auto-retry gate).
+const TASK_RETRY_REQ_ID: i64 = 55;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -1967,6 +1970,30 @@ impl HangarPlugin {
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
             let _ = host.log_info(format!("hangar: task transition send failed: {e}")).await;
+        }
+    }
+
+    /// Fire the deferred `hangar/task_retry` raised by the Task Kanban failed-column
+    /// `R` / task-detail `R` — the operator's manual force-requeue of a terminal
+    /// task.
+    ///
+    /// Unlike the automatic retry seam (which correctly refuses `agent_error` and a
+    /// capped chain), this is a HUMAN override: the daemon requeues ANY terminal
+    /// reason. On success the daemon emits `TaskQueued`, which drives the plugin's
+    /// snapshot re-fetch so the fresh attempt card appears in the queued column —
+    /// the visible confirmation. A send failure is logged but non-fatal.
+    async fn apply_task_retry_action(&mut self, host: &HostClient, task_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "task_id": task_id });
+        let Ok(body) = encode_request(TASK_RETRY_REQ_ID, daemon_methods::HANGAR_TASK_RETRY, params)
+        else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: task retry send failed: {e}")).await;
         }
     }
 
@@ -4275,6 +4302,13 @@ impl Plugin for HangarPlugin {
         // board and fire `hangar/task_transition` over the daemon socket.
         if let Some(action) = self.screens.take_pending_kanban_action() {
             self.apply_kanban_action(host, action).await;
+        }
+        // Drain any deferred manual task-retry (`R` on a terminal card in the Task
+        // Kanban failed column / task-detail) and fire `hangar/task_retry` over the
+        // daemon socket; the daemon's TaskQueued push re-fetches the board so the
+        // fresh queued attempt appears.
+        if let Some(task_id) = self.screens.take_pending_task_retry_action() {
+            self.apply_task_retry_action(host, task_id).await;
         }
         // P4 / D8: drain any deferred board mutation (`⇧←/→`, `x`, `n`, `m`) raised
         // by the Boards screen and fire the matching `hangar/board_*` over the

@@ -649,6 +649,7 @@ async fn handle(
         | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req, events).await,
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
+        methods::HANGAR_TASK_RETRY => handle_task_retry(pool, req, events).await,
         methods::HANGAR_ISSUE_CREATE => handle_issue_create(pool, req, events).await,
         methods::HANGAR_ISSUE_DELETE => handle_issue_delete(pool, req, events).await,
         methods::HANGAR_ISSUE_CANCEL_ACTIVE => handle_issue_cancel_active(pool, req, events).await,
@@ -977,6 +978,79 @@ async fn handle_task_transition(
         }
     }
     Ok(serde_json::json!({}))
+}
+
+/// Dispatch `hangar/task_retry`: force-requeue one terminal task at an operator's
+/// explicit request (the Task Kanban failed-column / task-detail `R`).
+///
+/// Unlike the automatic retry seam in the run loop, this is a HUMAN override:
+/// [`RetryService::force_requeue`] bypasses both the `RetryDisposition` reason gate
+/// and the `max_attempts` cap, so a terminal `agent_error` (which never
+/// auto-retries) still spawns a fresh `queued` child. On a spawn we emit
+/// [`HangarEvent::TaskQueued`] so every subscribed board re-pulls its task list and
+/// the new attempt card appears in the queued column — the visible confirmation of
+/// the requeue.
+///
+/// Workspace-scoped like the sibling mutators: an unknown workspace or a foreign /
+/// missing task id is an `INVALID_PARAMS` rejection (a mutating handler must not
+/// silently no-op on a typo). A non-terminal task answers `{ new_task_id: null }`
+/// (nothing to requeue). A per-(issue, agent) pending-slot collision surfaces the
+/// store error.
+async fn handle_task_retry(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::task::TaskRepo;
+    use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
+
+    let params: ainb_hangar_proto::snapshots::TaskRetryParams =
+        parse_params(req, "{ workspace_id, task_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let task = TaskRepo::get_by_id(pool, &params.task_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .filter(|t| t.workspace_id == ws.as_str())
+        .ok_or_else(|| {
+            invalid_params(&format!("no task `{}` in this workspace", params.task_id))
+        })?;
+
+    let new_id = SystemIdGen.new_ulid();
+    let decision = RetryService::force_requeue(pool, &task, &new_id, &SystemClock)
+        .await
+        .map_err(|e| store_err(&e))?;
+
+    let new_task_id = match decision {
+        RetryDecision::Spawned { new_task_id } => {
+            // Announce the fresh attempt so boards re-pull and surface the queued
+            // card. TaskQueued needs the issue + agent ids; a task with no issue
+            // still requeues, it just publishes no queue event (the next snapshot
+            // pull reconciles either way).
+            if let (Ok(task_id), Some(issue_raw)) = (
+                ainb_hangar_core::ids::TaskId::from_str(new_task_id.clone()),
+                task.issue_id.clone(),
+            ) {
+                if let (Ok(issue_id), Ok(agent_id)) = (
+                    ainb_hangar_core::ids::IssueId::from_str(issue_raw),
+                    AgentId::from_str(task.agent_id.clone()),
+                ) {
+                    events.emit(
+                        ws.as_str(),
+                        ainb_hangar_proto::events::HangarEvent::TaskQueued {
+                            task_id,
+                            issue_id,
+                            agent_id,
+                        },
+                    );
+                }
+            }
+            Some(new_task_id)
+        }
+        RetryDecision::DoNotRetry => None,
+    };
+
+    to_value(&ainb_hangar_proto::snapshots::TaskRetryResult { new_task_id })
 }
 
 /// Map a committed task transition onto its wire [`HangarEvent`] (e38.2).

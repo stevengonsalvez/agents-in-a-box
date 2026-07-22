@@ -164,6 +164,19 @@ pub const HANGAR_TASKS_LIST: &str = "hangar/tasks_list";
 /// transition is an `INVALID_PARAMS` error.
 pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
 
+/// `hangar/task_retry` — force-requeue one terminal task at an operator's explicit
+/// request (the Task Kanban failed-column / task-detail `R`).
+///
+/// Params: [`crate::snapshots::TaskRetryParams`] (`{ workspace_id, task_id }`).
+/// Result: `{ new_task_id: String }` on a fresh queued attempt, or
+/// `{ new_task_id: null }` when the task was not terminal (nothing to requeue).
+/// Unlike the automatic retry, this is a HUMAN override: it bypasses the
+/// `RetryDisposition` reason gate AND the `max_attempts` cap, so a terminal
+/// `agent_error` (which never auto-retries) still re-queues a `parent_task_id`-
+/// chained child. Workspace-scoped: a foreign task id is an `INVALID_PARAMS`
+/// rejection (the mutating handler must not silently no-op on a typo).
+pub const HANGAR_TASK_RETRY: &str = "hangar/task_retry";
+
 /// `hangar/issue_update` — edit fields of one existing issue (e38.8).
 ///
 /// Params: [`crate::snapshots::IssueUpdateParams`]
@@ -966,6 +979,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_SET_ENABLED,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
+    HANGAR_TASK_RETRY,
     HANGAR_ISSUE_UPDATE,
     HANGAR_ISSUE_LABEL_ATTACH,
     HANGAR_ISSUE_LABEL_DETACH,
@@ -1126,6 +1140,7 @@ mod tests {
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
+            HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
@@ -1192,6 +1207,7 @@ mod tests {
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
+            HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,

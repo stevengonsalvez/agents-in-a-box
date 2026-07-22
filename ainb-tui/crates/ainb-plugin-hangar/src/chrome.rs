@@ -179,7 +179,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
-        Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move")],
+        Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move"), ("R", "retry")],
         Screen::Boards => vec![
             ("↵", "run"),
             ("a", "attach"),

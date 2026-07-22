@@ -536,6 +536,13 @@ pub struct ScreenStates {
     /// `render` pass to fire `hangar/task_transition` over the daemon socket
     /// (P8.4). `None` when idle.
     pub pending_kanban_action: Option<KanbanAction>,
+    /// A manual task-retry RPC raised by the Task Kanban failed-column `R` or the
+    /// task-detail `R`, awaiting the `render` pass to fire `hangar/task_retry` over
+    /// the daemon socket. Carries the terminal task id to force-requeue. `None`
+    /// when idle. Unlike the automatic retry seam, this is an operator override:
+    /// the daemon requeues ANY terminal reason (including `agent_error`, which
+    /// never auto-retries).
+    pub pending_task_retry_action: Option<String>,
     /// An issue-assign RPC raised by the agent-picker modal (Enter on a picked
     /// actor), awaiting the `render` pass to fire `hangar/issue_update` over the
     /// daemon socket (e38.8). `None` when idle.
@@ -969,6 +976,12 @@ impl ScreenStates {
     /// Take the pending Kanban card-move RPC raised by the board, if any (P8.4).
     pub const fn take_pending_kanban_action(&mut self) -> Option<KanbanAction> {
         self.pending_kanban_action.take()
+    }
+
+    /// Take the pending manual task-retry RPC raised by the Kanban / task-detail
+    /// `R`, if any.
+    pub const fn take_pending_task_retry_action(&mut self) -> Option<String> {
+        self.pending_task_retry_action.take()
     }
 
     /// Take the pending issue-assign RPC raised by the agent picker, if any
@@ -1546,8 +1559,9 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
     };
     let out = reduce_task_detail(&td, ev);
     // Lift the compose-submit intent into a deferred `hangar/comment_add` RPC the
-    // `render` pass drains + fires (the sync key router can't `await`). Retry /
-    // cancel intents are not yet wired to an RPC, so they fold as before.
+    // `render` pass drains + fires (the sync key router can't `await`). The retry
+    // intent lifts into a deferred `hangar/task_retry`; the cancel intent still
+    // folds as before.
     let mut nav = None;
     match &out.intent {
         Some(TaskDetailIntent::AddComment { issue_id, body }) => {
@@ -1555,6 +1569,13 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
                 issue_id: issue_id.as_str().to_string(),
                 body: body.clone(),
             });
+        }
+        // The `R` retry on a terminal task lifts into a deferred `hangar/task_retry`
+        // the `render` pass fires — a HUMAN override that force-requeues ANY
+        // terminal reason (the daemon bypasses the auto-retry disposition gate). The
+        // freshly-queued attempt then surfaces on the board via the TaskQueued push.
+        Some(TaskDetailIntent::RetryTask(task_id)) => {
+            states.pending_task_retry_action = Some(task_id.as_str().to_string());
         }
         // 63l.5: confirmed `x` delete arms the SAME deferred `hangar/issue_delete`
         // the issue-list `x` uses, then navigates back to the issue list so the
@@ -1577,6 +1598,21 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
 /// pass drains `pending_kanban_action` and fires it). `h/j/k/l` mirror the arrows
 /// for vi-style navigation.
 fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
+    // `R` force-requeues the focused card when it is terminal (the failed /
+    // cancelled columns). A HUMAN override: it lifts a deferred `hangar/task_retry`
+    // the `render` pass fires, which the daemon force-requeues regardless of the
+    // auto-retry disposition (so a terminal `agent_error` — which never
+    // auto-retries — still gets a fresh attempt). A non-terminal focused card (or
+    // an empty column) is a no-op. Intercepted before the focus/drag reducer so it
+    // never folds into navigation.
+    if key.code == (KeyCode::Char { ch: 'R' }) {
+        if let Some(card) = states.kanban.focused_card() {
+            if matches!(card.status.as_str(), "failed" | "cancelled") {
+                states.pending_task_retry_action = Some(card.task_id.clone());
+            }
+        }
+        return;
+    }
     let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
     let ev = match &key.code {
         KeyCode::Left => Some(if shift {
@@ -2100,5 +2136,78 @@ mod filter_chip_route_tests {
         assert_eq!(states.issue_list.filter(), FilterChip::Mine);
         route_issue_list(&mut states, &key(KeyCode::BackTab));
         assert_eq!(states.issue_list.filter(), FilterChip::Agents);
+    }
+}
+
+#[cfg(test)]
+mod kanban_retry_route_tests {
+    use super::*;
+    use ainb_hangar_proto::events::TaskCardRow;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn card(id: &str, status: &str) -> TaskCardRow {
+        TaskCardRow {
+            id: ainb_hangar_core::ids::TaskId::from_str(id).unwrap(),
+            workspace_id: "ws".into(),
+            agent_id: "agent-1".into(),
+            issue_id: Some("issue-1".into()),
+            status: status.into(),
+            priority: 0,
+            created_at: 0,
+            branch: None,
+            pr_url: None,
+            pr_status: None,
+        }
+    }
+
+    /// Focus the failed column (index 3 of [Queued, Running, Done, Failed]).
+    fn focus_failed_column(states: &mut ScreenStates) {
+        for _ in 0..3 {
+            route_kanban(states, &key(KeyCode::Right));
+        }
+    }
+
+    /// `R` on a focused FAILED card lifts a `hangar/task_retry` for that task —
+    /// the in-product recovery for a terminal `agent_error` that never auto-retries.
+    /// Regression guard for `manual-retry-noop-on-agent-error-task`: before the `R`
+    /// arm in `route_kanban` the key folded into navigation and no attempt row was
+    /// ever requeued.
+    #[test]
+    fn r_on_failed_card_lifts_task_retry() {
+        let mut states = ScreenStates::default();
+        states.set_tasks(&[card("01HANGARTASKFAILED0001", "failed")]);
+        focus_failed_column(&mut states);
+
+        route_kanban(&mut states, &key(KeyCode::Char { ch: 'R' }));
+
+        assert_eq!(
+            states.take_pending_task_retry_action().as_deref(),
+            Some("01HANGARTASKFAILED0001"),
+            "R on a failed card must lift a task_retry for that task id"
+        );
+    }
+
+    /// `R` on a non-terminal (queued) card is a no-op: only a terminal card can be
+    /// requeued, so a live run is never forked.
+    #[test]
+    fn r_on_queued_card_is_a_noop() {
+        let mut states = ScreenStates::default();
+        states.set_tasks(&[card("01HANGARTASKQUEUED0001", "queued")]);
+        // Focus stays on the queued column (index 0), where the card lives.
+
+        route_kanban(&mut states, &key(KeyCode::Char { ch: 'R' }));
+
+        assert!(
+            states.take_pending_task_retry_action().is_none(),
+            "R on a non-terminal card must not lift a retry"
+        );
     }
 }

@@ -864,6 +864,25 @@ pub struct TaskTransitionParams {
     pub to_status: String,
 }
 
+/// Params for [`crate::methods::HANGAR_TASK_RETRY`]: the workspace (tenant guard)
+/// and the terminal task to force-requeue at an operator's explicit request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRetryParams {
+    /// The subscribed workspace the task must belong to.
+    pub workspace_id: String,
+    /// The terminal task to requeue.
+    pub task_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_TASK_RETRY`]: the id of the freshly-queued
+/// child attempt, or `None` when the task was not terminal (nothing to requeue).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRetryResult {
+    /// The `parent_task_id`-chained child that was enqueued, or `None` when the
+    /// task was not in a terminal state.
+    pub new_task_id: Option<String>,
+}
+
 /// A three-state edit instruction for a nullable issue field (e38.8).
 ///
 /// A bare `Option<T>` collapses "leave this field unchanged" and "clear this
