@@ -87,12 +87,50 @@ description, and a run-history line — with the live transcript below.
 |-----|--------|
 | `j` / `k` | Scroll |
 | `c` | Compose a comment (Enter submits, Esc cancels) |
-| `R` | Retry the task (only once terminal) |
+| `R` | Retry the task (only once terminal). Whether a retry spawns anything is decided by the failure reason — see [Task failures](#task-failures); the NoRetry reasons refuse. |
 | `X` | Cancel the running task (confirm overlay) |
 | `x` | Delete the bound issue (confirm overlay; the daemon rejects a delete with active tasks and the rejection surfaces as a note) |
 
 Issue deletion here and on the Issue list mirrors the `ainb hangar issue delete`
 CLI command (dry-run preview without `--yes`).
+
+### Task failures
+
+When a task lands in `failed`, the recorded `failure_reason` says why, and it
+decides whether a retry (`R` here, or `ainb hangar task retry <id>`) does
+anything. Retries classify three ways:
+
+- **Resume** — the infrastructure failed, not the agent; the retry resumes the
+  same provider session.
+- **Fresh** — the conversation is poisoned (the model wedged on its own
+  context); the retry starts a new session instead of resuming.
+- **No retry** — the failure is deterministic or terminal by intent; a retry is
+  refused (`not retried (non-retryable or attempts exhausted)`), so pressing
+  `R` on these does nothing useful.
+
+| Reason | What triggers it | Retry |
+|--------|------------------|-------|
+| `agent_error` | The agent ran and errored or gave up. | No retry |
+| `user_cancel` | A human cancelled the run. | No retry |
+| `timeout` | A TTL sweeper expired a stalled row (queued / dispatched / running TTL) with no recorded cause. | No retry |
+| `spawn_error` | The provider binary could not be spawned — e.g. the configured `claude` / `codex` path does not resolve. The agent never started. | No retry |
+| `spawn_timeout` | The running→spawn setup phase wedged past its 60s umbrella bound (`HANGAR_SPAWN_SETUP_TIMEOUT_MS` override) — e.g. a headless keychain read that never returns. A wedged environment does not self-heal on re-dispatch. | No retry |
+| `provision_error` | Pre-run setup failed before any provider was reached — the issue's repo could not be cloned / worktree-added, or the exec environment could not be prepared. Deterministic: re-fails identically. | No retry |
+| `provider_contract_drift` | The provider's structured event stream carried no recognised terminal — a CLI shape the parser does not know. The fix is a parser update, not a re-run. | No retry |
+| `unknown` | Unclassified failure. | No retry |
+| `runtime_offline` | The runtime hosting the agent went offline mid-run. | Retry, resume session |
+| `runtime_recovery` | The task failed during daemon recovery (orphan reclaim). | Retry, resume session |
+| `iteration_limit` | The agent exhausted its per-run iteration budget without finishing. | Retry, fresh session |
+| `api_invalid_request` | The provider rejected the request as malformed (e.g. an Anthropic 400 `invalid_request_error`). | Retry, fresh session |
+| `semantic_inactivity` | The run stalled with no semantic progress (no new tool calls / output). | Retry, fresh session |
+
+Every retry chain is capped by the task's `max_attempts` regardless of reason.
+
+**Where the real error surfaces:** a `provision_error` writes the underlying
+setup error (the failed clone / worktree message) into the task's `result`, so
+the task-detail screen shows it directly. A `spawn_timeout`'s cause is logged by
+the daemon — check the Logs screen (`L`) or the daemon log. For agent-side
+failures the transcript on this screen carries the run output.
 
 ## Skill manager (`3`) — P6.5
 
