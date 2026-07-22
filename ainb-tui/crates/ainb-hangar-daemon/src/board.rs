@@ -21,8 +21,10 @@
 //! with no matching auto-move column is a silent no-op.
 
 use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::task::Task;
 use sqlx::SqlitePool;
 
@@ -68,6 +70,119 @@ pub async fn auto_move_after_transition(pool: &SqlitePool, task: &Task, new_stat
         }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "board auto-move failed; proceeding");
+        }
+    }
+}
+
+/// Forward-advance the task's ISSUE lifecycle `state` to match a task-status
+/// token — the durable-issue twin of [`auto_move_after_transition`].
+///
+/// The default hangar issue board buckets cards by `issue.state` alone
+/// (`hangar/issues_list` serves it verbatim), while the board auto-move only
+/// touches durable `board_card` rows — which the default screen never
+/// materialises. So a plain dispatched task walked its FSM (`running` → `done`)
+/// with its issue frozen at `todo`/`open`, stranding the card in Todo through the
+/// whole run and after it finished. This seam makes `issue.state` authoritative:
+/// the running transition promotes the issue to `in_progress` and terminal
+/// success to `done`, so the next snapshot re-pull renders the correct column.
+///
+/// `new_state` is a task-status token (`running` / `done` / …). Only the two that
+/// have an issue-lifecycle meaning advance the issue:
+/// * `running` → [`IssueLifecycle::InProgress`]
+/// * `done`    → [`IssueLifecycle::Done`]
+///
+/// Every other token (`failed` / `cancelled` / an unknown) is a deliberate no-op:
+/// a failed run must NOT mark its issue `done`, and the issue simply stays where
+/// it is.
+///
+/// # Advance-only
+///
+/// The write is guarded to only ever move the issue FORWARD along the canonical
+/// column order ([`IssueLifecycle::order`]): a target at or behind the issue's
+/// current column is skipped. This mirrors the `if issue.state == …` guard the
+/// PR-merge snapshot uses (snapshots.rs) so a manually-set or PR-merged terminal
+/// state is never regressed — e.g. a re-run's `running` transition can never drag
+/// an already-`done` issue back to `in_progress`.
+///
+/// # Best-effort
+///
+/// A NULL-issue chat task, a missing issue row, or a store fault is logged and
+/// swallowed exactly like the board auto-move: the task's FSM state has already
+/// committed and a lifecycle write must never down the claim loop.
+pub async fn advance_issue_lifecycle_after_transition(
+    pool: &SqlitePool,
+    task: &Task,
+    new_state: &str,
+) {
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    let target = match new_state {
+        "running" => IssueLifecycle::InProgress,
+        "done" => IssueLifecycle::Done,
+        // `failed` / `cancelled` / unknown carry no forward issue-lifecycle
+        // meaning — leave the issue where it is.
+        _ => return,
+    };
+    let current = match IssueRepo::get_by_id(pool, issue_id).await {
+        Ok(Some(issue)) => issue,
+        // The issue vanished (or never existed) — nothing to advance.
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle advance: reading issue failed; proceeding");
+            return;
+        }
+    };
+    // Advance-only: never regress an issue that already sits at or beyond the
+    // target column (a manually-set or PR-merged terminal state, or the same
+    // state twice → idempotent no-op).
+    if target.order() <= IssueLifecycle::for_state(&current.state).order() {
+        return;
+    }
+    match IssueRepo::update_state(pool, issue_id, target.as_str()).await {
+        Ok(()) => tracing::info!(
+            task_id = %task.id,
+            issue_id = %issue_id,
+            from = %current.state,
+            to = target.as_str(),
+            "issue lifecycle advanced"
+        ),
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle advance failed; proceeding");
+        }
+    }
+}
+
+/// Forward-advance the task's ISSUE lifecycle by its issue's AGGREGATE terminal
+/// outcome — the durable-issue twin of [`auto_move_after_terminal`], gated on the
+/// same drain.
+///
+/// A squad card fans out N tasks onto one issue, so a single sibling reaching
+/// `done` must not mark the whole issue `done` while others still run.
+/// [`TaskRepo::issue_aggregate_terminal_state`] returns `None` until the active
+/// set drains, then the aggregate token (`failed` > `cancelled` > `done`). Only
+/// the aggregate `done` promotes the issue (via
+/// [`advance_issue_lifecycle_after_transition`], which no-ops on `failed` /
+/// `cancelled`), so a failed or still-running set never advances the issue.
+///
+/// Best-effort — every fault is logged and swallowed (the task's terminal state
+/// has already committed).
+pub async fn advance_issue_lifecycle_after_terminal(pool: &SqlitePool, task: &Task) {
+    use ainb_hangar_store::repo::task::TaskRepo;
+
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    let Ok(ws) = WorkspaceId::from_str(task.workspace_id.clone()) else {
+        tracing::warn!(task_id = %task.id, "issue lifecycle terminal advance: empty workspace id; skipping");
+        return;
+    };
+    match TaskRepo::issue_aggregate_terminal_state(pool, ws.as_str(), issue_id).await {
+        // Active set not drained — a sibling still runs; do not advance yet.
+        Ok(None) => {}
+        Ok(Some(state)) => advance_issue_lifecycle_after_transition(pool, task, &state).await,
+        Err(e) => {
+            tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle terminal advance: aggregate read failed");
         }
     }
 }

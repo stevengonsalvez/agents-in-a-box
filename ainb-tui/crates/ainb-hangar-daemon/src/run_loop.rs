@@ -952,6 +952,11 @@ async fn execute_claimed(
         // P4 / D8: auto-move the task's issue card into any board's `running`
         // auto-move column.
         crate::board::auto_move_after_transition(pool, &task, "running").await;
+        // The default issue board buckets by `issue.state`, not the durable
+        // `board_card` the auto-move touches — so also forward-advance the issue's
+        // own lifecycle to `in_progress`, or a plain task's card strands in Todo
+        // through its whole run. Advance-only + best-effort.
+        crate::board::advance_issue_lifecycle_after_transition(pool, &task, "running").await;
         // e38.6: write a durable, agent-authored "started" comment to the task's
         // issue so the agent's activity survives beyond the bounded transcript
         // buffer. A NULL-issue chat task writes nothing.
@@ -1423,6 +1428,10 @@ async fn finalize_success(
     // card does not slide to `done` while its leader / other members still run.
     // Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // Twin the durable-card move on the issue's own `state` (the default board
+    // buckets by it): an aggregate-`done` set promotes the issue to `done`;
+    // failed/cancelled sets leave it untouched. Advance-only + best-effort.
+    crate::board::advance_issue_lifecycle_after_terminal(pool, task).await;
     // tcp T4 / F7 + FANOUT-SEMANTICS: a task of this card just went terminal, so
     // re-evaluate every card that DEPENDS on it — a dependent whose blockers are now
     // all FINISHED (their active sets drained with a `done`) becomes runnable (the 🔒
@@ -1552,6 +1561,10 @@ async fn finalize_failure(
     // and one failed sibling lands the whole card in the `failed` column (aggregate
     // precedence). Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // Twin on `issue.state`: the aggregate is `failed`/`cancelled` here (this
+    // task's own failure is in the set), so this no-ops — but it keeps the
+    // lifecycle seam symmetric with the board seam. Advance-only + best-effort.
+    crate::board::advance_issue_lifecycle_after_terminal(pool, task).await;
     // tcp T4 / F7 + FANOUT-SEMANTICS: this member going terminal may have drained a
     // blocker whose set already held a `done` sibling — re-evaluate dependents so a
     // squad blocker that finished on a mixed done/failed drain still unblocks. The
@@ -1656,6 +1669,9 @@ async fn finalize_setup_failure(
         clock,
     );
     crate::board::auto_move_after_terminal(pool, task).await;
+    // Twin on `issue.state`; no-ops on the failed aggregate, kept for symmetry
+    // with the board seam. Advance-only + best-effort.
+    crate::board::advance_issue_lifecycle_after_terminal(pool, task).await;
     crate::board::unblock_dependents_after_terminal(pool, task).await;
     progress_comment::emit_checkpoint(
         pool,
