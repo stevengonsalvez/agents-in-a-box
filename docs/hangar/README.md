@@ -36,6 +36,9 @@ docs/hangar/
 
 ## How to read
 
+0. Using the shipped TUI? `tui-keybindings.md` documents every screen's keys,
+   including the [task-failure taxonomy](tui-keybindings.md#task-failures)
+   (what each `failure_reason` means and whether a retry helps).
 1. Start with `hangar-plan.html` — the synthesized proposal with inline diagrams.
 2. Drill into individual reports under `research/` for evidence and citations.
 3. The diagrams in `diagrams/` are also usable standalone.
