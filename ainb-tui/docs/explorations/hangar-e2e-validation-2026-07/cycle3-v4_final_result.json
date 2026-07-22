@@ -1,0 +1,62 @@
+{
+  "phase": "V4 Pattern B (handover, HARD) - cycle 3",
+  "pass": false,
+  "artifacts": {
+    "v4Branch": "ainb/01KY4G2FWSSF19D45KHKAGZW1J",
+    "v3Branch": "ainb/01KY4F2P90AHH53FJ5HQ3Q70GT",
+    "v4IssueId": "01KY4G2FTD12KZDM5BDQV8E0BG",
+    "v4TaskId": "01KY4G2FWSSF19D45KHKAGZW1J",
+    "cloneDir": "/Users/stevengonsalvez/.claude/jobs/cc83c6a4/tmp/hangar-e2e/home-c3/clones/agents-in-a-box-36e96b65f7a6",
+    "evidenceDir": "/Users/stevengonsalvez/.claude/jobs/cc83c6a4/tmp/hangar-e2e/cycle-3"
+  },
+  "wizard_drive_result": {
+    "status": "SUCCEEDED - every field set and visually confirmed via tmux capture-pane before submit",
+    "fields_confirmed": {
+      "Title": "Review the docs fix c3",
+      "Brief": "full reviewer instructions, confirmed complete + unfocused after settle",
+      "Linked": "https://github.com/stevengonsalvez/agents-in-a-box/issues/429",
+      "Repo": "agents-in-a-box (resolved local clone, selected via @ dropdown)",
+      "Source": "ainb/01KY4F2P90AHH53FJ5HQ3Q70GT (typed after clearing the 'main' default, confirmed on-screen verbatim before Enter)",
+      "Target": "main (left default)",
+      "Agent": "reviewer (cycled via Right from claude -> dev -> reviewer, confirmed on-screen)"
+    },
+    "note": "Long literal text (Brief ~700 chars) and rapid-fire arrow keys need generous settle time (2-3s) before the next capture reads true state — the TUI's per-keystroke redraw lags behind tmux send-keys -l bursts; the same intermediate capture that looked wrong (stale Brief text, stuck 'dev' after only 1-2 Right presses) resolved correctly on a later re-capture. Not itself a bug, just a driving-harness timing lesson."
+  },
+  "hard_failure": {
+    "id": "V4-F1 (Source branch override is silently dropped -> Pattern B handover never happens)",
+    "summary": "The create-wizard's 'Source' field is fully functional in the UI (typed, displayed, submitted) but the resulting dispatched task branches from main's tip, NOT from the typed source branch. The reviewer agent's worktree therefore never contained the V3 dev agent's docs-fix commits, breaking the entire Pattern-B handover premise: 'the branch is the baton'.",
+    "assertion_1_sqlite_FAILED": "issue.source_branch = NULL and agent_task_queue.source_branch = NULL for the new issue/task, despite the wizard visibly showing 'Source ainb/01KY4F2P90AHH53FJ5HQ3Q70GT' immediately before Enter was pressed. Expected: stored = 'ainb/01KY4F2P90AHH53FJ5HQ3Q70GT'.",
+    "assertion_2_git_FAILED": "git worktree for the new task (ainb/01KY4G2FWSSF19D45KHKAGZW1J) was created at commit 5cc46072 -- IDENTICAL to main's tip -- not at 29a8245c (V3's branch tip). `git merge-base --is-ancestor ainb/01KY4F2P90AHH53FJ5HQ3Q70GT ainb/01KY4G2FWSSF19D45KHKAGZW1J` returns non-zero (NOT an ancestor). V3's commits are NOT reachable from V4's branch.",
+    "downstream_symptom": "Because the reviewer's worktree had no docs-fix diff to review, the reviewer agent (with nothing to critique) improvised and committed its own doc regeneration (3a6bc451 'docs(cli): regenerate CLI reference from current binary') directly on top of main inside what it believed was the review branch -- a plausible-looking but semantically wrong outcome that would have silently passed a shallow 'did it commit something' check. This is exactly the kind of failure the harness's fail-closed doctrine (git ancestry, not exit codes) is designed to catch.",
+    "confidence": "CONFIRMED (not hypothesis) for the observable failure (sqlite + git evidence, reproducible, both assertions independently checked). The EXACT line where the override value is lost is a hypothesis pending deeper trace -- code review traced the full client->wire->daemon chain and found no obvious break, meaning the bug is either a subtle runtime issue (ordering/race between the two RPC legs, or a serialization edge case) or in a segment not yet read line-by-line.",
+    "code_pointers_for_fix_agent": [
+      "crates/ainb-plugin-hangar/src/screen/issue_list.rs:~1594 (wizard_try_create builds IssueListIntent::CreateAndRun{ source_branch: opt(&wizard.source_branch), ... } -- confirmed correct: opt() only special-cases blank, not 'main')",
+      "crates/ainb-plugin-hangar/src/plugin.rs:~2530-2597 (apply_create_action stashes source_branch/target_branch into self.wizard_dispatch_in_flight; only fired on the issue_create reply)",
+      "crates/ainb-plugin-hangar/src/plugin.rs:~2680-2747 (fire_issue_dispatch: sends TWO RPCs -- hangar/issue_update THEN hangar/issue_run, sequentially over the same unix_socket_send; issue_run's IssueRunParams carries dispatch.source_branch as the override)",
+      "crates/ainb-hangar-daemon/src/rpc/mod.rs:1415 handle_issue_update -> issue_field_update_from_params (line 1573): CONFIRMED BUG #1 -- this fn builds IssueFieldUpdate{title,state,assignee,priority,due_date} and NEVER reads params.source_branch / params.target_branch at all, even though IssueUpdateParams has those fields on the wire. The update leg is a silent no-op for source/target branch -- issue.source_branch can never be persisted via issue_update as currently written.",
+      "crates/ainb-hangar-daemon/src/rpc/mod.rs:2845 handle_issue_run: DOES read params.source_branch into source_override and pass it into run_card(...) -- this leg should NOT depend on the (buggy) update leg per its own doc comment ('the run is correct even if the persist is still in flight').",
+      "crates/ainb-hangar-daemon/src/rpc/mod.rs:3082 run_card: computes source_branch = source_branch_override.or(card_source) and writes it via CardParityRepo::set_task_source_branch_in_tx(&mut tx, &task_id, source_branch.as_deref()) -- traced correct on paper.",
+      "NEXT STEP FOR FIX AGENT: since the client->wire->run_card chain reads correct in review but the DB proves the override arrived as None, instrument/trace params.source_branch as actually deserialized inside handle_issue_run for a live repro (add a tracing::info! at daemon entry), OR check for a request-id collision / stream_id race between the issue_update and issue_run sends (both fired back-to-back on the same stream_id without awaiting a reply in between -- verify the daemon's per-connection request dispatch doesn't drop/overwrite params when two requests share worker state)."
+    ]
+  },
+  "side_effects_stevie_should_know": [
+    "The broken V4 task (01KY4G2FWSSF19D45KHKAGZW1J) was left RUNNING in the cycle-3 sandboxed home when I stopped driving it further -- polling to a doomed terminal state (it can never satisfy the merge-base assertion regardless of outcome, since its worktree never had V3's commits) would have burned real claude API cost for zero additional signal. I stopped the cycle-3 daemon and killed my tmux session; the task's own agent process (if still running as a background job) was NOT explicitly killed -- Stevie or the next cycle's V0 rebuild should confirm no orphaned agent process survives before reusing home-c3."
+  ],
+  "run_log": [
+    "Restarted the cycle-3 daemon (was stopped); confirmed socket bound + migrations applied.",
+    "Confirmed V3's output branch ainb/01KY4F2P90AHH53FJ5HQ3Q70GT exists in the home-c3 clone with 2 docs commits (29a8245c, b29d6023) on top of main, and run_history shows the V3 task (01KY4F2P90AHH53FJ5HQ3Q70GT) outcome=success.",
+    "Launched the real TUI in tmux, drove 'g' -> Hangar -> 'c' -> New task wizard.",
+    "Typed Title, Brief (multi-line, ~700 chars), Linked issue URL -- each confirmed via capture-pane; learned the TUI needs 2-3s settle time after a long literal paste before the render catches up.",
+    "Picked Repo via @agents-in-a-box dropdown filter -> Down -> Enter, confirmed the resolved local-clone repo landed on the Repo row.",
+    "Cleared the Source row's 'main' default (4x Backspace) and typed 'ainb/01KY4F2P90AHH53FJ5HQ3Q70GT', confirmed verbatim on screen.",
+    "Left Target as 'main' default per spec.",
+    "Cycled Agent Right from 'claude' default to 'reviewer' (took 4 Right presses total across two commands due to render lag, not 3 as the roster length would suggest -- reconfirmed final state was stable 'reviewer' before submit).",
+    "Captured a full before-submit screenshot showing every field correct, then pressed Enter.",
+    "New card HGR-3 'Review the docs fix c3' appeared in the In Progress column within 3s.",
+    "sqlite query IMMEDIATELY revealed source_branch = NULL on both the issue and agent_task_queue rows -- the first failed assertion.",
+    "git worktree inspection confirmed the new branch ainb/01KY4G2FWSSF19D45KHKAGZW1J was checked out at main's exact tip (5cc46072), and `git merge-base --is-ancestor` proved V3's branch is NOT an ancestor -- the second, conclusive failed assertion.",
+    "Traced daemon log (no source_branch/issue_update/issue_run lines at INFO level -- daemon doesn't log RPC method names at that level, so the log was inconclusive) then traced the Rust source end-to-end (wizard -> plugin.rs dispatch stash -> issue_update/issue_run RPC construction -> daemon handlers -> run_card -> set_task_source_branch_in_tx), confirming ONE definite dead-code bug (issue_update drops source_branch/target_branch entirely) and leaving the issue_run leg's exact failure point as the next trace step for the fix agent.",
+    "Observed the reviewer agent had already committed a spurious, semantically-wrong commit (docs regen) directly on the broken branch -- concrete proof the failure isn't just a DB-column cosmetic issue, it corrupts the actual agent behavior.",
+    "Stopped the cycle-3 daemon and killed tmux session hangar-v4-c3-1784709673 by exact name."
+  ]
+}

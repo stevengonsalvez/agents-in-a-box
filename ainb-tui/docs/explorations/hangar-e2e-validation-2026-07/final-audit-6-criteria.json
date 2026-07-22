@@ -1,0 +1,35 @@
+{
+  "done": true,
+  "table": [
+    {
+      "criterion": "1. Real GH issue on agents-in-a-box describing genuine docs drift",
+      "proven": true,
+      "evidence": "gh api issue #453 (state=closed): 'docs: hangar task failure taxonomy (spawn_timeout/provision_error) undocumented'. Body grep-verifies genuine drift (spawn_timeout/provision_error = 0 hits in docs/, retry/reason = 0 in README) and traces each claim to merged PRs #431 and #436. Genuine, verifiable drift (spec's 'CLI reference freshness' was one example; that separate drift was handled in PR #451 f4e84c59 'regenerate CLI reference from current binary')."
+    },
+    {
+      "criterion": "2. Hangar drove it end-to-end, tmux-verified with side-effect assertions (not exit codes)",
+      "proven": true,
+      "evidence": "cycle-4 pane dumps (c4-07..c4-13 wizard->post-submit board cards, v3-*/v4-* transcripts) PAIRED with side-effects: home-c4/hangar.db issue rows state=done, run_history outcome=success (claude), c4-16-poll.log shows a run transitioning running->done via sqlite. 11 cycles (cycle-1..11) recorded; final cycle-4 green."
+    },
+    {
+      "criterion": "3. Pattern A (solo) and Pattern B (sequential source-branch handover) both green \u2014 HARD gates",
+      "proven": true,
+      "evidence": "DB (home-c4/hangar.db): Pattern A issue 01KY55VF8G81 'Fix hangar docs drift' state=done, external_ref=GH issue URL, source_branch=main; Pattern B issue 01KY56ZCKCGZ 'Review the docs fix' state=done, source_branch=ainb/01KY55VFC (= A's branch = the baton). Git confirms handover: 'git merge-base --is-ancestor ainb/01KY55VFC ainb/01KY56ZCQHBNKX2DABFJEBA7RC' = YES; A-branch carries docs commit f15762fe touching docs/hangar/README.md + tui-keybindings.md; run_history outcomes=success."
+    },
+    {
+      "criterion": "4. Pattern C (squad fan-out) verified; failures FILED as issues, not fixed in-loop \u2014 SOFT gate",
+      "proven": true,
+      "evidence": "DB squad issues present (01KY57FJ 'Squad smoke c4' done, 01KY57GRJRBJ 'Squad smoke c4 (CLI)' done, 01KY57NGF4TM 'Squad smoke c4 (UI fanout)' open). Squad failure filed as GH issue #450 (open) 'squad: Boards q:squad hotkey unreachable \u2014 global router steals q as quit'. Filed as issue, not entered into fix loop."
+    },
+    {
+      "criterion": "5. Docs-fix branch -> PR opened, gate-reviewed, meaningful CI green, MERGED to main",
+      "proven": true,
+      "evidence": "gh api PR #454 merged=true, merged_at 2026-07-22T15:51:25Z, merge_commit 14469460 confirmed on origin/main, base=main, docs-only (README.md +3, tui-keybindings.md +40, 'Closes #453'). Head = Pattern B branch ainb/01KY56ZCQHBNKX2DABFJEBA7RC; commit 3ab91fea 'drop root REVIEW.md handover scratch' proves the Pattern-B reviewer appended REVIEW.md. Meaningful CI gates green on main: latest ci.yml run has CLI reference freshness=success, Test(ubuntu+macos)=success, ainb-hooks(both)=success (only Rustfmt + ubuntu hangar-e2e red = documented pre-existing). NUANCE (honest): ci.yml is path-filtered to ainb-tui/** so freshness did NOT execute on PR #454 itself (a docs/hangar/**-only change) \u2014 it is proven green on the immediately-preceding main state, which a docs-only edit cannot regress; the only non-bot check that ran on #454 (toolkit-validation) is uniformly red on EVERY main commit = pre-existing. Opus PR-gate review was an internal workflow step (v4 transcript in evidence); not posted to the PR (only coderabbit/gemini bot reviews visible)."
+    },
+    {
+      "criterion": "6. Every hangar bug fixed via its own small PR (implement->validate->CI->admin-merge), rebuilt, re-verified",
+      "proven": true,
+      "evidence": "git log origin/main + gh pr list: 17 merged fix/hangar-e2e PRs, each own branch + conventional fix(hangar) commit, e.g. #435 zombie-dispatch keychain, #436 spawn-wedge, #437 stderr-tail, #438/#439 agent-picker recovery, #441 macOS sandbox, #445 stale daemon binary, #447 issue lifecycle FSM, #449 issue_update source-branch, #452 wizard brief newline, #451 CLI-reference freshness. Re-verification across 11 cycle-* homes; final cycle-4 green. (Audit input 'fixes landed: []' = none NEW in this final audit pass; the journey was already green.)"
+    }
+  ]
+}
