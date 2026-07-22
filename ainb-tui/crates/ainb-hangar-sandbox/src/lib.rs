@@ -40,6 +40,7 @@
 //! and the workdir, both allowed) can branch on [`SandboxPolicy::disabled`] and
 //! [`Enforcement`] without touching this crate's internals.
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
 mod policy;
@@ -182,4 +183,109 @@ fn passthrough(program: &Path) -> SandboxedCommand {
 /// generated profile / ruleset references real, symlink-resolved paths.
 pub(crate) fn canonical_or_self(p: &Path) -> PathBuf {
     std::fs::canonicalize(p).unwrap_or_else(|_| p.to_path_buf())
+}
+
+/// Whether `p` is a bare program name: a single component with no path
+/// separator, e.g. `"claude"` (as opposed to `"./claude"` or `"/usr/bin/claude"`).
+/// Such a name is meaningless to the kernel's path-based sandbox rules: it must
+/// be resolved to the absolute binary the OS will actually exec.
+fn is_bare_name(p: &Path) -> bool {
+    p.parent() == Some(Path::new("")) && p.file_name().is_some()
+}
+
+/// Whether `p` exists as an executable regular file (used by the `PATH` search).
+#[cfg(unix)]
+fn is_executable_file(p: &Path) -> bool {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::metadata(p).is_ok_and(|m| m.is_file() && m.permissions().mode() & 0o111 != 0)
+}
+
+/// Whether `p` exists as a regular file (non-unix has no exec bit to check).
+#[cfg(not(unix))]
+fn is_executable_file(p: &Path) -> bool {
+    p.is_file()
+}
+
+/// Search `$PATH` for a bare executable `name`.
+///
+/// Returns the first entry that exists and is executable, or `None` for a
+/// non-bare path (it already names a location) or when nothing on `$PATH`
+/// matches.
+///
+/// Public so the daemon can resolve a bare provider name (the default
+/// `"claude"`/`"codex"`/`"copilot"`) to an absolute binary ONCE at startup,
+/// before the path ever reaches [`sandboxed_command`], and warn if resolution
+/// fails. This crate itself uses it as defense-in-depth ([`resolve_program`]) so
+/// a bare program name can never emit a meaningless `(literal "<bare-name>")`
+/// rule that matches nothing.
+#[must_use]
+pub fn find_on_path(name: &Path) -> Option<PathBuf> {
+    let path_var = std::env::var_os("PATH")?;
+    find_on_path_in(name, &path_var)
+}
+
+/// [`find_on_path`] against an explicit `$PATH` value, the injectable seam so
+/// the search is testable without mutating the process environment.
+fn find_on_path_in(name: &Path, path_var: &OsStr) -> Option<PathBuf> {
+    if !is_bare_name(name) {
+        return None;
+    }
+    std::env::split_paths(path_var)
+        .map(|dir| dir.join(name))
+        .find(|candidate| is_executable_file(candidate))
+}
+
+/// Resolve a program path for a sandbox profile to a real, absolute, symlink-
+/// canonicalized binary.
+///
+/// A bare name is located on `$PATH` first (so the profile references the actual
+/// binary the OS will exec, e.g. a `~/.local/bin/claude` symlink into
+/// `~/.local/share/claude/versions/…` that no system read root covers); anything
+/// else, or a bare name not found on `$PATH`, falls back to
+/// [`canonical_or_self`].
+///
+/// Defense-in-depth: the daemon already resolves provider paths at startup, but
+/// this guarantees a bare name can never survive into the emitted profile as a
+/// meaningless `(literal "<bare-name>")` allow rule.
+pub(crate) fn resolve_program(program: &Path) -> PathBuf {
+    let located = find_on_path(program).unwrap_or_else(|| program.to_path_buf());
+    canonical_or_self(&located)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn find_on_path_resolves_bare_name_in_temp_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = tempfile::tempdir().unwrap();
+        let bin = dir.path().join("myprov");
+        std::fs::write(&bin, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&bin, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        // A bare name on a `$PATH` that contains the temp dir resolves to the
+        // absolute file (canonicalized upstream in `resolve_program`).
+        let found = find_on_path_in(Path::new("myprov"), dir.path().as_os_str()).unwrap();
+        assert_eq!(found, bin);
+        assert!(found.is_absolute());
+
+        // A name absent from the given `$PATH` resolves to nothing.
+        assert!(
+            find_on_path_in(Path::new("definitely-absent-xyz"), dir.path().as_os_str()).is_none()
+        );
+
+        // A non-bare path is never PATH-searched.
+        assert!(find_on_path_in(Path::new("/usr/bin/myprov"), dir.path().as_os_str()).is_none());
+    }
+
+    #[test]
+    fn is_bare_name_distinguishes_plain_names_from_paths() {
+        assert!(is_bare_name(Path::new("claude")));
+        assert!(!is_bare_name(Path::new("./claude")));
+        assert!(!is_bare_name(Path::new("/usr/bin/claude")));
+        assert!(!is_bare_name(Path::new("dir/claude")));
+    }
 }
