@@ -1553,24 +1553,39 @@ async fn finalize_success(
 /// Propagates a [`persist_session_id`] or [`FailTaskService`] FSM/DB fault. The
 /// progress comment and the retry evaluation are best-effort and never error.
 /// Compose the human-readable `result`-column detail for a failed run from the
-/// runner's captured output tails, or `None` when the runner captured NOTHING
-/// (the bare `fail` path with no stored detail).
+/// runner's captured output tails. Never returns nothing — every failure path
+/// leaves a diagnosable `result`, closing the black hole a bare `fail` (no
+/// stored detail) used to leave.
 ///
-/// BOTH tails are folded, each under its own labelled section, because the two
-/// providers surface their terminal error on different streams: `claude
-/// --output-format stream-json` writes the failing `{"type":"result",...}` line
-/// to STDOUT, while a crashed CLI or a shell wrapper writes to STDERR. Persisting
-/// only stderr (the previous behaviour) therefore dropped exactly the evidence an
-/// exit-65 claude agent_error leaves behind, making it undiagnosable from the DB.
+/// BOTH tails are folded, each under its own labelled section, when at least
+/// one is present, because the two providers surface their terminal error on
+/// different streams: `claude --output-format stream-json` writes the failing
+/// `{"type":"result",...}` line to STDOUT, while a crashed CLI or a shell
+/// wrapper writes to STDERR. Persisting only stderr (the previous behaviour)
+/// therefore dropped exactly the evidence an exit-65 claude agent_error leaves
+/// behind.
+///
+/// A zero-output death (e.g. a sandboxed CLI killed exit 65 before writing a
+/// byte) leaves BOTH tails empty; that failure is synthesised from what we DO
+/// know — the reason, exit code, and provider (e.g. "agent_error: provider
+/// claude exit 65 with no output") — instead of storing `result = NULL` and
+/// making the crash undiagnosable from the DB alone. Signal-killed runs have no
+/// exit code.
 fn failure_detail(
     reason: ainb_hangar_store::service::fail::FailureReason,
+    provider: &str,
+    exit_code: Option<i32>,
     stdout_tail: &str,
     stderr_tail: &str,
-) -> Option<String> {
+) -> String {
     let stdout = stdout_tail.trim();
     let stderr = stderr_tail.trim();
     if stdout.is_empty() && stderr.is_empty() {
-        return None;
+        let exit = exit_code.map_or_else(
+            || "no exit code (killed)".to_string(),
+            |c| format!("exit {c}"),
+        );
+        return format!("{}: provider {provider} {exit} with no output", reason.as_db_str());
     }
     let mut detail = format!("run failed ({}):", reason.as_db_str());
     if !stdout.is_empty() {
@@ -1581,7 +1596,7 @@ fn failure_detail(
         detail.push_str("\n\nstderr:\n");
         detail.push_str(stderr);
     }
-    Some(detail)
+    detail
 }
 
 /// hangar-e2e-6 escape hatch: when `HANGAR_KEEP_FAILED_RUNS=1` the daemon
@@ -1608,20 +1623,26 @@ async fn finalize_failure(
     // Persist the session id (if any) before failing so a retry can resume the
     // provider conversation.
     persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
-    // When the runner captured any output tail (a crashed / gave-up provider),
-    // persist it into the `result` column (in the TaskResult `{"content": ...}`
-    // shape the detail surface renders) so the failure is diagnosable from stored
-    // evidence alone. The bare `fail` path left `result` blank, making every
-    // `agent_error` crash undiagnosable from the DB. Both tails are folded:
-    // `claude --output-format stream-json` writes its terminal ERROR line to
-    // STDOUT, so persisting only stderr dropped exactly the evidence an exit-65
-    // agent_error leaves behind. Neither tail → the plain `fail`.
-    let fail_outcome = match failure_detail(reason, &result.stdout_tail, &result.stderr_tail) {
-        None => FailTaskService::fail(pool, &task.id, reason, clock).await,
-        Some(detail) => {
-            FailTaskService::fail_with_detail(pool, &task.id, reason, &detail, clock).await
-        }
-    };
+    // Persist a diagnostic into the `result` column (in the TaskResult
+    // `{"content": ...}` shape the detail surface renders) on EVERY failure, so a
+    // crash is diagnosable from stored evidence alone. The bare `fail` path left
+    // `result` blank, making every crash undiagnosable from the DB. Both tails
+    // are folded when present — `claude --output-format stream-json` writes its
+    // terminal ERROR line to STDOUT, so persisting only stderr dropped exactly
+    // the evidence an exit-65 agent_error leaves behind. A zero-output death
+    // (e.g. a sandboxed CLI killed exit 65 before writing a byte) leaves BOTH
+    // tails empty; `failure_detail` synthesises a diagnostic there from what we
+    // DO know (reason + exit code + provider), so no failure path leaves
+    // `result` NULL.
+    let detail = failure_detail(
+        reason,
+        provider,
+        result.exit_code,
+        &result.stdout_tail,
+        &result.stderr_tail,
+    );
+    let fail_outcome =
+        FailTaskService::fail_with_detail(pool, &task.id, reason, &detail, clock).await;
     match fail_outcome {
         Ok(_) => {}
         // tcp T3 / F6: a human cancel (`running -> cancelled`) beat this failure to
@@ -2580,10 +2601,11 @@ mod tests {
         use ainb_hangar_store::service::fail::FailureReason;
         let detail = failure_detail(
             FailureReason::AgentError,
+            "claude",
+            Some(1),
             r#"{"type":"result","subtype":"error_during_execution","error":"boom"}"#,
             "node: fatal: could not start",
-        )
-        .expect("both tails present → a Some detail");
+        );
         assert!(
             detail.contains("agent_error"),
             "detail must name the reason: {detail}"
@@ -2607,24 +2629,35 @@ mod tests {
         use ainb_hangar_store::service::fail::FailureReason;
         let detail = failure_detail(
             FailureReason::AgentError,
+            "claude",
+            Some(65),
             r#"{"type":"result","subtype":"error","error":"exit 65"}"#,
             "   ",
-        )
-        .expect("a stdout-only failure must still produce a detail");
+        );
         assert!(
             detail.contains("exit 65"),
             "the stdout error line must survive into the detail: {detail}"
         );
     }
 
-    /// No captured output on EITHER stream → `None` (the bare `fail` with no
-    /// stored detail), and whitespace-only tails count as empty.
+    /// No captured output on EITHER stream → a SYNTHESIZED diagnostic naming the
+    /// exit code, reason, and provider (never a blank `fail` / NULL `result`),
+    /// and whitespace-only tails count as empty.
     #[test]
-    fn failure_detail_is_none_when_no_output_captured() {
+    fn failure_detail_synthesizes_diagnostic_when_no_output_captured() {
         use ainb_hangar_store::service::fail::FailureReason;
+        let detail = failure_detail(FailureReason::AgentError, "claude", Some(65), "   ", "\n\t");
         assert!(
-            failure_detail(FailureReason::AgentError, "   ", "\n\t").is_none(),
-            "whitespace-only tails must be treated as no captured evidence"
+            detail.contains("65"),
+            "the synthesized diagnostic must name the exit code: {detail}"
+        );
+        assert!(
+            detail.contains("agent_error"),
+            "the synthesized diagnostic must name the failure reason: {detail}"
+        );
+        assert!(
+            detail.contains("claude"),
+            "the synthesized diagnostic must name the provider: {detail}"
         );
     }
 
@@ -3101,6 +3134,114 @@ mod tests {
             Some("spawn_timeout"),
             "the umbrella must attribute the wedge as spawn_timeout (got {:?})",
             row.failure_reason
+        );
+    }
+
+    /// hangar-e2e-7 REGRESSION: a failure whose runner captured NO output (both
+    /// tails empty — the zero-output death, e.g. a sandboxed CLI killed exit 65
+    /// before writing a byte) must STILL persist a synthesized diagnostic into the
+    /// `result` column, not leave it NULL. Cycle-2 #437 only closed the
+    /// non-empty-stderr leg; the empty-tail leg went through the bare `fail`,
+    /// storing `result = NULL` and making the crash undiagnosable from the DB
+    /// alone. After the fix the synthesized `result` names the exit code + reason
+    /// + provider, so any future no-output provider death is self-describing.
+    #[tokio::test]
+    async fn finalize_failure_with_empty_tails_persists_synthetic_diagnostic() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // A `queued` task is a legal `fail` source state (same as `running`), so
+        // we can drive `finalize_failure` directly without walking the full FSM.
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        // The zero-output crash: a non-zero exit code, NO stdout, NO stderr — the
+        // exact shape the macOS sandbox exit-65 death produces.
+        let result = crate::runner::RunnerResult {
+            exit_code: Some(65),
+            session_id: None,
+            usage: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+        };
+        // A scratch workdir: teardown + branch reclaim are no-ops for it, so the
+        // finalize is exercised without provisioning a real worktree.
+        let run_wd = crate::workdir_provision::RunWorkdir::Scratch {
+            path: dir.path().join("scratch"),
+        };
+        // A throwaway execenv rooted in the tempdir; `finalize_failure` only
+        // reads `env.logs` for the `HANGAR_KEEP_FAILED_RUNS` diagnostic log line
+        // (unset here), so the paths need not exist.
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+        let clock = SystemClock;
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+
+        finalize_failure(
+            pool,
+            &task,
+            &run_wd,
+            &env,
+            ainb_hangar_store::service::fail::FailureReason::AgentError,
+            result,
+            "claude",
+            &clock,
+            &stats,
+            &events,
+        )
+        .await
+        .expect("finalize_failure handles a zero-output crash");
+
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "failed", "the row must terminalise as failed");
+        // The core regression: `result` must be NON-NULL and self-describe the
+        // crash from the exit code + reason (before the fix it was NULL here).
+        let result_json = row
+            .result
+            .expect("a zero-output failure must NOT leave `result` NULL — it is the black hole this fix closes");
+        assert!(
+            result_json.contains("65"),
+            "the synthesized diagnostic must name the exit code, got {result_json:?}"
+        );
+        assert!(
+            result_json.contains("agent_error"),
+            "the synthesized diagnostic must name the failure reason, got {result_json:?}"
+        );
+        assert!(
+            result_json.contains("claude"),
+            "the synthesized diagnostic must name the provider, got {result_json:?}"
         );
     }
 
