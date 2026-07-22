@@ -158,8 +158,8 @@ pub struct DaemonConfig {
     /// non-functional. That matches the interactive path, which is already
     /// deliberately unsandboxed. `HANGAR_DAEMON_DISABLE_SANDBOX` is the explicit
     /// override in both directions: `=1` forces it OFF (security downgrade),
-    /// `=0` forces it ON (used to exercise the profile on macOS). Disabling it
-    /// is logged.
+    /// `=0` forces it ON (used to exercise the profile on macOS). The resolved
+    /// posture is logged at daemon startup (see [`log_sandbox_posture`]).
     pub sandbox: bool,
 }
 
@@ -387,6 +387,22 @@ async fn reap_interactive_sessions(sessions: &InteractiveSessions) {
     }
 }
 
+/// Emit the daemon's resolved headless OS-sandbox posture at INFO, once at boot.
+///
+/// `sandbox = true` means every headless provider subprocess is confined in the
+/// OS FS sandbox (Landlock/Seatbelt); `false` means the passthrough (unconfined)
+/// path. `target_os` records which platform default (or env override) produced
+/// it. This is the single startup diagnostic that disambiguates an exit-65
+/// dispatch failure between "confinement on, still failing" and "stale binary".
+/// Factored out of [`run`] so it is unit-testable without booting the daemon.
+fn log_sandbox_posture(cfg: &DaemonConfig) {
+    tracing::info!(
+        sandbox = cfg.sandbox,
+        target_os = std::env::consts::OS,
+        "headless provider sandbox posture"
+    );
+}
+
 /// Run the daemon's steady state: spawn sweepers, then poll-claim-execute until
 /// `Ctrl-C`.
 ///
@@ -412,6 +428,12 @@ pub async fn run(
     stats: Arc<HealthStats>,
     events: EventSink,
 ) -> anyhow::Result<()> {
+    // hangar-e2e-5: record the resolved headless OS-sandbox posture once at boot.
+    // Without this line an exit-65 dispatch failure was ambiguous between "fix
+    // present, still failing" and "stale binary (fix absent)"; the confinement
+    // posture is the missing diagnostic. Emitted before any task runs so triage
+    // (and the e2e harness) can assert `sandbox=false` up front.
+    log_sandbox_posture(&cfg);
     spawn_sweepers(pool.clone(), cfg.sweeper);
     // e38.22: schedule the on-disk workspace GC alongside the row-sweepers, so
     // leaked per-task dirs (no `.gc_meta.json`, mtime past the 72h grace) and
@@ -2578,6 +2600,108 @@ mod tests {
         assert_eq!(
             resolved, bare,
             "an unresolvable bare name is returned as-is"
+        );
+    }
+
+    /// hangar-e2e-5: the daemon must emit its resolved OS-sandbox posture at
+    /// boot. Without this INFO line an exit-65 headless dispatch failure was
+    /// indistinguishable from a stale binary (fix absent); a full e2e cycle was
+    /// burned on that ambiguity. Capture the event and assert both the message
+    /// and that the `sandbox` field carries the configured posture verbatim.
+    #[test]
+    fn log_sandbox_posture_emits_posture_at_boot() {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default, Clone)]
+        struct Event {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        type EventLog = Arc<Mutex<Vec<Event>>>;
+
+        struct Collector<'a>(&'a mut Event);
+        impl Visit for Collector<'_> {
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                self.0.fields.push((field.name().to_string(), value.to_string()));
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.0.message = value.to_string();
+                } else {
+                    self.0.fields.push((field.name().to_string(), value.to_string()));
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}");
+                if field.name() == "message" {
+                    self.0.message = rendered;
+                } else {
+                    self.0.fields.push((field.name().to_string(), rendered));
+                }
+            }
+        }
+
+        struct CollectLayer {
+            log: EventLog,
+        }
+        impl<S> Layer<S> for CollectLayer
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut captured = Event::default();
+                event.record(&mut Collector(&mut captured));
+                self.log.lock().expect("event log lock").push(captured);
+            }
+        }
+
+        let log: EventLog = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(CollectLayer { log: log.clone() });
+
+        // Two configs proving the field mirrors the posture, not a constant.
+        let mut cfg = DaemonConfig::from_env();
+        tracing::subscriber::with_default(subscriber, || {
+            cfg.sandbox = false;
+            log_sandbox_posture(&cfg);
+            cfg.sandbox = true;
+            log_sandbox_posture(&cfg);
+        });
+
+        let events: Vec<Event> = log.lock().expect("event log").clone();
+        let posture: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.message == "headless provider sandbox posture")
+            .collect();
+        assert_eq!(
+            posture.len(),
+            2,
+            "expected one sandbox-posture log per boot call, got {}",
+            posture.len()
+        );
+        let sandbox_field = |e: &Event| {
+            e.fields
+                .iter()
+                .find(|(k, _)| k == "sandbox")
+                .map(|(_, v)| v.clone())
+                .expect("posture log must carry a `sandbox` field")
+        };
+        assert_eq!(
+            sandbox_field(posture[0]),
+            "false",
+            "OFF posture must log sandbox=false"
+        );
+        assert_eq!(
+            sandbox_field(posture[1]),
+            "true",
+            "ON posture must log sandbox=true"
+        );
+        assert!(
+            posture[0].fields.iter().any(|(k, _)| k == "target_os"),
+            "posture log must carry the resolving platform in `target_os`"
         );
     }
 
