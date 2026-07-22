@@ -87,7 +87,7 @@ description, and a run-history line — with the live transcript below.
 |-----|--------|
 | `j` / `k` | Scroll |
 | `c` | Compose a comment (Enter submits, Esc cancels) |
-| `R` | Retry the task (only once terminal). Whether a retry spawns anything is decided by the failure reason — see [Task failures](#task-failures); the NoRetry reasons refuse. |
+| `R` | Retry the task (only once terminal). Whether a retry spawns anything is decided by the failure reason — see [Task failures](#task-failures); the reasons marked **No retry** there do nothing. |
 | `X` | Cancel the running task (confirm overlay) |
 | `x` | Delete the bound issue (confirm overlay; the daemon rejects a delete with active tasks and the rejection surfaces as a note) |
 
@@ -116,7 +116,7 @@ anything. Retries classify three ways:
 | `spawn_error` | The provider binary could not be spawned — e.g. the configured `claude` / `codex` path does not resolve. The agent never started. | No retry |
 | `spawn_timeout` | The running→spawn setup phase wedged past its 60s umbrella bound (`HANGAR_SPAWN_SETUP_TIMEOUT_MS` override) — e.g. a headless keychain read that never returns. A wedged environment does not self-heal on re-dispatch. | No retry |
 | `provision_error` | Pre-run setup failed before any provider was reached — the issue's repo could not be cloned / worktree-added, or the exec environment could not be prepared. Deterministic: re-fails identically. | No retry |
-| `provider_contract_drift` | The provider's structured event stream carried no recognised terminal — a CLI shape the parser does not know. The fix is a parser update, not a re-run. | No retry |
+| `provider_contract_drift` | The provider's structured event stream carried no recognised completion or error event — a CLI output shape the parser does not know. The fix is a parser update, not a re-run. | No retry |
 | `unknown` | Unclassified failure. | No retry |
 | `runtime_offline` | The runtime hosting the agent went offline mid-run. | Retry, resume session |
 | `runtime_recovery` | The task failed during daemon recovery (orphan reclaim). | Retry, resume session |
