@@ -1146,15 +1146,21 @@ mod tests {
         let ui = CodeReviewUi::default();
         let mut term = Terminal::new(TestBackend::new(120, 40)).unwrap();
 
-        // 20 frames over a 2000-row diff. Viewport-only rendering keeps this fast.
+        // 20 frames over a 2000-row diff. Viewport-only rendering keeps this fast
+        // (~0.25s locally). This guards against an O(total-rows) regression that
+        // renders the whole diff per frame instead of just the viewport, which
+        // would be ~50x slower (tens of seconds). The budget is deliberately
+        // generous because shared macOS CI runners are noisy and slow under load
+        // (observed ~1.7s), so a tighter bound flakes without catching real
+        // regressions any better.
         let start = Instant::now();
         for _ in 0..20 {
             term.draw(|fr| render(fr, fr.area(), &model, &ui)).unwrap();
         }
         let elapsed = start.elapsed();
         assert!(
-            elapsed.as_millis() < 1500,
-            "20 frames of a 2000-row diff took {elapsed:?} (budget 1500ms)"
+            elapsed.as_millis() < 4000,
+            "20 frames of a 2000-row diff took {elapsed:?} (budget 4000ms)"
         );
     }
 
