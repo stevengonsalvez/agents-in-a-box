@@ -26,7 +26,7 @@
 //! | `HANGAR_SPAWN_SETUP_TIMEOUT_MS` | running→spawn setup-phase umbrella override (tests) | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
-//! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
+//! | `HANGAR_DAEMON_DISABLE_SANDBOX` | `1` forces providers UNCONFINED (security downgrade); `0` forces the OS sandbox ON | unset (platform default: ON on Linux, OFF on macOS) |
 //!
 //! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the
 //! daemon still sweeps) — a daemon with no runtime has nothing to claim.
@@ -149,9 +149,17 @@ pub struct DaemonConfig {
     /// the sweeper fails it without the loop racing to start it.
     pub disable_claim: bool,
     /// e38.23: confine every provider subprocess in the OS-level FS sandbox.
-    /// **Default ON**; set `HANGAR_DAEMON_DISABLE_SANDBOX=1` to opt out (the
-    /// override seam — e.g. a debug build on a platform whose sandbox primitive
-    /// misbehaves). Disabling it is a security downgrade and is logged.
+    ///
+    /// The env-unset default is **platform-specific** (see [`Self::default_sandbox`]):
+    /// ON where the sandbox primitive can actually boot a Node-based provider
+    /// CLI (Linux/Landlock), OFF on macOS — where the default-on Seatbelt profile
+    /// kills every headless `claude` task before it writes a transcript (exit 65
+    /// in ~825ms even with the credential injected), making headless dispatch
+    /// non-functional. That matches the interactive path, which is already
+    /// deliberately unsandboxed. `HANGAR_DAEMON_DISABLE_SANDBOX` is the explicit
+    /// override in both directions: `=1` forces it OFF (security downgrade),
+    /// `=0` forces it ON (used to exercise the profile on macOS). Disabling it
+    /// is logged.
     pub sandbox: bool,
 }
 
@@ -192,8 +200,10 @@ impl DaemonConfig {
             sweeper.reclaim_window = sweeper.reclaim_window.min(sweeper.dispatched_ttl / 2);
         }
         let disable_claim = std::env::var_os("HANGAR_DAEMON_DISABLE_CLAIM").is_some();
-        // e38.23: sandbox is ON by default; the env var is an explicit opt-out.
-        let sandbox = std::env::var_os("HANGAR_DAEMON_DISABLE_SANDBOX").is_none_or(|v| v != "1");
+        // e38.23 / hangar-e2e-4: the headless OS sandbox posture is the platform
+        // default (ON on Linux, OFF on macOS) unless the env var overrides it.
+        let sandbox =
+            Self::resolve_sandbox(std::env::var_os("HANGAR_DAEMON_DISABLE_SANDBOX").as_deref());
 
         Self {
             runtime_id,
@@ -206,6 +216,43 @@ impl DaemonConfig {
             disable_claim,
             sandbox,
         }
+    }
+
+    /// Resolve the headless OS FS sandbox posture from the explicit
+    /// `HANGAR_DAEMON_DISABLE_SANDBOX` override value (`None` when unset).
+    ///
+    /// `Some("1")` forces the sandbox OFF (the documented security opt-out);
+    /// `Some("0")` forces it ON (needed to exercise the profile on macOS, where
+    /// it is otherwise off by default); any other value — or unset — falls back
+    /// to [`Self::default_sandbox`]. Split out as a pure function so the
+    /// override precedence is testable without mutating process env.
+    fn resolve_sandbox(override_val: Option<&std::ffi::OsStr>) -> bool {
+        match override_val {
+            Some(v) if v == "1" => false,
+            Some(v) if v == "0" => true,
+            _ => Self::default_sandbox(),
+        }
+    }
+
+    /// The env-unset default headless sandbox posture for this platform.
+    ///
+    /// OFF on macOS: the default-on Seatbelt profile ([`ainb_hangar_sandbox`])
+    /// cannot boot a Node-based provider CLI — every headless `claude` task dies
+    /// exit 65 in ~825ms before writing a transcript, even with the credential
+    /// injected — so leaving it on makes headless dispatch non-functional. The
+    /// interactive path is already deliberately unsandboxed. ON everywhere else
+    /// (Linux/Landlock), where the profile runs the CLI fine.
+    #[cfg(target_os = "macos")]
+    const fn default_sandbox() -> bool {
+        false
+    }
+
+    /// The env-unset default headless sandbox posture: ON on Linux/Landlock,
+    /// which can run a Node-based provider CLI under confinement. See the
+    /// macOS variant for why that platform defaults OFF.
+    #[cfg(not(target_os = "macos"))]
+    const fn default_sandbox() -> bool {
+        true
     }
 }
 
@@ -344,9 +391,9 @@ pub async fn run(
         copilot_path: cfg.copilot_path.clone(),
         max_runtime: cfg.provider_max_runtime,
         tail_lines: TAIL_LINES,
-        // e38.23: confine every provider spawn in the OS-level FS sandbox by
-        // default. Overridable via `HANGAR_DAEMON_DISABLE_SANDBOX=1` (see
-        // `DaemonConfig::from_env`).
+        // e38.23: confine every provider spawn in the OS-level FS sandbox per
+        // the platform default (ON on Linux, OFF on macOS). Overridable via
+        // `HANGAR_DAEMON_DISABLE_SANDBOX` (see `DaemonConfig::from_env`).
         sandbox: cfg.sandbox,
     });
 
@@ -2363,6 +2410,45 @@ fn warn_danger_access(task: &Task, provider: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// hangar-e2e-4: the `HANGAR_DAEMON_DISABLE_SANDBOX` override wins in both
+    /// directions regardless of platform default — `=1` forces the headless OS
+    /// sandbox OFF, `=0` forces it ON (the latter is how the durable follow-up
+    /// exercises the Seatbelt profile on macOS, where it is otherwise off).
+    #[test]
+    fn resolve_sandbox_env_override_forces_off_and_on() {
+        use std::ffi::OsStr;
+        assert!(
+            !DaemonConfig::resolve_sandbox(Some(OsStr::new("1"))),
+            "HANGAR_DAEMON_DISABLE_SANDBOX=1 must force the sandbox OFF"
+        );
+        assert!(
+            DaemonConfig::resolve_sandbox(Some(OsStr::new("0"))),
+            "HANGAR_DAEMON_DISABLE_SANDBOX=0 must force the sandbox ON"
+        );
+    }
+
+    /// hangar-e2e-4: with the env var unset, the headless sandbox posture is the
+    /// PLATFORM default. On macOS it must be OFF — the default-on Seatbelt
+    /// profile cannot boot the Node `claude` CLI, so every headless task died
+    /// exit 65 before writing a transcript; on Linux/Landlock it stays ON. This
+    /// is the fix's core assertion: before it, macOS defaulted ON (dispatch
+    /// broken); after, OFF (dispatch restored), matching the already-unsandboxed
+    /// interactive path.
+    #[test]
+    fn resolve_sandbox_unset_uses_platform_default() {
+        let posture = DaemonConfig::resolve_sandbox(None);
+        #[cfg(target_os = "macos")]
+        assert!(
+            !posture,
+            "macOS: headless sandbox must default OFF (Seatbelt cannot boot the claude Node CLI)"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            posture,
+            "non-macOS: headless sandbox must default ON (Landlock runs the CLI fine)"
+        );
+    }
 
     /// A secret backend whose `get` blocks far longer than any test timeout.
     /// Stands in for the headless keychain GUI-prompt hang that wedged dispatch.
