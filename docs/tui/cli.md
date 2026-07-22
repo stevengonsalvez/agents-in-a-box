@@ -2862,6 +2862,7 @@ Commands:
   search  Search issues by title, description, or comment body (ranked)
   show    Show one issue by id
   update  Edit an existing issue's state, assignee, priority, or due date
+  delete  Delete an issue and all its history (dry-run without `--yes`)
   label   Attach or detach a label on an issue
   help    Print this message or the help of the given subcommand(s)
 
@@ -2919,6 +2920,15 @@ Options:
           A label to attach to the issue (repeatable: `--label bug --label p0`).
           
           Persisted as the issue's label list. The full labels table + attach/detach is a separate concern; create just records the labels it is handed.
+
+      --repo <REPO>
+          The repo the run executes in: an absolute checkout path, the literal `scratch`, or a REMOTE (`owner/repo`, a full URL, or `git@…`) — a remote is cloned once into the shared clone cache and the local path persisted, exactly like the board card-create path (migration 0032/0042)
+
+      --source-branch <SOURCE_BRANCH>
+          The SOURCE branch the run branches FROM (migration 0042); omitted uses the repo's default branch. Persisted on the issue AND the enqueued task
+
+      --target-branch <TARGET_BRANCH>
+          The TARGET branch a future PR lands INTO (migration 0042); stored on the issue for later PR automation
 
   -h, --help
           Print help (see a summary with '-h')
@@ -3025,6 +3035,26 @@ Options:
 
   -h, --help
           Print help (see a summary with '-h')
+```
+
+#### `ainb hangar issue delete`
+
+Delete an issue and all its history (dry-run without `--yes`)
+
+```console
+$ ainb hangar issue delete --help
+Delete an issue and all its history (dry-run without `--yes`)
+
+Usage: ainb hangar issue delete [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) to delete
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --yes                    Actually perform the delete. Without this flag the command only PREVIEWS what would be removed and exits without touching the database
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
 ```
 
 #### `ainb hangar issue label`
@@ -3174,6 +3204,8 @@ Commands:
   stop     Stop the running daemon: signal the exact recorded PID, then remove the PID file
   restart  Restart the daemon: `stop` (if running) then `start`
   setup    One-command bring-up: ensure the store + socket-auth token, then `start`
+  config   View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+  cred     Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3281,6 +3313,48 @@ $ ainb hangar daemon setup --help
 One-command bring-up: ensure the store + socket-auth token, then `start`
 
 Usage: ainb hangar daemon setup [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon config`
+
+View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+
+```console
+$ ainb hangar daemon config --help
+View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+
+Usage: ainb hangar daemon config [OPTIONS] <COMMAND>
+
+Commands:
+  list  List every configurable: key, current value (or default), default, type
+  get   Print one knob's current value (or its default when unset)
+  set   Validate + persist one knob's value (rejects unknown keys / bad values)
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon cred`
+
+Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
+
+```console
+$ ainb hangar daemon cred --help
+Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
+
+Usage: ainb hangar daemon cred [OPTIONS] <COMMAND>
+
+Commands:
+  status  Report whether a credential is configured and where it resolves from (env override / secret store / not set). Never prints the value
+  set     Store a long-lived token. Reads the token from STDIN by default (so it never lands on argv or in shell history); `--setup-token` instead drives the interactive `claude setup-token` browser flow and captures the result
+  clear   Remove the stored credential. Idempotent
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3526,6 +3600,7 @@ Edit, archive, and list workspace agents
 Usage: ainb hangar agent [OPTIONS] <COMMAND>
 
 Commands:
+  create     Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
   list       List the workspace's agents (active by default; `--all` includes archived)
   edit       Edit an agent's config knobs (model / args / MCP / thinking / env / name)
   archive    Archive an agent (hide it from the active picker)
@@ -3535,6 +3610,25 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar agent create`
+
+Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
+
+```console
+$ ainb hangar agent create --help
+Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
+
+Usage: ainb hangar agent create [OPTIONS] --name <NAME>
+
+Options:
+      --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
+      --name <NAME>                  The new agent's name
+      --provider <PROVIDER>          Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`
+      --instructions <INSTRUCTIONS>  Optional instructions / system prompt for the agent
+      --workspace <WORKSPACE>        Workspace slug to create the agent in. Defaults to the bootstrapped `default` workspace (created if absent)
+  -h, --help                         Print help
 ```
 
 #### `ainb hangar agent list`
@@ -3580,6 +3674,8 @@ Options:
       --thinking <THINKING>          New thinking level (e.g. `low`/`medium`/`high`); omitted leaves it. Mutually exclusive with `--clear-thinking`
       --clear-thinking               Clear the thinking level; omitted leaves it
       --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is given the whole env map is REPLACED with the values
+      --token-budget <TOKEN_BUDGET>  New token budget (rtk/headroom, migration 0042); omitted leaves it. Mutually exclusive with `--clear-token-budget`
+      --clear-token-budget           Clear the token budget (back to unlimited); omitted leaves it
       --workspace <WORKSPACE>        Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                         Print help
 ```
