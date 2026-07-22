@@ -1412,6 +1412,59 @@ async fn handle_issue_cancel_active(
 /// (an unknown id, or an issue owned by another tenant) is rejected as a
 /// not-found error — never a cross-tenant edit. Only a committed edit pushes the
 /// event. Split out of [`handle`] to keep that dispatcher within the line cap.
+/// Persist an F6 card edit (repo, agent, upstream ref, branches) onto the durable
+/// issue, mirroring `board_card_create`. Called only once the target row resolved,
+/// so a foreign / unknown issue is rejected before any write. Safe while a run is
+/// in flight: the running task captured its repo + agent at ENQUEUE, so an edit
+/// only steers the NEXT run. Crucially the branch write lands BEFORE the named-agent
+/// auto-dispatch in [`handle_issue_update`], so that run reads the card's real
+/// `source_branch` instead of a NULL that would branch the worktree off `main`.
+#[allow(clippy::too_many_arguments)]
+async fn persist_card_edits(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    repo_ref: Option<&str>,
+    agent: Option<ainb_hangar_core::agent_kind::AgentKind>,
+    external_ref: Option<&str>,
+    source_branch: Option<&str>,
+    target_branch: Option<&str>,
+) -> Result<(), RpcError> {
+    use ainb_hangar_store::repo::card_parity::CardParityRepo;
+
+    // bead pv8 parity with `board_card_create`: a remote-only favorite pick arrives
+    // as its REMOTE indicator (`owner/repo`, a URL) — not an absolute path, not
+    // `scratch`. Resolve it to a LOCAL clone path BEFORE persisting so the
+    // run/provision path (which only understands a path or `scratch`) never sees a
+    // bare remote it would mistake for a filesystem path. A path / `scratch` passes
+    // through untouched; the clone runs once, idempotently.
+    let resolved_repo_ref = match repo_ref {
+        Some(r) => {
+            let ainb_dir = ainb_hangar_core::hangar_home().ok_or_else(|| {
+                internal("cannot resolve hangar home to clone a remote favorite")
+            })?;
+            Some(resolve_card_repo_ref(&ainb_dir, r).await?)
+        }
+        None => None,
+    };
+    CardParityRepo::set_issue_repo_agent(
+        pool,
+        workspace_id,
+        issue_id,
+        resolved_repo_ref.as_deref(),
+        agent,
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    CardParityRepo::set_issue_external_ref(pool, workspace_id, issue_id, external_ref)
+        .await
+        .map_err(|e| store_err(&e))?;
+    CardParityRepo::set_issue_branches(pool, workspace_id, issue_id, source_branch, target_branch)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(())
+}
+
 async fn handle_issue_update(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -1420,7 +1473,6 @@ async fn handle_issue_update(
     use ainb_hangar_proto::events::HangarEvent;
 
     use ainb_hangar_core::agent_kind::AgentKind;
-    use ainb_hangar_store::repo::card_parity::CardParityRepo;
 
     let params: ainb_hangar_proto::snapshots::IssueUpdateParams = parse_params(
         req,
@@ -1438,7 +1490,16 @@ async fn handle_issue_update(
     let agent = params.agent.as_deref().and_then(AgentKind::parse);
     // 0043: an upstream-issue link edit (blank leaves it unchanged, not cleared).
     let external_ref = params.external_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
-    let edits_card = repo_ref.is_some() || agent.is_some() || external_ref.is_some();
+    // 0042: the branch overrides the create-wizard Source field carries. Blank
+    // leaves each unchanged (never cleared); persisting them BEFORE the named-agent
+    // auto-dispatch below is what lets that run read the card's real source branch.
+    let source_branch = params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let target_branch = params.target_branch.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    let edits_card = repo_ref.is_some()
+        || agent.is_some()
+        || external_ref.is_some()
+        || source_branch.is_some()
+        || target_branch.is_some();
 
     // Resolve (and, for the field edit, write) the refreshed row. A field edit runs
     // the scoped UPDATE + re-read; a repo/agent-ONLY edit changes no field-UPDATE
@@ -1469,33 +1530,17 @@ async fn handle_issue_update(
     // task captured its repo + agent at ENQUEUE (`set_task_repo_agent_in_tx`), so an
     // edit only steers the NEXT run — never mutates a task already dispatched.
     if edits_card {
-        // bead pv8 parity with `board_card_create`: a remote-only favorite pick
-        // arrives as its REMOTE indicator (`owner/repo`, a URL) — not an absolute
-        // path, not `scratch`. Resolve it to a LOCAL clone path BEFORE persisting so
-        // the run/provision path (which only understands a path or `scratch`) never
-        // sees a bare remote it would mistake for a filesystem path. A path /
-        // `scratch` passes through untouched; the clone runs once, idempotently.
-        let resolved_repo_ref = match repo_ref {
-            Some(r) => {
-                let ainb_dir = ainb_hangar_core::hangar_home().ok_or_else(|| {
-                    internal("cannot resolve hangar home to clone a remote favorite")
-                })?;
-                Some(resolve_card_repo_ref(&ainb_dir, r).await?)
-            }
-            None => None,
-        };
-        CardParityRepo::set_issue_repo_agent(
+        persist_card_edits(
             pool,
             ws.as_str(),
             &params.issue_id,
-            resolved_repo_ref.as_deref(),
+            repo_ref,
             agent,
+            external_ref,
+            source_branch,
+            target_branch,
         )
-        .await
-        .map_err(|e| store_err(&e))?;
-        CardParityRepo::set_issue_external_ref(pool, ws.as_str(), &params.issue_id, external_ref)
-            .await
-            .map_err(|e| store_err(&e))?;
+        .await?;
     }
 
     // A committed edit announces the refreshed row to subscribers. Re-read AFTER
@@ -7008,6 +7053,107 @@ mod tests {
             task_issue.as_deref(),
             Some(id.as_str()),
             "the task carries the issue"
+        );
+    }
+
+    /// Pattern-B handover regression: the create-wizard fires ONE `issue_update`
+    /// carrying BOTH a `source_branch` AND a NAMED-agent assignee, then the
+    /// named-agent auto-dispatch re-runs the card. The dispatched task MUST branch
+    /// FROM the wizard's source branch, not `main`.
+    ///
+    /// Mutation-provable: drop the `set_issue_branches` persist that now runs
+    /// BEFORE the auto-dispatch and the card's `source_branch` stays NULL, so the
+    /// auto-dispatched `agent_task_queue.source_branch` comes back NULL and both
+    /// assertions below go red — the exact silent break the fake-script e2e missed.
+    #[tokio::test]
+    async fn issue_update_named_agent_persists_source_branch_for_autodispatch() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "reviewer", "claude", None).await.unwrap();
+
+        // An issue that carries a repo but NO source branch yet — the state right
+        // before the wizard's edit lands.
+        let id = ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.clone(),
+                workspace_id: ws.clone(),
+                title: "hand off to reviewer".into(),
+                description: Some("review the V3 tip".into()),
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        CardParityRepo::set_issue_repo_agent(pool, &ws, &id, Some("scratch"), None)
+            .await
+            .unwrap();
+
+        let handover_branch = "ainb/01KY4F2P90AHH53FJ5HQ3Q70GT";
+
+        // ONE RPC carrying source_branch + a named-agent assignee — the wizard shape.
+        let resp = dispatch(
+            pool,
+            &req(
+                methods::HANGAR_ISSUE_UPDATE,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "issue_id": id,
+                    "assignee": format!("agent:{}", agent.id),
+                    "source_branch": handover_branch,
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(
+            resp.error.is_none(),
+            "the assign+source RPC must succeed: {:?}",
+            resp.error
+        );
+
+        // The card persisted the wizard's source branch.
+        let (persisted_source, _target) =
+            CardParityRepo::get_issue_branches(pool, &id).await.unwrap().unwrap();
+        assert_eq!(
+            persisted_source.as_deref(),
+            Some(handover_branch),
+            "issue.source_branch must persist the wizard's Source field"
+        );
+
+        // The auto-dispatched task branched FROM that source, not from main/NULL.
+        let task_source: Option<String> = sqlx::query_scalar(
+            "SELECT source_branch FROM agent_task_queue WHERE issue_id = ? LIMIT 1",
+        )
+        .bind(&id)
+        .fetch_one(pool)
+        .await
+        .unwrap();
+        assert_eq!(
+            task_source.as_deref(),
+            Some(handover_branch),
+            "the named-agent auto-dispatch must branch from the persisted source"
         );
     }
 }
