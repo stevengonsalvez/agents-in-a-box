@@ -1,0 +1,137 @@
+Analysis of sampling ainb-hangar-daemon (pid 10918) every 1 millisecond
+Process:         ainb-hangar-daemon [10918]
+Path:            /Users/USER/*/ainb-hangar-daemon
+Load Address:    0x1020d8000
+Identifier:      ainb-hangar-daemon
+Version:         0
+Code Type:       ARM64
+Platform:        macOS
+Parent Process:  launchd [1]
+Target Type:     live task
+
+Date/Time:       2026-07-21 15:00:49.407 +0100
+Launch Time:     2026-07-21 14:58:05.570 +0100
+OS Version:      macOS 26.4.1 (25E253)
+Report Version:  7
+Analysis Tool:   /usr/bin/sample
+
+Physical footprint:         13.1M
+Physical footprint (peak):  13.2M
+Idle exit:                  untracked
+----
+
+Call graph:
+
+=== [ARCHIVE NOTE: trimmed from 208KB/1233 lines full 'sample' output to the two load-bearing thread stacks below. Full sample had 18 threads total: main-thread, 9x tokio-runtime-worker, tracing-appender, 5x sqlx-sqlite-worker, notify-rs fsevents loop. Only the main thread and the wedged tokio-runtime-worker (blocked in security_framework::passwords::get_generic_password, the macOS Keychain synchronous call) are load-bearing evidence for the zombie-dispatch root cause fixed in PR #435. The other 15 thread stacks were idle/parked and are omitted.] ===
+
+    2357 Thread_146144321   DispatchQueue_1: com.apple.main-thread  (serial)
+    + 2357 start  (in dyld) + 6992  [0x18af6fda4]
+    +   2357 main  (in ainb-hangar-daemon) + 36  [0x1020df010]
+    +     2357 std::rt::lang_start::hf78867888253dd43  (in ainb-hangar-daemon) + 84  [0x1020e2f10]  rt.rs:205
+    +       2357 _RNvNtCsaLOjE9VYtxK_3std2rt19lang_start_internal  (in ainb-hangar-daemon) + 952  [0x1034aca3c]
+    +         2357 std::rt::lang_start::_$u7b$$u7b$closure$u7d$$u7d$::hf8eae8223388dae5  (in ainb-hangar-daemon) + 28  [0x1020e2f38]  rt.rs:206
+    +           2357 std::sys::backtrace::__rust_begin_short_backtrace::hef03b22957fa88a8  (in ainb-hangar-daemon) + 24  [0x1020e2f68]  backtrace.rs:166
+    +             2357 core::ops::function::FnOnce::call_once::h9069f43dfc1ad2b9  (in ainb-hangar-daemon) + 20  [0x1020e072c]  function.rs:250
+    +               2357 ainb_hangar_daemon::main::h45ef2d67d0b8287f  (in ainb-hangar-daemon) + 248  [0x1020de3cc]  main.rs:75
+    +                 2357 tokio::runtime::runtime::Runtime::block_on::h38ceb7cbcf250196  (in ainb-hangar-daemon) + 508  [0x1020e34cc]  runtime.rs:328
+    +                   2357 tokio::runtime::runtime::Runtime::block_on_inner::h038860ab04c580b7  (in ainb-hangar-daemon) + 132  [0x1020e30a0]  runtime.rs:358
+    +                     2357 tokio::runtime::scheduler::multi_thread::MultiThread::block_on::h276017cbfc27659f  (in ainb-hangar-daemon) + 60  [0x1020df054]  mod.rs:86
+    +                       2357 tokio::runtime::context::runtime::enter_runtime::hc9f194a47e8eafe0  (in ainb-hangar-daemon) + 168  [0x1020d911c]  runtime.rs:65
+    +                         2357 tokio::runtime::scheduler::multi_thread::MultiThread::block_on::_$u7b$$u7b$closure$u7d$$u7d$::h4c481fc5cd900c2a  (in ainb-hangar-daemon) + 44  [0x1020df0f4]  mod.rs:87
+    +                           2357 tokio::runtime::context::blocking::BlockingRegionGuard::block_on::ha7a5aefb941e572c  (in ainb-hangar-daemon) + 84  [0x1020df508]  blocking.rs:66
+    +                             2357 tokio::runtime::park::CachedParkThread::block_on::hc944c91e61c8374a  (in ainb-hangar-daemon) + 688  [0x1020e2490]  park.rs:289
+    +                               2357 tokio::runtime::park::CachedParkThread::park::hba2ee57a54b2cdb7  (in ainb-hangar-daemon) + 24  [0x103357e34]
+    +                                 2357 tokio::runtime::park::CachedParkThread::with_current::h2340b54d9fdc8ee7  (in ainb-hangar-daemon) + 28  [0x103357d40]
+    +                                   2357 std::thread::local::LocalKey$LT$T$GT$::try_with::hecc4fdd88a154d65  (in ainb-hangar-daemon) + 160  [0x103386524]
+    +                                     2357 tokio::runtime::park::CachedParkThread::with_current::_$u7b$$u7b$closure$u7d$$u7d$::h10d039b2b6e36567  (in ainb-hangar-daemon) + 24  [0x103357dbc]
+    +                                       2357 tokio::runtime::park::CachedParkThread::park::_$u7b$$u7b$closure$u7d$$u7d$::h7060e219529b8067  (in ainb-hangar-daemon) + 28  [0x103357eb0]
+    +                                         2357 tokio::runtime::park::Inner::park::h66ba916eebf11a1b  (in ainb-hangar-daemon) + 296  [0x1033587d8]
+    +                                           2357 tokio::loom::std::parking_lot::Condvar::wait::h55914a4025c0df9e  (in ainb-hangar-daemon) + 36  [0x1033b7d24]
+    +                                             2357 parking_lot::condvar::Condvar::wait::h3eae69edf1502fd4  (in ainb-hangar-daemon) + 68  [0x1033b5158]
+    +                                               2357 parking_lot::condvar::Condvar::wait_until_internal::ha33e70790a66ae4c  (in ainb-hangar-daemon) + 160  [0x1033e4bc8]
+    +                                                 2357 parking_lot_core::parking_lot::park::h03ece30b1a129d50  (in ainb-hangar-daemon) + 296  [0x1033e1b54]
+    +                                                   2357 parking_lot_core::parking_lot::park::_$u7b$$u7b$closure$u7d$$u7d$::h7b24b01f7cbe1178  (in ainb-hangar-daemon) + 676  [0x1033e31c0]
+    +                                                     2357 _$LT$parking_lot_core..thread_parker..imp..ThreadParker$u20$as$u20$parking_lot_core..thread_parker..ThreadParkerT$GT$::park::h82fd03027536bc49  (in ainb-hangar-daemon) + 224  [0x1033e44fc]
+    +                                                       2357 _pthread_cond_wait  (in libsystem_pthread.dylib) + 980  [0x18b32c128]
+    +                                                         2357 __psynch_cvwait  (in libsystem_kernel.dylib) + 8  [0x18b2eb50c]
+
+=== WEDGED THREAD: Thread_146144329 (tokio-runtime-worker), blocked in macOS Keychain get_generic_password ===
+
+    2357 Thread_146144329: tokio-runtime-worker
+    + 2357 thread_start  (in libsystem_pthread.dylib) + 8  [0x18b326c1c]
+    +   2357 _pthread_start  (in libsystem_pthread.dylib) + 136  [0x18b32bc58]
+    +     2357 _RNvNvMs0_NtNtNtCsaLOjE9VYtxK_3std3sys6thread4unixNtB7_6Thread3new12thread_start  (in ainb-hangar-daemon) + 408  [0x1034b4b68]
+    +       2357 core::ops::function::FnOnce::call_once$u7b$$u7b$vtable.shim$u7d$$u7d$::h6b65c7002db05f76  (in ainb-hangar-daemon) + 24  [0x1033a7c2c]
+    +         2357 std::thread::lifecycle::spawn_unchecked::_$u7b$$u7b$closure$u7d$$u7d$::h19670e7dd78b87b8  (in ainb-hangar-daemon) + 260  [0x103362d1c]
+    +           2357 __rust_try  (in ainb-hangar-daemon) + 32  [0x10336fdb8]
+    +             2357 std::panicking::catch_unwind::do_call::h452e6b8054dda044  (in ainb-hangar-daemon) + 52  [0x1033b5bc8]
+    +               2357 _$LT$core..panic..unwind_safe..AssertUnwindSafe$LT$F$GT$$u20$as$u20$core..ops..function..FnOnce$LT$$LP$$RP$$GT$$GT$::call_once::hf97dfdd298e9002c  (in ainb-hangar-daemon) + 44  [0x10337d648]
+    +                 2357 std::thread::lifecycle::spawn_unchecked::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hb49be18f1addc029  (in ainb-hangar-daemon) + 116  [0x103362ea4]
+    +                   2357 std::sys::backtrace::__rust_begin_short_backtrace::h85960bc80275da10  (in ainb-hangar-daemon) + 16  [0x10337df00]
+    +                     2357 tokio::runtime::blocking::pool::Spawner::spawn_thread::_$u7b$$u7b$closure$u7d$$u7d$::h78bb244e6b79c398  (in ainb-hangar-daemon) + 144  [0x10337748c]
+    +                       2357 tokio::runtime::blocking::pool::Inner::run::h41c9cac6335015b0  (in ainb-hangar-daemon) + 404  [0x1033765e4]
+    +                         2357 tokio::runtime::blocking::pool::Task::run::hd02c313763fe64d3  (in ainb-hangar-daemon) + 28  [0x103376444]
+    +                           2357 tokio::runtime::task::UnownedTask$LT$S$GT$::run::hfa3271d244ce1810  (in ainb-hangar-daemon) + 64  [0x10337f700]
+    +                             2357 tokio::runtime::task::raw::RawTask::poll::h501bb4b43be56c93  (in ainb-hangar-daemon) + 52  [0x103390170]
+    +                               2357 tokio::runtime::task::raw::poll::hd55a72c17dcac667  (in ainb-hangar-daemon) + 36  [0x10338f974]
+    +                                 2357 tokio::runtime::task::harness::Harness$LT$T$C$S$GT$::poll::hb32a59d819964132  (in ainb-hangar-daemon) + 28  [0x10334c718]
+    +                                   2357 tokio::runtime::task::harness::Harness$LT$T$C$S$GT$::poll_inner::hf19c287bad2a6941  (in ainb-hangar-daemon) + 172  [0x10334bbc0]
+    +                                     2357 tokio::runtime::task::harness::poll_future::h63b8a724fd24acb7  (in ainb-hangar-daemon) + 96  [0x10334a9ec]
+    +                                       2357 std::panic::catch_unwind::h6f3b43d4152d326a  (in ainb-hangar-daemon) + 116  [0x103351608]
+    +                                         2357 __rust_try  (in ainb-hangar-daemon) + 32  [0x103352250]
+    +                                           2357 std::panicking::catch_unwind::do_call::hbb6fe4849e78feea  (in ainb-hangar-daemon) + 64  [0x1033b5eec]
+    +                                             2357 _$LT$core..panic..unwind_safe..AssertUnwindSafe$LT$F$GT$$u20$as$u20$core..ops..function..FnOnce$LT$$LP$$RP$$GT$$GT$::call_once::h43d156490225693c  (in ainb-hangar-daemon) + 44  [0x10337d2f0]
+    +                                               2357 tokio::runtime::task::harness::poll_future::_$u7b$$u7b$closure$u7d$$u7d$::h8b46fa33775e4166  (in ainb-hangar-daemon) + 64  [0x10334b034]
+    +                                                 2357 tokio::runtime::task::core::Core$LT$T$C$S$GT$::poll::hdc74603224155939  (in ainb-hangar-daemon) + 72  [0x10334f5c8]
+    +                                                   2357 tokio::runtime::task::core::Core$LT$T$C$S$GT$::poll::_$u7b$$u7b$closure$u7d$$u7d$::he4d68aa79faacf55  (in ainb-hangar-daemon) + 192  [0x10334fa78]
+    +                                                     2357 _$LT$tokio..runtime..blocking..task..BlockingTask$LT$T$GT$$u20$as$u20$core..future..future..Future$GT$::poll::h5a11bf3f88a09b42  (in ainb-hangar-daemon) + 136  [0x103361fd4]
+    +                                                       2357 tokio::runtime::scheduler::multi_thread::worker::Launch::launch::_$u7b$$u7b$closure$u7d$$u7d$::h910290ac1a828c18  (in ainb-hangar-daemon) + 24  [0x103368c30]
+    +                                                         2357 tokio::runtime::scheduler::multi_thread::worker::run::hfd4e66521a0cd321  (in ainb-hangar-daemon) + 600  [0x103367aa0]
+    +                                                           2357 tokio::runtime::context::runtime::enter_runtime::h2851dfd3f2a2f23d  (in ainb-hangar-daemon) + 176  [0x10335a6d8]
+    +                                                             2357 tokio::runtime::scheduler::multi_thread::worker::run::_$u7b$$u7b$closure$u7d$$u7d$::hd11fd1c4099abf6e  (in ainb-hangar-daemon) + 248  [0x103367bf8]
+    +                                                               2357 tokio::runtime::context::set_scheduler::h83a853fd963a7b92  (in ainb-hangar-daemon) + 68  [0x10339664c]
+    +                                                                 2357 std::thread::local::LocalKey$LT$T$GT$::with::h68b64d2f601e9f2e  (in ainb-hangar-daemon) + 24  [0x103384f78]
+    +                                                                   2357 std::thread::local::LocalKey$LT$T$GT$::try_with::hc5f60c229b1ae82d  (in ainb-hangar-daemon) + 196  [0x103386368]
+    +                                                                     2357 tokio::runtime::context::set_scheduler::_$u7b$$u7b$closure$u7d$$u7d$::h9c96549729d550e5  (in ainb-hangar-daemon) + 40  [0x103396708]
+    +                                                                       2357 tokio::runtime::context::scoped::Scoped$LT$T$GT$::set::hecf0341a134bd007  (in ainb-hangar-daemon) + 148  [0x1033972e4]
+    +                                                                         2357 tokio::runtime::scheduler::multi_thread::worker::run::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::he027d1cd90a28897  (in ainb-hangar-daemon) + 104  [0x103367cd4]
+    +                                                                           2357 tokio::runtime::scheduler::multi_thread::worker::Context::run::h37f11cbf3b110a41  (in ainb-hangar-daemon) + 936  [0x10336a73c]
+    +                                                                             2357 tokio::runtime::scheduler::multi_thread::worker::Context::run_task::h937aaf0fad54343c  (in ainb-hangar-daemon) + 944  [0x10336b5a0]
+    +                                                                               2357 tokio::runtime::scheduler::multi_thread::worker::Context::run_task::_$u7b$$u7b$closure$u7d$$u7d$::hef7c5621928cfc9e  (in ainb-hangar-daemon) + 56  [0x10336b6bc]
+    +                                                                                 2357 tokio::runtime::task::LocalNotified$LT$S$GT$::run::h7377a7c132fb28ad  (in ainb-hangar-daemon) + 44  [0x10337f824]
+    +                                                                                   2357 tokio::runtime::task::raw::RawTask::poll::h501bb4b43be56c93  (in ainb-hangar-daemon) + 52  [0x103390170]
+    +                                                                                     2357 tokio::runtime::task::raw::poll::h8ae85f78236d69fc  (in ainb-hangar-daemon) + 36  [0x1022ed694]
+    +                                                                                       2357 tokio::runtime::task::harness::Harness$LT$T$C$S$GT$::poll::hc76cc206e32e98d3  (in ainb-hangar-daemon) + 28  [0x1023b9198]
+    +                                                                                         2357 tokio::runtime::task::harness::Harness$LT$T$C$S$GT$::poll_inner::h9611b24884ddf923  (in ainb-hangar-daemon) + 172  [0x1023a2a10]
+    +                                                                                           2357 tokio::runtime::task::harness::poll_future::hf6b2d3dacf1db1db  (in ainb-hangar-daemon) + 96  [0x102395268]
+    +                                                                                             2357 std::panic::catch_unwind::h8a3f539a6b4625ab  (in ainb-hangar-daemon) + 116  [0x1022d5fcc]
+    +                                                                                               2357 __rust_try  (in ainb-hangar-daemon) + 32  [0x1022dfba4]
+    +                                                                                                 2357 std::panicking::catch_unwind::do_call::h9baf14b98c4bb84d  (in ainb-hangar-daemon) + 64  [0x1025e79a8]
+    +                                                                                                   2357 _$LT$core..panic..unwind_safe..AssertUnwindSafe$LT$F$GT$$u20$as$u20$core..ops..function..FnOnce$LT$$LP$$RP$$GT$$GT$::call_once::h3d543cd467f17f88  (in ainb-hangar-daemon) + 44  [0x102149db4]
+    +                                                                                                     2357 tokio::runtime::task::harness::poll_future::_$u7b$$u7b$closure$u7d$$u7d$::hf11141829a9369a3  (in ainb-hangar-daemon) + 64  [0x10239bd7c]
+    +                                                                                                       2357 tokio::runtime::task::core::Core$LT$T$C$S$GT$::poll::he6b14ef5b6ecbde1  (in ainb-hangar-daemon) + 72  [0x10252f1c4]
+    +                                                                                                         2357 tokio::runtime::task::core::Core$LT$T$C$S$GT$::poll::_$u7b$$u7b$closure$u7d$$u7d$::h8b9bb0352bf2e896  (in ainb-hangar-daemon) + 192  [0x102534c90]
+    +                                                                                                           2357 _$LT$core..pin..Pin$LT$P$GT$$u20$as$u20$core..future..future..Future$GT$::poll::hf6056e5272a2edb2  (in ainb-hangar-daemon) + 56  [0x102307ce4]
+    +                                                                                                             2357 ainb_hangar_daemon::run_loop::run::_$u7b$$u7b$closure$u7d$$u7d$::_$u7b$$u7b$closure$u7d$$u7d$::hb59e832a0dbda0b3  (in ainb-hangar-daemon) + 516  [0x1021dd734]
+    +                                                                                                               2357 ainb_hangar_daemon::run_loop::execute_claimed::_$u7b$$u7b$closure$u7d$$u7d$::hdf9bee8eb7fd69aa  (in ainb-hangar-daemon) + 23572  [0x1021ae584]
+    +                                                                                                                 2357 ainb_hangar_daemon::claude_cred::keys_for_backend::h58e0dc3a70d45921  (in ainb-hangar-daemon) + 132  [0x1021dfa5c]
+    +                                                                                                                   2357 ainb_hangar_daemon::claude_cred::resolve::hfa23626d805f64af  (in ainb-hangar-daemon) + 244  [0x1021e0830]
+    +                                                                                                                     2357 _$LT$ainb_hangar_secrets..mac..MacKeychainBackend$u20$as$u20$ainb_hangar_secrets..SecretBackend$GT$::get::h535ae8143f30475e  (in ainb-hangar-daemon) + 140  [0x10283b3dc]
+    +                                                                                                                       2357 security_framework::passwords::get_generic_password::h199d9c234d6f08a4  (in ainb-hangar-daemon) + 348  [0x102842110]
+    +                                                                                                                         2357 SecItemCopyMatching  (in Security) + 344  [0x18eec9b14]
+    +                                                                                                                           2357 SecItemCopyMatching_osx(__CFDictionary const*, void const**)  (in Security) + 2120  [0x18eec6d9c]
+    +                                                                                                                             2357 AddItemResults(__SecKeychainItem*, __SecIdentity*, SecItemParams*, __CFAllocator const*, __CFArray**, void const**)  (in Security) + 548  [0x18eec87ec]
+    +                                                                                                                               2357 SecKeychainItemCopyContent  (in Security) + 296  [0x18eeea614]
+    +                                                                                                                                 2357 Security::KeychainCore::ItemImpl::getContent(SecItemClass*, SecKeychainAttributeList*, unsigned int*, void**)  (in Security) + 744  [0x18eea4ea4]
+    +                                                                                                                                   2357 Security::KeychainCore::ItemImpl::getContent(Security::CssmClient::DbAttributes*, Security::CssmDataContainer*)  (in Security) + 572  [0x18eea0338]
+    +                                                                                                                                     2357 Security::CssmClient::SSDbUniqueRecordImpl::get(Security::CssmClient::DbAttributes*, Security::CssmDataContainer*, cssm_access_credentials const*)  (in Security) + 288  [0x18ec32c50]
+    +                                                                                                                                       2357 Security::CssmClient::SSGroupImpl::decodeDataBlob(cssm_data const&, cssm_access_credentials const*, Security::Allocator&, cssm_data&)  (in Security) + 640  [0x18edeae58]
+    +                                                                                                                                         2357 CSSM_DecryptDataFinal  (in Security) + 152  [0x18ee7d774]
+    +                                                                                                                                           2357 cssm_DecryptDataFinal(long, unsigned long long, cssm_data*)  (in Security) + 188  [0x18edefd74]
+    +                                                                                                                                             2357 Security::CSPFullPluginSession::CSPContext::final(Security::CssmData&, Security::Allocator&)  (in Security) + 68  [0x18ec374b4]
+    +                                                                                                                                               2357 SSCryptContext::outputSize(bool, unsigned long)  (in Security) + 372  [0x18edc7028]
+    +                                                                                                                                                 2357 Security::SecurityServer::ClientSession::decrypt(Security::Context const&, unsigned int, Security::CssmData const&, Security::CssmData&, Security::Allocator&)  (in Security) + 768  [0x18ef53f98]
+    +                                                                                                                                                   2357 mach_msg  (in libsystem_kernel.dylib) + 24  [0x18b2e7fc0]
+    +                                                                                                                                                     2357 mach_msg_overwrite  (in libsystem_kernel.dylib) + 480  [0x18b2f09c0]
+    +                                                                                                                                                       2357 mach_msg2_internal  (in libsystem_kernel.dylib) + 76  [0x18b2fa574]
+    +                                                                                                                                                         2357 mach_msg2_trap  (in libsystem_kernel.dylib) + 8  [0x18b2e7c34]
