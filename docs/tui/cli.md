@@ -2930,6 +2930,11 @@ Options:
       --target-branch <TARGET_BRANCH>
           The TARGET branch a future PR lands INTO (migration 0042); stored on the issue for later PR automation
 
+      --parent <PARENT>
+          Make this a SUB-ISSUE of an existing issue (`issue.id`, migration 0046).
+          
+          The parent must exist in the same workspace; completing the last child of the lowest unfinished stage cascades a roll-up comment onto the parent.
+
   -h, --help
           Print help (see a summary with '-h')
 ```
@@ -3729,6 +3734,7 @@ List, re-role, and remove workspace members
 Usage: ainb hangar member [OPTIONS] <COMMAND>
 
 Commands:
+  add       Add a human member (find-or-create the user by email, then join)
   list      List the workspace's members (email + role)
   set-role  Change a member's role (`owner` / `admin` / `member`)
   remove    Remove a member from the workspace (the user row survives)
@@ -3737,6 +3743,43 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar member add`
+
+Add a human member (find-or-create the user by email, then join)
+
+```console
+$ ainb hangar member add --help
+Add a human member (find-or-create the user by email, then join)
+
+Usage: ainb hangar member add [OPTIONS] --email <EMAIL>
+
+Options:
+      --email <EMAIL>
+          The member's email (find-or-create the user by this address)
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --role <ROLE>
+          The role to grant: `owner`, `admin`, or `member` (default `member`)
+
+          Possible values:
+          - owner:  Full administrative control; a workspace must always keep one
+          - admin:  Elevated management, short of ownership
+          - member: A regular member
+          
+          [default: member]
+
+      --workspace <WORKSPACE>
+          Workspace slug to add the member to. Defaults to the bootstrapped `default` workspace
+
+  -h, --help
+          Print help (see a summary with '-h')
 ```
 
 #### `ainb hangar member list`
