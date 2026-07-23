@@ -31,7 +31,9 @@
 //! are semantic rules no constraint can express, so they are enforced here in
 //! application code.
 
+use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use sqlx::SqlitePool;
 
 /// The three roles a member can hold within a workspace (`member.role`).
@@ -90,6 +92,88 @@ pub struct Member {
 pub struct MemberRepo;
 
 impl MemberRepo {
+    /// Add a human member: find-or-create the `user` by email, then insert the
+    /// `(workspace_id, user_id, role)` membership. Workspace-scoped.
+    ///
+    /// Mirrors multica's membership flow (`workspace.go` `CreateMember`,
+    /// auto-stubbing a `user` by email when none exists). In one transaction it
+    /// looks up `user.id` for `email`; if absent it mints a ULID user id (the
+    /// store's [`IdGen`] convention) and inserts the `user` row, then inserts the
+    /// membership. An existing user (a member of another workspace, say) is
+    /// reused, so the same email in a sibling tenant is a *separate* membership
+    /// over one shared user row.
+    ///
+    /// Idempotent-safe: re-adding an existing `(workspace, user)` pair trips the
+    /// member composite-PK uniqueness and is reported as
+    /// [`MemberRepoError::AlreadyMember`] (nothing written), never a duplicate.
+    ///
+    /// Returns the created membership as a [`Member`] (the same shape
+    /// [`list`](MemberRepo::list) returns).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemberRepoError::EmptyEmail`] when `email` is blank,
+    /// [`MemberRepoError::AlreadyMember`] when the pair already exists, or
+    /// [`MemberRepoError::Db`] on a store failure.
+    pub async fn add(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        email: &str,
+        role: MemberRole,
+    ) -> Result<Member, MemberRepoError> {
+        let email = email.trim();
+        if email.is_empty() {
+            return Err(MemberRepoError::EmptyEmail);
+        }
+
+        let mut tx = pool.begin().await?;
+        // Find-or-create the user by email (`user.email` is NOT NULL UNIQUE).
+        let existing: Option<String> =
+            sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+                .bind(email)
+                .fetch_optional(&mut *tx)
+                .await?;
+        let user_id = match existing {
+            Some(id) => id,
+            None => {
+                let id = SystemIdGen.new_ulid();
+                let now = HangarClock::now_ms(&SystemClock);
+                sqlx::query("INSERT INTO user (id, email, created_at) VALUES (?, ?, ?)")
+                    .bind(&id)
+                    .bind(email)
+                    .bind(now)
+                    .execute(&mut *tx)
+                    .await?;
+                id
+            }
+        };
+
+        // Insert the membership. A conflict on the composite PK means this user is
+        // already a member of this workspace → AlreadyMember (not a raw Db error).
+        let inserted =
+            sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, ?, ?)")
+                .bind(workspace.as_str())
+                .bind(&user_id)
+                .bind(role.as_str())
+                .execute(&mut *tx)
+                .await;
+        if let Err(e) = inserted {
+            let already_member = e
+                .as_database_error()
+                .is_some_and(sqlx::error::DatabaseError::is_unique_violation);
+            if already_member {
+                return Err(MemberRepoError::AlreadyMember);
+            }
+            return Err(MemberRepoError::Db(e));
+        }
+        tx.commit().await?;
+        Ok(Member {
+            user_id,
+            email: email.to_string(),
+            role: role.as_str().to_string(),
+        })
+    }
+
     /// List every member of `workspace`, joined with their user record, ordered
     /// by email (the stable Members-pane render order).
     ///
@@ -251,6 +335,14 @@ pub enum MemberRepoError {
     /// set. Surfaced by the caller after [`MemberRole::parse`] returns `None`.
     #[error("invalid role: must be one of owner/admin/member")]
     InvalidRole,
+    /// [`add`](MemberRepo::add) was called with a blank email. Rejected before
+    /// any write (a member's email is its human label; it must be non-empty).
+    #[error("email must not be empty")]
+    EmptyEmail,
+    /// [`add`](MemberRepo::add) targeted a `(workspace, user)` pair that already
+    /// exists — the user is already a member of this workspace. Nothing written.
+    #[error("that user is already a member of this workspace")]
+    AlreadyMember,
     /// An underlying `sqlx` failure (uniqueness conflict, IO, …).
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -424,6 +516,124 @@ mod tests {
         assert!(matches!(err, MemberRepoError::LastOwner), "got {err:?}");
         let members = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
         assert_eq!(members.len(), 2, "rejected removal left both members");
+    }
+
+    /// `add` mints a fresh user (by email) AND the membership when neither
+    /// exists — the workspace's first *added* member.
+    #[tokio::test]
+    async fn add_mints_user_and_membership() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+
+        let m = MemberRepo::add(pool, &ws("ws-a"), "dana@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+        assert_eq!(m.email, "dana@example.com");
+        assert_eq!(m.role, "member");
+        assert!(!m.user_id.is_empty(), "a user id was minted");
+
+        // The user row exists and the membership is listed.
+        let members = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].email, "dana@example.com");
+        assert_eq!(members[0].user_id, m.user_id);
+    }
+
+    /// Re-adding the SAME `(workspace, user)` pair is rejected as `AlreadyMember`
+    /// — idempotent-safe, never a duplicate row.
+    #[tokio::test]
+    async fn add_existing_pair_is_already_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+
+        MemberRepo::add(pool, &ws("ws-a"), "dana@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+        let err = MemberRepo::add(pool, &ws("ws-a"), "dana@example.com", MemberRole::Admin)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MemberRepoError::AlreadyMember), "got {err:?}");
+
+        // Still exactly one membership, and the original role is untouched.
+        let members = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].role, "member", "re-add did not overwrite the role");
+    }
+
+    /// `add` reuses an EXISTING user (found by email) rather than minting a
+    /// second user row — the same person joining a second workspace.
+    #[tokio::test]
+    async fn add_reuses_existing_user_by_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        // Dana already exists as a member of ws-a.
+        let first = MemberRepo::add(pool, &ws("ws-a"), "dana@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+
+        let second = MemberRepo::add(pool, &ws("ws-b"), "dana@example.com", MemberRole::Admin)
+            .await
+            .unwrap();
+        assert_eq!(
+            second.user_id, first.user_id,
+            "the same email reuses the one user row"
+        );
+        // Exactly one `user` row for that email.
+        let user_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user WHERE email = 'dana@example.com'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(user_count, 1, "no duplicate user minted");
+    }
+
+    /// `add` is workspace-scoped: the same email added to two sibling tenants is
+    /// two separate memberships (one shared user), each with its own role.
+    #[tokio::test]
+    async fn add_is_workspace_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+
+        MemberRepo::add(pool, &ws("ws-a"), "dana@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+        MemberRepo::add(pool, &ws("ws-b"), "dana@example.com", MemberRole::Admin)
+            .await
+            .unwrap();
+
+        let a = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
+        let b = MemberRepo::list(pool, &ws("ws-b")).await.unwrap();
+        assert_eq!(a.len(), 1);
+        assert_eq!(b.len(), 1);
+        assert_eq!(a[0].role, "member", "ws-a keeps its own role");
+        assert_eq!(b[0].role, "admin", "ws-b keeps its own role");
+        assert_eq!(a[0].user_id, b[0].user_id, "one shared user across tenants");
+    }
+
+    /// A blank email is rejected before any write.
+    #[tokio::test]
+    async fn add_rejects_empty_email() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+
+        let err = MemberRepo::add(pool, &ws("ws-a"), "   ", MemberRole::Member)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, MemberRepoError::EmptyEmail), "got {err:?}");
+        let members = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
+        assert!(members.is_empty(), "nothing written on a blank email");
     }
 
     /// `MemberRole::parse` round-trips the closed set and rejects junk.
