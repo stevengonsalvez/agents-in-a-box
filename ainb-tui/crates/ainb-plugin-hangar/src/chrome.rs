@@ -380,10 +380,11 @@ mod tests {
     /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
     #[test]
     fn top_bar_renders_tabs_and_slug() {
-        // Wide enough that the full fourteen-tab strip (P4 added `[B]Boards`, P7
-        // `[S]Squads`, P5 `[P]Profiles` — ~155 cols) AND the right-side
-        // workspace-slug cluster both fit; the tabs win width contention, so a
-        // narrower buffer drops the slug (covered by the 80x24 floor smoke).
+        // Wide enough that the full fifteen-tab strip (P4 added `[B]Boards`, P7
+        // `[S]Squads`, P5 `[P]Profiles`, slice 2 `[A]Agents` — ~168 cols) AND the
+        // right-side workspace-slug cluster both fit; the tabs win width
+        // contention, so a narrower buffer drops the slug (covered by the 80x24
+        // floor smoke).
         let mut buf = WireBuffer::new(200, 24);
         render_top_bar(&mut buf, 200, &Screen::IssueList, "acme", Presence::Online);
         // Reconstruct row 0 text from the wire buffer cells.

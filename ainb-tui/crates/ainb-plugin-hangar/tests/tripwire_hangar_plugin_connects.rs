@@ -194,12 +194,12 @@ where
         host_write
             .write_all(&host_frame(&serde_json::json!({
                 "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
-                // 176 cols so the right-cluster presence dot fits alongside the
-                // thirteen-tab strip (e38.35 added Usage; P2 added Control; P7
-                // added the Squads tab, ~144 cols); the tabs win width contention,
-                // so at a narrower width the cluster yields and `online` would not
-                // render.
-                "params": { "viewport": {"width": 176, "height": 24}, "generation": 0 }
+                // 200 cols so the right-cluster presence dot fits alongside the
+                // fifteen-tab strip (e38.35 added Usage; P2 added Control; P7 added
+                // Squads; slice 2 added the Agents tab, pushing the strip to ~168
+                // cols); the tabs win width contention, so at a narrower width the
+                // cluster yields and `online` would not render.
+                "params": { "viewport": {"width": 200, "height": 24}, "generation": 0 }
             })))
             .await
             .unwrap();
