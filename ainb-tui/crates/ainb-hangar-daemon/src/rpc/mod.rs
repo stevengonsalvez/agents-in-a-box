@@ -3965,6 +3965,10 @@ fn member_repo_err(e: &ainb_hangar_store::repo::member::MemberRepoError) -> RpcE
             invalid_params("a workspace must always keep at least one owner")
         }
         MemberRepoError::InvalidRole => invalid_params("role must be one of owner/admin/member"),
+        MemberRepoError::EmptyEmail => invalid_params("email must not be empty"),
+        MemberRepoError::AlreadyMember => {
+            invalid_params("that user is already a member of this workspace")
+        }
         MemberRepoError::Db(db) => store_err(db),
     }
 }

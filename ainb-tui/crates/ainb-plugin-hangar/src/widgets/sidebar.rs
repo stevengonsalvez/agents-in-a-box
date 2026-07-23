@@ -179,6 +179,45 @@ mod tests {
         assert!(row_text(&buf, 1, 40).contains("unassigned"));
     }
 
+    /// The Assignee row surfaces the polymorphic actor KIND: a member assignee
+    /// paints its `member:` prefix, distinct from the `agent:` an agent shows
+    /// (agents-are-team-members symmetry, made visible in the TUI). Mutation-
+    /// provable: strip the kind prefix from the snapshot ref and this goes red.
+    #[test]
+    fn assignee_row_distinguishes_member_from_agent_kind() {
+        let mut member_buf = WireBuffer::new(48, 8);
+        render_sidebar(
+            &mut member_buf,
+            0,
+            0,
+            8,
+            48,
+            &issue(None, Some("member:dana")),
+        );
+        let member_row = row_text(&member_buf, 1, 48);
+        assert!(
+            member_row.contains("member:dana"),
+            "member kind shown: {member_row}"
+        );
+        assert!(!member_row.contains("agent:"), "not painted as an agent");
+
+        let mut agent_buf = WireBuffer::new(48, 8);
+        render_sidebar(
+            &mut agent_buf,
+            0,
+            0,
+            8,
+            48,
+            &issue(None, Some("agent:claude")),
+        );
+        let agent_row = row_text(&agent_buf, 1, 48);
+        assert!(
+            agent_row.contains("agent:claude"),
+            "agent kind shown: {agent_row}"
+        );
+        assert!(!agent_row.contains("member:"), "not painted as a member");
+    }
+
     /// Progressive disclosure: a `None` description omits the Notes row entirely.
     #[test]
     fn absent_description_omits_notes_row() {
