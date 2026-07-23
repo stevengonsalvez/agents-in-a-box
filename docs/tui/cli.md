@@ -88,7 +88,7 @@ Options:
       --create-branch <CREATE_BRANCH>  Create a new branch with this name
       --worktree                       Use git worktree for isolation
       --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot]
-      --model <MODEL>                  Model to use (sonnet, opus, haiku) [default: sonnet]
+      --model <MODEL>                  Provider model ID to pass through unchanged
   -p, --prompt <PROMPT>                Initial prompt to send
   -a, --attach                         Attach to session after creation
       --dangerously-skip-permissions   Skip permission prompts (dangerous!)
@@ -3174,6 +3174,8 @@ Commands:
   stop     Stop the running daemon: signal the exact recorded PID, then remove the PID file
   restart  Restart the daemon: `stop` (if running) then `start`
   setup    One-command bring-up: ensure the store + socket-auth token, then `start`
+  config   View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+  cred     Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
   help     Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3281,6 +3283,48 @@ $ ainb hangar daemon setup --help
 One-command bring-up: ensure the store + socket-auth token, then `start`
 
 Usage: ainb hangar daemon setup [OPTIONS]
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon config`
+
+View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+
+```console
+$ ainb hangar daemon config --help
+View + edit the daemon's user-config knobs (`list`/`get`/`set`)
+
+Usage: ainb hangar daemon config [OPTIONS] <COMMAND>
+
+Commands:
+  list  List every configurable: key, current value (or default), default, type
+  get   Print one knob's current value (or its default when unset)
+  set   Validate + persist one knob's value (rejects unknown keys / bad values)
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar daemon cred`
+
+Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
+
+```console
+$ ainb hangar daemon cred --help
+Manage the one-time, host-wide `claude` credential the daemon injects into confined headless runs (`status`/`set`/`clear`)
+
+Usage: ainb hangar daemon cred [OPTIONS] <COMMAND>
+
+Commands:
+  status  Report whether a credential is configured and where it resolves from (env override / secret store / not set). Never prints the value
+  set     Store a long-lived token. Reads the token from STDIN by default (so it never lands on argv or in shell history); `--setup-token` instead drives the interactive `claude setup-token` browser flow and captures the result
+  clear   Remove the stored credential. Idempotent
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3526,6 +3570,7 @@ Edit, archive, and list workspace agents
 Usage: ainb hangar agent [OPTIONS] <COMMAND>
 
 Commands:
+  create     Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
   list       List the workspace's agents (active by default; `--all` includes archived)
   edit       Edit an agent's config knobs (model / args / MCP / thinking / env / name)
   archive    Archive an agent (hide it from the active picker)
@@ -3535,6 +3580,25 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar agent create`
+
+Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
+
+```console
+$ ainb hangar agent create --help
+Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
+
+Usage: ainb hangar agent create [OPTIONS] --name <NAME>
+
+Options:
+      --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
+      --name <NAME>                  The new agent's name
+      --provider <PROVIDER>          Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`
+      --instructions <INSTRUCTIONS>  Optional instructions / system prompt for the agent
+      --workspace <WORKSPACE>        Workspace slug to create the agent in. Defaults to the bootstrapped `default` workspace (created if absent)
+  -h, --help                         Print help
 ```
 
 #### `ainb hangar agent list`
