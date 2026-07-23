@@ -2831,11 +2831,7 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     let assignee = if args.unassign {
         Some(None)
     } else {
-        args.assign
-            .as_deref()
-            .map(parse_assignee)
-            .transpose()?
-            .map(Some)
+        args.assign.as_deref().map(parse_assignee).transpose()?.map(Some)
     };
     let due_date = if args.clear_due {
         Some(None)
@@ -2895,8 +2891,9 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
 /// existing script and tripwire that passes a raw agent id is byte-unchanged.
 fn parse_assignee(raw: &str) -> Result<ActorRef> {
     if raw.contains(':') {
-        raw.parse::<ActorRef>()
-            .with_context(|| format!("invalid assignee `{raw}` (expected member:<id> or agent:<id>)"))
+        raw.parse::<ActorRef>().with_context(|| {
+            format!("invalid assignee `{raw}` (expected member:<id> or agent:<id>)")
+        })
     } else {
         ActorRef::new(ActorKind::Agent, raw).context("assignee agent id was empty")
     }
@@ -3028,9 +3025,10 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     // work).
     let parsed_assignee = args.assign.as_deref().map(parse_assignee).transpose()?;
     let (assignment, member_assignee) = match parsed_assignee {
-        Some(actor) if actor.kind() == ActorKind::Agent => {
-            (Some(resolve_agent_runtime(pool, &workspace_id, actor.id()).await?), None)
-        }
+        Some(actor) if actor.kind() == ActorKind::Agent => (
+            Some(resolve_agent_runtime(pool, &workspace_id, actor.id()).await?),
+            None,
+        ),
         Some(actor) => (None, Some(actor)),
         None => (None, None),
     };
@@ -4270,10 +4268,7 @@ fn issue_line(i: &Issue) -> String {
     };
     // The assignee's canonical `member:<id>`/`agent:<id>` form surfaces the actor
     // KIND (a human member vs an agent), shown only when the issue is assigned.
-    let assignee = i
-        .assignee
-        .as_ref()
-        .map_or_else(String::new, |a| format!("  assignee={a}"));
+    let assignee = i.assignee.as_ref().map_or_else(String::new, |a| format!("  assignee={a}"));
     format!(
         "{}  [{}]  priority={}  {}{assignee}{due}{labels}",
         i.id, i.state, i.priority, i.title

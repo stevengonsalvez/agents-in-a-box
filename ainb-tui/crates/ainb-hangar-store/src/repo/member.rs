@@ -32,8 +32,8 @@
 //! application code.
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
-use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::SqlitePool;
 
 /// The three roles a member can hold within a workspace (`member.role`).
@@ -128,24 +128,22 @@ impl MemberRepo {
 
         let mut tx = pool.begin().await?;
         // Find-or-create the user by email (`user.email` is NOT NULL UNIQUE).
-        let existing: Option<String> =
-            sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+        let existing: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+            .bind(email)
+            .fetch_optional(&mut *tx)
+            .await?;
+        let user_id = if let Some(id) = existing {
+            id
+        } else {
+            let id = SystemIdGen.new_ulid();
+            let now = HangarClock::now_ms(&SystemClock);
+            sqlx::query("INSERT INTO user (id, email, created_at) VALUES (?, ?, ?)")
+                .bind(&id)
                 .bind(email)
-                .fetch_optional(&mut *tx)
+                .bind(now)
+                .execute(&mut *tx)
                 .await?;
-        let user_id = match existing {
-            Some(id) => id,
-            None => {
-                let id = SystemIdGen.new_ulid();
-                let now = HangarClock::now_ms(&SystemClock);
-                sqlx::query("INSERT INTO user (id, email, created_at) VALUES (?, ?, ?)")
-                    .bind(&id)
-                    .bind(email)
-                    .bind(now)
-                    .execute(&mut *tx)
-                    .await?;
-                id
-            }
+            id
         };
 
         // Insert the membership. A conflict on the composite PK means this user is
@@ -561,7 +559,10 @@ mod tests {
         // Still exactly one membership, and the original role is untouched.
         let members = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
         assert_eq!(members.len(), 1);
-        assert_eq!(members[0].role, "member", "re-add did not overwrite the role");
+        assert_eq!(
+            members[0].role, "member",
+            "re-add did not overwrite the role"
+        );
     }
 
     /// `add` reuses an EXISTING user (found by email) rather than minting a
@@ -628,9 +629,7 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
 
-        let err = MemberRepo::add(pool, &ws("ws-a"), "   ", MemberRole::Member)
-            .await
-            .unwrap_err();
+        let err = MemberRepo::add(pool, &ws("ws-a"), "   ", MemberRole::Member).await.unwrap_err();
         assert!(matches!(err, MemberRepoError::EmptyEmail), "got {err:?}");
         let members = MemberRepo::list(pool, &ws("ws-a")).await.unwrap();
         assert!(members.is_empty(), "nothing written on a blank email");

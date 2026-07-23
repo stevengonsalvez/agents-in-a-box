@@ -186,15 +186,35 @@ mod tests {
     #[test]
     fn assignee_row_distinguishes_member_from_agent_kind() {
         let mut member_buf = WireBuffer::new(48, 8);
-        render_sidebar(&mut member_buf, 0, 0, 8, 48, &issue(None, Some("member:dana")));
+        render_sidebar(
+            &mut member_buf,
+            0,
+            0,
+            8,
+            48,
+            &issue(None, Some("member:dana")),
+        );
         let member_row = row_text(&member_buf, 1, 48);
-        assert!(member_row.contains("member:dana"), "member kind shown: {member_row}");
+        assert!(
+            member_row.contains("member:dana"),
+            "member kind shown: {member_row}"
+        );
         assert!(!member_row.contains("agent:"), "not painted as an agent");
 
         let mut agent_buf = WireBuffer::new(48, 8);
-        render_sidebar(&mut agent_buf, 0, 0, 8, 48, &issue(None, Some("agent:claude")));
+        render_sidebar(
+            &mut agent_buf,
+            0,
+            0,
+            8,
+            48,
+            &issue(None, Some("agent:claude")),
+        );
         let agent_row = row_text(&agent_buf, 1, 48);
-        assert!(agent_row.contains("agent:claude"), "agent kind shown: {agent_row}");
+        assert!(
+            agent_row.contains("agent:claude"),
+            "agent kind shown: {agent_row}"
+        );
         assert!(!agent_row.contains("member:"), "not painted as a member");
     }
 
