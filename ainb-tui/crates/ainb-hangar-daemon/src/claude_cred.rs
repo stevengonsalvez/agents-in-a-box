@@ -241,11 +241,41 @@ fn read_system_claude_oauth() -> Option<SecretBytes> {
         }
         let raw = String::from_utf8(out.stdout).ok()?;
         let token = extract_access_token(&raw)?;
+        // The system access token has an ~8h TTL and the confined child cannot
+        // refresh it (claude refreshes by writing BACK to the Keychain). If it is
+        // already expired, still inject it — claude is the authority and clock
+        // skew shouldn't cause a false skip — but log a CLEAR, actionable hint so
+        // the ensuing auth failure is diagnosable rather than mysterious.
+        warn_if_system_token_expired(&raw);
         Some(SecretBytes::from(token.as_bytes()))
     }
     #[cfg(not(all(target_os = "macos", not(test))))]
     {
         None
+    }
+}
+
+/// Log an actionable warning when the system claude token is already expired.
+///
+/// Split out (and taking the raw value, not the token) so the reader stays
+/// linear; the expiry math itself is covered by [`expires_at_ms`].
+#[cfg(all(target_os = "macos", not(test)))]
+fn warn_if_system_token_expired(raw: &str) {
+    let Some(expires_at) = expires_at_ms(raw) else {
+        return;
+    };
+    let now_ms = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    if now_ms > 0 && expires_at < now_ms {
+        let ago_h = (now_ms - expires_at) / 3_600_000;
+        tracing::warn!(
+            expired_hours_ago = ago_h,
+            "system claude login token has expired; the dispatch will fail to \
+             authenticate. Open Claude Code to refresh your login, or set \
+             HANGAR_CLAUDE_OAUTH_TOKEN to a long-lived `claude setup-token` value \
+             for an unattended daemon."
+        );
     }
 }
 
@@ -275,6 +305,21 @@ fn extract_access_token(raw: &str) -> Option<String> {
         .and_then(serde_json::Value::as_str)
         .filter(|t| !t.is_empty())
         .map(str::to_string)
+}
+
+/// Extract `claudeAiOauth.expiresAt` (epoch milliseconds) from a `security -w`
+/// value, or `None` for a raw / fieldless value.
+///
+/// Probed against Claude Code 2.1.x: `expiresAt` is an integer epoch-ms. Pure +
+/// testable; used only to decide whether to warn about an expired login.
+// Reached only by the macOS reader (and its own test); silence dead-code elsewhere.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+#[must_use]
+fn expires_at_ms(raw: &str) -> Option<i64> {
+    let v: serde_json::Value = serde_json::from_str(raw.trim()).ok()?;
+    v.get("claudeAiOauth")
+        .and_then(|o| o.get("expiresAt"))
+        .and_then(serde_json::Value::as_i64)
 }
 
 /// Report the configured source without materialising the secret into a caller.
@@ -570,6 +615,20 @@ mod tests {
         );
         // Empty output -> None.
         assert_eq!(extract_access_token("   \n"), None);
+    }
+
+    #[test]
+    fn expires_at_ms_reads_the_epoch_millis_field() {
+        // The real value shape: expiresAt is an integer epoch-ms.
+        let blob = r#"{"claudeAiOauth":{"accessToken":"t","expiresAt":1784852992972}}"#;
+        assert_eq!(expires_at_ms(blob), Some(1_784_852_992_972));
+        // Missing field / non-JSON / raw token -> None (no expiry known).
+        assert_eq!(
+            expires_at_ms(r#"{"claudeAiOauth":{"accessToken":"t"}}"#),
+            None
+        );
+        assert_eq!(expires_at_ms("sk-ant-oat-raw"), None);
+        assert_eq!(expires_at_ms(""), None);
     }
 
     #[test]
