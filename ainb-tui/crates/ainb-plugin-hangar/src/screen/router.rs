@@ -66,6 +66,10 @@ fn reduce_key(state: &AppState, c: char) -> Reduction {
         'S' => switch_tab(state, Screen::Squads),
         // `P` (capital) opens the profile editor from anywhere (P5).
         'P' => switch_tab(state, Screen::Profiles),
+        // `A` (capital) opens the Agents roster from anywhere (slice 2). `A` was
+        // free — the old `[3]Agents` tab folded into the issue-list filter chip
+        // (e38.38) and never reclaimed a letter, so this is the first `A` binding.
+        'A' => switch_tab(state, Screen::Agents),
         ',' => switch_tab(state, Screen::Settings),
         // `?` opens the help overlay over the current screen (P4.1 deliverable,
         // P4.md:78). Esc restores the prior screen, like any modal.
@@ -126,4 +130,34 @@ const fn no_intent(state: AppState) -> Reduction {
 /// A no-op reduction: state cloned unchanged, no intent.
 fn unchanged(state: &AppState) -> Reduction {
     no_intent(state.clone())
+}
+
+#[cfg(test)]
+mod agents_nav_tests {
+    use super::*;
+    use ainb_hangar_core::ids::WorkspaceId;
+
+    fn state() -> AppState {
+        AppState::new(WorkspaceId::from_str("default").unwrap())
+    }
+
+    /// `A` routes to the Agents roster from any screen, clearing modal bookkeeping.
+    #[test]
+    fn a_routes_to_agents() {
+        let out = reduce(&state(), AppEvent::Key('A'));
+        assert_eq!(out.state.screen, Screen::Agents);
+        assert!(out.state.prior_screen.is_none());
+        assert!(out.intent.is_none());
+    }
+
+    /// The Agents tab is not a modal, so a bare Esc on it is a no-op at the routing
+    /// layer (its create/delete overlays own Esc-to-cancel); the user leaves via a
+    /// tab hotkey or `q`, never trapped.
+    #[test]
+    fn esc_on_agents_is_a_routing_noop() {
+        let on_agents = reduce(&state(), AppEvent::Key('A')).state;
+        let out = reduce(&on_agents, AppEvent::Esc);
+        assert_eq!(out.state.screen, Screen::Agents);
+        assert!(out.intent.is_none());
+    }
 }

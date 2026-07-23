@@ -241,6 +241,11 @@ const ISSUE_CANCEL_ACTIVE_REQ_ID: i64 = 54;
 /// JSON-RPC id for the `hangar/task_retry` force-requeue raised by the Task Kanban
 /// failed-column / task-detail `R` (a human override of the auto-retry gate).
 const TASK_RETRY_REQ_ID: i64 = 55;
+/// JSON-RPC id for a `hangar/agent_delete` raised by the Agents roster `x` confirm
+/// (slice 2). The reply carries the refreshed `AgentsListResult`, so it folds
+/// through [`Self::apply_agents`] into the cached actors — the same seam
+/// [`AGENT_CREATE_REQ_ID`] uses, so the deleted row drops from the roster live.
+const AGENT_DELETE_REQ_ID: i64 = 56;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -886,6 +891,19 @@ impl HangarPlugin {
                     self.screens.squads.note_err(format!("agent create failed: {}", e.message));
                 } else {
                     self.screens.squads.note_ok("agent created");
+                }
+                self.conn.on_event();
+            }
+            // The Agents roster `x` delete reply folds the shrunk roster back
+            // through the same actor cache; an error (active tasks / FK-pinned
+            // history) surfaces on the Agents pane so the refusal is never silent.
+            RpcId::Number(AGENT_DELETE_REQ_ID) => {
+                if let Some(e) = &resp.error {
+                    self.screens
+                        .agents
+                        .note_err(format!("delete failed: {}", e.message));
+                } else {
+                    self.apply_agents(resp);
                 }
                 self.conn.on_event();
             }
@@ -2313,6 +2331,51 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire a deferred agent RPC raised by the Agents roster screen (slice 2).
+    ///
+    /// Maps [`AgentsAction::Create`] to `hangar/agent_create` (fired with no ids —
+    /// the daemon fills workspace / runtime / owner) and [`AgentsAction::Delete`] to
+    /// `hangar/agent_delete` (the agent's id extracted from its `agent:<id>` ref,
+    /// scoped to the workspace). The create reply folds through [`AGENT_CREATE_REQ_ID`]
+    /// and the delete through [`AGENT_DELETE_REQ_ID`] — both refresh the roster via
+    /// the shared actor cache.
+    async fn apply_agents_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::AgentsAction,
+    ) {
+        use crate::screen::AgentsAction;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let (id, method, params) = match action {
+            AgentsAction::Create { name } => (
+                AGENT_CREATE_REQ_ID,
+                daemon_methods::HANGAR_AGENT_CREATE,
+                serde_json::json!({ "workspace_id": ws, "name": name }),
+            ),
+            AgentsAction::Delete { actor_ref } => {
+                // Extract the bare agent id from the canonical `agent:<id>` ref; a
+                // malformed ref (no prefix) is a no-op rather than a bad RPC.
+                let Some(agent_id) = actor_ref.strip_prefix("agent:") else {
+                    return;
+                };
+                (
+                    AGENT_DELETE_REQ_ID,
+                    daemon_methods::HANGAR_AGENT_DELETE,
+                    serde_json::json!({ "workspace_id": ws, "agent_id": agent_id }),
+                )
+            }
+        };
+        let Ok(body) = encode_request(id, method, params) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: agent rpc send failed: {e}")).await;
+        }
+    }
+
     /// The first cached AGENT actor-ref not already the leader or a member of
     /// `squad_id` — the glue's add-member selection policy (P7). `None` when every
     /// cached agent is already on the squad.
@@ -3100,6 +3163,18 @@ impl HangarPlugin {
         // owns Esc-to-cancel), mirroring the issue-list capture guard so typing a
         // squad name like `qa` inserts instead of quitting / switching tabs.
         if matches!(app.screen, Screen::Squads) && self.screens.squads.is_creating() {
+            if let Some(nav) = route_key(&app, &mut self.screens, key) {
+                self.apply_nav(&app, nav);
+            }
+            return;
+        }
+        // The Agents roster's create-name input and delete-confirm overlay are
+        // text/decision capture surfaces too (slice 2): while one is open every key
+        // — including the tab-switch chars and `q` — belongs to the overlay, not to
+        // nav. Route straight to the reducer (which owns Esc-to-cancel) so typing an
+        // agent name like `qa` inserts instead of quitting / switching tabs, and so
+        // Enter confirms the delete rather than being eaten by the routing layer.
+        if matches!(app.screen, Screen::Agents) && self.screens.agents.is_capturing() {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
             }
@@ -4079,7 +4154,7 @@ const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Optio
             // numbered tabs are now contiguous `1`→`4`.
             if matches!(
                 *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'S' | 'P' | ',' | '?' | 'q'
+                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'S' | 'P' | 'A' | ',' | '?' | 'q'
             ) =>
         {
             Some(AppEvent::Key(*ch))
@@ -4322,6 +4397,12 @@ impl Plugin for HangarPlugin {
         // (`squad_fanout`) surfaces the leader+members brief note.
         if let Some(action) = self.screens.take_pending_squads_action() {
             self.apply_squad_action(host, action).await;
+        }
+        // Slice 2: drain any deferred agent mutation (`n` create / `x` delete) raised
+        // by the Agents roster and fire `hangar/agent_create` / `hangar/agent_delete`
+        // over the daemon socket; both replies fold the refreshed roster back.
+        if let Some(action) = self.screens.take_pending_agents_action() {
+            self.apply_agents_action(host, action).await;
         }
         // e38.8: drain any deferred issue-assign (Enter in the agent picker)
         // raised by the modal and fire `hangar/issue_update` over the daemon

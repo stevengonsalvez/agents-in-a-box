@@ -14,6 +14,7 @@
 //! [`crate::chrome`]; this module owns only the routing state it renders from.
 
 pub mod agent_picker;
+pub mod agents;
 pub mod app_screens;
 pub mod autopilots;
 pub mod banner_state;
@@ -36,9 +37,9 @@ pub mod task_detail;
 pub mod usage_dashboard;
 
 pub use app_screens::{
-    AttentionAnswerAction, AutopilotAction, BoardsAction, IssueAssignAction, IssueCommentAction,
-    IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates, SkillAction,
-    SquadAction, WorkspaceAction, render_body, route_key,
+    AgentsAction, AttentionAnswerAction, AutopilotAction, BoardsAction, IssueAssignAction,
+    IssueCommentAction, IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates,
+    SkillAction, SquadAction, WorkspaceAction, render_body, route_key,
 };
 pub use router::reduce;
 
@@ -93,6 +94,11 @@ pub enum Screen {
     /// backed by `profile/list` + `profile/get`, with tier editing via
     /// `profile/upsert` (P5).
     Profiles,
+    /// Agents roster (hotkey `A`, slice 2) — the first-class list of the
+    /// workspace's named agents with inline create (`n` → `hangar/agent_create`) +
+    /// delete (`x` → `hangar/agent_delete`), backed by the cached `hangar/agents_list`
+    /// snapshot (no new list RPC).
+    Agents,
     /// Settings (hotkey `,`).
     Settings,
     /// Help overlay (hotkey `?`) — a modal listing global + screen-local
@@ -123,6 +129,7 @@ impl Screen {
             Self::ControlCenter => "Control",
             Self::Squads => "Squads",
             Self::Profiles => "Profiles",
+            Self::Agents => "Agents",
             Self::Settings => "Settings",
             Self::Help => "Help",
             Self::CommandPalette => "Search",
