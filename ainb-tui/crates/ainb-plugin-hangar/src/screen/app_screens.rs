@@ -23,6 +23,7 @@ use ainb_plugin_sdk::{KeyCode, KeyEvent, WireBuffer};
 use super::agent_picker::{
     AgentPickerEvent, AgentPickerIntent, AgentPickerState, reduce_agent_picker,
 };
+use super::agents::{AgentsEvent, AgentsIntent, AgentsState, reduce_agents};
 use super::autopilots::{AutopilotsEvent, AutopilotsIntent, AutopilotsState, reduce_autopilots};
 use super::boards::{BoardsEvent, BoardsIntent, BoardsKey, BoardsState, reduce_boards};
 use super::command_palette::{
@@ -442,6 +443,29 @@ pub enum SquadAction {
     },
 }
 
+/// A deferred daemon RPC raised by the Agents roster screen (slice 2).
+///
+/// Like [`SquadAction`], the sync key router can't `await`; it stashes the action
+/// on [`ScreenStates::pending_agents_action`] and the plugin's `render` pass drains
+/// it and fires the matching agent RPC over the daemon socket. Both replies carry
+/// the refreshed `AgentsListResult`, so the roster folds back through the same
+/// `set_actors` seam the pickers use.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AgentsAction {
+    /// Create an AGENT named `name` (`n` + Enter) — `hangar/agent_create`; the glue
+    /// fires it with no ids (the daemon fills workspace / runtime / owner).
+    Create {
+        /// The new agent's name.
+        name: String,
+    },
+    /// Delete `actor_ref` (Enter on the `x` confirm) — `hangar/agent_delete`; the
+    /// glue extracts the id and scopes the delete to the workspace.
+    Delete {
+        /// The agent to delete, in canonical `agent:<id>` form.
+        actor_ref: String,
+    },
+}
+
 /// A deferred `attention/answer` RPC raised by the control-center screen (P2).
 ///
 /// Like the other deferred actions, the sync key router can't `await`; the
@@ -504,6 +528,10 @@ pub struct ScreenStates {
     /// Squads screen cache (P7 / D17), built from `hangar/squads_list` with each
     /// leader/member resolved against the cached actor snapshot for live status.
     pub squads: SquadsState,
+    /// Agents roster screen cache (slice 2), rebuilt from the same cached
+    /// `hangar/agents_list` actor snapshot that feeds the pickers (agent actors
+    /// only), preserving selection + open create/delete overlays across a refresh.
+    pub agents: AgentsState,
     /// Profile-editor screen cache (P5), filled from `profile/list` (roster) +
     /// `profile/get` (the selected profile's detail + both compile previews).
     pub profiles: ProfilesState,
@@ -616,6 +644,10 @@ pub struct ScreenStates {
     /// awaiting the `render` pass to fire the matching `hangar/squad_*` over the
     /// daemon socket (P7 / D17). `None` when idle.
     pub pending_squads_action: Option<SquadAction>,
+    /// An agent mutation RPC raised by the Agents roster screen (`n` create / `x`
+    /// delete), awaiting the `render` pass to fire `hangar/agent_create` or
+    /// `hangar/agent_delete` over the daemon socket (slice 2). `None` when idle.
+    pub pending_agents_action: Option<AgentsAction>,
     /// A `profile/get` raised by the profile editor (selection moved to a row
     /// whose detail is not loaded), awaiting the `render` pass to fire it. Carries
     /// the slug to fetch. `None` when idle (P5).
@@ -804,6 +836,12 @@ impl ScreenStates {
         self.pending_squads_action.take()
     }
 
+    /// Take the pending agent mutation RPC raised by the Agents roster screen, if
+    /// any (slice 2).
+    pub const fn take_pending_agents_action(&mut self) -> Option<AgentsAction> {
+        self.pending_agents_action.take()
+    }
+
     /// Replace the profile-editor roster from a `profile/list` result (P5),
     /// preserving the selection where possible. Arms a `profile/get` for the
     /// selected profile when its detail is not yet loaded, so the preview pane
@@ -848,6 +886,20 @@ impl ScreenStates {
             })
             .collect();
         self.issue_list.set_agents(named);
+        // Rebuild the Agents roster screen from the same snapshot (agent actors
+        // only), preserving the selection + any open create/delete overlay so a
+        // background refresh mid-interaction does not wipe the user's input. A
+        // delete-confirm whose agent vanished (this delete landed) is dropped.
+        let selected = self.agents.selected_index();
+        let creating = self.agents.create_buffer().map(str::to_string);
+        let confirming = self.agents.confirm_target().map(str::to_string);
+        let note = self.agents.note().map(str::to_string);
+        let mut next_agents = AgentsState::from_actors(&actors);
+        next_agents.set_selected(selected);
+        next_agents.set_create_buffer(creating);
+        next_agents.restore_confirm(confirming);
+        next_agents.set_note(note);
+        self.agents = next_agents;
         self.actors = actors;
     }
 
@@ -1162,6 +1214,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
         Screen::Profiles => {
             super::profiles::render_profiles(buf, w, top, bottom, &states.profiles);
         }
+        Screen::Agents => {
+            super::agents::render_agents(buf, w, top, bottom, &states.agents);
+        }
         Screen::Settings => {
             if let Some(s) = &states.settings {
                 super::settings::render_settings(buf, w, h, top, bottom, s);
@@ -1429,6 +1484,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::Squads => {
             route_squads(states, key);
+            None
+        }
+        Screen::Agents => {
+            route_agents(states, key);
             None
         }
         Screen::Profiles => {
@@ -1973,6 +2032,34 @@ fn route_squads(states: &mut ScreenStates, key: &KeyEvent) {
             member_ref,
         }),
         Some(SquadsIntent::AssignIssue { squad_id }) => Some(SquadAction::Assign { squad_id }),
+        None => None,
+    };
+}
+
+/// Agents roster key routing (slice 2): fold the key into the pure reducer,
+/// lifting an [`AgentsIntent`] into a deferred [`AgentsAction`] the `render` pass
+/// fires over the daemon socket (the sync key router can't `await`).
+///
+/// Esc cancels an open create/delete overlay; every other printable key (incl.
+/// Enter / Backspace while an overlay is open) folds into the reducer. `↑`/`↓`
+/// mirror `k`/`j` for roster navigation.
+fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
+    let ev = if matches!(key.code, KeyCode::Esc) {
+        AgentsEvent::Esc
+    } else if matches!(key.code, KeyCode::Up) {
+        AgentsEvent::Key('k')
+    } else if matches!(key.code, KeyCode::Down) {
+        AgentsEvent::Key('j')
+    } else if let Some(c) = key_char(key) {
+        AgentsEvent::Key(c)
+    } else {
+        return;
+    };
+    let out = reduce_agents(&states.agents, ev);
+    states.agents = out.state;
+    states.pending_agents_action = match out.intent {
+        Some(AgentsIntent::CreateAgent { name }) => Some(AgentsAction::Create { name }),
+        Some(AgentsIntent::DeleteAgent { actor_ref }) => Some(AgentsAction::Delete { actor_ref }),
         None => None,
     };
 }

@@ -658,6 +658,7 @@ async fn handle(
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
+        methods::HANGAR_AGENT_DELETE => handle_agent_delete(pool, req).await,
         methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
         methods::HANGAR_AGENT_ARCHIVE => handle_agent_archive(pool, req).await,
         methods::HANGAR_MEMBERS_LIST => handle_members_list(pool, req).await,
@@ -1514,9 +1515,8 @@ async fn persist_card_edits(
     // through untouched; the clone runs once, idempotently.
     let resolved_repo_ref = match repo_ref {
         Some(r) => {
-            let ainb_dir = ainb_hangar_core::hangar_home().ok_or_else(|| {
-                internal("cannot resolve hangar home to clone a remote favorite")
-            })?;
+            let ainb_dir = ainb_hangar_core::hangar_home()
+                .ok_or_else(|| internal("cannot resolve hangar home to clone a remote favorite"))?;
             Some(resolve_card_repo_ref(&ainb_dir, r).await?)
         }
         None => None,
@@ -1940,6 +1940,55 @@ async fn handle_agent_create(
     }
     // Answer with the refreshed roster (the same shape agents_list returns) so
     // the plugin folds the new agent into its cached list and the squad gate clears.
+    let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
+}
+
+/// Dispatch `hangar/agent_delete` (Agents screen `x` remove, slice 2): delete one
+/// named agent and answer with the refreshed `agents_list` so the client folds the
+/// shrunk roster back into its picker cache.
+///
+/// Mirrors [`handle_issue_delete`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the workspace-scoped delete. A `(agent_id, workspace)`
+/// pair that matches no row is a not-found error (never a cross-tenant delete); an
+/// agent with a live task is refused with a machine-readable `active_tasks` marker
+/// (so the TUI can offer "cancel the run first"); an agent still FK-pinned by run
+/// history is refused with an "archive instead" message. A fresh, never-run agent
+/// deletes cleanly.
+async fn handle_agent_delete(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::agent::{AgentDeleteError, AgentRepo};
+
+    let params: ainb_hangar_proto::snapshots::AgentDeleteParams =
+        parse_params(req, "{ workspace_id, agent_id }")?;
+    // The mutating handler must not silently no-op on a typo'd workspace.
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    AgentRepo::delete(pool, ws.as_str(), &params.agent_id)
+        .await
+        .map_err(|e| match e {
+            AgentDeleteError::NotFound => {
+                invalid_params(&format!("no agent `{}` in this workspace", params.agent_id))
+            }
+            // A live run blocks the delete — surface the "cancel first" message
+            // tagged with a machine-readable marker (append-only `data`) so the TUI
+            // can offer an inline cancel instead of dead-ending on the text.
+            AgentDeleteError::ActiveTasks(n) => RpcError {
+                code: INVALID_PARAMS,
+                message: e.to_string(),
+                data: Some(serde_json::json!({ "reason": "active_tasks", "active": n })),
+            },
+            // FK-pinned history: refuse rather than orphan, pointing at archive.
+            AgentDeleteError::HasHistory => RpcError {
+                code: INVALID_PARAMS,
+                message: e.to_string(),
+                data: Some(serde_json::json!({ "reason": "has_history" })),
+            },
+            AgentDeleteError::Db(ref db) => store_err(db),
+        })?;
+    // Answer with the refreshed roster (the same shape agents_list / agent_create
+    // return) so the plugin folds the shrunk list into its picker cache.
     let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
 }
@@ -5268,6 +5317,82 @@ mod tests {
         .await;
         assert!(resp.error.is_none(), "{resp:?}");
         assert_eq!(resp.result.unwrap()["actor_ref"], "agent:agent-1");
+    }
+
+    /// `hangar/agent_delete` removes a fresh (never-run) agent through the
+    /// dispatcher and answers with the refreshed roster no longer carrying it. The
+    /// agent is created via `agent_create` first so it has no FK-pinned history.
+    #[tokio::test]
+    async fn agent_delete_removes_a_fresh_agent() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        // Create a throwaway agent, then read its id back off the refreshed roster.
+        let created = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_CREATE,
+                serde_json::json!({ "workspace_id": "default", "name": "throwaway" }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(created.error.is_none(), "{created:?}");
+        let actors = created.result.unwrap();
+        let new_ref = actors["actors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|a| a["display_name"] == "throwaway")
+            .expect("created agent is on the roster")["actor_ref"]
+            .as_str()
+            .unwrap()
+            .to_string();
+        let new_id = new_ref.strip_prefix("agent:").unwrap();
+
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_DELETE,
+                serde_json::json!({ "workspace_id": "default", "agent_id": new_id }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(resp.error.is_none(), "{resp:?}");
+        let roster = resp.result.unwrap();
+        let still_there = roster["actors"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|a| a["display_name"] == "throwaway");
+        assert!(
+            !still_there,
+            "the deleted agent must be gone from the roster"
+        );
+    }
+
+    /// An unknown agent id is rejected (not a silent no-op), mirroring the mutating
+    /// workspace-reject contract.
+    #[tokio::test]
+    async fn agent_delete_unknown_agent_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        let resp = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_DELETE,
+                serde_json::json!({ "workspace_id": "default", "agent_id": "no-such-agent" }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert_eq!(resp.error.unwrap().code, INVALID_PARAMS);
     }
 
     /// `hangar/skill_get` returns the seeded `commit` skill's detail, scoped to
