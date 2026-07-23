@@ -65,7 +65,17 @@ pub struct InteractiveSession {
     pub rtk_enabled: bool,            // RTK PreToolUse hook wired in session's worktree
 }
 
-/// Persisted session metadata for discovery across restarts
+/// How the persisted model value should be interpreted.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ModelSource {
+    /// Metadata written before provider model IDs were stored verbatim.
+    #[default]
+    LegacyTyped,
+    /// Provider model ID supplied by the user and passed through unchanged.
+    Raw,
+}
+
+/// Persisted session metadata for discovery across restarts.
 ///
 /// This solves the branch-mismatch problem: when a user changes branches in a worktree,
 /// the old tmux session name no longer matches the current branch. By persisting the
@@ -93,6 +103,9 @@ pub struct SessionMetadata {
     pub skip_permissions: Option<bool>,
     #[serde(default)]
     pub model: Option<String>,
+    /// Distinguishes legacy typed model names from raw provider model IDs.
+    #[serde(default)]
+    pub model_source: ModelSource,
     /// Legacy Codex-only field. New writes use provider-agnostic `model`.
     #[serde(default)]
     pub codex_model: Option<CodexModel>,
@@ -101,20 +114,32 @@ pub struct SessionMetadata {
 impl SessionMetadata {
     /// Resolve the raw model value used for launch/restart.
     ///
-    /// New metadata stores the exact CLI value in `model`. Legacy enum values
-    /// serialized as strings are translated to their historical canonical IDs.
+    /// New metadata stores the exact CLI value in `model` and marks it `Raw`.
+    /// Legacy enum values serialized as strings are translated to historical IDs.
     /// Old Codex records stored their model in `codex_model`, so retain that
     /// fallback until the on-disk corpus has naturally migrated.
     pub fn launch_model(&self) -> Option<String> {
         if let Some(model) = self.model.as_deref() {
-            return normalize_persisted_model(self.agent_type, model);
+            return match self.model_source {
+                ModelSource::Raw => normalize_raw_model(model),
+                ModelSource::LegacyTyped => normalize_legacy_model(self.agent_type, model),
+            };
         }
 
         self.codex_model.and_then(|model| model.cli_value()).map(str::to_string)
     }
 }
 
-fn normalize_persisted_model(agent_type: SessionAgentType, value: &str) -> Option<String> {
+fn normalize_raw_model(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+        return None;
+    }
+
+    Some(trimmed.to_string())
+}
+
+fn normalize_legacy_model(agent_type: SessionAgentType, value: &str) -> Option<String> {
     let trimmed = value.trim();
     if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") || trimmed == "SystemDefault" {
         return None;
@@ -478,6 +503,7 @@ impl InteractiveSessionManager {
             rtk_enabled,
             skip_permissions: Some(skip_permissions),
             model,
+            model_source: ModelSource::Raw,
             codex_model: None,
         };
         // Locked RMW so a concurrent `ainb kill` / recovery / daemon register
@@ -646,6 +672,7 @@ impl InteractiveSessionManager {
             rtk_enabled,
             skip_permissions: Some(skip_permissions),
             model,
+            model_source: ModelSource::Raw,
             codex_model: None,
         };
         // Locked RMW (pu4): serialise against concurrent kill/recovery writers.
@@ -2054,6 +2081,7 @@ mod tests {
             rtk_enabled: false,
             skip_permissions: None,
             model: None,
+            model_source: Default::default(),
             codex_model: None,
         });
         store.save().expect("save");
@@ -2104,6 +2132,7 @@ mod tests {
                 rtk_enabled: false,
                 skip_permissions: Some(true),
                 model: Some("gpt-5.6-luna".to_string()),
+                model_source: ModelSource::Raw,
                 codex_model: Some(CodexModel::Gpt55),
             });
         })
@@ -2156,6 +2185,23 @@ mod tests {
         assert_eq!(codex.launch_model().as_deref(), Some("gpt-5.5"));
     }
 
+    #[test]
+    fn raw_model_metadata_preserves_provider_value() {
+        let metadata: SessionMetadata = serde_json::from_value(serde_json::json!({
+            "session_id": uuid::Uuid::new_v4(),
+            "tmux_session_name": "tmux_raw_claude",
+            "worktree_path": "/tmp/raw-claude",
+            "workspace_name": "raw",
+            "created_at": "2026-07-23T00:00:00Z",
+            "agent_type": "Claude",
+            "model": "Opus",
+            "model_source": "Raw"
+        }))
+        .expect("raw Claude metadata");
+
+        assert_eq!(metadata.launch_model().as_deref(), Some("Opus"));
+    }
+
     /// pu4: `SessionStore::mutate` must serialise concurrent load-modify-save
     /// through the cross-process lock so racing writers never lost-update the
     /// store. Two thread pools each upsert a disjoint set of keys into the SAME
@@ -2187,6 +2233,7 @@ mod tests {
             rtk_enabled: false,
             skip_permissions: None,
             model: None,
+            model_source: Default::default(),
             codex_model: None,
         };
 

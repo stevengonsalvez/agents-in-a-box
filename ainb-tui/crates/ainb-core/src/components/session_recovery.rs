@@ -821,6 +821,7 @@ impl SessionRecoveryState {
             rtk_enabled: false,
             skip_permissions: None,
             model: None,
+            model_source: Default::default(),
             codex_model: None,
         };
 

@@ -16,7 +16,7 @@ use uuid::Uuid;
 use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
-use crate::interactive::session_manager::{SessionMetadata, SessionStore};
+use crate::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
 use crate::models::session::SessionAgentType;
 use crate::tmux::TmuxSession;
 
@@ -142,6 +142,7 @@ pub async fn execute(args: RunArgs) -> Result<()> {
         rtk_enabled: false,
         skip_permissions: Some(args.dangerously_skip_permissions),
         model: model.clone(),
+        model_source: ModelSource::Raw,
         codex_model: None,
     };
 

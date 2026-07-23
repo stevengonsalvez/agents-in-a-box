@@ -287,6 +287,7 @@ mod tests {
             rtk_enabled: false,
             skip_permissions: None,
             model: None,
+            model_source: Default::default(),
             codex_model: None,
         };
 
@@ -325,6 +326,7 @@ mod tests {
             rtk_enabled: false,
             skip_permissions: Some(false),
             model: Some("claude-opus-4-8".to_string()),
+            model_source: Default::default(),
             codex_model: None,
         };
 
