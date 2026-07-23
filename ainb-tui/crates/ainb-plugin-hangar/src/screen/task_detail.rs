@@ -1277,6 +1277,9 @@ mod card_tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         }
     }
 

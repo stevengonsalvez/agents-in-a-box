@@ -178,6 +178,11 @@ pub struct BoardCard {
     /// Whether the issue links an upstream GitHub/Jira issue (`issue.external_ref`,
     /// 0043): drives a subtle `⧉` glyph flush-right on the id line for traceability.
     pub linked: bool,
+    /// This issue's sub-issue roll-up `(done, total)` (migration 0046), or `None`
+    /// when it has no children. Drives a `⊟ done/total` footer badge — gold once
+    /// complete — so a parent card visibly flips to `1/1` when its last child
+    /// finishes (the board-observable side of the child-done cascade).
+    pub subtasks: Option<(u32, u32)>,
 }
 
 /// One status column's input to the board.
@@ -620,6 +625,32 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
             );
         }
     }
+
+    // Sub-issue roll-up badge (0046): `⊟ done/total`, painted just right of the
+    // priority chip. Gold once every child is complete (the parent card flips to
+    // `1/1` after its last sub-issue finishes), muted while work remains. Only
+    // drawn when the card actually has children.
+    if let Some((done, total)) = card.subtasks {
+        if total > 0 {
+            let badge = format!("⊟ {done}/{total}");
+            let badge_x =
+                inner_x.saturating_add(u16::try_from(chip.chars().count() + 1).unwrap_or(0));
+            let color = if done >= total { GOLD } else { MUTED_GRAY };
+            // Keep clear of the flush-right assignee glyph (2 cells wide).
+            let badge_right = inner_right.saturating_sub(3);
+            if badge_x < badge_right {
+                put_str_bg(
+                    buf,
+                    badge_x,
+                    footer_y,
+                    &clip(&badge, badge_right.saturating_sub(badge_x)),
+                    color,
+                    fill,
+                    badge_right,
+                );
+            }
+        }
+    }
 }
 
 /// Fill `rect` with background-only spaces — the raised card surface the
@@ -896,6 +927,7 @@ mod tests {
             priority,
             assignee_initial: assignee,
             linked: false,
+            subtasks: None,
         }
     }
 

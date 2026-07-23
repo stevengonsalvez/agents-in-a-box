@@ -814,6 +814,10 @@ impl IssueListState {
                                 a.split_once(':').map_or(a, |(_, id)| id).chars().next()
                             }),
                             linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
+                            // 0046: the sub-issue roll-up, so a PARENT card shows a
+                            // `⊟ done/total` badge that flips to gold `1/1` when its
+                            // last child completes. `None` for a childless issue.
+                            subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
                         })
                         .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
@@ -2499,6 +2503,9 @@ mod tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         }
     }
 

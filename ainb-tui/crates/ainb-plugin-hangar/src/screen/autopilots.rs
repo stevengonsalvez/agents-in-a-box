@@ -116,6 +116,7 @@ impl AutopilotsState {
                     priority: PriorityChip::from_priority(0),
                     assignee_initial: ap.name.chars().next(),
                     linked: false,
+                    subtasks: None,
                 }
             })
             .collect::<Vec<_>>();
