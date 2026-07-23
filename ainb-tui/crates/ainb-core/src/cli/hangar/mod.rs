@@ -4268,8 +4268,14 @@ fn issue_line(i: &Issue) -> String {
     } else {
         format!("  labels={}", i.labels.join(","))
     };
+    // The assignee's canonical `member:<id>`/`agent:<id>` form surfaces the actor
+    // KIND (a human member vs an agent), shown only when the issue is assigned.
+    let assignee = i
+        .assignee
+        .as_ref()
+        .map_or_else(String::new, |a| format!("  assignee={a}"));
     format!(
-        "{}  [{}]  priority={}  {}{due}{labels}",
+        "{}  [{}]  priority={}  {}{assignee}{due}{labels}",
         i.id, i.state, i.priority, i.title
     )
 }
@@ -4279,13 +4285,22 @@ fn issue_line(i: &Issue) -> String {
 fn issue_to_json(i: &Issue) -> String {
     let desc = i.description.as_deref().map_or_else(|| "null".to_string(), json_string);
     let due = i.due_date.map_or_else(|| "null".to_string(), |d| d.to_string());
+    // Assignee + creator render as their canonical `member:<id>`/`agent:<id>`
+    // string (the polymorphic actor kind), `null` when the issue is unassigned.
+    let assignee = i
+        .assignee
+        .as_ref()
+        .map_or_else(|| "null".to_string(), |a| json_string(&a.to_string()));
+    let creator = json_string(&i.creator.to_string());
     format!(
-        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{},\"priority\":{},\"due_date\":{},\"labels\":{}}}",
+        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"assignee\":{},\"creator\":{},\"created_at\":{},\"priority\":{},\"due_date\":{},\"labels\":{}}}",
         json_string(&i.id),
         json_string(&i.workspace_id),
         json_string(&i.title),
         desc,
         json_string(&i.state),
+        assignee,
+        creator,
         i.created_at,
         i.priority,
         due,
@@ -4951,16 +4966,18 @@ fn md_cell(s: &str) -> String {
 }
 
 const fn issue_csv_header() -> &'static str {
-    "id,state,title,description,created_at,priority,due_date,labels"
+    "id,state,title,description,assignee,created_at,priority,due_date,labels"
 }
 fn issue_csv_row(i: &Issue) -> String {
     let due = i.due_date.map_or_else(String::new, |d| d.to_string());
+    let assignee = i.assignee.as_ref().map(ToString::to_string).unwrap_or_default();
     format!(
-        "{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{}",
         csv_field(&i.id),
         csv_field(&i.state),
         csv_field(&i.title),
         csv_field(i.description.as_deref().unwrap_or("")),
+        csv_field(&assignee),
         i.created_at,
         i.priority,
         csv_field(&due),
@@ -4968,17 +4985,19 @@ fn issue_csv_row(i: &Issue) -> String {
     )
 }
 const fn issue_md_header() -> &'static str {
-    "| id | state | title | description | priority | due_date | labels |\n\
-     | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| id | state | title | description | assignee | priority | due_date | labels |\n\
+     | --- | --- | --- | --- | --- | --- | --- | --- |\n"
 }
 fn issue_md_row(i: &Issue) -> String {
     let due = i.due_date.map_or_else(String::new, |d| d.to_string());
+    let assignee = i.assignee.as_ref().map(ToString::to_string).unwrap_or_default();
     format!(
-        "| {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} | {} |",
         md_cell(&i.id),
         md_cell(&i.state),
         md_cell(&i.title),
         md_cell(i.description.as_deref().unwrap_or("")),
+        md_cell(&assignee),
         i.priority,
         md_cell(&due),
         md_cell(&i.labels.join(" ")),
