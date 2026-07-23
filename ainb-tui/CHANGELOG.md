@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-07-23
+### Added
+- Merge pull request #457 from stevengonsalvez/feat/hangar-agents-screen
+- **hangar-daemon**: wire the hangar/agent_delete handler
+- **hangar-plugin**: add a first-class Agents screen (nav A, create, delete)
+- **hangar-proto**: add hangar/agent_delete method + params
+- **hangar-store**: add AgentRepo::delete guarded on active tasks + FK history
+
+### Fixed
+- Merge pull request #456 from stevengonsalvez/f/headroom-stats
+- **burndown**: retain headroom lifetime savings
+
+
 ## [1.16.0] - 2026-07-23
 ### Added
 - Merge pull request #400 from stevengonsalvez/feat/autostandup-default-off-toggle
