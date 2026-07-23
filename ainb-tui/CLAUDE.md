@@ -222,6 +222,16 @@ so it self-heals past the ~8h token TTL as long as your `claude` login is curren
 If step 2 can't read a token (not logged in), behavior is unchanged — the daemon
 falls through to the legacy store, with no hard break.
 
+**The ~8h TTL caveat:** the system access token (step 2) expires after ~8h and the
+confined child cannot refresh it. Because the daemon re-reads it fresh per
+dispatch, an idle-then-active daemon self-heals as long as your interactive
+`claude` login is still valid. If the token IS expired at dispatch, the daemon
+logs a clear hint (`system claude login token has expired … Open Claude Code to
+refresh …`) and the run fails to authenticate rather than silently succeeding.
+For a fully unattended daemon that must outlive the 8h window, set
+`HANGAR_CLAUDE_OAUTH_TOKEN` (step 1) to a long-lived `claude setup-token` value —
+that override wins and never expires on the 8h clock.
+
 ### Shared MCP Pool
 
 With `[mcp_pool]` enabled, `ainb run` (Claude sessions) ensures a standalone
