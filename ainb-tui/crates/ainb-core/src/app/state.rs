@@ -17,7 +17,7 @@ use crate::docker::LogStreamingCoordinator;
 use crate::editors;
 // Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
 // `RepoSource` import retired with the legacy remote-clone flow.
-use crate::models::{Session, SessionAgentType, Workspace};
+use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -3348,13 +3348,9 @@ struct ConfigureLaunchSnapshot {
     mode: crate::models::SessionMode,
     boss_prompt: Option<String>,
     agent_type: crate::models::SessionAgentType,
-    /// Claude model for Claude-agent sessions. `Some(SystemDefault)` / `None`
-    /// both omit `--model` from the spawned `claude` command (the CLI's own
-    /// default applies). Set only when `agent_type == Claude`.
-    session_model: Option<crate::models::ClaudeModel>,
-    /// Codex model for Codex-agent sessions. Same omit-on-default semantics
-    /// as `session_model`. Set only when `agent_type == Codex`.
-    codex_model: Option<crate::models::CodexModel>,
+    /// Raw provider model ID. AINB passes this through unchanged to Claude or
+    /// Codex; provider CLI owns validation and model catalog updates.
+    model: Option<String>,
     /// The base-branch popup pick (2026-06). `None` = legacy base policy:
     /// HEAD for local repos, origin/HEAD for remote/star launches.
     base: Option<crate::components::new_session::configure::BaseSelection>,
@@ -5483,9 +5479,8 @@ impl AppState {
             SessionMode::Interactive,
             None,
             metadata.agent_type,
-            metadata.model,
+            metadata.launch_model(),
         );
-        session.codex_model = metadata.codex_model;
         session.id = metadata.session_id;
         session.tmux_session_name = Some(metadata.tmux_session_name.clone());
         session.status = SessionStatus::Stopped;
@@ -7323,7 +7318,7 @@ impl AppState {
         &mut self,
         spec: crate::components::new_session::configure::LaunchSpec,
     ) {
-        use crate::models::{ClaudeModel, CodexModel, SessionAgentType, SessionMode};
+        use crate::models::{SessionAgentType, SessionMode};
 
         // Finding #7: `LaunchSpec` is the single source of truth — no more
         // reaching back into `configure_state` to re-derive what the
@@ -7339,18 +7334,12 @@ impl AppState {
             "copilot" => SessionAgentType::Copilot,
             _ => SessionAgentType::Claude,
         };
-        // Per-agent model parsing. `preset.agent_model` is a free-form String
-        // (TOML schema stability) — each enum's `parse()` accepts aliases,
-        // canonical IDs, and `""` / `"default"` (→ SystemDefault). For
-        // non-Claude / non-Codex agents the model concept doesn't apply at
-        // CLI launch time, so we leave both as `None`.
-        let session_model = if agent_type == SessionAgentType::Claude {
-            Some(ClaudeModel::parse(&preset.agent_model))
-        } else {
-            None
-        };
-        let codex_model = if agent_type == SessionAgentType::Codex {
-            Some(CodexModel::parse(&preset.agent_model))
+        let model = if matches!(
+            agent_type,
+            SessionAgentType::Claude | SessionAgentType::Codex
+        ) {
+            let model = preset.agent_model.trim();
+            (!is_default_model(model)).then(|| model.to_string())
         } else {
             None
         };
@@ -7367,8 +7356,7 @@ impl AppState {
             mode,
             boss_prompt,
             agent_type,
-            session_model,
-            codex_model,
+            model,
             base: spec.base.clone(),
             headroom_enabled: spec.headroom_enabled,
             rtk_enabled: spec.rtk_enabled,
@@ -7522,8 +7510,7 @@ impl AppState {
                 snapshot.mode,
                 snapshot.boss_prompt,
                 snapshot.agent_type,
-                snapshot.session_model,
-                snapshot.codex_model,
+                snapshot.model,
                 existing_worktree,
                 base_start_point,
                 snapshot.headroom_enabled,
@@ -8383,8 +8370,7 @@ impl AppState {
         mode: crate::models::SessionMode,
         boss_prompt: Option<String>,
         agent_type: crate::models::SessionAgentType,
-        model: Option<crate::models::ClaudeModel>,
-        codex_model: Option<crate::models::CodexModel>,
+        model: Option<String>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
         headroom_enabled: bool,
@@ -8400,7 +8386,6 @@ impl AppState {
                     skip_permissions,
                     agent_type,
                     model,
-                    codex_model,
                     existing_worktree,
                     base_start_point,
                     headroom_enabled,
@@ -8441,8 +8426,7 @@ impl AppState {
         session_id: Uuid,
         skip_permissions: bool,
         agent_type: crate::models::SessionAgentType,
-        model: Option<crate::models::ClaudeModel>,
-        codex_model: Option<crate::models::CodexModel>,
+        model: Option<String>,
         existing_worktree: Option<(std::path::PathBuf, std::path::PathBuf)>,
         base_start_point: Option<String>,
         headroom_enabled: bool,
@@ -8504,8 +8488,7 @@ impl AppState {
                     branch_name.to_string(),
                     skip_permissions,
                     agent_type,
-                    model,
-                    codex_model,
+                    model.clone(),
                     headroom_enabled,
                     rtk_enabled,
                 )
@@ -8523,7 +8506,6 @@ impl AppState {
                     skip_permissions,
                     agent_type,
                     model,
-                    codex_model,
                     headroom_enabled,
                     rtk_enabled,
                 )
@@ -9164,10 +9146,10 @@ impl AppState {
         // metadata predating the field) → default to yolo
         // (`--dangerously-skip-permissions`), per the "default dangerously-skip"
         // requirement. `Some(v)` preserves the value the session was started with.
-        let (skip_permissions, model, codex_model) = metadata
+        let (skip_permissions, model) = metadata
             .as_ref()
-            .map(|m| (m.skip_permissions.unwrap_or(true), m.model, m.codex_model))
-            .unwrap_or((true, None, None));
+            .map(|m| (m.skip_permissions.unwrap_or(true), m.launch_model()))
+            .unwrap_or((true, None));
 
         // Capture audit context before any fallible step so we can record both
         // success and failure with the same fields.
@@ -9228,7 +9210,6 @@ impl AppState {
                     &metadata.tmux_session_name,
                     skip_permissions,
                     model,
-                    codex_model,
                     metadata.agent_type,
                     transcript.clone(),
                     true, // resume_requested — Enter/r on a Stopped session
@@ -10787,9 +10768,8 @@ impl AppState {
     /// Restart Claude in an existing tmux session (for Idle sessions)
     async fn restart_cli_in_tmux(&mut self, session_id: Uuid) -> anyhow::Result<String> {
         use crate::config::CliProvider;
+        use crate::interactive::InteractiveSessionManager;
         use crate::models::session::SessionAgentType;
-        use anyhow::Context;
-        use std::process::Command;
 
         let session = self
             .find_session(session_id)
@@ -10802,10 +10782,7 @@ impl AppState {
             .clone();
 
         let workspace_path = session.workspace_path.clone();
-        let skip_permissions = session.skip_permissions;
         let agent_type = session.agent_type;
-        let model = session.model;
-        let codex_model = session.codex_model;
 
         let provider = match agent_type {
             SessionAgentType::Claude => CliProvider::Claude,
@@ -10821,74 +10798,43 @@ impl AppState {
         // (Claude, keyed off the worktree cwd) and the Headroom routing flag.
         let store = crate::interactive::SessionStore::load();
         let metadata = store.sessions.get(&tmux_session_name);
+        let skip_permissions =
+            metadata.and_then(|m| m.skip_permissions).unwrap_or(session.skip_permissions);
+        let model = metadata
+            .and_then(crate::interactive::SessionMetadata::launch_model)
+            .or_else(|| session.model.clone());
 
-        // Restart continues the existing conversation, for parity with the
-        // Stopped-session resume path: Claude `--continue`, Codex `resume
-        // --last`, Copilot `--continue`. `has_history` gates Claude's
-        // `--continue` (no prior transcript → fresh, avoids a dead pane).
-        let has_history = agent_type == SessionAgentType::Claude
-            && metadata
-                .map(|m| Self::find_latest_transcript(&m.worktree_path).is_some())
-                .unwrap_or(false);
-
-        let cmd_parts =
-            crate::interactive::session_manager::InteractiveSessionManager::build_cli_cmd_parts(
-                &provider,
-                agent_type,
-                skip_permissions,
-                model,
-                codex_model,
-                true, // resume_requested — restart continues the conversation
-                has_history,
-            );
-
-        // Preserve per-session Headroom routing across restart. `send-keys`
-        // bypasses build_env_setup_for_provider, so re-derive the proxy export
-        // from the persisted SessionMetadata (keyed by tmux name) and prepend
-        // it — otherwise a restarted HR session would silently stop routing
-        // through the proxy.
-        //
-        // Mirror the launch path (`start_cli_in_tmux`): the stored flag is
-        // *intent*; only inject the base URL when the proxy is actually
-        // healthy. Injecting a dead-port URL would brick the restarted CLI on
-        // connection-refused. Ensure the proxy first; degrade to direct on
-        // failure rather than pointing the session at a closed port.
-        let mut headroom_active = metadata.map(|m| m.headroom_enabled).unwrap_or(false)
-            && matches!(
-                agent_type,
-                SessionAgentType::Claude | SessionAgentType::Codex
-            );
-        if headroom_active {
-            if let Err(e) = crate::headroom::ensure_proxy_running().await {
-                warn!(
-                    "headroom proxy unavailable on restart — running DIRECT, no compression: {e}"
-                );
-                headroom_active = false;
-            }
-        }
-        let cli_cmd = format!(
-            "{}{}",
-            crate::interactive::session_manager::headroom_env_prefix(agent_type, headroom_active),
-            cmd_parts.join(" ")
-        );
+        // Reuse the launch/resume path: it replaces even a dead
+        // remain-on-exit pane with `respawn-pane -k`, restores provider argv,
+        // and reapplies Headroom/API-key/OTEL environment consistently.
+        let resume_transcript = if agent_type == SessionAgentType::Claude {
+            let worktree_path = metadata
+                .map(|m| m.worktree_path.as_path())
+                .unwrap_or_else(|| std::path::Path::new(&workspace_path));
+            Self::find_latest_transcript(worktree_path)
+        } else {
+            None
+        };
+        let headroom_enabled = metadata.map(|m| m.headroom_enabled).unwrap_or(false);
 
         info!(
-            "Restarting {} in tmux session '{}' for workspace '{}' (cmd: {})",
+            "Restarting {} in tmux session '{}' for workspace '{}'",
             provider.display_name(),
             tmux_session_name,
-            workspace_path,
-            cli_cmd
+            workspace_path
         );
 
-        let output = Command::new("tmux")
-            .args(&["send-keys", "-t", &tmux_session_name, &cli_cmd, "C-m"])
-            .output()
-            .context("Failed to send CLI restart command to tmux")?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            anyhow::bail!("Failed to send command to tmux: {}", stderr);
-        }
+        InteractiveSessionManager::new()?
+            .start_cli_in_tmux(
+                &tmux_session_name,
+                skip_permissions,
+                model,
+                agent_type,
+                resume_transcript,
+                true,
+                headroom_enabled,
+            )
+            .await?;
 
         if let Some(session) = self.find_session_mut(session_id) {
             session.set_status(crate::models::SessionStatus::Running);
@@ -10908,13 +10854,12 @@ impl AppState {
     /// 1. Resolve the session and validate it is Claude or Codex.
     /// 2. Load the SessionStore; check that headroom_enabled is true.
     /// 3. Set headroom_enabled = false and save the store.
-    /// 4. Build the resume command: `[provider] [--skip-perms] [--continue for Claude]`.
+    /// 4. Rebuild the provider command from persisted launch settings.
     ///    No env prefix (headroom is now off → `headroom_env_prefix(…, false)` == "").
     /// 5. Replace the running CLI with `tmux respawn-pane -k` using the same
     ///    `sh -c '…exec cli …'` shape as `start_cli_in_tmux`.
     ///    `respawn-pane -k` kills the running process and starts fresh in-place,
     ///    which is the only way to clear env vars from a running process.
-    ///    Codex has no `--continue` flag — it restarts fresh (noted in notification).
     async fn downgrade_headroom_session(&mut self, session_id: Uuid) -> anyhow::Result<()> {
         use crate::config::CliProvider;
         use crate::models::session::SessionAgentType;
@@ -10933,7 +10878,8 @@ impl AppState {
             .clone();
 
         let agent_type = session.agent_type;
-        let skip_permissions = session.skip_permissions;
+        let session_skip_permissions = session.skip_permissions;
+        let session_model = session.model.clone();
 
         // --- 1a. Only Claude/Codex are Headroom-capable ---
         let provider = match agent_type {
@@ -10956,12 +10902,12 @@ impl AppState {
         // The lock is best-effort: on failure we proceed unlocked rather than
         // abort the downgrade. The early-return paths drop the guard (unlock)
         // as they leave the block.
-        {
+        let (skip_permissions, model, has_history) = {
             let _lock = crate::interactive::SessionStore::lock()
                 .map_err(|e| warn!("Failed to lock sessions.json for Headroom flip: {e}"))
                 .ok();
             let mut store = crate::interactive::SessionStore::load();
-            match store.sessions.get(&tmux_session_name) {
+            let launch_settings = match store.sessions.get(&tmux_session_name) {
                 None => {
                     self.add_warning_notification(
                         "Session not found in store — Headroom state unknown".to_string(),
@@ -10974,8 +10920,13 @@ impl AppState {
                     );
                     return Ok(());
                 }
-                _ => {}
-            }
+                Some(meta) => (
+                    meta.skip_permissions.unwrap_or(session_skip_permissions),
+                    meta.launch_model().or(session_model),
+                    agent_type == SessionAgentType::Claude
+                        && Self::find_latest_transcript(&meta.worktree_path).is_some(),
+                ),
+            };
 
             if let Some(meta) = store.sessions.get_mut(&tmux_session_name) {
                 meta.headroom_enabled = false;
@@ -10988,7 +10939,8 @@ impl AppState {
                     tmux_session_name, e
                 );
             }
-        }
+            launch_settings
+        };
 
         // --- 4. Build the resume command (no env prefix — headroom is off) ---
         //
@@ -10996,20 +10948,20 @@ impl AppState {
         // and we are not injecting an API key here (the original launch path
         // already injected it into the pane's environment; `respawn-pane -k`
         // inherits from the ainb-tui process which has the correct key).
-        let mut cmd_parts: Vec<String> = vec![provider.command().to_string()];
-        if skip_permissions {
-            cmd_parts.push(provider.skip_permissions_flag().to_string());
-        }
-        // Claude: `--continue` (-c) resumes the most recent conversation in the cwd.
-        // Codex: no continue/resume flag exists — restarts fresh.
-        let codex_fresh_note = if agent_type == SessionAgentType::Claude {
-            cmd_parts.push("--continue".to_string());
-            ""
-        } else {
-            " (Codex restarted fresh — no --continue flag)"
-        };
-
-        let cli_cmd = cmd_parts.join(" ");
+        let cmd_parts =
+            crate::interactive::session_manager::InteractiveSessionManager::build_cli_cmd_parts(
+                &provider,
+                agent_type,
+                skip_permissions,
+                model.as_deref(),
+                true,
+                has_history,
+            );
+        let cli_cmd = cmd_parts
+            .iter()
+            .map(|part| shell_escape::escape(part.into()).into_owned())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         info!(
             "Downgrading Headroom for {} in '{}': cmd={}",
@@ -11064,8 +11016,7 @@ impl AppState {
         }
 
         self.add_success_notification(format!(
-            "Headroom OFF for this session — resumed direct (no compression){}",
-            codex_fresh_note
+            "Headroom OFF for this session — resumed direct (no compression)"
         ));
 
         info!(

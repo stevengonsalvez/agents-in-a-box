@@ -88,7 +88,7 @@ Options:
       --create-branch <CREATE_BRANCH>  Create a new branch with this name
       --worktree                       Use git worktree for isolation
       --tool <TOOL>                    AI tool to use [default: claude] [possible values: claude, codex, gemini, copilot]
-      --model <MODEL>                  Model to use (sonnet, opus, haiku) [default: sonnet]
+      --model <MODEL>                  Provider model ID to pass through unchanged
   -p, --prompt <PROMPT>                Initial prompt to send
   -a, --attach                         Attach to session after creation
       --dangerously-skip-permissions   Skip permission prompts (dangerous!)
