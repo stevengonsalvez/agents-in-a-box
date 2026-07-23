@@ -13,7 +13,9 @@
 
 use crate::audit::{self, AuditResult, AuditTrigger};
 use crate::git::WorktreeManager;
-use crate::models::{CodexModel, Session, SessionAgentType, SessionMode, SessionStatus};
+use crate::models::{
+    CodexModel, Session, SessionAgentType, SessionMode, SessionStatus, is_default_model,
+};
 use anyhow::{Context, Result};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
@@ -132,7 +134,7 @@ impl SessionMetadata {
 
 fn normalize_raw_model(value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") {
+    if is_default_model(trimmed) {
         return None;
     }
 
@@ -141,7 +143,7 @@ fn normalize_raw_model(value: &str) -> Option<String> {
 
 fn normalize_legacy_model(agent_type: SessionAgentType, value: &str) -> Option<String> {
     let trimmed = value.trim();
-    if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default") || trimmed == "SystemDefault" {
+    if is_default_model(trimmed) || trimmed == "SystemDefault" {
         return None;
     }
 
@@ -1426,10 +1428,7 @@ impl InteractiveSessionManager {
             agent_type,
             SessionAgentType::Claude | SessionAgentType::Codex
         ) {
-            if let Some(model) = model
-                .map(str::trim)
-                .filter(|model| !model.is_empty() && !model.eq_ignore_ascii_case("default"))
-            {
+            if let Some(model) = model.map(str::trim).filter(|model| !is_default_model(model)) {
                 cmd_parts.push("--model".to_string());
                 cmd_parts.push(model.to_string());
             }

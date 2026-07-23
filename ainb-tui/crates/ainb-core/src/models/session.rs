@@ -6,6 +6,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Whether a model value requests the provider's configured default.
+pub(crate) fn is_default_model(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionMode {
     // PascalCase variants are the canonical wire format for
@@ -815,5 +821,17 @@ impl Session {
     pub fn set_tmux_session_name(&mut self, name: String) {
         self.tmux_session_name = Some(name);
         self.update_last_accessed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_default_model;
+
+    #[test]
+    fn default_model_sentinels_are_recognized_after_trimming() {
+        assert!(is_default_model(""));
+        assert!(is_default_model("  DEFAULT  "));
+        assert!(!is_default_model("claude-opus-4-8"));
     }
 }

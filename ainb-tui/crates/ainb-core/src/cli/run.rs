@@ -17,7 +17,7 @@ use super::RunArgs;
 use crate::config::CliProvider;
 use crate::git::worktree_manager::WorktreeManager;
 use crate::interactive::session_manager::{ModelSource, SessionMetadata, SessionStore};
-use crate::models::session::SessionAgentType;
+use crate::models::session::{SessionAgentType, is_default_model};
 use crate::tmux::TmuxSession;
 
 /// Execute the run command
@@ -357,7 +357,7 @@ fn get_current_branch(repo_path: &std::path::Path) -> Option<String> {
 /// Normalize only AINB's no-model sentinels. Every other value stays opaque.
 fn requested_model(model: Option<&str>) -> Option<String> {
     let model = model?.trim();
-    (!model.is_empty() && !model.eq_ignore_ascii_case("default")).then(|| model.to_string())
+    (!is_default_model(model)).then(|| model.to_string())
 }
 
 /// Validate that the selected provider's CLI binary is installed and on PATH

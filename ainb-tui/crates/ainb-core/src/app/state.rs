@@ -17,7 +17,7 @@ use crate::docker::LogStreamingCoordinator;
 use crate::editors;
 // Phase 6 (new-session redesign): ParsedRepo / RemoteBranch / legacy
 // `RepoSource` import retired with the legacy remote-clone flow.
-use crate::models::{Session, SessionAgentType, Workspace};
+use crate::models::{Session, SessionAgentType, Workspace, is_default_model};
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::time::{Duration, Instant};
@@ -7339,7 +7339,7 @@ impl AppState {
             SessionAgentType::Claude | SessionAgentType::Codex
         ) {
             let model = preset.agent_model.trim();
-            (!model.is_empty() && !model.eq_ignore_ascii_case("default")).then(|| model.to_string())
+            (!is_default_model(model)).then(|| model.to_string())
         } else {
             None
         };
@@ -10808,7 +10808,10 @@ impl AppState {
         // remain-on-exit pane with `respawn-pane -k`, restores provider argv,
         // and reapplies Headroom/API-key/OTEL environment consistently.
         let resume_transcript = if agent_type == SessionAgentType::Claude {
-            metadata.and_then(|m| Self::find_latest_transcript(&m.worktree_path))
+            let worktree_path = metadata
+                .map(|m| m.worktree_path.as_path())
+                .unwrap_or_else(|| std::path::Path::new(&workspace_path));
+            Self::find_latest_transcript(worktree_path)
         } else {
             None
         };
