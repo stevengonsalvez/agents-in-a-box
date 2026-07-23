@@ -136,6 +136,50 @@ impl AgentConfigUpdate {
     }
 }
 
+/// Failure modes of [`AgentRepo::delete`] (Agents screen `x` remove, slice 2).
+///
+/// Mirrors [`crate::repo::issue::IssueDeleteError`]'s shape so the daemon handler
+/// maps each arm to the same `INVALID_PARAMS` contract. An agent OWNS its task /
+/// usage / autopilot rows by foreign key, so a hard delete is only safe once the
+/// agent has no active run AND no FK-pinned history — the two guarded arms below.
+#[derive(Debug)]
+pub enum AgentDeleteError {
+    /// No agent matched `(id, workspace_id)` — an unknown id or a foreign tenant.
+    NotFound,
+    /// The agent has one or more ACTIVE tasks (queued / dispatched / running);
+    /// the run must be cancelled before the agent can be deleted. Carries the
+    /// active count.
+    ActiveTasks(i64),
+    /// The agent still carries run history the schema pins by foreign key (past
+    /// tasks, usage, autopilots): a hard delete would trip an FK constraint, so it
+    /// is refused (archive the agent instead).
+    HasHistory,
+    /// An underlying store fault.
+    Db(sqlx::Error),
+}
+
+impl std::fmt::Display for AgentDeleteError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::NotFound => write!(f, "no agent with that id in this workspace"),
+            Self::ActiveTasks(n) => write!(
+                f,
+                "{n} active task(s) on this agent — cancel the run first, then delete"
+            ),
+            Self::HasHistory => write!(f, "agent has run history — archive it instead of deleting"),
+            Self::Db(e) => write!(f, "store error: {e}"),
+        }
+    }
+}
+
+impl std::error::Error for AgentDeleteError {}
+
+impl From<sqlx::Error> for AgentDeleteError {
+    fn from(e: sqlx::Error) -> Self {
+        Self::Db(e)
+    }
+}
+
 /// Stateless typed wrapper over the `agent` table.
 pub struct AgentRepo;
 
@@ -347,6 +391,83 @@ impl AgentRepo {
             .await?;
         Ok(res.rows_affected() == 1)
     }
+
+    /// Hard-delete one agent, scoped to a workspace (Agents screen `x` remove,
+    /// slice 2).
+    ///
+    /// Workspace-scoped at the SQL boundary: an `(id, workspace_id)` pair that
+    /// matches no row is [`AgentDeleteError::NotFound`] (never a cross-tenant
+    /// delete). The delete is GUARDED in two ways, mirroring
+    /// [`crate::repo::issue::IssueRepo::delete_cascade`]:
+    /// - refused while the agent has any ACTIVE task (queued / dispatched /
+    ///   running) → [`AgentDeleteError::ActiveTasks`];
+    /// - refused when the `DELETE` trips a foreign-key constraint because the agent
+    ///   still owns FK-pinned history (past tasks, usage rows, autopilots) →
+    ///   [`AgentDeleteError::HasHistory`]. `sqlx` runs `PRAGMA foreign_keys = ON`,
+    ///   so the database itself refuses to orphan those rows — this never silently
+    ///   dangles a reference.
+    ///
+    /// A fresh, never-run agent (the common case created from the Agents screen)
+    /// has no active task and no history, so it deletes cleanly.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AgentDeleteError`]: `NotFound` / `ActiveTasks` / `HasHistory` per
+    /// the guards above, or `Db` on any other store fault.
+    pub async fn delete(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        id: &str,
+    ) -> Result<(), AgentDeleteError> {
+        // Resolve the agent within its workspace; an unknown / foreign id is
+        // NotFound rather than a silent no-op.
+        let exists: Option<String> =
+            sqlx::query_scalar("SELECT id FROM agent WHERE id = ? AND workspace_id = ?")
+                .bind(id)
+                .bind(workspace_id)
+                .fetch_optional(pool)
+                .await?;
+        if exists.is_none() {
+            return Err(AgentDeleteError::NotFound);
+        }
+
+        // Refuse while any of the agent's tasks is live — deleting would orphan the
+        // running attempt (and would trip the FK anyway; this yields the precise
+        // "cancel first" message instead of the generic history one).
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_task_queue \
+             WHERE agent_id = ? AND workspace_id = ? \
+               AND status IN ('queued','dispatched','running')",
+        )
+        .bind(id)
+        .bind(workspace_id)
+        .fetch_one(pool)
+        .await?;
+        if active > 0 {
+            return Err(AgentDeleteError::ActiveTasks(active));
+        }
+
+        match sqlx::query("DELETE FROM agent WHERE id = ? AND workspace_id = ?")
+            .bind(id)
+            .bind(workspace_id)
+            .execute(pool)
+            .await
+        {
+            Ok(_) => Ok(()),
+            // The agent still carries FK-pinned history (terminal tasks, usage,
+            // autopilots): the DB refuses the delete rather than orphaning those
+            // rows. Surface it as the archive-instead guard, not a raw store error.
+            Err(e) if is_foreign_key_violation(&e) => Err(AgentDeleteError::HasHistory),
+            Err(e) => Err(AgentDeleteError::Db(e)),
+        }
+    }
+}
+
+/// Whether a `sqlx` error is a SQLite foreign-key constraint violation. Used by
+/// [`AgentRepo::delete`] to turn a history-pinned delete into the actionable
+/// [`AgentDeleteError::HasHistory`] rather than an opaque store error.
+fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
+    e.as_database_error().is_some_and(|db| db.message().contains("FOREIGN KEY"))
 }
 
 /// The full column list every `SELECT` reads, in [`Agent::from_row`] order. A
@@ -405,6 +526,111 @@ fn decode_err(column: &str, detail: &str) -> sqlx::Error {
     sqlx::Error::ColumnDecode {
         index: column.to_string(),
         source: format!("malformed '{column}': {detail}").into(),
+    }
+}
+
+#[cfg(test)]
+mod delete_tests {
+    use super::*;
+    use crate::Store;
+    use crate::bootstrap;
+
+    /// Boot a fresh store with the default workspace + owner + runtime seeded, and
+    /// create one agent on it. Returns `(store, workspace_id, agent)`; the store is
+    /// kept alive by the caller so the temp DB outlives the test.
+    async fn seed_agent(name: &str) -> (Store, String, Agent) {
+        let dir = tempfile::tempdir().unwrap();
+        // Leak the tempdir so the sqlite file survives for the store's lifetime.
+        let dir = Box::leak(Box::new(dir));
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let ws = bootstrap::ensure_default_workspace(store.pool()).await.unwrap();
+        let agent = bootstrap::create_agent(store.pool(), &ws, name, "claude", None).await.unwrap();
+        (store, ws, agent)
+    }
+
+    /// Insert one task for `agent` in `ws` at `status` (issue-less, so no issue FK
+    /// is needed) — the fixture for the active-task and history guards.
+    async fn seed_task(pool: &SqlitePool, ws: &str, agent: &Agent, id: &str, status: &str) {
+        sqlx::query(
+            "INSERT INTO agent_task_queue (id, workspace_id, runtime_id, agent_id, status, created_at) \
+             VALUES (?, ?, ?, ?, ?, 1000)",
+        )
+        .bind(id)
+        .bind(ws)
+        .bind(&agent.runtime_id)
+        .bind(&agent.id)
+        .bind(status)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// A fresh, never-run agent deletes cleanly and vanishes from the roster.
+    #[tokio::test]
+    async fn delete_removes_a_fresh_agent() {
+        let (store, ws, agent) = seed_agent("scratch").await;
+        let pool = store.pool();
+
+        AgentRepo::delete(pool, &ws, &agent.id).await.unwrap();
+
+        assert!(AgentRepo::get(pool, &agent.id).await.unwrap().is_none());
+        assert_eq!(bootstrap::agent_count(pool, &ws).await.unwrap(), 0);
+    }
+
+    /// An unknown id (never a real agent) is a not-found error, not a silent no-op.
+    #[tokio::test]
+    async fn delete_unknown_agent_is_not_found() {
+        let (store, ws, _agent) = seed_agent("keep").await;
+        let out = AgentRepo::delete(store.pool(), &ws, "no-such-agent").await;
+        assert!(matches!(out, Err(AgentDeleteError::NotFound)));
+    }
+
+    /// A real agent id but a FOREIGN workspace matches no row — a not-found error,
+    /// never a cross-tenant delete (the agent survives).
+    #[tokio::test]
+    async fn delete_is_workspace_scoped() {
+        let (store, _ws, agent) = seed_agent("tenant-a").await;
+        let pool = store.pool();
+
+        let out = AgentRepo::delete(pool, "some-other-ws", &agent.id).await;
+        assert!(matches!(out, Err(AgentDeleteError::NotFound)));
+        assert!(
+            AgentRepo::get(pool, &agent.id).await.unwrap().is_some(),
+            "a cross-tenant delete must not remove the agent"
+        );
+    }
+
+    /// An agent with a live (running) task is refused with the active-task count —
+    /// cancel the run first (mirrors the issue delete guard).
+    #[tokio::test]
+    async fn delete_refused_while_a_task_is_active() {
+        let (store, ws, agent) = seed_agent("busy").await;
+        let pool = store.pool();
+        seed_task(pool, &ws, &agent, "task-run-1", "running").await;
+
+        let out = AgentRepo::delete(pool, &ws, &agent.id).await;
+        assert!(
+            matches!(out, Err(AgentDeleteError::ActiveTasks(1))),
+            "a running task must block the delete with its count"
+        );
+        assert!(AgentRepo::get(pool, &agent.id).await.unwrap().is_some());
+    }
+
+    /// An agent whose only tasks are terminal still carries FK-pinned history, so a
+    /// hard delete is refused as `HasHistory` (archive instead) — the DB never
+    /// orphans the historical row.
+    #[tokio::test]
+    async fn delete_refused_when_history_is_fk_pinned() {
+        let (store, ws, agent) = seed_agent("veteran").await;
+        let pool = store.pool();
+        seed_task(pool, &ws, &agent, "task-done-1", "done").await;
+
+        let out = AgentRepo::delete(pool, &ws, &agent.id).await;
+        assert!(
+            matches!(out, Err(AgentDeleteError::HasHistory)),
+            "a terminal task pins the agent by FK; delete must be refused, not orphaning it"
+        );
+        assert!(AgentRepo::get(pool, &agent.id).await.unwrap().is_some());
     }
 }
 
