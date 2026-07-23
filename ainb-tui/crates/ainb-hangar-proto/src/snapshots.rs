@@ -1130,6 +1130,22 @@ pub struct AgentArchiveParams {
     pub archived: bool,
 }
 
+/// Params for [`crate::methods::HANGAR_AGENT_DELETE`]: delete one named agent
+/// from a workspace (the Agents screen `x` remove, slice 2).
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// scopes the delete by `(agent_id, workspace_id)` so a foreign-tenant agent id
+/// deletes nothing. The daemon refuses the delete while the agent has an active
+/// task or still carries FK-pinned run history (see
+/// [`crate::methods::HANGAR_AGENT_DELETE`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentDeleteParams {
+    /// The subscribed workspace the agent must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent to delete (`agent.id`).
+    pub agent_id: String,
+}
+
 /// Params for [`crate::methods::HANGAR_COMMENT_ADD`] (e38.5): append one comment
 /// to an issue, scoped to a workspace.
 ///

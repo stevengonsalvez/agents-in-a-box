@@ -354,6 +354,23 @@ pub const HANGAR_AGENT_ARCHIVE: &str = "hangar/agent_archive";
 /// task — so a `codex` agent runs codex.
 pub const HANGAR_AGENT_CREATE: &str = "hangar/agent_create";
 
+/// `hangar/agent_delete` — delete one named agent from a workspace (the Agents
+/// screen `x` remove, slice 2).
+///
+/// Params: [`crate::snapshots::AgentDeleteParams`] (`{ workspace_id, agent_id }`).
+/// Result: the refreshed [`crate::snapshots::AgentsListResult`] (the same shape
+/// [`HANGAR_AGENT_CREATE`] answers with) so the client folds the shrunk roster
+/// back into the cache that drives the Agents/Squads pickers.
+///
+/// Mutating + workspace-scoped like [`HANGAR_AGENT_ARCHIVE`]: a foreign-tenant or
+/// unknown `agent_id` is rejected as not-found (never a cross-tenant delete). The
+/// delete is REFUSED while the agent has any ACTIVE task (queued / dispatched /
+/// running) — the caller must cancel the run first — and refused when the agent
+/// still carries run HISTORY the schema pins by foreign key (archive it instead);
+/// both surface as `INVALID_PARAMS` so a fresh, never-run agent deletes cleanly
+/// while a live/historical one is guarded rather than silently orphaned.
+pub const HANGAR_AGENT_DELETE: &str = "hangar/agent_delete";
+
 /// `hangar/members_list` — snapshot the human members of a workspace (e38.11).
 ///
 /// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
@@ -1070,6 +1087,9 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_DELETE,
     // Issue-scoped cancel-active (board-less cancel-and-delete), likewise appended.
     HANGAR_ISSUE_CANCEL_ACTIVE,
+    // Agent delete (Agents screen `x` remove) is APPENDED at the catalogue tail —
+    // append-only wire.
+    HANGAR_AGENT_DELETE,
 ];
 
 #[cfg(test)]
@@ -1174,6 +1194,7 @@ mod tests {
             HANGAR_SQUAD_FANOUT,
             HANGAR_RUN_HISTORY,
             HANGAR_AGENT_CREATE,
+            HANGAR_AGENT_DELETE,
             HANGAR_ISSUE_DELETE,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
@@ -1268,6 +1289,7 @@ mod tests {
             HANGAR_DAEMON_CONFIG_GET,
             HANGAR_DAEMON_CONFIG_SET,
             HANGAR_AGENT_CREATE,
+            HANGAR_AGENT_DELETE,
             HANGAR_DAEMON_CONFIG_LIST,
             HANGAR_ISSUE_DELETE,
             HANGAR_ISSUE_CANCEL_ACTIVE,
