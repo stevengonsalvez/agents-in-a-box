@@ -530,6 +530,8 @@ pub struct AgentArchiveArgs {
 /// owner is rejected.
 #[derive(Subcommand, Debug)]
 pub enum MemberCommand {
+    /// Add a human member (find-or-create the user by email, then join).
+    Add(MemberAddArgs),
     /// List the workspace's members (email + role).
     List(MemberListArgs),
     /// Change a member's role (`owner` / `admin` / `member`).
@@ -537,6 +539,21 @@ pub enum MemberCommand {
     SetRole(MemberSetRoleArgs),
     /// Remove a member from the workspace (the user row survives).
     Remove(MemberRemoveArgs),
+}
+
+/// Arguments for `hangar member add`.
+#[derive(Args, Debug)]
+pub struct MemberAddArgs {
+    /// The member's email (find-or-create the user by this address).
+    #[arg(long)]
+    pub email: String,
+    /// The role to grant: `owner`, `admin`, or `member` (default `member`).
+    #[arg(long, value_enum, default_value_t = MemberRoleArg::Member)]
+    pub role: MemberRoleArg,
+    /// Workspace slug to add the member to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar member list`.
@@ -1952,10 +1969,30 @@ fn clear_or_set<T>(clear: bool, value: Option<T>) -> Option<Option<T>> {
 async fn dispatch_member(cmd: MemberCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
+        MemberCommand::Add(args) => run_member_add(&store, args).await,
         MemberCommand::List(args) => run_member_list(&store, args, format).await,
         MemberCommand::SetRole(args) => run_member_set_role(&store, args).await,
         MemberCommand::Remove(args) => run_member_remove(&store, args).await,
     }
+}
+
+/// `hangar member add`: find-or-create the user by email, then join the member
+/// to the workspace. Mirrors [`run_member_set_role`] (talks to the store
+/// directly, not the daemon). Prints the minted/reused user id, email, and role.
+async fn run_member_add(store: &Store, args: MemberAddArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let member = MemberRepo::add(store.pool(), &ws, &args.email, args.role.to_repo())
+        .await
+        .map_err(member_cli_err)?;
+    println!(
+        "added member {} ({}) as {}",
+        member.user_id, member.email, member.role
+    );
+    Ok(())
 }
 
 /// `hangar member list`: list the workspace's members (email + role).
@@ -2033,6 +2070,10 @@ fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow
         MemberRepoError::LastOwner => {
             anyhow::anyhow!("a workspace must always keep at least one owner")
         }
+        MemberRepoError::AlreadyMember => {
+            anyhow::anyhow!("that user is already a member of this workspace")
+        }
+        MemberRepoError::EmptyEmail => anyhow::anyhow!("email must not be empty"),
         other => anyhow::Error::new(other).context("member mutation failed"),
     }
 }
@@ -2784,13 +2825,15 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
 
     // Map the present flags onto the partial edit. The two nullable fields use
-    // the clear-flag to distinguish "clear to none" from "leave unchanged".
+    // the clear-flag to distinguish "clear to none" from "leave unchanged". The
+    // assign token is polymorphic: `member:<id>`/`agent:<id>`, or a bare id
+    // (back-compat: a bare id is an agent).
     let assignee = if args.unassign {
         Some(None)
     } else {
         args.assign
             .as_deref()
-            .map(|id| ActorRef::new(ActorKind::Agent, id).context("assignee agent id was empty"))
+            .map(parse_assignee)
             .transpose()?
             .map(Some)
     };
@@ -2830,14 +2873,33 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     // in-product path back to work short of filing a brand-new issue. The task
     // reads the issue card's persisted repo/branch/agent, and the one-active-run
     // guard means a re-assign while a run is in flight never double-dispatches.
-    if let Some(agent_id) = args.assign.as_deref() {
-        if let Some(task_id) =
-            enqueue_assigned_task(store.pool(), &workspace_id, &args.id, agent_id).await?
-        {
-            println!("queued task {task_id}");
+    // Only an AGENT assignee dispatches a run — a member assignee just commits
+    // (agents-are-team-members symmetry: same column, but a human does no work).
+    if let Some(raw) = args.assign.as_deref() {
+        let assignee = parse_assignee(raw)?;
+        if assignee.kind() == ActorKind::Agent {
+            if let Some(task_id) =
+                enqueue_assigned_task(store.pool(), &workspace_id, &args.id, assignee.id()).await?
+            {
+                println!("queued task {task_id}");
+            }
         }
     }
     Ok(())
+}
+
+/// Parse a CLI `--assign` token into a polymorphic [`ActorRef`].
+///
+/// A token containing `:` is parsed as the canonical `member:<id>`/`agent:<id>`
+/// form. A bare token (no `:`) stays an **agent** for back-compat, so every
+/// existing script and tripwire that passes a raw agent id is byte-unchanged.
+fn parse_assignee(raw: &str) -> Result<ActorRef> {
+    if raw.contains(':') {
+        raw.parse::<ActorRef>()
+            .with_context(|| format!("invalid assignee `{raw}` (expected member:<id> or agent:<id>)"))
+    } else {
+        ActorRef::new(ActorKind::Agent, raw).context("assignee agent id was empty")
+    }
 }
 
 /// Enqueue one `queued` task for `agent_id` on `issue_id`, mirroring the daemon's
@@ -2958,12 +3020,19 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     let creator = ActorRef::new(ActorKind::Member, DEFAULT_CREATOR_ID)
         .expect("default creator id is non-empty");
 
-    // Resolve the assignee (if any): the agent must exist in the workspace; its
-    // runtime is the queue the task lands on. Resolved BEFORE the issue insert so
-    // a bad agent id fails before any write.
-    let assignment = match args.assign.as_deref() {
-        Some(agent_id) => Some(resolve_agent_runtime(pool, &workspace_id, agent_id).await?),
-        None => None,
+    // Resolve the assignee (if any). The token is polymorphic: an AGENT
+    // (`agent:<id>` or a bare id) must exist in the workspace and its runtime is
+    // the queue the task lands on — resolved BEFORE the issue insert so a bad
+    // agent id fails before any write. A MEMBER (`member:<id>`) is stored as-is
+    // and enqueues NO task (agents-are-team-members symmetry: a human does no
+    // work).
+    let parsed_assignee = args.assign.as_deref().map(parse_assignee).transpose()?;
+    let (assignment, member_assignee) = match parsed_assignee {
+        Some(actor) if actor.kind() == ActorKind::Agent => {
+            (Some(resolve_agent_runtime(pool, &workspace_id, actor.id()).await?), None)
+        }
+        Some(actor) => (None, Some(actor)),
+        None => (None, None),
     };
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&clock);
 
@@ -2985,7 +3054,8 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         state: args.state,
         assignee: assignment
             .as_ref()
-            .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty")),
+            .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty"))
+            .or_else(|| member_assignee.clone()),
         creator,
         created_at: now,
         priority: args.priority,
