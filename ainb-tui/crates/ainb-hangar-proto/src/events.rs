@@ -349,6 +349,22 @@ pub struct IssueRow {
     /// ran. Drives the `Runs:` line's `<when>`. Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<i64>,
+    /// This issue's parent, when it is a **sub-issue** (`issue.parent_issue_id`,
+    /// migration 0046), else `None` for a top-level issue. Omitted from the wire
+    /// when `None` (`skip_serializing_if`) so the shape only grows for a reader
+    /// that supplies it — a pre-0046 snapshot decodes to `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// How many sub-issues this issue has (`0` when it is not a parent). Drives
+    /// the parent card's `⊟ done/total` roll-up badge. `#[serde(default)]` keeps a
+    /// pre-0046 snapshot decodable (defaults to `0`).
+    #[serde(default)]
+    pub child_total: u32,
+    /// How many of this issue's sub-issues are terminal (`done`/`cancelled`).
+    /// Pairs with [`Self::child_total`] for the roll-up badge. `#[serde(default)]`
+    /// keeps a pre-0046 snapshot decodable (defaults to `0`).
+    #[serde(default)]
+    pub child_done: u32,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
