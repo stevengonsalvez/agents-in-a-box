@@ -66,6 +66,9 @@ pub struct ClaimedTask {
     pub prior_work_dir: Option<String>,
     /// When the claim happened (`HangarClock::now_ms`), epoch milliseconds.
     pub dispatched_at: i64,
+    /// The dispatching squad (migration 0045), or `None` for a single-agent task.
+    /// The daemon keys its claim-time leader-briefing hook off this.
+    pub squad_id: Option<String>,
 }
 
 /// Stateless claim service over the `agent_task_queue` table.
@@ -158,7 +161,7 @@ WHERE id = ( \
     ORDER BY q.priority DESC, q.created_at, q.id \
     LIMIT 1 \
 ) \
-RETURNING id, workspace_id, agent_id, runtime_id, issue_id, session_id, work_dir, dispatched_at";
+RETURNING id, workspace_id, agent_id, runtime_id, issue_id, session_id, work_dir, dispatched_at, squad_id";
 
 /// Decode a [`ClaimedTask`] from the `RETURNING` row of [`CLAIM_SQL`].
 ///
@@ -174,5 +177,6 @@ fn claimed_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<ClaimedTask, sqlx::
         prior_session_id: row.try_get("session_id")?,
         prior_work_dir: row.try_get("work_dir")?,
         dispatched_at: row.try_get("dispatched_at")?,
+        squad_id: row.try_get("squad_id")?,
     })
 }

@@ -406,6 +406,20 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
             .expect("task 0033 branch column");
     assert_eq!(task_branch, None, "0033 task.branch defaults NULL");
 
+    // 0045 task.squad_id defaults NULL on a pre-existing row (a single-agent task
+    // carries no dispatching squad), so legacy tasks arm no claim-time briefing hook.
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT squad_id FROM agent_task_queue WHERE id = ?"
+        )
+        .bind("task-1")
+        .fetch_one(pool)
+        .await
+        .expect("task 0045 squad_id column"),
+        None,
+        "0045 task.squad_id defaults NULL"
+    );
+
     // 0032 workspace.default_agent defaults NULL on prior rows.
     assert_eq!(
         sqlx::query_scalar::<_, Option<String>>("SELECT default_agent FROM workspace WHERE id = ?")
@@ -593,7 +607,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 43, "head is migration 0043");
+    assert_eq!(head_version, 45, "head is migration 0045");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
