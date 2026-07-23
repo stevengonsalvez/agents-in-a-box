@@ -210,6 +210,16 @@ mod tests {
     }
 
     #[test]
+    fn headroom_stats_uses_the_larger_available_counter() {
+        let json = r#"{
+            "savings":{"total_tokens":42000},
+            "persistent_savings":{"lifetime":{"tokens_saved":41000}}
+        }"#;
+        let stats: HeadroomStats = serde_json::from_str(json).expect("parse HeadroomStats");
+        assert_eq!(stats.tokens_saved(), 42_000);
+    }
+
+    #[test]
     fn headroom_stats_defaults_to_zero_on_empty() {
         let stats: HeadroomStats = serde_json::from_str("{}").expect("parse empty");
         assert_eq!(stats.savings.total_tokens, 0);
