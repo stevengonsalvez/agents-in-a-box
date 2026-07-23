@@ -837,6 +837,23 @@ async fn prepare_spawn_inputs(
 // Bundling them into a context struct is a larger refactor than this credential
 // change warrants; the sibling run functions here carry the same shape.
 #[allow(clippy::too_many_arguments)]
+/// The claim-time squad-leader briefing injection seam (migration 0045 / GAPS #1).
+///
+/// When a claimed task carries a `squad_id`, the daemon will inject the leader
+/// briefing (Operating Protocol + Roster + Instructions) into the run's system
+/// instructions here. gap #5 lands the HOOK POINT + the dispatch-log evidence;
+/// the briefing BODY is gap #1 — this returns `None` (no text yet) but logs that
+/// the injection point fired, keyed off the `squad_id`, so the seam is observable.
+fn squad_briefing_hook(task: &Task) -> Option<String> {
+    let squad_id = task.squad_id.as_deref()?;
+    tracing::info!(
+        task_id = %task.id,
+        squad_id = %squad_id,
+        "squad briefing hook: leader-briefing injection point (body: gap #1)"
+    );
+    None // gap #1 fills this with buildSquadLeaderBriefing()
+}
+
 async fn execute_claimed(
     pool: &SqlitePool,
     runner: &Runner,
@@ -881,6 +898,14 @@ async fn execute_claimed(
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "context prompt read failed");
         }
+    }
+
+    // Claim-time squad briefing injection point (migration 0045). Fires BEFORE
+    // provider dispatch so the hook is exercised even when the run later fails to
+    // spawn (a nonexistent provider path still exercises it).
+    if let Some(briefing) = squad_briefing_hook(&task) {
+        // gap #1: merge `briefing` into the run's system instructions / CLAUDE.md here.
+        let _ = briefing;
     }
 
     // e38.16: resolve which provider exec path this task routes to (agent →
@@ -1585,7 +1610,10 @@ fn failure_detail(
             || "no exit code (killed)".to_string(),
             |c| format!("exit {c}"),
         );
-        return format!("{}: provider {provider} {exit} with no output", reason.as_db_str());
+        return format!(
+            "{}: provider {provider} {exit} with no output",
+            reason.as_db_str()
+        );
     }
     let mut detail = format!("run failed ({}):", reason.as_db_str());
     if !stdout.is_empty() {
@@ -3134,6 +3162,175 @@ mod tests {
             Some("spawn_timeout"),
             "the umbrella must attribute the wedge as spawn_timeout (got {:?})",
             row.failure_reason
+        );
+    }
+
+    /// migration 0045 / gap #5: driving the REAL `execute_claimed` seam for a task
+    /// stamped with a `squad_id` must emit the claim-time squad-briefing hook line —
+    /// carrying BOTH the `task_id` and the `squad_id` — BEFORE the provider spawn.
+    /// The provider paths are nonexistent so the run fails, yet the hook must have
+    /// already fired (the observable seam gap #1 keys its briefing injection off).
+    /// Deleting the `squad_briefing_hook(&task)` call from `execute_claimed` turns
+    /// this RED: no hook event is captured though the row still terminalises.
+    #[tokio::test]
+    async fn execute_claimed_fires_the_squad_briefing_hook_before_spawn() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+        use ainb_hangar_store::service::claim::ClaimTaskService;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default, Clone)]
+        struct Ev {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        type Log = Arc<Mutex<Vec<Ev>>>;
+        struct Collect<'a>(&'a mut Ev);
+        impl Visit for Collect<'_> {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.0.message = value.to_string();
+                } else {
+                    self.0.fields.push((field.name().to_string(), value.to_string()));
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}");
+                if field.name() == "message" {
+                    self.0.message = rendered;
+                } else {
+                    self.0.fields.push((field.name().to_string(), rendered));
+                }
+            }
+        }
+        struct CollectLayer {
+            log: Log,
+        }
+        impl<S> Layer<S> for CollectLayer
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut captured = Ev::default();
+                event.record(&mut Collect(&mut captured));
+                self.log.lock().expect("event log lock").push(captured);
+            }
+        }
+
+        // Serialise with every other `$AINB_HANGAR_HOME`-mutating test.
+        let _env = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hangar-home");
+        let prior_home = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "leader", "claude", None).await.unwrap();
+
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        // Stamp the dispatching squad, exactly as a squad dispatch would, so the
+        // claimed task carries it into `execute_claimed`.
+        TaskRepo::set_squad_id(pool, &task_id, "squad-alpha").await.unwrap();
+
+        let clock = SystemClock;
+        let claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the queued task must claim");
+
+        // Nonexistent provider paths: the run fails to spawn, but the squad hook
+        // must have fired first (it is placed BEFORE provider dispatch).
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "/nonexistent/hangar-test-claude".into(),
+            codex_path: "/nonexistent/hangar-test-codex".into(),
+            copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+        let interactive = InteractiveSessions::default();
+
+        let log: Log = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(CollectLayer { log: log.clone() });
+        let outcome = {
+            // Current-thread runtime: the guard holds the subscriber across every
+            // `.await` in `execute_claimed`, so the inline hook event is captured.
+            let _guard = tracing::subscriber::set_default(subscriber);
+            execute_claimed(
+                pool,
+                &runner,
+                &claimed,
+                &clock,
+                &stats,
+                &events,
+                &interactive,
+                Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
+            )
+            .await
+        };
+
+        // Restore env BEFORE asserting so a failed assertion never leaks it.
+        match prior_home {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+        outcome.expect("execute_claimed handles the spawn failure internally (never Err)");
+
+        let events: Vec<Ev> = log.lock().expect("event log").clone();
+        let hook: Vec<&Ev> =
+            events.iter().filter(|e| e.message.contains("squad briefing hook")).collect();
+        assert_eq!(
+            hook.len(),
+            1,
+            "exactly one claim-time squad-briefing hook line must fire"
+        );
+        let field =
+            |e: &Ev, k: &str| e.fields.iter().find(|(name, _)| name == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            field(hook[0], "squad_id").as_deref(),
+            Some("squad-alpha"),
+            "the hook line must carry the dispatching squad_id"
+        );
+        assert_eq!(
+            field(hook[0], "task_id").as_deref(),
+            Some(task_id.as_str()),
+            "the hook line must carry the claimed task_id"
+        );
+
+        // The run still terminalised (nonexistent provider) — proving the hook
+        // fired on the path to a FAILED run, before the spawn, not only on success.
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "failed",
+            "the nonexistent provider must terminalise the run"
         );
     }
 
