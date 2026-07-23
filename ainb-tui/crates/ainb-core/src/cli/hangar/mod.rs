@@ -5472,6 +5472,142 @@ mod tests {
         );
     }
 
+    /// `parse_assignee` is polymorphic: a `member:`/`agent:` token keeps its
+    /// kind, a bare id stays an agent (back-compat). Mutation-provable: flip the
+    /// bare-id branch to Member and the last two assertions go red.
+    #[test]
+    fn parse_assignee_is_polymorphic_bare_id_is_agent() {
+        let m = parse_assignee("member:u-1").expect("member ref");
+        assert_eq!(m.kind(), ActorKind::Member);
+        assert_eq!(m.id(), "u-1");
+        let a = parse_assignee("agent:a-1").expect("agent ref");
+        assert_eq!(a.kind(), ActorKind::Agent);
+        assert_eq!(a.id(), "a-1");
+        // Back-compat: a bare id is an agent, unchanged from before.
+        let bare = parse_assignee("a-1").expect("bare id");
+        assert_eq!(bare.kind(), ActorKind::Agent);
+        assert_eq!(bare.id(), "a-1");
+    }
+
+    /// `issue create --assign member:<id>` persists `(member, id)` on the issue
+    /// AND enqueues NO agent task — a human assignee does no work.
+    ///
+    /// Mutation-provable: if the create path silently coerced the member into an
+    /// agent, the assignee kind would read `agent` (first assert) and a task row
+    /// would appear (last assert). Both would go red.
+    #[tokio::test]
+    async fn issue_create_assign_member_persists_and_enqueues_no_task() {
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::member::{MemberRepo, MemberRole};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws_id = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        let ws = WorkspaceId::from_str(ws_id.clone()).unwrap();
+        let member = MemberRepo::add(store.pool(), &ws, "dana@example.com", MemberRole::Member)
+            .await
+            .expect("add member");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "human task",
+            "--assign",
+            &format!("member:{}", member.user_id),
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let issue = IssueRepo::list_by_workspace_state(store.pool(), &ws_id, DEFAULT_ISSUE_STATE)
+            .await
+            .expect("list issues")
+            .into_iter()
+            .find(|i| i.title == "human task")
+            .expect("created issue present");
+        let assignee = issue.assignee.as_ref().expect("member issue is assigned");
+        assert_eq!(assignee.kind(), ActorKind::Member, "stored as a MEMBER");
+        assert_eq!(assignee.id(), member.user_id, "the member's user id");
+
+        let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .expect("count tasks");
+        assert_eq!(tasks, 0, "a member assignee enqueues NO agent task");
+
+        // And the read surface shows the polymorphic kind.
+        assert!(
+            issue_to_json(&issue).contains(&format!("\"assignee\":\"member:{}\"", member.user_id)),
+            "json surfaces the member actor-ref"
+        );
+        assert!(
+            issue_line(&issue).contains(&format!("assignee=member:{}", member.user_id)),
+            "text line surfaces the member actor-ref"
+        );
+    }
+
+    /// `issue create --assign agent:<id>` persists `(agent, id)` AND enqueues one
+    /// task — the symmetric agent path still dispatches a run.
+    ///
+    /// Mutation-provable pair to the member test above: this asserts the task IS
+    /// enqueued for an agent, so a change that skipped agent enqueue goes red.
+    #[tokio::test]
+    async fn issue_create_assign_agent_persists_and_enqueues_task() {
+        use ainb_hangar_store::bootstrap;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        bootstrap::ensure_runtime(store.pool(), &bootstrap::default_runtime_id(), 1)
+            .await
+            .expect("ensure runtime");
+        let agent = bootstrap::create_agent(store.pool(), &ws, "robot", "claude", None)
+            .await
+            .expect("create agent");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "robot task",
+            "--repo",
+            "scratch",
+            "--assign",
+            &format!("agent:{}", agent.id),
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let issue = IssueRepo::list_by_workspace_state(store.pool(), &ws, DEFAULT_ISSUE_STATE)
+            .await
+            .expect("list issues")
+            .into_iter()
+            .find(|i| i.title == "robot task")
+            .expect("created issue present");
+        let assignee = issue.assignee.as_ref().expect("agent issue is assigned");
+        assert_eq!(assignee.kind(), ActorKind::Agent, "stored as an AGENT");
+        assert_eq!(assignee.id(), agent.id);
+
+        let tasks: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE agent_id = ?")
+                .bind(&agent.id)
+                .fetch_one(store.pool())
+                .await
+                .expect("count tasks");
+        assert_eq!(tasks, 1, "an agent assignee enqueues exactly one run");
+    }
+
     #[test]
     fn parses_issue_list_default_state_open() {
         let cmd = parse_hangar(&["ainb", "hangar", "issue", "list"]);
