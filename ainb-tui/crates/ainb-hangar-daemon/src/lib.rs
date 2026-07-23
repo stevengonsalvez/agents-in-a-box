@@ -87,6 +87,10 @@ pub mod events;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
+/// Authoritative Fleet reducer fed by hooks, provider events, and tmux discovery.
+pub mod fleet;
+/// Claude and Codex provider transports for authoritative Fleet control.
+pub mod fleet_provider;
 /// The task-lifecycle state machine (T8): `statig` typed compile-time
 /// transitions.
 ///
@@ -401,6 +405,27 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         )
         .spawn();
     }
+
+    // Tmux reconciliation keeps unhooked and standalone provider sessions in
+    // the canonical Fleet roster as degraded rows with exact pane identity.
+    let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
+
+    // Managed Codex transport starts independently from daemon readiness. A
+    // missing or incompatible Codex binary leaves hook and tmux observation
+    // running, while the service records an honest transport downgrade.
+    let _codex_manager = (!once
+        && std::env::var_os("AINB_CODEX_MANAGED")
+            .as_deref()
+            .is_none_or(|value| value != "0"))
+    .then(|| {
+        let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
+        let socket = dir.join("codex-app-server.sock");
+        crate::fleet_provider::codex_manager::spawn_service(
+            crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket),
+            store.pool().clone(),
+            broker.sink(),
+        )
+    });
 
     // P5 (T6): reconcile the agent-profile index against the on-disk masters and
     // spawn an fs-watch so an edit-on-disk of `{hangar_home}/profiles/<slug>.md`

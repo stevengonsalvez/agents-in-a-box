@@ -97,6 +97,24 @@ impl EmbedClient {
     /// Attach to `session_name` at the given cell size and start streaming its
     /// output into a vt100 parser on a dedicated reader thread.
     pub fn attach(session_name: &str, rows: u16, cols: u16) -> Result<Self> {
+        Self::attach_target(session_name, rows, cols)
+    }
+
+    /// Attach to an exact tmux target. Window and pane targets are selected
+    /// before starting the embedded client, then the client attaches to the
+    /// owning session without losing the exact target.
+    pub fn attach_target(target: &str, rows: u16, cols: u16) -> Result<Self> {
+        let session_name = target.split_once(':').map_or(target, |(session, _)| session).trim();
+        anyhow::ensure!(!session_name.is_empty(), "tmux target has no session name");
+        if target.contains(':') {
+            for command in ["select-window", "select-pane"] {
+                let status = std::process::Command::new("tmux")
+                    .args([command, "-t", target])
+                    .status()
+                    .with_context(|| format!("tmux {command} {target}"))?;
+                anyhow::ensure!(status.success(), "tmux {command} rejected {target}");
+            }
+        }
         let rows = rows.max(1);
         let cols = cols.max(1);
 

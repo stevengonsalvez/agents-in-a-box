@@ -43,9 +43,9 @@
 //!
 //! ## Delivery semantics
 //!
-//! Best-effort: a missing file is a no-op; a corrupt line is skipped (its bytes
-//! still consumed so the cursor never wedges); a store/emit fault is logged and
-//! dropped (a failed ingest must never down the daemon).
+//! Best-effort: a missing file is a no-op and a corrupt line is skipped. A store
+//! fault leaves the cursor before the failed line so a later pass replays it.
+//! A failed ingest never downs the daemon.
 
 use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -73,7 +73,10 @@ const TICK: std::time::Duration = std::time::Duration::from_secs(3);
 /// submit) never indicate a session is blocked, so they are skipped without a
 /// transcript read.
 fn is_qualifying(event_type: &str) -> bool {
-    matches!(event_type, "Notification" | "Stop" | "SubagentStop")
+    matches!(
+        event_type,
+        "AskUserQuestion" | "PermissionRequest" | "Notification" | "Stop" | "SubagentStop"
+    )
 }
 
 /// The subset of the canonical hook line the producer needs. Lenient: unknown
@@ -82,6 +85,8 @@ fn is_qualifying(event_type: &str) -> bool {
 #[derive(Debug, Deserialize)]
 struct HookEventLine {
     #[serde(default)]
+    ts: i64,
+    #[serde(default)]
     session_id: String,
     #[serde(default)]
     cwd: String,
@@ -89,6 +94,10 @@ struct HookEventLine {
     transcript_path: String,
     #[serde(default)]
     event_type: String,
+    #[serde(default)]
+    matcher: String,
+    #[serde(default)]
+    agent: String,
 }
 
 /// The attention ingest producer — owns the paths + the write handles.
@@ -99,6 +108,13 @@ pub struct AttentionIngest {
     events_jsonl: PathBuf,
     /// This producer's OWN durable byte-offset cursor (a plain u64 text file).
     cursor_path: PathBuf,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineOutcome {
+    Processed,
+    Raised,
+    Retry,
 }
 
 impl AttentionIngest {
@@ -162,35 +178,78 @@ impl AttentionIngest {
         let end = last_nl + 1;
 
         let mut raised = 0;
+        let mut committed_end = 0usize;
         // Track each line's absolute byte offset in the file (the stable
-        // per-occurrence identity the attention id is keyed on). `split` drops the
-        // '\n' delimiter, so advance by the line length plus one for it.
+        // per-occurrence identity the attention id is keyed on). `split_inclusive`
+        // keeps the delimiter, avoiding a synthetic extra byte after the final
+        // newline.
         let mut line_start = 0usize;
-        for line_bytes in buf[..end].split(|&b| b == b'\n') {
+        for segment in buf[..end].split_inclusive(|&b| b == b'\n') {
             let offset = start + line_start as u64;
-            line_start += line_bytes.len() + 1;
+            line_start += segment.len();
+            let line_bytes = segment.strip_suffix(b"\n").unwrap_or(segment);
             if line_bytes.is_empty() {
+                committed_end = line_start;
                 continue;
             }
             if let Ok(line) = std::str::from_utf8(line_bytes) {
-                if self.process_line(line, offset, now_ms).await {
-                    raised += 1;
+                match self.process_line(line, offset, now_ms).await {
+                    LineOutcome::Raised => {
+                        raised += 1;
+                        committed_end = line_start;
+                    }
+                    LineOutcome::Processed => committed_end = line_start,
+                    LineOutcome::Retry => break,
                 }
+            } else {
+                committed_end = line_start;
             }
         }
-        write_cursor(&self.cursor_path, start + end as u64);
+        write_cursor(&self.cursor_path, start + committed_end as u64);
         raised
     }
 
-    /// Process one hook line: gate, classify, raise. Returns `true` when a NEW
-    /// attention row was raised. `offset` is the line's absolute byte position in
-    /// `events.jsonl` — the stable per-occurrence key the attention id uses.
-    async fn process_line(&self, raw: &str, offset: u64, now_ms: i64) -> bool {
+    /// Process one hook line. Store faults return `Retry`, leaving the cursor
+    /// before this line so the next pass replays it through idempotent event IDs.
+    async fn process_line(&self, raw: &str, offset: u64, now_ms: i64) -> LineOutcome {
         let Ok(line) = serde_json::from_str::<HookEventLine>(raw) else {
-            return false;
+            return LineOutcome::Processed;
         };
-        if !is_qualifying(&line.event_type) || (line.cwd.is_empty() && line.session_id.is_empty()) {
-            return false;
+        if line.cwd.is_empty() && line.session_id.is_empty() {
+            return LineOutcome::Processed;
+        }
+
+        // Every hook line feeds the canonical Fleet reducer, including events
+        // that do not raise an attention card. The byte offset is a replay-safe
+        // occurrence id, shared with this consumer's durable cursor semantics.
+        let payload =
+            serde_json::from_str::<serde_json::Value>(raw).unwrap_or(serde_json::Value::Null);
+        let semantic_event = if line.event_type == "PreToolUse" && line.matcher == "AskUserQuestion"
+        {
+            "AskUserQuestion"
+        } else {
+            line.event_type.as_str()
+        };
+        if !line.session_id.is_empty() {
+            let observation = crate::fleet::HookObservation {
+                event_id: format!("hook:{}:{offset}", line.session_id),
+                provider: &line.agent,
+                provider_session_id: &line.session_id,
+                cwd: &line.cwd,
+                event_type: semantic_event,
+                payload: &payload,
+                observed_at: if line.ts > 0 { line.ts } else { now_ms },
+            };
+            if let Err(error) =
+                crate::fleet::apply_hook(&self.pool, &self.events, observation).await
+            {
+                tracing::warn!(error = %error, "fleet hook reduce failed");
+                return LineOutcome::Retry;
+            }
+        }
+
+        if !is_qualifying(semantic_event) {
+            return LineOutcome::Processed;
         }
 
         // Classify off the async runtime: `classify` reads the JSONL transcript +
@@ -202,7 +261,7 @@ impl AttentionIngest {
         .await
         .ok()
         .flatten() else {
-            return false;
+            return LineOutcome::Processed;
         };
 
         let kind = kind_of(&row.context);
@@ -227,11 +286,11 @@ impl AttentionIngest {
         let id = format!("att:{}:{}", line.session_id, offset);
 
         match AttentionRepo::get(&self.pool, &id).await {
-            Ok(Some(_)) => return false, // already raised (open or answered)
+            Ok(Some(_)) => return LineOutcome::Processed, // already raised
             Ok(None) => {}
             Err(e) => {
                 tracing::warn!(error = %e, "attention ingest: existence check failed");
-                return false;
+                return LineOutcome::Retry;
             }
         }
 
@@ -263,7 +322,7 @@ impl AttentionIngest {
         };
         if let Err(e) = AttentionRepo::insert(&self.pool, &new).await {
             tracing::warn!(error = %e, "attention ingest: insert failed");
-            return false;
+            return LineOutcome::Retry;
         }
         self.events.emit_attention(HangarEvent::AttentionRaised {
             attention_id: id,
@@ -274,7 +333,7 @@ impl AttentionIngest {
             created_at: now_ms,
             channels,
         });
-        true
+        LineOutcome::Raised
     }
 
     /// Close any OPEN ASK rows a session still carries once a later hook shows it
@@ -646,6 +705,29 @@ mod tests {
         let ingest = ingest_for(&store, &events_jsonl, &cursor);
         assert_eq!(ingest.ingest_once(5000).await, 0);
         assert!(AttentionRepo::list_fleet(store.pool()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn fleet_store_failure_leaves_cursor_before_line_for_replay() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        std::fs::write(
+            &events_jsonl,
+            format!("{}\n", hook_line("sid-retry", "/tmp/retry", "SessionStart")),
+        )
+        .unwrap();
+
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+        store.pool().close().await;
+
+        assert_eq!(ingest.ingest_once(5000).await, 0);
+        assert_eq!(
+            read_cursor(&cursor),
+            0,
+            "failed Fleet persistence must not consume the durable hook line"
+        );
     }
 
     #[tokio::test]

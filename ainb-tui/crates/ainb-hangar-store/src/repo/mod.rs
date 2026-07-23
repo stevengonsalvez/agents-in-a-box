@@ -19,6 +19,7 @@ pub mod card_parity;
 pub mod comment;
 pub mod daemon_config;
 pub mod event_log;
+pub mod fleet;
 pub mod inbox;
 pub mod issue;
 pub mod label;

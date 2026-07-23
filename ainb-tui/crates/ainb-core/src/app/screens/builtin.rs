@@ -731,7 +731,26 @@ impl Screen for FleetPanelScreen {
         ids::FLEET_PANEL
     }
     fn render(&mut self, frame: &mut Frame, area: Rect, state: &mut AppState) {
-        crate::components::fleet_panel::render(frame, area, &mut state.fleet_panel_state);
+        if state.is_interactive_pane() {
+            use ratatui::layout::{Constraint, Direction, Layout, Margin};
+            let panes = Layout::default()
+                .direction(Direction::Horizontal)
+                .constraints([Constraint::Percentage(55), Constraint::Percentage(45)])
+                .split(area);
+            crate::components::fleet_panel::render(frame, panes[0], &mut state.fleet_panel_state);
+            let inner = panes[1].inner(Margin {
+                vertical: 1,
+                horizontal: 1,
+            });
+            if let Some(embed) = state.embed.as_mut() {
+                let _ = embed.resize(inner.height, inner.width);
+            }
+            state.embed_pane_area = Some(inner);
+            crate::components::TmuxPreviewPane::new().render_interactive(frame, panes[1], state);
+        } else {
+            state.embed_pane_area = None;
+            crate::components::fleet_panel::render(frame, area, &mut state.fleet_panel_state);
+        }
     }
 }
 

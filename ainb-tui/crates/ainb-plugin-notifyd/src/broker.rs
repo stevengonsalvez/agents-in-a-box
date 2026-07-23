@@ -6,17 +6,21 @@
 //! the one gap where AgentPeek's design beats ours: a human synchronously
 //! approving or denying a live Claude `PermissionRequest` hook.
 //!
-//! Three line-JSON operations, one per connection:
+//! Five line-JSON operations, one per connection:
 //!
-//! - **AWAIT** — a waiting hook (the `ainb fleet atc hook`
+//! - **AWAIT**: a waiting hook (the `ainb fleet atc hook`
 //!   `PermissionRequest` branch) dials in, registers itself keyed by
 //!   `session_id`, and BLOCKS on the connection until a human decides or
 //!   the broker times out. The response is the decision.
-//! - **DECIDE** — the fleet TUI / CLI dials in, names a `session_id` and
+//! - **DECIDE**: the fleet TUI / CLI dials in, names a `session_id` and
 //!   an `approve`/`deny`, the broker hands the decision to the blocked
 //!   AWAIT, and both connections resolve.
-//! - **LIST** — dump the pending session ids (what is currently waiting
-//!   for a human), for the Daemons overlay / CLI status.
+//! - **AWAIT_STRUCTURED**: a managed AskUserQuestion hook registers its exact
+//!   fingerprint and complete question array, then blocks for answers.
+//! - **ANSWER_STRUCTURED**: an operator answers every question. The broker
+//!   accepts only the current fingerprint and only the first valid answer.
+//! - **LIST**: dump pending requests, including structured questions and their
+//!   current fingerprint, for Fleet surfaces.
 //!
 //! ## Durability model
 //!
@@ -24,9 +28,9 @@
 //! AWAIT on disconnect, so restarting notifyd is the single resume
 //! command: every still-alive waiter re-registers itself. There is no
 //! durable pending file. If a waiter's AWAIT times out (no human in the
-//! window) the fallback is **deny** — never auto-approve. The
-//! correlation key across every surface is `session_id`, because Claude
-//! blocks on at most one permission request per session at a time.
+//! window) the permission fallback is **deny**, never auto-approve. Permission
+//! requests correlate by `session_id`. Structured requests additionally require
+//! the exact fingerprint so a late answer cannot resolve a newer prompt.
 //!
 //! ## Trust boundary
 //!
@@ -39,7 +43,7 @@
 //! local process. Do not treat an `allow` from this broker as proof a
 //! HUMAN clicked it if same-uid code is untrusted.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, Write};
 use std::os::unix::net::UnixStream as StdUnixStream;
 use std::path::Path;
@@ -87,6 +91,45 @@ pub struct Decision {
     pub reason: String,
 }
 
+/// One structured answer for an exact AskUserQuestion question.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredQuestionAnswer {
+    /// Exact question text used as Claude's answer-map key.
+    pub question: String,
+    /// Selected labels in user order. Multiple values preserve multi-select.
+    pub selected_options: Vec<String>,
+}
+
+/// Resolution returned to a blocked structured-question hook.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+pub enum StructuredResolution {
+    /// Human supplied complete answers.
+    Answered {
+        /// One answer for every original question.
+        answers: Vec<StructuredQuestionAnswer>,
+    },
+    /// Broker could not safely provide an answer.
+    Rejected {
+        /// Human-readable safe failure reason.
+        reason: String,
+    },
+}
+
+impl StructuredResolution {
+    fn timed_out() -> Self {
+        Self::Rejected {
+            reason: "no human answer before timeout".to_string(),
+        }
+    }
+
+    fn superseded() -> Self {
+        Self::Rejected {
+            reason: "superseded by a newer request for this session".to_string(),
+        }
+    }
+}
+
 impl Decision {
     /// The safe fallback when no human answered in time.
     fn timed_out() -> Self {
@@ -112,17 +155,27 @@ struct Pending {
     /// `session_id` — only the entry whose id we still hold gets removed
     /// on our own timeout, so a superseding AWAIT is never clobbered.
     id: u64,
-    /// Tool the permission request is for (e.g. `Bash`), for display.
-    tool: String,
-    /// Short human context (e.g. the command), for display.
-    context: String,
     /// When this AWAIT registered, ms since epoch — drives `waiting_ms`.
     since_ms: u64,
-    /// Channel to deliver the human's decision to the blocked AWAIT.
-    tx: oneshot::Sender<Decision>,
+    /// Exact pending request and its response channel.
+    kind: PendingKind,
 }
 
-/// One pending approval as reported by LIST.
+enum PendingKind {
+    Permission {
+        tool: String,
+        context: String,
+        request_fingerprint: String,
+        tx: oneshot::Sender<Decision>,
+    },
+    Structured {
+        request_fingerprint: String,
+        questions: Vec<serde_json::Value>,
+        tx: oneshot::Sender<StructuredResolution>,
+    },
+}
+
+/// One pending broker request as reported by LIST.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct PendingInfo {
     /// The session blocked on a human decision.
@@ -131,8 +184,134 @@ pub struct PendingInfo {
     pub tool: String,
     /// Short human context.
     pub context: String,
+    /// Exact structured request fingerprint, absent for permissions.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_fingerprint: Option<String>,
+    /// Complete original question objects, empty for permissions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub questions: Vec<serde_json::Value>,
     /// How long it has been waiting, in milliseconds.
     pub waiting_ms: u64,
+}
+
+/// Broker acknowledgement for an exact structured answer attempt.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct StructuredAnswerAck {
+    /// Request parsed and processed.
+    pub ok: bool,
+    /// Matching waiter received this answer.
+    pub matched: bool,
+    /// Fingerprint or pending request kind did not match current state.
+    pub stale: bool,
+    /// Validation error, when supplied answers were incomplete or malformed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub error: Option<String>,
+}
+
+impl StructuredAnswerAck {
+    fn matched() -> Self {
+        Self {
+            ok: true,
+            matched: true,
+            stale: false,
+            error: None,
+        }
+    }
+
+    fn unmatched() -> Self {
+        Self {
+            ok: true,
+            matched: false,
+            stale: false,
+            error: None,
+        }
+    }
+
+    fn stale() -> Self {
+        Self {
+            ok: true,
+            matched: false,
+            stale: true,
+            error: None,
+        }
+    }
+
+    fn invalid(error: String) -> Self {
+        Self {
+            ok: false,
+            matched: false,
+            stale: false,
+            error: Some(error),
+        }
+    }
+}
+
+/// Stable fingerprint for exact structured tool input.
+#[must_use]
+pub fn request_fingerprint(tool_input: &serde_json::Value) -> String {
+    let bytes = serde_json::to_vec(tool_input).unwrap_or_default();
+    let hash = bytes.iter().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(*byte)).wrapping_mul(0x0000_0100_0000_01b3)
+    });
+    format!("fnv1a64:{hash:016x}")
+}
+
+fn validate_structured_answers(
+    questions: &[serde_json::Value],
+    answers: &[StructuredQuestionAnswer],
+) -> std::result::Result<(), String> {
+    if questions.is_empty() {
+        return Err("structured request has no questions".to_string());
+    }
+    if answers.len() != questions.len() {
+        return Err(format!(
+            "expected {} question answers, received {}",
+            questions.len(),
+            answers.len()
+        ));
+    }
+    let mut expected = HashMap::new();
+    for question in questions {
+        let text = question
+            .get("question")
+            .and_then(serde_json::Value::as_str)
+            .filter(|text| !text.is_empty())
+            .ok_or_else(|| "structured question is missing question text".to_string())?;
+        let multi = question
+            .get("multiSelect")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
+        if expected.insert(text, multi).is_some() {
+            return Err(format!("duplicate structured question text: {text}"));
+        }
+    }
+    let mut answered = HashSet::new();
+    for answer in answers {
+        let Some(multi) = expected.get(answer.question.as_str()) else {
+            return Err(format!(
+                "answer does not match current question: {}",
+                answer.question
+            ));
+        };
+        if !answered.insert(answer.question.as_str()) {
+            return Err(format!(
+                "duplicate answer for question: {}",
+                answer.question
+            ));
+        }
+        if answer.selected_options.is_empty()
+            || answer.selected_options.iter().any(|value| value.trim().is_empty())
+        {
+            return Err(format!("question has an empty answer: {}", answer.question));
+        }
+        if !multi && answer.selected_options.len() != 1 {
+            return Err(format!(
+                "single-select question received multiple answers: {}",
+                answer.question
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Shared broker state: the pending map plus the AWAIT timeout. Cloneable
@@ -165,11 +344,38 @@ impl BrokerState {
         let now = now_ms();
         let map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
         map.iter()
-            .map(|(session_id, p)| PendingInfo {
-                session_id: session_id.clone(),
-                tool: p.tool.clone(),
-                context: p.context.clone(),
-                waiting_ms: now.saturating_sub(p.since_ms),
+            .map(|(session_id, pending)| {
+                let (tool, context, request_fingerprint, questions) = match &pending.kind {
+                    PendingKind::Permission {
+                        tool,
+                        context,
+                        request_fingerprint,
+                        ..
+                    } => (
+                        tool.clone(),
+                        context.clone(),
+                        (!request_fingerprint.is_empty()).then(|| request_fingerprint.clone()),
+                        Vec::new(),
+                    ),
+                    PendingKind::Structured {
+                        request_fingerprint,
+                        questions,
+                        ..
+                    } => (
+                        "AskUserQuestion".to_string(),
+                        serde_json::to_string(questions).unwrap_or_default(),
+                        Some(request_fingerprint.clone()),
+                        questions.clone(),
+                    ),
+                };
+                PendingInfo {
+                    session_id: session_id.clone(),
+                    tool,
+                    context,
+                    request_fingerprint,
+                    questions,
+                    waiting_ms: now.saturating_sub(pending.since_ms),
+                }
             })
             .collect()
     }
@@ -179,20 +385,49 @@ impl BrokerState {
     /// dropped receiver (the AWAIT raced into its timeout/supersede path)
     /// reports `false`, so the TUI/CLI never claims a match that nobody heard.
     pub fn decide(&self, session_id: &str, decision: Decision) -> bool {
+        self.decide_exact(session_id, None, decision)
+    }
+
+    /// Resolve only the exact current permission request fingerprint.
+    pub fn decide_exact(
+        &self,
+        session_id: &str,
+        request_fingerprint: Option<&str>,
+        decision: Decision,
+    ) -> bool {
         let taken = {
             let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
-            map.remove(session_id)
+            if matches!(
+                map.get(session_id).map(|p| &p.kind),
+                Some(PendingKind::Permission { request_fingerprint: current, .. })
+                    if (current.is_empty() && request_fingerprint.is_none())
+                        || request_fingerprint == Some(current.as_str())
+            ) {
+                map.remove(session_id)
+            } else {
+                None
+            }
         };
         match taken {
-            Some(p) => p.tx.send(decision).is_ok(),
+            Some(Pending {
+                kind: PendingKind::Permission { tx, .. },
+                ..
+            }) => tx.send(decision).is_ok(),
             None => false,
+            Some(_) => false,
         }
     }
 
     /// Register an AWAIT and block until a human decides, the entry is
     /// superseded, or the timeout fires (fallback: deny). Never returns
     /// without a decision — the waiting hook is never left empty-handed.
-    async fn await_decision(&self, session_id: String, tool: String, context: String) -> Decision {
+    async fn await_decision(
+        &self,
+        session_id: String,
+        tool: String,
+        context: String,
+        request_fingerprint: String,
+    ) -> Decision {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
         {
@@ -201,10 +436,13 @@ impl BrokerState {
                 session_id.clone(),
                 Pending {
                     id,
-                    tool,
-                    context,
                     since_ms: now_ms(),
-                    tx,
+                    kind: PendingKind::Permission {
+                        tool,
+                        context,
+                        request_fingerprint,
+                        tx,
+                    },
                 },
             );
         }
@@ -223,6 +461,86 @@ impl BrokerState {
                 }
                 Decision::timed_out()
             }
+        }
+    }
+
+    async fn await_structured(
+        &self,
+        session_id: String,
+        request_fingerprint: String,
+        questions: Vec<serde_json::Value>,
+    ) -> StructuredResolution {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let (tx, rx) = oneshot::channel();
+        {
+            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            map.insert(
+                session_id.clone(),
+                Pending {
+                    id,
+                    since_ms: now_ms(),
+                    kind: PendingKind::Structured {
+                        request_fingerprint,
+                        questions,
+                        tx,
+                    },
+                },
+            );
+        }
+
+        match tokio::time::timeout(self.await_timeout, rx).await {
+            Ok(Ok(resolution)) => resolution,
+            Ok(Err(_)) => StructuredResolution::superseded(),
+            Err(_) => {
+                let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+                if map.get(&session_id).is_some_and(|p| p.id == id) {
+                    map.remove(&session_id);
+                }
+                StructuredResolution::timed_out()
+            }
+        }
+    }
+
+    fn answer_structured(
+        &self,
+        session_id: &str,
+        request_fingerprint: &str,
+        answers: Vec<StructuredQuestionAnswer>,
+    ) -> StructuredAnswerAck {
+        let taken = {
+            let mut map = self.pending.lock().unwrap_or_else(|p| p.into_inner());
+            let Some(pending) = map.get(session_id) else {
+                return StructuredAnswerAck::unmatched();
+            };
+            let PendingKind::Structured {
+                request_fingerprint: current,
+                questions,
+                ..
+            } = &pending.kind
+            else {
+                return StructuredAnswerAck::stale();
+            };
+            if current != request_fingerprint {
+                return StructuredAnswerAck::stale();
+            }
+            if let Err(error) = validate_structured_answers(questions, &answers) {
+                return StructuredAnswerAck::invalid(error);
+            }
+            map.remove(session_id)
+        };
+
+        match taken {
+            Some(Pending {
+                kind: PendingKind::Structured { tx, .. },
+                ..
+            }) => {
+                if tx.send(StructuredResolution::Answered { answers }).is_ok() {
+                    StructuredAnswerAck::matched()
+                } else {
+                    StructuredAnswerAck::unmatched()
+                }
+            }
+            _ => StructuredAnswerAck::unmatched(),
         }
     }
 }
@@ -244,6 +562,8 @@ enum Request {
         tool: String,
         #[serde(default)]
         context: String,
+        #[serde(default)]
+        request_fingerprint: String,
     },
     /// A human (TUI/CLI) delivers a decision for a session.
     Decide {
@@ -251,6 +571,22 @@ enum Request {
         decision: DecisionKind,
         #[serde(default)]
         reason: String,
+        #[serde(default)]
+        request_fingerprint: Option<String>,
+    },
+    /// A waiting AskUserQuestion hook registers its exact request and blocks.
+    #[serde(rename = "await_structured")]
+    AwaitStructured {
+        session_id: String,
+        request_fingerprint: String,
+        questions: Vec<serde_json::Value>,
+    },
+    /// Human answers an exact current AskUserQuestion request.
+    #[serde(rename = "answer_structured")]
+    AnswerStructured {
+        session_id: String,
+        request_fingerprint: String,
+        answers: Vec<StructuredQuestionAnswer>,
     },
     /// Dump the pending session ids.
     List,
@@ -320,17 +656,50 @@ async fn handle_connection(stream: UnixStream, state: BrokerState) -> Result<()>
             session_id,
             tool,
             context,
+            request_fingerprint,
         } => {
-            let decision = state.await_decision(session_id, tool, context).await;
+            let decision =
+                state.await_decision(session_id, tool, context, request_fingerprint).await;
             write_line(reader.get_mut(), &decision).await?;
         }
         Request::Decide {
             session_id,
             decision,
             reason,
+            request_fingerprint,
         } => {
-            let matched = state.decide(&session_id, Decision { decision, reason });
+            let matched = state.decide_exact(
+                &session_id,
+                request_fingerprint.as_deref(),
+                Decision { decision, reason },
+            );
             write_line(reader.get_mut(), &DecideAck { ok: true, matched }).await?;
+        }
+        Request::AwaitStructured {
+            session_id,
+            request_fingerprint,
+            questions,
+        } => {
+            let resolution = if session_id.is_empty()
+                || request_fingerprint.is_empty()
+                || questions.is_empty()
+            {
+                StructuredResolution::Rejected {
+                    reason: "structured await requires session, fingerprint, and questions"
+                        .to_string(),
+                }
+            } else {
+                state.await_structured(session_id, request_fingerprint, questions).await
+            };
+            write_line(reader.get_mut(), &resolution).await?;
+        }
+        Request::AnswerStructured {
+            session_id,
+            request_fingerprint,
+            answers,
+        } => {
+            let ack = state.answer_structured(&session_id, &request_fingerprint, answers);
+            write_line(reader.get_mut(), &ack).await?;
         }
         Request::List => {
             let pending = state.list();
@@ -393,12 +762,26 @@ pub fn client_await(
     context: &str,
     deadline: Duration,
 ) -> Decision {
+    client_await_exact(sock, session_id, tool, context, "", deadline)
+}
+
+/// Block on one exact permission request fingerprint.
+#[must_use]
+pub fn client_await_exact(
+    sock: &Path,
+    session_id: &str,
+    tool: &str,
+    context: &str,
+    request_fingerprint: &str,
+    deadline: Duration,
+) -> Decision {
     let started = Instant::now();
     let req = serde_json::json!({
         "op": "await",
         "session_id": session_id,
         "tool": tool,
         "context": context,
+        "request_fingerprint": request_fingerprint,
     });
     let line = serde_json::to_string(&req).unwrap_or_default();
     loop {
@@ -438,12 +821,96 @@ fn try_await_once(
     Ok(Some(decision))
 }
 
+/// Block until an exact structured request receives complete human answers.
+///
+/// The original questions stay on the broker for operator rendering. Answer
+/// delivery requires the same request fingerprint, preventing a late answer
+/// from resolving a newer prompt in the same session.
+#[must_use]
+pub fn client_await_structured(
+    sock: &Path,
+    session_id: &str,
+    request_fingerprint: &str,
+    questions: &[serde_json::Value],
+    deadline: Duration,
+) -> StructuredResolution {
+    let started = Instant::now();
+    let request = serde_json::json!({
+        "op": "await_structured",
+        "session_id": session_id,
+        "request_fingerprint": request_fingerprint,
+        "questions": questions,
+    });
+    let line = serde_json::to_string(&request).unwrap_or_default();
+    loop {
+        let remaining = deadline.saturating_sub(started.elapsed());
+        if remaining.is_zero() {
+            return StructuredResolution::timed_out();
+        }
+        match try_await_structured_once(sock, &line, remaining) {
+            Ok(Some(resolution)) => return resolution,
+            Ok(None) | Err(_) => std::thread::sleep(REDIAL_INTERVAL),
+        }
+    }
+}
+
+fn try_await_structured_once(
+    sock: &Path,
+    line: &str,
+    read_timeout: Duration,
+) -> std::io::Result<Option<StructuredResolution>> {
+    let mut stream = StdUnixStream::connect(sock)?;
+    stream.set_read_timeout(Some(read_timeout))?;
+    stream.write_all(line.as_bytes())?;
+    stream.write_all(b"\n")?;
+    stream.flush()?;
+    let mut reader = std::io::BufReader::new(stream);
+    let mut response = String::new();
+    if reader.read_line(&mut response)? == 0 {
+        return Ok(None);
+    }
+    let resolution = serde_json::from_str(response.trim())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))?;
+    Ok(Some(resolution))
+}
+
+/// Answer the current exact structured request for one session.
+pub fn client_answer_structured(
+    sock: &Path,
+    session_id: &str,
+    request_fingerprint: &str,
+    answers: &[StructuredQuestionAnswer],
+) -> std::io::Result<StructuredAnswerAck> {
+    let response = client_round_trip(
+        sock,
+        &serde_json::json!({
+            "op": "answer_structured",
+            "session_id": session_id,
+            "request_fingerprint": request_fingerprint,
+            "answers": answers,
+        }),
+    )?;
+    serde_json::from_value(response)
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+}
+
 /// Deliver a decision for `session_id` to the broker (the TUI/CLI approve/deny
 /// lever). Returns whether a waiter was actually blocked on that session
 /// (`matched` false = nothing was waiting, e.g. it already timed out).
 pub fn client_decide(
     sock: &Path,
     session_id: &str,
+    decision: DecisionKind,
+    reason: &str,
+) -> std::io::Result<bool> {
+    client_decide_exact(sock, session_id, None, decision, reason)
+}
+
+/// Deliver a decision only to the exact permission request fingerprint.
+pub fn client_decide_exact(
+    sock: &Path,
+    session_id: &str,
+    request_fingerprint: Option<&str>,
     decision: DecisionKind,
     reason: &str,
 ) -> std::io::Result<bool> {
@@ -454,9 +921,19 @@ pub fn client_decide(
             "session_id": session_id,
             "decision": decision,
             "reason": reason,
+            "request_fingerprint": request_fingerprint,
         }),
     )?;
     Ok(resp.get("matched").and_then(serde_json::Value::as_bool).unwrap_or(false))
+}
+
+/// Stable exact permission identity shared by hook and controller.
+#[must_use]
+pub fn permission_fingerprint(tool: &str, context: &str) -> String {
+    request_fingerprint(&serde_json::json!({
+        "tool": tool,
+        "context": context,
+    }))
 }
 
 /// List sessions currently blocked on a human decision (Daemons overlay / CLI
@@ -562,6 +1039,106 @@ mod tests {
         let parsed: Decision = serde_json::from_str(decision.trim()).unwrap();
         assert_eq!(parsed.decision, DecisionKind::Approve);
         assert_eq!(parsed.reason, "ok");
+
+        handle.abort();
+        let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn structured_answer_preserves_all_questions_and_rejects_stale() {
+        let (sock, _state, handle) = spawn_broker(Duration::from_secs(30)).await;
+        let questions = serde_json::json!([
+            {
+                "question": "Region?",
+                "header": "Region",
+                "options": [{"label": "EU"}, {"label": "US"}],
+                "multiSelect": false
+            },
+            {
+                "question": "Checks?",
+                "header": "Checks",
+                "options": [{"label": "Lint"}, {"label": "Test"}],
+                "multiSelect": true
+            }
+        ]);
+        let tool_input = serde_json::json!({ "questions": questions });
+        let fingerprint = request_fingerprint(&tool_input);
+        let request = serde_json::json!({
+            "op": "await_structured",
+            "session_id": "ask-1",
+            "request_fingerprint": fingerprint,
+            "questions": tool_input["questions"],
+        });
+        let sock_waiter = sock.clone();
+        let waiter = tokio::spawn(async move {
+            round_trip(&sock_waiter, &serde_json::to_string(&request).unwrap()).await
+        });
+        wait_for_pending(&sock, "ask-1").await;
+
+        let pending = {
+            let socket = sock.clone();
+            tokio::task::spawn_blocking(move || client_list(&socket).unwrap())
+                .await
+                .unwrap()
+        };
+        assert_eq!(
+            pending[0].request_fingerprint.as_deref(),
+            Some(fingerprint.as_str())
+        );
+        assert_eq!(pending[0].questions.len(), 2);
+        assert_eq!(pending[0].questions[1]["multiSelect"], true);
+
+        let stale: StructuredAnswerAck = serde_json::from_str(
+            round_trip(
+                &sock,
+                r#"{"op":"answer_structured","session_id":"ask-1","request_fingerprint":"fnv1a64:stale","answers":[]}"#,
+            )
+            .await
+            .trim(),
+        )
+        .unwrap();
+        assert!(stale.stale);
+        assert!(!stale.matched);
+
+        let incomplete = serde_json::json!({
+            "op": "answer_structured",
+            "session_id": "ask-1",
+            "request_fingerprint": fingerprint,
+            "answers": [{"question": "Region?", "selected_options": ["EU"]}],
+        });
+        let invalid: StructuredAnswerAck = serde_json::from_str(
+            round_trip(&sock, &serde_json::to_string(&incomplete).unwrap()).await.trim(),
+        )
+        .unwrap();
+        assert!(!invalid.ok);
+        assert!(invalid.error.as_deref().is_some_and(|error| error.contains("expected 2")));
+
+        let complete = serde_json::json!({
+            "op": "answer_structured",
+            "session_id": "ask-1",
+            "request_fingerprint": fingerprint,
+            "answers": [
+                {"question": "Region?", "selected_options": ["EU"]},
+                {"question": "Checks?", "selected_options": ["Lint", "Test"]}
+            ],
+        });
+        let answer_line = serde_json::to_string(&complete).unwrap();
+        let accepted: StructuredAnswerAck =
+            serde_json::from_str(round_trip(&sock, &answer_line).await.trim()).unwrap();
+        assert!(accepted.matched);
+
+        let resolution: StructuredResolution =
+            serde_json::from_str(waiter.await.unwrap().trim()).unwrap();
+        let StructuredResolution::Answered { answers } = resolution else {
+            panic!("structured waiter must receive answers");
+        };
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[1].selected_options, ["Lint", "Test"]);
+
+        let second: StructuredAnswerAck =
+            serde_json::from_str(round_trip(&sock, &answer_line).await.trim()).unwrap();
+        assert!(!second.matched, "first structured answer must win");
+        assert!(!second.stale);
 
         handle.abort();
         let _ = std::fs::remove_file(&sock);
@@ -832,5 +1409,39 @@ mod tests {
 
         rt2.shutdown_background();
         let _ = std::fs::remove_file(&sock);
+    }
+
+    #[tokio::test]
+    async fn exact_permission_decision_refuses_stale_fingerprint() {
+        let state = BrokerState::with_timeout(Duration::from_secs(2));
+        let waiting = state.clone();
+        let waiter = tokio::spawn(async move {
+            waiting
+                .await_decision(
+                    "session-exact".to_string(),
+                    "Bash".to_string(),
+                    "command".to_string(),
+                    "fingerprint-new".to_string(),
+                )
+                .await
+        });
+        tokio::task::yield_now().await;
+        assert!(!state.decide_exact(
+            "session-exact",
+            Some("fingerprint-old"),
+            Decision {
+                decision: DecisionKind::Approve,
+                reason: "stale".to_string(),
+            },
+        ));
+        assert!(state.decide_exact(
+            "session-exact",
+            Some("fingerprint-new"),
+            Decision {
+                decision: DecisionKind::Approve,
+                reason: "exact".to_string(),
+            },
+        ));
+        assert_eq!(waiter.await.unwrap().reason, "exact");
     }
 }

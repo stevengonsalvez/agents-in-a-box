@@ -854,15 +854,16 @@ async fn hook(matches: &clap::ArgMatches) -> Result<()> {
     Ok(())
 }
 
-/// What the lifecycle hook emits on stdout. Two distinct JSON shapes flow to the
-/// same stdout: a `Stop`-block decision (`{"decision":"block",...}`) and the
-/// `PermissionRequest` `hookSpecificOutput` decision. The permission line is
-/// pre-serialized (built by [`permission_emit_json`]) and emitted verbatim.
+/// What the lifecycle hook emits on stdout. Stop, PermissionRequest, and
+/// structured PreToolUse outputs share stdout. Hook-specific lines are
+/// pre-serialized and emitted verbatim.
 enum HookEmit {
     /// A Stop-drain block decision, serialized on emit.
     Stop(plumbing::StopDecision),
     /// A pre-serialized `hookSpecificOutput` permission-decision JSON line.
     Permission(String),
+    /// A pre-serialized structured AskUserQuestion hook output.
+    Structured(String),
 }
 
 /// Convert a [`hook_inner`]/[`hook_core`] result into the hook's exit behaviour:
@@ -884,7 +885,7 @@ fn swallow_hook_result(result: Result<Option<HookEmit>>) -> (bool, Option<String
             }
         },
         // Already a complete JSON line — emit as-is.
-        Ok(Some(HookEmit::Permission(json))) => (true, Some(json)),
+        Ok(Some(HookEmit::Permission(json) | HookEmit::Structured(json))) => (true, Some(json)),
         Ok(None) => (true, None),
         Err(e) => {
             // Log-and-swallow: a drain/serialize/IO failure must NOT wedge Stop
@@ -925,6 +926,76 @@ fn extract_permission_context(payload: &str) -> String {
         .and_then(|v| v.get("tool_input").or_else(|| v.get("input")).cloned())
         .map(|ti| ti.to_string())
         .unwrap_or_default()
+}
+
+fn extract_structured_tool_input(
+    payload: &str,
+) -> Result<(serde_json::Value, Vec<serde_json::Value>, String)> {
+    let hook_input: serde_json::Value =
+        serde_json::from_str(payload).context("parsing AskUserQuestion hook payload")?;
+    let tool_input = hook_input
+        .get("tool_input")
+        .or_else(|| hook_input.get("input"))
+        .cloned()
+        .context("AskUserQuestion payload missing tool_input")?;
+    let questions = tool_input
+        .get("questions")
+        .and_then(serde_json::Value::as_array)
+        .filter(|questions| !questions.is_empty())
+        .cloned()
+        .context("AskUserQuestion tool_input missing questions")?;
+    let request_identity = serde_json::json!({
+        "tool_use_id": hook_input.get("tool_use_id").cloned().unwrap_or(serde_json::Value::Null),
+        "tool_input": tool_input.clone(),
+    });
+    let fingerprint = ainb_plugin_notifyd::broker::request_fingerprint(&request_identity);
+    Ok((tool_input, questions, fingerprint))
+}
+
+fn structured_emit_json(
+    mut tool_input: serde_json::Value,
+    resolution: &ainb_plugin_notifyd::broker::StructuredResolution,
+) -> String {
+    use ainb_plugin_notifyd::broker::StructuredResolution;
+
+    let hook_output = match resolution {
+        StructuredResolution::Answered { answers } => {
+            let answer_map = answers
+                .iter()
+                .map(|answer| {
+                    (
+                        answer.question.clone(),
+                        serde_json::Value::String(answer.selected_options.join(", ")),
+                    )
+                })
+                .collect::<serde_json::Map<_, _>>();
+            let Some(input) = tool_input.as_object_mut() else {
+                return structured_emit_json(
+                    serde_json::Value::Null,
+                    &StructuredResolution::Rejected {
+                        reason: "AskUserQuestion tool_input is not an object".to_string(),
+                    },
+                );
+            };
+            input.insert("answers".to_string(), serde_json::Value::Object(answer_map));
+            serde_json::json!({
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "permissionDecisionReason": "answered through Fleet structured broker",
+                    "updatedInput": tool_input,
+                }
+            })
+        }
+        StructuredResolution::Rejected { reason } => serde_json::json!({
+            "hookSpecificOutput": {
+                "hookEventName": "PreToolUse",
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }),
+    };
+    hook_output.to_string()
 }
 
 /// The fallible body of [`hook`]: resolves the process env (`AINB_HOME`,
@@ -1099,7 +1170,41 @@ fn hook_core(
         }
     }
 
-    // 4. PermissionRequest: SYNCHRONOUS approve/deny round-trip. The waiting
+    // 4. PreToolUse(AskUserQuestion): block on exact structured answers and
+    //    return the full original questions plus Claude's answer map. Labels
+    //    never pass through generic text delivery.
+    if base_event == "PreToolUse"
+        && matcher == Some("AskUserQuestion")
+        && !session_id.is_empty()
+        && is_fleet_member
+    {
+        let socket = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
+        let (tool_input, questions, fingerprint) = match extract_structured_tool_input(payload) {
+            Ok(request) => request,
+            Err(error) => {
+                let resolution = ainb_plugin_notifyd::broker::StructuredResolution::Rejected {
+                    reason: error.to_string(),
+                };
+                return Ok(Some(HookEmit::Structured(structured_emit_json(
+                    serde_json::Value::Null,
+                    &resolution,
+                ))));
+            }
+        };
+        let resolution = ainb_plugin_notifyd::broker::client_await_structured(
+            &socket,
+            session_id,
+            &fingerprint,
+            &questions,
+            ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
+        );
+        return Ok(Some(HookEmit::Structured(structured_emit_json(
+            tool_input,
+            &resolution,
+        ))));
+    }
+
+    // 5. PermissionRequest: SYNCHRONOUS approve/deny round-trip. The waiting
     //    Claude hook BLOCKS here on the approve broker socket until a human
     //    answers from the fleet UI (or `ainb fleet ... approve/deny`), then
     //    relays the verdict straight back as a `hookSpecificOutput` permission
@@ -1111,11 +1216,13 @@ fn hook_core(
         let sock = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
         let tool = matcher.unwrap_or_default();
         let context = extract_permission_context(payload);
-        let decision = ainb_plugin_notifyd::broker::client_await(
+        let fingerprint = ainb_plugin_notifyd::broker::permission_fingerprint(tool, &context);
+        let decision = ainb_plugin_notifyd::broker::client_await_exact(
             &sock,
             session_id,
             tool,
             &context,
+            &fingerprint,
             ainb_plugin_notifyd::broker::CLIENT_AWAIT_DEADLINE,
         );
         return Ok(Some(HookEmit::Permission(permission_emit_json(&decision))));
@@ -1314,6 +1421,39 @@ fn resolve_matcher(
         .map(str::to_string)
 }
 
+fn current_tmux_identity() -> Option<(String, String)> {
+    let pane = std::env::var_os("TMUX_PANE").filter(|value| !value.is_empty())?;
+    let tmux = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let output = std::process::Command::new(tmux)
+        .args([
+            std::ffi::OsStr::new("display-message"),
+            std::ffi::OsStr::new("-p"),
+            std::ffi::OsStr::new("-t"),
+            pane.as_os_str(),
+            std::ffi::OsStr::new("-F"),
+            std::ffi::OsStr::new(
+                "#{session_name}\t#{window_index}\t#{pane_index}\t#{pane_id}\t#{pane_pid}\t#{session_created}",
+            ),
+        ])
+        .output()
+        .ok()
+        .filter(|output| output.status.success())?;
+    parse_hook_tmux_identity(std::str::from_utf8(&output.stdout).ok()?)
+}
+
+fn parse_hook_tmux_identity(row: &str) -> Option<(String, String)> {
+    let fields = row.trim().split('\t').collect::<Vec<_>>();
+    if fields.len() != 6 || fields.iter().any(|field| field.is_empty()) {
+        return None;
+    }
+    let target = format!("{}:{}.{}", fields[0], fields[1], fields[2]);
+    let fingerprint = format!(
+        "pane={};pid={};session_started={}",
+        fields[3], fields[4], fields[5]
+    );
+    Some((target, fingerprint))
+}
+
 /// Build the canonical `events.jsonl` line for one hook fire. This is the exact
 /// shape the notifyd ingest tailer parses (`crate ainb-plugin-notifyd::ingest`)
 /// and the Wave 3 materializer consumes: ts, session_id, cwd, transcript_path,
@@ -1345,6 +1485,10 @@ fn build_event_line(
     };
     let matcher_val = resolve_matcher(base_event, matcher, parsed.as_ref());
     let transcript_path = extract_transcript_path(parsed.as_ref());
+    let (tmux_target, process_start_fingerprint) = current_tmux_identity()
+        .map_or((None, None), |(target, fingerprint)| {
+            (Some(target), Some(fingerprint))
+        });
     // Bounded raw payload: embed the parsed value if it fit, else a truncation
     // marker so the line stays small and always valid JSON.
     let payload_val: serde_json::Value = if payload.len() <= MAX_EVENT_PAYLOAD_BYTES {
@@ -1361,6 +1505,8 @@ fn build_event_line(
         "event_type": base_event,
         "matcher": matcher_val,
         "parent": parent,
+        "tmux_target": tmux_target,
+        "process_start_fingerprint": process_start_fingerprint,
         "payload": payload_val,
     })
 }
@@ -1949,6 +2095,15 @@ mod tests {
         assert_eq!(line["payload"]["tool_name"], "AskUserQuestion");
     }
 
+    #[test]
+    fn hook_tmux_identity_matches_discovery_fingerprint_shape() {
+        let identity = parse_hook_tmux_identity("claude-a\t2\t1\t%9\t4242\t1700000000\n")
+            .expect("exact tmux identity");
+        assert_eq!(identity.0, "claude-a:2.1");
+        assert_eq!(identity.1, "pane=%9;pid=4242;session_started=1700000000");
+        assert!(parse_hook_tmux_identity("claude-a\t2\t1").is_none());
+    }
+
     // --- H-A1: the hook NEVER returns Err (always exit 0) --------------------
 
     #[tokio::test]
@@ -2054,5 +2209,170 @@ mod tests {
         assert!(ctx.contains("rm -rf /tmp/x"), "context was: {ctx}");
         assert!(extract_permission_context("not json").is_empty());
         assert!(extract_permission_context("{}").is_empty());
+    }
+
+    #[test]
+    fn structured_request_fingerprint_includes_tool_use_id() {
+        let payload = |tool_use_id: &str| {
+            serde_json::json!({
+                "tool_name": "AskUserQuestion",
+                "tool_use_id": tool_use_id,
+                "tool_input": {
+                    "questions": [{
+                        "question": "Same question?",
+                        "header": "Same",
+                        "options": [{"label": "Yes"}],
+                        "multiSelect": false
+                    }]
+                }
+            })
+            .to_string()
+        };
+        let (_, _, first) = extract_structured_tool_input(&payload("toolu_1")).unwrap();
+        let (_, _, second) = extract_structured_tool_input(&payload("toolu_2")).unwrap();
+        assert_ne!(
+            first, second,
+            "later identical question needs distinct identity"
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn ask_hook_returns_complete_structured_answer_without_text_routing() {
+        use ainb_plugin_notifyd::broker::{
+            BrokerState, StructuredQuestionAnswer, client_answer_structured, client_list,
+        };
+        use tokio::net::UnixListener;
+
+        let home = TempDir::new().unwrap();
+        let cwd = provision_atc(home.path(), "tower");
+        let paths = ainb_plugin_notifyd::paths::Paths::under(home.path());
+        std::fs::create_dir_all(paths.approve_socket.parent().unwrap()).unwrap();
+        let listener = UnixListener::bind(&paths.approve_socket).unwrap();
+        let server = tokio::spawn(ainb_plugin_notifyd::broker::serve(
+            listener,
+            BrokerState::with_timeout(std::time::Duration::from_secs(30)),
+        ));
+
+        let payload = serde_json::json!({
+            "tool_name": "AskUserQuestion",
+            "tool_use_id": "toolu_ask_1",
+            "tool_input": {
+                "questions": [
+                    {
+                        "question": "Region?",
+                        "header": "Region",
+                        "options": [
+                            {"label": "EU", "description": "Europe"},
+                            {"label": "US", "description": "United States"}
+                        ],
+                        "multiSelect": false
+                    },
+                    {
+                        "question": "Checks?",
+                        "header": "Checks",
+                        "options": [
+                            {"label": "Lint", "description": "Run linter"},
+                            {"label": "Test", "description": "Run tests"}
+                        ],
+                        "multiSelect": true
+                    }
+                ]
+            }
+        });
+        let original_questions = payload["tool_input"]["questions"].clone();
+        let hook_home = home.path().to_path_buf();
+        let hook_cwd = cwd.clone();
+        let hook_payload = payload.to_string();
+        let waiter = tokio::task::spawn_blocking(move || {
+            hook_core(
+                &hook_home,
+                "PreToolUse",
+                "ask-session",
+                hook_cwd.to_str().unwrap(),
+                None,
+                None,
+                50,
+                &hook_payload,
+                Some("AskUserQuestion"),
+            )
+        });
+
+        let pending = loop {
+            let socket = paths.approve_socket.clone();
+            let listed = tokio::task::spawn_blocking(move || client_list(&socket))
+                .await
+                .unwrap()
+                .unwrap_or_default();
+            if let Some(pending) = listed.into_iter().find(|item| item.session_id == "ask-session")
+            {
+                break pending;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+        };
+        assert_eq!(
+            pending.questions,
+            original_questions.as_array().unwrap().clone()
+        );
+        let fingerprint = pending.request_fingerprint.unwrap();
+
+        let stale_socket = paths.approve_socket.clone();
+        let stale = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &stale_socket,
+                "ask-session",
+                "fnv1a64:stale",
+                &[StructuredQuestionAnswer {
+                    question: "Region?".to_string(),
+                    selected_options: vec!["EU".to_string()],
+                }],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(stale.stale);
+        assert!(!stale.matched);
+
+        let answer_socket = paths.approve_socket.clone();
+        let accepted = tokio::task::spawn_blocking(move || {
+            client_answer_structured(
+                &answer_socket,
+                "ask-session",
+                &fingerprint,
+                &[
+                    StructuredQuestionAnswer {
+                        question: "Region?".to_string(),
+                        selected_options: vec!["EU".to_string()],
+                    },
+                    StructuredQuestionAnswer {
+                        question: "Checks?".to_string(),
+                        selected_options: vec!["Lint".to_string(), "Test".to_string()],
+                    },
+                ],
+            )
+        })
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(accepted.matched);
+
+        let emitted = waiter.await.unwrap().unwrap().expect("structured hook output");
+        let HookEmit::Structured(line) = emitted else {
+            panic!("AskUserQuestion must emit structured hook output");
+        };
+        let output: serde_json::Value = serde_json::from_str(&line).unwrap();
+        let specific = &output["hookSpecificOutput"];
+        assert_eq!(specific["hookEventName"], "PreToolUse");
+        assert_eq!(specific["permissionDecision"], "allow");
+        assert_eq!(specific["updatedInput"]["questions"], original_questions);
+        assert_eq!(specific["updatedInput"]["answers"]["Region?"], "EU");
+        assert_eq!(specific["updatedInput"]["answers"]["Checks?"], "Lint, Test");
+        assert!(
+            output.get("text").is_none(),
+            "must not route labels as generic text"
+        );
+
+        server.abort();
+        let _ = std::fs::remove_file(&paths.approve_socket);
     }
 }

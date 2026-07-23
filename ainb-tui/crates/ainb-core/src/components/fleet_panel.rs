@@ -1,22 +1,13 @@
 // ABOUTME: Fleet control panel — the interactive "who-needs-you" looking-glass.
 //
-// A two-pane (list + detail) screen that reads the SAME event-sourced
-// `current_state` table the fleet readers use (Wave 4), opening the
-// `ainb-plugin-notifyd` SQLite store strictly READ-ONLY (`Store::open_readonly`
-// — SQLITE_OPEN_READ_ONLY, no migrate/create/WAL-write) on the render tick so
-// the panel can never mutate the daemon's DB. The list shows one row per
-// session that has a
-// materialized state (ASK/ERR/WAIT/IDLE/RUNNING/DONE); the detail pane expands
-// the selected row — for ASK it renders the full question + every option so the
-// human can pick one.
+// A two-pane (list + detail) screen backed by Hangar's authoritative Fleet
+// snapshot RPC. Socket reads run on a worker thread, cached rows survive daemon
+// outages, and selection is restored by stable session key after each refresh.
+// Lifecycle and attention stay independent in the wire model, then map onto the
+// compact legacy badges rendered here.
 //
-// Unlike the read-only Daemons screen, this panel ACTS: answering an interview
-// (ASK) and broadcasting a prompt both go through the EXISTING fleet send path
-// (`fleet::send::send`, the same tmux send-keys mechanism `fleet broadcast`
-// uses). The send is async and the TUI key path is sync, so the action is
-// dispatched onto a detached worker thread that owns a tiny current-thread tokio
-// runtime — the UI render loop never blocks on tmux I/O (mirrors the
-// off-the-render-thread discipline in `components/daemons.rs`).
+// Actions use versioned `fleet/action` RPC receipts. Structured answers never
+// become generic text, and stale request fingerprints are rejected by Hangar.
 //
 // Keys:
 //   - ↑ / ↓ / k / j     move the row selection
@@ -31,11 +22,16 @@
 // Style follows the ainb-tui guide (rounded borders, gold titles,
 // cornflower-blue panels, selection-green indicator), matching Inbox/Daemons.
 
+use std::collections::HashMap;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use ainb_plugin_notifyd::{Paths, StateRow, Store};
+use ainb_hangar_proto::fleet::FleetSession;
+use ainb_plugin_hangar::screen::fleet::{
+    FleetCapabilities, FleetEvent, FleetIntent, FleetPaneState, FleetSessionRow, reduce_fleet,
+};
+use ainb_plugin_notifyd::StateRow;
 use ratatui::{
     prelude::*,
     style::{Color, Modifier, Style},
@@ -44,6 +40,7 @@ use ratatui::{
 };
 
 pub use crate::fleet::control::ActionFeedback;
+use crate::fleet::control::{FleetDaemonHealth, FleetHostUpdate, FleetHostUpdateSink};
 use crate::fleet::read::jsonl_tail::AskUserQuestionData;
 
 // Palette shared with the rest of ainb-tui (see components/layout.rs).
@@ -57,10 +54,6 @@ const SUBDUED_BORDER: Color = Color::Rgb(60, 60, 80);
 const ALERT_RED: Color = Color::Rgb(220, 100, 100);
 const WAIT_AMBER: Color = Color::Rgb(220, 180, 90);
 
-/// Re-query the store at most this often (in render ticks). The query is a
-/// single indexed `SELECT` over a small table behind WAL, so every-tick is
-/// cheap, but keeping a counter mirrors the Inbox screen's discipline.
-const POLL_TICKS: u64 = 1;
 /// Window in which an identical dispatch is treated as an accidental double tap.
 const DUPLICATE_DISPATCH_WINDOW: Duration = Duration::from_secs(2);
 
@@ -96,10 +89,22 @@ pub struct FleetPanelState {
     /// Read-only handle to the notifyd store. `None` until first opened or when
     /// the DB is absent/unreadable (the screen then shows a friendly empty
     /// state, never crashes).
-    pub store: Option<Store>,
+    pub store: Option<()>,
     /// Cached store path for diagnostics in the empty state.
     pub db_path: std::path::PathBuf,
-    /// Render-tick counter gating the re-query cadence.
+    /// Latest authoritative session metadata keyed by stable session key.
+    pub session_meta: HashMap<String, FleetSession>,
+    /// Canonical Fleet reducer shared with Hangar plugin pane.
+    pub canonical: FleetPaneState,
+    /// Ordered snapshots and connection health from the persistent stream.
+    stream_updates: FleetHostUpdateSink,
+    /// Persistent stream starts lazily when the operator opens Fleet.
+    stream_started: bool,
+    /// Current authoritative transport health for action gating and rendering.
+    daemon_health: FleetDaemonHealth,
+    /// Worker-produced reducer events awaiting UI-thread application.
+    canonical_updates: Arc<Mutex<Vec<FleetEvent>>>,
+    /// Render-tick counter retained for deterministic UI tests and animation.
     pub tick: u64,
     /// Transient feedback published by the async action worker. Cloned cheaply;
     /// the lock is held only for the microseconds it takes to read/replace the
@@ -122,25 +127,19 @@ pub struct FleetPanelState {
 
 impl Default for FleetPanelState {
     fn default() -> Self {
-        let paths = Paths::from_home().ok();
-        let db_path = paths.as_ref().map(|p| p.db.clone()).unwrap_or_default();
-        let store = if db_path.exists() {
-            // READ-ONLY: the panel only reads current_state on the render tick;
-            // it must never migrate/create/WAL-write the daemon's DB.
-            Store::open_readonly(&db_path)
-                .map_err(|e| {
-                    tracing::warn!(error = ?e, path = %db_path.display(), "fleet panel: eager store open failed");
-                })
-                .ok()
-        } else {
-            None
-        };
+        let db_path = crate::fleet::bridge::daemon::socket_path().unwrap_or_default();
         Self {
             selected: 0,
             option_cursor: 0,
             rows: Vec::new(),
-            store,
+            store: None,
             db_path,
+            session_meta: HashMap::new(),
+            canonical: FleetPaneState::default(),
+            stream_updates: Arc::new(Mutex::new(Vec::new())),
+            stream_started: false,
+            daemon_health: FleetDaemonHealth::Offline("Fleet stream not started".into()),
+            canonical_updates: Arc::new(Mutex::new(Vec::new())),
             tick: 0,
             feedback: Arc::new(Mutex::new(ActionFeedback::default())),
             in_flight: Arc::new(AtomicBool::new(false)),
@@ -159,44 +158,130 @@ impl std::fmt::Debug for FleetPanelState {
             .field("store_open", &self.store.is_some())
             .field("db_path", &self.db_path)
             .field("tick", &self.tick)
+            .field("fleet_revision", &self.canonical.head_revision())
+            .field("daemon_health", &self.daemon_health)
             .finish()
     }
 }
 
 impl FleetPanelState {
-    /// Lazily open the store when the DB file exists. Idempotent.
-    pub fn ensure_open(&mut self) {
-        if self.store.is_none() && self.db_path.exists() {
-            match Store::open_readonly(&self.db_path) {
-                Ok(s) => self.store = Some(s),
-                Err(e) => {
-                    tracing::warn!(error = ?e, path = %self.db_path.display(), "fleet panel: store open failed");
+    /// Drain persistent stream and action updates without performing socket IO.
+    pub fn refresh(&mut self) {
+        self.drain_stream_updates();
+        self.drain_canonical_updates();
+    }
+
+    fn start_subscription(&mut self) {
+        if self.stream_started {
+            return;
+        }
+        self.stream_started = true;
+        self.daemon_health = FleetDaemonHealth::Connecting;
+        if let Err(error) = crate::fleet::control::spawn_fleet_subscription(
+            Arc::clone(&self.stream_updates),
+            self.canonical.head_revision(),
+        ) {
+            self.daemon_health = FleetDaemonHealth::Offline(error.clone());
+            self.set_feedback(format!("Fleet subscription failed: {error}"));
+        }
+    }
+
+    fn apply_snapshot(&mut self, snapshot: ainb_hangar_proto::fleet::FleetSnapshot) {
+        let sessions = snapshot.sessions;
+        let selected_key = self.selected_row().map(|row| row.session_id.clone());
+        self.session_meta = sessions
+            .iter()
+            .cloned()
+            .map(|session| (session.session_key.clone(), session))
+            .collect();
+        self.rows = sessions.iter().map(state_row_from_fleet).collect();
+        self.rows.sort_by_key(|row| std::cmp::Reverse(row.last_event_ts));
+        self.canonical.apply_snapshot(
+            snapshot.head_revision,
+            sessions.into_iter().map(FleetSessionRow::from).collect(),
+        );
+        self.selected = selected_key
+            .as_ref()
+            .and_then(|key| self.rows.iter().position(|row| &row.session_id == key))
+            .unwrap_or_else(|| self.selected.min(self.rows.len().saturating_sub(1)));
+        self.clamp_option_cursor();
+    }
+
+    fn drain_stream_updates(&mut self) {
+        let updates = self
+            .stream_updates
+            .lock()
+            .ok()
+            .map(|mut updates| std::mem::take(&mut *updates))
+            .unwrap_or_default();
+        for update in updates {
+            match update {
+                FleetHostUpdate::Snapshot(snapshot) => self.apply_snapshot(snapshot),
+                FleetHostUpdate::Health(health) => {
+                    self.store = health.is_online().then_some(());
+                    if let FleetDaemonHealth::Offline(detail) = &health {
+                        self.set_feedback(format!("Fleet daemon unavailable: {detail}"));
+                    }
+                    self.daemon_health = health;
                 }
             }
         }
     }
 
-    /// Re-fetch `current_state` rows from the store, clamping selection into the
-    /// new bounds. Best-effort: a query error leaves the prior rows in place.
-    pub fn refresh(&mut self) {
-        self.ensure_open();
-        if let Some(store) = self.store.as_ref() {
-            match store.list_current_state() {
-                Ok(rows) => {
-                    self.rows = rows;
-                    if self.selected >= self.rows.len() {
-                        self.selected = self.rows.len().saturating_sub(1);
-                    }
-                    self.clamp_option_cursor();
-                }
-                Err(e) => tracing::warn!(error = ?e, "fleet panel: list_current_state failed"),
-            }
+    fn drain_canonical_updates(&mut self) {
+        let updates = self
+            .canonical_updates
+            .lock()
+            .ok()
+            .map(|mut updates| std::mem::take(&mut *updates))
+            .unwrap_or_default();
+        for event in updates {
+            let reduction = reduce_fleet(&self.canonical, event);
+            self.canonical = reduction.state;
         }
+    }
+
+    /// Fold one canonical event and return host side effect intent.
+    pub fn reduce_canonical(&mut self, event: FleetEvent) -> Option<FleetIntent> {
+        let reduction = reduce_fleet(&self.canonical, event);
+        self.canonical = reduction.state;
+        reduction.intent
+    }
+
+    /// Whether canonical pane currently captures modal input.
+    pub fn canonical_modal_open(&self) -> bool {
+        self.canonical.is_modal_open()
+    }
+
+    /// Whether live authoritative Fleet control transport is available.
+    #[must_use]
+    pub const fn daemon_online(&self) -> bool {
+        self.daemon_health.is_online()
+    }
+
+    /// Human-readable connection health for degraded UI and tests.
+    #[must_use]
+    pub fn daemon_health(&self) -> &FleetDaemonHealth {
+        &self.daemon_health
+    }
+
+    /// Queue reducer update from a detached action worker.
+    pub fn canonical_update_sink(&self) -> Arc<Mutex<Vec<FleetEvent>>> {
+        Arc::clone(&self.canonical_updates)
+    }
+
+    fn seed_canonical_from_legacy_rows(&mut self) {
+        if self.canonical.session_count() != 0 || self.rows.is_empty() {
+            return;
+        }
+        let rows = self.rows.iter().map(canonical_row_from_legacy).collect();
+        self.canonical.apply_snapshot(0, rows);
     }
 
     /// Arm the screen on navigation INTO it: open + refresh so the first frame
     /// is populated. Idempotent.
     pub fn arm(&mut self) {
+        self.start_subscription();
         self.refresh();
     }
 
@@ -218,6 +303,13 @@ impl FleetPanelState {
     pub fn move_up(&mut self, n: usize) {
         self.selected = self.selected.saturating_sub(n);
         self.option_cursor = 0;
+        for _ in 0..n {
+            let reduction = reduce_fleet(
+                &self.canonical,
+                FleetEvent::Key(ainb_plugin_hangar::screen::fleet::FleetKey::Up),
+            );
+            self.canonical = reduction.state;
+        }
     }
 
     /// Move the row selection down by `n`, saturating at the last row.
@@ -228,6 +320,13 @@ impl FleetPanelState {
             self.selected = (self.selected + n).min(self.rows.len() - 1);
         }
         self.option_cursor = 0;
+        for _ in 0..n {
+            let reduction = reduce_fleet(
+                &self.canonical,
+                FleetEvent::Key(ainb_plugin_hangar::screen::fleet::FleetKey::Down),
+            );
+            self.canonical = reduction.state;
+        }
     }
 
     /// The parsed ASK payload for the selected row, if it is an ASK.
@@ -366,7 +465,7 @@ impl FleetPanelState {
     pub fn guarded_dispatch(
         &mut self,
         session_id: String,
-        cwd: String,
+        _cwd: String,
         text: String,
         row_ts: Option<i64>,
         kind_label: &'static str,
@@ -385,14 +484,33 @@ impl FleetPanelState {
             return false;
         }
         self.remember_dispatch(session_id.clone(), text.clone(), row_ts, now);
-        crate::fleet::control::dispatch_send(
+        let Some(session) = self.session_meta.get(&session_id).cloned() else {
+            self.set_feedback("session changed, refresh Fleet before acting".to_string());
+            return false;
+        };
+        let action = if is_answer {
+            let Some(request_fingerprint) = session.current_request_fingerprint.clone() else {
+                self.set_feedback("structured request identity unavailable".to_string());
+                return false;
+            };
+            ainb_hangar_proto::fleet::ControlAction::StructuredAnswer {
+                request_fingerprint,
+                request_identity: fleet_request_identity(&session),
+                answers: vec![ainb_hangar_proto::fleet::FleetQuestionAnswer {
+                    question_id: first_question_id(&session).unwrap_or_else(|| "0".to_string()),
+                    selected_options: vec![text],
+                    text: None,
+                }],
+            }
+        } else {
+            ainb_hangar_proto::fleet::ControlAction::SendPrompt { text }
+        };
+        dispatch_fleet_action(
             Arc::clone(&self.feedback),
             Arc::clone(&self.in_flight),
-            session_id,
-            cwd,
-            text,
+            session,
+            action,
             kind_label,
-            is_answer,
         );
         true
     }
@@ -426,13 +544,35 @@ impl FleetPanelState {
             self.set_feedback("cannot decide: row has no session id".to_string());
             return false;
         }
+        let Some(session) = self.session_meta.get(&session_id).cloned() else {
+            self.set_feedback("session changed, refresh Fleet before acting".to_string());
+            return false;
+        };
+        let Some(request_fingerprint) = session.current_request_fingerprint.clone() else {
+            self.set_feedback("approval request identity unavailable".to_string());
+            return false;
+        };
+        let request_identity = fleet_request_identity(&session);
+        let action = match kind {
+            ainb_plugin_notifyd::broker::DecisionKind::Approve => {
+                ainb_hangar_proto::fleet::ControlAction::Approve {
+                    request_fingerprint,
+                    request_identity,
+                }
+            }
+            ainb_plugin_notifyd::broker::DecisionKind::Deny => {
+                ainb_hangar_proto::fleet::ControlAction::Deny {
+                    request_fingerprint,
+                    request_identity,
+                }
+            }
+        };
         self.set_feedback(format!("{kind_label} → {session_id}: delivering…"));
-        crate::fleet::control::dispatch_decide(
+        dispatch_fleet_action(
             Arc::clone(&self.feedback),
             Arc::clone(&self.in_flight),
-            session_id,
-            kind,
-            String::new(),
+            session,
+            action,
             kind_label,
         );
         true
@@ -467,6 +607,141 @@ impl FleetPanelState {
     }
 }
 
+fn fleet_request_identity(
+    session: &FleetSession,
+) -> Option<ainb_hangar_proto::fleet::FleetRequestIdentity> {
+    let request = session.current_request.as_ref()?;
+    let payload = request.get("payload").unwrap_or(request);
+    let identity = payload.get("identity").unwrap_or(payload);
+    let request_id = identity
+        .get("requestId")
+        .or_else(|| identity.get("request_id"))
+        .or_else(|| identity.get("tool_use_id"))
+        .or_else(|| identity.get("id"))?
+        .clone();
+    let string = |camel: &str, snake: &str| {
+        identity
+            .get(camel)
+            .or_else(|| payload.get(snake))
+            .and_then(serde_json::Value::as_str)
+            .map(str::to_string)
+    };
+    Some(ainb_hangar_proto::fleet::FleetRequestIdentity {
+        request_id,
+        thread_id: string("threadId", "thread_id").unwrap_or_default(),
+        turn_id: string("turnId", "turn_id").unwrap_or_default(),
+        item_id: string("itemId", "item_id").unwrap_or_default(),
+    })
+}
+
+fn first_question_id(session: &FleetSession) -> Option<String> {
+    let request = session.current_request.as_ref()?;
+    let payload = request.get("payload").unwrap_or(request);
+    let input = payload.get("tool_input").or_else(|| payload.get("input")).unwrap_or(payload);
+    let question = input.get("questions")?.as_array()?.first()?;
+    Some(
+        question
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("0")
+            .to_string(),
+    )
+}
+
+fn dispatch_fleet_action(
+    feedback: Arc<Mutex<ActionFeedback>>,
+    in_flight: Arc<AtomicBool>,
+    session: FleetSession,
+    action: ainb_hangar_proto::fleet::ControlAction,
+    kind_label: &'static str,
+) {
+    if in_flight
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    std::thread::spawn(move || {
+        let result = crate::fleet::control::execute_fleet_action_blocking(
+            ainb_hangar_proto::fleet::FleetActionParams {
+                session_key: session.session_key.clone(),
+                expected_version: session.version,
+                request_id: uuid::Uuid::new_v4().to_string(),
+                action,
+            },
+        );
+        let message = match result {
+            Ok(receipt) => format!(
+                "{kind_label}: {:?}{}",
+                receipt.status,
+                receipt.detail.as_deref().map_or(String::new(), |detail| format!(": {detail}"))
+            ),
+            Err(error) => format!("{kind_label} failed: {error}"),
+        };
+        if let Ok(mut slot) = feedback.lock() {
+            slot.message = message;
+        }
+        in_flight.store(false, Ordering::Release);
+    });
+}
+
+fn state_row_from_fleet(session: &FleetSession) -> StateRow {
+    use ainb_hangar_proto::fleet::{AttentionState, FleetProvenance, LifecycleState};
+
+    let kind = match session.attention {
+        AttentionState::Ask => "ASK",
+        AttentionState::Approval => "APPROVE",
+        AttentionState::Waiting => "WAIT",
+        AttentionState::Error => "ERR",
+        AttentionState::None => match session.lifecycle {
+            LifecycleState::Starting => "STARTING",
+            LifecycleState::Running => "RUNNING",
+            LifecycleState::TurnComplete | LifecycleState::Exited => "DONE",
+            LifecycleState::Idle => "IDLE",
+            LifecycleState::Unknown => "UNKNOWN",
+        },
+    }
+    .to_string();
+    StateRow {
+        session_id: session.session_key.clone(),
+        cwd: session.cwd.clone(),
+        context: request_context(session),
+        parent: None,
+        last_event_ts: session
+            .attention_updated_at
+            .max(session.lifecycle_updated_at)
+            .max(session.last_observed_at),
+        source: match session.provenance {
+            FleetProvenance::Authoritative => "hangar-authoritative",
+            FleetProvenance::Inferred => "hangar-inferred",
+        }
+        .to_string(),
+        kind,
+    }
+}
+
+fn request_context(session: &FleetSession) -> Option<String> {
+    use ainb_hangar_proto::fleet::AttentionState;
+    let request = session.current_request.as_ref()?;
+    if session.attention != AttentionState::Ask {
+        return serde_json::to_string(request).ok();
+    }
+    let payload = request.get("payload").unwrap_or(request);
+    let input = payload.get("tool_input").or_else(|| payload.get("input")).unwrap_or(payload);
+    let question = input.get("questions")?.as_array()?.first()?;
+    let normalized = serde_json::json!({
+        "question": question.get("question").and_then(serde_json::Value::as_str).unwrap_or(""),
+        "header": question.get("header").and_then(serde_json::Value::as_str),
+        "options": question.get("options").cloned().unwrap_or_else(|| serde_json::json!([])),
+        "multi_select": question
+            .get("multiSelect")
+            .or_else(|| question.get("multi_select"))
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
+    });
+    serde_json::to_string(&normalized).ok()
+}
+
 /// Parse the ASK context JSON the materializer stored (the AskUserQuestion
 /// payload). Returns a placeholder question with no options if it can't parse,
 /// so the detail pane always renders something rather than blanking.
@@ -475,7 +750,7 @@ fn parse_ask(context_json: Option<&str>) -> Option<AskUserQuestionData> {
         context_json
             .and_then(|c| serde_json::from_str::<AskUserQuestionData>(c).ok())
             .unwrap_or_else(|| AskUserQuestionData {
-                question: "(no question text in current_state)".to_string(),
+                question: "(question payload unavailable)".to_string(),
                 header: None,
                 options: Vec::new(),
                 multi_select: false,
@@ -569,29 +844,191 @@ fn truncate_chars(s: &str, max: usize) -> String {
 /// Render the Fleet panel into `area`.
 pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
     state.tick = state.tick.wrapping_add(1);
-    if state.tick % POLL_TICKS == 0 {
-        state.refresh();
+    state.refresh();
+
+    state.seed_canonical_from_legacy_rows();
+    let now_ms = chrono::Utc::now().timestamp_millis();
+    let reduction = reduce_fleet(&state.canonical, FleetEvent::Tick(now_ms));
+    state.canonical = reduction.state;
+
+    let mut wire = ainb_plugin_protocol::wire_buffer::WireBuffer::new(area.width, area.height);
+    let content_top = 1;
+    let content_bottom = area.height.saturating_sub(1);
+    ainb_plugin_hangar::screen::fleet::render_fleet(
+        &mut wire,
+        area.width,
+        content_top,
+        content_bottom,
+        &state.canonical,
+    );
+    if !state.daemon_online() {
+        ainb_plugin_hangar::screen::fleet::render_degraded_banner(
+            &mut wire,
+            area.width,
+            content_top,
+        );
+    }
+    let buf = frame.buffer_mut();
+    for (coord, cell) in wire.cells {
+        if coord.x >= area.width || coord.y >= area.height {
+            continue;
+        }
+        if let Some(target) = buf.cell_mut((area.x + coord.x, area.y + coord.y)) {
+            target.set_symbol(&cell.symbol);
+            target.set_fg(wire_color(cell.fg));
+            target.set_bg(wire_color(cell.bg));
+        }
     }
 
-    let chunks = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1),
-            Constraint::Min(3),
-            Constraint::Length(1),
-            Constraint::Length(1),
-        ])
-        .split(area);
+    let total = state.canonical.session_count();
+    let needs = state
+        .rows
+        .iter()
+        .filter(|row| {
+            matches!(
+                row.kind.as_str(),
+                "ASK" | "APPROVE" | "ERR" | "WAIT" | "IDLE"
+            )
+        })
+        .count();
+    frame.render_widget(
+        Paragraph::new(format!(
+            "🛫 Fleet · {total} sessions · {needs} need attention · Hangar"
+        ))
+        .style(Style::default().fg(GOLD).add_modifier(Modifier::BOLD)),
+        Rect::new(area.x, area.y, area.width, 1),
+    );
+    if total == 0 && area.height > 3 {
+        let message = if state.daemon_online() {
+            "No Fleet sessions yet, press t to start managed Codex"
+        } else {
+            "Hangar daemon not running, cached snapshot retained"
+        };
+        frame.render_widget(
+            Paragraph::new(message).style(Style::default().fg(MUTED_GRAY)),
+            Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1),
+        );
+    }
+    frame.render_widget(
+        Paragraph::new(
+            "↑↓ move  Enter/a answer  B broadcast  p prompt  t start  → attach  A full attach  q/Esc back",
+        )
+        .style(Style::default().fg(MUTED_GRAY)),
+        Rect::new(
+            area.x,
+            area.y + area.height.saturating_sub(1),
+            area.width,
+            1,
+        ),
+    );
+    // Retain legacy fixture status only for revision-zero compatibility tests.
+    // Authoritative Fleet snapshots already render complete detail and feedback;
+    // painting this row over them hides delivery receipts and leaks raw JSON.
+    if area.height > 2 && !state.rows.is_empty() && state.canonical.head_revision() == 0 {
+        let badges = state
+            .rows
+            .iter()
+            .map(|row| match row.kind.as_str() {
+                "APPROVE" => "APRV",
+                "STARTING" => "STRT",
+                "RUNNING" => "RUN",
+                other => other,
+            })
+            .collect::<Vec<_>>()
+            .join(" ");
+        let selected = state.selected_row();
+        let detail = selected.and_then(|row| row.context.as_deref()).unwrap_or_default();
+        let approval = selected
+            .is_some_and(|row| row.kind == "APPROVE")
+            .then_some("needs approval ")
+            .unwrap_or_default();
+        frame.render_widget(
+            Paragraph::new(format!("{badges}  {approval}{detail}"))
+                .style(Style::default().fg(MUTED_GRAY)),
+            Rect::new(
+                area.x,
+                area.y + area.height.saturating_sub(2),
+                area.width,
+                1,
+            ),
+        );
+    }
+}
 
-    render_title(frame, chunks[0], state);
-    let panes = Layout::default()
-        .direction(Direction::Horizontal)
-        .constraints([Constraint::Percentage(45), Constraint::Percentage(55)])
-        .split(chunks[1]);
-    render_list(frame, panes[0], state);
-    render_detail(frame, panes[1], state);
-    render_status(frame, chunks[2], state);
-    render_help(frame, chunks[3], state);
+fn wire_color(color: Option<ainb_plugin_protocol::wire_buffer::Color>) -> Color {
+    color.map_or(Color::Reset, |color| Color::Rgb(color.r, color.g, color.b))
+}
+
+fn canonical_row_from_legacy(row: &StateRow) -> FleetSessionRow {
+    let (lifecycle_state, attention_state) = match row.kind.as_str() {
+        "ASK" => ("IDLE", "ASK"),
+        "APPROVE" => ("IDLE", "APPROVAL"),
+        "ERR" => ("IDLE", "ERROR"),
+        "WAIT" => ("IDLE", "WAITING"),
+        "IDLE" => ("IDLE", "NONE"),
+        "RUNNING" => ("RUNNING", "NONE"),
+        "STARTING" => ("STARTING", "NONE"),
+        "DONE" => ("TURN_COMPLETE", "NONE"),
+        _ => ("UNKNOWN", "NONE"),
+    };
+    let raw_context = row
+        .context
+        .as_deref()
+        .and_then(|context| serde_json::from_str::<serde_json::Value>(context).ok());
+    let current_request = if row.kind == "ASK" {
+        raw_context.map(|question| serde_json::json!({
+            "questions": [{
+                "id": "0",
+                "question": question.get("question").cloned().unwrap_or_default(),
+                "header": question.get("header").cloned().unwrap_or_default(),
+                "options": question.get("options").cloned().unwrap_or_else(|| serde_json::json!([])),
+                "multiSelect": question.get("multi_select").cloned().unwrap_or(false.into())
+            }]
+        }))
+    } else {
+        raw_context
+    };
+    FleetSessionRow {
+        session_key: row.session_id.clone(),
+        provider: "claude".into(),
+        provider_session_id: Some(row.session_id.clone()),
+        current_request_fingerprint: current_request.as_ref().map(|_| "legacy-fixture".into()),
+        current_request,
+        lifecycle_state: lifecycle_state.into(),
+        attention_state: attention_state.into(),
+        management_state: "MANAGED".into(),
+        provenance: row.source.clone(),
+        confidence: if row.source == "hook" { "HIGH" } else { "LOW" }.into(),
+        transport_health: "HEALTHY".into(),
+        capabilities: FleetCapabilities::List(
+            [
+                "structured_answer",
+                "approvals",
+                "send_prompt",
+                "tmux_attach",
+                "continue_turn",
+                "retry",
+                "interrupt",
+                "stop",
+                "restart",
+                "kill",
+                "archive",
+            ]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        ),
+        version: 1,
+        cwd: row.cwd.clone(),
+        tmux_target: None,
+        display_name: Some(short_session(row)),
+        discovered_at: row.last_event_ts,
+        last_observed_at: row.last_event_ts,
+        metadata_updated_at: row.last_event_ts,
+        lifecycle_updated_at: row.last_event_ts,
+        attention_updated_at: row.last_event_ts,
+        transport_updated_at: row.last_event_ts,
+    }
 }
 
 fn render_title(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
@@ -610,7 +1047,7 @@ fn render_title(frame: &mut Frame, area: Rect, state: &FleetPanelState) {
             format!("· {total} sessions · {needs} need attention "),
             Style::default().fg(SOFT_WHITE),
         ),
-        Span::styled("· current_state", Style::default().fg(MUTED_GRAY)),
+        Span::styled("· Hangar", Style::default().fg(MUTED_GRAY)),
     ]);
     frame.render_widget(Paragraph::new(title), area);
 }
@@ -628,11 +1065,11 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
 
     if state.rows.is_empty() {
         let msg = if state.store.is_some() {
-            "(no fleet state yet — press n to create an ATC session, or fire a hook)"
+            "(no Fleet sessions yet, press n to create an ATC session)"
         } else if state.db_path.exists() {
-            "(could not open notifications.db — check daemon logs)"
+            "(Hangar socket unavailable, cached snapshot retained)"
         } else {
-            "(notifications.db not found — run `ainb-notifyd install --all` then start the daemon)"
+            "(Hangar daemon not running)"
         };
         let paragraph = Paragraph::new(msg)
             .style(Style::default().fg(MUTED_GRAY))
@@ -647,7 +1084,11 @@ fn render_list(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         .iter()
         .map(|r| {
             let (badge, badge_color) = kind_badge(&r.kind);
-            let src = if r.source == "hook" { "" } else { " ~tmux" };
+            let src = if r.source == "hangar-authoritative" {
+                ""
+            } else {
+                " ~inferred"
+            };
             let row = Line::from(vec![
                 Span::styled(
                     badge,
@@ -952,13 +1393,10 @@ mod tests {
 
     fn state_with(rows: Vec<StateRow>) -> FleetPanelState {
         let mut s = FleetPanelState::default();
-        // Force the store closed + point the path at a non-existent DB so the
-        // render tick's `refresh()` is a no-op and the seeded rows survive —
-        // the render is exercised against a deterministic cache, never the
-        // host's real ~/.agents-in-a-box/notifications.db (mirrors the Inbox
-        // screen's test seam).
+        // Force the daemon disconnected and use a non-existent socket so the
+        // render tick preserves seeded rows in its deterministic cache.
         s.store = None;
-        s.db_path = std::path::PathBuf::from("/nonexistent/notifications.db");
+        s.db_path = std::path::PathBuf::from("/nonexistent/hangar.sock");
         s.rows = rows;
         s.clamp_option_cursor();
         s
@@ -1105,11 +1543,11 @@ mod tests {
     fn empty_state_renders_without_panic() {
         let mut state = FleetPanelState::default();
         state.store = None;
-        state.db_path = std::path::PathBuf::from("/nonexistent/notifications.db");
+        state.db_path = std::path::PathBuf::from("/nonexistent/hangar.sock");
         let out = render_to_string(&mut state, 100, 16);
         assert!(out.contains("Fleet"), "title missing in empty state: {out}");
         assert!(
-            out.contains("notifications.db not found") || out.contains("no fleet state"),
+            out.contains("Hangar daemon not running") || out.contains("no fleet state"),
             "empty-state hint missing: {out}"
         );
         assert!(out.contains("Enter/a"), "help bar missing: {out}");
@@ -1279,5 +1717,57 @@ mod tests {
         assert_eq!(short_session(&r), "0123456789ab");
         let r2 = row("short-id", "", "RUNNING", None, "hook");
         assert_eq!(short_session(&r2), "short-id");
+    }
+
+    #[test]
+    fn stream_updates_apply_in_order_and_retain_latest_revision_offline() {
+        use ainb_hangar_proto::fleet::FleetSnapshot;
+
+        let mut state = FleetPanelState::default();
+        state.stream_updates.lock().expect("stream update queue").extend([
+            FleetHostUpdate::Snapshot(FleetSnapshot {
+                head_revision: 7,
+                sessions: Vec::new(),
+            }),
+            FleetHostUpdate::Health(FleetDaemonHealth::Online),
+            FleetHostUpdate::Snapshot(FleetSnapshot {
+                head_revision: 9,
+                sessions: Vec::new(),
+            }),
+            FleetHostUpdate::Health(FleetDaemonHealth::Offline("socket closed".into())),
+        ]);
+
+        state.refresh();
+
+        assert_eq!(state.canonical.head_revision(), 9);
+        assert_eq!(
+            state.daemon_health(),
+            &FleetDaemonHealth::Offline("socket closed".into())
+        );
+        assert!(!state.daemon_online());
+        assert!(state.feedback_line().contains("socket closed"));
+    }
+
+    #[test]
+    fn offline_render_keeps_cached_session_and_shows_degraded_banner() {
+        let mut state = state_with(vec![row(
+            "cached-session",
+            "/work/cached",
+            "IDLE",
+            None,
+            "hook",
+        )]);
+
+        let out = render_to_string(&mut state, 130, 20);
+
+        assert!(out.contains("cached"), "cached row disappeared: {out}");
+        assert!(
+            out.contains("Fleet daemon offline"),
+            "banner missing: {out}"
+        );
+        assert!(
+            out.contains("high-risk actions disabled"),
+            "offline gate missing: {out}"
+        );
     }
 }
