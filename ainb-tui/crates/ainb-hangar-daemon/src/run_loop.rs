@@ -701,13 +701,15 @@ pub fn spawn_gc_sweeper(
 /// Resolve the claude credential env for `backend`, bounded and off the async
 /// worker.
 ///
-/// The keychain read ([`claude_cred::keys_for_backend`] →
-/// `MacKeychainBackend::get`) is a synchronous, unbounded external call that can
-/// present a BLOCKING GUI auth prompt on a headless daemon (legacy `SecKeychain`
-/// ACL trust invalidated by a rebuilt binary). Answered by nobody, it wedges the
-/// calling async worker forever, freezing the task at `running` (the
-/// zombie-dispatch defect). We run it on [`tokio::task::spawn_blocking`] (same
-/// pattern as [`cap_parent_inbox`]) and race it against `timeout`.
+/// The credential read ([`claude_cred::keys_for_backend`], which shells out to
+/// `/usr/bin/security` for the system claude login) is a synchronous, unbounded
+/// external call that CAN present a BLOCKING GUI auth prompt — but only ONCE, the
+/// first time before the operator clicks "Always Allow" for the stable Apple-signed
+/// `security` binary (unlike the legacy in-process read, whose ACL trust was
+/// re-invalidated by every rebuilt daemon binary). Answered by nobody, that first
+/// prompt would wedge the calling async worker, freezing the task at `running`
+/// (the zombie-dispatch defect). We run it on [`tokio::task::spawn_blocking`]
+/// (same pattern as [`cap_parent_inbox`]) and race it against `timeout`.
 ///
 /// On timeout OR a join error we log a clear warning and return an EMPTY env, so
 /// the dispatch proceeds without an injected `CLAUDE_CODE_OAUTH_TOKEN`: the run
