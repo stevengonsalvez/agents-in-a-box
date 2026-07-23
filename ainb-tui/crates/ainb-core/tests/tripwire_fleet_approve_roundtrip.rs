@@ -3,13 +3,10 @@
 //!
 //! Proves, against a live `ainb tui` in tmux with an isolated HOME:
 //!
-//! 1. a `PermissionRequest`-derived state renders as the gold `APRV` badge and
-//!    a `SessionStart`-derived state as the blue `STRT` badge in the Fleet
-//!    panel (`f`);
-//! 2. pressing `y` on the APPROVE row delivers a first-class approve to a REAL
-//!    broker waiter parked on the isolated `approve.sock` — the same
-//!    `client_await` call a blocked Claude `PermissionRequest` hook makes —
-//!    and the waiter unblocks with `DecisionKind::Approve`.
+//! 1. reducer-fed `PermissionRequest` and `SessionStart` sessions render from a
+//!    real isolated Hangar daemon socket;
+//! 2. pressing `y` submits versioned `fleet/action`, persists a DELIVERED
+//!    receipt, then reaches the real Claude blocking-hook broker.
 //!
 //! The broker end is the real `ainb_plugin_notifyd::broker::serve` accept
 //! loop, not a stand-in, so the bytes on the socket are exactly what
@@ -22,8 +19,13 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
+use ainb_plugin_notifyd::Paths;
 use ainb_plugin_notifyd::broker::{self, BrokerState, DecisionKind};
-use ainb_plugin_notifyd::{Paths, StateRow, Store};
+
+#[path = "support/fleet_hangar.rs"]
+mod fleet_hangar;
+
+use fleet_hangar::{EnvGuard, ExactTmuxSession, FleetHangar};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -37,8 +39,6 @@ fn tmux_available() -> bool {
         .unwrap_or(false)
 }
 
-/// Seed onboarding + dismissed notify prompt + the two fleet states:
-/// APPROVE (newest → selected row 0) and STARTING.
 fn seed_isolated_home(home: &Path) {
     let base = home.join(".agents-in-a-box");
     let cfg = base.join("config");
@@ -55,29 +55,6 @@ git_directories = []
     fs::write(cfg.join("onboarding.toml"), onboarding).expect("seed onboarding.toml");
     let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
-
-    let paths = Paths::under(&base);
-    let store = Store::open(&paths.db).expect("open notifications.db");
-    let approve = StateRow {
-        session_id: "fleet-approve-1".to_string(),
-        cwd: home.join("approving-project").display().to_string(),
-        kind: "APPROVE".to_string(),
-        context: Some(r#"{"tool":"Bash","input":"rm -rf build/"}"#.to_string()),
-        parent: Some("atc-main".to_string()),
-        last_event_ts: 400,
-        source: "hook".to_string(),
-    };
-    let starting = StateRow {
-        session_id: "fleet-start-1".to_string(),
-        cwd: home.join("booting-project").display().to_string(),
-        kind: "STARTING".to_string(),
-        context: None,
-        parent: Some("atc-main".to_string()),
-        last_event_ts: 300,
-        source: "hook".to_string(),
-    };
-    store.upsert_current_state(&approve).expect("seed APPROVE current_state");
-    store.upsert_current_state(&starting).expect("seed STARTING current_state");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -110,28 +87,17 @@ fn send_key(session: &str, key: &str) {
     assert!(status.success(), "tmux send-keys {key:?} failed");
 }
 
-fn poll_capture_resending<F>(
-    session: &str,
-    key: &str,
-    deadline: Instant,
-    mut ok: F,
-) -> Option<String>
-where
-    F: FnMut(&str) -> bool,
-{
+fn open_fleet_screen(session: &str) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        send_key(session, key);
-        thread::sleep(Duration::from_millis(500));
-        let cap = capture_pane(session);
-        if ok(&cap) {
-            return Some(cap);
+        let capture = capture_pane(session);
+        if capture.contains("Fleet ·") && capture.contains("sessions ·") {
+            return Some(capture);
         }
+        send_key(session, "f");
+        thread::sleep(Duration::from_millis(500));
     }
     None
-}
-
-fn kill_session(session: &str) {
-    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -146,6 +112,37 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
     let _ = fs::remove_dir_all(&home);
     fs::create_dir_all(&home).expect("create short-path home");
     seed_isolated_home(&home);
+    let hangar_home = home.join("hangar-home");
+    let _ainb_home = EnvGuard::set("AINB_HOME", home.join(".agents-in-a-box"));
+    let _disable_tmux_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
+    let hangar = FleetHangar::start(&hangar_home);
+    hangar.apply_hook(
+        "fleet-approve-request",
+        "fleet-approve-1",
+        &home.join("approving-project"),
+        "PermissionRequest",
+        serde_json::json!({
+            "matcher": "Bash",
+            "payload": {
+                "tool_use_id": "approve-tool-1",
+                "tool_name": "Bash",
+                "tool_input": {"command": "rm -rf build/"}
+            }
+        }),
+        4_000_000_000_400,
+    );
+    hangar.apply_hook(
+        "fleet-start-session",
+        "fleet-start-1",
+        &home.join("booting-project"),
+        "SessionStart",
+        serde_json::json!({ "source": "hook" }),
+        4_000_000_000_300,
+    );
+    let approval_fingerprint = hangar
+        .session("claude:fleet-approve-1")
+        .and_then(|session| session.current_request_fingerprint)
+        .expect("seeded approval has exact request fingerprint");
 
     // Real broker on the isolated approve.sock, riding a test-owned runtime.
     let paths = Paths::under(home.join(".agents-in-a-box"));
@@ -160,40 +157,43 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
         });
     }
 
-    // Park a REAL waiter — the same blocking call a Claude PermissionRequest
+    // Park a REAL waiter: the same blocking call a Claude PermissionRequest
     // hook makes. It blocks until the TUI's `y` decides it (or 60s deny-falls-back,
     // which the assertion below would catch as a wrong decision).
     let waiter = {
         let sock = paths.approve_socket.clone();
+        let fingerprint = approval_fingerprint.clone();
         thread::spawn(move || {
-            broker::client_await(
+            broker::client_await_exact(
                 &sock,
                 "fleet-approve-1",
                 "Bash",
                 "rm -rf build/",
+                &fingerprint,
                 Duration::from_secs(60),
             )
         })
     };
 
-    let session = format!("tripwire-fleet-aprv-{}", std::process::id());
-    let status = Command::new("tmux")
-        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
-        .status()
-        .expect("tmux new-session");
-    assert!(status.success(), "tmux new-session failed");
+    let tmux = ExactTmuxSession::create(
+        format!("tripwire-fleet-aprv-{}", std::process::id()),
+        "180",
+        "50",
+    );
+    let session = tmux.name();
 
     let peers_db = home.join("peers.db");
     let jobs_dir = home.join("jobs");
     let cmd = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
+        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home.display(),
+        hangar = hangar_home.display(),
         peers = peers_db.display(),
         jobs = jobs_dir.display(),
         bin = ainb_bin().display()
     );
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &cmd, "Enter"])
+        .args(["send-keys", "-t", session, &cmd, "Enter"])
         .status()
         .expect("send launch cmd");
 
@@ -202,54 +202,67 @@ fn fleet_panel_approve_roundtrips_to_a_blocked_waiter() {
     });
     if pre.is_none() {
         let last = capture_pane(&session);
-        kill_session(&session);
         let _ = fs::remove_dir_all(&home);
         panic!("HomeScreen never rendered Fleet shortcut; last capture:\n---\n{last}\n---");
     }
 
-    // 1. Frame truth: both new badges render, APPROVE row selected (newest ts).
-    let opened = poll_capture_resending(
-        &session,
-        "f",
-        Instant::now() + Duration::from_secs(30),
-        |c| {
-            c.contains("APRV")
-                && c.contains("STRT")
-                && c.contains("needs approval")
-                && c.contains("starting")
-                && c.contains("approving-project")
-                && c.contains("booting-project")
-        },
+    // 1. Frame truth: both canonical states render, APPROVAL row selected (newest ts).
+    assert!(
+        open_fleet_screen(&session).is_some(),
+        "f did not open Fleet screen:\n{}",
+        capture_pane(&session)
     );
+    let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
+        c.contains("APPR")
+            && c.contains("STARTI")
+            && c.contains("State: IDLE / APPROVAL")
+            && c.contains("claude:fleet-ap")
+            && c.contains("claude:fleet-st")
+            && c.contains("approving-project")
+            && c.contains("hangar-authoritative")
+    });
     let Some(open_cap) = opened else {
         let last = capture_pane(&session);
-        kill_session(&session);
         let _ = fs::remove_dir_all(&home);
-        panic!("Fleet panel did not render APRV+STRT badges; last capture:\n---\n{last}\n---");
+        panic!(
+            "Fleet panel did not render APPROVAL+STARTING states; last capture:\n---\n{last}\n---"
+        );
     };
     assert!(
         open_cap.contains("y") && open_cap.contains("approve"),
         "help bar must advertise the y approve lever:\n{open_cap}"
     );
+    assert!(
+        !open_cap.contains("current_state"),
+        "Fleet must not expose or read legacy notifyd current_state:\n{open_cap}"
+    );
 
     // 2. y on the selected APPROVE row → broker → parked waiter unblocks.
     send_key(&session, "y");
     let feedback = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
-        c.contains("approved → fleet-approve-1")
+        c.contains("approved request: Delivered") && c.contains("claude blocking hook broker")
     });
     let Some(feedback_cap) = feedback else {
         let last = capture_pane(&session);
-        kill_session(&session);
         let _ = fs::remove_dir_all(&home);
         panic!("approve feedback never rendered; last capture:\n---\n{last}\n---");
     };
     assert!(
-        feedback_cap.contains("matched the waiting hook"),
-        "approve must report a matched waiter, not a miss:\n{feedback_cap}"
+        !feedback_cap.contains("approved failed"),
+        "approve must succeed through Hangar action RPC:\n{feedback_cap}"
+    );
+
+    let receipt = hangar
+        .latest_receipt("claude:fleet-approve-1")
+        .expect("approval persisted a Fleet receipt");
+    assert_eq!(receipt.action_kind, "approve");
+    assert_eq!(receipt.status, "DELIVERED");
+    assert_eq!(
+        receipt.detail.as_deref(),
+        Some("claude blocking hook broker")
     );
 
     let decision = waiter.join().expect("waiter thread");
-    kill_session(&session);
     let _ = fs::remove_dir_all(&home);
     assert_eq!(
         decision.decision,

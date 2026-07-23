@@ -1,14 +1,13 @@
-//! Tripwire: the Fleet panel opens from Home, renders hook-materialized
-//! `current_state`, lets the operator move an ASK option, attempts the answer
-//! dispatch path, and returns to Home via `Esc`.
+//! Tripwire: the Fleet panel opens from Home, renders Hangar's authoritative
+//! Fleet snapshot, moves an ASK option, submits a versioned structured answer,
+//! and returns to Home via `Esc`.
 //!
 //! This is the live-terminal sibling of the Fleet panel unit tests. It drives
 //! the real `ainb` binary in tmux with an isolated HOME seeded with:
 //!
 //! 1. completed onboarding + a complete dismissed notify install record, so no
 //!    first-run modal swallows the `f` key;
-//! 2. a notifyd SQLite store populated via the real `Store::upsert_current_state`
-//!    API the materializer uses.
+//! 2. a real isolated Hangar store, reducer, daemon socket, and auth token.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -16,7 +15,13 @@ use std::process::Command;
 use std::thread;
 use std::time::{Duration, Instant};
 
-use ainb_plugin_notifyd::{Paths, StateRow, Store};
+use ainb_plugin_notifyd::Paths;
+use ainb_plugin_notifyd::broker::{self, BrokerState, StructuredResolution};
+
+#[path = "support/fleet_hangar.rs"]
+mod fleet_hangar;
+
+use fleet_hangar::{EnvGuard, ExactTmuxSession, FleetHangar};
 
 fn ainb_bin() -> PathBuf {
     PathBuf::from(env!("CARGO_BIN_EXE_ainb"))
@@ -47,35 +52,6 @@ git_directories = []
 
     let install_record = r#"{"agents":[],"hook_script":"","claude_plugin_dir":null,"codex_hooks_json":null,"plugin_version":null,"prompt_dismissed":true}"#;
     fs::write(base.join("install.json"), install_record).expect("seed install.json");
-
-    let paths = Paths::under(&base);
-    fs::create_dir_all(&paths.base).expect("create ainb base");
-    let store = Store::open(&paths.db).expect("open notifications.db");
-    let ask = StateRow {
-        session_id: "fleet-panel-ask-1".to_string(),
-        cwd: home.join("fleet-tripwire-project").display().to_string(),
-        kind: "ASK".to_string(),
-        context: Some(
-            r#"{"question":"Deploy patched fleet bridge?","header":"Release gate","options":[{"label":"Yes","description":"ship verified fix"},{"label":"Continue","description":"keep watching"}]}"#
-                .to_string(),
-        ),
-        parent: Some("atc-main".to_string()),
-        last_event_ts: 300,
-        source: "hook".to_string(),
-    };
-    let wait = StateRow {
-        session_id: "fleet-panel-wait-1".to_string(),
-        cwd: home.join("waiting-project").display().to_string(),
-        kind: "WAIT".to_string(),
-        context: Some(
-            r#"{"reason":"permission_prompt","message":"allow cargo test?"}"#.to_string(),
-        ),
-        parent: Some("atc-main".to_string()),
-        last_event_ts: 200,
-        source: "hook".to_string(),
-    };
-    store.upsert_current_state(&ask).expect("seed ASK current_state");
-    store.upsert_current_state(&wait).expect("seed WAIT current_state");
 }
 
 fn capture_pane(session: &str) -> String {
@@ -108,28 +84,17 @@ fn send_key(session: &str, key: &str) {
     assert!(status.success(), "tmux send-keys {key:?} failed");
 }
 
-fn poll_capture_resending<F>(
-    session: &str,
-    key: &str,
-    deadline: Instant,
-    mut ok: F,
-) -> Option<String>
-where
-    F: FnMut(&str) -> bool,
-{
+fn open_fleet_screen(session: &str) -> Option<String> {
+    let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
-        send_key(session, key);
-        thread::sleep(Duration::from_millis(500));
-        let cap = capture_pane(session);
-        if ok(&cap) {
-            return Some(cap);
+        let capture = capture_pane(session);
+        if capture.contains("Fleet ·") && capture.contains("sessions ·") {
+            return Some(capture);
         }
+        send_key(session, "f");
+        thread::sleep(Duration::from_millis(500));
     }
     None
-}
-
-fn kill_session(session: &str) {
-    let _ = Command::new("tmux").args(["kill-session", "-t", session]).status();
 }
 
 #[test]
@@ -139,27 +104,128 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         return;
     }
 
-    let home_tmp = tempfile::tempdir().expect("home tempdir");
+    // Keep approve.sock below AF_UNIX's path-length limit.
+    let home_tmp = tempfile::Builder::new()
+        .prefix("ainb-fpan-")
+        .tempdir_in("/tmp")
+        .expect("home tempdir");
     seed_isolated_home(home_tmp.path());
+    let hangar_home = home_tmp.path().join("hangar-home");
+    let _ainb_home = EnvGuard::set("AINB_HOME", home_tmp.path().join(".agents-in-a-box"));
+    let _disable_tmux_discovery = EnvGuard::set("AINB_FLEET_DISABLE_TMUX_DISCOVERY", "1");
+    let hangar = FleetHangar::start(&hangar_home);
+    hangar.apply_hook(
+        "fleet-panel-ask-start",
+        "fleet-panel-ask-1",
+        &home_tmp.path().join("fleet-tripwire-project"),
+        "SessionStart",
+        serde_json::json!({ "source": "hook" }),
+        4_000_000_000_299,
+    );
+    hangar.apply_hook(
+        "fleet-panel-ask-question",
+        "fleet-panel-ask-1",
+        &home_tmp.path().join("fleet-tripwire-project"),
+        "AskUserQuestion",
+        serde_json::json!({
+            "payload": {
+                "tool_use_id": "ask-tool-1",
+                "tool_input": {
+                    "questions": [{
+                        "id": "release-gate",
+                        "question": "Deploy patched fleet bridge?",
+                        "header": "Release gate",
+                        "options": [
+                            {"label": "Yes", "description": "ship verified fix"},
+                            {"label": "Continue", "description": "keep watching"}
+                        ]
+                    }]
+                }
+            }
+        }),
+        4_000_000_000_300,
+    );
+    hangar.apply_hook(
+        "fleet-panel-wait",
+        "fleet-panel-wait-1",
+        &home_tmp.path().join("waiting-project"),
+        "Notification",
+        serde_json::json!({
+            "reason": "permission_prompt",
+            "message": "allow cargo test?"
+        }),
+        4_000_000_000_200,
+    );
+    let seeded = hangar
+        .session("claude:fleet-panel-ask-1")
+        .expect("seeded ASK appears in authoritative snapshot");
+    assert!(
+        seeded
+            .current_request
+            .as_ref()
+            .and_then(|request| request.pointer("/payload/tool_input/questions"))
+            .is_some(),
+        "authoritative ASK snapshot must preserve complete request: {seeded:?}"
+    );
+    let request_fingerprint = seeded
+        .current_request_fingerprint
+        .clone()
+        .expect("seeded ASK has exact request fingerprint");
 
-    let session = format!("tripwire-fleet-panel-{}", std::process::id());
-    let status = Command::new("tmux")
-        .args(["new-session", "-d", "-s", &session, "-x", "180", "-y", "50"])
-        .status()
-        .expect("tmux new-session");
-    assert!(status.success(), "tmux new-session failed");
+    // Real broker plus real structured hook waiter. Fleet answer must traverse
+    // TUI -> fleet/action -> Hangar -> broker and unblock exact request.
+    let paths = Paths::under(home_tmp.path().join(".agents-in-a-box"));
+    let broker_runtime = tokio::runtime::Runtime::new().expect("broker runtime");
+    let broker_state = BrokerState::new();
+    {
+        let sock = paths.approve_socket.clone();
+        let state = broker_state.clone();
+        broker_runtime.spawn(async move {
+            let listener = tokio::net::UnixListener::bind(&sock).expect("bind approve.sock");
+            broker::serve(listener, state).await;
+        });
+    }
+    let waiter = {
+        let sock = paths.approve_socket.clone();
+        let fingerprint = request_fingerprint.clone();
+        thread::spawn(move || {
+            broker::client_await_structured(
+                &sock,
+                "fleet-panel-ask-1",
+                &fingerprint,
+                &[serde_json::json!({
+                    "id": "release-gate",
+                    "question": "Deploy patched fleet bridge?",
+                    "header": "Release gate",
+                    "options": [
+                        {"label": "Yes", "description": "ship verified fix"},
+                        {"label": "Continue", "description": "keep watching"}
+                    ]
+                })],
+                Duration::from_secs(60),
+            )
+        })
+    };
+
+    let tmux = ExactTmuxSession::create(
+        format!("tripwire-fleet-panel-{}", std::process::id()),
+        "180",
+        "50",
+    );
+    let session = tmux.name();
 
     let peers_db = home_tmp.path().join("peers.db");
     let jobs_dir = home_tmp.path().join("jobs");
     let cmd = format!(
-        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
+        "HOME={home} AINB_HOME={home}/.agents-in-a-box AINB_HANGAR_HOME={hangar} AINB_FLEET_DISABLE_TMUX_DISCOVERY=1 AINB_DISABLE_PLUGINS=1 CLAUDE_PEERS_DB={peers} AINB_FLEET_JOBS_DIR={jobs} exec {bin} tui",
         home = home_tmp.path().display(),
+        hangar = hangar_home.display(),
         peers = peers_db.display(),
         jobs = jobs_dir.display(),
         bin = ainb_bin().display()
     );
     Command::new("tmux")
-        .args(["send-keys", "-t", &session, &cmd, "Enter"])
+        .args(["send-keys", "-t", session, &cmd, "Enter"])
         .status()
         .expect("send launch cmd");
 
@@ -168,45 +234,49 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     });
     let Some(pre_cap) = pre else {
         let last = capture_pane(&session);
-        kill_session(&session);
         panic!("HomeScreen never rendered Fleet shortcut; last capture:\n---\n{last}\n---");
     };
     assert!(
         !pre_cap.contains("Deploy patched fleet bridge?"),
-        "pre-key capture already on Fleet panel — state leaked:\n{pre_cap}"
+        "pre-key capture already on Fleet panel: state leaked:\n{pre_cap}"
     );
 
-    let opened = poll_capture_resending(
-        &session,
-        "f",
-        Instant::now() + Duration::from_secs(30),
-        |c| {
-            c.contains("Fleet")
-                && c.contains("current_state")
-                && c.contains("ASK")
-                && c.contains("Deploy patched fleet bridge?")
-                && c.contains("Yes")
-                && c.contains("Continue")
-                && c.contains("WAIT")
-        },
+    assert!(
+        open_fleet_screen(&session).is_some(),
+        "f did not open Fleet screen:\n{}",
+        capture_pane(&session)
     );
+    let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
+        c.contains("Fleet")
+            && c.contains("Hangar")
+            && c.contains("ASK")
+            && c.contains("Deploy patched fleet bridge?")
+            && c.contains("Yes")
+            && c.contains("Continue")
+            && c.contains("WAIT")
+            && c.contains("hangar-authoritative")
+    });
     let Some(open_cap) = opened else {
         let last = capture_pane(&session);
-        kill_session(&session);
-        panic!("Fleet panel did not render seeded current_state; last capture:\n---\n{last}\n---");
+        panic!(
+            "Fleet panel did not render authoritative Hangar snapshot; last capture:\n---\n{last}\n---"
+        );
     };
     assert!(
         open_cap.contains("Enter/a") && open_cap.contains("q/Esc"),
         "Fleet help bar missing answer/back controls:\n{open_cap}"
     );
+    assert!(
+        !open_cap.contains("current_state"),
+        "Fleet must not expose or read legacy notifyd current_state:\n{open_cap}"
+    );
 
     send_key(&session, "Tab");
     let advanced = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
-        c.contains("▶ Continue")
+        c.contains(">[ ] Continue")
     });
     let Some(tab_cap) = advanced else {
         let last = capture_pane(&session);
-        kill_session(&session);
         panic!("Tab did not move ASK option cursor to Continue; last capture:\n---\n{last}\n---");
     };
     assert!(
@@ -216,29 +286,38 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
 
     send_key(&session, "Enter");
     let answered = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
-        c.contains("answering ask with 'Continue'")
-            || c.contains("answered ask")
-            || c.contains("no live session matched")
+        c.contains("answered ask: Delivered") && c.contains("claude structured hook broker")
     });
     let Some(answer_cap) = answered else {
         let last = capture_pane(&session);
-        kill_session(&session);
         panic!("Fleet answer dispatch feedback never rendered; last capture:\n---\n{last}\n---");
     };
     assert!(
-        answer_cap.contains("Continue")
-            && (answer_cap.contains("answering ask")
-                || answer_cap.contains("answered ask")
-                || answer_cap.contains("no live session matched")),
-        "answer feedback did not name the selected option/path:\n{answer_cap}"
+        !answer_cap.contains("no live session matched"),
+        "structured answer must use Hangar RPC, never legacy tmux discovery:\n{answer_cap}"
     );
+    let receipt = hangar
+        .latest_receipt("claude:fleet-panel-ask-1")
+        .expect("structured answer persisted a Fleet receipt");
+    assert_eq!(receipt.action_kind, "structured_answer");
+    assert_eq!(receipt.status, "DELIVERED");
+    assert_eq!(
+        receipt.detail.as_deref(),
+        Some("claude structured hook broker")
+    );
+    let resolution = waiter.join().expect("structured waiter thread");
+    let StructuredResolution::Answered { answers } = resolution else {
+        panic!("structured waiter did not receive answer: {resolution:?}");
+    };
+    assert_eq!(answers.len(), 1);
+    assert_eq!(answers[0].question, "Deploy patched fleet bridge?");
+    assert_eq!(answers[0].selected_options, ["Continue"]);
 
     send_key(&session, "Escape");
     let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("Stats") && c.contains("[i]") && !c.contains("Deploy patched fleet bridge?")
     });
     let final_cap = capture_pane(&session);
-    kill_session(&session);
     assert!(
         back.is_some(),
         "Esc from Fleet panel did not return to Home. Final capture:\n---\n{final_cap}\n---"

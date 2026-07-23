@@ -10,6 +10,7 @@
 
 pub mod discover;
 pub mod enrich_cache;
+pub mod provider;
 pub mod read;
 pub mod repo_clone;
 pub mod repo_roster;
@@ -18,6 +19,7 @@ pub mod session_registry;
 pub mod types;
 
 pub use types::{
-    AinbSession, Block, BrokerPeer, Liveness, SendOutcome, Session, SessionSource, SessionState,
-    Signal,
+    AinbSession, AttentionState, Block, BrokerPeer, Capabilities, Capability, Confidence,
+    FleetSession, LifecycleState, Liveness, ManagementState, Provenance, Provider, SendOutcome,
+    Session, SessionKey, SessionSource, SessionState, Signal, TransportHealth,
 };

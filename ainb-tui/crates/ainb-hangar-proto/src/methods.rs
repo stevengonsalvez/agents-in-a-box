@@ -245,6 +245,14 @@ pub const HANGAR_ISSUE_DELETE: &str = "hangar/issue_delete";
 /// workspace-scoped, mirroring [`HANGAR_ISSUE_DELETE`]. An issue with no active
 /// task is a clean `{ cancelled: 0 }`, never an error.
 pub const HANGAR_ISSUE_CANCEL_ACTIVE: &str = "hangar/issue_cancel_active";
+/// Fetch canonical Fleet snapshot and revision head.
+pub const FLEET_SNAPSHOT: &str = "fleet/snapshot";
+/// Subscribe after a global Fleet revision.
+pub const FLEET_SUBSCRIBE: &str = "fleet/subscribe";
+/// Execute one versioned Fleet action.
+pub const FLEET_ACTION: &str = "fleet/action";
+/// Deliver text to explicit Fleet targets.
+pub const FLEET_BROADCAST: &str = "fleet/broadcast";
 
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
 /// screen's create-wizard dispatch; plans/hangar-task-agent-model.md).
@@ -1090,6 +1098,11 @@ pub const ALL_METHODS: &[&str] = &[
     // Agent delete (Agents screen `x` remove) is APPENDED at the catalogue tail —
     // append-only wire.
     HANGAR_AGENT_DELETE,
+    // Fleet control-plane methods are appended at the wire catalogue tail.
+    FLEET_SNAPSHOT,
+    FLEET_SUBSCRIBE,
+    FLEET_ACTION,
+    FLEET_BROADCAST,
 ];
 
 #[cfg(test)]
@@ -1293,6 +1306,10 @@ mod tests {
             HANGAR_DAEMON_CONFIG_LIST,
             HANGAR_ISSUE_DELETE,
             HANGAR_ISSUE_CANCEL_ACTIVE,
+            FLEET_SNAPSHOT,
+            FLEET_SUBSCRIBE,
+            FLEET_ACTION,
+            FLEET_BROADCAST,
         ];
         for m in declared {
             assert!(

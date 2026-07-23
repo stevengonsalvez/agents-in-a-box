@@ -1,5 +1,8 @@
 // ABOUTME: Shared fleet types — Session / SessionState / Signal / Block / Liveness.
 
+use std::collections::BTreeSet;
+use std::fmt;
+
 use serde::{Deserialize, Serialize};
 
 /// Which discovery source contributed to a session record.
@@ -12,6 +15,206 @@ pub enum SessionSource {
     Peers,
     /// `~/.claude/jobs/<id>/`
     Jobs,
+    /// Exact pane metadata from `tmux list-panes -a`.
+    Tmux,
+}
+
+/// Provider owning a Fleet session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Provider {
+    Claude,
+    Codex,
+    Unknown,
+}
+
+impl Provider {
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Claude => "claude",
+            Self::Codex => "codex",
+            Self::Unknown => "unknown",
+        }
+    }
+}
+
+impl fmt::Display for Provider {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.as_str())
+    }
+}
+
+/// Stable Fleet identity. Cwd is deliberately excluded.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionKey(String);
+
+impl SessionKey {
+    /// Identity for a provider session with an authoritative provider id.
+    #[must_use]
+    pub fn managed(provider: Provider, provider_session_id: &str) -> Self {
+        Self(format!("{provider}:{provider_session_id}"))
+    }
+
+    /// Identity for a legacy pane without an authoritative provider id.
+    #[must_use]
+    pub fn legacy(
+        provider: Provider,
+        exact_tmux_target: &str,
+        process_start_fingerprint: &str,
+    ) -> Self {
+        Self(format!(
+            "legacy:{provider}:{exact_tmux_target}:{process_start_fingerprint}"
+        ))
+    }
+
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl fmt::Display for SessionKey {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+/// Provider lifecycle, independent from attention state.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum LifecycleState {
+    Starting,
+    Running,
+    TurnComplete,
+    Idle,
+    Exited,
+    Unknown,
+}
+
+/// Human attention required by a session, independent from lifecycle.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+pub enum AttentionState {
+    None,
+    Ask,
+    Approval,
+    Waiting,
+    Error,
+}
+
+/// Whether Fleet has an authoritative provider control channel.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ManagementState {
+    Managed,
+    Degraded,
+}
+
+/// Control and observation features supported for one session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Capability {
+    StructuredAnswer,
+    ApprovalDecision,
+    SendPrompt,
+    ContinueTurn,
+    RetryTurn,
+    InterruptTurn,
+    Start,
+    Restart,
+    Stop,
+    Kill,
+    Archive,
+    TextSend,
+    TmuxAttach,
+}
+
+/// Explicit capability set used to gate Fleet actions.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct Capabilities(BTreeSet<Capability>);
+
+impl Capabilities {
+    #[must_use]
+    pub fn new(items: impl IntoIterator<Item = Capability>) -> Self {
+        Self(items.into_iter().collect())
+    }
+
+    #[must_use]
+    pub fn degraded_tmux() -> Self {
+        Self::new([Capability::TextSend, Capability::TmuxAttach])
+    }
+
+    #[must_use]
+    pub fn contains(&self, capability: Capability) -> bool {
+        self.0.contains(&capability)
+    }
+
+    pub fn extend(&mut self, other: &Self) {
+        self.0.extend(other.0.iter().copied());
+    }
+}
+
+/// Origin of a Fleet observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Provenance {
+    AppServer,
+    Hook,
+    Tmux,
+    AinbRegistry,
+    Broker,
+    Job,
+    Transcript,
+}
+
+/// Trust level assigned to an observation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Confidence {
+    Inferred,
+    Observed,
+    Authoritative,
+}
+
+/// Current health of a session control or observation transport.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TransportHealth {
+    Healthy,
+    Degraded,
+    Unavailable,
+    Unknown,
+}
+
+/// Authoritative Fleet read-model record used by new control-plane surfaces.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetSession {
+    pub session_key: SessionKey,
+    pub provider: Provider,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub provider_session_id: Option<String>,
+    pub cwd: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub exact_tmux_target: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub pane_pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub process_start_fingerprint: Option<String>,
+    pub lifecycle: LifecycleState,
+    pub attention: AttentionState,
+    pub management: ManagementState,
+    pub capabilities: Capabilities,
+    pub provenance: BTreeSet<Provenance>,
+    pub confidence: Confidence,
+    pub transport_health: TransportHealth,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub first_seen_ms: Option<i64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub last_seen_ms: Option<i64>,
+    pub version: u64,
 }
 
 /// Unified session identity. May be backed by 1+ sources after merge.
@@ -163,4 +366,40 @@ pub enum SendOutcome {
     Broker { peer_id: String },
     Tmux { tmux_session: String },
     Failed { reason: String },
+}
+
+#[cfg(test)]
+mod fleet_identity_tests {
+    use super::*;
+
+    #[test]
+    fn managed_key_uses_provider_and_provider_session_id() {
+        assert_eq!(
+            SessionKey::managed(Provider::Codex, "thread-123").as_str(),
+            "codex:thread-123"
+        );
+        assert_eq!(
+            SessionKey::managed(Provider::Claude, "session-456").as_str(),
+            "claude:session-456"
+        );
+    }
+
+    #[test]
+    fn legacy_key_changes_with_exact_target_or_process_start() {
+        let first = SessionKey::legacy(Provider::Claude, "agent:1.0", "pid=1;started=10");
+        let other_pane = SessionKey::legacy(Provider::Claude, "agent:1.1", "pid=1;started=10");
+        let restarted = SessionKey::legacy(Provider::Claude, "agent:1.0", "pid=2;started=20");
+
+        assert_ne!(first, other_pane);
+        assert_ne!(first, restarted);
+    }
+
+    #[test]
+    fn degraded_capabilities_exclude_structured_and_destructive_actions() {
+        let capabilities = Capabilities::degraded_tmux();
+        assert!(capabilities.contains(Capability::TextSend));
+        assert!(capabilities.contains(Capability::TmuxAttach));
+        assert!(!capabilities.contains(Capability::StructuredAnswer));
+        assert!(!capabilities.contains(Capability::Kill));
+    }
 }
