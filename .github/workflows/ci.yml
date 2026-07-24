@@ -95,10 +95,14 @@ jobs:
       # Running them here fails on the missing harness, not on the code. Every
       # other integration target now runs.
       #
-      # The former trailing `-- --skip …` args are dropped: nextest does not
-      # implement libtest's `--skip`, and a list-diff proves they filtered
-      # nothing (identical test set with and without them). Removing them changes
-      # no behaviour, it just stops the command claiming a skip it never made.
+      # The former trailing `-- --skip …` args are dropped because the two tests
+      # they muted are FIXED, not because the flag was inert — nextest does
+      # honour it. Both were host-dependent rather than broken:
+      # `test_validate_provider_installed_claude` asserted a real `claude` was
+      # installed on the machine, and `custom_ranges_are_inclusive` hardcoded a
+      # `+01:00` wall clock for a range anchored at LOCAL midnight. They now
+      # drive a stub on a controlled `$PATH` and derive their boundaries from
+      # the host's own zone, so nothing needs muting.
       - run: "cargo nextest run --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
         working-directory: ${{ env.WORKING_DIR }}
 
