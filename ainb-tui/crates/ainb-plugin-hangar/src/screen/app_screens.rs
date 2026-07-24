@@ -297,7 +297,7 @@ pub enum BoardsAction {
         /// The squad to assign, or `None` to clear.
         squad_id: Option<String>,
     },
-    /// Add a depends-on blocker to a card (`D`) — `hangar/board_card_dep_add`
+    /// Add a depends-on blocker to a card (`d`) — `hangar/board_card_dep_add`
     /// (tcp T4 / F7).
     CardDepAdd {
         /// The board both cards sit on.
@@ -399,6 +399,10 @@ pub enum IssueCreateAction {
         /// ref (V3-F3): persisted as the new issue's assignee AND carried as the
         /// run's assignee override. `None` when a provider chip was chosen instead.
         assignee: Option<String>,
+        /// 0046 sub-issues: the parent issue's wire id when the wizard was opened
+        /// as an "add sub-issue" (`s`), threaded into `hangar/issue_create` so the
+        /// daemon links the new issue as a child. `None` for a top-level create.
+        parent_issue_id: Option<String>,
     },
 }
 
@@ -1148,6 +1152,11 @@ pub enum NavIntent {
     OpenAgentPicker(ainb_hangar_core::ids::IssueId),
     /// Open task detail for the issue under the selection (raised by Enter).
     OpenTaskForIssue(ainb_hangar_core::ids::IssueId),
+    /// 0046 sub-issues: mark an issue Done from the keyboard (`d`). The glue moves
+    /// the card optimistically and arms the durable `hangar/issue_update{state}`
+    /// RPC (the SAME seam as the context-menu `Move to ▸ Done`), so a `d` on a
+    /// sub-issue fires the child-done cascade. Carries the target issue id.
+    MarkIssueDone(ainb_hangar_core::ids::IssueId),
     /// Open the task's captured PR URL in the host browser (raised by `o` on the
     /// task-detail screen, P9.2). Only surfaced when the task has a `pr_url` — `o`
     /// is a no-op (no intent) when none, so there is never a silent open of
@@ -1517,7 +1526,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
         // pane (P8.5), the usage dashboard (e38.35), and the help overlay (the
-        // `D`/`U`/`?` tab-switch + global keys are handled by the router before
+        // `d`/`U`/`?` tab-switch + global keys are handled by the router before
         // reaching here).
         Screen::DaemonHealth | Screen::Usage | Screen::Help => None,
     }
@@ -1632,6 +1641,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
+        // 0046: `d` marks the highlighted issue Done, surfaced as a NavIntent the
+        // glue lifts into the SAME optimistic-move + `hangar/issue_update{state}`
+        // seam the context-menu `Move to ▸ Done` uses, firing the child cascade.
+        Some(IssueListIntent::MarkDone(id)) => Some(NavIntent::MarkIssueDone(id)),
         // Phase 5: the wizard's Agent-stage commit lifts into a deferred
         // create-and-dispatch chain the `render` pass drains + fires (the sync
         // key router can't `await`).
@@ -1644,6 +1657,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             target_branch,
             agent,
             assignee,
+            parent_issue_id,
         }) => {
             states.pending_create_action = Some(IssueCreateAction::CreateAndRun {
                 title,
@@ -1654,6 +1668,7 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
                 target_branch,
                 agent,
                 assignee,
+                parent_issue_id,
             });
             None
         }
@@ -1918,7 +1933,7 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'm' => Some(BoardsEvent::ToggleAutoMove),
             // `q` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a picker.
             'q' => Some(BoardsEvent::AssignSquad),
-            // `D` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
+            // `d` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
             'D' => Some(BoardsEvent::AddDependency),
             // `R` (uppercase, distinct from `r` = rename) toggles the auto-run flag.
             'R' => Some(BoardsEvent::ToggleAutoRun),

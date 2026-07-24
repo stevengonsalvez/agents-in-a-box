@@ -3057,6 +3057,7 @@ impl HangarPlugin {
             target_branch,
             agent,
             assignee,
+            parent_issue_id,
         } = action;
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             self.screens.issue_list.set_note("create failed: daemon link is down");
@@ -3076,6 +3077,13 @@ impl HangarPlugin {
         // and is appended to the dispatched brief; omitted when blank.
         if let Some(link) = external_ref {
             params["external_ref"] = serde_json::Value::String(link);
+        }
+        // 0046 sub-issues: when the wizard was opened as an "add sub-issue" (`s`),
+        // thread the pre-bound parent so the daemon links the new issue as a child
+        // (`issue.parent_issue_id`). Omitted for a top-level `c` create so the wire
+        // shape only grows when a sub-issue is actually created.
+        if let Some(parent) = parent_issue_id {
+            params["parent_issue_id"] = serde_json::Value::String(parent);
         }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,
@@ -3548,7 +3556,7 @@ impl HangarPlugin {
         // task-detail comment-compose modal (e38.5) and the settings key-entry
         // (API-key) modal each treat every printable key as typed text. Without
         // this guard the routing layer would swallow the global tab-switch chars
-        // (`C`/`U`/`I`/`K`/`D`/`L`/`,`) first — so typing an uppercase `C` in an
+        // (`C`/`U`/`I`/`K`/`d`/`L`/`,`) first — so typing an uppercase `C` in an
         // API key or a comment draft would switch tabs and drop the character
         // instead of inserting it. Route straight to the screen reducer (which
         // owns Esc-to-close for both), mirroring the issue-list capture guard.
@@ -4471,6 +4479,20 @@ impl HangarPlugin {
                     next.selected_task = Some(task_id);
                     next.prior_screen = None;
                     self.app = Some(next);
+                }
+            }
+            NavIntent::MarkIssueDone(issue_id) => {
+                // 0046: `d` marks the highlighted issue Done through the SAME seam
+                // the context-menu `Move to ▸ Done` uses: move the card
+                // optimistically (so the board reflects it at once) AND arm the
+                // durable `hangar/issue_update{state:"done"}` RPC (drained + fired
+                // in `render`). On the daemon that terminal transition fires the
+                // child-done → parent cascade for a sub-issue.
+                let to_status = ainb_hangar_proto::lifecycle::IssueLifecycle::Done;
+                if let Some(moved) =
+                    self.screens.issue_list.move_issue_to(issue_id.as_str(), to_status)
+                {
+                    self.pending_issue_state_update = Some((moved, to_status));
                 }
             }
             NavIntent::OpenPrUrl(url) => {
