@@ -24,7 +24,7 @@
 //! the task's issue into In Progress without waiting for an `IssueUpdated`,
 //! because the daemon reports task lifecycle before it rewrites the issue row.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ainb_hangar_core::ids::IssueId;
 use ainb_hangar_proto::events::{HangarEvent, IssueRow};
@@ -233,6 +233,424 @@ fn assignee_kind(row: &IssueRow) -> Option<ActorKind> {
     }
 }
 
+/// Seven days in epoch milliseconds — the width of the [`DateFacet::DueSoon`]
+/// window (deadline within a week from `now`).
+const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// The structured facet dimensions the filter panel narrows on (multica-gap #10).
+///
+/// Mirrors `issueTableQuerySpec.Filters`: status, priority, label, assignee kind,
+/// due date — the five sections the panel cycles left-to-right, and the key
+/// `facet_counts` / `FacetFilters` dispatch on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FacetKind {
+    /// The lifecycle status facet (`todo` / `in_progress` / …).
+    Status,
+    /// The priority facet (P0..P3).
+    Priority,
+    /// The label facet (exact label names).
+    Label,
+    /// The assignee-kind facet (member / agent / unassigned).
+    Assignee,
+    /// The due-date bucket facet (overdue / due soon / no due date).
+    Due,
+}
+
+impl FacetKind {
+    /// The five facet sections in panel display order.
+    pub const ALL: [Self; 5] = [
+        Self::Status,
+        Self::Priority,
+        Self::Label,
+        Self::Assignee,
+        Self::Due,
+    ];
+
+    /// The section header rendered on the panel's left rail.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Status => "Status",
+            Self::Priority => "Priority",
+            Self::Label => "Label",
+            Self::Assignee => "Assignee",
+            Self::Due => "Due",
+        }
+    }
+
+    /// The next section in display order (wraps `Due → Status`) — drives the
+    /// panel's `Right` / `Tab` section switch.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Status => Self::Priority,
+            Self::Priority => Self::Label,
+            Self::Label => Self::Assignee,
+            Self::Assignee => Self::Due,
+            Self::Due => Self::Status,
+        }
+    }
+
+    /// The previous section in display order (wraps `Status → Due`) — drives the
+    /// panel's `Left` / `Shift+Tab` section switch.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::Status => Self::Due,
+            Self::Priority => Self::Status,
+            Self::Label => Self::Priority,
+            Self::Assignee => Self::Label,
+            Self::Due => Self::Assignee,
+        }
+    }
+}
+
+/// The assignee-kind facet value (multica-gap #10).
+///
+/// Supersedes the legacy `Members`/`Agents` chips as a proper facet dimension
+/// (they still coexist; both predicates AND). `Unassigned` matches a row whose
+/// `assignee` is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssigneeFacet {
+    /// Assigned to a human member (`member:*`).
+    Member,
+    /// Assigned to an agent (`agent:*`).
+    Agent,
+    /// No assignee.
+    Unassigned,
+}
+
+impl AssigneeFacet {
+    /// The facet value display label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Member => "Member",
+            Self::Agent => "Agent",
+            Self::Unassigned => "Unassigned",
+        }
+    }
+
+    /// The compact token used in the closed-panel active-facet summary chip.
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Agent => "agent",
+            Self::Unassigned => "none",
+        }
+    }
+
+    /// Classify a row's assignee into its facet bucket.
+    fn of_row(row: &IssueRow) -> Self {
+        match assignee_kind(row) {
+            Some(ActorKind::Member) => Self::Member,
+            Some(ActorKind::Agent) => Self::Agent,
+            None => Self::Unassigned,
+        }
+    }
+}
+
+/// The due-date bucket facet value (a simplified `Date{Field=due,Start,End}`).
+///
+/// Single-select: [`FacetFilters::date`] is `Option<DateFacet>`, and a row falls
+/// into at most one bucket at a given `now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DateFacet {
+    /// `due_date < now` — past its deadline.
+    Overdue,
+    /// `now <= due_date <= now + 7d` — due within a week.
+    DueSoon,
+    /// `due_date` is `None` — no deadline set.
+    NoDueDate,
+}
+
+impl DateFacet {
+    /// The three buckets in panel display order.
+    pub const ALL: [Self; 3] = [Self::Overdue, Self::DueSoon, Self::NoDueDate];
+
+    /// The facet value display label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Overdue => "Overdue",
+            Self::DueSoon => "Due soon",
+            Self::NoDueDate => "No due date",
+        }
+    }
+
+    /// The compact token used in the closed-panel active-facet summary chip.
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Overdue => "overdue",
+            Self::DueSoon => "due-soon",
+            Self::NoDueDate => "no-due",
+        }
+    }
+
+    /// The bucket `row` falls into at `now_ms`, or `None` when it has a future
+    /// deadline outside the week-long [`Self::DueSoon`] window.
+    const fn bucket_of(row: &IssueRow, now_ms: i64) -> Option<Self> {
+        match row.due_date {
+            None => Some(Self::NoDueDate),
+            Some(due) if due < now_ms => Some(Self::Overdue),
+            Some(due) if due <= now_ms.saturating_add(SEVEN_DAYS_MS) => Some(Self::DueSoon),
+            Some(_) => None,
+        }
+    }
+
+    /// Whether `row` falls into this bucket at `now_ms`.
+    fn accepts(self, row: &IssueRow, now_ms: i64) -> bool {
+        Self::bucket_of(row, now_ms) == Some(self)
+    }
+}
+
+/// The priority label (`P0`..`P3`) for a wire priority scalar (`0..3` = P3..P0,
+/// HIGHER = MORE URGENT). Clamped so an out-of-range scalar never panics.
+fn priority_label(priority: i64) -> String {
+    format!("P{}", (3 - priority).clamp(0, 3))
+}
+
+/// One selectable value in a facet section (multica-gap #10).
+///
+/// The tagged union the panel cursor points at and [`FacetFilters::toggle`]
+/// flips. `Ord` (deterministic) so the per-value count map iterates stably for
+/// snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FacetValue {
+    /// A lifecycle status value.
+    Status(IssueLifecycle),
+    /// A priority value (`0..3` = P3..P0).
+    Priority(i64),
+    /// A label name.
+    Label(String),
+    /// An assignee-kind value.
+    Assignee(AssigneeFacet),
+    /// A due-date bucket value.
+    Due(DateFacet),
+}
+
+impl FacetValue {
+    /// The facet section this value belongs to.
+    #[must_use]
+    pub const fn kind(&self) -> FacetKind {
+        match self {
+            Self::Status(_) => FacetKind::Status,
+            Self::Priority(_) => FacetKind::Priority,
+            Self::Label(_) => FacetKind::Label,
+            Self::Assignee(_) => FacetKind::Assignee,
+            Self::Due(_) => FacetKind::Due,
+        }
+    }
+
+    /// The value's display label (`Todo`, `P0`, `bug`, `Member`, `Overdue`).
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Status(s) => s.label().to_string(),
+            Self::Priority(p) => priority_label(*p),
+            Self::Label(l) => l.clone(),
+            Self::Assignee(a) => a.label().to_string(),
+            Self::Due(d) => d.label().to_string(),
+        }
+    }
+}
+
+/// The structured facet selection layered ON TOP OF the assignee chip + `/` query.
+///
+/// Mirrors multica `issueTableQuerySpec.Filters`. OR within a facet, AND across
+/// facets: a row passes iff — for every NON-EMPTY facet — it matches at least one
+/// selected value in that facet. An empty facet imposes no constraint.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FacetFilters {
+    /// Selected lifecycle statuses. Empty = all.
+    pub statuses: BTreeSet<IssueLifecycle>,
+    /// Selected priorities (`0..3` = P3..P0). Empty = all.
+    pub priorities: BTreeSet<i64>,
+    /// Selected label names (exact, case-sensitive as stored). Empty = all.
+    pub labels: BTreeSet<String>,
+    /// Selected assignee kinds. Empty = all.
+    pub assignees: BTreeSet<AssigneeFacet>,
+    /// Selected due-date bucket. `None` = all (no date constraint).
+    pub date: Option<DateFacet>,
+}
+
+impl FacetFilters {
+    /// Whether NO facet is selected (the panel imposes no narrowing).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.statuses.is_empty()
+            && self.priorities.is_empty()
+            && self.labels.is_empty()
+            && self.assignees.is_empty()
+            && self.date.is_none()
+    }
+
+    /// Whether `row` passes every non-empty facet (OR within, AND across).
+    fn accepts(&self, row: &IssueRow, now_ms: i64) -> bool {
+        if !self.statuses.is_empty()
+            && !self.statuses.contains(&IssueLifecycle::for_state(&row.state))
+        {
+            return false;
+        }
+        if !self.priorities.is_empty() && !self.priorities.contains(&row.priority) {
+            return false;
+        }
+        if !self.labels.is_empty() && !row.labels.iter().any(|l| self.labels.contains(l)) {
+            return false;
+        }
+        if !self.assignees.is_empty() && !self.assignees.contains(&AssigneeFacet::of_row(row)) {
+            return false;
+        }
+        if let Some(date) = self.date {
+            if !date.accepts(row, now_ms) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Flip one value's membership in its facet set. The due facet is
+    /// single-select (toggling the active bucket clears it; a different bucket
+    /// replaces it).
+    fn toggle(&mut self, value: &FacetValue) {
+        match value {
+            FacetValue::Status(s) => flip(&mut self.statuses, *s),
+            FacetValue::Priority(p) => flip(&mut self.priorities, *p),
+            FacetValue::Label(l) => {
+                if !self.labels.remove(l) {
+                    self.labels.insert(l.clone());
+                }
+            }
+            FacetValue::Assignee(a) => flip(&mut self.assignees, *a),
+            FacetValue::Due(d) => {
+                self.date = if self.date == Some(*d) {
+                    None
+                } else {
+                    Some(*d)
+                };
+            }
+        }
+    }
+
+    /// Whether `value` is currently selected.
+    #[must_use]
+    pub fn contains(&self, value: &FacetValue) -> bool {
+        match value {
+            FacetValue::Status(s) => self.statuses.contains(s),
+            FacetValue::Priority(p) => self.priorities.contains(p),
+            FacetValue::Label(l) => self.labels.contains(l),
+            FacetValue::Assignee(a) => self.assignees.contains(a),
+            FacetValue::Due(d) => self.date == Some(*d),
+        }
+    }
+
+    /// Blank out one facet section's own selection — used to compute the
+    /// drill-down counts for that section (multica: a facet's option counts are
+    /// against the set filtered by all OTHER facets).
+    fn without_kind(&self, kind: FacetKind) -> Self {
+        let mut probe = self.clone();
+        match kind {
+            FacetKind::Status => probe.statuses.clear(),
+            FacetKind::Priority => probe.priorities.clear(),
+            FacetKind::Label => probe.labels.clear(),
+            FacetKind::Assignee => probe.assignees.clear(),
+            FacetKind::Due => probe.date = None,
+        }
+        probe
+    }
+
+    /// A compact single-line summary of the active facets for the closed-panel
+    /// chip (`⛃ status:todo priority:P0 label:bug`), or `None` when nothing is
+    /// selected. Values inside a facet are `/`-joined (the OR-within reading).
+    #[must_use]
+    pub fn summary(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if !self.statuses.is_empty() {
+            let vals = self.statuses.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+            parts.push(format!("status:{}", vals.join("/")));
+        }
+        if !self.priorities.is_empty() {
+            // Highest urgency first (P0 before P3) in the summary too.
+            let vals = self.priorities.iter().rev().map(|p| priority_label(*p)).collect::<Vec<_>>();
+            parts.push(format!("priority:{}", vals.join("/")));
+        }
+        if !self.labels.is_empty() {
+            let vals = self.labels.iter().cloned().collect::<Vec<_>>();
+            parts.push(format!("label:{}", vals.join("/")));
+        }
+        if !self.assignees.is_empty() {
+            let vals = self.assignees.iter().map(|a| a.token()).collect::<Vec<_>>();
+            parts.push(format!("assignee:{}", vals.join("/")));
+        }
+        if let Some(date) = self.date {
+            parts.push(format!("due:{}", date.token()));
+        }
+        Some(format!("⛃ {}", parts.join(" ")))
+    }
+}
+
+/// Flip `value`'s membership in `set` (remove if present, else insert).
+fn flip<T: Ord + Clone>(set: &mut BTreeSet<T>, value: T) {
+    if !set.remove(&value) {
+        set.insert(value);
+    }
+}
+
+/// The values a row contributes to one facet section (for the drill-down count
+/// tally). A row contributes to EACH of its labels; to at most one due bucket;
+/// to exactly one status/priority/assignee value.
+fn facet_values_of_row(kind: FacetKind, row: &IssueRow, now_ms: i64) -> Vec<FacetValue> {
+    match kind {
+        FacetKind::Status => vec![FacetValue::Status(IssueLifecycle::for_state(&row.state))],
+        FacetKind::Priority => vec![FacetValue::Priority(row.priority)],
+        FacetKind::Label => row.labels.iter().map(|l| FacetValue::Label(l.clone())).collect(),
+        FacetKind::Assignee => vec![FacetValue::Assignee(AssigneeFacet::of_row(row))],
+        FacetKind::Due => DateFacet::bucket_of(row, now_ms)
+            .map(|d| vec![FacetValue::Due(d)])
+            .unwrap_or_default(),
+    }
+}
+
+/// The open filter-panel's transient cursor (multica-gap #10).
+///
+/// Which facet section is active and which value row the cursor points at. Lives
+/// on [`IssueListState`] only while the panel is open
+/// ([`IssueListMode::FilterPanel`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterPanelState {
+    /// The active (focused) facet section.
+    section: FacetKind,
+    /// The cursor row within the active section's value list.
+    cursor: usize,
+}
+
+impl Default for FilterPanelState {
+    /// A fresh panel: Status section, cursor on the first value.
+    fn default() -> Self {
+        Self {
+            section: FacetKind::Status,
+            cursor: 0,
+        }
+    }
+}
+
+impl FilterPanelState {
+    /// The active facet section.
+    #[must_use]
+    pub const fn section(&self) -> FacetKind {
+        self.section
+    }
+
+    /// The cursor row within the active section.
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
 /// Whether the screen is in normal navigation, filter-text-entry, or
 /// the staged create-wizard mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -261,6 +679,12 @@ pub enum IssueListMode {
     /// is captured. Entered from the plugin glue on the daemon's active-tasks
     /// delete rejection, never directly by a key press.
     ConfirmCancelDelete,
+    /// `f` faceted-filter panel (multica-gap #10): a modal overlay
+    /// ([`IssueListState::filter_panel`]) for selecting structured status /
+    /// priority / label / assignee / due facets. Arrow/`hjkl` navigate,
+    /// Space/Enter toggle the value under the cursor, `C` clears, Esc/`f` close
+    /// (the applied facets REMAIN applied); every other key is captured.
+    FilterPanel,
 }
 
 /// The target of an open `x` delete-confirm overlay (63d): the issue id the
@@ -571,6 +995,16 @@ pub struct IssueListState {
     /// [`IssueListMode::ConfirmCancelDelete`] (armed by the plugin glue when a
     /// delete is refused for active tasks). `None` otherwise.
     confirm_cancel_delete: Option<PendingDelete>,
+    /// The structured facet selection (multica-gap #10) layered on top of the
+    /// chip + `/` query. Empty by default (no narrowing).
+    facets: FacetFilters,
+    /// The wall-clock the date facet evaluates against (epoch ms), seeded by the
+    /// render glue's clock ([`set_now_ms`](Self::set_now_ms)). `0` on a fresh
+    /// state; the reducer stays pure by reading this field rather than a clock.
+    now_ms: i64,
+    /// The open `f` facet-panel cursor, set while `mode` is
+    /// [`IssueListMode::FilterPanel`]. `None` otherwise.
+    filter_panel: Option<FilterPanelState>,
 }
 
 impl Default for IssueListState {
@@ -591,6 +1025,9 @@ impl Default for IssueListState {
             hovered_id: None,
             confirm_delete: None,
             confirm_cancel_delete: None,
+            facets: FacetFilters::default(),
+            now_ms: 0,
+            filter_panel: None,
         }
     }
 }
@@ -628,7 +1065,38 @@ impl IssueListState {
                 | IssueListMode::CreateInput
                 | IssueListMode::ConfirmDelete
                 | IssueListMode::ConfirmCancelDelete
+                | IssueListMode::FilterPanel
         )
+    }
+
+    /// The structured facet selection (multica-gap #10).
+    #[must_use]
+    pub const fn facets(&self) -> &FacetFilters {
+        &self.facets
+    }
+
+    /// The open `f` facet-panel cursor, or `None` when the panel is closed — the
+    /// renderer draws the overlay from this.
+    #[must_use]
+    pub const fn filter_panel(&self) -> Option<&FilterPanelState> {
+        self.filter_panel.as_ref()
+    }
+
+    /// Seed the wall-clock the date facet evaluates against (epoch ms), from the
+    /// render glue's clock. Keeps the reducer pure — it reads this field rather
+    /// than calling a clock itself.
+    pub const fn set_now_ms(&mut self, now_ms: i64) {
+        self.now_ms = now_ms;
+    }
+
+    /// Close the `f` facet panel (Esc / `f`): drop the overlay and return to
+    /// normal navigation in one press. The APPLIED facets REMAIN applied (closing
+    /// the picker is not clearing it). A no-op when the panel is not open.
+    pub fn abort_filter_panel(&mut self) {
+        if self.mode == IssueListMode::FilterPanel {
+            self.mode = IssueListMode::Normal;
+            self.filter_panel = None;
+        }
     }
 
     /// Abort the create wizard (Esc): drop the WHOLE staged overlay — whatever
@@ -790,12 +1258,83 @@ impl IssueListState {
         self.note = Some(note.into());
     }
 
-    /// Iterate the rows passing the active chip + query, in daemon order.
+    /// Iterate the rows passing the active chip + query + facets, in daemon
+    /// order. Because `rows_in_column` / `board_columns` / `column_count` all
+    /// derive from THIS, the column-header `(N)` counts reflect the facets for
+    /// free (multica-gap #10).
     pub fn visible_rows(&self) -> impl Iterator<Item = &IssueRow> {
         let q = self.query.to_lowercase();
+        let now = self.now_ms;
         self.rows.iter().filter(move |r| {
-            self.filter.accepts(r) && (q.is_empty() || r.title.to_lowercase().contains(&q))
+            self.filter.accepts(r)
+                && (q.is_empty() || r.title.to_lowercase().contains(&q))
+                && self.facets.accepts(r, now)
         })
+    }
+
+    /// Per-value counts for one facet section (multica `ListIssueTableFacets`),
+    /// computed against the rows passing the chip + query + ALL OTHER facets (but
+    /// NOT this section's own selection) — drill-down count semantics, so a user
+    /// sees "if I also pick this value, I get N more". Only values with count > 0
+    /// are returned. Deterministically ordered: status by lifecycle order, labels
+    /// alphabetically, assignee/due by their display order, priority MOST-URGENT
+    /// FIRST (P0 before P3). This backs the panel's per-value counts.
+    #[must_use]
+    pub fn facet_counts(&self, kind: FacetKind) -> Vec<(FacetValue, usize)> {
+        let probe = self.facets.without_kind(kind);
+        let q = self.query.to_lowercase();
+        let now = self.now_ms;
+        let mut tally: BTreeMap<FacetValue, usize> = BTreeMap::new();
+        for row in self.rows.iter().filter(|r| {
+            self.filter.accepts(r)
+                && (q.is_empty() || r.title.to_lowercase().contains(&q))
+                && probe.accepts(r, now)
+        }) {
+            for value in facet_values_of_row(kind, row, now) {
+                *tally.entry(value).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(FacetValue, usize)> = tally.into_iter().collect();
+        // Priority renders most-urgent-first (P0 before P3): reverse the natural
+        // ascending-i64 `BTreeMap` order. All entries are `Priority(_)` here, so
+        // reversing the whole vec is safe.
+        if kind == FacetKind::Priority {
+            out.reverse();
+        }
+        out
+    }
+
+    /// Build the render snapshot for the `f` facet panel (multica-gap #10): every
+    /// facet section with its in-scope value rows (`[x]` selection + drill-down
+    /// count), the active section flagged, and the cursor index carried on the
+    /// active section only. Zero-count values are already omitted by
+    /// [`facet_counts`](Self::facet_counts).
+    #[must_use]
+    pub fn facet_panel_sections(&self) -> Vec<crate::widgets::facet_panel::FacetSectionView> {
+        use crate::widgets::facet_panel::{FacetSectionView, FacetValueRow};
+        let active = self.filter_panel.as_ref().map(|p| p.section);
+        let cursor = self.filter_panel.as_ref().map(|p| p.cursor);
+        FacetKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let is_active = active == Some(kind);
+                let values = self
+                    .facet_counts(kind)
+                    .into_iter()
+                    .map(|(value, count)| FacetValueRow {
+                        label: value.label(),
+                        count,
+                        selected: self.facets.contains(&value),
+                    })
+                    .collect();
+                FacetSectionView {
+                    label: kind.label().to_string(),
+                    active: is_active,
+                    values,
+                    cursor: if is_active { cursor } else { None },
+                }
+            })
+            .collect()
     }
 
     /// Iterate the visible rows that fall into `column`, in daemon order.
@@ -1016,13 +1555,15 @@ impl IssueListState {
 
     /// Select the row whose issue id matches `id` (e38.13 command-palette jump).
     ///
-    /// Resets the chip filter to `All` and clears the query first so the target is
-    /// guaranteed visible (a search hit may live under any state, and the active
-    /// filter could otherwise hide it), then points the selection at its visible
-    /// index. A no-op when no cached row carries that id (a stale palette hit).
+    /// Resets the chip filter to `All`, clears the query, AND clears the facets
+    /// first so the target is guaranteed visible (a search hit may live under any
+    /// state / priority / label, and an active facet could otherwise hide it),
+    /// then points the selection at its visible index. A no-op when no cached row
+    /// carries that id (a stale palette hit).
     pub fn select_by_id(&mut self, id: &str) {
         self.filter = FilterChip::All;
         self.query.clear();
+        self.facets = FacetFilters::default();
         let idx = self.visible_rows().position(|r| r.id.as_str() == id);
         if let Some(idx) = idx {
             self.selected = idx;
@@ -1042,6 +1583,23 @@ impl IssueListState {
             self.selected = 0;
         } else if self.selected >= len {
             self.selected = len - 1;
+        }
+    }
+
+    /// Clamp the open panel's cursor into its active section's value list after a
+    /// facet toggle shrank the in-scope value set (a drilled-down section can
+    /// drop options). A no-op when the panel is closed.
+    fn clamp_panel_cursor(&mut self) {
+        let Some(section) = self.filter_panel.as_ref().map(|p| p.section) else {
+            return;
+        };
+        let len = self.facet_counts(section).len();
+        if let Some(panel) = self.filter_panel.as_mut() {
+            panel.cursor = if len == 0 {
+                0
+            } else {
+                panel.cursor.min(len - 1)
+            };
         }
     }
 }
@@ -1066,8 +1624,39 @@ pub enum IssueListEvent {
     Wizard(WizardKey),
     /// The active filter chip was changed.
     SetFilter(FilterChip),
+    /// A structured navigation key for the open `f` facet panel (multica-gap
+    /// #10): arrows / toggle / clear / close. Ignored when no panel is open.
+    Panel(PanelKey),
+    /// Flip one value in one facet set (multica-gap #10). Raised by the panel's
+    /// Space/Enter on the value under the cursor; usable directly by tests.
+    ToggleFacet(FacetKind, FacetValue),
+    /// Clear ALL facet selections (the panel's `C` "clear all", multica-gap #10).
+    ClearFacets,
     /// A domain event arrived on the subscribed stream.
     Event(HangarEvent),
+}
+
+/// A structured key folded into the open `f` facet panel (multica-gap #10).
+///
+/// The panel needs arrows (which a plain `char` can't carry) and a Space/Enter
+/// toggle, so — like the create wizard's [`WizardKey`] — the router maps the raw
+/// key vocabulary onto these before handing them to the reducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelKey {
+    /// Move the value cursor up (`Up` / `k`).
+    Up,
+    /// Move the value cursor down (`Down` / `j`).
+    Down,
+    /// Switch to the previous facet section (`Left` / `Shift+Tab` / `h`).
+    Left,
+    /// Switch to the next facet section (`Right` / `Tab` / `l`).
+    Right,
+    /// Toggle the value under the cursor (`Space` / `Enter`).
+    Toggle,
+    /// Clear all facet selections (`C`).
+    Clear,
+    /// Close the panel, keeping the applied facets (`Esc` / `f`).
+    Close,
 }
 
 /// A side-effect the plugin glue performs after an issue-list [`reduce_issue_list`].
@@ -1152,6 +1741,9 @@ pub fn reduce_issue_list(state: &IssueListState, ev: IssueListEvent) -> IssueLis
         IssueListEvent::Key(c) => reduce_key(state, c),
         IssueListEvent::Wizard(k) => reduce_wizard_key(state, k),
         IssueListEvent::SetFilter(chip) => set_filter(state, chip),
+        IssueListEvent::Panel(k) => reduce_panel_key(state, k),
+        IssueListEvent::ToggleFacet(kind, value) => toggle_facet(state, kind, &value),
+        IssueListEvent::ClearFacets => clear_facets(state),
         IssueListEvent::Event(event) => fold_event(state, event),
     }
 }
@@ -1166,6 +1758,10 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
         IssueListMode::CreateInput => reduce_wizard_key(state, wizard_key_from_char(c)),
         IssueListMode::ConfirmDelete => reduce_confirm_delete_key(state, c),
         IssueListMode::ConfirmCancelDelete => reduce_confirm_cancel_delete_key(state, c),
+        // The facet panel is driven by the structured [`IssueListEvent::Panel`]
+        // vocabulary (the router maps its keys), so a plain `char` here is an
+        // unmodelled no-op rather than leaking to the board underneath.
+        IssueListMode::FilterPanel => unchanged(state),
         IssueListMode::Normal => reduce_normal_key(state, c),
     }
 }
@@ -1185,6 +1781,10 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
         'j' => move_selection_down(state),
         'k' => move_selection_up(state),
         '/' => enter_filter_mode(state),
+        // `f` opens the faceted-filter panel (multica-gap #10). `f` is free on the
+        // issues screen (lowercase: the host reserves UPPERCASE `F` for the Fleet
+        // tab-switch).
+        'f' => open_filter_panel(state),
         'c' => enter_create_mode(state),
         // 0046: `s` opens the create wizard as an "add sub-issue" with the
         // highlighted row pre-bound as the parent (never user-typed). Lowercase so
@@ -1695,6 +2295,107 @@ fn set_filter(state: &IssueListState, chip: FilterChip) -> IssueListReduction {
     no_intent(next)
 }
 
+/// Open the `f` faceted-filter panel (multica-gap #10) on the Status section with
+/// the cursor on the first value. No intent — the panel folds facet toggles
+/// locally; the board narrows live as facets are picked.
+fn open_filter_panel(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::FilterPanel;
+    next.filter_panel = Some(FilterPanelState::default());
+    next.clamp_panel_cursor();
+    no_intent(next)
+}
+
+/// Close the panel (Esc / `f`): back to normal navigation, the APPLIED facets
+/// REMAIN applied (closing the picker is not clearing it — multica parity).
+fn close_filter_panel(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::Normal;
+    next.filter_panel = None;
+    no_intent(next)
+}
+
+/// Fold one structured panel key (multica-gap #10). A no-op when the panel is
+/// not open (defensive — the router only sends these in `FilterPanel` mode).
+fn reduce_panel_key(state: &IssueListState, key: PanelKey) -> IssueListReduction {
+    let Some(panel) = state.filter_panel.clone() else {
+        return unchanged(state);
+    };
+    match key {
+        PanelKey::Close => close_filter_panel(state),
+        PanelKey::Clear => clear_facets(state),
+        PanelKey::Up => move_panel_cursor(state, -1),
+        PanelKey::Down => move_panel_cursor(state, 1),
+        PanelKey::Left => switch_panel_section(state, panel.section.prev()),
+        PanelKey::Right => switch_panel_section(state, panel.section.next()),
+        PanelKey::Toggle => toggle_panel_value(state, &panel),
+    }
+}
+
+/// Move the panel's value cursor by `delta` (−1 up / +1 down), saturating at the
+/// active section's value-list bounds.
+fn move_panel_cursor(state: &IssueListState, delta: i32) -> IssueListReduction {
+    let Some(section) = state.filter_panel.as_ref().map(|p| p.section) else {
+        return unchanged(state);
+    };
+    let len = state.facet_counts(section).len();
+    let mut next = state.clone();
+    if let Some(panel) = next.filter_panel.as_mut() {
+        if delta < 0 {
+            panel.cursor = panel.cursor.saturating_sub(1);
+        } else if len > 0 {
+            panel.cursor = (panel.cursor + 1).min(len - 1);
+        }
+    }
+    no_intent(next)
+}
+
+/// Switch the panel's active facet section, resetting the value cursor to the
+/// top of the new section.
+fn switch_panel_section(state: &IssueListState, section: FacetKind) -> IssueListReduction {
+    let mut next = state.clone();
+    if let Some(panel) = next.filter_panel.as_mut() {
+        panel.section = section;
+        panel.cursor = 0;
+    }
+    no_intent(next)
+}
+
+/// Toggle the facet value under the panel cursor (Space / Enter). A no-op when
+/// the active section has no in-scope values (an empty drilled-down list).
+fn toggle_panel_value(state: &IssueListState, panel: &FilterPanelState) -> IssueListReduction {
+    let counts = state.facet_counts(panel.section);
+    let Some((value, _)) = counts.get(panel.cursor) else {
+        return unchanged(state);
+    };
+    toggle_facet(state, panel.section, value)
+}
+
+/// Flip one value in one facet set (multica-gap #10), re-clamping the board
+/// selection AND the panel cursor (the visible set / value list may have shrunk).
+/// The `kind`/`value` mismatch guard keeps a caller from toggling a Priority
+/// value into the Status set.
+fn toggle_facet(state: &IssueListState, kind: FacetKind, value: &FacetValue) -> IssueListReduction {
+    if value.kind() != kind {
+        return unchanged(state);
+    }
+    let mut next = state.clone();
+    next.facets.toggle(value);
+    next.clamp_selection();
+    next.clamp_panel_cursor();
+    no_intent(next)
+}
+
+/// Clear every facet selection (the panel's `C`), re-clamping the selection and
+/// panel cursor into the (re-widened) visible set.
+fn clear_facets(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.facets = FacetFilters::default();
+    next.clamp_selection();
+    next.clamp_panel_cursor();
+    no_intent(next)
+}
+
 /// Fold a host [`HangarEvent`] into the cached rows.
 fn fold_event(state: &IssueListState, event: HangarEvent) -> IssueListReduction {
     let mut next = state.clone();
@@ -1794,7 +2495,22 @@ pub fn render_issue_list(
     // chips render identically here and on the skill manager (P4.6).
     let chip_labels: Vec<&str> = FilterChip::all().iter().map(|c| c.label()).collect();
     let active_chip = FilterChip::all().iter().position(|c| *c == state.filter).unwrap_or(0);
-    crate::widgets::filter_chip::render_chip_bar(buf, top, area_w, &chip_labels, active_chip);
+    let chip_end =
+        crate::widgets::filter_chip::render_chip_bar(buf, top, area_w, &chip_labels, active_chip);
+    // multica-gap #10: a compact gold active-facet summary trails the chips when
+    // ANY facet is applied, so the board reads as filtered even with the panel
+    // closed (fail-visible). Clipped ahead of the right-aligned working chip.
+    if let Some(summary) = state.facets.summary() {
+        let summary_right = area_w.saturating_sub(10);
+        put_str(
+            buf,
+            chip_end.saturating_add(1),
+            top,
+            &summary,
+            GOLD,
+            summary_right,
+        );
+    }
     // Working-agents avatar stack, right-aligned on the same chip row.
     crate::widgets::working_chip::render_working_chip(buf, top, area_w, working_count);
 
@@ -1822,7 +2538,16 @@ pub fn render_issue_list(
     // whole body region; the `x` delete-confirm is the RED bottom-strip overlay;
     // otherwise a transient dispatch note (launch feedback / failure) paints on
     // the bottom row.
-    if let Some(wizard) = state.wizard() {
+    if state.mode == IssueListMode::FilterPanel {
+        // multica-gap #10: the faceted-filter panel over the board.
+        crate::widgets::facet_panel::render(
+            buf,
+            area_w,
+            col_top,
+            bottom,
+            &state.facet_panel_sections(),
+        );
+    } else if let Some(wizard) = state.wizard() {
         render_wizard(
             buf,
             area_w,

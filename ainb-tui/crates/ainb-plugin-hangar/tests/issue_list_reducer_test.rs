@@ -923,3 +923,248 @@ fn d_key_on_empty_board_is_noop() {
     let out = reduce_issue_list(&s, IssueListEvent::Key('d'));
     assert!(out.intent.is_none());
 }
+
+// ---------------------------------------------------------------------------
+// Faceted filtering (multica-gap #10): structured status / priority / label /
+// assignee / due facets with per-value drill-down counts, OR-within / AND-across.
+// ---------------------------------------------------------------------------
+
+use ainb_hangar_proto::lifecycle::IssueLifecycle;
+use ainb_plugin_hangar::screen::issue_list::{AssigneeFacet, FacetKind, FacetValue, PanelKey};
+
+/// A wire `IssueRow` with explicit priority + labels for facet tests.
+/// `priority` is the wire scalar (`3` = P0, `1` = P2, `2` = P1, `0` = P3).
+fn facet_row(id: &str, state: &str, priority: i64, labels: &[&str]) -> IssueRow {
+    let mut r = row(id, state, Some("agent:claude"));
+    r.title = format!("{id} title");
+    r.priority = priority;
+    r.labels = labels.iter().map(|l| (*l).to_string()).collect();
+    r
+}
+
+/// The discriminating 5-row matrix from the gap-10 spec: exactly ONE row is
+/// `todo + P0 + bug` (the sole survivor of the 3-facet AND filter).
+fn facet_matrix() -> IssueListState {
+    IssueListState::with_rows(vec![
+        facet_row("target", "todo", 3, &["bug"]), // todo P0 bug  ← survivor
+        facet_row("d_nolbl", "todo", 3, &[]),     // todo P0 (no label)
+        facet_row("d_p2bug", "todo", 1, &["bug"]), // todo P2 bug
+        facet_row("d_progbug", "in_progress", 3, &["bug"]), // prog P0 bug
+        facet_row("d_chore", "done", 2, &["chore"]), // done P1 chore
+    ])
+}
+
+/// Collect the visible row ids (daemon order) for assertion.
+fn visible_ids(s: &IssueListState) -> Vec<String> {
+    s.visible_rows().map(|r| r.id.as_str().to_string()).collect()
+}
+
+/// Toggling status=todo AND priority=P0 AND label=bug narrows to the SOLE target
+/// row, and the column counts reflect it (Todo (1), In Progress (0)).
+#[test]
+fn three_facet_and_narrows_to_single_row() {
+    let s = facet_matrix();
+    // Baseline: all five visible.
+    assert_eq!(visible_ids(&s).len(), 5);
+
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Status, FacetValue::Status(IssueLifecycle::Todo)),
+    )
+    .state;
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Priority, FacetValue::Priority(3)),
+    )
+    .state;
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Label, FacetValue::Label("bug".to_string())),
+    )
+    .state;
+
+    assert_eq!(visible_ids(&s), vec!["target".to_string()]);
+    assert_eq!(s.column_count(IssueColumn::Todo), 1);
+    assert_eq!(s.column_count(IssueColumn::InProgress), 0);
+    assert_eq!(s.column_count(IssueColumn::Done), 0);
+}
+
+/// OR-within a facet: adding P2 to the {P0} priority set re-admits the P2 decoy
+/// (P0 OR P2), still AND-ed with status=todo AND label=bug.
+#[test]
+fn or_within_priority_readmits_decoy() {
+    let s = facet_matrix();
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Status, FacetValue::Status(IssueLifecycle::Todo)),
+    )
+    .state;
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Label, FacetValue::Label("bug".to_string())),
+    )
+    .state;
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Priority, FacetValue::Priority(3)),
+    )
+    .state;
+    // todo + bug + P0 → only target.
+    assert_eq!(visible_ids(&s), vec!["target".to_string()]);
+
+    // Add P2 (OR within priority): the todo+bug+P2 decoy joins.
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Priority, FacetValue::Priority(1)),
+    )
+    .state;
+    let mut ids = visible_ids(&s);
+    ids.sort();
+    assert_eq!(ids, vec!["d_p2bug".to_string(), "target".to_string()]);
+}
+
+/// Facet counts are drill-down: with status=todo + priority=P0 applied, the LABEL
+/// counts are against status+priority (NOT the label facet), so `bug` shows 1 and
+/// `chore` is absent (zero-count omitted).
+#[test]
+fn label_counts_are_drilldown_against_other_facets() {
+    let s = facet_matrix();
+    // No facets: label counts over all rows → bug 3, chore 1.
+    let all = s.facet_counts(FacetKind::Label);
+    assert_eq!(
+        all,
+        vec![
+            (FacetValue::Label("bug".to_string()), 3),
+            (FacetValue::Label("chore".to_string()), 1),
+        ]
+    );
+
+    // Apply status=todo + priority=P0.
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Status, FacetValue::Status(IssueLifecycle::Todo)),
+    )
+    .state;
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Priority, FacetValue::Priority(3)),
+    )
+    .state;
+    // Drill-down label counts (todo + P0 scope, excluding label facet): only the
+    // target (bug) qualifies; d_nolbl has no label; chore is zero → omitted.
+    assert_eq!(
+        s.facet_counts(FacetKind::Label),
+        vec![(FacetValue::Label("bug".to_string()), 1)]
+    );
+}
+
+/// Priority counts render most-urgent-first (P0 before P2), and no-facet status
+/// counts omit the zero-count Backlog value (only present values appear).
+#[test]
+fn priority_counts_order_p0_first_and_omit_zero() {
+    let s = facet_matrix();
+    let prio = s.facet_counts(FacetKind::Priority);
+    // P0(value 3) = 3 rows, P1(value 2) = 1, P2(value 1) = 1 → P0 first.
+    assert_eq!(
+        prio,
+        vec![
+            (FacetValue::Priority(3), 3),
+            (FacetValue::Priority(2), 1),
+            (FacetValue::Priority(1), 1),
+        ]
+    );
+
+    let status = s.facet_counts(FacetKind::Status);
+    // Only Todo / In Progress / Done present; Backlog + In Review omitted.
+    assert_eq!(
+        status,
+        vec![
+            (FacetValue::Status(IssueLifecycle::Todo), 3),
+            (FacetValue::Status(IssueLifecycle::InProgress), 1),
+            (FacetValue::Status(IssueLifecycle::Done), 1),
+        ]
+    );
+}
+
+/// The `f` key opens the panel; Space toggles the first Status value (Todo, the
+/// first present); Right moves to Priority; Space toggles P0 (first, most-urgent);
+/// Right to Label; Space toggles bug — narrowing to the single target, exactly as
+/// the tmux acceptance drives it.
+#[test]
+fn panel_key_journey_narrows_to_target() {
+    let s = facet_matrix();
+    let s = reduce_issue_list(&s, IssueListEvent::Key('f')).state;
+    assert_eq!(s.mode(), IssueListMode::FilterPanel);
+    // Status section, cursor 0 → Todo (first present value).
+    let s = reduce_issue_list(&s, IssueListEvent::Panel(PanelKey::Toggle)).state;
+    // → Priority section (cursor resets to 0 = P0).
+    let s = reduce_issue_list(&s, IssueListEvent::Panel(PanelKey::Right)).state;
+    let s = reduce_issue_list(&s, IssueListEvent::Panel(PanelKey::Toggle)).state;
+    // → Label section (cursor 0 = bug, the only in-scope label).
+    let s = reduce_issue_list(&s, IssueListEvent::Panel(PanelKey::Right)).state;
+    let s = reduce_issue_list(&s, IssueListEvent::Panel(PanelKey::Toggle)).state;
+
+    assert_eq!(visible_ids(&s), vec!["target".to_string()]);
+    assert!(s.facets().contains(&FacetValue::Status(IssueLifecycle::Todo)));
+    assert!(s.facets().contains(&FacetValue::Priority(3)));
+    assert!(s.facets().contains(&FacetValue::Label("bug".to_string())));
+
+    // Esc closes the panel but the facets REMAIN applied (still one row).
+    let s = reduce_issue_list(&s, IssueListEvent::Panel(PanelKey::Close)).state;
+    assert_eq!(s.mode(), IssueListMode::Normal);
+    assert_eq!(visible_ids(&s), vec!["target".to_string()]);
+}
+
+/// `ClearFacets` (the panel's `C`) drops every selection and re-widens the board.
+#[test]
+fn clear_facets_rewidens_the_board() {
+    let s = facet_matrix();
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Status, FacetValue::Status(IssueLifecycle::Todo)),
+    )
+    .state;
+    assert_eq!(visible_ids(&s).len(), 3);
+    let s = reduce_issue_list(&s, IssueListEvent::ClearFacets).state;
+    assert_eq!(visible_ids(&s).len(), 5);
+    assert!(s.facets().is_empty());
+}
+
+/// The active-facet summary chip reflects the applied facets (fail-visible).
+#[test]
+fn facet_summary_reports_applied_facets() {
+    let s = facet_matrix();
+    assert!(s.facets().summary().is_none());
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Status, FacetValue::Status(IssueLifecycle::Todo)),
+    )
+    .state;
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(FacetKind::Priority, FacetValue::Priority(3)),
+    )
+    .state;
+    let summary = s.facets().summary().expect("summary present");
+    assert!(summary.contains("status:todo"), "summary: {summary}");
+    assert!(summary.contains("priority:P0"), "summary: {summary}");
+}
+
+/// The assignee facet buckets a row by its actor kind (member / agent /
+/// unassigned), AND-ed with the other facets.
+#[test]
+fn assignee_facet_filters_by_actor_kind() {
+    // Give one todo row a member assignee, leave the rest agent-assigned.
+    let mut rows: Vec<IssueRow> = facet_matrix().visible_rows().cloned().collect();
+    rows[1].assignee = Some("member:alice".to_string()); // d_nolbl → member
+    let s = IssueListState::with_rows(rows);
+    let s = reduce_issue_list(
+        &s,
+        IssueListEvent::ToggleFacet(
+            FacetKind::Assignee,
+            FacetValue::Assignee(AssigneeFacet::Member),
+        ),
+    )
+    .state;
+    assert_eq!(visible_ids(&s), vec!["d_nolbl".to_string()]);
+}
