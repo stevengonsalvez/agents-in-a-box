@@ -39,7 +39,8 @@ use ainb_plugin_protocol::{
         SecretStoreGetResult, SnapshotGetParams, SnapshotGetResult, SnapshotPublishParams,
         SnapshotSubscribeParams, SnapshotSubscribeResult, SpawnManagedSubprocessParams,
         SpawnManagedSubprocessResult, UnixSocketCloseParams, UnixSocketDialParams,
-        UnixSocketDialResult, UnixSocketSendParams, WorkspaceGetActiveParams,
+        UnixSocketDialResult, UnixSocketSendParams, WorkspaceCreateParams, WorkspaceCreateResult,
+        WorkspaceDeleteParams, WorkspaceDeleteResult, WorkspaceGetActiveParams,
         WorkspaceGetActiveResult, WorkspaceListParams, WorkspaceListResult,
         WorkspaceSetActiveParams, WorkspaceSetActiveResult, WorkspaceSetDefaultParams,
         WorkspaceSetDefaultResult,
@@ -438,6 +439,35 @@ impl HostClient {
             workspace_id: workspace_id.into(),
         };
         self.send_request(methods::HOST_WORKSPACE_SET_DEFAULT, &params).await
+    }
+
+    /// Create a workspace with `slug` + `name`. Capability-gated by
+    /// `workspace:write` (`-32001` when denied); a bad/taken slug is `-32602`.
+    /// The result carries the new row (`active`/`default` false) — switch to it
+    /// with [`Self::workspace_set_active`] to land in it.
+    pub async fn workspace_create(
+        &self,
+        slug: impl Into<String>,
+        name: impl Into<String>,
+    ) -> Result<WorkspaceCreateResult> {
+        let params = WorkspaceCreateParams {
+            slug: slug.into(),
+            name: name.into(),
+        };
+        self.send_request(methods::HOST_WORKSPACE_CREATE, &params).await
+    }
+
+    /// Delete workspace `workspace_id` and its scoped rows. Capability-gated by
+    /// `workspace:write`; deleting the effective-active or the last workspace is
+    /// `-32602`.
+    pub async fn workspace_delete(
+        &self,
+        workspace_id: impl Into<String>,
+    ) -> Result<WorkspaceDeleteResult> {
+        let params = WorkspaceDeleteParams {
+            workspace_id: workspace_id.into(),
+        };
+        self.send_request(methods::HOST_WORKSPACE_DELETE, &params).await
     }
 
     /// Resolve a pending response, called by the server reader when a

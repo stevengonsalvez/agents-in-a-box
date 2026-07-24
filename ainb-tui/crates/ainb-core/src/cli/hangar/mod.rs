@@ -2195,6 +2195,11 @@ fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) 
         WorkspaceRepoError::BadWhitelist { detail } => {
             anyhow::anyhow!("invalid repo whitelist: {detail}")
         }
+        WorkspaceRepoError::BadSlug { detail } => anyhow::anyhow!("invalid slug: {detail}"),
+        WorkspaceRepoError::SlugTaken => {
+            anyhow::anyhow!("a workspace with that slug already exists")
+        }
+        WorkspaceRepoError::LastWorkspace => anyhow::anyhow!("cannot delete the last workspace"),
         db @ WorkspaceRepoError::Db(_) => {
             anyhow::Error::new(db).context("workspace config mutation failed")
         }

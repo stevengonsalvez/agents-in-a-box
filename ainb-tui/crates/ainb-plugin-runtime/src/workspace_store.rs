@@ -40,8 +40,8 @@ use ainb_hangar_proto::events::HangarEvent;
 use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_protocol::manifest::CapabilityGrant;
 use ainb_plugin_protocol::params::{
-    WorkspaceEntry, WorkspaceGetActiveResult, WorkspaceListResult, WorkspaceSetActiveResult,
-    WorkspaceSetDefaultResult,
+    WorkspaceCreateResult, WorkspaceDeleteResult, WorkspaceEntry, WorkspaceGetActiveResult,
+    WorkspaceListResult, WorkspaceSetActiveResult, WorkspaceSetDefaultResult,
 };
 use parking_lot::RwLock;
 use serde_json::Value;
@@ -88,6 +88,31 @@ impl SwitchState {
     }
 }
 
+/// The daemon-store mutator injected into the host workspace store (P-multica#4).
+///
+/// The runtime layer (`ainb-plugin-runtime`) depends on `ainb-hangar-core` but
+/// deliberately NOT `ainb-hangar-store`, so it cannot touch sqlite directly. The
+/// production catalogue MUTATIONS (create / delete a `workspace` row) are
+/// therefore injected as a trait object — mirroring the `secret_store` DI shape.
+/// The concrete impl (`SqliteWorkspaceMutator`) lives in `ainb-core`, where
+/// `Store::open_default` is already reachable. Slug validation runs store-side; the
+/// runtime passes the strings through.
+pub trait WorkspaceCatalogueMutator: Send + Sync {
+    /// Create a workspace + owner member and return its identity row.
+    ///
+    /// # Errors
+    /// Returns an [`RpcError`] for an invalid/taken slug (`-32602`) or a store
+    /// fault (`-32603`).
+    fn create(&self, slug: &str, name: &str) -> Result<WorkspaceInfo, RpcError>;
+
+    /// Delete a workspace and its scoped child rows.
+    ///
+    /// # Errors
+    /// Returns an [`RpcError`] for an unknown/last workspace (`-32602`) or a store
+    /// fault (`-32603`).
+    fn delete(&self, id: &str) -> Result<(), RpcError>;
+}
+
 /// The injected host workspace store.
 ///
 /// Production reads/writes `~/.agents-in-a-box/hangar/state.toml` and pushes
@@ -112,6 +137,21 @@ pub trait WorkspaceStore: Send + Sync {
     /// # Errors
     /// Returns an [`RpcError`] when the underlying state file cannot be written.
     fn set_default(&self, default: &str) -> Result<(), RpcError>;
+
+    /// Create a workspace (`slug` + `name`), fold it into the catalogue, and
+    /// return its identity row.
+    ///
+    /// # Errors
+    /// Returns an [`RpcError`] when no mutator is injected (`-32603`), or the
+    /// mutator's slug/store error verbatim.
+    fn create(&self, slug: &str, name: &str) -> Result<WorkspaceInfo, RpcError>;
+
+    /// Delete workspace `id` and drop it from the catalogue.
+    ///
+    /// # Errors
+    /// Returns an [`RpcError`] when no mutator is injected (`-32603`), or the
+    /// mutator's store error verbatim.
+    fn delete(&self, id: &str) -> Result<(), RpcError>;
 
     /// Broadcast a [`HangarEvent::WorkspaceChanged`] to subscribers.
     fn broadcast(&self, event: HangarEvent);
@@ -244,6 +284,60 @@ pub fn set_default_logic(
         .expect("WorkspaceSetDefaultResult serializable"))
 }
 
+/// `host/workspace_create` logic: gate on `workspace:write`, create the
+/// workspace, and return the new row (never `active`/`default` — the plugin
+/// switches to it explicitly).
+///
+/// # Errors
+/// Returns `-32001` when the cap is ungranted (before any store hit), or the
+/// store's create error (`-32602` for a bad/taken slug, `-32603` on a store
+/// fault) verbatim.
+pub fn create_logic(
+    grant: &CapabilityGrant,
+    store: &dyn WorkspaceStore,
+    slug: &str,
+    name: &str,
+) -> Result<Value, RpcError> {
+    ensure_write_granted(grant)?;
+    let info = store.create(slug, name)?;
+    let workspace = WorkspaceEntry {
+        id: info.id,
+        slug: info.slug,
+        name: info.name,
+        active: false,
+        default: false,
+    };
+    Ok(serde_json::to_value(WorkspaceCreateResult { workspace })
+        .expect("WorkspaceCreateResult serializable"))
+}
+
+/// `host/workspace_delete` logic: gate on `workspace:write`, validate the id,
+/// refuse the effective-active workspace, then delete.
+///
+/// You cannot delete the tenant you are standing in — the plugin must switch away
+/// first — so a delete targeting the effective-active workspace is rejected with
+/// `-32602` before any store mutation.
+///
+/// # Errors
+/// Returns `-32001` when the cap is ungranted, `-32602` for an unknown id or the
+/// effective-active workspace, or the store's delete error verbatim.
+pub fn delete_logic(
+    grant: &CapabilityGrant,
+    store: &dyn WorkspaceStore,
+    id: &str,
+) -> Result<Value, RpcError> {
+    ensure_write_granted(grant)?;
+    ensure_known(store, id)?;
+    let catalogue = store.catalogue();
+    if store.switch_state().effective_active(&catalogue).as_deref() == Some(id) {
+        return Err(RpcError::invalid_params(format!(
+            "cannot delete the active workspace: {id:?} (switch away first)"
+        )));
+    }
+    store.delete(id)?;
+    Ok(serde_json::to_value(WorkspaceDeleteResult {}).expect("WorkspaceDeleteResult serializable"))
+}
+
 // =====================================================================
 // state.toml-backed production store
 // =====================================================================
@@ -357,10 +451,15 @@ pub struct StateTomlWorkspaceStore {
     path: PathBuf,
     catalogue: RwLock<Vec<WorkspaceInfo>>,
     events: broadcast::Sender<HangarEvent>,
+    /// The daemon-store mutator for create/delete. `None` on the switch-only
+    /// stores (the P5.5 tests) — create/delete then return `-32603`. The
+    /// production store injects the sqlite mutator via [`Self::with_mutator`].
+    mutator: Option<Arc<dyn WorkspaceCatalogueMutator>>,
 }
 
 impl StateTomlWorkspaceStore {
-    /// Construct a store backed by `path` with the given workspace `catalogue`.
+    /// Construct a store backed by `path` with the given workspace `catalogue`
+    /// and NO mutator (create/delete unavailable until [`Self::with_mutator`]).
     #[must_use]
     pub fn new(path: PathBuf, catalogue: Vec<WorkspaceInfo>) -> Self {
         let (events, _rx) = broadcast::channel(64);
@@ -368,7 +467,16 @@ impl StateTomlWorkspaceStore {
             path,
             catalogue: RwLock::new(catalogue),
             events,
+            mutator: None,
         }
+    }
+
+    /// Attach a [`WorkspaceCatalogueMutator`] so create/delete can mutate the
+    /// daemon store. Builder form — chains off [`Self::new`].
+    #[must_use]
+    pub fn with_mutator(mut self, mutator: Arc<dyn WorkspaceCatalogueMutator>) -> Self {
+        self.mutator = Some(mutator);
+        self
     }
 
     /// Replace the cached catalogue (e.g. when the daemon's workspace list
@@ -405,6 +513,30 @@ impl WorkspaceStore for StateTomlWorkspaceStore {
         state.default = Some(default.to_string());
         write_switch_state_at(&self.path, &state)
             .map_err(|e| RpcError::internal(format!("write state.toml: {e}")))
+    }
+
+    fn create(&self, slug: &str, name: &str) -> Result<WorkspaceInfo, RpcError> {
+        let mutator = self
+            .mutator
+            .as_ref()
+            .ok_or_else(|| RpcError::internal("workspace create unavailable (no mutator)"))?;
+        let info = mutator.create(slug, name)?;
+        // Fold the new row into the cached catalogue so `list_logic` reflects it
+        // immediately, then signal subscribers the workspace set changed.
+        self.catalogue.write().push(info.clone());
+        self.broadcast(workspace_changed(None, info.id.clone()));
+        Ok(info)
+    }
+
+    fn delete(&self, id: &str) -> Result<(), RpcError> {
+        let mutator = self
+            .mutator
+            .as_ref()
+            .ok_or_else(|| RpcError::internal("workspace delete unavailable (no mutator)"))?;
+        mutator.delete(id)?;
+        self.catalogue.write().retain(|w| w.id != id);
+        self.broadcast(workspace_changed(None, id.to_string()));
+        Ok(())
     }
 
     fn broadcast(&self, event: HangarEvent) {
