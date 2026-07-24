@@ -24,7 +24,7 @@ use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, W
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
     ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow, InboxEntryRow, IssueRow,
-    PresenceState, SkillFile, SkillRow, TaskCardRow,
+    PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
@@ -439,8 +439,13 @@ pub async fn agents_list(
 ) -> Result<Vec<ActorRow>, sqlx::Error> {
     let mut out = Vec::new();
 
+    // Fetch the whole workspace's live task counts ONCE (multica buildPresenceMap)
+    // so the per-agent workload dimension is an O(1) map lookup, not an N+1 query.
+    let workload_map = TaskRepo::live_workload_by_workspace(pool, workspace_id).await?;
+
     for agent in AgentRepo::list_by_workspace(pool, workspace_id).await? {
-        out.push(agent_actor_row(pool, &agent).await?);
+        let (running, queued) = workload_map.get(&agent.id).copied().unwrap_or((0, 0));
+        out.push(agent_actor_row_with_counts(pool, &agent, running, queued).await?);
     }
 
     for member in members_of(pool, workspace_id).await? {
@@ -449,6 +454,8 @@ pub async fn agents_list(
             display_name: member.email,
             subtitle: member.role,
             presence: PresenceState::Online,
+            // A human member carries no live task workload — always Idle.
+            workload: Workload::Idle,
             is_agent: false,
             recent_rank: None,
         });
@@ -759,20 +766,41 @@ fn presence_from_status(status: &str) -> PresenceState {
 }
 
 /// Map one store [`Agent`](ainb_hangar_store::repo::agent::Agent) onto its picker
-/// [`ActorRow`], deriving presence from the backing runtime's status.
+/// [`ActorRow`], deriving presence from the backing runtime's status and the
+/// workload dimension from the agent's OWN live task counts.
 ///
-/// Shared by [`agents_list`] and the e38.15 agent-CRUD wrappers
-/// ([`agent_update`] / [`agent_archive`]) so the row a mutation answers with is
-/// byte-identical to the same agent's `agents_list` row. A missing runtime maps
+/// Shared by the e38.15 agent-CRUD wrappers ([`agent_update`] / [`agent_archive`])
+/// so the row a mutation answers with is byte-identical to the same agent's
+/// `agents_list` row. Fetches the single-agent live counts itself (the batch
+/// [`agents_list`] path instead resolves them once and calls
+/// [`agent_actor_row_with_counts`] directly, avoiding an N+1 query).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the runtime or task-count lookup fails.
+async fn agent_actor_row(
+    pool: &SqlitePool,
+    agent: &ainb_hangar_store::repo::agent::Agent,
+) -> Result<ActorRow, sqlx::Error> {
+    let (running, queued) = TaskRepo::live_workload_for_agent(pool, &agent.id).await?;
+    agent_actor_row_with_counts(pool, agent, running, queued).await
+}
+
+/// Build one agent's picker [`ActorRow`] from its store row plus already-resolved
+/// live task counts (`running`, `queued`), deriving presence from the runtime and
+/// workload via [`Workload::derive`]. The counts-taking seam lets [`agents_list`]
+/// batch the workload query once for the whole workspace. A missing runtime maps
 /// to `Offline` (the runtime FK is required, but a deleted-out-of-band runtime
 /// must not panic the snapshot).
 ///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] if the runtime lookup fails.
-async fn agent_actor_row(
+async fn agent_actor_row_with_counts(
     pool: &SqlitePool,
     agent: &ainb_hangar_store::repo::agent::Agent,
+    running: i64,
+    queued: i64,
 ) -> Result<ActorRow, sqlx::Error> {
     let presence = match AgentRuntimeRepo::get(pool, &agent.runtime_id).await? {
         Some(rt) => presence_from_status(&rt.status),
@@ -783,6 +811,7 @@ async fn agent_actor_row(
         display_name: agent.name.clone(),
         subtitle: "agent".to_string(),
         presence,
+        workload: Workload::derive(running, queued),
         is_agent: true,
         recent_rank: None,
     })

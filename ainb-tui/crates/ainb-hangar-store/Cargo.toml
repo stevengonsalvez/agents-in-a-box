@@ -56,6 +56,9 @@ tracing-subscriber = { workspace = true }
 # tests do not inherit `#[cfg(test)]`, so the feature must be turned on
 # explicitly for the test build.
 ainb-hangar-store = { path = ".", features = ["test-support"] }
+# Test-only: the workload integration test folds live counts through the shared
+# `Workload::derive` so it pins the exact same derivation the daemon ships.
+ainb-hangar-proto = { path = "../ainb-hangar-proto" }
 
 # Local lint config rather than `workspace = true` because the
 # workspace-level lints declare lint groups (clippy::all, ::pedantic,

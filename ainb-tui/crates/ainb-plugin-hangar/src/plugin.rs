@@ -6205,6 +6205,7 @@ mod tests {
             display_name: "alice".into(),
             subtitle: "dev".into(),
             presence: PresenceState::Online,
+            workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent: false,
             recent_rank: Some(0),
         }]);

@@ -520,6 +520,78 @@ impl TaskRepo {
         rows.iter().map(task_from_row).collect()
     }
 
+    /// Live (non-terminal) task counts per agent for a whole workspace, in one
+    /// O(N) pass — the batch backing for `agents_list`'s workload dimension
+    /// (multica `buildPresenceMap`). Returns `agent_id -> (running, queued)`
+    /// where `queued` folds Hangar's `queued` + `dispatched` (claimed-but-not-yet-
+    /// running is still "waiting to work"). Terminal rows (`done`/`failed`/
+    /// `cancelled`) are excluded, so history never reaches the list-level dot.
+    /// An agent with zero live tasks is absent from the map (the caller defaults
+    /// it to `Idle`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn live_workload_by_workspace(
+        pool: &SqlitePool,
+        workspace_id: &str,
+    ) -> Result<std::collections::HashMap<String, (i64, i64)>, sqlx::Error> {
+        // SQLite booleans are 0/1, so `SUM(status = 'running')` counts the running
+        // rows (same idiom as `issue_aggregate_terminal_state`). The predicate
+        // pre-filters to live rows so the GROUP BY only spans agents with work.
+        let rows = sqlx::query(
+            "SELECT agent_id, \
+                    COALESCE(SUM(status = 'running'), 0) AS running, \
+                    COALESCE(SUM(status IN ('queued','dispatched')), 0) AS queued \
+               FROM agent_task_queue \
+              WHERE workspace_id = ? \
+                AND status IN ('queued','dispatched','running') \
+              GROUP BY agent_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("agent_id")?,
+                    (
+                        row.try_get::<i64, _>("running")?,
+                        row.try_get::<i64, _>("queued")?,
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    /// Live (non-terminal) counts for ONE agent — the single-row backing for the
+    /// `agent_update` / `agent_archive` CRUD responses, so their row's workload
+    /// is byte-identical to the same agent's `agents_list` row. Returns
+    /// `(running, queued)`, or `(0, 0)` when the agent has no live task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn live_workload_for_agent(
+        pool: &SqlitePool,
+        agent_id: &str,
+    ) -> Result<(i64, i64), sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(status = 'running'), 0) AS running, \
+                    COALESCE(SUM(status IN ('queued','dispatched')), 0) AS queued \
+               FROM agent_task_queue \
+              WHERE agent_id = ? \
+                AND status IN ('queued','dispatched','running')",
+        )
+        .bind(agent_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((
+            row.try_get::<i64, _>("running")?,
+            row.try_get::<i64, _>("queued")?,
+        ))
+    }
+
     /// Move one task to `to_status`, **scoped to `workspace_id`**, stamping the
     /// lifecycle timestamps the new status implies. Backs the Kanban card-move
     /// (P8.4): `Shift+←/→` drags a card to a new column.

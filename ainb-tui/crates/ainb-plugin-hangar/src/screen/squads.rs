@@ -783,6 +783,7 @@ mod tests {
             display_name: name.into(),
             subtitle: String::new(),
             presence,
+            workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent,
             recent_rank: None,
         }
@@ -908,7 +909,11 @@ mod tests {
     fn create_agent_flow_raises_intent_and_esc_cancels_in_one_press() {
         let state = SquadsState::from_snapshot(&snapshot(), &actors());
         let opened = reduce_squads(&state, SquadsEvent::Key('n')).state;
-        assert_eq!(opened.agent_buffer(), Some(""), "n opens the agent-create input");
+        assert_eq!(
+            opened.agent_buffer(),
+            Some(""),
+            "n opens the agent-create input"
+        );
         assert!(!opened.is_creating(), "the squad-create input stays closed");
 
         // Type "bot".
@@ -919,12 +924,18 @@ mod tests {
 
         // Enter submits and closes the input.
         let out = reduce_squads(&typed, SquadsEvent::Key('\n'));
-        assert_eq!(out.intent, Some(SquadsIntent::CreateAgent { name: "bot".into() }));
+        assert_eq!(
+            out.intent,
+            Some(SquadsIntent::CreateAgent { name: "bot".into() })
+        );
         assert!(out.state.agent_buffer().is_none(), "input closes on submit");
 
         // A SINGLE Esc on the open input cancels with no intent.
         let cancel = reduce_squads(&typed, SquadsEvent::Esc);
-        assert!(cancel.state.agent_buffer().is_none(), "one Esc closes the agent input");
+        assert!(
+            cancel.state.agent_buffer().is_none(),
+            "one Esc closes the agent input"
+        );
         assert!(cancel.intent.is_none());
     }
 
@@ -935,7 +946,11 @@ mod tests {
         let opened = reduce_squads(&state, SquadsEvent::Key('n')).state;
         let out = reduce_squads(&opened, SquadsEvent::Key('\n'));
         assert!(out.intent.is_none());
-        assert_eq!(out.state.agent_buffer(), Some(""), "blank submit keeps the input open");
+        assert_eq!(
+            out.state.agent_buffer(),
+            Some(""),
+            "blank submit keeps the input open"
+        );
     }
 
     /// A blank create submit is a no-op — the input stays open, no intent.

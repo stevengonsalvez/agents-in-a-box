@@ -2059,7 +2059,7 @@ pub struct DaemonConfigListResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::PresenceState;
+    use crate::events::{PresenceState, Workload};
 
     /// The params + result envelopes round-trip through JSON.
     #[test]
@@ -2144,6 +2144,7 @@ mod tests {
                 display_name: "claude-agent".into(),
                 subtitle: "agent · claude".into(),
                 presence: PresenceState::Online,
+                workload: Workload::Working,
                 is_agent: true,
                 recent_rank: Some(0),
             }],

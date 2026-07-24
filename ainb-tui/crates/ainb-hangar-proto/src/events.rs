@@ -238,6 +238,50 @@ pub enum PresenceState {
     Offline,
 }
 
+/// Workload dimension (multica `Workload`), orthogonal to availability.
+///
+/// Derived from LIVE task counts only — terminal tasks
+/// (`done`/`failed`/`cancelled`) are excluded, so history never bleeds into the
+/// list-level dot. An agent is a `(presence, workload)` pair: e.g.
+/// `online · working`, `unstable · queued`, `offline · idle`. `Unstable`
+/// (runtime degraded) must never be conflated with `Queued` (waiting work) — the
+/// two dimensions ([`PresenceState`] and this) are computed independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Workload {
+    /// At least one task is `running` (`⚙ working`, green).
+    Working,
+    /// No running task but >=1 `queued`/`dispatched` (`◔ queued`, amber).
+    Queued,
+    /// No live tasks (`· idle`, gray).
+    #[default]
+    Idle,
+}
+
+impl Workload {
+    /// Whether this is the default `Idle` (backs the wire `skip_serializing_if`,
+    /// so an idle workload is omitted from the JSON and the shape only grows for
+    /// a producer that supplies a non-idle value).
+    #[must_use]
+    pub const fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    /// Derive the workload from an agent's LIVE task counts: `running > 0 →
+    /// Working`, else `queued > 0 → Queued`, else `Idle`. Kept here so the store,
+    /// daemon, and tests share one definition (multica `deriveWorkload`).
+    #[must_use]
+    pub const fn derive(running: i64, queued: i64) -> Self {
+        if running > 0 {
+            Self::Working
+        } else if queued > 0 {
+            Self::Queued
+        } else {
+            Self::Idle
+        }
+    }
+}
+
 /// A wire-side issue row.
 ///
 /// This is the daemon's read model carried to the plugin — distinct from the
@@ -384,6 +428,12 @@ pub struct ActorRow {
     pub subtitle: String,
     /// Current presence (drives the inline 3-state dot).
     pub presence: PresenceState,
+    /// Live workload dimension (multica `Workload`), orthogonal to `presence`.
+    /// Derived from the agent's live task counts; `Idle` for members and for a
+    /// pre-workload snapshot (`#[serde(default)]`). Omitted from the wire when
+    /// `Idle` so the shape only grows for a producer that supplies it.
+    #[serde(default, skip_serializing_if = "Workload::is_idle")]
+    pub workload: Workload,
     /// Whether this actor is an agent (`true`) or a human member (`false`).
     pub is_agent: bool,
     /// Recent-use rank: `Some(n)` pins the actor in the `RECENT` section (lower
@@ -605,4 +655,53 @@ pub struct CommentRow {
     pub body: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `Workload::derive` folds live counts per the multica precedence:
+    /// `running > 0 → Working` beats `queued > 0 → Queued` beats `Idle`.
+    #[test]
+    fn workload_derive_precedence() {
+        assert_eq!(Workload::derive(0, 0), Workload::Idle);
+        assert_eq!(Workload::derive(0, 3), Workload::Queued);
+        assert_eq!(Workload::derive(2, 0), Workload::Working);
+        // running wins even when both are non-zero.
+        assert_eq!(Workload::derive(1, 5), Workload::Working);
+    }
+
+    /// An `ActorRow` JSON without a `workload` key decodes to `Idle` (a
+    /// pre-workload snapshot), and an `Idle` workload is omitted from the wire.
+    #[test]
+    fn actor_row_workload_is_additive_wire() {
+        let json = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent","presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.workload, Workload::Idle);
+
+        // Idle is skip_serializing_if — the key never appears for an idle row.
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("workload"),
+            "idle workload must be omitted from the wire: {out}"
+        );
+    }
+
+    /// A non-idle workload round-trips through JSON as a `snake_case` token.
+    #[test]
+    fn actor_row_workload_round_trips() {
+        let row = ActorRow {
+            actor_ref: "agent:a1".into(),
+            display_name: "bot".into(),
+            subtitle: "agent".into(),
+            presence: PresenceState::Online,
+            workload: Workload::Working,
+            is_agent: true,
+            recent_rank: None,
+        };
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(out.contains("\"workload\":\"working\""), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
+    }
 }
