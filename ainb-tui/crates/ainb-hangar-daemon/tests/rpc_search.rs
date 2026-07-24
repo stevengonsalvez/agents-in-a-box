@@ -129,6 +129,8 @@ async fn insert_issue(pool: &sqlx::SqlitePool, ws: &str, id: &str, title: &str, 
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            parent_issue_id: None,
+            stage: None,
         },
     )
     .await

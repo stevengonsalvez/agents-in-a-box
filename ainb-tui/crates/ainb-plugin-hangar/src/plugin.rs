@@ -3057,6 +3057,7 @@ impl HangarPlugin {
             target_branch,
             agent,
             assignee,
+            parent_issue_id,
         } = action;
         let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
             self.screens.issue_list.set_note("create failed: daemon link is down");
@@ -3076,6 +3077,13 @@ impl HangarPlugin {
         // and is appended to the dispatched brief; omitted when blank.
         if let Some(link) = external_ref {
             params["external_ref"] = serde_json::Value::String(link);
+        }
+        // 0046 sub-issues: when the wizard was opened as an "add sub-issue" (`s`),
+        // thread the pre-bound parent so the daemon links the new issue as a child
+        // (`issue.parent_issue_id`). Omitted for a top-level `c` create so the wire
+        // shape only grows when a sub-issue is actually created.
+        if let Some(parent) = parent_issue_id {
+            params["parent_issue_id"] = serde_json::Value::String(parent);
         }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,
@@ -3336,6 +3344,9 @@ impl HangarPlugin {
     /// a cross-tenant data leak. So after a `SetActive`, re-issue the
     /// workspace-scoped snapshot requests (now scoped to the new `ws_id`).
     async fn apply_workspace_action(&mut self, host: &HostClient, action: WorkspaceAction) {
+        // Create is special: on success it also auto-switches into the new
+        // tenant, so track whether a data-plane re-scope is required.
+        let mut rescope = matches!(action, WorkspaceAction::SetActive(_));
         let result = match &action {
             // A bare refresh just pulls the list (no mutating cap call).
             WorkspaceAction::Refresh => Ok(()),
@@ -3345,18 +3356,36 @@ impl HangarPlugin {
             WorkspaceAction::SetDefault(id) => {
                 host.workspace_set_default(id.clone()).await.map(|_| ())
             }
+            WorkspaceAction::Create { slug, name } => {
+                match host.workspace_create(slug.clone(), name.clone()).await {
+                    // Auto-switch to the new tenant so the operator lands in it,
+                    // then re-scope the data plane below.
+                    Ok(r) => {
+                        host.workspace_set_active(r.workspace.id.clone()).await.ok();
+                        rescope = true;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            WorkspaceAction::Delete(id) => {
+                // A delete re-scopes too: the active workspace may have moved to a
+                // surviving tenant (the host resolves effective-active).
+                rescope = true;
+                host.workspace_delete(id.clone()).await.map(|_| ())
+            }
         };
         if let Err(e) = result {
             let _ = host.log_info(format!("hangar: workspace action failed: {e}")).await;
             return;
         }
         self.refresh_workspaces(host).await;
-        // After an active-workspace switch, re-pull every workspace-scoped
-        // snapshot so the screens reflect the NEW tenant's data (not the prior
-        // one's stale cache). `refresh_workspaces` already moved `ws_id`, and
-        // `fetch_snapshots` reads it, so the re-fetch is scoped to the switch
-        // target.
-        if matches!(action, WorkspaceAction::SetActive(_)) {
+        // After an active-workspace switch/create/delete, re-pull every
+        // workspace-scoped snapshot so the screens reflect the NEW tenant's data
+        // (not the prior one's stale cache). `refresh_workspaces` already moved
+        // `ws_id`, and `fetch_snapshots` reads it, so the re-fetch is scoped to
+        // the effective-active target.
+        if rescope {
             self.fetch_snapshots(host).await;
         }
     }
@@ -3548,7 +3577,7 @@ impl HangarPlugin {
         // task-detail comment-compose modal (e38.5) and the settings key-entry
         // (API-key) modal each treat every printable key as typed text. Without
         // this guard the routing layer would swallow the global tab-switch chars
-        // (`C`/`U`/`I`/`K`/`D`/`L`/`,`) first — so typing an uppercase `C` in an
+        // (`C`/`U`/`I`/`K`/`d`/`L`/`,`) first — so typing an uppercase `C` in an
         // API key or a comment draft would switch tabs and drop the character
         // instead of inserting it. Route straight to the screen reducer (which
         // owns Esc-to-close for both), mirroring the issue-list capture guard.
@@ -3564,18 +3593,20 @@ impl HangarPlugin {
             }
             return;
         }
-        // The Settings screen has TWO text-capture surfaces: the key-entry
-        // (API-key) modal and the Daemon-section numeric-config overlay. Both must
-        // be listed here — the config overlay's realistic values (30, 120, 240,
-        // 1440) all contain a digit the routing layer claims as a tab switch, so
-        // omitting it makes typing a number teleport the user to another tab and
-        // drop the keystroke. Keep this in sync with `is_capturing_text`.
+        // The Settings screen has THREE text-capture surfaces: the key-entry
+        // (API-key) modal, the Daemon-section numeric-config overlay, and the
+        // new-workspace name modal (P-multica#4). All must be listed here — a
+        // workspace name like `Beta` / `QA` / `Data` contains an uppercase letter
+        // the routing layer claims as a tab switch (`B`→Boards, `q`→quit, …), so
+        // omitting the name modal makes typing such a name teleport the user to
+        // another tab and drop the keystroke (exactly as the config overlay's
+        // digits did). Keep this in sync with `is_capturing_text`.
         if matches!(app.screen, Screen::Settings)
-            && self
-                .screens
-                .settings
-                .as_ref()
-                .is_some_and(|s| s.key_entry_open() || s.config_input_buffer().is_some())
+            && self.screens.settings.as_ref().is_some_and(|s| {
+                s.key_entry_open()
+                    || s.config_input_buffer().is_some()
+                    || s.workspace_name_input().is_some()
+            })
         {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
@@ -4108,6 +4139,9 @@ impl HangarPlugin {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -4470,6 +4504,20 @@ impl HangarPlugin {
                     self.app = Some(next);
                 }
             }
+            NavIntent::MarkIssueDone(issue_id) => {
+                // 0046: `d` marks the highlighted issue Done through the SAME seam
+                // the context-menu `Move to ▸ Done` uses: move the card
+                // optimistically (so the board reflects it at once) AND arm the
+                // durable `hangar/issue_update{state:"done"}` RPC (drained + fired
+                // in `render`). On the daemon that terminal transition fires the
+                // child-done → parent cascade for a sub-issue.
+                let to_status = ainb_hangar_proto::lifecycle::IssueLifecycle::Done;
+                if let Some(moved) =
+                    self.screens.issue_list.move_issue_to(issue_id.as_str(), to_status)
+                {
+                    self.pending_issue_state_update = Some((moved, to_status));
+                }
+            }
             NavIntent::OpenPrUrl(url) => {
                 // Open the captured PR URL in the host browser (P9.2). The
                 // routing layer only raises this when the task has a `pr_url`, so
@@ -4741,14 +4789,14 @@ impl Plugin for HangarPlugin {
                 .task_detail
                 .as_ref()
                 .is_some_and(|td| td.compose_buffer().is_some()),
-            // Both Settings capture surfaces: the key-entry modal AND the
-            // Daemon-section numeric-config overlay (kept in sync with the
-            // routing guard in `on_key`).
-            Screen::Settings => self
-                .screens
-                .settings
-                .as_ref()
-                .is_some_and(|s| s.key_entry_open() || s.config_input_buffer().is_some()),
+            // All THREE Settings capture surfaces: the key-entry modal, the
+            // Daemon-section numeric-config overlay, AND the new-workspace name
+            // modal (kept in sync with the routing guard in `on_key`).
+            Screen::Settings => self.screens.settings.as_ref().is_some_and(|s| {
+                s.key_entry_open()
+                    || s.config_input_buffer().is_some()
+                    || s.workspace_name_input().is_some()
+            }),
             Screen::Squads => self.screens.squads.is_creating(),
             // Every open Boards overlay (create-title / profile-pick / column
             // rename / `Run ▾`) consumes all keys as input, per its routing guard.
@@ -5504,6 +5552,9 @@ mod tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         }]);
         p
     }
@@ -5653,6 +5704,9 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -5677,6 +5731,9 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
             },
         ]);
 
@@ -5862,6 +5919,9 @@ mod tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -5946,6 +6006,9 @@ mod tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -6022,6 +6085,9 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
             })
             .collect();
         p.screens.set_issues(rows);
@@ -6102,6 +6168,9 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -6126,6 +6195,9 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -6547,6 +6619,9 @@ mod tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);
@@ -6702,6 +6777,124 @@ mod tests {
             "digits accumulate in the overlay"
         );
         assert!(matches!(p.app_state().screen, Screen::Settings));
+    }
+
+    /// Seed a plugin on the Settings screen's Workspaces section with two
+    /// workspaces (`default` active + `acme`), so the new-workspace name modal
+    /// (P-multica#4) can be driven through the REAL `on_key` routing.
+    fn plugin_on_workspaces_settings() -> HangarPlugin {
+        use crate::screen::settings::{SettingsSection, SettingsState};
+        use ainb_hangar_proto::settings::{HealthSnapshot, WorkspaceRow};
+        let mut p = connected_plugin_with_issue();
+        let health = HealthSnapshot {
+            socket_path: "/tmp/x.sock".into(),
+            pid: 1,
+            uptime_secs: 0,
+            version: "test".into(),
+            connected: true,
+        };
+        let workspaces = vec![
+            WorkspaceRow {
+                id: "01WSDEFAULT0000000000000000".into(),
+                slug: "default".into(),
+                name: "Default Workspace".into(),
+                current: true,
+                default: true,
+            },
+            WorkspaceRow {
+                id: "01WSACME000000000000000000".into(),
+                slug: "acme".into(),
+                name: "acme".into(),
+                current: false,
+                default: false,
+            },
+        ];
+        p.screens.settings = Some(SettingsState::new(
+            health,
+            Vec::new(),
+            Vec::new(),
+            workspaces,
+        ));
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Settings;
+        p.app = Some(app);
+        // Navigate Daemon -> Workspaces (j x3) through the real routing.
+        for _ in 0..3 {
+            p.on_key(&key_press(KeyCode::Char { ch: 'j' }));
+        }
+        assert_eq!(
+            p.screens.settings.as_ref().map(SettingsState::section),
+            Some(SettingsSection::Workspaces),
+            "j x3 lands on the Workspaces section"
+        );
+        p
+    }
+
+    /// REGRESSION (routing level, not the pure reducer, P-multica#4): the
+    /// new-workspace name modal is a text-capture surface. A realistic workspace
+    /// name (`Beta`, `QA`, `Data`) begins with an uppercase letter that
+    /// `routing_event` claims as a tab switch (`B`→Boards, `q`→quit, …), so
+    /// without registering the modal in BOTH capture guards (`on_key` +
+    /// `captures_text`) the first such keystroke teleported the user to another
+    /// tab and dropped the modal — the headline create path was unusable for any
+    /// name starting with a claimed char. The pure `reduce_settings` tests never
+    /// see this because they bypass `routing_event`. Drive the real `on_key`.
+    #[test]
+    fn typing_a_workspace_name_with_a_tab_char_stays_in_the_modal() {
+        let mut p = plugin_on_workspaces_settings();
+
+        // `n` opens the name modal with an empty buffer.
+        p.on_key(&key_press(KeyCode::Char { ch: 'n' }));
+        assert_eq!(
+            p.screens.settings.as_ref().and_then(|s| s.workspace_name_input()),
+            Some(""),
+            "n opens the new-workspace name modal"
+        );
+
+        // THE REGRESSION: `B` (routing maps 'B' → Boards) must extend the name
+        // buffer, NOT switch tabs. Type "Beta" — every char stays in the modal.
+        for ch in ['B', 'e', 't', 'a'] {
+            p.on_key(&key_press(KeyCode::Char { ch }));
+        }
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings),
+            "typing a workspace name must NOT switch screens, got {:?}",
+            p.app_state().screen
+        );
+        assert_eq!(
+            p.screens.settings.as_ref().and_then(|s| s.workspace_name_input()),
+            Some("Beta"),
+            "the full name (incl. the tab-switch char) lands in the modal"
+        );
+
+        // Enter derives the slug and arms the create action carrying the FULL name.
+        p.on_key(&key_press(KeyCode::Enter));
+        match p.screens.take_pending_ws_action() {
+            Some(WorkspaceAction::Create { slug, name }) => {
+                assert_eq!(name, "Beta", "the create carries the full typed name");
+                assert_eq!(slug, "beta", "slug is derived lower-case from the name");
+            }
+            other => panic!("expected a pending Create action, got {other:?}"),
+        }
+    }
+
+    /// The plugin must declare `captures_text` while the new-workspace name modal
+    /// is open (P-multica#4) so the HOST suppresses its own global single-char
+    /// shortcuts (`H`/`?`/`W`) and forwards them into the name instead of eating
+    /// them — the second half of the capture-surface contract (the first is the
+    /// `on_key` routing guard proven above). Kept in lock-step with that guard.
+    #[test]
+    fn name_modal_declares_text_capture() {
+        let mut p = plugin_on_workspaces_settings();
+        assert!(
+            !p.captures_text(),
+            "no capture surface is open before the modal"
+        );
+        p.on_key(&key_press(KeyCode::Char { ch: 'n' }));
+        assert!(
+            p.captures_text(),
+            "an open new-workspace name modal must declare text-capture"
+        );
     }
 
     /// REGRESSION: two config edits landing before a render pass must BOTH be

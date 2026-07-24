@@ -25,6 +25,9 @@ pub mod finalize;
 
 /// `{queued|dispatched|running} -> cancelled`.
 pub mod cancel;
+/// Child-done → parent cascade: post a roll-up comment on the parent when a
+/// sub-issue completes and closes its stage barrier (migration 0046).
+pub mod child_done;
 /// `running -> done` with the structured result payload.
 pub mod complete;
 /// `{running|queued} -> failed` with a typed [`fail::FailureReason`].

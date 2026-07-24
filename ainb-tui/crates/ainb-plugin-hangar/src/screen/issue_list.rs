@@ -404,6 +404,16 @@ pub struct CreateWizard {
     target_branch: String,
     /// The highlighted agent chip (index into [`AgentChip::ALL`]).
     agent_cursor: usize,
+    /// 0046 sub-issues: when the wizard was opened as an "add sub-issue" (`s` on a
+    /// highlighted row, or the context-menu `Add sub-issue`), the parent issue's
+    /// wire id, carried into the `hangar/issue_create` payload so the daemon links
+    /// the new issue as a child. `None` = a top-level issue (the plain `c` create).
+    /// Never user-typed: it is only ever pre-bound from the highlighted row.
+    parent_issue_id: Option<String>,
+    /// The parent issue's human display (its `HGR-<n>` id + title) shown in the
+    /// read-only `Sub-issue of …` banner atop the wizard. Set iff `parent_issue_id`
+    /// is set.
+    parent_display: Option<String>,
 }
 
 impl Default for CreateWizard {
@@ -421,6 +431,8 @@ impl Default for CreateWizard {
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             agent_cursor: 0,
+            parent_issue_id: None,
+            parent_display: None,
         }
     }
 }
@@ -449,6 +461,20 @@ impl CreateWizard {
     #[must_use]
     pub fn link(&self) -> &str {
         &self.link
+    }
+
+    /// The parent issue's wire id when this wizard is an "add sub-issue" (`s` /
+    /// context-menu `Add sub-issue`), else `None` (a top-level `c` create).
+    #[must_use]
+    pub fn parent_issue_id(&self) -> Option<&str> {
+        self.parent_issue_id.as_deref()
+    }
+
+    /// The parent issue's human display for the `Sub-issue of …` banner, set iff
+    /// [`Self::parent_issue_id`] is set.
+    #[must_use]
+    pub fn parent_display(&self) -> Option<&str> {
+        self.parent_display.as_deref()
     }
 
     /// The picked repo ref, or `None` until one is chosen.
@@ -814,6 +840,10 @@ impl IssueListState {
                                 a.split_once(':').map_or(a, |(_, id)| id).chars().next()
                             }),
                             linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
+                            // 0046: the sub-issue roll-up, so a PARENT card shows a
+                            // `⊟ done/total` badge that flips to gold `1/1` when its
+                            // last child completes. `None` for a childless issue.
+                            subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
                         })
                         .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
@@ -1082,7 +1112,17 @@ pub enum IssueListIntent {
         /// carried as the run's assignee override so the dispatch routes to it.
         /// `None` when the roster was empty and a provider chip was chosen instead.
         assignee: Option<String>,
+        /// 0046 sub-issues: the parent issue's wire id when the wizard was opened
+        /// as an "add sub-issue" (`s` / context-menu `Add sub-issue`), threaded into
+        /// `hangar/issue_create` so the daemon links the new issue as a child.
+        /// `None` for a top-level `c` create.
+        parent_issue_id: Option<String>,
     },
+    /// 0046 sub-issues: mark the highlighted issue **Done** from the keyboard
+    /// (`d`), the same lifecycle move the context-menu `Move to ▸ Done` raises,
+    /// so it routes through `hangar/issue_update{state:"done"}` on the daemon and
+    /// fires the child-done → parent cascade. Carries the target issue id.
+    MarkDone(IssueId),
     /// Delete the confirmed issue (63d): raised ONLY by Enter on the `x` RED
     /// confirm overlay. The plugin glue lifts it into `hangar/issue_delete`; the
     /// daemon's `IssueDeleted` push then drops the row from the list.
@@ -1146,6 +1186,19 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
         'k' => move_selection_up(state),
         '/' => enter_filter_mode(state),
         'c' => enter_create_mode(state),
+        // 0046: `s` opens the create wizard as an "add sub-issue" with the
+        // highlighted row pre-bound as the parent (never user-typed). Lowercase so
+        // it falls through to this reducer: the host reserves UPPERCASE `S` as the
+        // global Squads tab-switch (`routing_event`).
+        's' => enter_create_subissue_mode(state),
+        // 0046: `d` marks the highlighted issue Done through the daemon
+        // (`hangar/issue_update{state:"done"}`), firing the child-done cascade
+        // when the row is a sub-issue. No-op when nothing is selected. Lowercase:
+        // UPPERCASE `D` is the host's global Daemon-health tab-switch.
+        'd' => state.selected_row().map_or_else(
+            || unchanged(state),
+            |row| with_intent(state.clone(), IssueListIntent::MarkDone(row.id.clone())),
+        ),
         'x' => enter_confirm_delete(state),
         'a' => state.selected_row().map_or_else(
             || unchanged(state),
@@ -1221,6 +1274,30 @@ fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     next.mode = IssueListMode::CreateInput;
     next.wizard = Some(CreateWizard::default());
     // A fresh wizard supersedes any stale dispatch note.
+    next.note = None;
+    no_intent(next)
+}
+
+/// Open the create wizard as an "add sub-issue" (`s`, 0046): identical to the
+/// plain `c` create except the highlighted row is pre-bound as the parent (its
+/// wire id + a `HGR-<n> title` display for the read-only banner). No-op when
+/// nothing is selected (a sub-issue always needs a parent row to hang from).
+fn enter_create_subissue_mode(state: &IssueListState) -> IssueListReduction {
+    let Some(row) = state.selected_row() else {
+        return unchanged(state);
+    };
+    // Prefer the human display id (`HGR-7`) with the title; fall back to the raw
+    // id when a pre-63l.3 snapshot lacks a display id (mirrors `arm_confirm_delete`).
+    let display = match &row.display_id {
+        Some(d) => format!("{d} {}", row.title),
+        None => row.title.clone(),
+    };
+    let mut wizard = CreateWizard::default();
+    wizard.parent_issue_id = Some(row.id.as_str().to_string());
+    wizard.parent_display = Some(display);
+    let mut next = state.clone();
+    next.mode = IssueListMode::CreateInput;
+    next.wizard = Some(wizard);
     next.note = None;
     no_intent(next)
 }
@@ -1603,6 +1680,9 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
             target_branch: opt(&wizard.target_branch),
             agent,
             assignee,
+            // 0046: carry the pre-bound parent through so an `s`-opened wizard
+            // creates a CHILD (the daemon links it); a plain `c` create is `None`.
+            parent_issue_id: wizard.parent_issue_id.clone(),
         },
     )
 }
@@ -1939,7 +2019,15 @@ fn render_wizard(
     // `region_h` — compact again on close.
     let dropdown_rows =
         repo_dropdown_visible_rows(wizard, repos, region_h.saturating_sub(brief_rows));
-    let card_h = WIZARD_CARD_H + brief_rows + dropdown_rows;
+    // 0046: an "add sub-issue" wizard (`s`) shows a read-only `Sub-issue of …`
+    // banner on its own row above the fields. It grows the card by 1 only when the
+    // viewport still has room after the Brief + dropdown have taken theirs, so a
+    // tight viewport degrades gracefully (banner dropped, fields intact). A plain
+    // `c` create has no parent, so the card is byte-identical to before.
+    let banner_rows = u16::from(
+        wizard.parent_display().is_some() && region_h > WIZARD_CARD_H + brief_rows + dropdown_rows,
+    );
+    let card_h = WIZARD_CARD_H + brief_rows + dropdown_rows + banner_rows;
 
     let left = (area_w.saturating_sub(card_w)) / 2;
     let right = left + card_w; // exclusive
@@ -1966,6 +2054,23 @@ fn render_wizard(
     let value_x = left + 12;
     let text_right = right.saturating_sub(1);
     let mut y = card_top + 1;
+    // 0046: the read-only `Sub-issue of <HGR-n title>` banner (only when the wizard
+    // was opened via `s` with a pre-bound parent). Cornflower so it reads as chrome,
+    // not an editable field; it precedes the Title row and never takes focus.
+    if banner_rows > 0 {
+        if let Some(parent) = wizard.parent_display() {
+            put_card_str(
+                buf,
+                label_x,
+                y,
+                &format!("Sub-issue of {parent}"),
+                CORNFLOWER_BLUE,
+                text_right,
+                true,
+            );
+        }
+        y = y.saturating_add(banner_rows);
+    }
     for field in WizardRow::ALL {
         let focused = wizard.focus() == field;
         let label = wizard_row_label(field);
@@ -2499,6 +2604,9 @@ mod tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
         }
     }
 

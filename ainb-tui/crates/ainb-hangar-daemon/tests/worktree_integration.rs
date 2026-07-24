@@ -68,6 +68,7 @@ fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
         repo_ref: None,
         agent_kind: "claude".to_string(),
         branch: None,
+        squad_id: None,
     }
 }
 

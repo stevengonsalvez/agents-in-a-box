@@ -126,6 +126,9 @@ pub async fn issues_list(
                 run_count: extras.run_count,
                 last_run_status: extras.last_run_status,
                 last_run_at: extras.last_run_at,
+                parent_id: extras.parent_id,
+                child_total: extras.child_total,
+                child_done: extras.child_done,
             });
         }
     }
@@ -143,6 +146,13 @@ struct IssueCardExtras {
     run_count: u32,
     last_run_status: Option<String>,
     last_run_at: Option<i64>,
+    /// The issue's parent, when it is a sub-issue (migration 0046); `None` for a
+    /// top-level issue.
+    parent_id: Option<String>,
+    /// This issue's sub-issue roll-up: `(done, total)`. `(0, 0)` when it has no
+    /// children. Drives the parent card's `⊟ done/total` badge.
+    child_done: u32,
+    child_total: u32,
 }
 
 /// Read the task-detail card extras for one issue (63d): the `repo_ref` / `agent`
@@ -178,6 +188,15 @@ async fn issue_card_fields(
     .bind(issue_id)
     .fetch_one(pool)
     .await?;
+    // 0046: this issue's parent link + its sub-issue roll-up, so the wire row can
+    // render the parent card's `⊟ done/total` badge and thread reparenting.
+    let parent_id: Option<String> =
+        sqlx::query_scalar("SELECT parent_issue_id FROM issue WHERE id = ?")
+            .bind(issue_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let (child_done, child_total) = IssueRepo::child_progress(pool, issue_id).await?;
     Ok(IssueCardExtras {
         repo_ref,
         agent: agent.map(|a| a.as_str().to_string()),
@@ -186,6 +205,9 @@ async fn issue_card_fields(
         run_count: u32::try_from(count).unwrap_or(u32::MAX),
         last_run_status: last_status,
         last_run_at: last_at,
+        parent_id,
+        child_done: u32::try_from(child_done).unwrap_or(u32::MAX),
+        child_total: u32::try_from(child_total).unwrap_or(u32::MAX),
     })
 }
 
@@ -264,6 +286,9 @@ pub async fn issues_search(
             run_count: extras.run_count,
             last_run_status: extras.last_run_status,
             last_run_at: extras.last_run_at,
+            parent_id: extras.parent_id,
+            child_total: extras.child_total,
+            child_done: extras.child_done,
         });
     }
     Ok(out)
@@ -1528,6 +1553,9 @@ pub async fn issue_row(
         run_count: extras.run_count,
         last_run_status: extras.last_run_status,
         last_run_at: extras.last_run_at,
+        parent_id: extras.parent_id,
+        child_total: extras.child_total,
+        child_done: extras.child_done,
     }))
 }
 
@@ -1630,6 +1658,9 @@ async fn read_issue_row(
         run_count: extras.run_count,
         last_run_status: extras.last_run_status,
         last_run_at: extras.last_run_at,
+        parent_id: extras.parent_id,
+        child_total: extras.child_total,
+        child_done: extras.child_done,
     }))
 }
 
@@ -1715,6 +1746,7 @@ pub async fn issue_create(
     description: Option<&str>,
     creator: &ActorRef,
     external_ref: Option<&str>,
+    parent_issue_id: Option<&str>,
 ) -> Result<IssueRow, sqlx::Error> {
     use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::issue::NewIssue;
@@ -1741,6 +1773,8 @@ pub async fn issue_create(
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            parent_issue_id: parent_issue_id.map(ToString::to_string),
+            stage: None,
         },
     )
     .await?;
@@ -1785,6 +1819,11 @@ pub async fn issue_create(
         run_count: 0,
         last_run_status: None,
         last_run_at: None,
+        // 0046: the parent link the create captured (a sub-issue), or `None` for a
+        // top-level issue. A fresh issue has no children yet, so the roll-up is 0/0.
+        parent_id: parent_issue_id.map(str::to_string),
+        child_total: 0,
+        child_done: 0,
     })
 }
 

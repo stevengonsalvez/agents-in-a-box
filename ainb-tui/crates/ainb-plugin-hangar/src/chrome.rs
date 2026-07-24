@@ -172,6 +172,8 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
             vec![
                 ("a", "assign"),
                 ("c", "create"),
+                ("s", "sub-issue"),
+                ("d", "done"),
                 ("x", "delete"),
                 ("/", "filter"),
                 ("tab", "chip"),

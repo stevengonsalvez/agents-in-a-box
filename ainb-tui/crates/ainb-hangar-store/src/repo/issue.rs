@@ -49,6 +49,12 @@ pub struct NewIssue {
     /// column — the minimal persistence the create flow needs (the full labels
     /// table + attach/detach is a separate concern).
     pub labels: Vec<String>,
+    /// Optional parent issue: a self-link making this a **sub-issue** of another
+    /// issue in the same workspace. `None` = a top-level issue (migration 0046).
+    pub parent_issue_id: Option<String>,
+    /// Optional 1-based **barrier stage** grouping this sub-issue among its
+    /// siblings; `None` = unstaged (one implicit stage) (migration 0046).
+    pub stage: Option<i64>,
 }
 
 /// A fully-materialised `issue` row read back from the database.
@@ -81,6 +87,12 @@ pub struct Issue {
     /// Optional upstream-issue reference (URL or `owner/repo#123`), or `None`
     /// (migration 0043).
     pub external_ref: Option<String>,
+    /// Optional parent issue: a self-link making this a **sub-issue**. `None` =
+    /// a top-level issue (migration 0046).
+    pub parent_issue_id: Option<String>,
+    /// Optional 1-based **barrier stage** among siblings; `None` = unstaged
+    /// (migration 0046).
+    pub stage: Option<i64>,
 }
 
 /// A partial-edit instruction for one issue's mutable fields (e38.8).
@@ -243,8 +255,8 @@ impl IssueRepo {
             "INSERT INTO issue \
              (id, workspace_id, title, description, state, \
               assignee_type, assignee_id, creator_type, creator_id, created_at, \
-              priority, due_date, labels) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              priority, due_date, labels, parent_issue_id, stage) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&issue.id)
         .bind(&issue.workspace_id)
@@ -259,6 +271,8 @@ impl IssueRepo {
         .bind(issue.priority)
         .bind(issue.due_date)
         .bind(labels_json)
+        .bind(&issue.parent_issue_id)
+        .bind(issue.stage)
         .execute(pool)
         .await?;
         Ok(())
@@ -275,7 +289,7 @@ impl IssueRepo {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, external_ref \
+             priority, due_date, labels, external_ref, parent_issue_id, stage \
              FROM issue WHERE id = ?",
         )
         .bind(id)
@@ -396,7 +410,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, external_ref \
+             priority, due_date, labels, external_ref, parent_issue_id, stage \
              FROM issue WHERE workspace_id = ? AND state = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -404,6 +418,59 @@ impl IssueRepo {
         .fetch_all(pool)
         .await?;
         rows.iter().map(issue_from_row).collect()
+    }
+
+    /// List the sub-issues of `parent_id`, ordered by barrier `stage` (unstaged
+    /// last) then creation order (migration 0046).
+    ///
+    /// Backed by `idx_issue_parent`. `NULLS LAST` keeps unstaged children after
+    /// the staged frontier so the caller can reason about the lowest unfinished
+    /// stage without a second pass.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails or a row's actor / labels
+    /// columns are malformed.
+    pub async fn list_children(
+        pool: &SqlitePool,
+        parent_id: &str,
+    ) -> Result<Vec<Issue>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, title, description, state, \
+             assignee_type, assignee_id, creator_type, creator_id, created_at, \
+             priority, due_date, labels, external_ref, parent_issue_id, stage \
+             FROM issue WHERE parent_issue_id = ? \
+             ORDER BY stage IS NULL, stage, created_at, id",
+        )
+        .bind(parent_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(issue_from_row).collect()
+    }
+
+    /// Roll-up counts for a parent's sub-issues: `(done, total)` where `done`
+    /// counts children whose `state` is terminal (`done` or `cancelled`)
+    /// (migration 0046).
+    ///
+    /// A parent with no children reads `(0, 0)`. Backed by `idx_issue_parent`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn child_progress(
+        pool: &SqlitePool,
+        parent_id: &str,
+    ) -> Result<(i64, i64), sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT \
+               COALESCE(SUM(CASE WHEN state IN ('done','cancelled') THEN 1 ELSE 0 END), 0) AS done, \
+               COUNT(*) AS total \
+             FROM issue WHERE parent_issue_id = ?",
+        )
+        .bind(parent_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((row.try_get("done")?, row.try_get("total")?))
     }
 
     /// The 1-based per-workspace creation ordinal of issue `id` — the `<n>` in
@@ -501,7 +568,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT i.id, i.workspace_id, i.title, i.description, i.state, \
              i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.created_at, \
-             i.priority, i.due_date, i.labels, i.external_ref, \
+             i.priority, i.due_date, i.labels, i.external_ref, i.parent_issue_id, i.stage, \
              MAX(CASE \
                  WHEN LOWER(i.title) LIKE ?2 ESCAPE '\\' THEN 3 \
                  WHEN LOWER(i.description) LIKE ?2 ESCAPE '\\' THEN 2 \
@@ -685,7 +752,16 @@ impl IssueRepo {
             .execute(&mut *tx)
             .await?;
 
-        // 5. The issue's directly-linked rows.
+        // 5. The issue's directly-linked rows. First orphan any sub-issues: the
+        //    `parent_issue_id` self-FK is `ON DELETE SET NULL` (migration 0046),
+        //    so children are NULLed automatically at the final DELETE, but FK
+        //    enforcement can be off on a given connection — this explicit UPDATE
+        //    makes the orphaning deterministic (belt-and-braces), so deleting a
+        //    parent never blocks and never leaves a dangling child link.
+        sqlx::query("UPDATE issue SET parent_issue_id = NULL WHERE parent_issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
         sqlx::query("DELETE FROM issue_label WHERE issue_id = ?")
             .bind(issue_id)
             .execute(&mut *tx)
@@ -803,6 +879,8 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         due_date: row.try_get("due_date")?,
         labels,
         external_ref: row.try_get("external_ref")?,
+        parent_issue_id: row.try_get("parent_issue_id")?,
+        stage: row.try_get("stage")?,
     })
 }
 
@@ -872,6 +950,8 @@ mod tests {
                 priority: 0,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
             },
         )
         .await

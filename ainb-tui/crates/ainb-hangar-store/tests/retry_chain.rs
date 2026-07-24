@@ -265,6 +265,58 @@ async fn child_inherits_repo_ref_and_agent_kind_but_not_branch() {
 }
 
 #[tokio::test]
+async fn child_inherits_parent_squad_id() {
+    // migration 0045: a retried squad task is still that squad's task. The child
+    // INSERT must copy the parent's `squad_id` verbatim — dropping it would silently
+    // disarm the daemon's claim-time leader-briefing hook for the child (the same
+    // class of bug as the `repo_ref` drop guarded above).
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t-squad",
+        None,
+        None,
+        1,
+        3,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    // Stamp the dispatching squad on the parent, exactly as a squad dispatch would.
+    sqlx::query("UPDATE agent_task_queue SET squad_id = ? WHERE id = ?")
+        .bind("squad-alpha")
+        .bind(&parent_seed.id)
+        .execute(store.pool())
+        .await
+        .expect("stamp squad_id on parent");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id)
+        .await
+        .unwrap()
+        .expect("parent re-reads");
+    assert_eq!(parent.squad_id.as_deref(), Some("squad-alpha"));
+
+    let clock = FixedClock(NOW_MS);
+    let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-squad", &clock)
+        .await
+        .expect("retry ok");
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-squad".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "child-squad")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    assert_eq!(
+        child.squad_id.as_deref(),
+        Some("squad-alpha"),
+        "child inherits the parent's squad_id (the briefing hook stays armed)"
+    );
+}
+
+#[tokio::test]
 async fn child_inherits_parent_priority() {
     // A retried urgent task must stay urgent: the child row inherits the
     // parent's `priority` (0..3 = P3..P0, higher = more urgent) so it keeps

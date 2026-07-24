@@ -1106,6 +1106,12 @@ pub struct IssueCreateArgs {
     /// issue for later PR automation.
     #[arg(long = "target-branch")]
     pub target_branch: Option<String>,
+    /// Make this a SUB-ISSUE of an existing issue (`issue.id`, migration 0046).
+    ///
+    /// The parent must exist in the same workspace; completing the last child of
+    /// the lowest unfinished stage cascades a roll-up comment onto the parent.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 /// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
@@ -2189,6 +2195,11 @@ fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) 
         WorkspaceRepoError::BadWhitelist { detail } => {
             anyhow::anyhow!("invalid repo whitelist: {detail}")
         }
+        WorkspaceRepoError::BadSlug { detail } => anyhow::anyhow!("invalid slug: {detail}"),
+        WorkspaceRepoError::SlugTaken => {
+            anyhow::anyhow!("a workspace with that slug already exists")
+        }
+        WorkspaceRepoError::LastWorkspace => anyhow::anyhow!("cannot delete the last workspace"),
         db @ WorkspaceRepoError::Db(_) => {
             anyhow::Error::new(db).context("workspace config mutation failed")
         }
@@ -2855,6 +2866,19 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         );
     }
 
+    // 0046: capture the pre-update state so a `--state done/cancelled` edit that
+    // completes a sub-issue can fire the child-done → parent cascade below. Read
+    // only when a state edit is requested (the cascade only fires on a transition).
+    let prev_state: Option<String> = if update.state.is_some() {
+        IssueRepo::get_by_id(store.pool(), &args.id)
+            .await
+            .with_context(|| format!("read issue {} before update", args.id))?
+            .filter(|i| i.workspace_id == workspace_id)
+            .map(|i| i.state)
+    } else {
+        None
+    };
+
     let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
         .await
         .with_context(|| format!("update issue {}", args.id))?;
@@ -2862,6 +2886,33 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         anyhow::bail!("no issue with id {} in this workspace", args.id);
     }
     println!("updated issue {}", args.id);
+
+    // 0046: a CLI-driven completion also posts the parent roll-up comment, so
+    // CLI and TUI behaviour stay aligned (the CLI has no daemon, so there is no
+    // agent wake — the comment is the observable side). Best-effort: a cascade
+    // fault must not fail an already-committed state edit.
+    if let (Some(prev), Some(new_state)) = (prev_state.as_deref(), update.state.as_deref()) {
+        let idgen = SystemIdGen;
+        let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+        match ainb_hangar_store::service::child_done::cascade_child_done(
+            store.pool(),
+            &workspace_id,
+            &args.id,
+            prev,
+            new_state,
+            now,
+            idgen.new_ulid(),
+        )
+        .await
+        {
+            Ok(Some(c)) => println!(
+                "posted sub-issue roll-up on parent {} ({}/{})",
+                c.parent_id, c.children_done, c.children_total
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: child-done cascade skipped: {e}"),
+        }
+    }
 
     // In-product recovery from a dead end: a post-creation assignment that names an
     // AGENT re-dispatches the issue, mirroring the create-time enqueue. Without
@@ -3034,6 +3085,18 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     };
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&clock);
 
+    // 0046: an optional parent makes this a sub-issue. Validate it resolves in the
+    // same workspace BEFORE the insert (mirrors the assignee-resolve contract) — a
+    // foreign / unknown parent is a hard error, never a silent cross-tenant link.
+    let parent_issue_id = args.parent.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(parent) = parent_issue_id {
+        let ok = IssueRepo::get_by_id(pool, parent)
+            .await
+            .context("resolve parent issue")?
+            .is_some_and(|p| p.workspace_id == workspace_id);
+        anyhow::ensure!(ok, "parent issue `{parent}` not found in this workspace");
+    }
+
     // e38.21: apply the workspace's issue_prefix to the new title so the prefix
     // actually takes effect on a created issue. An unconfigured workspace leaves
     // the title verbatim (the v1 behaviour). Read after the assignee resolve so a
@@ -3059,6 +3122,8 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         priority: args.priority,
         due_date: args.due,
         labels: args.labels.clone(),
+        parent_issue_id: parent_issue_id.map(ToString::to_string),
+        stage: None,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 

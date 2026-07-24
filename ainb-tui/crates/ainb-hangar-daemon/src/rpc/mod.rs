@@ -3094,6 +3094,22 @@ async fn handle_issue_create(
     })?;
     // 0043: an upstream link is optional; a blank one links nothing (stored NULL).
     let external_ref = params.external_ref.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // 0046: an optional parent makes the new issue a sub-issue. Validate the parent
+    // resolves in THIS workspace (mirrors the assignee-resolve contract) — a
+    // foreign/unknown parent is a client error, never a silent cross-tenant link.
+    let parent_issue_id =
+        params.parent_issue_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(parent) = parent_issue_id {
+        let ok = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, parent)
+            .await
+            .map_err(|e| store_err(&e))?
+            .is_some_and(|p| p.workspace_id == ws.as_str());
+        if !ok {
+            return Err(invalid_params(&format!(
+                "parent issue `{parent}` not found in this workspace"
+            )));
+        }
+    }
     let row = snapshots::issue_create(
         pool,
         &SystemIdGen,
@@ -3103,6 +3119,7 @@ async fn handle_issue_create(
         params.description.as_deref(),
         &creator,
         external_ref,
+        parent_issue_id,
     )
     .await
     .map_err(|e| store_err(&e))?;
@@ -3319,6 +3336,28 @@ async fn persist_card_edits(
     Ok(())
 }
 
+/// Read an issue's current `state` before an update, but only when the edit
+/// actually changes `state` (0046). Workspace-scoped, so a foreign/unknown id
+/// reads `None`. The daemon feeds this to the child-done cascade so it sees the
+/// real non-terminal → terminal transition; a non-state edit skips the query.
+async fn issue_prev_state_for_cascade(
+    pool: &SqlitePool,
+    ws: &ainb_hangar_core::ids::WorkspaceId,
+    issue_id: &str,
+    update: &ainb_hangar_store::repo::issue::IssueFieldUpdate,
+) -> Result<Option<String>, RpcError> {
+    if update.state.is_none() {
+        return Ok(None);
+    }
+    Ok(
+        ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, issue_id)
+            .await
+            .map_err(|e| store_err(&e))?
+            .filter(|i| i.workspace_id == ws.as_str())
+            .map(|i| i.state),
+    )
+}
+
 async fn handle_issue_update(
     pool: &SqlitePool,
     req: &RpcRequest,
@@ -3335,6 +3374,10 @@ async fn handle_issue_update(
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let update = issue_field_update_from_params(&params)?;
+
+    // 0046: capture the issue's PRE-update state (only when a state edit is
+    // requested) so a completion can fire the child-done → parent cascade below.
+    let prev_state = issue_prev_state_for_cascade(pool, &ws, &params.issue_id, &update).await?;
 
     // F6 card edit: the card's repo + chosen agent are persisted on the durable
     // card (the issue) exactly as `board_card_create` does — trim the repo, drop an
@@ -3452,6 +3495,23 @@ async fn handle_issue_update(
                 }
             }
         }
+    }
+
+    // 0046: a state edit that moved this sub-issue into a terminal token cascades a
+    // roll-up comment onto its parent (and wakes an agent/squad parent). Fires
+    // AFTER the state UPDATE committed, best-effort — the comment is the durable
+    // side; the event push + parent wake are opportunistic. A non-terminal edit, a
+    // top-level issue, or an unclosed stage barrier is a silent no-op.
+    if let (Some(prev), Some(new_state)) = (prev_state.as_deref(), params.state.as_deref()) {
+        crate::board::maybe_cascade_child_done(
+            pool,
+            &ws,
+            &params.issue_id,
+            prev,
+            new_state,
+            events,
+        )
+        .await;
     }
 
     events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
@@ -4596,6 +4656,8 @@ async fn handle_board_card_create(
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            parent_issue_id: None,
+            stage: None,
         },
     )
     .await
@@ -8641,6 +8703,8 @@ mod tests {
                         assignee: None,
                         due_date: None,
                         labels: Vec::new(),
+                        parent_issue_id: None,
+                        stage: None,
                     },
                 )
                 .await
@@ -8742,6 +8806,8 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
             },
         )
         .await
@@ -8819,6 +8885,8 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
             },
         )
         .await
@@ -8901,6 +8969,8 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
             },
         )
         .await
@@ -8978,6 +9048,8 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
             },
         )
         .await
@@ -9084,6 +9156,8 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
             },
         )
         .await

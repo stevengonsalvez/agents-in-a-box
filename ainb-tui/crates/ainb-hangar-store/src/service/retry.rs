@@ -6,8 +6,9 @@
 //! attempts remaining spawns a fresh `queued` child row whose `parent_task_id`
 //! chains back to the failed task and whose `attempt` is `parent.attempt + 1`.
 //! Everything else (workspace / runtime / agent / issue / work_dir / priority /
-//! max_attempts / **repo_ref / agent_kind**) is inherited verbatim so the retry
-//! re-provisions the SAME repo's worktree under the SAME provider (tcp 19n); all
+//! max_attempts / **repo_ref / agent_kind / squad_id**) is inherited verbatim so
+//! the retry re-provisions the SAME repo's worktree under the SAME provider (tcp
+//! 19n) and stays keyed to the SAME dispatching squad (migration 0045); all
 //! per-run timestamps, outputs, and the recorded `branch` reset.
 //!
 //! # Retry/resume taxonomy (reference migration 055 + `GetLastTaskSession`)
@@ -125,15 +126,21 @@ pub enum RetryDecision {
 /// retry is a NEW ATTEMPT of the SAME logical run, so it belongs to the parent's
 /// run generation — the card-state folds must fold the retry child together with
 /// its parent's siblings, not treat it as a fresh generation.
+/// `squad_id` is copied from the parent (migration 0045): a retried squad task is
+/// still that squad's task, so the child must carry the same squad ref — dropping
+/// it on retry would silently disarm the daemon's claim-time briefing hook for the
+/// child (the same class of bug as the `repo_ref` / `generation` drops guarded
+/// above).
 /// Binds, in order: `id`, `workspace_id`, `runtime_id`, `agent_id`, `issue_id`,
 /// `work_dir`, `priority`, `attempt`, `max_attempts`, `parent_task_id`,
-/// `session_id`, `repo_ref`, `agent_kind`, `generation`, `created_at`.
+/// `session_id`, `repo_ref`, `agent_kind`, `generation`, `source_branch`,
+/// `squad_id`, `created_at`.
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
  (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
   attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, generation, \
-  source_branch, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  source_branch, squad_id, created_at) \
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -274,9 +281,9 @@ impl RetryService {
     /// (`attempt = parent.attempt + 1`, `max_attempts`, `parent_task_id`,
     /// `session_id`) in one statement so the child is correct-or-absent rather than
     /// transiently carrying the schema defaults. `repo_ref` / `agent_kind` /
-    /// `priority` / `generation` / `source_branch` are inherited; the per-run
-    /// columns (`result` / `failure_reason` / `started_at` / `finished_at` /
-    /// `dispatched_at` / `branch`) reset by being omitted (NULL). `session_id` is
+    /// `priority` / `generation` / `source_branch` / `squad_id` are inherited; the
+    /// per-run columns (`result` / `failure_reason` / `started_at` / `finished_at`
+    /// / `dispatched_at` / `branch`) reset by being omitted (NULL). `session_id` is
     /// bound by the caller per the retry/resume taxonomy.
     async fn spawn_child(
         pool: &SqlitePool,
@@ -302,6 +309,7 @@ impl RetryService {
             .bind(&parent.agent_kind)
             .bind(parent.generation)
             .bind(&parent.source_branch)
+            .bind(&parent.squad_id)
             .bind(clock.now_ms())
             .execute(pool)
             .await?;

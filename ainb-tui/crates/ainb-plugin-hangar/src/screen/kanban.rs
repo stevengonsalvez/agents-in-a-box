@@ -226,6 +226,7 @@ impl KanbanState {
                         priority: PriorityChip::from_priority(0),
                         assignee_initial: c.agent_id.chars().next(),
                         linked: false,
+                        subtasks: None,
                     })
                     .collect::<Vec<_>>();
                 card_board::BoardColumn {
