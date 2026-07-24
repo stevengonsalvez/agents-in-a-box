@@ -233,6 +233,14 @@ pub mod seed;
 /// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
 /// and all-or-nothing.
 pub mod skills_sync;
+/// Claim-time squad-leader briefing builder (multica `squad_briefing.go` parity,
+/// gap #7).
+///
+/// [`squad_briefing::build_squad_leader_briefing`] composes the Operating
+/// Protocol + Squad Roster appended to a leader agent's run `CLAUDE.md` at claim
+/// time, so a squad-leader task runs with the coordinator role + the roster of
+/// members it can delegate to. Member tasks and non-squad tasks get no briefing.
+pub mod squad_briefing;
 /// Auto-standup watcher (D13; spec P9 §4.8).
 ///
 /// [`standup::StandupWatcher`] is a daemon-global periodic scan that WRITES
