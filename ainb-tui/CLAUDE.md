@@ -192,6 +192,46 @@ See `config/example.config.toml` for all available options with documentation.
 | `[mcp_pool]` | `idle_grace_secs` | Reap a pooled server N seconds after its last session detaches (default: 300) |
 | `[mcp_servers.*]` | `shared` | Per-server pool opt-out — set false for stateful servers (default: true) |
 
+### Daemon claude credential (no repeating keychain prompt)
+
+The Hangar daemon hands its spawned `claude` child a `CLAUDE_CODE_OAUTH_TOKEN`
+because that child cannot self-authenticate (it runs under a Seatbelt profile
+that denies securityd, with a task-isolated HOME, so it reaches neither the
+Keychain nor `~/.claude`). The daemon resolves that token in this order
+(`crates/ainb-hangar-daemon/src/claude_cred.rs::resolve`):
+
+1. `HANGAR_CLAUDE_OAUTH_TOKEN` in the daemon's own env (override), else
+2. your SYSTEM `claude` login — the `Claude Code-credentials` Keychain item —
+   read by shelling out to `/usr/bin/security`, else
+3. the legacy stored token (`ainb-hangar::global` / `claude.oauth_token`), else
+4. nothing — the run reaches `claude` and fails loudly.
+
+Step 2 means **no setup step**: `just dev` and an installed `ainb` both just use
+the `claude` login you already have. You may see **one** macOS keychain prompt
+the first time ("security wants to use … Claude Code-credentials") — click
+**Always Allow** and it never asks again.
+
+Why one prompt, not one per launch: a Keychain ACL trusts the *requesting binary*
+by code signature. The daemon is an unsigned binary whose hash changes on every
+`just dev` / release rebuild (and every `brew upgrade` for installed `ainb`), so
+an in-process read is never on the ACL and prompts every time. `/usr/bin/security`
+is Apple-signed and stable, so "Always Allow" attaches to it and sticks across
+all daemon rebuilds and upgrades. The access token is re-read fresh per dispatch,
+so it self-heals past the ~8h token TTL as long as your `claude` login is current.
+
+If step 2 can't read a token (not logged in), behavior is unchanged — the daemon
+falls through to the legacy store, with no hard break.
+
+**The ~8h TTL caveat:** the system access token (step 2) expires after ~8h and the
+confined child cannot refresh it. Because the daemon re-reads it fresh per
+dispatch, an idle-then-active daemon self-heals as long as your interactive
+`claude` login is still valid. If the token IS expired at dispatch, the daemon
+logs a clear hint (`system claude login token has expired … Open Claude Code to
+refresh …`) and the run fails to authenticate rather than silently succeeding.
+For a fully unattended daemon that must outlive the 8h window, set
+`HANGAR_CLAUDE_OAUTH_TOKEN` (step 1) to a long-lived `claude setup-token` value —
+that override wins and never expires on the 8h clock.
+
 ### Shared MCP Pool
 
 With `[mcp_pool]` enabled, `ainb run` (Claude sessions) ensures a standalone
