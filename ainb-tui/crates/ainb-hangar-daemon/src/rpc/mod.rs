@@ -3079,7 +3079,7 @@ async fn handle_issue_create(
 
     let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
         req,
-        "{ workspace_id, title, description?, creator, external_ref? }",
+        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -3099,6 +3099,22 @@ async fn handle_issue_create(
     // foreign/unknown parent is a client error, never a silent cross-tenant link.
     let parent_issue_id =
         params.parent_issue_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    // 0048: trim-drop blank list elements at the boundary — an empty-string
+    // criterion / ref is a UI artefact, not data. An empty list is valid (no error).
+    let acceptance_criteria: Vec<String> = params
+        .acceptance_criteria
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
+    let context_refs: Vec<String> = params
+        .context_refs
+        .iter()
+        .map(|s| s.trim())
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect();
     if let Some(parent) = parent_issue_id {
         let ok = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, parent)
             .await
@@ -3120,6 +3136,8 @@ async fn handle_issue_create(
         &creator,
         external_ref,
         parent_issue_id,
+        &acceptance_criteria,
+        &context_refs,
     )
     .await
     .map_err(|e| store_err(&e))?;
@@ -3744,8 +3762,10 @@ async fn handle_agent_create(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentCreateParams =
-        parse_params(req, "{ workspace_id?, name, provider?, model?, instructions? }")?;
+    let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params(
+        req,
+        "{ workspace_id?, name, provider?, model?, instructions? }",
+    )?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("agent name must not be empty"));
@@ -3767,11 +3787,7 @@ async fn handle_agent_create(
     // as a single follow-up config write rather than widening create_agent's
     // signature across every caller. A blank model is treated as absent (no
     // spurious empty-string write, so an unset model stays NULL).
-    let model = params
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty());
+    let model = params.model.as_deref().map(str::trim).filter(|s| !s.is_empty());
     if model.is_some() || params.token_budget.is_some() {
         let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
             model: model.map(|m| Some(m.to_string())),
@@ -4665,6 +4681,8 @@ async fn handle_board_card_create(
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
             parent_issue_id: None,
             stage: None,
         },
@@ -7310,11 +7328,7 @@ mod tests {
         .unwrap();
         assert_eq!(row.0, "codex", "provider persisted");
         assert_eq!(row.1.as_deref(), Some("gpt-5-codex"), "model persisted");
-        assert_eq!(
-            row.2.as_deref(),
-            Some("be terse"),
-            "instructions persisted"
-        );
+        assert_eq!(row.2.as_deref(), Some("be terse"), "instructions persisted");
     }
 
     /// A create that omits `model` leaves the column NULL — no spurious
@@ -8833,6 +8847,8 @@ mod tests {
                         labels: Vec::new(),
                         parent_issue_id: None,
                         stage: None,
+                        acceptance_criteria: Vec::new(),
+                        context_refs: Vec::new(),
                     },
                 )
                 .await
@@ -8936,6 +8952,8 @@ mod tests {
                 labels: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await
@@ -9016,6 +9034,8 @@ mod tests {
                 labels: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await
@@ -9101,6 +9121,8 @@ mod tests {
                 labels: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await
@@ -9181,6 +9203,8 @@ mod tests {
                 labels: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await
@@ -9303,6 +9327,8 @@ mod tests {
                     labels: Vec::new(),
                     parent_issue_id: None,
                     stage: None,
+                    acceptance_criteria: Vec::new(),
+                    context_refs: Vec::new(),
                 },
             )
             .await
@@ -9450,6 +9476,8 @@ mod tests {
                 labels: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await

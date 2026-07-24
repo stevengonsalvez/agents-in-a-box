@@ -88,6 +88,8 @@ async fn seed_issue(store: &Store, id: &str, title: &str, state: &str) -> String
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     id.to_string()

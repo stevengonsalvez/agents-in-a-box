@@ -72,6 +72,8 @@ async fn board_card_auto_moves_and_greens_on_run_success() {
             labels: Vec::new(),
             parent_issue_id: None,
             stage: None,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         },
     )
     .await
