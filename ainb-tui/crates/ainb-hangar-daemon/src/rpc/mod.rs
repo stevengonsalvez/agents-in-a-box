@@ -3745,7 +3745,7 @@ async fn handle_agent_create(
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
     let params: ainb_hangar_proto::snapshots::AgentCreateParams =
-        parse_params(req, "{ workspace_id?, name, provider?, instructions? }")?;
+        parse_params(req, "{ workspace_id?, name, provider?, model?, instructions? }")?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("agent name must not be empty"));
@@ -3763,11 +3763,19 @@ async fn handle_agent_create(
     )
     .await
     .map_err(|e| store_err(&e))?;
-    // Optional create-time token budget (0042): applied as a follow-up config
-    // write rather than widening create_agent's signature across every caller.
-    if let Some(budget) = params.token_budget {
+    // Optional create-time model override (gap #9) + token budget (0042): applied
+    // as a single follow-up config write rather than widening create_agent's
+    // signature across every caller. A blank model is treated as absent (no
+    // spurious empty-string write, so an unset model stays NULL).
+    let model = params
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    if model.is_some() || params.token_budget.is_some() {
         let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
-            token_budget: Some(Some(budget)),
+            model: model.map(|m| Some(m.to_string())),
+            token_budget: params.token_budget.map(Some),
             ..Default::default()
         };
         ainb_hangar_store::repo::agent::AgentRepo::update_config(
@@ -7265,6 +7273,80 @@ mod tests {
             !still_there,
             "the deleted agent must be gone from the roster"
         );
+    }
+
+    /// The guided-create wire (gap #9) persists the FULL structured draft:
+    /// `agent_create` with provider + model + instructions writes all three onto
+    /// the row, not just the name — the load-bearing proof the widened wire lands.
+    #[tokio::test]
+    async fn agent_create_persists_provider_model_and_instructions() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let created = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_CREATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "name": "guidedbot",
+                    "provider": "codex",
+                    "model": "gpt-5-codex",
+                    "instructions": "be terse",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(created.error.is_none(), "{created:?}");
+
+        let row: (String, Option<String>, Option<String>) = sqlx::query_as(
+            "SELECT provider, model, instructions FROM agent WHERE name = 'guidedbot'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(row.0, "codex", "provider persisted");
+        assert_eq!(row.1.as_deref(), Some("gpt-5-codex"), "model persisted");
+        assert_eq!(
+            row.2.as_deref(),
+            Some("be terse"),
+            "instructions persisted"
+        );
+    }
+
+    /// A create that omits `model` leaves the column NULL — no spurious
+    /// empty-string write from the create-time follow-up.
+    #[tokio::test]
+    async fn agent_create_without_model_leaves_model_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let created = dispatch(
+            store.pool(),
+            &req(
+                methods::HANGAR_AGENT_CREATE,
+                serde_json::json!({
+                    "workspace_id": "default",
+                    "name": "nomodelbot",
+                    "provider": "claude",
+                }),
+            ),
+            &health(),
+            &sink(),
+        )
+        .await;
+        assert!(created.error.is_none(), "{created:?}");
+
+        let model: Option<String> =
+            sqlx::query_scalar("SELECT model FROM agent WHERE name = 'nomodelbot'")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert!(model.is_none(), "model stays NULL when not supplied");
     }
 
     /// An unknown agent id is rejected (not a silent no-op), mirroring the mutating

@@ -1114,6 +1114,10 @@ pub struct AgentCreateParams {
     /// Optional free-form system prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`); absent =
+    /// the provider default. Applied as a create-time config follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Optional token budget (rtk/headroom); absent = unlimited (migration 0042).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<i64>,
@@ -2610,6 +2614,7 @@ mod tests {
             name: "reviewer".into(),
             provider: Some("codex".into()),
             instructions: Some("be terse".into()),
+            model: Some("gpt-5-codex".into()),
             token_budget: Some(250_000),
         };
         let s = serde_json::to_string(&full).unwrap();
@@ -2621,6 +2626,7 @@ mod tests {
         assert!(minimal.workspace_id.is_none());
         assert!(minimal.provider.is_none());
         assert!(minimal.instructions.is_none());
+        assert!(minimal.model.is_none());
         // The optional fields are omitted from the serialized form when absent.
         assert_eq!(
             serde_json::to_string(&minimal).unwrap(),
