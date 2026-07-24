@@ -470,11 +470,20 @@ pub enum SquadAction {
 /// `set_actors` seam the pickers use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsAction {
-    /// Create an AGENT named `name` (`n` + Enter) — `hangar/agent_create`; the glue
-    /// fires it with no ids (the daemon fills workspace / runtime / owner).
+    /// Create an AGENT from the guided wizard (`n` → name → provider → model →
+    /// instructions → confirm) — `hangar/agent_create`; the glue fires it with no
+    /// ids (the daemon fills workspace / runtime / owner) and carries the collected
+    /// provider / model / instructions through so the created row is fully
+    /// configured, not just named.
     Create {
         /// The new agent's name.
         name: String,
+        /// The chosen provider (`claude`/`codex`/`copilot`).
+        provider: String,
+        /// The optional per-agent model override (`None` = provider default).
+        model: Option<String>,
+        /// The optional free-form instructions (`None` = left blank).
+        instructions: Option<String>,
     },
     /// Delete `actor_ref` (Enter on the `x` confirm) — `hangar/agent_delete`; the
     /// glue extracts the id and scopes the delete to the workspace.
@@ -914,12 +923,12 @@ impl ScreenStates {
         // background refresh mid-interaction does not wipe the user's input. A
         // delete-confirm whose agent vanished (this delete landed) is dropped.
         let selected = self.agents.selected_index();
-        let creating = self.agents.create_buffer().map(str::to_string);
+        let creating = self.agents.create_state();
         let confirming = self.agents.confirm_target().map(str::to_string);
         let note = self.agents.note().map(str::to_string);
         let mut next_agents = AgentsState::from_actors(&actors);
         next_agents.set_selected(selected);
-        next_agents.set_create_buffer(creating);
+        next_agents.set_create_state(creating);
         next_agents.restore_confirm(confirming);
         next_agents.set_note(note);
         self.agents = next_agents;
@@ -2170,6 +2179,11 @@ fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
         AgentsEvent::Key('k')
     } else if matches!(key.code, KeyCode::Down) {
         AgentsEvent::Key('j')
+    } else if matches!(key.code, KeyCode::Left) {
+        // `←`/`→` drive the create wizard's provider picker (mapped to `h`/`l`).
+        AgentsEvent::Key('h')
+    } else if matches!(key.code, KeyCode::Right) {
+        AgentsEvent::Key('l')
     } else if let Some(c) = key_char(key) {
         AgentsEvent::Key(c)
     } else {
@@ -2178,7 +2192,17 @@ fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
     let out = reduce_agents(&states.agents, ev);
     states.agents = out.state;
     states.pending_agents_action = match out.intent {
-        Some(AgentsIntent::CreateAgent { name }) => Some(AgentsAction::Create { name }),
+        Some(AgentsIntent::CreateAgent {
+            name,
+            provider,
+            model,
+            instructions,
+        }) => Some(AgentsAction::Create {
+            name,
+            provider,
+            model,
+            instructions,
+        }),
         Some(AgentsIntent::DeleteAgent { actor_ref }) => Some(AgentsAction::Delete { actor_ref }),
         None => None,
     };

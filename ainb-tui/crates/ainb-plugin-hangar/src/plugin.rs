@@ -2771,10 +2771,24 @@ impl HangarPlugin {
         };
         let ws = self.app_state().ws_id.as_str().to_string();
         let (id, method, params) = match action {
-            AgentsAction::Create { name } => (
+            AgentsAction::Create {
+                name,
+                provider,
+                model,
+                instructions,
+            } => (
                 AGENT_CREATE_REQ_ID,
                 daemon_methods::HANGAR_AGENT_CREATE,
-                serde_json::json!({ "workspace_id": ws, "name": name }),
+                // `model` / `instructions` are `Option`s; the proto's
+                // `skip_serializing_if` drops them when absent so the wire stays
+                // clean and the daemon leaves those columns at their defaults.
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "name": name,
+                    "provider": provider,
+                    "model": model,
+                    "instructions": instructions,
+                }),
             ),
             AgentsAction::Delete { actor_ref } => {
                 // Extract the bare agent id from the canonical `agent:<id>` ref; a
