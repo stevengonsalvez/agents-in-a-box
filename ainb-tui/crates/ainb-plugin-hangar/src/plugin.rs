@@ -3344,6 +3344,9 @@ impl HangarPlugin {
     /// a cross-tenant data leak. So after a `SetActive`, re-issue the
     /// workspace-scoped snapshot requests (now scoped to the new `ws_id`).
     async fn apply_workspace_action(&mut self, host: &HostClient, action: WorkspaceAction) {
+        // Create is special: on success it also auto-switches into the new
+        // tenant, so track whether a data-plane re-scope is required.
+        let mut rescope = matches!(action, WorkspaceAction::SetActive(_));
         let result = match &action {
             // A bare refresh just pulls the list (no mutating cap call).
             WorkspaceAction::Refresh => Ok(()),
@@ -3353,18 +3356,36 @@ impl HangarPlugin {
             WorkspaceAction::SetDefault(id) => {
                 host.workspace_set_default(id.clone()).await.map(|_| ())
             }
+            WorkspaceAction::Create { slug, name } => {
+                match host.workspace_create(slug.clone(), name.clone()).await {
+                    // Auto-switch to the new tenant so the operator lands in it,
+                    // then re-scope the data plane below.
+                    Ok(r) => {
+                        host.workspace_set_active(r.workspace.id.clone()).await.ok();
+                        rescope = true;
+                        Ok(())
+                    }
+                    Err(e) => Err(e),
+                }
+            }
+            WorkspaceAction::Delete(id) => {
+                // A delete re-scopes too: the active workspace may have moved to a
+                // surviving tenant (the host resolves effective-active).
+                rescope = true;
+                host.workspace_delete(id.clone()).await.map(|_| ())
+            }
         };
         if let Err(e) = result {
             let _ = host.log_info(format!("hangar: workspace action failed: {e}")).await;
             return;
         }
         self.refresh_workspaces(host).await;
-        // After an active-workspace switch, re-pull every workspace-scoped
-        // snapshot so the screens reflect the NEW tenant's data (not the prior
-        // one's stale cache). `refresh_workspaces` already moved `ws_id`, and
-        // `fetch_snapshots` reads it, so the re-fetch is scoped to the switch
-        // target.
-        if matches!(action, WorkspaceAction::SetActive(_)) {
+        // After an active-workspace switch/create/delete, re-pull every
+        // workspace-scoped snapshot so the screens reflect the NEW tenant's data
+        // (not the prior one's stale cache). `refresh_workspaces` already moved
+        // `ws_id`, and `fetch_snapshots` reads it, so the re-fetch is scoped to
+        // the effective-active target.
+        if rescope {
             self.fetch_snapshots(host).await;
         }
     }

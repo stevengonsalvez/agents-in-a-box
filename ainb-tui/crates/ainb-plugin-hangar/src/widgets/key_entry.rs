@@ -59,6 +59,41 @@ pub fn render_key_entry_modal(buf: &mut WireBuffer, area_w: u16, area_h: u16, ma
     );
 }
 
+/// Render the new-workspace name modal centred in an `area_w` × `area_h` area,
+/// showing the typed `name` verbatim (P-multica#4).
+pub fn render_workspace_name_modal(buf: &mut WireBuffer, area_w: u16, area_h: u16, name: &str) {
+    let modal_w: u16 = 44.min(area_w);
+    let modal_h: u16 = 6.min(area_h);
+    let x0 = (area_w.saturating_sub(modal_w)) / 2;
+    let y0 = (area_h.saturating_sub(modal_h)) / 2;
+    let x1 = x0 + modal_w - 1;
+    let y1 = y0 + modal_h - 1;
+
+    for x in x0..=x1 {
+        put_char(buf, x, y0, '─', BORDER);
+        put_char(buf, x, y1, '─', BORDER);
+    }
+    for y in y0..=y1 {
+        put_char(buf, x0, y, '│', BORDER);
+        put_char(buf, x1, y, '│', BORDER);
+    }
+    put_char(buf, x0, y0, '╭', BORDER);
+    put_char(buf, x1, y0, '╮', BORDER);
+    put_char(buf, x0, y1, '╰', BORDER);
+    put_char(buf, x1, y1, '╯', BORDER);
+
+    put_str(buf, x0 + 2, y0, " New workspace ", TITLE, x1);
+    // Show the tail of the typed name so a long name stays visible at the cursor.
+    let field_w = modal_w.saturating_sub(4) as usize;
+    let shown: String = if name.chars().count() > field_w {
+        name.chars().rev().take(field_w).collect::<Vec<_>>().into_iter().rev().collect()
+    } else {
+        name.to_string()
+    };
+    put_str(buf, x0 + 2, y0 + 2, &shown, TEXT, x1);
+    put_str(buf, x0 + 2, y1 - 1, "Enter create · Esc cancel", HINT, x1);
+}
+
 /// Write `s` at `(x, row)` in `color`, clipping at column `right` (exclusive).
 fn put_str(buf: &mut WireBuffer, x: u16, row: u16, s: &str, color: Color, right: u16) {
     let mut cx = x;
@@ -91,5 +126,18 @@ mod tests {
         render_key_entry_modal(&mut buf, 80, 24, 5);
         let stars = buf.cells.iter().filter(|(_, c)| c.symbol == "*").count();
         assert_eq!(stars, 5);
+    }
+
+    /// The workspace-name modal shows the typed name verbatim (not masked).
+    #[test]
+    fn workspace_name_modal_shows_typed_name() {
+        let mut buf = WireBuffer::new(80, 24);
+        render_workspace_name_modal(&mut buf, 80, 24, "acme");
+        for ch in ['a', 'c', 'm', 'e'] {
+            assert!(
+                buf.cells.iter().any(|(_, c)| c.symbol == ch.to_string()),
+                "modal must render '{ch}' of the typed name"
+            );
+        }
     }
 }

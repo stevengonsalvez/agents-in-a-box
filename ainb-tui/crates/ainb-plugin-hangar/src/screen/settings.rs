@@ -30,7 +30,7 @@ use ainb_hangar_proto::snapshots::{MemberWireRow, NotifyRuleWireRow};
 use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_sdk::WireBuffer;
 
-use crate::widgets::key_entry::render_key_entry_modal;
+use crate::widgets::key_entry::{render_key_entry_modal, render_workspace_name_modal};
 
 /// A secret key value with a **redacting** `Debug` impl.
 ///
@@ -241,6 +241,11 @@ pub struct SettingsState {
     /// The in-flight numeric-input overlay for an `Int` knob (opened with
     /// Enter/Space on an int row). `None` when no overlay is open.
     config_input: Option<ConfigInput>,
+    /// The in-flight new-workspace name modal (opened with `n` on the Workspaces
+    /// section). Holds the name typed so far; Enter derives the slug and emits a
+    /// [`SettingsIntent::CreateWorkspace`], Esc cancels. `None` when closed
+    /// (P-multica#4).
+    workspace_name_input: Option<String>,
 }
 
 /// The in-flight numeric-input overlay for editing an `Int` daemon-config knob.
@@ -300,7 +305,15 @@ impl SettingsState {
             config_values: vec![None; DAEMON_CONFIG_REGISTRY.len()],
             config_sel: 0,
             config_input: None,
+            workspace_name_input: None,
         }
+    }
+
+    /// The in-flight new-workspace name buffer, present while the modal is open
+    /// (for render + tests).
+    #[must_use]
+    pub fn workspace_name_input(&self) -> Option<&str> {
+        self.workspace_name_input.as_deref()
     }
 
     /// The effective value string for the config knob at registry `idx`: the
@@ -485,9 +498,18 @@ pub enum SettingsIntent {
     /// Toggle the default workspace (`d`). Carries the workspace id; maps to
     /// `host/workspace_set_default`.
     ToggleDefault(String),
-    /// Create a new workspace (`n` on the Workspace pane). The plugin glue
-    /// opens the host's new-workspace flow.
-    NewWorkspace,
+    /// Create a new workspace (`Enter` in the name modal opened by `n`). Carries
+    /// the derived `slug` + the typed `name`; the glue maps it to
+    /// `host/workspace_create` (P-multica#4).
+    CreateWorkspace {
+        /// The slug derived from the typed name (`lower`, spaces → hyphens).
+        slug: String,
+        /// The human-readable name the operator typed.
+        name: String,
+    },
+    /// Delete the selected workspace (`x` on the Workspace pane). Carries the
+    /// stable ULID id; the glue maps it to `host/workspace_delete` (P-multica#4).
+    DeleteWorkspace(String),
     /// Rename the selected workspace (`r`). Carries the workspace id.
     RenameWorkspace(String),
     /// Toggle one notification routing cell (`space` on the Notifications grid,
@@ -546,7 +568,10 @@ pub fn reduce_settings(state: &SettingsState, ev: SettingsEvent) -> SettingsRedu
 /// let them scroll the pane underneath. The Notifications grid keeps its own
 /// 2D cursor keys (`J`/`K` × `h`/`l`) and is left alone here.
 fn reduce_cursor(state: &SettingsState, delta: i32) -> SettingsReduction {
-    if state.key_entry.is_some() || state.config_input.is_some() {
+    if state.key_entry.is_some()
+        || state.config_input.is_some()
+        || state.workspace_name_input.is_some()
+    {
         return unchanged(state);
     }
     match state.section {
@@ -560,6 +585,10 @@ fn reduce_cursor(state: &SettingsState, delta: i32) -> SettingsReduction {
 fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
     if state.key_entry.is_some() {
         return reduce_key_entry_key(state, c);
+    }
+    // The new-workspace name modal owns the keyboard while open (P-multica#4).
+    if state.workspace_name_input.is_some() {
+        return reduce_workspace_name_key(state, c);
     }
     // The numeric-input overlay owns the keyboard while open (digits/commit/cancel).
     if state.config_input.is_some() {
@@ -593,10 +622,10 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
         'r' if state.section == SettingsSection::Workspaces => {
             workspace_intent(state, SettingsIntent::RenameWorkspace)
         }
-        'n' if state.section == SettingsSection::Workspaces => SettingsReduction {
-            state: state.clone(),
-            intent: Some(SettingsIntent::NewWorkspace),
-        },
+        // `n` opens the new-workspace name modal; `x` deletes the selected
+        // workspace (never the active row) (P-multica#4).
+        'n' if state.section == SettingsSection::Workspaces => open_workspace_name_entry(state),
+        'x' if state.section == SettingsSection::Workspaces => workspace_delete_intent(state),
         _ => unchanged(state),
     }
 }
@@ -615,6 +644,100 @@ fn workspace_intent(
             intent: Some(make(w.id.clone())),
         },
     )
+}
+
+/// Emit a `DeleteWorkspace` intent for the selected row — but NEVER the active
+/// one (you cannot delete the tenant you are standing in; the host would reject
+/// it with `-32602` anyway, so guard here for a clean no-op) (P-multica#4).
+fn workspace_delete_intent(state: &SettingsState) -> SettingsReduction {
+    match state.workspaces.get(state.list_selected) {
+        Some(w) if !w.current => SettingsReduction {
+            state: state.clone(),
+            intent: Some(SettingsIntent::DeleteWorkspace(w.id.clone())),
+        },
+        _ => unchanged(state),
+    }
+}
+
+/// Open the new-workspace name modal with an empty buffer (P-multica#4).
+fn open_workspace_name_entry(state: &SettingsState) -> SettingsReduction {
+    let mut next = state.clone();
+    next.workspace_name_input = Some(String::new());
+    no_intent(next)
+}
+
+/// Handle a key while the new-workspace name modal is open: Enter creates,
+/// Backspace trims, any printable char extends the name (P-multica#4).
+fn reduce_workspace_name_key(state: &SettingsState, c: char) -> SettingsReduction {
+    match c {
+        '\n' | '\r' => confirm_workspace_name(state),
+        '\u{8}' | '\u{7f}' => {
+            let mut next = state.clone();
+            if let Some(buf) = next.workspace_name_input.as_mut() {
+                buf.pop();
+            }
+            no_intent(next)
+        }
+        _ => {
+            let mut next = state.clone();
+            if let Some(buf) = next.workspace_name_input.as_mut() {
+                buf.push(c);
+            }
+            no_intent(next)
+        }
+    }
+}
+
+/// Confirm the name modal: close it and, if the name yields a non-empty slug,
+/// emit a `CreateWorkspace { slug, name }` intent. A blank/slug-less name closes
+/// the modal with no intent (nothing to create) (P-multica#4).
+fn confirm_workspace_name(state: &SettingsState) -> SettingsReduction {
+    let mut next = state.clone();
+    let name = next.workspace_name_input.take().unwrap_or_default();
+    let name = name.trim().to_string();
+    let slug = slugify(&name);
+    if slug.is_empty() {
+        return no_intent(next);
+    }
+    SettingsReduction {
+        state: next,
+        intent: Some(SettingsIntent::CreateWorkspace { slug, name }),
+    }
+}
+
+/// Derive a workspace slug from a display name: lower-case, map spaces/underscores
+/// to hyphens, drop every other non-`[a-z0-9-]` char, and collapse/trim hyphens
+/// so the result satisfies the host's `^[a-z0-9]+(-[a-z0-9]+)*$` guard (the host
+/// re-validates; this just gives a sensible default) (P-multica#4).
+fn slugify(name: &str) -> String {
+    let mut out = String::with_capacity(name.len());
+    let mut prev_hyphen = false;
+    for ch in name.chars() {
+        let mapped = if ch.is_ascii_alphanumeric() {
+            Some(ch.to_ascii_lowercase())
+        } else if ch == ' ' || ch == '_' || ch == '-' {
+            Some('-')
+        } else {
+            None
+        };
+        match mapped {
+            Some('-') => {
+                if !out.is_empty() && !prev_hyphen {
+                    out.push('-');
+                    prev_hyphen = true;
+                }
+            }
+            Some(c) => {
+                out.push(c);
+                prev_hyphen = false;
+            }
+            None => {}
+        }
+    }
+    while out.ends_with('-') {
+        out.pop();
+    }
+    out
 }
 
 /// Handle a key on the Daemon section: `j`/`k` leave to the adjacent section,
@@ -878,6 +1001,7 @@ fn reduce_esc(state: &SettingsState) -> SettingsReduction {
     let mut next = state.clone();
     next.config_input = None;
     next.key_entry = None;
+    next.workspace_name_input = None;
     no_intent(next)
 }
 
@@ -1325,6 +1449,9 @@ pub fn render_settings(
     }
     if let Some(input) = &state.config_input {
         render_config_input_overlay(buf, area_w, area_h, input);
+    }
+    if let Some(name) = &state.workspace_name_input {
+        render_workspace_name_modal(buf, area_w, area_h, name);
     }
 }
 

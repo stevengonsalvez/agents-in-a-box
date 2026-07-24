@@ -67,6 +67,16 @@ pub enum WorkspaceAction {
     SetActive(String),
     /// Toggle the workspace default (`d`) — `host/workspace_set_default`.
     SetDefault(String),
+    /// Create a workspace (`n` → name modal → Enter) — `host/workspace_create`,
+    /// then auto-switch into it (P-multica#4).
+    Create {
+        /// The slug derived from the typed name.
+        slug: String,
+        /// The human-readable workspace name.
+        name: String,
+    },
+    /// Delete a workspace (`x`) — `host/workspace_delete` (P-multica#4).
+    Delete(String),
 }
 
 /// A deferred daemon RPC raised by the Settings Notifications grid (tcp T5).
@@ -1438,6 +1448,14 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SettingsIntent::ToggleDefault(id)) => {
                         states.pending_ws_action = Some(WorkspaceAction::SetDefault(id));
                     }
+                    // `n` name modal confirmed → create the workspace + auto-switch.
+                    Some(SettingsIntent::CreateWorkspace { slug, name }) => {
+                        states.pending_ws_action = Some(WorkspaceAction::Create { slug, name });
+                    }
+                    // `x` on a non-active row → delete the workspace.
+                    Some(SettingsIntent::DeleteWorkspace(id)) => {
+                        states.pending_ws_action = Some(WorkspaceAction::Delete(id));
+                    }
                     // A toggled routing cell fires a `hangar/notify_rule_set`
                     // scoped to the grid's current global/workspace scope (tcp T5,
                     // agents-in-a-box-cqh).
@@ -1461,7 +1479,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SettingsIntent::SetDaemonConfig { key, value }) => {
                         states.pending_daemon_config_set.push((key, value));
                     }
-                    // KeychainWrite / New / Rename land in their own beads.
+                    // KeychainWrite / Rename land in their own beads.
                     _ => {
                         // Seed the pane from the live host workspace list the
                         // first time the user lands on the Workspace section.
