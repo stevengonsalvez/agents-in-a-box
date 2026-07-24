@@ -216,6 +216,67 @@ impl SquadRepo {
         Ok(squads)
     }
 
+    /// Resolve ONE squad by id within `workspace` (leader + ordered members), or
+    /// `None`.
+    ///
+    /// Workspace-scoped: a squad id from another tenant, or an unknown / hard-
+    /// deleted id (there is no FK on `agent_task_queue.squad_id` — see migration
+    /// 0045), resolves to `None`. The daemon's claim-time briefing injection keys
+    /// off this: a `None` return = skip injection silently (no stale briefing),
+    /// mirroring multica's dangling-`squad_id` guard.
+    ///
+    /// Reuses the same [`decode_actor`] + `(member_type, member_id)` ordering as
+    /// [`list`](Self::list), just filtered to the one id (an id-keyed single-row
+    /// read + one member sub-select, not an O(squads) scan).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if a query or actor-ref decode fails.
+    pub async fn get(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+    ) -> Result<Option<Squad>, sqlx::Error> {
+        use sqlx::Row;
+        let Some(r) = sqlx::query(
+            "SELECT id, name, leader_type, leader_id FROM squad \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(squad_id)
+        .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await?
+        else {
+            return Ok(None);
+        };
+
+        let id: String = r.try_get("id")?;
+        let leader = decode_actor(
+            &r.try_get::<String, _>("leader_type")?,
+            &r.try_get::<String, _>("leader_id")?,
+        )?;
+        let member_rows = sqlx::query(
+            "SELECT member_type, member_id FROM squad_member \
+             WHERE squad_id = ? ORDER BY member_type, member_id",
+        )
+        .bind(&id)
+        .fetch_all(pool)
+        .await?;
+        let mut members = Vec::with_capacity(member_rows.len());
+        for m in &member_rows {
+            members.push(decode_actor(
+                &m.try_get::<String, _>("member_type")?,
+                &m.try_get::<String, _>("member_id")?,
+            )?);
+        }
+        Ok(Some(Squad {
+            id,
+            name: r.try_get("name")?,
+            leader,
+            members,
+        }))
+    }
+
     /// Resolve `squad` to its LEADER's agent id, the seam that makes leader-routing
     /// take effect.
     ///
@@ -497,6 +558,46 @@ mod tests {
         seed_ws(pool, "ws-b").await;
         let foreign = SquadRepo::member_agent_ids(pool, &ws("ws-b"), "s1").await.unwrap();
         assert!(foreign.is_empty(), "a foreign tenant sees no members");
+    }
+
+    /// `get` resolves ONE squad by id with leader + ordered members, returns
+    /// `None` for an unknown id, and is workspace-scoped (a foreign-tenant id
+    /// resolves to `None`) — the claim-time briefing lookup seam.
+    #[tokio::test]
+    async fn get_resolves_one_squad_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-2")).await.unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &member("u-1")).await.unwrap();
+
+        let got = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().expect("squad present");
+        assert_eq!(got.id, "s1");
+        assert_eq!(got.name, "alpha");
+        assert_eq!(got.leader, agent("a-lead"));
+        assert_eq!(
+            got.members,
+            vec![agent("a-1"), agent("a-2"), member("u-1")],
+            "members ordered by (type, id)"
+        );
+
+        // Unknown id → None.
+        assert_eq!(
+            SquadRepo::get(pool, &ws("ws-a"), "nope").await.unwrap(),
+            None
+        );
+        // Foreign-tenant id → None (tenant guard).
+        assert_eq!(
+            SquadRepo::get(pool, &ws("ws-b"), "s1").await.unwrap(),
+            None,
+            "a foreign tenant cannot resolve the squad"
+        );
     }
 
     /// `leader_agent_id` resolves an agent leader to its agent id (the routing
