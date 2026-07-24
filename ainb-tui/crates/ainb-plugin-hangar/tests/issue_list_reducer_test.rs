@@ -41,6 +41,9 @@ fn row(id: &str, state: &str, assignee: Option<&str>) -> IssueRow {
         run_count: 0,
         last_run_status: None,
         last_run_at: None,
+        parent_id: None,
+        child_total: 0,
+        child_done: 0,
     }
 }
 
@@ -380,6 +383,8 @@ fn wizard_complete_form_commits_create_and_run() {
             // No named-agent roster injected → provider-chip fallback (no assignee).
             agent: Some("codex".to_string()),
             assignee: None,
+            // A plain `c` create carries no parent (0046).
+            parent_issue_id: None,
         })
     );
     assert_eq!(out.state.mode(), IssueListMode::Normal);
@@ -582,6 +587,8 @@ fn wizard_branch_edits_and_blanks_round_trip() {
             // No named-agent roster injected → provider-chip fallback (no assignee).
             agent: Some("claude".to_string()),
             assignee: None,
+            // A plain `c` create carries no parent (0046).
+            parent_issue_id: None,
         })
     );
 }
@@ -807,4 +814,112 @@ fn wizard_agent_row_falls_back_to_provider_chips_when_roster_empty() {
         }
         other => panic!("expected CreateAndRun, got {other:?}"),
     }
+}
+
+// ---------------------------------------------------------------------------
+// 0046 sub-issues: `s` (add sub-issue, parent pre-bound) + `d` (mark done).
+// ---------------------------------------------------------------------------
+
+/// `s` opens the create wizard as an "add sub-issue" with the HIGHLIGHTED row
+/// pre-bound as the parent: the wizard exposes the parent's wire id + a display
+/// for the read-only banner, and is otherwise a normal Title-focused create.
+#[test]
+fn s_key_opens_subissue_wizard_with_parent_prebound() {
+    let s = seeded_state(); // selection defaults to the first row (i1)
+    let parent_id = s.selected_row().unwrap().id.as_str().to_string();
+
+    let out = reduce_issue_list(&s, IssueListEvent::Key('s'));
+
+    assert!(out.intent.is_none(), "opening the wizard raises no intent");
+    assert_eq!(out.state.mode(), IssueListMode::CreateInput);
+    let w = out.state.wizard().expect("wizard is open");
+    assert_eq!(
+        w.focus(),
+        WizardRow::Title,
+        "focus starts on Title like `c`"
+    );
+    assert_eq!(
+        w.parent_issue_id(),
+        Some(parent_id.as_str()),
+        "the highlighted row is pre-bound as the parent"
+    );
+    assert!(
+        w.parent_display().is_some_and(|d| d.contains("Issue i1")),
+        "the banner display names the parent row"
+    );
+}
+
+/// A complete sub-issue form commits `CreateAndRun` carrying the pre-bound
+/// `parent_issue_id`, so the daemon links the new issue as a child.
+#[test]
+fn subissue_wizard_commit_carries_parent_issue_id() {
+    let s = seeded_state();
+    let parent_id = s.selected_row().unwrap().id.as_str().to_string();
+    // Open via `s`, then fill exactly like `ready_to_create` (title + repo + agent).
+    let s = reduce_issue_list(&s, IssueListEvent::Key('s')).state;
+    let s = type_str(s, "Fix login");
+    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
+    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
+    let s = wiz(&s, WizardKey::Down).state; // Link → Repo
+    let s = wiz(&s, WizardKey::Char('@')).state;
+    let s = wiz(&s, WizardKey::Enter).state; // pick scratch
+    let s = wiz(&s, WizardKey::Down).state; // Repo → Source
+    let s = wiz(&s, WizardKey::Down).state; // Source → Target
+    let s = wiz(&s, WizardKey::Down).state; // Target → Agent
+
+    let out = wiz(&s, WizardKey::Enter);
+
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            parent_issue_id, ..
+        }) => assert_eq!(
+            parent_issue_id,
+            Some(parent_id),
+            "the sub-issue create threads the pre-bound parent id"
+        ),
+        other => panic!("expected CreateAndRun carrying the parent, got {other:?}"),
+    }
+}
+
+/// The plain `c` create carries NO parent (regression guard for the 0046 field).
+#[test]
+fn plain_create_carries_no_parent() {
+    let out = wiz(&ready_to_create(), WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            parent_issue_id, ..
+        }) => assert_eq!(parent_issue_id, None),
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
+}
+
+/// `s` with no selectable row (empty board) is a no-op: a sub-issue needs a
+/// parent row to hang from.
+#[test]
+fn s_key_on_empty_board_is_noop() {
+    let s = IssueListState::with_rows(Vec::new());
+    let out = reduce_issue_list(&s, IssueListEvent::Key('s'));
+    assert!(out.intent.is_none());
+    assert_eq!(out.state.mode(), IssueListMode::Normal, "no wizard opens");
+    assert!(out.state.wizard().is_none());
+}
+
+/// `d` raises `MarkDone` for the highlighted row: the keyboard mark-done that
+/// routes through `hangar/issue_update{state:"done"}` and fires the cascade.
+#[test]
+fn d_key_marks_highlighted_row_done() {
+    let s = seeded_state();
+    let target = s.selected_row().unwrap().id.clone();
+
+    let out = reduce_issue_list(&s, IssueListEvent::Key('d'));
+
+    assert_eq!(out.intent, Some(IssueListIntent::MarkDone(target)));
+}
+
+/// `d` on an empty board is a no-op (nothing selected → no intent).
+#[test]
+fn d_key_on_empty_board_is_noop() {
+    let s = IssueListState::with_rows(Vec::new());
+    let out = reduce_issue_list(&s, IssueListEvent::Key('d'));
+    assert!(out.intent.is_none());
 }

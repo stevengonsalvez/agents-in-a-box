@@ -1031,6 +1031,12 @@ pub struct IssueCreateParams {
     /// it). Append-only field: an old client omits it, an old daemon ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// Optional parent issue id: when set, the created issue is a **sub-issue** of
+    /// that parent (migration 0046). The daemon validates the parent exists in the
+    /// same workspace and rejects a foreign/unknown parent. Append-only field: an
+    /// old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_issue_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
@@ -2121,6 +2127,9 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();

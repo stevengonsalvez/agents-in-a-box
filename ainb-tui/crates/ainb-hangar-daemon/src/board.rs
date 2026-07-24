@@ -28,6 +28,8 @@ use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::task::Task;
 use sqlx::SqlitePool;
 
+use crate::events::EventSink;
+
 /// Move the task's issue card to the `new_state`-matched auto-move column of every
 /// board that carries it (P4 / D8). Best-effort; see the module docs.
 ///
@@ -323,6 +325,146 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
         }
         Err(_) => {
             tracing::warn!(issue = %issue_id, "auto-run refused (no repo/agent or store fault)")
+        }
+    }
+}
+
+/// Advance the issue lifecycle, then cascade a completed sub-issue to its parent.
+///
+/// Fires the child-done → parent cascade (migration 0046) after the aggregate
+/// terminal advance when that completion moved a **sub-issue** into a terminal
+/// state — the agent-run twin of the TUI/CLI `issue_update` cascade path.
+///
+/// Captures the issue's `state` around [`advance_issue_lifecycle_after_terminal`]
+/// so the cascade sees the real non-terminal → terminal transition (a squad
+/// fan-out whose set has not drained leaves the issue non-terminal, so nothing
+/// cascades until the last sibling finishes). Best-effort throughout — every fault
+/// is logged and swallowed, exactly like the advance it wraps.
+pub async fn advance_and_cascade_child(pool: &SqlitePool, task: &Task, events: &EventSink) {
+    let prev_state = match task.issue_id.as_deref() {
+        Some(id) => match IssueRepo::get_by_id(pool, id).await {
+            Ok(Some(issue)) => Some(issue.state),
+            _ => None,
+        },
+        None => None,
+    };
+    advance_issue_lifecycle_after_terminal(pool, task).await;
+    let (Some(child_id), Some(prev)) = (task.issue_id.as_deref(), prev_state) else {
+        return;
+    };
+    let Ok(ws) = WorkspaceId::from_str(task.workspace_id.clone()) else {
+        return;
+    };
+    let new_state = match IssueRepo::get_by_id(pool, child_id).await {
+        Ok(Some(issue)) => issue.state,
+        _ => return,
+    };
+    maybe_cascade_child_done(pool, &ws, child_id, &prev, &new_state, events).await;
+}
+
+/// Run the store-side child-done cascade + wake the parent on a fired cascade.
+///
+/// For `child_id`'s `prev → new` transition, on a fired cascade this pushes the
+/// parent's new comment as a live `CommentAdded` event AND (when the parent's
+/// assignee is an agent) wakes it through the shared
+/// [`run_card`](crate::rpc::run_card) core. Shared by the agent-run seam
+/// ([`advance_and_cascade_child`]) and the TUI/CLI `issue_update` handler.
+///
+/// Best-effort: the store cascade (the comment write) is the durable side; a
+/// failed event push or a refused parent wake leaves the comment committed. Only a
+/// store fault is logged — the child's terminal state has already committed and a
+/// cascade fault must never down the caller.
+pub async fn maybe_cascade_child_done(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    child_id: &str,
+    prev_state: &str,
+    new_state: &str,
+    events: &EventSink,
+) {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::idgen::{IdGen as _, SystemIdGen};
+    use ainb_hangar_proto::events::{CommentRow, HangarEvent};
+    use ainb_hangar_store::service::child_done::cascade_child_done;
+
+    let now_ms = SystemClock.now_ms();
+    let comment_id = SystemIdGen.new_ulid();
+    let cascade = match cascade_child_done(
+        pool,
+        ws.as_str(),
+        child_id,
+        prev_state,
+        new_state,
+        now_ms,
+        comment_id,
+    )
+    .await
+    {
+        Ok(Some(c)) => c,
+        Ok(None) => return,
+        Err(e) => {
+            tracing::warn!(error = %e, child = %child_id, "child-done cascade: store fault; skipping");
+            return;
+        }
+    };
+
+    // Push the parent's new comment so a subscribed parent-detail view refreshes
+    // live (best-effort: a malformed id only skips the event, not the wake).
+    if let (Ok(cid), Ok(iid)) = (
+        ainb_hangar_core::ids::CommentId::from_str(cascade.comment_id.clone()),
+        ainb_hangar_core::ids::IssueId::from_str(cascade.parent_id.clone()),
+    ) {
+        events.emit(
+            ws.as_str(),
+            HangarEvent::CommentAdded(CommentRow {
+                id: cid,
+                issue_id: iid,
+                author: format!(
+                    "{}:{}",
+                    cascade.comment_author.kind().as_str(),
+                    cascade.comment_author.id()
+                ),
+                body: cascade.comment_body.clone(),
+                created_at: now_ms,
+            }),
+        );
+    }
+
+    // Wake the parent's assignee when it is an agent (a squad leader / single
+    // agent) — the multica `dispatchParentAssigneeTrigger`. An unassigned or
+    // member parent has nobody to wake (the store guard already excluded members).
+    let Some(assignee) = cascade.parent_assignee.as_ref() else {
+        return;
+    };
+    if assignee.kind() != ActorKind::Agent {
+        return;
+    }
+    let parent = match IssueRepo::get_by_id(pool, &cascade.parent_id).await {
+        Ok(Some(p)) if p.workspace_id == ws.as_str() => p,
+        _ => return,
+    };
+    match crate::rpc::run_card(
+        pool,
+        ws,
+        None,
+        &parent,
+        "headless",
+        None,
+        None,
+        None,
+        Some(assignee),
+    )
+    .await
+    {
+        Ok(_) => {
+            tracing::info!(parent = %cascade.parent_id, "child-done cascade: parent agent woken");
+        }
+        Err(crate::rpc::CardRunError::Blocked(_) | crate::rpc::CardRunError::ActiveRun(_)) => {
+            tracing::debug!(parent = %cascade.parent_id, "child-done cascade: parent wake skipped (not launchable)");
+        }
+        Err(_) => {
+            tracing::warn!(parent = %cascade.parent_id, "child-done cascade: parent wake refused");
         }
     }
 }

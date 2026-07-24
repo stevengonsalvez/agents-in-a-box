@@ -419,6 +419,8 @@ impl<'a> ReconcileService<'a> {
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            parent_issue_id: None,
+            stage: None,
         };
         IssueRepo::insert(self.pool, &new).await?;
         self.mapping

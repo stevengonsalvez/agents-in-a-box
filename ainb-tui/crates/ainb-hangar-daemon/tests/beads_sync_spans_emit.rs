@@ -159,6 +159,8 @@ async fn seed_issue(store: &Store, ws: &str, id: &str, title: &str) -> Issue {
         priority: 0,
         due_date: None,
         labels: Vec::new(),
+        parent_issue_id: None,
+        stage: None,
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     IssueRepo::get_by_id(store.pool(), id)
