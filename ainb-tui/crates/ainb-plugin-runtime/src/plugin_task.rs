@@ -26,7 +26,8 @@ use ainb_plugin_protocol::params::{
     SnapshotGetResult, SnapshotPublishParams, SnapshotSubscribeParams, SnapshotSubscribeResult,
     SpawnManagedSubprocessParams, SpawnManagedSubprocessResult, UnixSocketCloseParams,
     UnixSocketDialParams, UnixSocketDialResult, UnixSocketSendParams, Viewport,
-    WorkspaceSetActiveParams, WorkspaceSetDefaultParams,
+    WorkspaceCreateParams, WorkspaceDeleteParams, WorkspaceSetActiveParams,
+    WorkspaceSetDefaultParams,
 };
 use ainb_plugin_protocol::wire_buffer::WireBuffer;
 use bytes::Bytes;
@@ -54,7 +55,8 @@ use crate::types::{
 };
 use crate::unix_socket::{UnixSocketRegistry, path_allowed};
 use crate::workspace_store::{
-    SharedWorkspaceStore, get_active_logic, list_logic, set_active_logic, set_default_logic,
+    SharedWorkspaceStore, create_logic, delete_logic, get_active_logic, list_logic,
+    set_active_logic, set_default_logic,
 };
 
 /// Wire-protocol ABI version the runtime advertises.
@@ -882,6 +884,8 @@ impl PluginTask {
             }
             methods::HOST_WORKSPACE_SET_ACTIVE => self.host_workspace_set_active(params),
             methods::HOST_WORKSPACE_SET_DEFAULT => self.host_workspace_set_default(params),
+            methods::HOST_WORKSPACE_CREATE => self.host_workspace_create(params),
+            methods::HOST_WORKSPACE_DELETE => self.host_workspace_delete(params),
             // host/action/invoke arriving FROM the plugin would be cross-plugin
             // routing — out of scope for the per-plugin task; rejected.
             other => Err(RpcError::method_not_found(other)),
@@ -1219,6 +1223,30 @@ impl PluginTask {
             serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
         let grant = &self.plugin.manifest.capabilities.workspace_write;
         set_default_logic(grant, self.workspace_store.as_ref(), &p.workspace_id)
+    }
+
+    /// Handle `host/workspace_create`.
+    ///
+    /// Delegates to [`create_logic`] (gated by `workspace:write`): creates the
+    /// workspace + owner member in the daemon store, folds it into the host
+    /// catalogue, and returns the new row (`active`/`default` false).
+    fn host_workspace_create(&self, params: Value) -> Result<Value, RpcError> {
+        let p: WorkspaceCreateParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.workspace_write;
+        create_logic(grant, self.workspace_store.as_ref(), &p.slug, &p.name)
+    }
+
+    /// Handle `host/workspace_delete`.
+    ///
+    /// Delegates to [`delete_logic`] (gated by `workspace:write`): refuses the
+    /// effective-active + last workspace, then tears the workspace down in the
+    /// daemon store and drops it from the host catalogue.
+    fn host_workspace_delete(&self, params: Value) -> Result<Value, RpcError> {
+        let p: WorkspaceDeleteParams =
+            serde_json::from_value(params).map_err(|e| RpcError::invalid_params(e.to_string()))?;
+        let grant = &self.plugin.manifest.capabilities.workspace_write;
+        delete_logic(grant, self.workspace_store.as_ref(), &p.workspace_id)
     }
 
     async fn handle_host_notification(&self, method: &str, params: Value) {
