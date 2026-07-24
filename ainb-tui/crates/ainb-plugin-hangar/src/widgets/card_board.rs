@@ -638,16 +638,12 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
             let color = if done >= total { GOLD } else { MUTED_GRAY };
             // Keep clear of the flush-right assignee glyph (2 cells wide).
             let badge_right = inner_right.saturating_sub(3);
-            if badge_x < badge_right {
-                put_str_bg(
-                    buf,
-                    badge_x,
-                    footer_y,
-                    &clip(&badge, badge_right.saturating_sub(badge_x)),
-                    color,
-                    fill,
-                    badge_right,
-                );
+            // Render the badge ONLY when the WHOLE thing fits before `badge_right`
+            // (CodeRabbit): a clipped `⊟ 1/` fragment misreads the roll-up, so a
+            // narrow card omits the badge entirely rather than truncating it.
+            let badge_w = u16::try_from(badge.chars().count()).unwrap_or(u16::MAX);
+            if badge_x.saturating_add(badge_w) <= badge_right {
+                put_str_bg(buf, badge_x, footer_y, &badge, color, fill, badge_right);
             }
         }
     }
