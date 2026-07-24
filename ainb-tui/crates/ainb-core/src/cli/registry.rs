@@ -1311,6 +1311,13 @@ impl CliCommand for NotifydCommand {
                     "ainb-hooks notification daemon: status, restart (the approve-socket \
                      resume/repair command), install/uninstall hooks",
                 )
+                .after_help(
+                    "EXAMPLES:\n  \
+                     ainb notifyd status              Install + daemon status\n  \
+                     ainb notifyd restart             Repair a dead/wedged approve socket\n  \
+                     ainb notifyd install --all       Install the hook for every agent\n  \
+                     ainb notifyd list --limit 20     Last 20 persisted notifications",
+                )
                 .subcommand(Command::new("run").about("Run the daemon in the foreground (default)"))
                 .subcommand(Command::new("stop").about("Stop a running daemon via its PID file"))
                 .subcommand(
