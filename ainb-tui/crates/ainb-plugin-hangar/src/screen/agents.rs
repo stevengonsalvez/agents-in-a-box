@@ -24,7 +24,7 @@
 //!     a single press; never traps the user (a bare Esc leaves navigation intact,
 //!     the footer advertises the tab hotkeys + `q` to leave).
 
-use ainb_hangar_proto::events::{ActorRow, PresenceState};
+use ainb_hangar_proto::events::{ActorRow, PresenceState, Workload};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use crate::widgets::presence_dot::presence_dot;
@@ -39,6 +39,9 @@ const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
 /// Destructive-confirm red — a delete prompt is never painted like a success.
 const ERROR_RED: Color = Color::rgb(235, 90, 90);
+/// Workload `queued` amber — waiting-to-work, distinct from the `unstable`
+/// availability dot (which is a runtime-degraded signal, never workload).
+const WORKLOAD_AMBER: Color = Color::rgb(230, 180, 60);
 
 /// One agent resolved for render: its canonical ref, display name, subtitle, and
 /// live presence (drives the inline 3-state dot).
@@ -50,8 +53,11 @@ pub struct AgentView {
     pub name: String,
     /// A short subtitle (the snapshot's `subtitle`, e.g. `agent`).
     pub subtitle: String,
-    /// Live presence (drives the inline dot).
+    /// Live presence — the availability dimension (drives the inline dot).
     pub presence: PresenceState,
+    /// Live workload — the orthogonal second dimension (multica `Workload`),
+    /// derived by the daemon from the agent's live task counts.
+    pub workload: Workload,
 }
 
 /// The render-state cache for the Agents screen.
@@ -100,6 +106,7 @@ impl AgentsState {
                 name: a.display_name.clone(),
                 subtitle: a.subtitle.clone(),
                 presence: a.presence,
+                workload: a.workload,
             })
             .collect();
         Self::new(agents)
@@ -498,7 +505,12 @@ fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
     put_str(buf, area_w - hint_w, row, HINTS, GOLD, area_w);
 }
 
-/// Render one agent row: `▶ <name>  <dot> <presence>  · <subtitle>`.
+/// Render one agent row:
+/// `▶ <name>  <dot> <presence> · <wl-glyph> <workload>  · <subtitle>`.
+///
+/// The two dimensions are painted side by side (multica `presence × workload`):
+/// the availability dot+word, then ` · ` + the workload glyph+word colour-coded
+/// by its state, so an `online` agent visibly reads `working` vs `idle`.
 fn render_agent_row(
     buf: &mut WireBuffer,
     row: u16,
@@ -535,6 +547,12 @@ fn render_agent_row(
         MUTED_GRAY,
         area_w,
     );
+    // The orthogonal workload dimension, painted right after availability.
+    let (wl_glyph, wl_color) = workload_dot(agent.workload);
+    x = put_str(buf, x, row, " · ", MUTED_GRAY, area_w);
+    x = put_cell(buf, x, row, wl_glyph, wl_color, area_w);
+    x = put_str(buf, x, row, " ", MUTED_GRAY, area_w);
+    x = put_str(buf, x, row, workload_word(agent.workload), wl_color, area_w);
     if !agent.subtitle.is_empty() {
         x = put_str(buf, x, row, "  · ", MUTED_GRAY, area_w);
         put_str(buf, x, row, &agent.subtitle, MUTED_GRAY, area_w);
@@ -547,6 +565,25 @@ const fn presence_word(presence: PresenceState) -> &'static str {
         PresenceState::Online => "online",
         PresenceState::Unstable => "unstable",
         PresenceState::Offline => "offline",
+    }
+}
+
+/// The lowercase workload word rendered next to its glyph.
+const fn workload_word(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Working => "working",
+        Workload::Queued => "queued",
+        Workload::Idle => "idle",
+    }
+}
+
+/// The workload glyph + colour: `⚙ working` (green), `◔ queued` (amber),
+/// `· idle` (gray) — mirroring the availability `presence_dot` idiom.
+const fn workload_dot(workload: Workload) -> (char, Color) {
+    match workload {
+        Workload::Working => ('⚙', SELECTION_GREEN),
+        Workload::Queued => ('◔', WORKLOAD_AMBER),
+        Workload::Idle => ('·', MUTED_GRAY),
     }
 }
 
@@ -592,6 +629,7 @@ mod tests {
                 "member".into()
             },
             presence: PresenceState::Online,
+            workload: Workload::Idle,
             is_agent,
             recent_rank: None,
         }
@@ -781,6 +819,65 @@ mod tests {
         let text = buffer_text(&buf, 80, 24);
         assert!(text.contains("Delete agent"), "confirm overlay must render");
         assert!(text.contains("backend-bot"), "confirm names the agent");
+    }
+
+    /// `from_actors` carries the workload dimension through from the snapshot.
+    #[test]
+    fn from_actors_carries_workload() {
+        let mut queued = actor("agent:a-1", "backend-bot", true);
+        queued.workload = Workload::Queued;
+        let state = AgentsState::from_actors(&[queued]);
+        assert_eq!(state.agents()[0].workload, Workload::Queued);
+    }
+
+    /// The render paints BOTH dimensions: the availability word AND the
+    /// orthogonal workload word are independently present on the same row.
+    #[test]
+    fn render_shows_both_presence_and_workload() {
+        let state = AgentsState::new(vec![
+            AgentView {
+                actor_ref: "agent:a-1".into(),
+                name: "worker".into(),
+                subtitle: "claude".into(),
+                presence: PresenceState::Online,
+                workload: Workload::Working,
+            },
+            AgentView {
+                actor_ref: "agent:a-2".into(),
+                name: "waiter".into(),
+                subtitle: "claude".into(),
+                presence: PresenceState::Online,
+                workload: Workload::Queued,
+            },
+        ]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        // Availability dimension still independently present.
+        assert!(text.contains("online"), "availability word must render");
+        // Orthogonal workload dimension present for both agents.
+        assert!(
+            text.contains("working"),
+            "a running agent renders `working`"
+        );
+        assert!(text.contains("queued"), "a queued agent renders `queued`");
+    }
+
+    /// An idle agent renders the `idle` workload word (the default dimension is
+    /// still surfaced, not blank).
+    #[test]
+    fn render_shows_idle_workload() {
+        let state = AgentsState::new(vec![AgentView {
+            actor_ref: "agent:a-1".into(),
+            name: "resting".into(),
+            subtitle: "claude".into(),
+            presence: PresenceState::Online,
+            workload: Workload::Idle,
+        }]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(text.contains("idle"), "an idle agent renders `idle`");
     }
 
     /// Reassemble the buffer text for render assertions.

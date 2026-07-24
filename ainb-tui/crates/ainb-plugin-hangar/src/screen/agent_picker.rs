@@ -403,6 +403,7 @@ mod render_tests {
             display_name: name.to_string(),
             subtitle: "sub".into(),
             presence: PresenceState::Online,
+            workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent,
             recent_rank,
         }

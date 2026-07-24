@@ -112,6 +112,7 @@ fn seeded_agents() -> serde_json::Value {
         display_name: name.into(),
         subtitle: String::new(),
         presence,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
     };

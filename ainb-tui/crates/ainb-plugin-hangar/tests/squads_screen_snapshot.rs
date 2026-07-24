@@ -22,6 +22,7 @@ fn actor(actor_ref: &str, name: &str, presence: PresenceState, is_agent: bool) -
         display_name: name.into(),
         subtitle: String::new(),
         presence,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
     }
@@ -89,7 +90,10 @@ fn render_empty_shows_help() {
         full.contains("Press 'n' to create an agent, 'c' to create a squad"),
         "empty help line missing:\n{full}"
     );
-    assert!(full.contains("[n]ew-agent"), "new-agent hint missing:\n{full}");
+    assert!(
+        full.contains("[n]ew-agent"),
+        "new-agent hint missing:\n{full}"
+    );
     assert!(full.contains("[c]reate"), "create hint missing:\n{full}");
 }
 
