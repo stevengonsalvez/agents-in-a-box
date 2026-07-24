@@ -404,6 +404,79 @@ pub enum AgentCommand {
     Archive(AgentArchiveArgs),
     /// Un-archive an agent (restore it to the active picker).
     Unarchive(AgentArchiveArgs),
+    /// Set an agent's invocation permission mode (gap #8: `private`/`public_to`).
+    Permission(AgentPermissionArgs),
+    /// Manage an agent's invocation allow-list (add/revoke/list a target).
+    Allow(AgentAllowArgs),
+    /// Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`).
+    CanInvoke(AgentCanInvokeArgs),
+}
+
+/// Arguments for `hangar agent permission`.
+#[derive(Args, Debug)]
+pub struct AgentPermissionArgs {
+    /// Agent id (ULID) to set the permission mode on.
+    pub id: String,
+    /// The new mode: `private` (owner-only, deny-by-default) or `public_to` (the
+    /// allow-list decides).
+    #[arg(long)]
+    pub mode: String,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar agent allow`.
+///
+/// Adds (or, with `--revoke`, removes) one invocation-target row, or lists the
+/// current allow-list with `--list`. Exactly one target flag (`--workspace` /
+/// `--member` / `--team`) is required unless `--list` is given. Adding a target
+/// implies `permission_mode=public_to` (mirroring multica's "share ⇒ public_to").
+#[derive(Args, Debug)]
+pub struct AgentAllowArgs {
+    /// Agent id (ULID) whose allow-list to manage.
+    pub id: String,
+    /// Grant/revoke the WHOLE workspace (a workspace target). Mutually exclusive
+    /// with `--member` / `--team`.
+    #[arg(long, conflicts_with_all = ["member", "team"])]
+    pub workspace: bool,
+    /// Grant/revoke a specific member (a user id or email). Mutually exclusive with
+    /// `--workspace` / `--team`.
+    #[arg(long, conflicts_with_all = ["workspace", "team"])]
+    pub member: Option<String>,
+    /// Grant/revoke a reserved team target (inert in V1). Mutually exclusive with
+    /// `--workspace` / `--member`.
+    #[arg(long, conflicts_with_all = ["workspace", "member"])]
+    pub team: Option<String>,
+    /// Remove the named target instead of adding it.
+    #[arg(long)]
+    pub revoke: bool,
+    /// Print the current allow-list (ignores the target flags).
+    #[arg(long)]
+    pub list: bool,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace_slug: Option<String>,
+}
+
+/// Arguments for `hangar agent can-invoke`.
+#[derive(Args, Debug)]
+pub struct AgentCanInvokeArgs {
+    /// Agent id (ULID) to test invocation on.
+    pub id: String,
+    /// The invoking user id or email to judge the run by.
+    #[arg(long = "as")]
+    pub as_user: String,
+    /// Treat the invoker as an `agent` actor (no resolved originator) rather than a
+    /// `member`. Exercises the A2A / workspaceBroad path.
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar agent create`.
@@ -1815,7 +1888,156 @@ async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
         AgentCommand::Edit(args) => run_agent_edit(&store, args).await,
         AgentCommand::Archive(args) => run_agent_set_archived(&store, args, true).await,
         AgentCommand::Unarchive(args) => run_agent_set_archived(&store, args, false).await,
+        AgentCommand::Permission(args) => run_agent_permission(&store, args).await,
+        AgentCommand::Allow(args) => run_agent_allow(&store, args).await,
+        AgentCommand::CanInvoke(args) => run_agent_can_invoke(&store, args).await,
     }
+}
+
+/// Resolve a `user_id_or_email` to a `user.id`: an `@`-bearing token is looked up
+/// in the `user` table (email is UNIQUE); anything else is treated as a ULID id
+/// verbatim. Errors when an email names no user.
+async fn resolve_user_id(store: &Store, token: &str) -> Result<String> {
+    let token = token.trim();
+    if token.contains('@') {
+        let id: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+            .bind(token)
+            .fetch_optional(store.pool())
+            .await
+            .context("look up user by email")?;
+        id.with_context(|| format!("no user with email {token}"))
+    } else {
+        Ok(token.to_string())
+    }
+}
+
+/// Fetch an agent by id, erroring when it does not exist.
+async fn require_agent(store: &Store, id: &str) -> Result<ainb_hangar_store::repo::agent::Agent> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    AgentRepo::get(store.pool(), id)
+        .await
+        .context("look up agent")?
+        .with_context(|| format!("no agent with id {id}"))
+}
+
+/// `hangar agent permission`: set the invocation permission mode + re-derive the
+/// legacy visibility label. Prints the new mode and derived visibility.
+async fn run_agent_permission(store: &Store, args: AgentPermissionArgs) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let mode = args.mode.trim();
+    if mode != "private" && mode != "public_to" {
+        anyhow::bail!("mode must be `private` or `public_to`, got `{mode}`");
+    }
+    let touched = AgentRepo::set_permission_mode(store.pool(), &args.id, mode)
+        .await
+        .with_context(|| format!("set permission mode for agent {}", args.id))?;
+    if !touched {
+        anyhow::bail!("no agent with id {}", args.id);
+    }
+    let agent = require_agent(store, &args.id).await?;
+    println!(
+        "agent {} permission_mode={} visibility={}",
+        args.id, agent.permission_mode, agent.visibility
+    );
+    Ok(())
+}
+
+/// `hangar agent allow`: add / revoke / list one invocation target. Adding a
+/// target flips the agent to `public_to` (so the grant actually takes effect).
+async fn run_agent_allow(store: &Store, args: AgentAllowArgs) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    use ainb_hangar_store::repo::agent_invocation_target::AgentInvocationTargetRepo;
+
+    let agent = require_agent(store, &args.id).await?;
+
+    if args.list {
+        let targets = AgentInvocationTargetRepo::list(store.pool(), &args.id)
+            .await
+            .context("list invocation targets")?;
+        if targets.is_empty() {
+            println!("agent {} has no invocation targets", args.id);
+        } else {
+            for t in targets {
+                println!("{}|{}", t.target_type, t.target_id);
+            }
+        }
+        return Ok(());
+    }
+
+    // Resolve the (target_type, target_id) from the exactly-one target flag.
+    let (target_type, target_id): (&str, String) = if args.workspace {
+        ("workspace", agent.workspace_id.clone())
+    } else if let Some(member) = args.member.as_deref() {
+        ("member", resolve_user_id(store, member).await?)
+    } else if let Some(team) = args.team.as_deref() {
+        ("team", team.to_string())
+    } else {
+        anyhow::bail!(
+            "pass exactly one of --workspace / --member <id|email> / --team <id> (or --list)"
+        );
+    };
+
+    if args.revoke {
+        let removed =
+            AgentInvocationTargetRepo::remove(store.pool(), &args.id, target_type, &target_id)
+                .await
+                .context("remove invocation target")?;
+        if removed {
+            println!("revoked {target_type}|{target_id} from agent {}", args.id);
+        } else {
+            println!("agent {} had no {target_type}|{target_id} target", args.id);
+        }
+        return Ok(());
+    }
+
+    // Adding a target only matters when the agent is public_to — flip it if needed
+    // (mirrors multica's "share ⇒ public_to").
+    if agent.permission_mode != "public_to" {
+        AgentRepo::set_permission_mode(store.pool(), &args.id, "public_to")
+            .await
+            .context("flip agent to public_to")?;
+    }
+    AgentInvocationTargetRepo::add(
+        store.pool(),
+        &ainb_hangar_core::idgen::SystemIdGen,
+        &ainb_hangar_core::clock::SystemClock,
+        &args.id,
+        target_type,
+        &target_id,
+        None,
+    )
+    .await
+    .context("add invocation target")?;
+    println!("allowed {target_type}|{target_id} on agent {}", args.id);
+    Ok(())
+}
+
+/// `hangar agent can-invoke`: print exactly `ALLOW` or `DENY` (exit 0 either way).
+/// The deterministic readout the acceptance greps.
+async fn run_agent_can_invoke(store: &Store, args: AgentCanInvokeArgs) -> Result<()> {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let agent = require_agent(store, &args.id).await?;
+    // An `--actor agent` invoke carries NO resolved originator (hangar has no
+    // originator column yet), so the user id is dropped for the agent-actor case —
+    // exactly the unattributed A2A path the gate fails closed against for
+    // member/team targets. A `member` actor resolves the id.
+    let is_agent_actor = args.actor.as_deref().map(str::trim) == Some("agent");
+    let (kind, user_id) = if is_agent_actor {
+        (ActorKind::Agent, None)
+    } else {
+        (
+            ActorKind::Member,
+            Some(resolve_user_id(store, &args.as_user).await?),
+        )
+    };
+    let allowed = AgentRepo::can_invoke(store.pool(), &agent, kind, user_id.as_deref())
+        .await
+        .context("evaluate can_invoke")?;
+    println!("{}", if allowed { "ALLOW" } else { "DENY" });
+    Ok(())
 }
 
 /// `hangar agent create`: create one agent from scratch, filling the workspace /

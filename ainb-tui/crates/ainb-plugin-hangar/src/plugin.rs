@@ -3239,6 +3239,9 @@ impl HangarPlugin {
             agent: dispatch.agent,
             source_branch: dispatch.source_branch,
             assignee: dispatch.assignee,
+            // gap #8: the TUI operator is the workspace owner; None lets the daemon
+            // default the invoker to the owner, whom the gate always admits.
+            invoker_user_id: None,
         };
         for (id, method, params) in [
             (
