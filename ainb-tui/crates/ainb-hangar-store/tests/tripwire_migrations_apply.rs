@@ -1261,3 +1261,48 @@ async fn migration_0034_adds_board_card_ord_defaulting_zero() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn migration_0047_adds_permission_mode_and_invocation_target() {
+    // Gap #8 / multica 130: agent invocation-permission. `agent.permission_mode`
+    // is the authoritative deny-by-default invoke source; `agent_invocation_target`
+    // is the FK-less allow-list. A fresh DB (no legacy rows) has the column with a
+    // 'private' default and an empty target table.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains(
+            "permission_mode TEXT NOT NULL DEFAULT 'private' CHECK (permission_mode IN ('private', 'public_to'))"
+        ),
+        "agent.permission_mode column + CHECK: {agent}"
+    );
+
+    let target = table_sql(&pool, "agent_invocation_target").await;
+    assert!(
+        target.contains("id TEXT PRIMARY KEY"),
+        "agent_invocation_target.id PK: {target}"
+    );
+    assert!(
+        target.contains("agent_id TEXT NOT NULL"),
+        "agent_invocation_target.agent_id NOT NULL (FK-less): {target}"
+    );
+    assert!(
+        target.contains(
+            "target_type TEXT NOT NULL CHECK (target_type IN ('workspace', 'member', 'team'))"
+        ),
+        "agent_invocation_target.target_type CHECK: {target}"
+    );
+    assert!(
+        target.contains("UNIQUE (agent_id, target_type, target_id)"),
+        "agent_invocation_target dedup UNIQUE: {target}"
+    );
+    // No FK on agent_id (matches the (actor_type, actor_id) FK-less convention).
+    assert!(
+        !target.contains("REFERENCES"),
+        "agent_invocation_target is FK-less by design: {target}"
+    );
+
+    pool.close().await;
+}
