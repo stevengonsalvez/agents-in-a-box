@@ -3480,6 +3480,7 @@ async fn handle_issue_update(
                     None,
                     None,
                     Some(actor),
+                    None, // owner-invoked recovery re-dispatch
                 )
                 .await
                 {
@@ -4813,6 +4814,7 @@ async fn handle_board_card_run(
         agent_override,
         params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()),
         None, // a board card runs under the card's own assignee (no wizard override)
+        None, // owner-invoked (the local TUI operator); the gate admits the owner
     )
     .await
     .map_err(card_run_err)?;
@@ -4924,6 +4926,11 @@ async fn handle_issue_run(
         .map(str::trim)
         .filter(|s| !s.is_empty())
         .and_then(|s| s.parse::<ainb_hangar_core::actor::ActorRef>().ok());
+    // gap #8: an optional invoker identity. Omitted (`None`) defaults to the
+    // workspace owner inside `run_card` — the ordinary single-operator Run, which
+    // the gate always admits. A multi-user caller (or a test) can name a non-owner
+    // member here to be gated against the agent's allow-list.
+    let invoker = params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let outcome = run_card(
         pool,
         &ws,
@@ -4934,6 +4941,7 @@ async fn handle_issue_run(
         agent_override,
         source_override,
         assignee_override.as_ref(),
+        invoker,
     )
     .await
     .map_err(card_run_err)?;
@@ -5005,6 +5013,11 @@ pub(crate) enum CardRunError {
     InteractiveSquad,
     /// The workspace has no agent to run a single-agent card on.
     NoAgent,
+    /// The resolved agent is not invocable by the effective invoker (gap #8: the
+    /// agent is `private`, or `public_to` without the invoker on its allow-list).
+    /// Carries `(agent_id, invoker)` for the client-visible message. No task row is
+    /// written.
+    NotInvocable { agent_id: String, invoker: String },
     /// A store fault.
     Db(sqlx::Error),
 }
@@ -5030,6 +5043,9 @@ fn card_run_err(e: CardRunError) -> RpcError {
             "interactive mode is not supported for a squad card — a squad runs as a headless batch; use headless",
         ),
         CardRunError::NoAgent => invalid_params("this workspace has no agent to run the card on"),
+        CardRunError::NotInvocable { agent_id, invoker } => invalid_params(&format!(
+            "agent {agent_id} is not invocable by {invoker} — it is private or you are not on its allow-list"
+        )),
         CardRunError::Db(db) => store_err(&db),
     }
 }
@@ -5103,6 +5119,7 @@ pub(crate) async fn run_card(
     agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
     source_branch_override: Option<&str>,
     assignee_override: Option<&ainb_hangar_core::actor::ActorRef>,
+    invoker_user_id: Option<&str>,
 ) -> Result<CardRunOutcome, CardRunError> {
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
@@ -5228,6 +5245,35 @@ pub(crate) async fn run_card(
         .await
         .map_err(CardRunError::Db)?
         .ok_or(CardRunError::NoAgent)?;
+
+    // gap #8 invocation gate: a run may only be enqueued for an agent the invoker
+    // is permitted to invoke (multica canInvokeAgent parity). The EFFECTIVE invoker
+    // defaults to the workspace owner (the ordinary single-operator TUI Run) when no
+    // explicit invoker is supplied — the owner branch always admits, so the existing
+    // Run path is unchanged; the gate only bites a non-owner member (the case the
+    // allow-list exists for). Denied here means NO task row is written.
+    let invoker_id = match invoker_user_id {
+        Some(u) => u.to_string(),
+        None => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, ws)
+            .await
+            .map_err(CardRunError::Db)?
+            .unwrap_or_default(),
+    };
+    let invocable = ainb_hangar_store::repo::agent::AgentRepo::can_invoke(
+        pool,
+        &agent,
+        ainb_hangar_core::actor::ActorKind::Member,
+        Some(&invoker_id),
+    )
+    .await
+    .map_err(CardRunError::Db)?;
+    if !invocable {
+        return Err(CardRunError::NotInvocable {
+            agent_id: agent.id.clone(),
+            invoker: invoker_id,
+        });
+    }
+
     let task_id = SystemIdGen.new_ulid();
     let mut tx = pool.begin().await.map_err(CardRunError::Db)?;
     TaskRepo::insert_in_tx(
@@ -8828,6 +8874,7 @@ mod tests {
             ainb_hangar_core::agent_kind::AgentKind::parse("claude"),
             None,
             None,
+            None,
         )
         .await;
 
@@ -8910,6 +8957,7 @@ mod tests {
             None, // no provider override — the named agent's own provider drives spawn
             None,
             Some(&override_ref),
+            None,
         )
         .await;
 
@@ -8985,6 +9033,7 @@ mod tests {
             &issue,
             "headless",
             Some("scratch"),
+            None,
             None,
             None,
             None,
@@ -9108,6 +9157,167 @@ mod tests {
             task_issue.as_deref(),
             Some(id.as_str()),
             "the task carries the issue"
+        );
+    }
+
+    /// gap #8 enqueue guard: the invocation gate actually BLOCKS a run, it does not
+    /// merely report. A PRIVATE agent invoked by a NON-OWNER member yields
+    /// `NotInvocable` and writes NO `agent_task_queue` row; the workspace OWNER
+    /// always enqueues (no regression); once the member is allow-listed
+    /// (`public_to` + member target) the SAME member enqueues exactly one task.
+    #[tokio::test]
+    async fn run_card_gates_a_private_agent_against_a_non_owner_member() {
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_core::idgen::SystemIdGen;
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::agent::AgentRepo;
+        use ainb_hangar_store::repo::agent_invocation_target::AgentInvocationTargetRepo;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+        use ainb_hangar_store::repo::member::{MemberRepo, MemberRole};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        // create_agent yields a PRIVATE agent (permission_mode default).
+        let agent = bootstrap::create_agent(pool, &ws, "secret-bot", "claude", None).await.unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        let bob = MemberRepo::add(pool, &ws_id, "bob@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+
+        // Two runnable issues (repo = scratch) so the one-active-run guard never
+        // masks a gate outcome.
+        let mk_issue = |title: &str| {
+            let id =
+                ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+            (id.clone(), title.to_string())
+        };
+        let (issue1, _) = mk_issue("private run one");
+        let (issue2, _) = mk_issue("private run two");
+        for (iid, title) in [(&issue1, "private run one"), (&issue2, "private run two")] {
+            IssueRepo::insert(
+                pool,
+                &NewIssue {
+                    id: iid.clone(),
+                    workspace_id: ws.clone(),
+                    title: title.into(),
+                    description: Some("do the work".into()),
+                    state: "todo".into(),
+                    creator: ainb_hangar_core::actor::ActorRef::new(
+                        ainb_hangar_core::actor::ActorKind::Member,
+                        "stevie",
+                    )
+                    .unwrap(),
+                    created_at: 1,
+                    priority: 0,
+                    assignee: None,
+                    due_date: None,
+                    labels: Vec::new(),
+                    parent_issue_id: None,
+                    stage: None,
+                },
+            )
+            .await
+            .unwrap();
+            CardParityRepo::set_issue_repo_agent(pool, &ws, iid, Some("scratch"), None)
+                .await
+                .unwrap();
+        }
+        let load =
+            |iid: String| async move { IssueRepo::get_by_id(pool, &iid).await.unwrap().unwrap() };
+
+        // (a) DENY: private agent + non-owner member bob → NotInvocable, no task row.
+        let denied = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load(issue1.clone()).await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            Some(&bob.user_id),
+        )
+        .await;
+        assert!(
+            matches!(denied, Err(CardRunError::NotInvocable { .. })),
+            "a non-owner member must NOT invoke a private agent (private, no target)",
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 0, "a blocked run writes NO task row");
+
+        // (b) OWNER (default None invoker) always enqueues — no regression.
+        let owner_run = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load(issue1.clone()).await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(
+            owner_run.is_ok(),
+            "owner-invoked run must enqueue even for a private agent"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(count, 1, "the owner's run enqueued exactly one task");
+
+        // (c) Allow-list bob (member target, mode public_to) → the SAME member now
+        //     enqueues, on the second issue.
+        AgentRepo::set_permission_mode(pool, &agent.id, "public_to").await.unwrap();
+        AgentInvocationTargetRepo::add(
+            pool,
+            &SystemIdGen,
+            &SystemClock,
+            &agent.id,
+            "member",
+            &bob.user_id,
+            None,
+        )
+        .await
+        .unwrap();
+        let member_run = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load(issue2.clone()).await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            Some(&bob.user_id),
+        )
+        .await;
+        assert!(
+            member_run.is_ok(),
+            "an allow-listed member must invoke the now-public_to agent"
+        );
+        let count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(
+            count, 2,
+            "the allow-listed member's run enqueued the second task"
         );
     }
 
