@@ -55,6 +55,7 @@ const SECOND_WS_ISSUE: &str = "Acme Login Bug";
 /// Runs after `prepare_pipeline` seeded the P4 fixture.
 fn seed_second_workspace(home: &std::path::Path) {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
+    use ainb_hangar_core::clock::HangarClock as _;
     use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
     let hangar_dir = home.join(".agents-in-a-box");
@@ -64,13 +65,19 @@ fn seed_second_workspace(home: &std::path::Path) {
         .expect("seed runtime");
     rt.block_on(async {
         let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open seed store");
+        // Stamped strictly AFTER the P4 fixture's workspace, so `acme` is always
+        // the SECOND row in the created_at-ordered workspace pane and the `J`
+        // (down) + `s` (activate) drive below lands on it deterministically. The
+        // old frozen 2023 constant tied with the (then also frozen) fixture and
+        // only worked because of insert order.
+        let created_at = ainb_hangar_core::clock::SystemClock.now_ms() + 1_000;
         // A distinct ULID-style id + the `acme` slug (id != slug, mirroring real
         // workspaces and the slug/id resolution contract).
         sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
             .bind(SECOND_WS_ID)
             .bind(SECOND_SLUG)
             .bind("Acme")
-            .bind(1_700_000_000_000_i64)
+            .bind(created_at)
             .execute(store.pool())
             .await
             .expect("insert second workspace");
@@ -91,7 +98,7 @@ fn seed_second_workspace(home: &std::path::Path) {
                 state: "open".into(),
                 assignee: None,
                 creator,
-                created_at: 1_700_000_000_000,
+                created_at,
                 priority: 0,
                 due_date: None,
                 labels: Vec::new(),

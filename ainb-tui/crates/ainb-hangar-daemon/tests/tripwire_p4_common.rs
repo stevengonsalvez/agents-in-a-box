@@ -495,6 +495,16 @@ fn prepare_pipeline_board_run_seeded(
     seed_first_run_ack(home.path());
     seed_notify_prompt_dismissed(home.path());
     seed_board_and_profile(&hangar_dir);
+    // Free the fixture's claim slot BEFORE the claim-enabled daemon starts.
+    //
+    // The P4 fixture seeds `agent-1` at the schema default cap of 1 and leaves
+    // its `task-1` in `running`, which fully consumes that one slot — so the
+    // card this pipeline's tripwire enqueues could never be claimed. It only
+    // ever worked by accident: the fixture used to be stamped in 2023, so the
+    // stale-running sweeper failed `task-1` on its first tick and freed the
+    // slot. With the fixture on a live clock that accident is gone, so the slot
+    // is now freed deliberately (`task-1` is a render-only prop here).
+    set_agent_concurrency(home.path(), 10);
     pre_spawn(home.path());
 
     let fake_claude = write_executable(home.path(), "fake-claude.sh", fake_agent_body);
