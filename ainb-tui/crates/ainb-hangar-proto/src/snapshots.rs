@@ -1694,6 +1694,13 @@ pub struct IssueRunParams {
     /// targets a named agent by carrying it here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the run by. APPEND-ONLY: omitted (`None`) defaults to the
+    /// workspace owner (the ordinary single-operator Run, which the gate always
+    /// admits — so this is invisible to existing callers). A multi-user caller
+    /// names a non-owner member here to be gated against the agent's allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_DELETE`] (63d): delete one issue and

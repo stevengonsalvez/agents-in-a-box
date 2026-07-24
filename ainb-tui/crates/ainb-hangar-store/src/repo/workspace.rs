@@ -157,6 +157,33 @@ impl WorkspaceRepo {
         })
     }
 
+    /// The `user_id` of the workspace's owner member, or `None` when the workspace
+    /// has no `owner`-role member (an un-bootstrapped / unknown workspace).
+    ///
+    /// The default invoking identity for a run enqueued with no explicit invoker
+    /// (the ordinary single-operator TUI Run): [`crate::repo::agent::AgentRepo::can_invoke`]
+    /// admits the owner unconditionally, so resolving the owner here keeps the
+    /// existing Run path unchanged while the gate still bites a non-owner member.
+    /// Picks the lowest `user_id` when several owners exist, for a deterministic
+    /// answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn owner_id(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT user_id FROM member \
+             WHERE workspace_id = ? AND role = 'owner' \
+             ORDER BY user_id LIMIT 1",
+        )
+        .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await
+    }
+
     /// Delete a workspace and every workspace-scoped child row in one transaction
     /// (multica `DeleteWorkspace` parity).
     ///
