@@ -888,7 +888,13 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_thirty_six_tables() {
+async fn all_migrations_preserve_every_core_table() {
+    // Guards against a migration DROPPING or renaming a core table. This used
+    // to assert an exact table count, which broke on every PR that added a
+    // migration (the multica-parity work adds new tables continuously): the
+    // exact count was never the point, catching a lost table is. So this
+    // checks that every table in `expected` still exists by name (a floor,
+    // not a ceiling): new tables are fine, a missing one fails loudly.
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -949,7 +955,14 @@ async fn all_migrations_create_exactly_thirty_six_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 37, "expected 37 v1 tables, got {names:?}");
+    // Floor, not a frozen ceiling: new migrations are free to add tables, but
+    // the table count must never drop below the known core set.
+    assert!(
+        names.len() >= expected.len(),
+        "expected at least {} core tables, got {} ({names:?})",
+        expected.len(),
+        names.len()
+    );
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
