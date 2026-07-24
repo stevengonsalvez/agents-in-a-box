@@ -746,6 +746,15 @@ pub enum WizardRow {
     /// traceability and appended to the dispatched brief. Enter here commits like
     /// the other single-line rows; blank is fine.
     Link,
+    /// The multi-line acceptance-criteria row (OPTIONAL): each non-blank line is
+    /// one criterion, stored as `issue.acceptance_criteria` (migration 0048).
+    /// Enter here inserts a NEWLINE (like `Brief`); printable chars append,
+    /// Backspace edits.
+    Acceptance,
+    /// The multi-line context-references row (OPTIONAL): each non-blank line is one
+    /// reference (URL / `owner/repo#123` / note), stored as `issue.context_refs`
+    /// (migration 0048). Enter here inserts a NEWLINE (like `Brief`).
+    Context,
     /// The repo picker row (REQUIRED — `@` fuzzy dropdown or ←/→ cycle; a
     /// repo-less create is impossible).
     Repo,
@@ -758,12 +767,14 @@ pub enum WizardRow {
 }
 
 impl WizardRow {
-    /// The rows in render / focus-cycle order (Title → Brief → Link → Repo →
-    /// Source → Target → Agent).
-    pub const ALL: [Self; 7] = [
+    /// The rows in render / focus-cycle order (Title → Brief → Link → Acceptance →
+    /// Context → Repo → Source → Target → Agent).
+    pub const ALL: [Self; 9] = [
         Self::Title,
         Self::Brief,
         Self::Link,
+        Self::Acceptance,
+        Self::Context,
         Self::Repo,
         Self::Source,
         Self::Target,
@@ -816,6 +827,14 @@ pub struct CreateWizard {
     /// The single-line linked-issue reference typed so far (OPTIONAL): a URL or
     /// `owner/repo#123` carried through to `issue.external_ref`. Blank is allowed.
     link: String,
+    /// The multi-line acceptance-criteria buffer (OPTIONAL): free text with
+    /// embedded newlines; each non-blank line becomes one `issue.acceptance_criteria`
+    /// element (migration 0048). Blank is allowed.
+    acceptance: String,
+    /// The multi-line context-references buffer (OPTIONAL): free text with embedded
+    /// newlines; each non-blank line becomes one `issue.context_refs` element
+    /// (migration 0048). Blank is allowed.
+    context: String,
     /// The picked repo's wire ref, or `None` until one is chosen (REQUIRED).
     repo_ref: Option<String>,
     /// The post-`@` fuzzy query filtering the repo dropdown.
@@ -849,6 +868,8 @@ impl Default for CreateWizard {
             title: String::new(),
             brief: String::new(),
             link: String::new(),
+            acceptance: String::new(),
+            context: String::new(),
             repo_ref: None,
             repo_query: String::new(),
             repo_dropdown: None,
@@ -885,6 +906,20 @@ impl CreateWizard {
     #[must_use]
     pub fn link(&self) -> &str {
         &self.link
+    }
+
+    /// The multi-line acceptance-criteria buffer typed so far (may contain embedded
+    /// newlines; may be empty).
+    #[must_use]
+    pub fn acceptance(&self) -> &str {
+        &self.acceptance
+    }
+
+    /// The multi-line context-references buffer typed so far (may contain embedded
+    /// newlines; may be empty).
+    #[must_use]
+    pub fn context(&self) -> &str {
+        &self.context
     }
 
     /// The parent issue's wire id when this wizard is an "add sub-issue" (`s` /
@@ -1684,6 +1719,14 @@ pub enum IssueListIntent {
         /// The linked-issue reference (OPTIONAL): a URL or `owner/repo#123` carried
         /// through to `issue.external_ref` for traceability. `None` when blank.
         external_ref: Option<String>,
+        /// The acceptance criteria (OPTIONAL, migration 0048): each non-blank line
+        /// of the Acceptance row, carried through to `issue.acceptance_criteria`.
+        /// Empty when the row was left blank.
+        acceptance_criteria: Vec<String>,
+        /// The context references (OPTIONAL, migration 0048): each non-blank line of
+        /// the Context row, carried through to `issue.context_refs`. Empty when the
+        /// row was left blank.
+        context_refs: Vec<String>,
         /// The repo picked in stage 2 (REQUIRED — an absolute path, `scratch`, or
         /// a remote indicator the daemon clones).
         repo_ref: String,
@@ -2027,6 +2070,20 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
             }
             set_wizard(state, wizard)
         }
+        // 0048: the multi-line list rows insert a newline on Enter (each line is
+        // one element), never firing create — same guard as `Brief`.
+        WizardKey::Enter if wizard.focus == WizardRow::Acceptance => {
+            if !wizard.acceptance.is_empty() {
+                wizard.acceptance.push('\n');
+            }
+            set_wizard(state, wizard)
+        }
+        WizardKey::Enter if wizard.focus == WizardRow::Context => {
+            if !wizard.context.is_empty() {
+                wizard.context.push('\n');
+            }
+            set_wizard(state, wizard)
+        }
         WizardKey::Enter => wizard_try_create(state, wizard),
         WizardKey::Tab | WizardKey::Down => wizard_move_focus(state, wizard, true),
         WizardKey::BackTab | WizardKey::Up => wizard_move_focus(state, wizard, false),
@@ -2106,6 +2163,8 @@ fn wizard_cycle_value(
         WizardRow::Title
         | WizardRow::Brief
         | WizardRow::Link
+        | WizardRow::Acceptance
+        | WizardRow::Context
         | WizardRow::Source
         | WizardRow::Target => {}
     }
@@ -2113,7 +2172,8 @@ fn wizard_cycle_value(
 }
 
 /// Type one char into the focused row: append to the focused text row (Title /
-/// Brief / Link / Source / Target), or open the `@` repo dropdown on the Repo row.
+/// Brief / Link / Acceptance / Context / Source / Target), or open the `@` repo
+/// dropdown on the Repo row.
 /// Any other key on a picker row is ignored.
 fn wizard_type_char(
     state: &IssueListState,
@@ -2124,6 +2184,8 @@ fn wizard_type_char(
         WizardRow::Title => wizard.title.push(c),
         WizardRow::Brief => wizard.brief.push(c),
         WizardRow::Link => wizard.link.push(c),
+        WizardRow::Acceptance => wizard.acceptance.push(c),
+        WizardRow::Context => wizard.context.push(c),
         WizardRow::Source => wizard.source_branch.push(c),
         WizardRow::Target => wizard.target_branch.push(c),
         WizardRow::Repo => {
@@ -2152,6 +2214,12 @@ fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueLi
         }
         WizardRow::Link => {
             wizard.link.pop();
+        }
+        WizardRow::Acceptance => {
+            wizard.acceptance.pop();
+        }
+        WizardRow::Context => {
+            wizard.context.pop();
         }
         WizardRow::Source => {
             wizard.source_branch.pop();
@@ -2220,6 +2288,17 @@ fn wizard_dropdown_key(
 /// field is missing, DO NOT create — jump focus to it (and open the `@` dropdown
 /// for the repo) so the user is guided, never silently blocked. This is the whole
 /// guard: an agent-less / repo-less / title-only issue is impossible to create.
+/// Split a multi-line wizard buffer (Acceptance / Context) into its list elements:
+/// one per line, each trimmed, dropping blank lines (a blank line is a UI artefact,
+/// not data). Order-preserving (migration 0048).
+fn split_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
 fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
     if wizard.title.trim().is_empty() {
         wizard.focus = WizardRow::Title;
@@ -2275,6 +2354,10 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
             // The linked-issue ref is trimmed (surrounding whitespace in a URL /
             // `owner/repo#123` is never meaningful); blank collapses to `None`.
             external_ref: opt(&wizard.link),
+            // 0048: split each multi-line buffer on newlines, trim, drop blank
+            // lines — each surviving line is one list element (order-preserving).
+            acceptance_criteria: split_lines(&wizard.acceptance),
+            context_refs: split_lines(&wizard.context),
             repo_ref,
             source_branch: opt(&wizard.source_branch),
             target_branch: opt(&wizard.target_branch),
@@ -2737,22 +2820,38 @@ fn render_wizard(
     // [`render_brief`] so the counted rows equal the painted lines).
     let brief_value_w = card_w.saturating_sub(15);
     let brief_rows = brief_visible_rows(wizard, brief_value_w, region_h);
+    // 0048: the Acceptance + Context rows are multi-line like the Brief (each
+    // non-blank line is one list element). Each takes the wrapped-line count within
+    // whatever budget survives after the fixed frame + the earlier multi-line rows,
+    // so the card never spills past `region_h`.
+    let acceptance_rows = multiline_visible_rows(
+        wizard.acceptance(),
+        brief_value_w,
+        region_h.saturating_sub(WIZARD_CARD_H + brief_rows),
+    );
+    let context_rows = multiline_visible_rows(
+        wizard.context(),
+        brief_value_w,
+        region_h.saturating_sub(WIZARD_CARD_H + brief_rows + acceptance_rows),
+    );
+    let multiline_rows = brief_rows + acceptance_rows + context_rows;
     // While the `@` dropdown is open the card GROWS by the number of candidate
     // rows it shows (filter line reuses the Repo row itself). The window is capped
     // at [`REPO_DROPDOWN_WINDOW`] and further shrunk to whatever the viewport can
-    // hold AFTER the Brief has taken its rows, so the card never spills past
-    // `region_h` — compact again on close.
+    // hold AFTER the multi-line rows have taken theirs, so the card never spills
+    // past `region_h` — compact again on close.
     let dropdown_rows =
-        repo_dropdown_visible_rows(wizard, repos, region_h.saturating_sub(brief_rows));
+        repo_dropdown_visible_rows(wizard, repos, region_h.saturating_sub(multiline_rows));
     // 0046: an "add sub-issue" wizard (`s`) shows a read-only `Sub-issue of …`
     // banner on its own row above the fields. It grows the card by 1 only when the
-    // viewport still has room after the Brief + dropdown have taken theirs, so a
-    // tight viewport degrades gracefully (banner dropped, fields intact). A plain
-    // `c` create has no parent, so the card is byte-identical to before.
+    // viewport still has room after the multi-line rows + dropdown have taken
+    // theirs, so a tight viewport degrades gracefully (banner dropped, fields
+    // intact). A plain `c` create has no parent, so the card is byte-identical.
     let banner_rows = u16::from(
-        wizard.parent_display().is_some() && region_h > WIZARD_CARD_H + brief_rows + dropdown_rows,
+        wizard.parent_display().is_some()
+            && region_h > WIZARD_CARD_H + multiline_rows + dropdown_rows,
     );
-    let card_h = WIZARD_CARD_H + brief_rows + dropdown_rows + banner_rows;
+    let card_h = WIZARD_CARD_H + multiline_rows + dropdown_rows + banner_rows;
 
     let left = (area_w.saturating_sub(card_w)) / 2;
     let right = left + card_w; // exclusive
@@ -2806,6 +2905,34 @@ fn render_wizard(
             y = y.saturating_add(brief_rows);
             continue;
         }
+        if field == WizardRow::Acceptance {
+            render_multiline(
+                buf,
+                value_x,
+                y,
+                text_right,
+                wizard.acceptance(),
+                focused,
+                ACCEPTANCE_PLACEHOLDER,
+                acceptance_rows,
+            );
+            y = y.saturating_add(acceptance_rows);
+            continue;
+        }
+        if field == WizardRow::Context {
+            render_multiline(
+                buf,
+                value_x,
+                y,
+                text_right,
+                wizard.context(),
+                focused,
+                CONTEXT_PLACEHOLDER,
+                context_rows,
+            );
+            y = y.saturating_add(context_rows);
+            continue;
+        }
         if field == WizardRow::Repo && wizard.repo_dropdown().is_some() {
             render_repo_dropdown(buf, value_x, y, text_right, wizard, repos, dropdown_rows);
             y = y.saturating_add(1 + dropdown_rows);
@@ -2849,14 +2976,27 @@ fn repo_dropdown_visible_rows(wizard: &CreateWizard, repos: &[RepoOption], regio
 /// card still fits `region_h` (the fixed frame plus these rows). Keeps the growth
 /// bounded and the small-viewport fallback intact.
 fn brief_visible_rows(wizard: &CreateWizard, value_w: u16, region_h: u16) -> u16 {
-    let lines = u16::try_from(wrap_text(wizard.brief(), value_w as usize).len())
+    multiline_visible_rows(
+        wizard.brief(),
+        value_w,
+        region_h.saturating_sub(WIZARD_CARD_H),
+    )
+}
+
+/// How many wrapped lines a multi-line list row (Acceptance / Context) paints:
+/// its wrapped-line count at `value_w`, floored at 1 (an empty row still shows one
+/// placeholder / cursor line), capped at [`BRIEF_WINDOW`], then shrunk to the
+/// caller-supplied `budget` (the rows still free after the fixed frame + the
+/// earlier multi-line rows have taken theirs). Mirrors [`brief_visible_rows`] so
+/// the counted rows equal the painted lines.
+fn multiline_visible_rows(text: &str, value_w: u16, budget: u16) -> u16 {
+    let lines = u16::try_from(wrap_text(text, value_w as usize).len())
         .unwrap_or(u16::MAX)
         .max(1);
     let want = lines.min(BRIEF_WINDOW);
     // The fixed rows always fit (the degenerate check guaranteed region_h >=
     // WIZARD_CARD_H + 1), so the budget is at least 1.
-    let budget = region_h.saturating_sub(WIZARD_CARD_H).max(1);
-    want.min(budget)
+    want.min(budget.max(1))
 }
 
 /// Wrap `text` into display lines at most `width` chars wide, honouring embedded
@@ -2888,13 +3028,13 @@ fn wrap_text(text: &str, width: usize) -> Vec<String> {
 /// The placeholder shown on an empty, unfocused Brief row so the optional field
 /// reads as skippable rather than broken.
 const BRIEF_PLACEHOLDER: &str = "(optional — describe the task)";
+/// The placeholder for the empty, unfocused Acceptance row (one criterion / line).
+const ACCEPTANCE_PLACEHOLDER: &str = "(optional — one criterion per line)";
+/// The placeholder for the empty, unfocused Context row (one reference / line).
+const CONTEXT_PLACEHOLDER: &str = "(optional — one reference per line)";
 
-/// Render the multi-line Brief value at `(x, y)` over `rows` lines, clipped at
-/// `right`. The focused row gets a `▶` marker + green text and a block cursor on
-/// the last line; unfocused shows soft-white (or the muted placeholder when
-/// empty). A brief longer than `rows` scroll-follows its newest line (an editor
-/// caret stays visible while typing). The marker sits on the first painted line;
-/// continuation lines indent to align under it.
+/// Render the multi-line Brief value at `(x, y)` over `rows` lines (see
+/// [`render_multiline`]).
 fn render_brief(
     buf: &mut WireBuffer,
     x: u16,
@@ -2903,15 +3043,43 @@ fn render_brief(
     wizard: &CreateWizard,
     rows: u16,
 ) {
-    let focused = wizard.focus() == WizardRow::Brief;
+    render_multiline(
+        buf,
+        x,
+        y,
+        right,
+        wizard.brief(),
+        wizard.focus() == WizardRow::Brief,
+        BRIEF_PLACEHOLDER,
+        rows,
+    );
+}
+
+/// Render a multi-line free-text value (`raw`) at `(x, y)` over `rows` lines,
+/// clipped at `right`. The focused row gets a `▶` marker + green text and a block
+/// cursor on the last line; unfocused shows soft-white (or the muted `placeholder`
+/// when empty). A value longer than `rows` scroll-follows its newest line (an
+/// editor caret stays visible while typing). The marker sits on the first painted
+/// line; continuation lines indent to align under it. Shared by the Brief,
+/// Acceptance, and Context rows.
+#[allow(clippy::too_many_arguments)]
+fn render_multiline(
+    buf: &mut WireBuffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    raw: &str,
+    focused: bool,
+    placeholder: &str,
+    rows: u16,
+) {
     let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
     let marker = if focused { "▶ " } else { "  " };
     let value_x = x.saturating_add(2);
     let width = right.saturating_sub(value_x).max(1) as usize;
-    let raw = wizard.brief();
     if raw.is_empty() && !focused {
         put_card_str(buf, x, y, marker, value_colour, right, true);
-        put_card_str(buf, value_x, y, BRIEF_PLACEHOLDER, MUTED_GRAY, right, true);
+        put_card_str(buf, value_x, y, placeholder, MUTED_GRAY, right, true);
         return;
     }
     let mut lines = wrap_text(raw, width);
@@ -2939,6 +3107,8 @@ const fn wizard_row_label(row: WizardRow) -> &'static str {
         WizardRow::Title => "Title",
         WizardRow::Brief => "Brief",
         WizardRow::Link => "Linked",
+        WizardRow::Acceptance => "Accept",
+        WizardRow::Context => "Context",
         WizardRow::Repo => "Repo",
         WizardRow::Source => "Source",
         WizardRow::Target => "Target",
@@ -2976,9 +3146,10 @@ fn render_wizard_field(
         WizardRow::Title => {
             put_card_str(buf, cx, y, &text(wizard.title()), value_colour, right, true);
         }
-        // The multi-line Brief is painted by [`render_brief`] (it spans several
-        // rows), so the single-row path never routes here.
-        WizardRow::Brief => {}
+        // The multi-line Brief / Acceptance / Context rows are painted by
+        // [`render_multiline`] (they span several rows), so the single-row path
+        // never routes here.
+        WizardRow::Brief | WizardRow::Acceptance | WizardRow::Context => {}
         WizardRow::Link => {
             let raw = wizard.link();
             let shown = if focused {
@@ -3332,6 +3503,8 @@ mod tests {
             parent_id: None,
             child_total: 0,
             child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         }
     }
 
@@ -3742,6 +3915,8 @@ mod tests {
         // Move focus past Brief to the Repo row, then open the dropdown.
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
@@ -3788,6 +3963,8 @@ mod tests {
         // Focus Repo (past Brief), cycle ←→ to pick `rosetta` (scratch=0, rosetta=1).
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // scratch
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // rosetta
@@ -3828,6 +4005,8 @@ mod tests {
         let s = type_into(&s, "Fix");
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
@@ -3876,6 +4055,8 @@ mod tests {
         let base = type_into(&base, "Fix");
         let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
         let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
+        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
+        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
         let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
 
         let painted_row_span = |s: &IssueListState| -> u16 {
@@ -3926,6 +4107,8 @@ mod tests {
         let s = type_into(&s, "Fix");
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
 

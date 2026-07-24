@@ -1168,6 +1168,18 @@ pub struct IssueCreateArgs {
     /// is a separate concern; create just records the labels it is handed.
     #[arg(long = "label", action = clap::ArgAction::Append)]
     pub labels: Vec<String>,
+    /// An acceptance criterion (repeatable: `--acceptance "x" --acceptance "y"`).
+    ///
+    /// Persisted as the issue's ordered acceptance-criteria list (migration 0048,
+    /// multica parity); rendered on the detail card's `Acceptance:` block.
+    #[arg(long = "acceptance", action = clap::ArgAction::Append)]
+    pub acceptance_criteria: Vec<String>,
+    /// A context reference — URL / `owner/repo#123` / note (repeatable).
+    ///
+    /// Persisted as the issue's ordered context-reference list (migration 0048,
+    /// multica parity); rendered on the detail card's `Context:` block.
+    #[arg(long = "context-ref", action = clap::ArgAction::Append)]
+    pub context_refs: Vec<String>,
     /// The repo the run executes in: an absolute checkout path, the literal
     /// `scratch`, or a REMOTE (`owner/repo`, a full URL, or `git@…`) — a remote
     /// is cloned once into the shared clone cache and the local path persisted,
@@ -2077,12 +2089,7 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
     // Optional model override: mirror the daemon's create-time follow-up so the
     // CLI create path persists the model too. A blank value is treated as absent
     // (leaves `model` NULL rather than writing an empty string).
-    if let Some(model) = args
-        .model
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-    {
+    if let Some(model) = args.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
         let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
             model: Some(Some(model.to_string())),
             ..Default::default()
@@ -3369,6 +3376,21 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         priority: args.priority,
         due_date: args.due,
         labels: args.labels.clone(),
+        // 0048: trim-drop blank elements — an empty criterion / ref is not data.
+        acceptance_criteria: args
+            .acceptance_criteria
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        context_refs: args
+            .context_refs
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect(),
         parent_issue_id: parent_issue_id.map(ToString::to_string),
         stage: None,
     };
@@ -5600,6 +5622,54 @@ mod tests {
         };
         assert_eq!(args.due, None, "no --due means no due date");
         assert!(args.labels.is_empty(), "no --label means no labels");
+    }
+
+    #[test]
+    fn parses_issue_create_acceptance_and_context_refs() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Ship gap 11",
+            "--acceptance",
+            "cargo build is green",
+            "--acceptance",
+            "detail card shows criteria",
+            "--context-ref",
+            "acme/api#42",
+        ]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(
+            args.acceptance_criteria,
+            vec![
+                "cargo build is green".to_string(),
+                "detail card shows criteria".to_string()
+            ],
+            "--acceptance is repeatable and order-preserving"
+        );
+        assert_eq!(
+            args.context_refs,
+            vec!["acme/api#42".to_string()],
+            "--context-ref is repeatable and order-preserving"
+        );
+
+        // Omitted -> both lists empty.
+        let cmd = parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "Plain"]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert!(
+            args.acceptance_criteria.is_empty(),
+            "no --acceptance means no criteria"
+        );
+        assert!(
+            args.context_refs.is_empty(),
+            "no --context-ref means no context refs"
+        );
     }
 
     #[test]

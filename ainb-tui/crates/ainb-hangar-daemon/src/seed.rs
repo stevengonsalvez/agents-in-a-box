@@ -129,6 +129,8 @@ pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
                 labels: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await?;

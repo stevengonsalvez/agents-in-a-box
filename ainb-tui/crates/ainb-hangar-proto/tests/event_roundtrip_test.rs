@@ -56,6 +56,8 @@ fn sample_issue() -> IssueRow {
         parent_id: None,
         child_total: 0,
         child_done: 0,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     }
 }
 
@@ -302,6 +304,8 @@ fn issue_create_params_parent_is_additive() {
         creator: "member:alice".to_string(),
         external_ref: None,
         parent_issue_id: Some("parent-1".to_string()),
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     let json = serde_json::to_string(&sub).expect("encode");
     let back: IssueCreateParams = serde_json::from_str(&json).expect("decode");

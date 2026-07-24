@@ -409,6 +409,20 @@ pub struct IssueRow {
     /// keeps a pre-0046 snapshot decodable (defaults to `0`).
     #[serde(default)]
     pub child_done: u32,
+    /// Ordered acceptance-criteria strings (`issue.acceptance_criteria`, migration
+    /// 0048): one criterion per element. Drives the task-detail card's
+    /// `Acceptance:` block. Empty by default; omitted from the wire when empty
+    /// (append-only) so an old client omits it and an old daemon ignores it — a
+    /// pre-0048 snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    /// Ordered context-reference strings (`issue.context_refs`, migration 0048):
+    /// URL / `owner/repo#123` / free text, one per element. Drives the task-detail
+    /// card's `Context:` block. Empty by default; omitted from the wire when empty
+    /// (append-only) so an old client omits it and an old daemon ignores it — a
+    /// pre-0048 snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_refs: Vec<String>,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).

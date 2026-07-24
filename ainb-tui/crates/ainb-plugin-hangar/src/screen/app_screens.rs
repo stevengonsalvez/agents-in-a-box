@@ -394,6 +394,14 @@ pub enum IssueCreateAction {
         /// The linked-issue reference (OPTIONAL) persisted as `issue.external_ref`
         /// for traceability and appended to the dispatched brief. `None` when blank.
         external_ref: Option<String>,
+        /// The acceptance criteria (OPTIONAL, migration 0048) persisted as
+        /// `issue.acceptance_criteria` and rendered on the detail card. Empty when
+        /// the wizard's Acceptance row was left blank.
+        acceptance_criteria: Vec<String>,
+        /// The context references (OPTIONAL, migration 0048) persisted as
+        /// `issue.context_refs` and rendered on the detail card. Empty when the
+        /// wizard's Context row was left blank.
+        context_refs: Vec<String>,
         /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
         /// indicator the daemon clones.
         repo_ref: String,
@@ -1706,6 +1714,8 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             title,
             brief,
             external_ref,
+            acceptance_criteria,
+            context_refs,
             repo_ref,
             source_branch,
             target_branch,
@@ -1717,6 +1727,8 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
                 title,
                 description: brief,
                 external_ref,
+                acceptance_criteria,
+                context_refs,
                 repo_ref,
                 source_branch,
                 target_branch,
