@@ -3066,6 +3066,8 @@ impl HangarPlugin {
             title,
             description,
             external_ref,
+            acceptance_criteria,
+            context_refs,
             repo_ref,
             source_branch,
             target_branch,
@@ -3098,6 +3100,16 @@ impl HangarPlugin {
         // shape only grows when a sub-issue is actually created.
         if let Some(parent) = parent_issue_id {
             params["parent_issue_id"] = serde_json::Value::String(parent);
+        }
+        // 0048: the wizard's Acceptance / Context lists land on
+        // `issue.acceptance_criteria` / `issue.context_refs` and render on the
+        // detail card. Omitted when empty so the wire shape only grows when the
+        // author supplied them (append-only).
+        if !acceptance_criteria.is_empty() {
+            params["acceptance_criteria"] = serde_json::json!(acceptance_criteria);
+        }
+        if !context_refs.is_empty() {
+            params["context_refs"] = serde_json::json!(context_refs);
         }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,
@@ -4159,6 +4171,10 @@ impl HangarPlugin {
             parent_id: None,
             child_total: 0,
             child_done: 0,
+            // The Kanban-synthesized header carries no acceptance / context lists of
+            // its own (the daemon owns those on the real issue row).
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -5572,6 +5588,8 @@ mod tests {
             parent_id: None,
             child_total: 0,
             child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         }]);
         p
     }
@@ -5724,6 +5742,8 @@ mod tests {
                 parent_id: None,
                 child_total: 0,
                 child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -5751,6 +5771,8 @@ mod tests {
                 parent_id: None,
                 child_total: 0,
                 child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         ]);
 
@@ -5939,6 +5961,8 @@ mod tests {
             parent_id: None,
             child_total: 0,
             child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -6026,6 +6050,8 @@ mod tests {
             parent_id: None,
             child_total: 0,
             child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -6105,6 +6131,8 @@ mod tests {
                 parent_id: None,
                 child_total: 0,
                 child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             })
             .collect();
         p.screens.set_issues(rows);
@@ -6188,6 +6216,8 @@ mod tests {
                 parent_id: None,
                 child_total: 0,
                 child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -6215,6 +6245,8 @@ mod tests {
                 parent_id: None,
                 child_total: 0,
                 child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -6640,6 +6672,8 @@ mod tests {
             parent_id: None,
             child_total: 0,
             child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);

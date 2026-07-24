@@ -129,6 +129,8 @@ pub async fn issues_list(
                 parent_id: extras.parent_id,
                 child_total: extras.child_total,
                 child_done: extras.child_done,
+                acceptance_criteria: issue.acceptance_criteria,
+                context_refs: issue.context_refs,
             });
         }
     }
@@ -289,6 +291,8 @@ pub async fn issues_search(
             parent_id: extras.parent_id,
             child_total: extras.child_total,
             child_done: extras.child_done,
+            acceptance_criteria: issue.acceptance_criteria,
+            context_refs: issue.context_refs,
         });
     }
     Ok(out)
@@ -1585,6 +1589,8 @@ pub async fn issue_row(
         parent_id: extras.parent_id,
         child_total: extras.child_total,
         child_done: extras.child_done,
+        acceptance_criteria: issue.acceptance_criteria,
+        context_refs: issue.context_refs,
     }))
 }
 
@@ -1690,6 +1696,8 @@ async fn read_issue_row(
         parent_id: extras.parent_id,
         child_total: extras.child_total,
         child_done: extras.child_done,
+        acceptance_criteria: issue.acceptance_criteria,
+        context_refs: issue.context_refs,
     }))
 }
 
@@ -1776,6 +1784,8 @@ pub async fn issue_create(
     creator: &ActorRef,
     external_ref: Option<&str>,
     parent_issue_id: Option<&str>,
+    acceptance_criteria: &[String],
+    context_refs: &[String],
 ) -> Result<IssueRow, sqlx::Error> {
     use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::issue::NewIssue;
@@ -1802,6 +1812,8 @@ pub async fn issue_create(
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            acceptance_criteria: acceptance_criteria.to_vec(),
+            context_refs: context_refs.to_vec(),
             parent_issue_id: parent_issue_id.map(ToString::to_string),
             stage: None,
         },
@@ -1853,6 +1865,10 @@ pub async fn issue_create(
         parent_id: parent_issue_id.map(str::to_string),
         child_total: 0,
         child_done: 0,
+        // The lists the create captured (blank elements already dropped at the
+        // handler boundary), echoed on the response + pushed IssueCreated event.
+        acceptance_criteria: acceptance_criteria.to_vec(),
+        context_refs: context_refs.to_vec(),
     })
 }
 
