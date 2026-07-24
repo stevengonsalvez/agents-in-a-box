@@ -493,6 +493,9 @@ pub struct AgentCreateArgs {
     /// Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`.
     #[arg(long)]
     pub provider: Option<String>,
+    /// Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`).
+    #[arg(long)]
+    pub model: Option<String>,
     /// Optional instructions / system prompt for the agent.
     #[arg(long)]
     pub instructions: Option<String>,
@@ -2071,6 +2074,28 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
     )
     .await
     .context("create agent")?;
+    // Optional model override: mirror the daemon's create-time follow-up so the
+    // CLI create path persists the model too. A blank value is treated as absent
+    // (leaves `model` NULL rather than writing an empty string).
+    if let Some(model) = args
+        .model
+        .as_deref()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+    {
+        let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
+            model: Some(Some(model.to_string())),
+            ..Default::default()
+        };
+        ainb_hangar_store::repo::agent::AgentRepo::update_config(
+            store.pool(),
+            &workspace_id,
+            &agent.id,
+            &update,
+        )
+        .await
+        .context("apply agent model override")?;
+    }
     println!("created agent {}", agent.name);
     Ok(())
 }
