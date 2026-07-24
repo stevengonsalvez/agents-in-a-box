@@ -9,6 +9,7 @@ use anyhow::{Result, bail};
 use crate::cli::OutputFormat;
 
 pub mod approve;
+pub mod ask;
 pub mod atc;
 pub mod bridge;
 pub mod broadcast;
@@ -34,6 +35,8 @@ pub async fn execute(matches: &clap::ArgMatches, format: OutputFormat) -> Result
         Some(("deny", sub)) => {
             approve::execute(sub, format, ainb_plugin_notifyd::broker::DecisionKind::Deny).await
         }
+        Some(("ask", sub)) => ask::execute_ask(sub, format).await,
+        Some(("answer", sub)) => ask::execute_answer(sub, format).await,
         Some(("standup", sub)) => standup::execute(sub, format).await,
         Some(("broadcast", sub)) => broadcast::execute(sub, format).await,
         Some(("sequence", sub)) => sequence::execute(sub, format).await,

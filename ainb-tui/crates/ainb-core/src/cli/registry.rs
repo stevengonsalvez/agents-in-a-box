@@ -2121,6 +2121,34 @@ impl CliCommand for FleetCommand {
             Command::new("deny")
                 .about("Deny a session's pending permission request (no arg: list waiters)"),
         );
+        let ask =
+            Command::new("ask").about("List authoritative structured AskUserQuestion requests");
+        let answer = Command::new("answer")
+            .about("Answer one complete AskUserQuestion through Fleet control RPC")
+            .arg(clap::Arg::new("session-key").required(true).help("Stable Fleet session key"))
+            .arg(
+                clap::Arg::new("version")
+                    .long("version")
+                    .required(true)
+                    .value_parser(clap::value_parser!(i64))
+                    .help("Session version returned by `ainb fleet ask --format json`"),
+            )
+            .arg(
+                clap::Arg::new("fingerprint")
+                    .long("fingerprint")
+                    .required(true)
+                    .help("Request fingerprint returned by `ainb fleet ask --format json`"),
+            )
+            .arg(
+                clap::Arg::new("answers").long("answers").required(true).help(
+                    "JSON array: [{\"question_id\":\"q\",\"selected_options\":[\"option\"]}]",
+                ),
+            )
+            .arg(
+                clap::Arg::new("request-id")
+                    .long("request-id")
+                    .help("Optional idempotency key for a retried answer"),
+            );
         let atc = build_atc_command();
         let bridge = Command::new("bridge")
             .about(
@@ -2139,12 +2167,14 @@ impl CliCommand for FleetCommand {
         app.subcommand(
             Command::new(self.name())
                 .about(
-                    "Fleet orchestration: standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge",
+                    "Fleet orchestration: ask / answer / standup / broadcast / sequence / needs / cost / daemon / daemons / atc / bridge",
                 )
                 .subcommand_required(true)
                 .arg_required_else_help(true)
                 .subcommand(approve)
                 .subcommand(deny)
+                .subcommand(ask)
+                .subcommand(answer)
                 .subcommand(standup)
                 .subcommand(broadcast)
                 .subcommand(sequence)
@@ -2159,6 +2189,8 @@ impl CliCommand for FleetCommand {
                     "EXAMPLES:\n  \
                      ainb fleet standup               Live status of all sessions\n  \
                      ainb fleet needs                 Sessions blocked on input / errors\n  \
+                     ainb fleet ask --format json     Exact questions + version/fingerprint\n  \
+                     ainb fleet answer claude:abc --version 7 --fingerprint fp --answers '[{\"question_id\":\"q-1\",\"selected_options\":[\"yes\"]}]'\n  \
                      ainb fleet broadcast \"git pull\" --all     Send a prompt to every session\n  \
                      ainb fleet sequence \"step 1\" \"step 2\"     Ordered prompts with ack between steps\n  \
                      ainb fleet approve               List sessions waiting on a permission decision\n  \
