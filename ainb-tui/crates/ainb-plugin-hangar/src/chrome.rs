@@ -175,6 +175,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
                 ("s", "sub-issue"),
                 ("d", "done"),
                 ("x", "delete"),
+                ("f", "facets"),
                 ("/", "filter"),
                 ("tab", "chip"),
             ]
@@ -369,6 +370,16 @@ mod tests {
         assert!(
             footer_hints(&Screen::TaskDetail(task)).contains(&("x", "delete")),
             "task-detail footer must show x:delete"
+        );
+    }
+
+    /// The issue-list footer advertises the `f:facets` faceted-filter panel
+    /// keybinding (multica-gap #10) so the panel is discoverable.
+    #[test]
+    fn footer_advertises_facets_on_issue_list() {
+        assert!(
+            footer_hints(&Screen::IssueList).contains(&("f", "facets")),
+            "issue list footer must show f:facets"
         );
     }
 
