@@ -48,8 +48,18 @@ pub struct Agent {
     pub runtime_id: String,
     /// Free-form system prompt / instructions; `None` when unset.
     pub instructions: Option<String>,
-    /// Visibility scope: `"workspace"` or `"private"`.
+    /// Visibility scope: `"workspace"` or `"private"`. **Derived-legacy** since
+    /// migration 0047: no code path gates invocation on it; it is kept in sync
+    /// with [`permission_mode`](Self::permission_mode) purely so legacy readers
+    /// never see a permission WIDENING (multica parity).
     pub visibility: String,
+    /// Invocation-permission mode (migration 0047): `"private"` (owner-only,
+    /// deny-by-default) or `"public_to"` (the [`agent_invocation_target`] allow-list
+    /// decides). **Authoritative** invoke source — [`AgentRepo::can_invoke`] gates
+    /// on this, not on [`visibility`](Self::visibility).
+    ///
+    /// [`agent_invocation_target`]: crate::repo::agent_invocation_target
+    pub permission_mode: String,
     /// Owning user (`user.id`).
     pub owner_id: String,
     /// `true` when the agent is archived (hidden from the active picker). The
@@ -194,10 +204,10 @@ impl AgentRepo {
     pub async fn insert(pool: &SqlitePool, agent: &Agent) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO agent \
-             (id, workspace_id, name, runtime_id, instructions, visibility, owner_id, \
-              archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
+             (id, workspace_id, name, runtime_id, instructions, visibility, permission_mode, \
+              owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
               token_budget) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -205,6 +215,7 @@ impl AgentRepo {
         .bind(&agent.runtime_id)
         .bind(&agent.instructions)
         .bind(&agent.visibility)
+        .bind(&agent.permission_mode)
         .bind(&agent.owner_id)
         .bind(i64::from(agent.archived))
         .bind(&agent.model)
@@ -392,6 +403,77 @@ impl AgentRepo {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Set one agent's [`permission_mode`](Agent::permission_mode) and re-derive the
+    /// legacy [`visibility`](Agent::visibility) label to stay consistent (migration
+    /// 0047, gap #8).
+    ///
+    /// `mode` must be `"private"` or `"public_to"` (the schema `CHECK` is the last
+    /// line of defence). After the mode write, `visibility` is re-derived from the
+    /// mode + the current allow-list: `public_to` with at least one `workspace`
+    /// target reads back `"workspace"`; otherwise (private, or public_to with only
+    /// member/team targets) it reads back `"private"`, so a legacy reader never sees
+    /// a WIDENING. Both writes run in one transaction.
+    ///
+    /// Returns `true` when the agent existed and was updated, `false` when `id`
+    /// matched no agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if either write fails (e.g. a `CHECK` violation on
+    /// an out-of-set `mode`).
+    pub async fn set_permission_mode(
+        pool: &SqlitePool,
+        id: &str,
+        mode: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        let res = sqlx::query("UPDATE agent SET permission_mode = ? WHERE id = ?")
+            .bind(mode)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if res.rows_affected() != 1 {
+            // No such agent — nothing to re-derive.
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let visibility = derive_visibility_in_tx(&mut tx, id, mode).await?;
+        sqlx::query("UPDATE agent SET visibility = ? WHERE id = ?")
+            .bind(visibility)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Re-derive the legacy [`visibility`](Agent::visibility) label from an agent's
+    /// current mode + allow-list, keeping the two consistent after a target
+    /// add/remove (migration 0047, gap #8). A no-op for an unknown id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if a lookup or the write fails.
+    pub async fn rederive_visibility(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+        let mode: Option<String> =
+            sqlx::query_scalar("SELECT permission_mode FROM agent WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+        let Some(mode) = mode else {
+            return Ok(());
+        };
+        let mut tx = pool.begin().await?;
+        let visibility = derive_visibility_in_tx(&mut tx, id, &mode).await?;
+        sqlx::query("UPDATE agent SET visibility = ? WHERE id = ?")
+            .bind(visibility)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Hard-delete one agent, scoped to a workspace (Agents screen `x` remove,
     /// slice 2).
     ///
@@ -463,6 +545,32 @@ impl AgentRepo {
     }
 }
 
+/// Derive the legacy `visibility` label for an agent from its `permission_mode`
+/// and current allow-list, inside a transaction (migration 0047 parity).
+///
+/// Rule (mirrors multica's derived-legacy field): a `public_to` agent with at
+/// least one `workspace` invocation target is `"workspace"`; everything else
+/// (`private`, or `public_to` with only member/team targets) is `"private"` — so
+/// a legacy reader that still keys on `visibility` never sees a WIDENING relative
+/// to the authoritative gate.
+async fn derive_visibility_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    agent_id: &str,
+    mode: &str,
+) -> Result<&'static str, sqlx::Error> {
+    if mode != "public_to" {
+        return Ok("private");
+    }
+    let has_workspace_target: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_invocation_target \
+         WHERE agent_id = ? AND target_type = 'workspace'",
+    )
+    .bind(agent_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(if has_workspace_target > 0 { "workspace" } else { "private" })
+}
+
 /// Whether a `sqlx` error is a SQLite foreign-key constraint violation. Used by
 /// [`AgentRepo::delete`] to turn a history-pinned delete into the actionable
 /// [`AgentDeleteError::HasHistory`] rather than an opaque store error.
@@ -473,8 +581,8 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 /// The full column list every `SELECT` reads, in [`Agent::from_row`] order. A
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
-     owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
-     token_budget FROM agent";
+     permission_mode, owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, \
+     provider, token_budget FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -644,6 +752,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             runtime_id: row.try_get("runtime_id")?,
             instructions: row.try_get("instructions")?,
             visibility: row.try_get("visibility")?,
+            permission_mode: row.try_get("permission_mode")?,
             owner_id: row.try_get("owner_id")?,
             archived: row.try_get::<i64, _>("archived")? != 0,
             model: row.try_get("model")?,

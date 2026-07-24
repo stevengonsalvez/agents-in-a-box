@@ -4036,6 +4036,7 @@ mod tests {
             runtime_id: bootstrap::default_runtime_id(),
             instructions: None,
             visibility: "workspace".into(),
+            permission_mode: "private".into(),
             owner_id: owner,
             archived: false,
             model: None,

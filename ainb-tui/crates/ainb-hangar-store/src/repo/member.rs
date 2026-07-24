@@ -172,6 +172,32 @@ impl MemberRepo {
         })
     }
 
+    /// Read `user_id`'s role within `workspace`, or `None` when the pair matches no
+    /// member (an unknown user, or a member owned by another tenant).
+    ///
+    /// The public, non-transactional counterpart of [`member_role_in_tx`], used as
+    /// the workspace-membership predicate by
+    /// [`crate::repo::agent::AgentRepo::can_invoke`] (gap #8): `Some(_)` means "is a
+    /// member of this workspace". An out-of-set stored token (which the `CHECK`
+    /// constraint should prevent) reads back `None`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn role(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        user_id: &str,
+    ) -> Result<Option<MemberRole>, sqlx::Error> {
+        let raw: Option<String> =
+            sqlx::query_scalar("SELECT role FROM member WHERE workspace_id = ? AND user_id = ?")
+                .bind(workspace.as_str())
+                .bind(user_id)
+                .fetch_optional(pool)
+                .await?;
+        Ok(raw.as_deref().and_then(MemberRole::parse))
+    }
+
     /// List every member of `workspace`, joined with their user record, ordered
     /// by email (the stable Members-pane render order).
     ///

@@ -190,6 +190,7 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
             runtime_id: "runtime-1".into(),
             instructions: None,
             visibility: "workspace".into(),
+            permission_mode: "private".into(),
             owner_id: "user-1".into(),
             archived: false,
             model: None,

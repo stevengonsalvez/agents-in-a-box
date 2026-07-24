@@ -142,6 +142,7 @@ async fn seed_agent(
             runtime_id: runtime_id.to_string(),
             instructions: None,
             visibility: "workspace".to_string(),
+            permission_mode: "private".to_string(),
             owner_id: owner_id.to_string(),
             archived: false,
             model: None,

@@ -6,6 +6,7 @@
 //! shared across every repo call.
 
 pub mod agent;
+pub mod agent_invocation_target;
 pub mod agent_runtime;
 pub mod atc_instance;
 pub mod attention;
