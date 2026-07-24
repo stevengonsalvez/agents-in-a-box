@@ -39,6 +39,7 @@
 #[path = "tripwire_p4_common.rs"]
 mod common;
 
+use ainb_hangar_core::clock::HangarClock as _;
 use std::path::Path;
 use std::time::{Duration, Instant};
 
@@ -59,6 +60,12 @@ const NEW_ISSUE_TITLE: &str = "ZQX7K";
 /// card identifier `#mvq001`. Distinctive so the on-screen card marker is
 /// greppable and the DB status assertion targets exactly this row.
 const MOVE_TASK_ID: &str = "task-move-mvq001";
+
+/// How many Enters the create wizard needs from a filled Title to a created
+/// issue: `title → jump to Repo (dropdown opens)`, `pick the highlighted repo`,
+/// `create`. One spare covers a frame where the first Enter is swallowed while
+/// the host is mid-repaint.
+const WIZARD_ENTER_STAGES: usize = 4;
 
 /// Count `issue` rows carrying `title` in the daemon's `hangar.db` (the real
 /// proof an issue create landed — not just rendered).
@@ -124,7 +131,10 @@ fn seed_move_card(home: &Path) {
         .bind(ainb_hangar_daemon::seed::WS_ID)
         .bind("runtime-1")
         .bind("agent-1")
-        .bind(1_700_000_000_000_i64)
+        // LIVE clock — the daemon's `sweep_expired_queued` pass runs even with
+        // `HANGAR_DAEMON_DISABLE_CLAIM=1`, so a card stamped in 2023 is failed
+        // with `timeout` before the tripwire can ever focus it.
+        .bind(ainb_hangar_core::clock::SystemClock.now_ms())
         .execute(store.pool())
         .await
         .expect("seed move card");
@@ -211,18 +221,28 @@ fn issue_create_keystroke_lands_in_db() {
         sess.capture()
     );
 
-    // Submit (Enter) — this fires the create RPC over the daemon socket.
-    sess.send_enter();
-
-    // POSITIVE (the real proof): a row with that title actually LANDS in the
-    // daemon DB. Poll the DB (the RPC is async) until the row appears.
+    // Submit. The Phase-5 wizard makes Repo a REQUIRED field, so a title-only
+    // Enter does NOT create: `wizard_try_create` jumps focus to the Repo row with
+    // the `@` dropdown open at candidate 0, the next Enter commits that candidate
+    // and closes the dropdown, and only the Enter after that fires the create RPC.
+    // Send Enter through those stages, polling the DB between each — every Enter
+    // on this wizard is "advance to the missing required row / pick the
+    // highlighted repo / create", so a re-send can never corrupt the staged task.
     let db_deadline = Instant::now() + Duration::from_secs(20 * common::budget_scale());
     let mut landed = 0;
-    while Instant::now() < db_deadline {
-        landed = count_issues_with_title(home, NEW_ISSUE_TITLE);
-        if landed >= 1 {
-            break;
+    'submit: for _ in 0..WIZARD_ENTER_STAGES {
+        sess.send_enter();
+        let stage_deadline = (Instant::now() + Duration::from_secs(4)).min(db_deadline);
+        while Instant::now() < stage_deadline {
+            landed = count_issues_with_title(home, NEW_ISSUE_TITLE);
+            if landed >= 1 {
+                break 'submit;
+            }
+            std::thread::sleep(Duration::from_millis(200));
         }
+    }
+    while landed < 1 && Instant::now() < db_deadline {
+        landed = count_issues_with_title(home, NEW_ISSUE_TITLE);
         std::thread::sleep(Duration::from_millis(200));
     }
     assert!(
@@ -357,7 +377,7 @@ fn kanban_move_keystroke_transitions_db() {
 /// create bar renders a distinctive prompt label so the tripwire can detect the
 /// compose mode is active before typing.
 fn create_prompt_visible(capture: &str) -> bool {
-    capture.contains("New issue") || capture.contains("Title:")
+    capture.contains("New task") && capture.contains("Title")
 }
 
 /// `true` when the focused card's line carries the given card marker — i.e. that
