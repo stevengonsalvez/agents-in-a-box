@@ -49,6 +49,14 @@ pub struct NewIssue {
     /// column — the minimal persistence the create flow needs (the full labels
     /// table + attach/detach is a separate concern).
     pub labels: Vec<String>,
+    /// Ordered acceptance-criteria strings (one criterion per element). Stored as
+    /// a single JSON-array column, identical persistence to `labels` (migration
+    /// 0048, multica parity `init.up.sql:66` `acceptance_criteria`).
+    pub acceptance_criteria: Vec<String>,
+    /// Ordered context-reference strings (URL / `owner/repo#123` / free text, one
+    /// per element). Stored as a single JSON-array column, identical persistence to
+    /// `labels` (migration 0048, multica parity `init.up.sql:67` `context_refs`).
+    pub context_refs: Vec<String>,
     /// Optional parent issue: a self-link making this a **sub-issue** of another
     /// issue in the same workspace. `None` = a top-level issue (migration 0046).
     pub parent_issue_id: Option<String>,
@@ -84,6 +92,12 @@ pub struct Issue {
     pub due_date: Option<i64>,
     /// Free-form labels, re-assembled from the JSON-array `labels` column.
     pub labels: Vec<String>,
+    /// Ordered acceptance-criteria strings, re-assembled from the JSON-array
+    /// `acceptance_criteria` column (migration 0048).
+    pub acceptance_criteria: Vec<String>,
+    /// Ordered context-reference strings, re-assembled from the JSON-array
+    /// `context_refs` column (migration 0048).
+    pub context_refs: Vec<String>,
     /// Optional upstream-issue reference (URL or `owner/repo#123`), or `None`
     /// (migration 0043).
     pub external_ref: Option<String>,
@@ -251,12 +265,15 @@ impl IssueRepo {
         let (assignee_type, assignee_id) = split_actor(issue.assignee.as_ref());
         let (creator_type, creator_id) = split_actor(Some(&issue.creator));
         let labels_json = labels_to_json(&issue.labels);
+        let acceptance_json = labels_to_json(&issue.acceptance_criteria);
+        let context_refs_json = labels_to_json(&issue.context_refs);
         sqlx::query(
             "INSERT INTO issue \
              (id, workspace_id, title, description, state, \
               assignee_type, assignee_id, creator_type, creator_id, created_at, \
-              priority, due_date, labels, parent_issue_id, stage) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              priority, due_date, labels, acceptance_criteria, context_refs, \
+              parent_issue_id, stage) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&issue.id)
         .bind(&issue.workspace_id)
@@ -271,6 +288,8 @@ impl IssueRepo {
         .bind(issue.priority)
         .bind(issue.due_date)
         .bind(labels_json)
+        .bind(acceptance_json)
+        .bind(context_refs_json)
         .bind(&issue.parent_issue_id)
         .bind(issue.stage)
         .execute(pool)
@@ -289,7 +308,7 @@ impl IssueRepo {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, external_ref, parent_issue_id, stage \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage \
              FROM issue WHERE id = ?",
         )
         .bind(id)
@@ -410,7 +429,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, external_ref, parent_issue_id, stage \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage \
              FROM issue WHERE workspace_id = ? AND state = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -438,7 +457,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, external_ref, parent_issue_id, stage \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage \
              FROM issue WHERE parent_issue_id = ? \
              ORDER BY stage IS NULL, stage, created_at, id",
         )
@@ -568,7 +587,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT i.id, i.workspace_id, i.title, i.description, i.state, \
              i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.created_at, \
-             i.priority, i.due_date, i.labels, i.external_ref, i.parent_issue_id, i.stage, \
+             i.priority, i.due_date, i.labels, i.acceptance_criteria, i.context_refs, i.external_ref, i.parent_issue_id, i.stage, \
              MAX(CASE \
                  WHEN LOWER(i.title) LIKE ?2 ESCAPE '\\' THEN 3 \
                  WHEN LOWER(i.description) LIKE ?2 ESCAPE '\\' THEN 2 \
@@ -866,6 +885,8 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
     )?
     .ok_or_else(|| decode_err("creator", "creator columns must be non-null"))?;
     let labels = labels_from_json(&row.try_get::<String, _>("labels")?)?;
+    let acceptance_criteria = labels_from_json(&row.try_get::<String, _>("acceptance_criteria")?)?;
+    let context_refs = labels_from_json(&row.try_get::<String, _>("context_refs")?)?;
     Ok(Issue {
         id: row.try_get("id")?,
         workspace_id: row.try_get("workspace_id")?,
@@ -878,6 +899,8 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         priority: row.try_get("priority")?,
         due_date: row.try_get("due_date")?,
         labels,
+        acceptance_criteria,
+        context_refs,
         external_ref: row.try_get("external_ref")?,
         parent_issue_id: row.try_get("parent_issue_id")?,
         stage: row.try_get("stage")?,
@@ -950,6 +973,8 @@ mod tests {
                 priority: 0,
                 due_date: None,
                 labels: Vec::new(),
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
                 parent_issue_id: None,
                 stage: None,
             },
@@ -1007,6 +1032,67 @@ mod tests {
             unchanged.title, "New title",
             "foreign-tenant edit left the title"
         );
+    }
+
+    /// `acceptance_criteria` + `context_refs` round-trip verbatim and
+    /// order-preserving through insert → `get_by_id`, and a create without them
+    /// reads back as empty (migration 0048 default `'[]'`).
+    #[tokio::test]
+    async fn acceptance_criteria_and_context_refs_round_trip() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: "issue-ac".into(),
+                workspace_id: "ws-a".into(),
+                title: "Ship gap 11".into(),
+                description: None,
+                state: "open".into(),
+                assignee: None,
+                creator: member(),
+                created_at: 1,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                acceptance_criteria: vec![
+                    "cargo build is green".into(),
+                    "detail card shows criteria".into(),
+                ],
+                context_refs: vec!["acme/api#42".into()],
+                parent_issue_id: None,
+                stage: None,
+            },
+        )
+        .await
+        .unwrap();
+
+        let issue = IssueRepo::get_by_id(pool, "issue-ac").await.unwrap().unwrap();
+        assert_eq!(
+            issue.acceptance_criteria,
+            vec![
+                "cargo build is green".to_string(),
+                "detail card shows criteria".to_string()
+            ],
+            "criteria survive verbatim and order-preserving"
+        );
+        assert_eq!(
+            issue.context_refs,
+            vec!["acme/api#42".to_string()],
+            "context refs survive verbatim"
+        );
+
+        // A create without the two lists reads back as the empty default.
+        seed_issue(pool, "ws-a", "issue-plain", "No lists", None, 2).await;
+        let plain = IssueRepo::get_by_id(pool, "issue-plain").await.unwrap().unwrap();
+        assert!(
+            plain.acceptance_criteria.is_empty(),
+            "default empty criteria"
+        );
+        assert!(plain.context_refs.is_empty(), "default empty context refs");
     }
 
     /// A title hit outranks a description hit outranks a comment-only hit; a

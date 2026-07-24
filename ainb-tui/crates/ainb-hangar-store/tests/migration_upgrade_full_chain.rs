@@ -404,6 +404,25 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "0046 issue.stage defaults NULL"
     );
 
+    // 0048 issue.acceptance_criteria / issue.context_refs both default to the empty
+    // JSON array `'[]'` on a pre-existing row (a legacy issue carries neither).
+    let issue_lists =
+        sqlx::query("SELECT acceptance_criteria, context_refs FROM issue WHERE id = ?")
+            .bind("issue-1")
+            .fetch_one(pool)
+            .await
+            .expect("issue 0048 columns");
+    assert_eq!(
+        issue_lists.get::<String, _>("acceptance_criteria"),
+        "[]",
+        "0048 issue.acceptance_criteria defaults to []"
+    );
+    assert_eq!(
+        issue_lists.get::<String, _>("context_refs"),
+        "[]",
+        "0048 issue.context_refs defaults to []"
+    );
+
     // 0033 (tcp T2): the run's produced worktree branch defaults NULL on a
     // pre-existing task row (recorded only at finalize when the run committed).
     // 0039 (tcp 8ln): the run generation defaults to 0 on a pre-existing row, so
@@ -625,7 +644,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 47, "head is migration 0047");
+    assert_eq!(head_version, 48, "head is migration 0048");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;

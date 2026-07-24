@@ -44,6 +44,8 @@ async fn insert_issue_with_member_assignee_roundtrips() {
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
 
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
@@ -86,6 +88,8 @@ async fn insert_issue_with_agent_assignee_roundtrips() {
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
 
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
@@ -134,6 +138,8 @@ async fn insert_issue_roundtrips_priority_due_date_and_labels() {
         labels: vec!["bug".to_string(), "p0".to_string()],
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
@@ -176,6 +182,8 @@ async fn insert_issue_defaults_priority_due_date_and_labels() {
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
@@ -208,6 +216,8 @@ async fn update_state_overwrites_lifecycle_state() {
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
@@ -253,6 +263,8 @@ async fn update_fields_edits_state_assignee_priority_and_due_date() {
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 
@@ -376,6 +388,8 @@ async fn update_fields_is_workspace_scoped_no_cross_tenant_edit() {
         labels: Vec::new(),
         parent_issue_id: None,
         stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
 

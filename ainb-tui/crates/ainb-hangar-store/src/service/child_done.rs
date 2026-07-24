@@ -274,6 +274,8 @@ mod tests {
                 labels: Vec::new(),
                 parent_issue_id: parent.map(ToString::to_string),
                 stage,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await

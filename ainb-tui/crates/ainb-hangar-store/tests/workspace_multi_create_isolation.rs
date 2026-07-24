@@ -49,6 +49,8 @@ async fn seed_issue(store: &Store, workspace_id: &str, title: &str) -> String {
             labels: Vec::new(),
             parent_issue_id: None,
             stage: None,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         },
     )
     .await
