@@ -83,7 +83,23 @@ jobs:
         with:
           workspaces: "ainb-tui -> target"
       - uses: taiki-e/install-action@nextest
-      - run: "cargo nextest run --lib --all-features --no-fail-fast -- --skip docker:: --skip cli::run::tests::test_validate_provider_installed_claude --skip models::usage::tests::custom_ranges_are_inclusive"
+      # `--lib` alone builds ONLY in-source `#[cfg(test)]` modules, so every
+      # integration target under `crates/*/tests/` was invisible here: whole test
+      # files could be added — or stop compiling — without any job noticing.
+      # `--tests` includes them.
+      #
+      # The `tripwire_*` binaries are excluded: they drive a real `ainb tui`
+      # under tmux against staged plugins, which this job deliberately does not
+      # provision (the hangar ones are the `hangar-e2e` job's authoritative
+      # matrix; the `ainb` ones are launched by `ainb-hooks` / their own steps).
+      # Running them here fails on the missing harness, not on the code. Every
+      # other integration target now runs.
+      #
+      # The former trailing `-- --skip …` args are dropped: nextest does not
+      # implement libtest's `--skip`, and a list-diff proves they filtered
+      # nothing (identical test set with and without them). Removing them changes
+      # no behaviour, it just stops the command claiming a skip it never made.
+      - run: "cargo nextest run --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────

@@ -117,7 +117,6 @@ fn daemon_health_sparkline_renders_with_red_failure_band() {
          the throughput ring needs them to drive the sparkline"
     );
 
-
     // Press `D` (single-char nav, no Enter) until the health pane chrome is on
     // screen with at least one sparkline block glyph.
     let deadline = Instant::now() + Duration::from_secs(45);
