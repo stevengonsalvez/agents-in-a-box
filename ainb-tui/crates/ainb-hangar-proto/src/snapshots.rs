@@ -1037,6 +1037,18 @@ pub struct IssueCreateParams {
     /// old client omits it, an old daemon ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent_issue_id: Option<String>,
+    /// Ordered acceptance-criteria strings authored in the create wizard/CLI
+    /// (migration 0048, multica parity): one criterion per element. Persisted on
+    /// the created issue and rendered on the detail card. Append-only field: an
+    /// old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    /// Ordered context-reference strings (URL / `owner/repo#123` / note) authored
+    /// in the create wizard/CLI (migration 0048, multica parity): one per element.
+    /// Persisted on the created issue and rendered on the detail card. Append-only
+    /// field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_refs: Vec<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
@@ -2141,6 +2153,8 @@ mod tests {
                 parent_id: None,
                 child_total: 0,
                 child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
