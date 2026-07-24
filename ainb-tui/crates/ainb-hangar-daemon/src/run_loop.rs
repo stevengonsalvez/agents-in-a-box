@@ -837,21 +837,25 @@ async fn prepare_spawn_inputs(
 // Bundling them into a context struct is a larger refactor than this credential
 // change warrants; the sibling run functions here carry the same shape.
 #[allow(clippy::too_many_arguments)]
-/// The claim-time squad-leader briefing injection seam (migration 0045 / GAPS #1).
+/// The claim-time squad-leader briefing (migration 0045 / gap #7).
 ///
-/// When a claimed task carries a `squad_id`, the daemon will inject the leader
-/// briefing (Operating Protocol + Roster + Instructions) into the run's system
-/// instructions here. gap #5 lands the HOOK POINT + the dispatch-log evidence;
-/// the briefing BODY is gap #1 — this returns `None` (no text yet) but logs that
-/// the injection point fired, keyed off the `squad_id`, so the seam is observable.
-fn squad_briefing_hook(task: &Task) -> Option<String> {
+/// When a claimed task carries a `squad_id`, log the injection point (keyed off
+/// the `squad_id` + `task_id`, so the seam stays observable) and build the
+/// leader briefing. Returns `Some(briefing)` ONLY when the claiming agent is the
+/// squad's leader agent (member tasks / non-squad tasks → `None`); the caller
+/// appends it to the run's `CLAUDE.md`. A dangling `squad_id`, a human-leader
+/// squad, or a workspace-id parse fault all resolve to `None` silently — the
+/// task still dispatches.
+async fn squad_leader_briefing(pool: &SqlitePool, task: &Task) -> Option<String> {
     let squad_id = task.squad_id.as_deref()?;
     tracing::info!(
         task_id = %task.id,
         squad_id = %squad_id,
-        "squad briefing hook: leader-briefing injection point (body: gap #1)"
+        "squad briefing hook: leader-briefing injection point"
     );
-    None // gap #1 fills this with buildSquadLeaderBriefing()
+    let workspace = ainb_hangar_core::ids::WorkspaceId::from_str(task.workspace_id.clone()).ok()?;
+    crate::squad_briefing::build_squad_leader_briefing(pool, &workspace, squad_id, &task.agent_id)
+        .await
 }
 
 async fn execute_claimed(
@@ -884,28 +888,34 @@ async fn execute_claimed(
         Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
     };
 
-    // e38.21: inject the workspace's context prompt into the task's execenv as a
-    // `CLAUDE.md` so the agent run actually sees the per-workspace context (the
-    // provider reads `CLAUDE.md` from its CWD). An unconfigured workspace writes
-    // no file (the v1 behaviour); a config-read or write fault is non-fatal — a
-    // task must still dispatch even if its context cannot be materialised.
-    match workspace_context_prompt(pool, &task.workspace_id).await {
-        Ok(prompt) => {
-            if let Err(e) = write_context_prompt(&env, prompt.as_deref()) {
-                tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
-            }
-        }
+    // e38.21 + gap #7: materialise ONE `CLAUDE.md` in the task's execenv carrying
+    // the workspace context prompt AND (for a squad-LEADER task) the claim-time
+    // squad-leader briefing. The provider reads `CLAUDE.md` from its CWD, so this
+    // is the single seam that makes both provable on disk / in transcript.
+    //
+    // Both parts are best-effort: an unconfigured workspace writes no context
+    // (v1 behaviour), a non-squad or member task gets no briefing, and a
+    // config-read / write fault is non-fatal — a task must still dispatch even if
+    // its context cannot be materialised. Fires BEFORE provider dispatch so the
+    // briefing is injected even when the run later fails to spawn.
+    let ws_prompt = match workspace_context_prompt(pool, &task.workspace_id).await {
+        Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "context prompt read failed");
+            None
         }
-    }
-
-    // Claim-time squad briefing injection point (migration 0045). Fires BEFORE
-    // provider dispatch so the hook is exercised even when the run later fails to
-    // spawn (a nonexistent provider path still exercises it).
-    if let Some(briefing) = squad_briefing_hook(&task) {
-        // gap #1: merge `briefing` into the run's system instructions / CLAUDE.md here.
-        let _ = briefing;
+    };
+    let briefing = squad_leader_briefing(pool, &task).await;
+    // Append-only / no-replace: the workspace context stays authoritative and the
+    // briefing stacks after it (multica daemon.go append semantics).
+    let combined = match (ws_prompt, briefing) {
+        (Some(p), Some(b)) => Some(format!("{p}\n\n{b}")),
+        (Some(p), None) => Some(p),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    if let Err(e) = write_context_prompt(&env, combined.as_deref()) {
+        tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
     }
 
     // e38.16: resolve which provider exec path this task routes to (agent →
@@ -3165,16 +3175,21 @@ mod tests {
         );
     }
 
-    /// migration 0045 / gap #5: driving the REAL `execute_claimed` seam for a task
-    /// stamped with a `squad_id` must emit the claim-time squad-briefing hook line —
-    /// carrying BOTH the `task_id` and the `squad_id` — BEFORE the provider spawn.
-    /// The provider paths are nonexistent so the run fails, yet the hook must have
-    /// already fired (the observable seam gap #1 keys its briefing injection off).
-    /// Deleting the `squad_briefing_hook(&task)` call from `execute_claimed` turns
-    /// this RED: no hook event is captured though the row still terminalises.
+    /// migration 0045 / gap #7: driving the REAL `execute_claimed` seam for a
+    /// LEADER task stamped with a `squad_id` must (a) emit the claim-time
+    /// squad-briefing hook line — carrying BOTH `task_id` and `squad_id` — BEFORE
+    /// the provider spawn, AND (b) materialise the leader briefing into the run's
+    /// `CLAUDE.md` (Operating Protocol + Roster with the member's name). The
+    /// provider paths are nonexistent so the run fails, yet both happen first (the
+    /// injection is pre-spawn). A MEMBER task carrying the same `squad_id` gets NO
+    /// roster (only the workspace context, which is unset here → no file). Deleting
+    /// the hook/inject wiring from `execute_claimed` turns this RED.
     #[tokio::test]
-    async fn execute_claimed_fires_the_squad_briefing_hook_before_spawn() {
+    async fn execute_claimed_injects_the_squad_leader_briefing_before_spawn() {
+        use ainb_hangar_core::actor::{ActorKind, ActorRef};
+        use ainb_hangar_core::ids::WorkspaceId;
         use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::squad::SquadRepo;
         use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
         use ainb_hangar_store::service::claim::ClaimTaskService;
         use std::sync::{Arc, Mutex};
@@ -3233,7 +3248,29 @@ mod tests {
         let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
         let rt = bootstrap::default_runtime_id();
         bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
-        let agent = bootstrap::create_agent(pool, &ws, "leader", "claude", None).await.unwrap();
+        // A squad "alpha" led by `captain`, with `scout` as a member — so the
+        // leader-task claim resolves a real roster to inject.
+        let captain = bootstrap::create_agent(pool, &ws, "captain", "claude", None).await.unwrap();
+        let scout = bootstrap::create_agent(pool, &ws, "scout", "claude", None).await.unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        SquadRepo::create(
+            pool,
+            &ws_id,
+            "squad-alpha",
+            "alpha",
+            &ActorRef::new(ActorKind::Agent, captain.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(
+            pool,
+            &ws_id,
+            "squad-alpha",
+            &ActorRef::new(ActorKind::Agent, scout.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
 
         let task_id =
             ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
@@ -3243,7 +3280,7 @@ mod tests {
                 id: task_id.clone(),
                 workspace_id: ws.clone(),
                 runtime_id: rt.clone(),
-                agent_id: agent.id.clone(),
+                agent_id: captain.id.clone(),
                 issue_id: None,
                 work_dir: None,
                 priority: 0,
@@ -3297,12 +3334,94 @@ mod tests {
             .await
         };
 
+        // A MEMBER task (agent `scout`, same squad) claimed + dispatched next: the
+        // builder returns `None` for a non-leader claimer, so with no workspace
+        // context configured NO `CLAUDE.md` is written. Runs inside the env window
+        // (before the restore below), outside the log-capture guard so the
+        // leader-only hook-once assertion holds.
+        let member_task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: member_task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: scout.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 2,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        TaskRepo::set_squad_id(pool, &member_task_id, "squad-alpha").await.unwrap();
+        let member_claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the member task must claim");
+        execute_claimed(
+            pool,
+            &runner,
+            &member_claimed,
+            &clock,
+            &stats,
+            &events,
+            &interactive,
+            Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
+        )
+        .await
+        .expect("member execute_claimed handles the spawn failure internally");
+
+        // Resolve the on-disk materialised prompts while env is still set.
+        let ws_slug = workspace_slug(pool, &ws).await.unwrap();
+        let leader_md = crate::execenv::task_root(&home, &ws_slug, &task_id)
+            .join("workdir")
+            .join(crate::execenv::CONTEXT_PROMPT_FILE);
+        let member_md = crate::execenv::task_root(&home, &ws_slug, &member_task_id)
+            .join("workdir")
+            .join(crate::execenv::CONTEXT_PROMPT_FILE);
+
         // Restore env BEFORE asserting so a failed assertion never leaks it.
         match prior_home {
             Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
             None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
         }
         outcome.expect("execute_claimed handles the spawn failure internally (never Err)");
+
+        // The LEADER task's materialised `CLAUDE.md` carries the full briefing.
+        let leader_prompt = std::fs::read_to_string(&leader_md)
+            .expect("the leader task's CLAUDE.md must be materialised pre-spawn");
+        assert!(
+            leader_prompt.contains("## Squad Operating Protocol"),
+            "leader briefing missing the operating protocol:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("## Squad Roster"),
+            "leader briefing missing the roster:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("Leader (you)"),
+            "leader briefing missing the leader self-row:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("captain"),
+            "leader briefing missing the leader name:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("scout"),
+            "leader briefing missing the member name in the roster:\n{leader_prompt}"
+        );
+
+        // The MEMBER task gets no roster (no file at all, since no workspace ctx).
+        assert!(
+            !member_md.exists()
+                || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Roster"),
+            "a member task must NOT receive the leader briefing"
+        );
 
         let events: Vec<Ev> = log.lock().expect("event log").clone();
         let hook: Vec<&Ev> =
