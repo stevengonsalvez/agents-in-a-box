@@ -701,13 +701,15 @@ pub fn spawn_gc_sweeper(
 /// Resolve the claude credential env for `backend`, bounded and off the async
 /// worker.
 ///
-/// The keychain read ([`claude_cred::keys_for_backend`] →
-/// `MacKeychainBackend::get`) is a synchronous, unbounded external call that can
-/// present a BLOCKING GUI auth prompt on a headless daemon (legacy `SecKeychain`
-/// ACL trust invalidated by a rebuilt binary). Answered by nobody, it wedges the
-/// calling async worker forever, freezing the task at `running` (the
-/// zombie-dispatch defect). We run it on [`tokio::task::spawn_blocking`] (same
-/// pattern as [`cap_parent_inbox`]) and race it against `timeout`.
+/// The credential read ([`claude_cred::keys_for_backend`], which shells out to
+/// `/usr/bin/security` for the system claude login) is a synchronous, unbounded
+/// external call that CAN present a BLOCKING GUI auth prompt — but only ONCE, the
+/// first time before the operator clicks "Always Allow" for the stable Apple-signed
+/// `security` binary (unlike the legacy in-process read, whose ACL trust was
+/// re-invalidated by every rebuilt daemon binary). Answered by nobody, that first
+/// prompt would wedge the calling async worker, freezing the task at `running`
+/// (the zombie-dispatch defect). We run it on [`tokio::task::spawn_blocking`]
+/// (same pattern as [`cap_parent_inbox`]) and race it against `timeout`.
 ///
 /// On timeout OR a join error we log a clear warning and return an EMPTY env, so
 /// the dispatch proceeds without an injected `CLAUDE_CODE_OAUTH_TOKEN`: the run
@@ -837,6 +839,27 @@ async fn prepare_spawn_inputs(
 // Bundling them into a context struct is a larger refactor than this credential
 // change warrants; the sibling run functions here carry the same shape.
 #[allow(clippy::too_many_arguments)]
+/// The claim-time squad-leader briefing (migration 0045 / gap #7).
+///
+/// When a claimed task carries a `squad_id`, log the injection point (keyed off
+/// the `squad_id` + `task_id`, so the seam stays observable) and build the
+/// leader briefing. Returns `Some(briefing)` ONLY when the claiming agent is the
+/// squad's leader agent (member tasks / non-squad tasks → `None`); the caller
+/// appends it to the run's `CLAUDE.md`. A dangling `squad_id`, a human-leader
+/// squad, or a workspace-id parse fault all resolve to `None` silently — the
+/// task still dispatches.
+async fn squad_leader_briefing(pool: &SqlitePool, task: &Task) -> Option<String> {
+    let squad_id = task.squad_id.as_deref()?;
+    tracing::info!(
+        task_id = %task.id,
+        squad_id = %squad_id,
+        "squad briefing hook: leader-briefing injection point"
+    );
+    let workspace = ainb_hangar_core::ids::WorkspaceId::from_str(task.workspace_id.clone()).ok()?;
+    crate::squad_briefing::build_squad_leader_briefing(pool, &workspace, squad_id, &task.agent_id)
+        .await
+}
+
 async fn execute_claimed(
     pool: &SqlitePool,
     runner: &Runner,
@@ -867,20 +890,34 @@ async fn execute_claimed(
         Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
     };
 
-    // e38.21: inject the workspace's context prompt into the task's execenv as a
-    // `CLAUDE.md` so the agent run actually sees the per-workspace context (the
-    // provider reads `CLAUDE.md` from its CWD). An unconfigured workspace writes
-    // no file (the v1 behaviour); a config-read or write fault is non-fatal — a
-    // task must still dispatch even if its context cannot be materialised.
-    match workspace_context_prompt(pool, &task.workspace_id).await {
-        Ok(prompt) => {
-            if let Err(e) = write_context_prompt(&env, prompt.as_deref()) {
-                tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
-            }
-        }
+    // e38.21 + gap #7: materialise ONE `CLAUDE.md` in the task's execenv carrying
+    // the workspace context prompt AND (for a squad-LEADER task) the claim-time
+    // squad-leader briefing. The provider reads `CLAUDE.md` from its CWD, so this
+    // is the single seam that makes both provable on disk / in transcript.
+    //
+    // Both parts are best-effort: an unconfigured workspace writes no context
+    // (v1 behaviour), a non-squad or member task gets no briefing, and a
+    // config-read / write fault is non-fatal — a task must still dispatch even if
+    // its context cannot be materialised. Fires BEFORE provider dispatch so the
+    // briefing is injected even when the run later fails to spawn.
+    let ws_prompt = match workspace_context_prompt(pool, &task.workspace_id).await {
+        Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "context prompt read failed");
+            None
         }
+    };
+    let briefing = squad_leader_briefing(pool, &task).await;
+    // Append-only / no-replace: the workspace context stays authoritative and the
+    // briefing stacks after it (multica daemon.go append semantics).
+    let combined = match (ws_prompt, briefing) {
+        (Some(p), Some(b)) => Some(format!("{p}\n\n{b}")),
+        (Some(p), None) => Some(p),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    if let Err(e) = write_context_prompt(&env, combined.as_deref()) {
+        tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
     }
 
     // e38.16: resolve which provider exec path this task routes to (agent →
@@ -1515,7 +1552,7 @@ async fn finalize_success(
     // Twin the durable-card move on the issue's own `state` (the default board
     // buckets by it): an aggregate-`done` set promotes the issue to `done`;
     // failed/cancelled sets leave it untouched. Advance-only + best-effort.
-    crate::board::advance_issue_lifecycle_after_terminal(pool, task).await;
+    crate::board::advance_and_cascade_child(pool, task, events).await;
     // tcp T4 / F7 + FANOUT-SEMANTICS: a task of this card just went terminal, so
     // re-evaluate every card that DEPENDS on it — a dependent whose blockers are now
     // all FINISHED (their active sets drained with a `done`) becomes runnable (the 🔒
@@ -1585,7 +1622,10 @@ fn failure_detail(
             || "no exit code (killed)".to_string(),
             |c| format!("exit {c}"),
         );
-        return format!("{}: provider {provider} {exit} with no output", reason.as_db_str());
+        return format!(
+            "{}: provider {provider} {exit} with no output",
+            reason.as_db_str()
+        );
     }
     let mut detail = format!("run failed ({}):", reason.as_db_str());
     if !stdout.is_empty() {
@@ -1711,7 +1751,7 @@ async fn finalize_failure(
     // Twin on `issue.state`: the aggregate is `failed`/`cancelled` here (this
     // task's own failure is in the set), so this no-ops — but it keeps the
     // lifecycle seam symmetric with the board seam. Advance-only + best-effort.
-    crate::board::advance_issue_lifecycle_after_terminal(pool, task).await;
+    crate::board::advance_and_cascade_child(pool, task, events).await;
     // tcp T4 / F7 + FANOUT-SEMANTICS: this member going terminal may have drained a
     // blocker whose set already held a `done` sibling — re-evaluate dependents so a
     // squad blocker that finished on a mixed done/failed drain still unblocks. The
@@ -1834,7 +1874,7 @@ async fn finalize_setup_failure(
     crate::board::auto_move_after_terminal(pool, task).await;
     // Twin on `issue.state`; no-ops on the failed aggregate, kept for symmetry
     // with the board seam. Advance-only + best-effort.
-    crate::board::advance_issue_lifecycle_after_terminal(pool, task).await;
+    crate::board::advance_and_cascade_child(pool, task, events).await;
     crate::board::unblock_dependents_after_terminal(pool, task).await;
     progress_comment::emit_checkpoint(
         pool,
@@ -3137,6 +3177,284 @@ mod tests {
         );
     }
 
+    /// migration 0045 / gap #7: driving the REAL `execute_claimed` seam for a
+    /// LEADER task stamped with a `squad_id` must (a) emit the claim-time
+    /// squad-briefing hook line — carrying BOTH `task_id` and `squad_id` — BEFORE
+    /// the provider spawn, AND (b) materialise the leader briefing into the run's
+    /// `CLAUDE.md` (Operating Protocol + Roster with the member's name). The
+    /// provider paths are nonexistent so the run fails, yet both happen first (the
+    /// injection is pre-spawn). A MEMBER task carrying the same `squad_id` gets NO
+    /// roster (only the workspace context, which is unset here → no file). Deleting
+    /// the hook/inject wiring from `execute_claimed` turns this RED.
+    #[tokio::test]
+    async fn execute_claimed_injects_the_squad_leader_briefing_before_spawn() {
+        use ainb_hangar_core::actor::{ActorKind, ActorRef};
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::squad::SquadRepo;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+        use ainb_hangar_store::service::claim::ClaimTaskService;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default, Clone)]
+        struct Ev {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        type Log = Arc<Mutex<Vec<Ev>>>;
+        struct Collect<'a>(&'a mut Ev);
+        impl Visit for Collect<'_> {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.0.message = value.to_string();
+                } else {
+                    self.0.fields.push((field.name().to_string(), value.to_string()));
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}");
+                if field.name() == "message" {
+                    self.0.message = rendered;
+                } else {
+                    self.0.fields.push((field.name().to_string(), rendered));
+                }
+            }
+        }
+        struct CollectLayer {
+            log: Log,
+        }
+        impl<S> Layer<S> for CollectLayer
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut captured = Ev::default();
+                event.record(&mut Collect(&mut captured));
+                self.log.lock().expect("event log lock").push(captured);
+            }
+        }
+
+        // Serialise with every other `$AINB_HANGAR_HOME`-mutating test.
+        let _env = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hangar-home");
+        let prior_home = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        // A squad "alpha" led by `captain`, with `scout` as a member — so the
+        // leader-task claim resolves a real roster to inject.
+        let captain = bootstrap::create_agent(pool, &ws, "captain", "claude", None).await.unwrap();
+        let scout = bootstrap::create_agent(pool, &ws, "scout", "claude", None).await.unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        SquadRepo::create(
+            pool,
+            &ws_id,
+            "squad-alpha",
+            "alpha",
+            &ActorRef::new(ActorKind::Agent, captain.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(
+            pool,
+            &ws_id,
+            "squad-alpha",
+            &ActorRef::new(ActorKind::Agent, scout.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: captain.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        // Stamp the dispatching squad, exactly as a squad dispatch would, so the
+        // claimed task carries it into `execute_claimed`.
+        TaskRepo::set_squad_id(pool, &task_id, "squad-alpha").await.unwrap();
+
+        let clock = SystemClock;
+        let claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the queued task must claim");
+
+        // Nonexistent provider paths: the run fails to spawn, but the squad hook
+        // must have fired first (it is placed BEFORE provider dispatch).
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "/nonexistent/hangar-test-claude".into(),
+            codex_path: "/nonexistent/hangar-test-codex".into(),
+            copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+        let interactive = InteractiveSessions::default();
+
+        let log: Log = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(CollectLayer { log: log.clone() });
+        let outcome = {
+            // Current-thread runtime: the guard holds the subscriber across every
+            // `.await` in `execute_claimed`, so the inline hook event is captured.
+            let _guard = tracing::subscriber::set_default(subscriber);
+            execute_claimed(
+                pool,
+                &runner,
+                &claimed,
+                &clock,
+                &stats,
+                &events,
+                &interactive,
+                Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
+            )
+            .await
+        };
+
+        // A MEMBER task (agent `scout`, same squad) claimed + dispatched next: the
+        // builder returns `None` for a non-leader claimer, so with no workspace
+        // context configured NO `CLAUDE.md` is written. Runs inside the env window
+        // (before the restore below), outside the log-capture guard so the
+        // leader-only hook-once assertion holds.
+        let member_task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: member_task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: scout.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 2,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        TaskRepo::set_squad_id(pool, &member_task_id, "squad-alpha").await.unwrap();
+        let member_claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the member task must claim");
+        execute_claimed(
+            pool,
+            &runner,
+            &member_claimed,
+            &clock,
+            &stats,
+            &events,
+            &interactive,
+            Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
+        )
+        .await
+        .expect("member execute_claimed handles the spawn failure internally");
+
+        // Resolve the on-disk materialised prompts while env is still set.
+        let ws_slug = workspace_slug(pool, &ws).await.unwrap();
+        let leader_md = crate::execenv::task_root(&home, &ws_slug, &task_id)
+            .join("workdir")
+            .join(crate::execenv::CONTEXT_PROMPT_FILE);
+        let member_md = crate::execenv::task_root(&home, &ws_slug, &member_task_id)
+            .join("workdir")
+            .join(crate::execenv::CONTEXT_PROMPT_FILE);
+
+        // Restore env BEFORE asserting so a failed assertion never leaks it.
+        match prior_home {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+        outcome.expect("execute_claimed handles the spawn failure internally (never Err)");
+
+        // The LEADER task's materialised `CLAUDE.md` carries the full briefing.
+        let leader_prompt = std::fs::read_to_string(&leader_md)
+            .expect("the leader task's CLAUDE.md must be materialised pre-spawn");
+        assert!(
+            leader_prompt.contains("## Squad Operating Protocol"),
+            "leader briefing missing the operating protocol:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("## Squad Roster"),
+            "leader briefing missing the roster:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("Leader (you)"),
+            "leader briefing missing the leader self-row:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("captain"),
+            "leader briefing missing the leader name:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("scout"),
+            "leader briefing missing the member name in the roster:\n{leader_prompt}"
+        );
+
+        // The MEMBER task gets no roster (no file at all, since no workspace ctx).
+        assert!(
+            !member_md.exists()
+                || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Roster"),
+            "a member task must NOT receive the leader briefing"
+        );
+
+        let events: Vec<Ev> = log.lock().expect("event log").clone();
+        let hook: Vec<&Ev> =
+            events.iter().filter(|e| e.message.contains("squad briefing hook")).collect();
+        assert_eq!(
+            hook.len(),
+            1,
+            "exactly one claim-time squad-briefing hook line must fire"
+        );
+        let field =
+            |e: &Ev, k: &str| e.fields.iter().find(|(name, _)| name == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            field(hook[0], "squad_id").as_deref(),
+            Some("squad-alpha"),
+            "the hook line must carry the dispatching squad_id"
+        );
+        assert_eq!(
+            field(hook[0], "task_id").as_deref(),
+            Some(task_id.as_str()),
+            "the hook line must carry the claimed task_id"
+        );
+
+        // The run still terminalised (nonexistent provider) — proving the hook
+        // fired on the path to a FAILED run, before the spawn, not only on success.
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "failed",
+            "the nonexistent provider must terminalise the run"
+        );
+    }
+
     /// hangar-e2e-7 REGRESSION: a failure whose runner captured NO output (both
     /// tails empty — the zero-output death, e.g. a sandboxed CLI killed exit 65
     /// before writing a byte) must STILL persist a synthesized diagnostic into the
@@ -3338,6 +3656,10 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await
@@ -3435,6 +3757,10 @@ mod tests {
                         assignee: None,
                         due_date: None,
                         labels: Vec::new(),
+                        parent_issue_id: None,
+                        stage: None,
+                        acceptance_criteria: Vec::new(),
+                        context_refs: Vec::new(),
                     },
                 )
                 .await
@@ -3714,6 +4040,7 @@ mod tests {
             runtime_id: bootstrap::default_runtime_id(),
             instructions: None,
             visibility: "workspace".into(),
+            permission_mode: "private".into(),
             owner_id: owner,
             archived: false,
             model: None,

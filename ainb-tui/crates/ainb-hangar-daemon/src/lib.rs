@@ -87,6 +87,10 @@ pub mod events;
 /// Per-task execution-environment layout: workdir/output/logs + `.gc_meta.json`
 /// (P1.6).
 pub mod execenv;
+/// Authoritative Fleet reducer fed by hooks, provider events, and tmux discovery.
+pub mod fleet;
+/// Claude and Codex provider transports for authoritative Fleet control.
+pub mod fleet_provider;
 /// The task-lifecycle state machine (T8): `statig` typed compile-time
 /// transitions.
 ///
@@ -229,6 +233,14 @@ pub mod seed;
 /// [`ainb_hangar_store::repo::skill::SkillRepo::upsert_by_name`] — idempotent
 /// and all-or-nothing.
 pub mod skills_sync;
+/// Claim-time squad-leader briefing builder (multica `squad_briefing.go` parity,
+/// gap #7).
+///
+/// [`squad_briefing::build_squad_leader_briefing`] composes the Operating
+/// Protocol + Squad Roster appended to a leader agent's run `CLAUDE.md` at claim
+/// time, so a squad-leader task runs with the coordinator role + the roster of
+/// members it can delegate to. Member tasks and non-squad tasks get no briefing.
+pub mod squad_briefing;
 /// Auto-standup watcher (D13; spec P9 §4.8).
 ///
 /// [`standup::StandupWatcher`] is a daemon-global periodic scan that WRITES
@@ -401,6 +413,27 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
         )
         .spawn();
     }
+
+    // Tmux reconciliation keeps unhooked and standalone provider sessions in
+    // the canonical Fleet roster as degraded rows with exact pane identity.
+    let _fleet_tmux = crate::fleet::spawn_tmux_reconciler(store.pool().clone(), broker.sink());
+
+    // Managed Codex transport starts independently from daemon readiness. A
+    // missing or incompatible Codex binary leaves hook and tmux observation
+    // running, while the service records an honest transport downgrade.
+    let _codex_manager = (!once
+        && std::env::var_os("AINB_CODEX_MANAGED")
+            .as_deref()
+            .is_none_or(|value| value != "0"))
+    .then(|| {
+        let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
+        let socket = dir.join("codex-app-server.sock");
+        crate::fleet_provider::codex_manager::spawn_service(
+            crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket),
+            store.pool().clone(),
+            broker.sink(),
+        )
+    });
 
     // P5 (T6): reconcile the agent-profile index against the on-disk masters and
     // spawn an fs-watch so an edit-on-disk of `{hangar_home}/profiles/<slug>.md`

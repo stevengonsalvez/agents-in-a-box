@@ -194,6 +194,11 @@ impl SquadAssignService {
             },
         )
         .await?;
+        // Stamp the dispatching squad onto the just-committed leader row (migration
+        // 0045), so the daemon claim path can key a leader-briefing injection off it.
+        // The insert used its own transaction; a follow-up UPDATE on the committed
+        // row is fine (the row is not yet claimable-and-gone this same tick).
+        TaskRepo::set_squad_id(pool, &task_id, squad_id).await?;
 
         Ok(SquadAssignment {
             task_id,
@@ -309,6 +314,11 @@ impl SquadAssignService {
         )
         .await?;
         Self::stamp_dispatch_fields(&mut tx, &leader_task_id, request).await?;
+        // Stamp the dispatching squad onto the leader brief (migration 0045). A
+        // SEPARATE call from `stamp_dispatch_fields` (not folded in) so squad_id is
+        // stamped even for the no-repo squads-screen fan-out, where
+        // `stamp_dispatch_fields` early-returns on a NULL `repo_ref`.
+        TaskRepo::set_squad_id_in_tx(&mut tx, &leader_task_id, squad_id).await?;
         for (agent_id, runtime_id) in member_targets {
             let task_id = idgen.new_ulid();
             TaskRepo::insert_in_tx(
@@ -328,6 +338,7 @@ impl SquadAssignService {
             )
             .await?;
             Self::stamp_dispatch_fields(&mut tx, &task_id, request).await?;
+            TaskRepo::set_squad_id_in_tx(&mut tx, &task_id, squad_id).await?;
             members.push(SquadMemberDispatch {
                 task_id,
                 agent_id,
@@ -476,6 +487,7 @@ mod tests {
                 runtime_id: runtime_id.into(),
                 instructions: None,
                 visibility: "workspace".into(),
+                permission_mode: "private".into(),
                 owner_id: "user-1".into(),
                 archived: false,
                 model: None,
@@ -525,6 +537,15 @@ mod tests {
             "the runtime was DERIVED from the squad's leader, not supplied"
         );
 
+        // The dispatching squad is stamped on the leader task row (migration 0045),
+        // so the daemon claim path can key a leader-briefing injection off it.
+        let row = TaskRepo::get_by_id(pool, &assignment.task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.squad_id.as_deref(),
+            Some("s1"),
+            "the leader-only assign stamps squad_id on the task row"
+        );
+
         // The LEADER's runtime claims the squad task — routing took effect.
         let claimed = ClaimTaskService::claim_for_runtime(pool, "rt-lead", &FixedClock(10_000))
             .await
@@ -534,6 +555,13 @@ mod tests {
         assert_eq!(
             claimed.agent_id, "a-lead",
             "dispatched to the LEADER agent, not anyone else"
+        );
+        // The claim projection carries the squad ref through to the daemon's
+        // briefing hook (migration 0045).
+        assert_eq!(
+            claimed.squad_id.as_deref(),
+            Some("s1"),
+            "the claimed projection carries squad_id for the briefing hook"
         );
 
         // The OTHER runtime claims nothing — the task is the leader's alone.
@@ -634,6 +662,21 @@ mod tests {
         assert_eq!(lead.issue_id.as_deref(), Some("issue-1"));
         assert_eq!(m1.issue_id.as_deref(), Some("issue-1"));
         assert_eq!(m2.issue_id.as_deref(), Some("issue-1"));
+
+        // Every fanned-out task (leader + both members) carries the dispatching
+        // squad (migration 0045), so the daemon keys a briefing hook off each.
+        for id in [
+            &fanout.leader.task_id,
+            &fanout.members[0].task_id,
+            &fanout.members[1].task_id,
+        ] {
+            let row = TaskRepo::get_by_id(pool, id).await.unwrap().unwrap();
+            assert_eq!(
+                row.squad_id.as_deref(),
+                Some("s1"),
+                "fanned task {id} must carry squad_id"
+            );
+        }
     }
 
     /// FAN-OUT stamps the card's repo + agent-kind onto EVERY fanned task (leader

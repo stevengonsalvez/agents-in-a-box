@@ -1031,6 +1031,24 @@ pub struct IssueCreateParams {
     /// it). Append-only field: an old client omits it, an old daemon ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// Optional parent issue id: when set, the created issue is a **sub-issue** of
+    /// that parent (migration 0046). The daemon validates the parent exists in the
+    /// same workspace and rejects a foreign/unknown parent. Append-only field: an
+    /// old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_issue_id: Option<String>,
+    /// Ordered acceptance-criteria strings authored in the create wizard/CLI
+    /// (migration 0048, multica parity): one criterion per element. Persisted on
+    /// the created issue and rendered on the detail card. Append-only field: an
+    /// old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    /// Ordered context-reference strings (URL / `owner/repo#123` / note) authored
+    /// in the create wizard/CLI (migration 0048, multica parity): one per element.
+    /// Persisted on the created issue and rendered on the detail card. Append-only
+    /// field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_refs: Vec<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
@@ -1108,6 +1126,10 @@ pub struct AgentCreateParams {
     /// Optional free-form system prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`); absent =
+    /// the provider default. Applied as a create-time config follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Optional token budget (rtk/headroom); absent = unlimited (migration 0042).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<i64>,
@@ -1688,6 +1710,13 @@ pub struct IssueRunParams {
     /// targets a named agent by carrying it here.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub assignee: Option<String>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the run by. APPEND-ONLY: omitted (`None`) defaults to the
+    /// workspace owner (the ordinary single-operator Run, which the gate always
+    /// admits — so this is invisible to existing callers). A multi-user caller
+    /// names a non-owner member here to be gated against the agent's allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_DELETE`] (63d): delete one issue and
@@ -2053,7 +2082,7 @@ pub struct DaemonConfigListResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::PresenceState;
+    use crate::events::{PresenceState, Workload};
 
     /// The params + result envelopes round-trip through JSON.
     #[test]
@@ -2121,6 +2150,11 @@ mod tests {
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
@@ -2135,6 +2169,7 @@ mod tests {
                 display_name: "claude-agent".into(),
                 subtitle: "agent · claude".into(),
                 presence: PresenceState::Online,
+                workload: Workload::Working,
                 is_agent: true,
                 recent_rank: Some(0),
             }],
@@ -2593,6 +2628,7 @@ mod tests {
             name: "reviewer".into(),
             provider: Some("codex".into()),
             instructions: Some("be terse".into()),
+            model: Some("gpt-5-codex".into()),
             token_budget: Some(250_000),
         };
         let s = serde_json::to_string(&full).unwrap();
@@ -2604,6 +2640,7 @@ mod tests {
         assert!(minimal.workspace_id.is_none());
         assert!(minimal.provider.is_none());
         assert!(minimal.instructions.is_none());
+        assert!(minimal.model.is_none());
         // The optional fields are omitted from the serialized form when absent.
         assert_eq!(
             serde_json::to_string(&minimal).unwrap(),

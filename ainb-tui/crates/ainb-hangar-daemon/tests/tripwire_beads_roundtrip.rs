@@ -80,6 +80,10 @@ async fn seed_issue(store: &Store) -> Issue {
         priority: 0,
         due_date: None,
         labels: Vec::new(),
+        parent_issue_id: None,
+        stage: None,
+        acceptance_criteria: Vec::new(),
+        context_refs: Vec::new(),
     };
     IssueRepo::insert(store.pool(), &new).await.expect("insert issue");
     IssueRepo::get_by_id(store.pool(), HANGAR_ID)

@@ -102,6 +102,10 @@ async fn seed_issue(store: &Store, id: &str, workspace_id: &str, title: &str) {
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            parent_issue_id: None,
+            stage: None,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         },
     )
     .await
@@ -140,6 +144,7 @@ async fn seed_agent(
             runtime_id: runtime_id.to_string(),
             instructions: None,
             visibility: "workspace".to_string(),
+            permission_mode: "private".to_string(),
             owner_id: owner_id.to_string(),
             archived: false,
             model: None,

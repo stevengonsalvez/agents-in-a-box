@@ -386,6 +386,43 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
         "0043 issue.external_ref defaults NULL"
     );
 
+    // 0046 issue.parent_issue_id / issue.stage both default NULL on a pre-existing
+    // row (a legacy issue is top-level and unstaged).
+    let issue_subtasks = sqlx::query("SELECT parent_issue_id, stage FROM issue WHERE id = ?")
+        .bind("issue-1")
+        .fetch_one(pool)
+        .await
+        .expect("issue 0046 columns");
+    assert_eq!(
+        issue_subtasks.get::<Option<String>, _>("parent_issue_id"),
+        None,
+        "0046 issue.parent_issue_id defaults NULL"
+    );
+    assert_eq!(
+        issue_subtasks.get::<Option<i64>, _>("stage"),
+        None,
+        "0046 issue.stage defaults NULL"
+    );
+
+    // 0048 issue.acceptance_criteria / issue.context_refs both default to the empty
+    // JSON array `'[]'` on a pre-existing row (a legacy issue carries neither).
+    let issue_lists =
+        sqlx::query("SELECT acceptance_criteria, context_refs FROM issue WHERE id = ?")
+            .bind("issue-1")
+            .fetch_one(pool)
+            .await
+            .expect("issue 0048 columns");
+    assert_eq!(
+        issue_lists.get::<String, _>("acceptance_criteria"),
+        "[]",
+        "0048 issue.acceptance_criteria defaults to []"
+    );
+    assert_eq!(
+        issue_lists.get::<String, _>("context_refs"),
+        "[]",
+        "0048 issue.context_refs defaults to []"
+    );
+
     // 0033 (tcp T2): the run's produced worktree branch defaults NULL on a
     // pre-existing task row (recorded only at finalize when the run committed).
     // 0039 (tcp 8ln): the run generation defaults to 0 on a pre-existing row, so
@@ -405,6 +442,20 @@ async fn assert_added_columns_read_defaults(pool: &SqlitePool) {
             .await
             .expect("task 0033 branch column");
     assert_eq!(task_branch, None, "0033 task.branch defaults NULL");
+
+    // 0045 task.squad_id defaults NULL on a pre-existing row (a single-agent task
+    // carries no dispatching squad), so legacy tasks arm no claim-time briefing hook.
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT squad_id FROM agent_task_queue WHERE id = ?"
+        )
+        .bind("task-1")
+        .fetch_one(pool)
+        .await
+        .expect("task 0045 squad_id column"),
+        None,
+        "0045 task.squad_id defaults NULL"
+    );
 
     // 0032 workspace.default_agent defaults NULL on prior rows.
     assert_eq!(
@@ -593,7 +644,7 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 43, "head is migration 0043");
+    assert_eq!(head_version, 48, "head is migration 0048");
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;

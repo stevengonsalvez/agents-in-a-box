@@ -48,8 +48,18 @@ pub struct Agent {
     pub runtime_id: String,
     /// Free-form system prompt / instructions; `None` when unset.
     pub instructions: Option<String>,
-    /// Visibility scope: `"workspace"` or `"private"`.
+    /// Visibility scope: `"workspace"` or `"private"`. **Derived-legacy** since
+    /// migration 0047: no code path gates invocation on it; it is kept in sync
+    /// with [`permission_mode`](Self::permission_mode) purely so legacy readers
+    /// never see a permission WIDENING (multica parity).
     pub visibility: String,
+    /// Invocation-permission mode (migration 0047): `"private"` (owner-only,
+    /// deny-by-default) or `"public_to"` (the [`agent_invocation_target`] allow-list
+    /// decides). **Authoritative** invoke source — [`AgentRepo::can_invoke`] gates
+    /// on this, not on [`visibility`](Self::visibility).
+    ///
+    /// [`agent_invocation_target`]: crate::repo::agent_invocation_target
+    pub permission_mode: String,
     /// Owning user (`user.id`).
     pub owner_id: String,
     /// `true` when the agent is archived (hidden from the active picker). The
@@ -194,10 +204,10 @@ impl AgentRepo {
     pub async fn insert(pool: &SqlitePool, agent: &Agent) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO agent \
-             (id, workspace_id, name, runtime_id, instructions, visibility, owner_id, \
-              archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
+             (id, workspace_id, name, runtime_id, instructions, visibility, permission_mode, \
+              owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
               token_budget) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -205,6 +215,7 @@ impl AgentRepo {
         .bind(&agent.runtime_id)
         .bind(&agent.instructions)
         .bind(&agent.visibility)
+        .bind(&agent.permission_mode)
         .bind(&agent.owner_id)
         .bind(i64::from(agent.archived))
         .bind(&agent.model)
@@ -392,6 +403,164 @@ impl AgentRepo {
         Ok(res.rows_affected() == 1)
     }
 
+    /// Set one agent's [`permission_mode`](Agent::permission_mode) and re-derive the
+    /// legacy [`visibility`](Agent::visibility) label to stay consistent (migration
+    /// 0047, gap #8).
+    ///
+    /// `mode` must be `"private"` or `"public_to"` (the schema `CHECK` is the last
+    /// line of defence). After the mode write, `visibility` is re-derived from the
+    /// mode + the current allow-list: `public_to` with at least one `workspace`
+    /// target reads back `"workspace"`; otherwise (`private`, or `public_to` with
+    /// only member/team targets) it reads back `"private"`, so a legacy reader never
+    /// sees a WIDENING. Both writes run in one transaction.
+    ///
+    /// Returns `true` when the agent existed and was updated, `false` when `id`
+    /// matched no agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if either write fails (e.g. a `CHECK` violation on
+    /// an out-of-set `mode`).
+    pub async fn set_permission_mode(
+        pool: &SqlitePool,
+        id: &str,
+        mode: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        let res = sqlx::query("UPDATE agent SET permission_mode = ? WHERE id = ?")
+            .bind(mode)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        if res.rows_affected() != 1 {
+            // No such agent — nothing to re-derive.
+            tx.rollback().await?;
+            return Ok(false);
+        }
+        let visibility = derive_visibility_in_tx(&mut tx, id, mode).await?;
+        sqlx::query("UPDATE agent SET visibility = ? WHERE id = ?")
+            .bind(visibility)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(true)
+    }
+
+    /// Re-derive the legacy [`visibility`](Agent::visibility) label from an agent's
+    /// current mode + allow-list, keeping the two consistent after a target
+    /// add/remove (migration 0047, gap #8). A no-op for an unknown id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if a lookup or the write fails.
+    pub async fn rederive_visibility(pool: &SqlitePool, id: &str) -> Result<(), sqlx::Error> {
+        let mode: Option<String> =
+            sqlx::query_scalar("SELECT permission_mode FROM agent WHERE id = ?")
+                .bind(id)
+                .fetch_optional(pool)
+                .await?;
+        let Some(mode) = mode else {
+            return Ok(());
+        };
+        let mut tx = pool.begin().await?;
+        let visibility = derive_visibility_in_tx(&mut tx, id, &mode).await?;
+        sqlx::query("UPDATE agent SET visibility = ? WHERE id = ?")
+            .bind(visibility)
+            .bind(id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Report whether a run may be enqueued for `agent` on behalf of `invoker`
+    /// (multica `canInvokeAgent` parity, gap #8). **Deny-by-default.**
+    ///
+    /// `invoker_kind` / `invoker_user_id` are the EFFECTIVE invoking identity:
+    ///   - a [`ActorKind::Member`] actor → that member's user id.
+    ///   - an [`ActorKind::Agent`] actor → the top-of-chain human ORIGINATOR id if
+    ///     resolved, else `None` (hangar has no originator column yet; an
+    ///     agent-actor invoke passes `None` and relies on the workspace-target
+    ///     exception below, failing closed for member/team targets — exactly
+    ///     multica's unattributed case). Resolving the originator (multica 184/185)
+    ///     is a separate downstream gap.
+    ///
+    /// Rules (ported 1:1 from `agent_access.go:48`):
+    ///   1. `invoker_user_id == agent.owner_id` (non-empty) → allow (owner always).
+    ///   2. `permission_mode != "public_to"` → deny (private / unknown =
+    ///      deny-by-default; **no admin bypass, no A2A bypass** — the privacy-hole
+    ///      fix).
+    ///   3. `public_to`: OR-match the allow-list:
+    ///      - `workspace` target → allow if the invoker is a workspace member, OR the
+    ///        actor is [`ActorKind::Agent`] (the `workspaceBroad` exception, scoped
+    ///        ONLY to workspace targets, so unattributed automation can trigger a
+    ///        `public_to workspace` agent but fails closed against member/team).
+    ///      - `member` target → allow if `invoker_user_id == target_id` (a resolved
+    ///        user; an Agent with `None` originator never matches — fail closed).
+    ///      - `team` target → inert in V1 (never admits).
+    ///   4. no match → deny.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if a lookup fails.
+    pub async fn can_invoke(
+        pool: &SqlitePool,
+        agent: &Agent,
+        invoker_kind: ainb_hangar_core::actor::ActorKind,
+        invoker_user_id: Option<&str>,
+    ) -> Result<bool, sqlx::Error> {
+        use crate::repo::agent_invocation_target::AgentInvocationTargetRepo;
+        use crate::repo::member::MemberRepo;
+        use ainb_hangar_core::actor::ActorKind;
+        use ainb_hangar_core::ids::WorkspaceId;
+
+        // 1. Owner always — a non-empty invoker id matching the agent's owner.
+        if let Some(uid) = invoker_user_id {
+            if !agent.owner_id.is_empty() && uid == agent.owner_id {
+                return Ok(true);
+            }
+        }
+        // 2. Private / unknown mode = deny-by-default (no admin/A2A bypass).
+        if agent.permission_mode != "public_to" {
+            return Ok(false);
+        }
+        // 3. public_to: OR-match the allow-list.
+        let targets = AgentInvocationTargetRepo::list(pool, &agent.id).await?;
+        // Is the (resolved) invoker a member of the agent's workspace?
+        let is_ws_member = match invoker_user_id {
+            Some(uid) => match WorkspaceId::from_str(agent.workspace_id.clone()) {
+                Ok(ws) => MemberRepo::role(pool, &ws, uid).await?.is_some(),
+                // An empty workspace id cannot resolve a membership → not a member.
+                Err(_) => false,
+            },
+            None => false,
+        };
+        // The workspaceBroad exception: unattributed automation (an Agent actor with
+        // no resolved originator) may trigger a workspace-target agent, but nothing
+        // narrower. (System actor joins this branch when hangar grows one.)
+        let workspace_broad = invoker_kind == ActorKind::Agent;
+        for t in &targets {
+            match t.target_type.as_str() {
+                "workspace" => {
+                    if is_ws_member || workspace_broad {
+                        return Ok(true);
+                    }
+                }
+                "member" => {
+                    if let Some(uid) = invoker_user_id {
+                        if t.target_id == uid {
+                            return Ok(true);
+                        }
+                    }
+                }
+                // `team` is reserved and inert in V1 (no team-membership source).
+                _ => {}
+            }
+        }
+        Ok(false)
+    }
+
     /// Hard-delete one agent, scoped to a workspace (Agents screen `x` remove,
     /// slice 2).
     ///
@@ -463,6 +632,36 @@ impl AgentRepo {
     }
 }
 
+/// Derive the legacy `visibility` label for an agent from its `permission_mode`
+/// and current allow-list, inside a transaction (migration 0047 parity).
+///
+/// Rule (mirrors multica's derived-legacy field): a `public_to` agent with at
+/// least one `workspace` invocation target is `"workspace"`; everything else
+/// (`private`, or `public_to` with only member/team targets) is `"private"` — so
+/// a legacy reader that still keys on `visibility` never sees a WIDENING relative
+/// to the authoritative gate.
+async fn derive_visibility_in_tx(
+    tx: &mut sqlx::SqliteConnection,
+    agent_id: &str,
+    mode: &str,
+) -> Result<&'static str, sqlx::Error> {
+    if mode != "public_to" {
+        return Ok("private");
+    }
+    let has_workspace_target: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_invocation_target \
+         WHERE agent_id = ? AND target_type = 'workspace'",
+    )
+    .bind(agent_id)
+    .fetch_one(&mut *tx)
+    .await?;
+    Ok(if has_workspace_target > 0 {
+        "workspace"
+    } else {
+        "private"
+    })
+}
+
 /// Whether a `sqlx` error is a SQLite foreign-key constraint violation. Used by
 /// [`AgentRepo::delete`] to turn a history-pinned delete into the actionable
 /// [`AgentDeleteError::HasHistory`] rather than an opaque store error.
@@ -473,8 +672,8 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 /// The full column list every `SELECT` reads, in [`Agent::from_row`] order. A
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
-     owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
-     token_budget FROM agent";
+     permission_mode, owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, \
+     provider, token_budget FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -644,6 +843,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             runtime_id: row.try_get("runtime_id")?,
             instructions: row.try_get("instructions")?,
             visibility: row.try_get("visibility")?,
+            permission_mode: row.try_get("permission_mode")?,
             owner_id: row.try_get("owner_id")?,
             archived: row.try_get::<i64, _>("archived")? != 0,
             model: row.try_get("model")?,
@@ -654,5 +854,175 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             provider: row.try_get("provider")?,
             token_budget: row.try_get("token_budget")?,
         })
+    }
+}
+
+#[cfg(test)]
+mod can_invoke_tests {
+    use super::*;
+    use crate::Store;
+    use crate::bootstrap;
+    use crate::repo::agent_invocation_target::AgentInvocationTargetRepo;
+    use crate::repo::member::{MemberRepo, MemberRole};
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_core::ids::WorkspaceId;
+
+    /// Seed a workspace with an owner-owned agent, a real workspace member `bob`,
+    /// and a NON-member user id `carol`. Returns `(store, ws, agent, owner_id,
+    /// bob_id, carol_id)`.
+    async fn seed() -> (Store, String, Agent, String, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let dir = Box::leak(Box::new(dir));
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let ws = bootstrap::ensure_default_workspace(store.pool()).await.unwrap();
+        let owner_id = bootstrap::default_owner_id(store.pool()).await.unwrap().unwrap();
+        let agent = bootstrap::create_agent(store.pool(), &ws, "secret-bot", "claude", None)
+            .await
+            .unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        let bob = MemberRepo::add(store.pool(), &ws_id, "bob@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+        // carol is a user id that is NOT a member of this workspace.
+        (
+            store,
+            ws,
+            agent,
+            owner_id,
+            bob.user_id,
+            "u-carol-nonmember".to_string(),
+        )
+    }
+
+    /// The full multica `canInvokeAgent` truth table across the four allow-list
+    /// shapes: private, member target, workspace target, team target.
+    #[tokio::test]
+    async fn can_invoke_truth_table() {
+        let (store, _ws, agent, owner, bob, carol) = seed().await;
+        let pool = store.pool();
+        let ws_target = agent.workspace_id.clone();
+
+        // ---- private (the create default): owner-only, deny everything else. ----
+        assert!(
+            AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&owner))
+                .await
+                .unwrap(),
+            "private: the owner always invokes"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&bob))
+                .await
+                .unwrap(),
+            "private: a non-owner member is denied (deny-by-default)"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Agent, None).await.unwrap(),
+            "private: an unattributed agent actor is denied (no A2A bypass)"
+        );
+
+        // ---- public_to + MEMBER target bob: bob in, carol/None out, owner in. ----
+        AgentRepo::set_permission_mode(pool, &agent.id, "public_to").await.unwrap();
+        AgentInvocationTargetRepo::add(
+            pool,
+            &SystemIdGen,
+            &SystemClock,
+            &agent.id,
+            "member",
+            &bob,
+            Some(&owner),
+        )
+        .await
+        .unwrap();
+        // Re-read so the struct carries the updated permission_mode.
+        let agent = AgentRepo::get(pool, &agent.id).await.unwrap().unwrap();
+        assert!(
+            AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&bob))
+                .await
+                .unwrap(),
+            "member target: bob (the listed member) invokes"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&carol))
+                .await
+                .unwrap(),
+            "member target: carol (never listed) is denied"
+        );
+        assert!(
+            AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&owner))
+                .await
+                .unwrap(),
+            "member target: the owner still invokes (owner branch)"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Agent, None).await.unwrap(),
+            "member target: an unattributed agent fails closed (not a workspace target)"
+        );
+
+        // ---- public_to + WORKSPACE target: members in, non-members out, ----
+        // ---- unattributed agent in (workspaceBroad exception). ----
+        AgentInvocationTargetRepo::remove(pool, &agent.id, "member", &bob)
+            .await
+            .unwrap();
+        AgentInvocationTargetRepo::add(
+            pool,
+            &SystemIdGen,
+            &SystemClock,
+            &agent.id,
+            "workspace",
+            &ws_target,
+            Some(&owner),
+        )
+        .await
+        .unwrap();
+        assert!(
+            AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&bob))
+                .await
+                .unwrap(),
+            "workspace target: bob (a member) invokes"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&carol))
+                .await
+                .unwrap(),
+            "workspace target: carol (not a member) is denied"
+        );
+        assert!(
+            AgentRepo::can_invoke(pool, &agent, ActorKind::Agent, None).await.unwrap(),
+            "workspace target: an unattributed agent IS admitted (workspaceBroad)"
+        );
+
+        // ---- public_to + TEAM target only: inert — nobody but the owner. ----
+        AgentInvocationTargetRepo::remove(pool, &agent.id, "workspace", &ws_target)
+            .await
+            .unwrap();
+        AgentInvocationTargetRepo::add(
+            pool,
+            &SystemIdGen,
+            &SystemClock,
+            &agent.id,
+            "team",
+            "team-1",
+            Some(&owner),
+        )
+        .await
+        .unwrap();
+        assert!(
+            AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&owner))
+                .await
+                .unwrap(),
+            "team target: owner still invokes (owner branch)"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Member, Some(&bob))
+                .await
+                .unwrap(),
+            "team target: a member is denied (team is inert in V1)"
+        );
+        assert!(
+            !AgentRepo::can_invoke(pool, &agent, ActorKind::Agent, None).await.unwrap(),
+            "team target: an unattributed agent is denied (team is inert)"
+        );
     }
 }

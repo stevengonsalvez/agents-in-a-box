@@ -82,6 +82,9 @@ pub struct EventBroker {
     /// as their durable source. Lossy like the workspace broadcast: a resuming
     /// surface catches up via `attention/list`, so a dropped nudge self-heals.
     attention_tx: broadcast::Sender<HangarEvent>,
+    /// Committed Fleet revisions. Durable rows in `fleet_event` remain source
+    /// of truth; this channel only wakes live subscribers.
+    fleet_tx: broadcast::Sender<i64>,
 }
 
 impl Default for EventBroker {
@@ -98,10 +101,12 @@ impl EventBroker {
     pub fn new() -> Self {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         Self {
             tx,
             outbox_tx: None,
             attention_tx,
+            fleet_tx,
         }
     }
 
@@ -117,12 +122,14 @@ impl EventBroker {
     pub fn with_outbox() -> (Self, mpsc::UnboundedReceiver<ScopedEvent>) {
         let (tx, _rx) = broadcast::channel(CHANNEL_CAPACITY);
         let (attention_tx, _arx) = broadcast::channel(CHANNEL_CAPACITY);
+        let (fleet_tx, _frx) = broadcast::channel(CHANNEL_CAPACITY);
         let (outbox_tx, outbox_rx) = mpsc::unbounded_channel();
         (
             Self {
                 tx,
                 outbox_tx: Some(outbox_tx),
                 attention_tx,
+                fleet_tx,
             },
             outbox_rx,
         )
@@ -135,6 +142,7 @@ impl EventBroker {
             tx: self.tx.clone(),
             outbox_tx: self.outbox_tx.clone(),
             attention_tx: self.attention_tx.clone(),
+            fleet_tx: self.fleet_tx.clone(),
         }
     }
 
@@ -156,6 +164,13 @@ impl EventBroker {
     pub fn subscribe_attention(&self) -> broadcast::Receiver<HangarEvent> {
         self.attention_tx.subscribe()
     }
+
+    /// Register before reading a Fleet snapshot, then replay durable revisions
+    /// after its head. This ordering closes the snapshot-to-live race.
+    #[must_use]
+    pub fn subscribe_fleet(&self) -> broadcast::Receiver<i64> {
+        self.fleet_tx.subscribe()
+    }
 }
 
 /// A publishing handle onto the broker, threaded through the daemon's mutation
@@ -165,6 +180,7 @@ pub struct EventSink {
     tx: broadcast::Sender<ScopedEvent>,
     outbox_tx: Option<mpsc::UnboundedSender<ScopedEvent>>,
     attention_tx: broadcast::Sender<HangarEvent>,
+    fleet_tx: broadcast::Sender<i64>,
 }
 
 impl EventSink {
@@ -200,6 +216,11 @@ impl EventSink {
     pub fn emit_attention(&self, event: HangarEvent) {
         let _ = self.attention_tx.send(event);
     }
+
+    /// Wake live Fleet subscribers after a durable revision commits.
+    pub fn emit_fleet_revision(&self, revision: i64) {
+        let _ = self.fleet_tx.send(revision);
+    }
 }
 
 /// Frame `event` as a `hangar/event` JSON-RPC notification in the daemon's
@@ -228,9 +249,15 @@ pub fn encode_event_frame(event: &HangarEvent) -> Vec<u8> {
 /// mirrors.
 #[must_use]
 pub fn encode_event_frame_payload(params: &serde_json::Value) -> Vec<u8> {
+    encode_notification_frame(EVENT_METHOD, params)
+}
+
+/// Frame arbitrary JSON-RPC notification parameters for control-plane streams.
+#[must_use]
+pub fn encode_notification_frame(method: &str, params: &serde_json::Value) -> Vec<u8> {
     let body = serde_json::to_vec(&serde_json::json!({
         "jsonrpc": "2.0",
-        "method": EVENT_METHOD,
+        "method": method,
         "params": params,
     }))
     .unwrap_or_else(|_| b"{}".to_vec());

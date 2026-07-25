@@ -821,6 +821,7 @@ impl SessionRecoveryState {
             rtk_enabled: false,
             skip_permissions: None,
             model: None,
+            model_source: Default::default(),
             codex_model: None,
         };
 
@@ -873,8 +874,7 @@ impl SessionRecoveryState {
                     &provider,
                     agent_type,
                     true, // skip_permissions — recovery launches yolo, as before
-                    None, // claude_model
-                    None, // codex_model
+                    None, // model
                     true, // resume_requested — orphan recovery is a resume
                     has_history,
                 )

@@ -112,6 +112,7 @@ fn seeded_agents() -> serde_json::Value {
         display_name: name.into(),
         subtitle: String::new(),
         presence,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
     };
@@ -151,6 +152,11 @@ fn seeded_issues() -> serde_json::Value {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         }],
     })
     .unwrap()

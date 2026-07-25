@@ -15,8 +15,11 @@
 //! data (`project_ainb_plugin_owns_data_plane`); the roster comes from the daemon.
 //!
 //! Keys:
-//!   * `n` — create: an inline "New agent name:" input (the exact Squads create
-//!     idiom); Enter on a non-blank name emits [`AgentsIntent::CreateAgent`].
+//!   * `n` — create: a guided wizard (name → provider picker → model →
+//!     instructions → confirm) that collects the real config fields, not just a
+//!     name, and shows a structured draft for review before Enter on the confirm
+//!     step emits [`AgentsIntent::CreateAgent`]. The faithful hangar analog of
+//!     multica's chat → structured-draft → confirm builder, minus the LLM turn.
 //!   * `x` — delete the selected agent behind a confirm overlay (the issue-list
 //!     delete-confirm pattern); Enter confirms → [`AgentsIntent::DeleteAgent`].
 //!   * `j`/`k` — move the selection.
@@ -24,7 +27,7 @@
 //!     a single press; never traps the user (a bare Esc leaves navigation intact,
 //!     the footer advertises the tab hotkeys + `q` to leave).
 
-use ainb_hangar_proto::events::{ActorRow, PresenceState};
+use ainb_hangar_proto::events::{ActorRow, PresenceState, Workload};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use crate::widgets::presence_dot::presence_dot;
@@ -39,6 +42,9 @@ const SOFT_WHITE: Color = Color::rgb(220, 220, 230);
 const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
 /// Destructive-confirm red — a delete prompt is never painted like a success.
 const ERROR_RED: Color = Color::rgb(235, 90, 90);
+/// Workload `queued` amber — waiting-to-work, distinct from the `unstable`
+/// availability dot (which is a runtime-degraded signal, never workload).
+const WORKLOAD_AMBER: Color = Color::rgb(230, 180, 60);
 
 /// One agent resolved for render: its canonical ref, display name, subtitle, and
 /// live presence (drives the inline 3-state dot).
@@ -50,14 +56,67 @@ pub struct AgentView {
     pub name: String,
     /// A short subtitle (the snapshot's `subtitle`, e.g. `agent`).
     pub subtitle: String,
-    /// Live presence (drives the inline dot).
+    /// Live presence — the availability dimension (drives the inline dot).
     pub presence: PresenceState,
+    /// Live workload — the orthogonal second dimension (multica `Workload`),
+    /// derived by the daemon from the agent's live task counts.
+    pub workload: Workload,
+}
+
+/// The fixed provider choices the create wizard cycles through — mirrors
+/// `bootstrap::SUPPORTED_PROVIDERS` so the daemon's `normalize_provider` never
+/// rejects a wizard pick (the picker can only land on a supported value).
+const SUPPORTED_PROVIDERS: [&str; 3] = ["claude", "codex", "copilot"];
+
+/// A structured agent draft accumulated across the guided create wizard.
+///
+/// This is the faithful hangar analog of multica's `<agent_draft>` block (minus the
+/// LLM turn): the user reviews it on the `Confirm` step before it fires a real
+/// create. Kept a plain, serializable-shaped struct so a future LLM-draft parser
+/// (agent-reference §1c fast-follow) can target it unchanged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CreateDraft {
+    /// The new agent's name (required, non-blank to advance past the `Name` step).
+    pub name: String,
+    /// The chosen provider — one of [`SUPPORTED_PROVIDERS`]; defaults to `claude`.
+    pub provider: String,
+    /// The optional per-agent model override; blank = the provider default.
+    pub model: String,
+    /// The optional free-form instructions / system prompt; blank = none.
+    pub instructions: String,
+}
+
+impl Default for CreateDraft {
+    fn default() -> Self {
+        Self {
+            name: String::new(),
+            provider: SUPPORTED_PROVIDERS[0].to_string(),
+            model: String::new(),
+            instructions: String::new(),
+        }
+    }
+}
+
+/// The step the guided create wizard is on. Enter advances `Name → Provider →
+/// Model → Instructions → Confirm`; Enter on `Confirm` fires the create.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CreateStep {
+    /// Type the agent name (required).
+    Name,
+    /// Pick the provider from the fixed list (a picker, never free text).
+    Provider,
+    /// Type an optional model override (blank = provider default).
+    Model,
+    /// Type optional instructions (blank = none).
+    Instructions,
+    /// Review the structured draft; Enter creates, Esc cancels.
+    Confirm,
 }
 
 /// The render-state cache for the Agents screen.
 ///
-/// Holds the resolved agents, the list selection, an optional create-name input
-/// buffer (`Some` only while `n` is open), and an optional pending-delete
+/// Holds the resolved agents, the list selection, an optional guided create wizard
+/// (`Some((draft, step))` only while `n` is open), and an optional pending-delete
 /// confirm target (`Some(actor_ref)` only while the `x` overlay is open). The two
 /// overlays are mutually exclusive (only one input at a time). All fields private;
 /// tests and the renderer read through accessors. The scroll offset is derived per
@@ -66,7 +125,7 @@ pub struct AgentView {
 pub struct AgentsState {
     agents: Vec<AgentView>,
     selected: usize,
-    create_input: Option<String>,
+    create: Option<(CreateDraft, CreateStep)>,
     confirm_delete: Option<String>,
     /// A transient ERROR note rendered red above the list — a delete/create
     /// refusal (active tasks, FK-pinned history) so the rejection is never silent.
@@ -81,7 +140,7 @@ impl AgentsState {
         Self {
             agents,
             selected: 0,
-            create_input: None,
+            create: None,
             confirm_delete: None,
             note: None,
         }
@@ -100,6 +159,7 @@ impl AgentsState {
                 name: a.display_name.clone(),
                 subtitle: a.subtitle.clone(),
                 presence: a.presence,
+                workload: a.workload,
             })
             .collect();
         Self::new(agents)
@@ -117,16 +177,22 @@ impl AgentsState {
         self.selected
     }
 
-    /// Whether the create-name input is open.
+    /// Whether the guided create wizard is open.
     #[must_use]
     pub const fn is_creating(&self) -> bool {
-        self.create_input.is_some()
+        self.create.is_some()
     }
 
-    /// The current create-name buffer, if the input is open.
+    /// The in-flight create draft, if the wizard is open (render + tests read it).
     #[must_use]
-    pub fn create_buffer(&self) -> Option<&str> {
-        self.create_input.as_deref()
+    pub fn create_draft(&self) -> Option<&CreateDraft> {
+        self.create.as_ref().map(|(draft, _)| draft)
+    }
+
+    /// The current wizard step, if the wizard is open.
+    #[must_use]
+    pub fn create_step(&self) -> Option<CreateStep> {
+        self.create.as_ref().map(|(_, step)| *step)
     }
 
     /// Whether the `x` delete-confirm overlay is open.
@@ -146,13 +212,20 @@ impl AgentsState {
     /// into this screen's reducer rather than letting them switch tabs.
     #[must_use]
     pub const fn is_capturing(&self) -> bool {
-        self.create_input.is_some() || self.confirm_delete.is_some()
+        self.create.is_some() || self.confirm_delete.is_some()
     }
 
-    /// Restore (or clear) the create-name buffer after a snapshot refresh, so a
-    /// background roster refresh mid-typing does not wipe the half-typed name.
-    pub fn set_create_buffer(&mut self, buf: Option<String>) {
-        self.create_input = buf;
+    /// Snapshot the in-flight wizard (draft + step) so a background roster refresh
+    /// can restore it — a refresh mid-wizard must not wipe the collected draft.
+    #[must_use]
+    pub fn create_state(&self) -> Option<(CreateDraft, CreateStep)> {
+        self.create.clone()
+    }
+
+    /// Restore (or clear) the guided create wizard after a snapshot refresh, so a
+    /// background roster refresh mid-wizard does not wipe the collected draft.
+    pub fn set_create_state(&mut self, create: Option<(CreateDraft, CreateStep)>) {
+        self.create = create;
     }
 
     /// Restore (or clear) the delete-confirm target after a refresh — but ONLY when
@@ -223,12 +296,19 @@ pub enum AgentsEvent {
 /// delete by id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsIntent {
-    /// Create an AGENT named `name` (`n` + Enter) — `hangar/agent_create`; the glue
-    /// fires it with no ids (the daemon fills workspace / runtime / owner) and folds
-    /// the refreshed roster back.
+    /// Create an AGENT from the guided wizard (`n` → name → provider → model →
+    /// instructions → confirm) — `hangar/agent_create`; the glue fires it with no
+    /// ids (the daemon fills workspace / runtime / owner) and folds the refreshed
+    /// roster back. Carries the full structured draft, not just a name.
     CreateAgent {
         /// The new agent's name (non-blank).
         name: String,
+        /// The chosen provider (one of [`SUPPORTED_PROVIDERS`]).
+        provider: String,
+        /// The optional model override — `None` when the model step was left blank.
+        model: Option<String>,
+        /// The optional instructions — `None` when the step was left blank.
+        instructions: Option<String>,
     },
     /// Delete `actor_ref` (Enter on the `x` confirm overlay) — `hangar/agent_delete`;
     /// the glue extracts the id from the ref and scopes the delete to the workspace.
@@ -252,7 +332,7 @@ pub struct AgentsReduction {
 pub fn reduce_agents(state: &AgentsState, ev: AgentsEvent) -> AgentsReduction {
     match ev {
         AgentsEvent::Key(c) => {
-            if state.create_input.is_some() {
+            if state.create.is_some() {
                 reduce_create_key(state, c)
             } else if state.confirm_delete.is_some() {
                 reduce_confirm_key(state, c)
@@ -264,35 +344,135 @@ pub fn reduce_agents(state: &AgentsState, ev: AgentsEvent) -> AgentsReduction {
     }
 }
 
-/// Handle a key while the create-name input is open: Enter submits (when non-blank)
-/// and emits [`AgentsIntent::CreateAgent`], Backspace deletes, any other printable
-/// char appends. Mirrors the Squads create idiom exactly.
+/// Handle a key while the guided create wizard is open. Step-aware:
+///
+/// * `Name` / `Model` / `Instructions` are free-text fields — printable chars
+///   append, Backspace pops, Enter advances (blank `Name` is a no-op, preserving
+///   the old name-only guard; blank `Model` / `Instructions` are allowed).
+/// * `Provider` is a **picker** — `←`/`→` (mapped to `h`/`l`) or `k`/`j` cycle the
+///   fixed [`SUPPORTED_PROVIDERS`] list; Enter advances. Free text never lands an
+///   unsupported provider, so the daemon's `normalize_provider` never rejects.
+/// * `Confirm` reviews the structured draft — Enter emits the full
+///   [`AgentsIntent::CreateAgent`] and closes the wizard; other keys hold.
 fn reduce_create_key(state: &AgentsState, c: char) -> AgentsReduction {
-    let mut buf = state.create_input.clone().unwrap_or_default();
+    let Some((draft, step)) = state.create.clone() else {
+        return unchanged(state);
+    };
+    match step {
+        CreateStep::Name => reduce_text_step(state, draft, c, CreateStep::Name, |d| &mut d.name),
+        CreateStep::Model => reduce_text_step(state, draft, c, CreateStep::Model, |d| &mut d.model),
+        CreateStep::Instructions => {
+            reduce_text_step(state, draft, c, CreateStep::Instructions, |d| {
+                &mut d.instructions
+            })
+        }
+        CreateStep::Provider => reduce_provider_step(state, draft, c),
+        CreateStep::Confirm => reduce_confirm_step(state, draft, c),
+    }
+}
+
+/// The next wizard step after `step` (Enter advances; `Confirm` fires instead of
+/// advancing, so it is handled by [`reduce_confirm_step`], never here).
+const fn next_step(step: CreateStep) -> CreateStep {
+    match step {
+        CreateStep::Name => CreateStep::Provider,
+        CreateStep::Provider => CreateStep::Model,
+        CreateStep::Model => CreateStep::Instructions,
+        CreateStep::Instructions | CreateStep::Confirm => CreateStep::Confirm,
+    }
+}
+
+/// Fold a key into one free-text wizard step (`Name` / `Model` / `Instructions`).
+/// `field` selects which draft field the step edits. Enter advances to the next
+/// step — except a blank `Name`, which is a no-op (keeps the old name-only guard).
+fn reduce_text_step(
+    state: &AgentsState,
+    mut draft: CreateDraft,
+    c: char,
+    step: CreateStep,
+    field: impl Fn(&mut CreateDraft) -> &mut String,
+) -> AgentsReduction {
     match c {
         '\n' => {
-            let name = buf.trim().to_string();
-            if name.is_empty() {
-                // Blank submit is a no-op — keep the input open.
+            if matches!(step, CreateStep::Name) && draft.name.trim().is_empty() {
+                // Blank name is a no-op — the wizard stays on the Name step.
                 return unchanged(state);
             }
             let mut next = state.clone();
-            next.create_input = None;
-            with_intent(next, AgentsIntent::CreateAgent { name })
+            next.create = Some((draft, next_step(step)));
+            no_intent(next)
         }
         '\u{8}' => {
-            buf.pop();
+            field(&mut draft).pop();
             let mut next = state.clone();
-            next.create_input = Some(buf);
+            next.create = Some((draft, step));
             no_intent(next)
         }
         c if !c.is_control() => {
-            buf.push(c);
+            field(&mut draft).push(c);
             let mut next = state.clone();
-            next.create_input = Some(buf);
+            next.create = Some((draft, step));
             no_intent(next)
         }
         _ => unchanged(state),
+    }
+}
+
+/// Fold a key into the `Provider` picker step: `l`/`j` (or `→`/`↓`) cycle forward,
+/// `h`/`k` (or `←`/`↑`) cycle backward through [`SUPPORTED_PROVIDERS`], Enter
+/// advances. The picker can only ever land on a supported provider.
+fn reduce_provider_step(state: &AgentsState, mut draft: CreateDraft, c: char) -> AgentsReduction {
+    let cur = SUPPORTED_PROVIDERS
+        .iter()
+        .position(|p| *p == draft.provider)
+        .unwrap_or(0);
+    let len = SUPPORTED_PROVIDERS.len();
+    let next_idx = match c {
+        '\n' => {
+            let mut next = state.clone();
+            next.create = Some((draft, next_step(CreateStep::Provider)));
+            return no_intent(next);
+        }
+        'l' | 'j' => (cur + 1) % len,
+        'h' | 'k' => (cur + len - 1) % len,
+        _ => return unchanged(state),
+    };
+    draft.provider = SUPPORTED_PROVIDERS[next_idx].to_string();
+    let mut next = state.clone();
+    next.create = Some((draft, CreateStep::Provider));
+    no_intent(next)
+}
+
+/// Fold a key into the `Confirm` review step: Enter emits the full
+/// [`AgentsIntent::CreateAgent`] (blank model / instructions collapse to `None`)
+/// and closes the wizard; any other key holds the review open.
+fn reduce_confirm_step(state: &AgentsState, draft: CreateDraft, c: char) -> AgentsReduction {
+    if c != '\n' {
+        return unchanged(state);
+    }
+    let model = non_blank(&draft.model);
+    let instructions = non_blank(&draft.instructions);
+    let mut next = state.clone();
+    next.create = None;
+    with_intent(
+        next,
+        AgentsIntent::CreateAgent {
+            name: draft.name.trim().to_string(),
+            provider: draft.provider,
+            model,
+            instructions,
+        },
+    )
+}
+
+/// Trim a draft field, collapsing a blank value to `None` (so a skipped optional
+/// step never writes an empty string).
+fn non_blank(s: &str) -> Option<String> {
+    let t = s.trim();
+    if t.is_empty() {
+        None
+    } else {
+        Some(t.to_string())
     }
 }
 
@@ -320,7 +500,7 @@ fn reduce_key(state: &AgentsState, c: char) -> AgentsReduction {
     match c {
         'n' => {
             let mut next = state.clone();
-            next.create_input = Some(String::new());
+            next.create = Some((CreateDraft::default(), CreateStep::Name));
             // A fresh interaction clears any stale refusal note.
             next.note = None;
             no_intent(next)
@@ -359,9 +539,10 @@ fn reduce_esc(state: &AgentsState) -> AgentsReduction {
         let mut next = state.clone();
         next.confirm_delete = None;
         no_intent(next)
-    } else if state.create_input.is_some() {
+    } else if state.create.is_some() {
+        // A single Esc cancels the whole wizard from ANY step (not step-by-step).
         let mut next = state.clone();
-        next.create_input = None;
+        next.create = None;
         no_intent(next)
     } else {
         unchanged(state)
@@ -416,18 +597,11 @@ pub fn render_agents(
         row = row.saturating_add(1);
     }
 
-    // Create-name input takes over the body while open (the `n` prompt).
-    if let Some(buffer) = state.create_buffer() {
-        let line = format!("New agent name: {buffer}▏");
-        put_str(
-            buf,
-            0,
-            row,
-            "Enter an agent name, Esc to cancel",
-            MUTED_GRAY,
-            area_w,
-        );
-        put_str(buf, 0, row.saturating_add(1), &line, GOLD, area_w);
+    // The guided create wizard takes over the body while open (the `n` flow). It
+    // shows the accumulated draft, then the current step's prompt — and on the
+    // final `Confirm` step the full structured draft for review before create.
+    if let Some((draft, step)) = state.create.as_ref() {
+        render_create_wizard(buf, area_w, row, draft, *step);
         return;
     }
 
@@ -478,6 +652,119 @@ pub fn render_agents(
     }
 }
 
+/// Render the guided create wizard body from `row` down: a title, the draft
+/// collected so far, and the active step's prompt. On the final `Confirm` step it
+/// paints the full structured draft (name / provider / model / instructions) as the
+/// review beat before the create fires — the faithful analog of multica's
+/// draft-then-confirm.
+fn render_create_wizard(
+    buf: &mut WireBuffer,
+    area_w: u16,
+    row: u16,
+    draft: &CreateDraft,
+    step: CreateStep,
+) {
+    put_str(buf, 0, row, "✦ New agent", GOLD, area_w);
+    let mut y = row.saturating_add(1);
+
+    // The accumulated draft above the active prompt (only fields already entered).
+    let show_field = |buf: &mut WireBuffer, y: u16, label: &str, val: &str| {
+        let line = format!("{label}: {val}");
+        put_str(buf, 0, y, &line, MUTED_GRAY, area_w);
+    };
+
+    match step {
+        CreateStep::Name => {
+            put_str(
+                buf,
+                0,
+                y,
+                "Name the agent, Enter to continue, Esc to cancel",
+                MUTED_GRAY,
+                area_w,
+            );
+            let line = format!("Name: {}▏", draft.name);
+            put_str(buf, 0, y.saturating_add(1), &line, GOLD, area_w);
+        }
+        CreateStep::Provider => {
+            show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            put_str(
+                buf,
+                0,
+                y,
+                "Pick a provider (←/→), Enter to continue, Esc to cancel",
+                MUTED_GRAY,
+                area_w,
+            );
+            // The current choice, framed so the picker reads as a selectable value.
+            let line = format!("Provider: ‹ {} ›", draft.provider);
+            put_str(buf, 0, y.saturating_add(1), &line, GOLD, area_w);
+        }
+        CreateStep::Model => {
+            show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            show_field(buf, y, "Provider", &draft.provider);
+            y = y.saturating_add(1);
+            put_str(
+                buf,
+                0,
+                y,
+                "Optional model override, Enter to continue (blank = default)",
+                MUTED_GRAY,
+                area_w,
+            );
+            let line = format!("Model: {}▏", draft.model);
+            put_str(buf, 0, y.saturating_add(1), &line, GOLD, area_w);
+        }
+        CreateStep::Instructions => {
+            show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            show_field(buf, y, "Provider", &draft.provider);
+            y = y.saturating_add(1);
+            put_str(
+                buf,
+                0,
+                y,
+                "Optional instructions, Enter to continue (blank = none)",
+                MUTED_GRAY,
+                area_w,
+            );
+            let line = format!("Instructions: {}▏", draft.instructions);
+            put_str(buf, 0, y.saturating_add(1), &line, GOLD, area_w);
+        }
+        CreateStep::Confirm => {
+            put_str(
+                buf,
+                0,
+                y,
+                "Review the draft — Enter to create, Esc to cancel",
+                MUTED_GRAY,
+                area_w,
+            );
+            y = y.saturating_add(1);
+            show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            show_field(buf, y, "Provider", &draft.provider);
+            y = y.saturating_add(1);
+            let model = if draft.model.trim().is_empty() {
+                "(default)"
+            } else {
+                draft.model.trim()
+            };
+            show_field(buf, y, "Model", model);
+            y = y.saturating_add(1);
+            let first_line = draft.instructions.lines().next().unwrap_or("");
+            let instr = if first_line.trim().is_empty() {
+                "(none)"
+            } else {
+                first_line
+            };
+            show_field(buf, y, "Instructions", instr);
+        }
+    }
+}
+
 /// The first-visible row index for a viewport of `visible_rows` rows that must keep
 /// `selected` on-screen (mirrors `squads::first_visible`).
 const fn first_visible(selected: usize, visible_rows: usize) -> usize {
@@ -498,7 +785,12 @@ fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
     put_str(buf, area_w - hint_w, row, HINTS, GOLD, area_w);
 }
 
-/// Render one agent row: `▶ <name>  <dot> <presence>  · <subtitle>`.
+/// Render one agent row:
+/// `▶ <name>  <dot> <presence> · <wl-glyph> <workload>  · <subtitle>`.
+///
+/// The two dimensions are painted side by side (multica `presence × workload`):
+/// the availability dot+word, then ` · ` + the workload glyph+word colour-coded
+/// by its state, so an `online` agent visibly reads `working` vs `idle`.
 fn render_agent_row(
     buf: &mut WireBuffer,
     row: u16,
@@ -535,6 +827,12 @@ fn render_agent_row(
         MUTED_GRAY,
         area_w,
     );
+    // The orthogonal workload dimension, painted right after availability.
+    let (wl_glyph, wl_color) = workload_dot(agent.workload);
+    x = put_str(buf, x, row, " · ", MUTED_GRAY, area_w);
+    x = put_cell(buf, x, row, wl_glyph, wl_color, area_w);
+    x = put_str(buf, x, row, " ", MUTED_GRAY, area_w);
+    x = put_str(buf, x, row, workload_word(agent.workload), wl_color, area_w);
     if !agent.subtitle.is_empty() {
         x = put_str(buf, x, row, "  · ", MUTED_GRAY, area_w);
         put_str(buf, x, row, &agent.subtitle, MUTED_GRAY, area_w);
@@ -547,6 +845,25 @@ const fn presence_word(presence: PresenceState) -> &'static str {
         PresenceState::Online => "online",
         PresenceState::Unstable => "unstable",
         PresenceState::Offline => "offline",
+    }
+}
+
+/// The lowercase workload word rendered next to its glyph.
+const fn workload_word(workload: Workload) -> &'static str {
+    match workload {
+        Workload::Working => "working",
+        Workload::Queued => "queued",
+        Workload::Idle => "idle",
+    }
+}
+
+/// The workload glyph + colour: `⚙ working` (green), `◔ queued` (amber),
+/// `· idle` (gray) — mirroring the availability `presence_dot` idiom.
+const fn workload_dot(workload: Workload) -> (char, Color) {
+    match workload {
+        Workload::Working => ('⚙', SELECTION_GREEN),
+        Workload::Queued => ('◔', WORKLOAD_AMBER),
+        Workload::Idle => ('·', MUTED_GRAY),
     }
 }
 
@@ -592,6 +909,7 @@ mod tests {
                 "member".into()
             },
             presence: PresenceState::Online,
+            workload: Workload::Idle,
             is_agent,
             recent_rank: None,
         }
@@ -631,38 +949,72 @@ mod tests {
         assert_eq!(up.selected_index(), 0);
     }
 
-    /// `n` opens the create input; typing appends; Enter (non-blank) emits a
-    /// `CreateAgent` intent; a single Esc cancels it outright.
+    /// Drive the whole wizard by pressing the given keys in order, returning the
+    /// final reduction (state + any emitted intent).
+    fn drive(state: &AgentsState, keys: &[char]) -> AgentsReduction {
+        let mut cur = state.clone();
+        let mut last = AgentsReduction {
+            state: cur.clone(),
+            intent: None,
+        };
+        for &c in keys {
+            last = reduce_agents(&cur, AgentsEvent::Key(c));
+            cur = last.state.clone();
+        }
+        last
+    }
+
+    /// `n` opens the wizard at `Name`; the full step sequence collects
+    /// name → provider → model → instructions and Enter on `Confirm` emits the
+    /// widened `CreateAgent` intent with every field; a single Esc cancels.
     #[test]
     fn create_flow_raises_intent_and_esc_cancels() {
         let state = AgentsState::from_actors(&snapshot());
         let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
-        assert_eq!(opened.create_buffer(), Some(""), "n opens the create input");
+        assert_eq!(opened.create_step(), Some(CreateStep::Name), "n opens Name");
+        assert_eq!(opened.create_draft().map(|d| d.name.as_str()), Some(""));
         assert!(opened.is_capturing());
 
-        // Type "qa".
-        let typed = reduce_agents(&opened, AgentsEvent::Key('q')).state;
-        let typed = reduce_agents(&typed, AgentsEvent::Key('a')).state;
-        assert_eq!(typed.create_buffer(), Some("qa"));
+        // Name "qa" + Enter -> Provider; '→'(l) cycles claude->codex; Enter -> Model;
+        // type model + Enter -> Instructions; type text + Enter -> Confirm.
+        let at_confirm = drive(
+            &opened,
+            &[
+                'q', 'a', '\n', // Name -> Provider
+                'l', '\n', // pick codex -> Model
+                'g', 'p', 't', '\n', // Model -> Instructions
+                'b', 'e', ' ', 't', 'e', 'r', 's', 'e', '\n', // -> Confirm
+            ],
+        )
+        .state;
+        assert_eq!(at_confirm.create_step(), Some(CreateStep::Confirm));
+        assert_eq!(
+            at_confirm.create_draft().map(|d| d.provider.as_str()),
+            Some("codex"),
+            "the provider picker landed on codex"
+        );
 
-        // Enter submits and closes the input.
-        let out = reduce_agents(&typed, AgentsEvent::Key('\n'));
+        // Enter on Confirm fires the full structured intent and closes the wizard.
+        let out = reduce_agents(&at_confirm, AgentsEvent::Key('\n'));
         assert_eq!(
             out.intent,
-            Some(AgentsIntent::CreateAgent { name: "qa".into() })
+            Some(AgentsIntent::CreateAgent {
+                name: "qa".into(),
+                provider: "codex".into(),
+                model: Some("gpt".into()),
+                instructions: Some("be terse".into()),
+            })
         );
-        assert!(
-            out.state.create_buffer().is_none(),
-            "input closes on submit"
-        );
+        assert!(!out.state.is_creating(), "wizard closes on create");
 
-        // A single Esc on the open input cancels with no intent.
-        let cancel = reduce_agents(&typed, AgentsEvent::Esc);
-        assert!(cancel.state.create_buffer().is_none());
+        // A single Esc mid-wizard (from the Confirm step) cancels with no intent.
+        let cancel = reduce_agents(&at_confirm, AgentsEvent::Esc);
+        assert!(!cancel.state.is_creating());
         assert!(cancel.intent.is_none());
     }
 
-    /// A blank create submit is a no-op — the input stays open, no intent.
+    /// A blank name Enter is a no-op — the wizard stays on the `Name` step, no
+    /// intent (preserves the old name-only guard).
     #[test]
     fn blank_create_submit_is_a_noop() {
         let state = AgentsState::from_actors(&snapshot());
@@ -670,9 +1022,67 @@ mod tests {
         let out = reduce_agents(&opened, AgentsEvent::Key('\n'));
         assert!(out.intent.is_none());
         assert_eq!(
-            out.state.create_buffer(),
-            Some(""),
-            "blank submit keeps the input open"
+            out.state.create_step(),
+            Some(CreateStep::Name),
+            "blank name keeps the wizard on the Name step"
+        );
+    }
+
+    /// Blank model AND blank instructions collapse to `None` on the emitted intent
+    /// (no spurious empty-string write), and the default provider (`claude`) is
+    /// carried when the picker is left untouched.
+    #[test]
+    fn wizard_blank_optionals_are_none() {
+        let state = AgentsState::from_actors(&snapshot());
+        let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
+        // Name "bot" + Enter; Provider Enter (leave claude); Model Enter (blank);
+        // Instructions Enter (blank); Confirm Enter.
+        let out = drive(
+            &opened,
+            &['b', 'o', 't', '\n', '\n', '\n', '\n', '\n'],
+        );
+        assert_eq!(
+            out.intent,
+            Some(AgentsIntent::CreateAgent {
+                name: "bot".into(),
+                provider: "claude".into(),
+                model: None,
+                instructions: None,
+            })
+        );
+    }
+
+    /// A single Esc at the `Provider` step (not the last one) cancels the whole
+    /// wizard in one press — never steps back to `Name`.
+    #[test]
+    fn wizard_esc_cancels_from_any_step() {
+        let state = AgentsState::from_actors(&snapshot());
+        let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
+        let at_provider = drive(&opened, &['a', '\n']).state;
+        assert_eq!(at_provider.create_step(), Some(CreateStep::Provider));
+        let cancelled = reduce_agents(&at_provider, AgentsEvent::Esc);
+        assert!(!cancelled.state.is_creating(), "one Esc closes the wizard");
+        assert!(cancelled.intent.is_none());
+    }
+
+    /// The provider picker cycles the fixed list forward AND backward, wrapping.
+    #[test]
+    fn wizard_provider_picker_cycles() {
+        let state = AgentsState::from_actors(&snapshot());
+        let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
+        let at_provider = drive(&opened, &['a', '\n']).state;
+        assert_eq!(
+            at_provider.create_draft().map(|d| d.provider.as_str()),
+            Some("claude")
+        );
+        // Forward: claude -> codex -> copilot -> claude (wrap).
+        let fwd = drive(&at_provider, &['l', 'l', 'l']).state;
+        assert_eq!(fwd.create_draft().map(|d| d.provider.as_str()), Some("claude"));
+        // Backward from claude wraps to copilot.
+        let back = drive(&at_provider, &['h']).state;
+        assert_eq!(
+            back.create_draft().map(|d| d.provider.as_str()),
+            Some("copilot")
         );
     }
 
@@ -781,6 +1191,111 @@ mod tests {
         let text = buffer_text(&buf, 80, 24);
         assert!(text.contains("Delete agent"), "confirm overlay must render");
         assert!(text.contains("backend-bot"), "confirm names the agent");
+    }
+
+    /// `from_actors` carries the workload dimension through from the snapshot.
+    #[test]
+    fn from_actors_carries_workload() {
+        let mut queued = actor("agent:a-1", "backend-bot", true);
+        queued.workload = Workload::Queued;
+        let state = AgentsState::from_actors(&[queued]);
+        assert_eq!(state.agents()[0].workload, Workload::Queued);
+    }
+
+    /// The render paints BOTH dimensions: the availability word AND the
+    /// orthogonal workload word are independently present on the same row.
+    #[test]
+    fn render_shows_both_presence_and_workload() {
+        let state = AgentsState::new(vec![
+            AgentView {
+                actor_ref: "agent:a-1".into(),
+                name: "worker".into(),
+                subtitle: "claude".into(),
+                presence: PresenceState::Online,
+                workload: Workload::Working,
+            },
+            AgentView {
+                actor_ref: "agent:a-2".into(),
+                name: "waiter".into(),
+                subtitle: "claude".into(),
+                presence: PresenceState::Online,
+                workload: Workload::Queued,
+            },
+        ]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        // Availability dimension still independently present.
+        assert!(text.contains("online"), "availability word must render");
+        // Orthogonal workload dimension present for both agents.
+        assert!(
+            text.contains("working"),
+            "a running agent renders `working`"
+        );
+        assert!(text.contains("queued"), "a queued agent renders `queued`");
+    }
+
+    /// An idle agent renders the `idle` workload word (the default dimension is
+    /// still surfaced, not blank).
+    #[test]
+    fn render_shows_idle_workload() {
+        let state = AgentsState::new(vec![AgentView {
+            actor_ref: "agent:a-1".into(),
+            name: "resting".into(),
+            subtitle: "claude".into(),
+            presence: PresenceState::Online,
+            workload: Workload::Idle,
+        }]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(text.contains("idle"), "an idle agent renders `idle`");
+    }
+
+    /// The `Confirm` step render shows the structured draft for review: the chosen
+    /// provider AND model AND a slice of the instructions are all visible before the
+    /// create fires.
+    #[test]
+    fn render_confirm_step_shows_structured_draft() {
+        let state = AgentsState::from_actors(&snapshot());
+        let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
+        let at_confirm = drive(
+            &opened,
+            &[
+                'q', 'a', '\n', // Name -> Provider
+                'l', '\n', // codex -> Model
+                'g', 'p', 't', '-', '5', '\n', // Model -> Instructions
+                'b', 'e', ' ', 't', 'e', 'r', 's', 'e', '\n', // -> Confirm
+            ],
+        )
+        .state;
+        assert_eq!(at_confirm.create_step(), Some(CreateStep::Confirm));
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &at_confirm);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(text.contains("codex"), "confirm shows the chosen provider");
+        assert!(text.contains("gpt-5"), "confirm shows the chosen model");
+        assert!(
+            text.contains("be terse"),
+            "confirm shows a slice of the instructions"
+        );
+    }
+
+    /// The `Provider` picker step renders the current provider choice.
+    #[test]
+    fn render_provider_step_shows_choice() {
+        let state = AgentsState::from_actors(&snapshot());
+        let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
+        // Name + Enter -> Provider, then cycle to codex.
+        let at_provider = drive(&opened, &['a', '\n', 'l']).state;
+        assert_eq!(at_provider.create_step(), Some(CreateStep::Provider));
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &at_provider);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(
+            text.contains("codex"),
+            "the provider picker shows the current choice"
+        );
     }
 
     /// Reassemble the buffer text for render assertions.

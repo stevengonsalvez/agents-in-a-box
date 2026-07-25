@@ -57,6 +57,7 @@ async fn test_remove_orphaned_session_purges_store_record() -> Result<()> {
         rtk_enabled: false,
         skip_permissions: None,
         model: None,
+        model_source: Default::default(),
         codex_model: None,
     });
     store.upsert(SessionMetadata {
@@ -70,6 +71,7 @@ async fn test_remove_orphaned_session_purges_store_record() -> Result<()> {
         rtk_enabled: false,
         skip_permissions: None,
         model: None,
+        model_source: Default::default(),
         codex_model: None,
     });
     store.save()?;

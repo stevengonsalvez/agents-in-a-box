@@ -1,5 +1,4 @@
-// ABOUTME: Fleet control-panel actions — dispatch a real send to a session
-// resolved from a `current_state` row, off the UI thread.
+// ABOUTME: Host Fleet subscription, daemon health, and detached control RPCs.
 //
 // The TUI fleet panel (`components/fleet_panel.rs`) browses the event-sourced
 // `current_state` and lets the human ACT: answer an interview (ASK) or
@@ -31,6 +30,11 @@
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::Duration;
+
+use ainb_hangar_proto::fleet::FleetSnapshot;
+
+use crate::fleet::bridge::daemon::FleetStreamEvent;
 
 /// Transient feedback published by the async action worker and rendered by the
 /// fleet panel's status line. Cloned cheaply; the lock is held only for the
@@ -39,6 +43,174 @@ use std::sync::atomic::{AtomicBool, Ordering};
 pub struct ActionFeedback {
     /// Human-readable status, e.g. "answered ask → /work/x: sent via tmux".
     pub message: String,
+}
+
+/// Connection health surfaced by the host Fleet panel.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetDaemonHealth {
+    /// Subscription worker is dialing or authenticating.
+    Connecting,
+    /// Snapshot and live revision stream are active.
+    Online,
+    /// Stream is unavailable; cached rows remain usable for safe inspection.
+    Offline(String),
+}
+
+impl FleetDaemonHealth {
+    /// Whether authoritative control RPCs may be trusted right now.
+    #[must_use]
+    pub const fn is_online(&self) -> bool {
+        matches!(self, Self::Online)
+    }
+}
+
+/// Ordered update from the persistent Fleet subscription worker.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FleetHostUpdate {
+    /// Complete authoritative state at one durable revision.
+    Snapshot(FleetSnapshot),
+    /// Subscription connection health changed.
+    Health(FleetDaemonHealth),
+}
+
+/// Shared ordered queue drained by the UI thread.
+pub type FleetHostUpdateSink = Arc<Mutex<Vec<FleetHostUpdate>>>;
+
+/// Start one persistent Fleet stream worker.
+pub fn spawn_fleet_subscription(
+    updates: FleetHostUpdateSink,
+    initial_cursor: i64,
+) -> Result<(), String> {
+    std::thread::Builder::new()
+        .name("ainb-fleet-subscription".into())
+        .spawn(move || {
+            let runtime = match tokio::runtime::Builder::new_current_thread().enable_all().build() {
+                Ok(runtime) => runtime,
+                Err(error) => {
+                    publish_host_update(
+                        &updates,
+                        FleetHostUpdate::Health(FleetDaemonHealth::Offline(format!(
+                            "runtime build failed: {error}"
+                        ))),
+                    );
+                    return;
+                }
+            };
+            runtime.block_on(run_fleet_subscription(updates, initial_cursor));
+        })
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+}
+
+async fn run_fleet_subscription(updates: FleetHostUpdateSink, initial_cursor: i64) {
+    let mut cursor = initial_cursor.max(0);
+    let mut attempt = 0_u32;
+    loop {
+        publish_host_update(
+            &updates,
+            FleetHostUpdate::Health(FleetDaemonHealth::Connecting),
+        );
+        let outcome = run_fleet_connection(&updates, &mut cursor).await;
+        let detail = outcome.err().unwrap_or_else(|| "Fleet stream ended".to_string());
+        publish_host_update(
+            &updates,
+            FleetHostUpdate::Health(FleetDaemonHealth::Offline(detail)),
+        );
+        tokio::time::sleep(subscription_backoff(attempt)).await;
+        attempt = attempt.saturating_add(1);
+    }
+}
+
+async fn run_fleet_connection(
+    updates: &FleetHostUpdateSink,
+    cursor: &mut i64,
+) -> Result<(), String> {
+    let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+        .map_err(|error| error.to_string())?;
+    let (subscription, mut stream) = client
+        .open_fleet_subscription(*cursor)
+        .await
+        .map_err(|error| error.to_string())?;
+
+    *cursor = subscription.snapshot.head_revision;
+    publish_host_update(updates, FleetHostUpdate::Snapshot(subscription.snapshot));
+
+    for event in subscription.replay {
+        reconcile_revision(&client, updates, cursor, event.revision).await?;
+    }
+    publish_host_update(updates, FleetHostUpdate::Health(FleetDaemonHealth::Online));
+
+    loop {
+        match stream.next_event().await.map_err(|error| error.to_string())? {
+            FleetStreamEvent::Revision(event) => {
+                reconcile_revision(&client, updates, cursor, event.revision).await?;
+            }
+            FleetStreamEvent::ResyncRequired => {
+                return Err(format!("Fleet stream lagged after revision {cursor}"));
+            }
+        }
+    }
+}
+
+async fn reconcile_revision(
+    client: &crate::fleet::bridge::daemon::DaemonClient,
+    updates: &FleetHostUpdateSink,
+    cursor: &mut i64,
+    revision: i64,
+) -> Result<(), String> {
+    if revision <= *cursor {
+        return Ok(());
+    }
+    let snapshot = client.fleet_snapshot().await.map_err(|error| error.to_string())?;
+    if snapshot.head_revision < revision {
+        return Err(format!(
+            "Fleet snapshot head {} precedes announced revision {revision}",
+            snapshot.head_revision
+        ));
+    }
+    *cursor = snapshot.head_revision;
+    publish_host_update(updates, FleetHostUpdate::Snapshot(snapshot));
+    Ok(())
+}
+
+fn publish_host_update(updates: &FleetHostUpdateSink, update: FleetHostUpdate) {
+    if let Ok(mut updates) = updates.lock() {
+        updates.push(update);
+    }
+}
+
+fn subscription_backoff(attempt: u32) -> Duration {
+    Duration::from_millis(250_u64.saturating_mul(1_u64 << attempt.min(4)))
+}
+
+/// Execute one authoritative Fleet broadcast on a worker thread.
+pub fn execute_fleet_broadcast_blocking(
+    params: ainb_hangar_proto::fleet::FleetBroadcastParams,
+) -> Result<ainb_hangar_proto::fleet::FleetBroadcastResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client.fleet_broadcast(params).await.map_err(|error| error.to_string())
+    })
+}
+
+/// Execute one authoritative Fleet action on a worker thread.
+pub fn execute_fleet_action_blocking(
+    params: ainb_hangar_proto::fleet::FleetActionParams,
+) -> Result<ainb_hangar_proto::fleet::FleetActionReceipt, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client.fleet_action(params).await.map_err(|error| error.to_string())
+    })
 }
 
 /// Dispatch a send to the session described by `(session_id, cwd)`, off the UI

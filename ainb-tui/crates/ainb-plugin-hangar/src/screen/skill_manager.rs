@@ -197,6 +197,7 @@ impl SkillManagerState {
                 priority: PriorityChip::from_priority(0),
                 assignee_initial: s.name.chars().next(),
                 linked: false,
+                subtasks: None,
             })
             .collect::<Vec<_>>();
         vec![BoardColumn {

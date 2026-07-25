@@ -2637,6 +2637,7 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         priority: PriorityChip::from_priority(0),
         assignee_initial: c.title.chars().next(),
         linked: false,
+        subtasks: None,
     }
 }
 

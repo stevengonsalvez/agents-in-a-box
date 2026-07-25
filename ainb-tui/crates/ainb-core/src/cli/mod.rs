@@ -155,9 +155,9 @@ pub struct RunArgs {
     #[arg(long, value_enum, default_value_t = Tool::Claude)]
     pub tool: Tool,
 
-    /// Model to use (sonnet, opus, haiku)
-    #[arg(long, default_value = "sonnet")]
-    pub model: String,
+    /// Provider model ID to pass through unchanged
+    #[arg(long)]
+    pub model: Option<String>,
 
     /// Initial prompt to send
     #[arg(long, short)]

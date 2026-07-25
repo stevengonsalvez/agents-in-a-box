@@ -247,8 +247,8 @@ async fn attention_subscribe_delivers_a_fleet_wide_raised_delta() {
     let mut client = Client::connect(&socket).await;
     client.auth_from_file(dir.path()).await;
 
-    // Subscribe fleet-wide (no workspace filter). The ack carries the (empty) open
-    // snapshot; the live forwarder is registered right after.
+    // Subscribe fleet-wide. Registration happens before the snapshot read, so
+    // an event emitted immediately after the ack cannot fall into a handoff gap.
     let ack = client.call(methods::ATTENTION_SUBSCRIBE, serde_json::json!({})).await;
     assert!(
         ack["error"].is_null(),
@@ -256,10 +256,7 @@ async fn attention_subscribe_delivers_a_fleet_wide_raised_delta() {
     );
     assert!(ack["result"]["attention"].as_array().unwrap().is_empty());
 
-    // Let the forwarder register (it is spawned just after the ack is queued),
-    // then emit a NO-WORKSPACE host attention nudge — the workspace forwarder
-    // would drop this; the fleet-wide one must deliver it.
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    // Emit immediately. A post-ack registration race would lose this nudge.
     sink.emit_attention(HangarEvent::AttentionRaised {
         attention_id: "att-9".into(),
         session_id: "sess".into(),

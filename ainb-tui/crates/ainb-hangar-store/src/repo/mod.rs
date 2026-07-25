@@ -6,6 +6,7 @@
 //! shared across every repo call.
 
 pub mod agent;
+pub mod agent_invocation_target;
 pub mod agent_runtime;
 pub mod atc_instance;
 pub mod attention;
@@ -19,6 +20,7 @@ pub mod card_parity;
 pub mod comment;
 pub mod daemon_config;
 pub mod event_log;
+pub mod fleet;
 pub mod inbox;
 pub mod issue;
 pub mod label;

@@ -1048,6 +1048,39 @@ fn render_detail_card(
         row = row.saturating_add(1);
     }
 
+    // --- Acceptance criteria (0048): a header row then one `☐ <criterion>` line
+    //     per element, rendered ONLY when non-empty so an issue without them reads
+    //     unchanged (mirrors the Linked conditional). ---
+    if !issue.acceptance_criteria.is_empty() {
+        card_field_row(buf, card_w, row, &[("Acceptance:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for criterion in &issue.acceptance_criteria {
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[("  ☐ ", CARD_LABEL), (criterion, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
+    // --- Context references (0048): a header row then one `⧉ <ref>` line per
+    //     element, rendered ONLY when non-empty. ---
+    if !issue.context_refs.is_empty() {
+        card_field_row(buf, card_w, row, &[("Context:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for reference in &issue.context_refs {
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[("  ⧉ ", CARD_LABEL), (reference, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
     // --- divider ---
     draw_card_divider(buf, row, card_w);
     row = row.saturating_add(1);
@@ -1277,6 +1310,11 @@ mod card_tests {
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         }
     }
 
@@ -1366,6 +1404,54 @@ mod card_tests {
         assert!(
             !painted_text(&buf).contains("Linked: "),
             "an unlinked issue shows no Linked line"
+        );
+    }
+
+    /// 0048: an issue carrying acceptance criteria renders an `Acceptance:` header
+    /// then one line per criterion; an empty list renders NO header.
+    #[test]
+    fn detail_card_renders_acceptance_block_only_when_present() {
+        let mut issue = full_issue();
+        issue.acceptance_criteria = vec!["builds".into(), "tests green".into()];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Acceptance:"), "acceptance header: {text}");
+        assert!(text.contains("builds"), "first criterion");
+        assert!(text.contains("tests green"), "second criterion");
+
+        // Empty list: no header at all.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        assert!(
+            !painted_text(&buf).contains("Acceptance:"),
+            "an issue with no criteria shows no Acceptance header"
+        );
+    }
+
+    /// 0048: an issue carrying context references renders a `Context:` header then
+    /// one line per reference; an empty list renders NO header.
+    #[test]
+    fn detail_card_renders_context_block_only_when_present() {
+        let mut issue = full_issue();
+        issue.context_refs = vec!["acme/api#42".into(), "https://docs".into()];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Context:"), "context header: {text}");
+        assert!(text.contains("acme/api#42"), "first reference");
+        assert!(text.contains("https://docs"), "second reference");
+
+        // Empty list: no header at all.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        assert!(
+            !painted_text(&buf).contains("Context:"),
+            "an issue with no context refs shows no Context header"
         );
     }
 

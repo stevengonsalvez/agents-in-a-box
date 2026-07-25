@@ -25,8 +25,12 @@
 //! yields `None` and [`WorkspaceRepo::set_config`] touches nothing (a
 //! [`WorkspaceRepoError::NotFound`], never a cross-tenant write).
 
+use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::SqlitePool;
+
+use crate::bootstrap::default_owner_id;
 
 /// The per-workspace config read from / written to the `workspace` table's
 /// migration-0020 columns.
@@ -63,10 +67,184 @@ impl WorkspaceConfig {
     }
 }
 
+/// A workspace's identity row (`id` / `slug` / `name`), as returned by
+/// [`WorkspaceRepo::create`]. The stable ULID `id` is what `state.toml` and every
+/// daemon RPC key on; `slug`/`name` are display.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WorkspaceRow {
+    /// Stable ULID workspace id.
+    pub id: String,
+    /// Short display handle (e.g. `acme`).
+    pub slug: String,
+    /// Human-readable display name.
+    pub name: String,
+}
+
 /// Stateless typed wrapper over the `workspace` table's config columns.
 pub struct WorkspaceRepo;
 
 impl WorkspaceRepo {
+    /// Create a workspace + owner `member` row in one transaction (multica
+    /// `CreateWorkspace` parity).
+    ///
+    /// Mints a fresh ULID `id`, inserts the `workspace` row, and links the
+    /// bootstrap owner user (resolved via [`default_owner_id`]) with an `owner`
+    /// `member` row — mirroring multica's "insert workspace, then insert an owner
+    /// member" transaction. Hangar is single-operator, so the owner user already
+    /// exists (the bootstrap seed); no new user, no auth.
+    ///
+    /// `slug` is assumed already validated by [`validate_slug`] (the caller owns
+    /// format checking); the DB's `slug` UNIQUE index is the last line of defence,
+    /// surfacing a duplicate as [`WorkspaceRepoError::SlugTaken`] rather than a raw
+    /// `sqlx` error.
+    ///
+    /// `issue_prefix` is stored verbatim (upper-cased) when `Some`; when `None` the
+    /// column is left NULL — the SAME deliberate choice
+    /// [`crate::bootstrap::ensure_default_workspace`] makes, because the
+    /// `issue_prefix` column is overloaded as the TITLE prefix
+    /// [`apply_issue_prefix`] prepends, so a defaulted prefix would mangle every new
+    /// issue's title (`ACMfix the build`). The display-id prefix defaults to `HGR`
+    /// at the render layer ([`issue_display_id`]) regardless. [`generate_issue_prefix`]
+    /// is provided for a caller that wants an explicit derived prefix.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceRepoError::SlugTaken`] on the slug UNIQUE violation,
+    /// [`WorkspaceRepoError::NotFound`] when no owner user exists yet (an
+    /// un-bootstrapped DB), or [`WorkspaceRepoError::Db`] on any other store fault.
+    pub async fn create(
+        pool: &SqlitePool,
+        slug: &str,
+        name: &str,
+        issue_prefix: Option<&str>,
+    ) -> Result<WorkspaceRow, WorkspaceRepoError> {
+        let owner_id = default_owner_id(pool).await?.ok_or(WorkspaceRepoError::NotFound)?;
+        let id = SystemIdGen.new_ulid();
+        let now = SystemClock.now_ms();
+        let stored_prefix = issue_prefix.map(str::to_ascii_uppercase);
+
+        let mut tx = pool.begin().await?;
+        let insert_ws = sqlx::query(
+            "INSERT INTO workspace (id, slug, name, created_at, issue_prefix) \
+             VALUES (?, ?, ?, ?, ?)",
+        )
+        .bind(&id)
+        .bind(slug)
+        .bind(name)
+        .bind(now)
+        .bind(stored_prefix.as_deref())
+        .execute(&mut *tx)
+        .await;
+        if let Err(e) = insert_ws {
+            let taken = e
+                .as_database_error()
+                .is_some_and(sqlx::error::DatabaseError::is_unique_violation);
+            if taken {
+                return Err(WorkspaceRepoError::SlugTaken);
+            }
+            return Err(e.into());
+        }
+        sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, ?, 'owner')")
+            .bind(&id)
+            .bind(&owner_id)
+            .execute(&mut *tx)
+            .await?;
+        tx.commit().await?;
+        Ok(WorkspaceRow {
+            id,
+            slug: slug.to_string(),
+            name: name.to_string(),
+        })
+    }
+
+    /// The `user_id` of the workspace's owner member, or `None` when the workspace
+    /// has no `owner`-role member (an un-bootstrapped / unknown workspace).
+    ///
+    /// The default invoking identity for a run enqueued with no explicit invoker
+    /// (the ordinary single-operator TUI Run): [`crate::repo::agent::AgentRepo::can_invoke`]
+    /// admits the owner unconditionally, so resolving the owner here keeps the
+    /// existing Run path unchanged while the gate still bites a non-owner member.
+    /// Picks the lowest `user_id` when several owners exist, for a deterministic
+    /// answer.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn owner_id(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT user_id FROM member \
+             WHERE workspace_id = ? AND role = 'owner' \
+             ORDER BY user_id LIMIT 1",
+        )
+        .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Delete a workspace and every workspace-scoped child row in one transaction
+    /// (multica `DeleteWorkspace` parity).
+    ///
+    /// Multica leans on Postgres `ON DELETE CASCADE`; sqlite's workspace child FKs
+    /// are bare `REFERENCES workspace(id)` (no cascade, and an applied migration
+    /// cannot be `ALTER`ed to add one), so this performs an EXPLICIT teardown of
+    /// every table that references the workspace (directly or through a
+    /// workspace-scoped parent) inside a single transaction. `PRAGMA
+    /// defer_foreign_keys = ON` defers FK enforcement to commit time, so the
+    /// per-statement order cannot trip an immediate-FK check (e.g. the
+    /// `agent_task_queue` self-reference) — only the final committed state must be
+    /// consistent, which it is because every referencing row is removed.
+    ///
+    /// The shared owner `user` is NOT deleted: it is the bootstrap seed linked to
+    /// the surviving default workspace via its own `member` row. Only THIS
+    /// workspace's `member` rows go.
+    ///
+    /// Refuses to delete the LAST workspace ([`WorkspaceRepoError::LastWorkspace`])
+    /// — the host must always have a tenant to stand in — and an unknown id
+    /// ([`WorkspaceRepoError::NotFound`]).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceRepoError::LastWorkspace`] when only one workspace
+    /// exists, [`WorkspaceRepoError::NotFound`] for an unknown id, or
+    /// [`WorkspaceRepoError::Db`] on a store fault.
+    pub async fn delete(pool: &SqlitePool, id: &WorkspaceId) -> Result<(), WorkspaceRepoError> {
+        let ws = id.as_str();
+        let total: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM workspace").fetch_one(pool).await?;
+        if total <= 1 {
+            return Err(WorkspaceRepoError::LastWorkspace);
+        }
+        let exists: Option<String> = sqlx::query_scalar("SELECT id FROM workspace WHERE id = ?")
+            .bind(ws)
+            .fetch_optional(pool)
+            .await?;
+        if exists.is_none() {
+            return Err(WorkspaceRepoError::NotFound);
+        }
+
+        let mut tx = pool.begin().await?;
+        // Defer FK checks to COMMIT so intra-transaction statement order is
+        // irrelevant; the committed state is consistent because every referencing
+        // row below is deleted. `defer_foreign_keys` resets to OFF at commit.
+        sqlx::query("PRAGMA defer_foreign_keys = ON").execute(&mut *tx).await?;
+        // Children (and grandchildren) first, then the workspace. Every `?` binds
+        // the same workspace id (see the per-statement bind loop below); the final
+        // statement keys on `id` rather than `workspace_id`, but the bound value is
+        // identical.
+        for stmt in WORKSPACE_TEARDOWN {
+            let mut q = sqlx::query(stmt);
+            for _ in 0..stmt.matches('?').count() {
+                q = q.bind(ws);
+            }
+            q.execute(&mut *tx).await?;
+        }
+        tx.commit().await?;
+        Ok(())
+    }
+
     /// Read `workspace`'s per-workspace config, or `None` if no such workspace
     /// exists (an unknown / foreign-tenant id).
     ///
@@ -205,6 +383,99 @@ pub fn issue_display_id(prefix: Option<&str>, seq: i64) -> String {
     format!("{resolved}-{seq}")
 }
 
+/// Every table that references a workspace (directly via `workspace_id`, or
+/// through a workspace-scoped parent), in child-before-parent teardown order.
+///
+/// Enumerated from the 17 `REFERENCES workspace` migrations plus their child
+/// tables. `PRAGMA defer_foreign_keys = ON` (set in [`WorkspaceRepo::delete`])
+/// makes the order non-load-bearing for correctness, but children-first keeps the
+/// intent legible. Each `?` binds the workspace id. Grandchild tables that already
+/// declare `ON DELETE CASCADE` off a workspace-scoped parent (`comment` → `issue`)
+/// are torn down explicitly here too — belt and suspenders, and harmless.
+const WORKSPACE_TEARDOWN: &[&str] = &[
+    "DELETE FROM agent_skill WHERE agent_id IN (SELECT id FROM agent WHERE workspace_id = ?) \
+       OR skill_id IN (SELECT id FROM skill WHERE workspace_id = ?)",
+    "DELETE FROM skill_file WHERE skill_id IN (SELECT id FROM skill WHERE workspace_id = ?)",
+    "DELETE FROM issue_label WHERE issue_id IN (SELECT id FROM issue WHERE workspace_id = ?) \
+       OR label_id IN (SELECT id FROM label WHERE workspace_id = ?)",
+    "DELETE FROM squad_member WHERE squad_id IN (SELECT id FROM squad WHERE workspace_id = ?)",
+    "DELETE FROM comment WHERE issue_id IN (SELECT id FROM issue WHERE workspace_id = ?)",
+    "DELETE FROM board_card WHERE board_id IN (SELECT id FROM board WHERE workspace_id = ?)",
+    "DELETE FROM board_column WHERE board_id IN (SELECT id FROM board WHERE workspace_id = ?)",
+    "DELETE FROM autopilot_webhook_delivery \
+       WHERE autopilot_id IN (SELECT id FROM autopilot WHERE workspace_id = ?)",
+    "DELETE FROM task_usage WHERE workspace_id = ?",
+    "DELETE FROM run_history WHERE workspace_id = ?",
+    "DELETE FROM agent_task_queue WHERE workspace_id = ?",
+    "DELETE FROM autopilot_run WHERE autopilot_id IN (SELECT id FROM autopilot WHERE workspace_id = ?)",
+    "DELETE FROM autopilot WHERE workspace_id = ?",
+    "DELETE FROM daemon_token \
+       WHERE runtime_id IN (SELECT id FROM agent_runtime WHERE workspace_id = ?)",
+    "DELETE FROM issue WHERE workspace_id = ?",
+    "DELETE FROM label WHERE workspace_id = ?",
+    "DELETE FROM squad WHERE workspace_id = ?",
+    "DELETE FROM board WHERE workspace_id = ?",
+    "DELETE FROM card_dependency WHERE workspace_id = ?",
+    "DELETE FROM inbox_entry WHERE workspace_id = ?",
+    "DELETE FROM attention WHERE workspace_id = ?",
+    "DELETE FROM event_log WHERE workspace_id = ?",
+    "DELETE FROM notify_rule WHERE workspace_id = ?",
+    "DELETE FROM skill WHERE workspace_id = ?",
+    "DELETE FROM agent WHERE workspace_id = ?",
+    "DELETE FROM agent_runtime WHERE workspace_id = ?",
+    "DELETE FROM member WHERE workspace_id = ?",
+    "DELETE FROM workspace WHERE id = ?",
+];
+
+/// Validate + normalise a caller-supplied workspace slug against multica's
+/// `^[a-z0-9]+(-[a-z0-9]+)*$` rule (`workspace.go` slug guard).
+///
+/// Trims surrounding whitespace, then accepts only lowercase ASCII letters,
+/// digits, and internal single hyphens (no leading/trailing/doubled hyphen).
+/// Upper-case input is REJECTED (not silently down-cased) so a slug is exactly
+/// what the operator typed — the multica frontend routes on `/{slug}/...`, so a
+/// surprising auto-mangle would point at the wrong route. Returns the trimmed
+/// slug on success.
+///
+/// # Errors
+///
+/// Returns [`WorkspaceRepoError::BadSlug`] for an empty slug or one containing any
+/// character outside `[a-z0-9-]`, or with a leading/trailing/doubled hyphen.
+pub fn validate_slug(raw: &str) -> Result<String, WorkspaceRepoError> {
+    let s = raw.trim();
+    let bad = |detail: &str| WorkspaceRepoError::BadSlug {
+        detail: detail.to_string(),
+    };
+    if s.is_empty() {
+        return Err(bad("slug must not be empty"));
+    }
+    if s.starts_with('-') || s.ends_with('-') || s.contains("--") {
+        return Err(bad(
+            "slug must not begin or end with a hyphen or contain a doubled hyphen",
+        ));
+    }
+    if !s.chars().all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '-') {
+        return Err(bad(
+            "slug must contain only lowercase letters, numbers, and hyphens",
+        ));
+    }
+    Ok(s.to_string())
+}
+
+/// Derive a default issue prefix from a workspace name (multica `generateIssuePrefix`).
+///
+/// Strips non-alphabetic characters, upper-cases, takes the first three, falling
+/// back to `"WS"` when nothing alphabetic remains. Examples: `"My Team"` → `MYT`,
+/// `"AB"` → `AB`, `"123"` → `WS`.
+#[must_use]
+pub fn generate_issue_prefix(name: &str) -> String {
+    let alpha: String = name.chars().filter(char::is_ascii_alphabetic).collect();
+    if alpha.is_empty() {
+        return "WS".to_string();
+    }
+    alpha.to_ascii_uppercase().chars().take(3).collect()
+}
+
 /// Parse a stored `repo_whitelist` JSON value into a `Vec<String>`, rejecting
 /// anything that is not a JSON array of strings.
 fn parse_whitelist(json: &str) -> Result<Vec<String>, WorkspaceRepoError> {
@@ -241,6 +512,19 @@ pub enum WorkspaceRepoError {
         /// The validation failure detail.
         detail: String,
     },
+    /// A create slug failed the `^[a-z0-9]+(-[a-z0-9]+)*$` format guard.
+    #[error("invalid slug: {detail}")]
+    BadSlug {
+        /// The validation failure detail.
+        detail: String,
+    },
+    /// A create hit the `workspace.slug` UNIQUE index — the slug is already taken.
+    #[error("a workspace with that slug already exists")]
+    SlugTaken,
+    /// A delete would remove the last remaining workspace, which is refused (the
+    /// host must always have a tenant to stand in).
+    #[error("cannot delete the last workspace")]
+    LastWorkspace,
     /// An underlying `sqlx` failure (IO, decode, …).
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -416,5 +700,260 @@ mod tests {
             "[OPS]-3",
             "trailing separator trimmed from the display id"
         );
+    }
+
+    // ---- create / delete (multica gap #4) ----
+
+    use crate::bootstrap::ensure_default_workspace;
+
+    async fn ws_slugs(pool: &SqlitePool) -> Vec<String> {
+        sqlx::query_scalar("SELECT slug FROM workspace ORDER BY created_at")
+            .fetch_all(pool)
+            .await
+            .unwrap()
+    }
+
+    /// Insert a bare issue into `workspace_id`, returning its id.
+    async fn seed_issue(pool: &SqlitePool, workspace_id: &str, title: &str) -> String {
+        let id = SystemIdGen.new_ulid();
+        let owner = default_owner_id(pool).await.unwrap().unwrap();
+        sqlx::query(
+            "INSERT INTO issue (id, workspace_id, title, creator_type, creator_id, created_at) \
+             VALUES (?, ?, ?, 'member', ?, ?)",
+        )
+        .bind(&id)
+        .bind(workspace_id)
+        .bind(title)
+        .bind(&owner)
+        .bind(1_000_i64)
+        .execute(pool)
+        .await
+        .unwrap();
+        id
+    }
+
+    /// Insert a runtime + agent into `workspace_id`, returning the agent id.
+    async fn seed_agent(pool: &SqlitePool, workspace_id: &str) -> String {
+        let owner = default_owner_id(pool).await.unwrap().unwrap();
+        let runtime_id = SystemIdGen.new_ulid();
+        sqlx::query(
+            "INSERT INTO agent_runtime \
+             (id, workspace_id, daemon_id, provider, runtime_mode, status) \
+             VALUES (?, ?, 'd', 'claude', 'local', 'online')",
+        )
+        .bind(&runtime_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await
+        .unwrap();
+        let agent_id = SystemIdGen.new_ulid();
+        sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES (?, ?, 'a', ?, 'workspace', ?)",
+        )
+        .bind(&agent_id)
+        .bind(workspace_id)
+        .bind(&runtime_id)
+        .bind(&owner)
+        .execute(pool)
+        .await
+        .unwrap();
+        agent_id
+    }
+
+    async fn count(pool: &SqlitePool, sql: &str, bind: &str) -> i64 {
+        sqlx::query_scalar(sql).bind(bind).fetch_one(pool).await.unwrap()
+    }
+
+    /// Create round-trips: the new workspace appears in the list beside the
+    /// default, and an owner `member` row is linked to it.
+    #[tokio::test]
+    async fn create_round_trips_and_links_owner() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        let row = WorkspaceRepo::create(pool, "acme", "Acme", None).await.unwrap();
+        assert_eq!(row.slug, "acme");
+        assert_eq!(row.name, "Acme");
+        assert!(!row.id.is_empty());
+
+        assert_eq!(ws_slugs(pool).await, vec!["default", "acme"]);
+        // One owner member per workspace (default's + acme's) sharing the one user.
+        let owners: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM member WHERE role = 'owner'")
+            .fetch_one(pool)
+            .await
+            .unwrap();
+        assert_eq!(owners, 2);
+        let users: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user").fetch_one(pool).await.unwrap();
+        assert_eq!(users, 1, "the owner user is shared, not duplicated");
+    }
+
+    /// A stored explicit `issue_prefix` is upper-cased; `None` leaves the column
+    /// NULL (no title mangling — the bootstrap invariant).
+    #[tokio::test]
+    async fn create_issue_prefix_is_upper_or_null() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        let a = WorkspaceRepo::create(pool, "acme", "Acme", Some("ops")).await.unwrap();
+        let b = WorkspaceRepo::create(pool, "beta", "Beta", None).await.unwrap();
+        let pa: Option<String> =
+            sqlx::query_scalar("SELECT issue_prefix FROM workspace WHERE id = ?")
+                .bind(&a.id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        let pb: Option<String> =
+            sqlx::query_scalar("SELECT issue_prefix FROM workspace WHERE id = ?")
+                .bind(&b.id)
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(pa.as_deref(), Some("OPS"));
+        assert_eq!(pb, None);
+    }
+
+    /// A duplicate slug is rejected by the UNIQUE index as `SlugTaken`.
+    #[tokio::test]
+    async fn create_duplicate_slug_is_slug_taken() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+
+        WorkspaceRepo::create(pool, "acme", "Acme", None).await.unwrap();
+        let err = WorkspaceRepo::create(pool, "acme", "Acme II", None).await.unwrap_err();
+        assert!(matches!(err, WorkspaceRepoError::SlugTaken), "got {err:?}");
+        assert_eq!(
+            ws_slugs(pool).await,
+            vec!["default", "acme"],
+            "no phantom row"
+        );
+    }
+
+    /// `validate_slug` accepts lower-alnum + internal hyphens, rejects everything
+    /// else (space, upper, empty, edge hyphens).
+    #[test]
+    fn validate_slug_matches_multica_pattern() {
+        assert_eq!(validate_slug("acme").unwrap(), "acme");
+        assert_eq!(validate_slug("  acme-corp ").unwrap(), "acme-corp");
+        assert_eq!(validate_slug("ws1").unwrap(), "ws1");
+        for bad in [
+            "Bad Slug",
+            "UPPER",
+            "",
+            "  ",
+            "-lead",
+            "trail-",
+            "a--b",
+            "under_score",
+        ] {
+            assert!(
+                matches!(validate_slug(bad), Err(WorkspaceRepoError::BadSlug { .. })),
+                "{bad:?} must be BadSlug"
+            );
+        }
+    }
+
+    /// `generate_issue_prefix` mirrors multica's derive rule.
+    #[test]
+    fn generate_issue_prefix_cases() {
+        assert_eq!(generate_issue_prefix("My Team"), "MYT");
+        assert_eq!(generate_issue_prefix("AB"), "AB");
+        assert_eq!(generate_issue_prefix("123"), "WS");
+        assert_eq!(generate_issue_prefix(""), "WS");
+        assert_eq!(generate_issue_prefix("a1b2c3"), "ABC");
+    }
+
+    /// Delete removes the workspace AND its issues/agents/runtime/member, while the
+    /// sibling default workspace's rows survive (isolation proof).
+    #[tokio::test]
+    async fn delete_tears_down_children_and_spares_siblings() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let default_id = ensure_default_workspace(pool).await.unwrap();
+        let acme = WorkspaceRepo::create(pool, "acme", "Acme", None).await.unwrap();
+
+        let default_issue = seed_issue(pool, &default_id, "DEFAULT sentinel").await;
+        let acme_issue = seed_issue(pool, &acme.id, "ACME only").await;
+        let acme_agent = seed_agent(pool, &acme.id).await;
+
+        WorkspaceRepo::delete(pool, &ws(&acme.id)).await.unwrap();
+
+        // acme + every child gone.
+        assert_eq!(ws_slugs(pool).await, vec!["default"]);
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM issue WHERE id = ?", &acme_issue).await,
+            0
+        );
+        assert_eq!(
+            count(pool, "SELECT COUNT(*) FROM agent WHERE id = ?", &acme_agent).await,
+            0
+        );
+        assert_eq!(
+            count(
+                pool,
+                "SELECT COUNT(*) FROM agent_runtime WHERE workspace_id = ?",
+                &acme.id
+            )
+            .await,
+            0
+        );
+        assert_eq!(
+            count(
+                pool,
+                "SELECT COUNT(*) FROM member WHERE workspace_id = ?",
+                &acme.id
+            )
+            .await,
+            0
+        );
+        // Sibling default survives, owner user survives.
+        assert_eq!(
+            count(
+                pool,
+                "SELECT COUNT(*) FROM issue WHERE id = ?",
+                &default_issue
+            )
+            .await,
+            1,
+            "the sibling workspace's issue must survive"
+        );
+        let users: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM user").fetch_one(pool).await.unwrap();
+        assert_eq!(users, 1, "the shared owner user is never deleted");
+    }
+
+    /// Deleting the last workspace is refused.
+    #[tokio::test]
+    async fn delete_last_workspace_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let only = ensure_default_workspace(pool).await.unwrap();
+        let err = WorkspaceRepo::delete(pool, &ws(&only)).await.unwrap_err();
+        assert!(
+            matches!(err, WorkspaceRepoError::LastWorkspace),
+            "got {err:?}"
+        );
+        assert_eq!(ws_slugs(pool).await, vec!["default"], "nothing removed");
+    }
+
+    /// Deleting an unknown id is `NotFound` (never a silent no-op).
+    #[tokio::test]
+    async fn delete_unknown_workspace_is_not_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        ensure_default_workspace(pool).await.unwrap();
+        WorkspaceRepo::create(pool, "acme", "Acme", None).await.unwrap();
+        let err = WorkspaceRepo::delete(pool, &ws("01NONEXISTENT")).await.unwrap_err();
+        assert!(matches!(err, WorkspaceRepoError::NotFound), "got {err:?}");
     }
 }

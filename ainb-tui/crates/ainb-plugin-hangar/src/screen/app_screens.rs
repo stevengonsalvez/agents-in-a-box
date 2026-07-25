@@ -33,6 +33,10 @@ use super::control_center::{
     ControlCenterEvent, ControlCenterIntent, ControlCenterState, reduce_control_center,
 };
 use super::daemon_health::DaemonHealthState;
+use super::fleet::{
+    FleetAction, FleetEvent, FleetFilter, FleetIntent, FleetKey, FleetPaneState, reduce_fleet,
+    selected_approval_action,
+};
 use super::inbox::InboxState;
 use super::issue_list::{
     IssueListEvent, IssueListIntent, IssueListMode, IssueListState, reduce_issue_list,
@@ -63,6 +67,16 @@ pub enum WorkspaceAction {
     SetActive(String),
     /// Toggle the workspace default (`d`) — `host/workspace_set_default`.
     SetDefault(String),
+    /// Create a workspace (`n` → name modal → Enter) — `host/workspace_create`,
+    /// then auto-switch into it (P-multica#4).
+    Create {
+        /// The slug derived from the typed name.
+        slug: String,
+        /// The human-readable workspace name.
+        name: String,
+    },
+    /// Delete a workspace (`x`) — `host/workspace_delete` (P-multica#4).
+    Delete(String),
 }
 
 /// A deferred daemon RPC raised by the Settings Notifications grid (tcp T5).
@@ -293,7 +307,7 @@ pub enum BoardsAction {
         /// The squad to assign, or `None` to clear.
         squad_id: Option<String>,
     },
-    /// Add a depends-on blocker to a card (`D`) — `hangar/board_card_dep_add`
+    /// Add a depends-on blocker to a card (`d`) — `hangar/board_card_dep_add`
     /// (tcp T4 / F7).
     CardDepAdd {
         /// The board both cards sit on.
@@ -380,6 +394,14 @@ pub enum IssueCreateAction {
         /// The linked-issue reference (OPTIONAL) persisted as `issue.external_ref`
         /// for traceability and appended to the dispatched brief. `None` when blank.
         external_ref: Option<String>,
+        /// The acceptance criteria (OPTIONAL, migration 0048) persisted as
+        /// `issue.acceptance_criteria` and rendered on the detail card. Empty when
+        /// the wizard's Acceptance row was left blank.
+        acceptance_criteria: Vec<String>,
+        /// The context references (OPTIONAL, migration 0048) persisted as
+        /// `issue.context_refs` and rendered on the detail card. Empty when the
+        /// wizard's Context row was left blank.
+        context_refs: Vec<String>,
         /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
         /// indicator the daemon clones.
         repo_ref: String,
@@ -395,6 +417,10 @@ pub enum IssueCreateAction {
         /// ref (V3-F3): persisted as the new issue's assignee AND carried as the
         /// run's assignee override. `None` when a provider chip was chosen instead.
         assignee: Option<String>,
+        /// 0046 sub-issues: the parent issue's wire id when the wizard was opened
+        /// as an "add sub-issue" (`s`), threaded into `hangar/issue_create` so the
+        /// daemon links the new issue as a child. `None` for a top-level create.
+        parent_issue_id: Option<String>,
     },
 }
 
@@ -452,11 +478,20 @@ pub enum SquadAction {
 /// `set_actors` seam the pickers use.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsAction {
-    /// Create an AGENT named `name` (`n` + Enter) — `hangar/agent_create`; the glue
-    /// fires it with no ids (the daemon fills workspace / runtime / owner).
+    /// Create an AGENT from the guided wizard (`n` → name → provider → model →
+    /// instructions → confirm) — `hangar/agent_create`; the glue fires it with no
+    /// ids (the daemon fills workspace / runtime / owner) and carries the collected
+    /// provider / model / instructions through so the created row is fully
+    /// configured, not just named.
     Create {
         /// The new agent's name.
         name: String,
+        /// The chosen provider (`claude`/`codex`/`copilot`).
+        provider: String,
+        /// The optional per-agent model override (`None` = provider default).
+        model: Option<String>,
+        /// The optional free-form instructions (`None` = left blank).
+        instructions: Option<String>,
     },
     /// Delete `actor_ref` (Enter on the `x` confirm) — `hangar/agent_delete`; the
     /// glue extracts the id and scopes the delete to the workspace.
@@ -525,6 +560,9 @@ pub struct ScreenStates {
     /// Control-center screen cache (P2), filled from the fleet-wide `attention/list`
     /// snapshot and refreshed on every `AttentionRaised` / `AttentionAnswered` push.
     pub control_center: ControlCenterState,
+    /// Authoritative Fleet registry pane, fed by `fleet/subscribe` and
+    /// reconciled from `fleet/snapshot` after stream gaps.
+    pub fleet: FleetPaneState,
     /// Squads screen cache (P7 / D17), built from `hangar/squads_list` with each
     /// leader/member resolved against the cached actor snapshot for live status.
     pub squads: SquadsState,
@@ -636,6 +674,8 @@ pub struct ScreenStates {
     /// key on an ASK), awaiting the `render` pass to fire it over the daemon socket
     /// (P2). `None` when idle.
     pub pending_answer_action: Option<AttentionAnswerAction>,
+    /// Fleet socket or attach intent raised by the pure Fleet reducer.
+    pub pending_fleet_intent: Option<FleetIntent>,
     /// A board mutation RPC raised by the Boards screen (`⇧←/→`, `x`, `n`, `m`),
     /// awaiting the `render` pass to fire the matching `hangar/board_*` over the
     /// daemon socket (P4). `None` when idle.
@@ -891,12 +931,12 @@ impl ScreenStates {
         // background refresh mid-interaction does not wipe the user's input. A
         // delete-confirm whose agent vanished (this delete landed) is dropped.
         let selected = self.agents.selected_index();
-        let creating = self.agents.create_buffer().map(str::to_string);
+        let creating = self.agents.create_state();
         let confirming = self.agents.confirm_target().map(str::to_string);
         let note = self.agents.note().map(str::to_string);
         let mut next_agents = AgentsState::from_actors(&actors);
         next_agents.set_selected(selected);
-        next_agents.set_create_buffer(creating);
+        next_agents.set_create_state(creating);
         next_agents.restore_confirm(confirming);
         next_agents.set_note(note);
         self.agents = next_agents;
@@ -1074,6 +1114,11 @@ impl ScreenStates {
     pub const fn take_pending_palette_action(&mut self) -> Option<PaletteAction> {
         self.pending_palette_action.take()
     }
+
+    /// Take one deferred Fleet action, broadcast, or attach intent.
+    pub const fn take_pending_fleet_intent(&mut self) -> Option<FleetIntent> {
+        self.pending_fleet_intent.take()
+    }
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
@@ -1134,6 +1179,11 @@ pub enum NavIntent {
     OpenAgentPicker(ainb_hangar_core::ids::IssueId),
     /// Open task detail for the issue under the selection (raised by Enter).
     OpenTaskForIssue(ainb_hangar_core::ids::IssueId),
+    /// 0046 sub-issues: mark an issue Done from the keyboard (`d`). The glue moves
+    /// the card optimistically and arms the durable `hangar/issue_update{state}`
+    /// RPC (the SAME seam as the context-menu `Move to ▸ Done`), so a `d` on a
+    /// sub-issue fires the child-done cascade. Carries the target issue id.
+    MarkIssueDone(ainb_hangar_core::ids::IssueId),
     /// Open the task's captured PR URL in the host browser (raised by `o` on the
     /// task-detail screen, P9.2). Only surfaced when the task has a `pr_url` — `o`
     /// is a no-op (no intent) when none, so there is never a silent open of
@@ -1207,6 +1257,9 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 &states.control_center,
                 now_ms(),
             );
+        }
+        Screen::Fleet => {
+            super::fleet::render_fleet(buf, w, top, bottom, &states.fleet);
         }
         Screen::Squads => {
             super::squads::render_squads(buf, w, top, bottom, &states.squads);
@@ -1412,6 +1465,14 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SettingsIntent::ToggleDefault(id)) => {
                         states.pending_ws_action = Some(WorkspaceAction::SetDefault(id));
                     }
+                    // `n` name modal confirmed → create the workspace + auto-switch.
+                    Some(SettingsIntent::CreateWorkspace { slug, name }) => {
+                        states.pending_ws_action = Some(WorkspaceAction::Create { slug, name });
+                    }
+                    // `x` on a non-active row → delete the workspace.
+                    Some(SettingsIntent::DeleteWorkspace(id)) => {
+                        states.pending_ws_action = Some(WorkspaceAction::Delete(id));
+                    }
                     // A toggled routing cell fires a `hangar/notify_rule_set`
                     // scoped to the grid's current global/workspace scope (tcp T5,
                     // agents-in-a-box-cqh).
@@ -1435,7 +1496,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     Some(SettingsIntent::SetDaemonConfig { key, value }) => {
                         states.pending_daemon_config_set.push((key, value));
                     }
-                    // KeychainWrite / New / Rename land in their own beads.
+                    // KeychainWrite / Rename land in their own beads.
                     _ => {
                         // Seed the pane from the live host workspace list the
                         // first time the user lands on the Workspace section.
@@ -1482,6 +1543,10 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
             route_control_center(states, key);
             None
         }
+        Screen::Fleet => {
+            route_fleet(states, key);
+            None
+        }
         Screen::Squads => {
             route_squads(states, key);
             None
@@ -1496,9 +1561,75 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         // Read-only / overlay screens with no per-screen keys: the daemon-health
         // pane (P8.5), the usage dashboard (e38.35), and the help overlay (the
-        // `D`/`U`/`?` tab-switch + global keys are handled by the router before
+        // `d`/`U`/`?` tab-switch + global keys are handled by the router before
         // reaching here).
         Screen::DaemonHealth | Screen::Usage | Screen::Help => None,
+    }
+}
+
+/// Fleet pane key routing. Filters and lifecycle verbs lift into the same pure
+/// reducer as navigation, broadcast, attach, and confirmation modal keys.
+fn route_fleet(states: &mut ScreenStates, key: &KeyEvent) {
+    let event = if states.fleet.is_modal_open() {
+        fleet_key(key).map(FleetEvent::Key)
+    } else {
+        match &key.code {
+            KeyCode::Char { ch: 'f' } => Some(FleetEvent::SetFilter(FleetFilter::Focus)),
+            KeyCode::Char { ch: 'o' } => Some(FleetEvent::SetFilter(FleetFilter::Actionable)),
+            KeyCode::Char { ch: 'm' } => Some(FleetEvent::SetFilter(FleetFilter::Managed)),
+            KeyCode::Char { ch: 'd' } => Some(FleetEvent::SetFilter(FleetFilter::Degraded)),
+            KeyCode::Char { ch: 'c' } => Some(FleetEvent::SetFilter(FleetFilter::Claude)),
+            KeyCode::Char { ch: 'x' } => Some(FleetEvent::SetFilter(FleetFilter::Codex)),
+            KeyCode::Char { ch: 'v' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
+            KeyCode::Char { ch: 's' } => Some(FleetEvent::RequestAction(FleetAction::Stop)),
+            KeyCode::Char { ch: 'r' } => Some(FleetEvent::RequestAction(FleetAction::Restart)),
+            KeyCode::Char { ch: 'i' } => Some(FleetEvent::RequestAction(FleetAction::Interrupt)),
+            KeyCode::Char { ch: 'n' } => {
+                Some(approval_event(&states.fleet, false, FleetAction::Continue))
+            }
+            KeyCode::Char { ch: 'y' } => {
+                Some(approval_event(&states.fleet, true, FleetAction::Retry))
+            }
+            KeyCode::Char { ch: '!' } => Some(FleetEvent::RequestAction(FleetAction::Kill)),
+            KeyCode::Char { ch: '#' } => Some(FleetEvent::RequestAction(FleetAction::Archive)),
+            _ => fleet_key(key).map(FleetEvent::Key),
+        }
+    };
+    let Some(event) = event else {
+        return;
+    };
+    let out = reduce_fleet(&states.fleet, event);
+    states.fleet = out.state;
+    if out.intent.is_some() {
+        states.pending_fleet_intent = out.intent;
+    }
+}
+
+fn approval_event(state: &FleetPaneState, approve: bool, fallback: FleetAction) -> FleetEvent {
+    let is_approval = state
+        .selected_session()
+        .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("APPROVAL"));
+    if !is_approval {
+        return FleetEvent::RequestAction(fallback);
+    }
+    match selected_approval_action(state, approve) {
+        Ok(action) => FleetEvent::RequestAction(action),
+        Err(detail) => FleetEvent::Feedback(detail),
+    }
+}
+
+fn fleet_key(key: &KeyEvent) -> Option<FleetKey> {
+    match &key.code {
+        KeyCode::Char { ch: ' ' } => Some(FleetKey::Space),
+        KeyCode::Char { ch } => Some(FleetKey::Char(*ch)),
+        KeyCode::Enter => Some(FleetKey::Enter),
+        KeyCode::Esc => Some(FleetKey::Esc),
+        KeyCode::Backspace => Some(FleetKey::Backspace),
+        KeyCode::Up => Some(FleetKey::Up),
+        KeyCode::Down => Some(FleetKey::Down),
+        KeyCode::Left => Some(FleetKey::Left),
+        KeyCode::Right => Some(FleetKey::Right),
+        _ => None,
     }
 }
 
@@ -1545,6 +1676,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
+        // 0046: `d` marks the highlighted issue Done, surfaced as a NavIntent the
+        // glue lifts into the SAME optimistic-move + `hangar/issue_update{state}`
+        // seam the context-menu `Move to ▸ Done` uses, firing the child cascade.
+        Some(IssueListIntent::MarkDone(id)) => Some(NavIntent::MarkIssueDone(id)),
         // Phase 5: the wizard's Agent-stage commit lifts into a deferred
         // create-and-dispatch chain the `render` pass drains + fires (the sync
         // key router can't `await`).
@@ -1552,21 +1687,27 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             title,
             brief,
             external_ref,
+            acceptance_criteria,
+            context_refs,
             repo_ref,
             source_branch,
             target_branch,
             agent,
             assignee,
+            parent_issue_id,
         }) => {
             states.pending_create_action = Some(IssueCreateAction::CreateAndRun {
                 title,
                 description: brief,
                 external_ref,
+                acceptance_criteria,
+                context_refs,
                 repo_ref,
                 source_branch,
                 target_branch,
                 agent,
                 assignee,
+                parent_issue_id,
             });
             None
         }
@@ -1831,7 +1972,7 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'm' => Some(BoardsEvent::ToggleAutoMove),
             // `q` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a picker.
             'q' => Some(BoardsEvent::AssignSquad),
-            // `D` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
+            // `d` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
             'D' => Some(BoardsEvent::AddDependency),
             // `R` (uppercase, distinct from `r` = rename) toggles the auto-run flag.
             'R' => Some(BoardsEvent::ToggleAutoRun),
@@ -2050,6 +2191,11 @@ fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
         AgentsEvent::Key('k')
     } else if matches!(key.code, KeyCode::Down) {
         AgentsEvent::Key('j')
+    } else if matches!(key.code, KeyCode::Left) {
+        // `←`/`→` drive the create wizard's provider picker (mapped to `h`/`l`).
+        AgentsEvent::Key('h')
+    } else if matches!(key.code, KeyCode::Right) {
+        AgentsEvent::Key('l')
     } else if let Some(c) = key_char(key) {
         AgentsEvent::Key(c)
     } else {
@@ -2058,7 +2204,17 @@ fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
     let out = reduce_agents(&states.agents, ev);
     states.agents = out.state;
     states.pending_agents_action = match out.intent {
-        Some(AgentsIntent::CreateAgent { name }) => Some(AgentsAction::Create { name }),
+        Some(AgentsIntent::CreateAgent {
+            name,
+            provider,
+            model,
+            instructions,
+        }) => Some(AgentsAction::Create {
+            name,
+            provider,
+            model,
+            instructions,
+        }),
         Some(AgentsIntent::DeleteAgent { actor_ref }) => Some(AgentsAction::Delete { actor_ref }),
         None => None,
     };

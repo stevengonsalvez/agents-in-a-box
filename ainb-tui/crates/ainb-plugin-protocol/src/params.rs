@@ -878,6 +878,40 @@ pub struct WorkspaceSetDefaultParams {
 pub struct WorkspaceSetDefaultResult {}
 
 // =====================================================================
+// host/workspace_create / host/workspace_delete
+// =====================================================================
+
+/// `host/workspace_create` params: the slug + display name for the new workspace.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateParams {
+    /// The new workspace's slug (validated `^[a-z0-9]+(-[a-z0-9]+)*$` host-side).
+    pub slug: String,
+    /// The new workspace's human-readable display name.
+    pub name: String,
+}
+
+/// `host/workspace_create` result: the newly-created workspace row.
+///
+/// The row is freshly created, so `active`/`default` are always `false` — the
+/// plugin switches to it explicitly after create if it wants it active.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceCreateResult {
+    /// The created workspace (`active`/`default` false).
+    pub workspace: WorkspaceEntry,
+}
+
+/// `host/workspace_delete` params: the workspace ULID to delete.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDeleteParams {
+    /// The workspace ULID to delete. Must name a known, non-active workspace.
+    pub workspace_id: String,
+}
+
+/// `host/workspace_delete` result: empty acknowledgement.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WorkspaceDeleteResult {}
+
+// =====================================================================
 // (de)serialise bytes::Bytes as a base64 string (with a legacy
 // byte-array fallback on decode).
 // =====================================================================
@@ -1195,6 +1229,23 @@ mod tests {
             workspace_id: "01J9ZX8QK8".into(),
         });
         rt(&WorkspaceSetDefaultResult::default());
+        rt(&WorkspaceCreateParams {
+            slug: "acme".into(),
+            name: "Acme".into(),
+        });
+        rt(&WorkspaceCreateResult {
+            workspace: WorkspaceEntry {
+                id: "01J9ZX8QK9".into(),
+                slug: "acme".into(),
+                name: "Acme".into(),
+                active: false,
+                default: false,
+            },
+        });
+        rt(&WorkspaceDeleteParams {
+            workspace_id: "01J9ZX8QK9".into(),
+        });
+        rt(&WorkspaceDeleteResult::default());
     }
 
     #[test]

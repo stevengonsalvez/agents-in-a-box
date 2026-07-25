@@ -24,7 +24,7 @@ use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, W
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
     ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow, InboxEntryRow, IssueRow,
-    PresenceState, SkillFile, SkillRow, TaskCardRow,
+    PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
 use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
@@ -126,6 +126,11 @@ pub async fn issues_list(
                 run_count: extras.run_count,
                 last_run_status: extras.last_run_status,
                 last_run_at: extras.last_run_at,
+                parent_id: extras.parent_id,
+                child_total: extras.child_total,
+                child_done: extras.child_done,
+                acceptance_criteria: issue.acceptance_criteria,
+                context_refs: issue.context_refs,
             });
         }
     }
@@ -143,6 +148,13 @@ struct IssueCardExtras {
     run_count: u32,
     last_run_status: Option<String>,
     last_run_at: Option<i64>,
+    /// The issue's parent, when it is a sub-issue (migration 0046); `None` for a
+    /// top-level issue.
+    parent_id: Option<String>,
+    /// This issue's sub-issue roll-up: `(done, total)`. `(0, 0)` when it has no
+    /// children. Drives the parent card's `⊟ done/total` badge.
+    child_done: u32,
+    child_total: u32,
 }
 
 /// Read the task-detail card extras for one issue (63d): the `repo_ref` / `agent`
@@ -178,6 +190,15 @@ async fn issue_card_fields(
     .bind(issue_id)
     .fetch_one(pool)
     .await?;
+    // 0046: this issue's parent link + its sub-issue roll-up, so the wire row can
+    // render the parent card's `⊟ done/total` badge and thread reparenting.
+    let parent_id: Option<String> =
+        sqlx::query_scalar("SELECT parent_issue_id FROM issue WHERE id = ?")
+            .bind(issue_id)
+            .fetch_optional(pool)
+            .await?
+            .flatten();
+    let (child_done, child_total) = IssueRepo::child_progress(pool, issue_id).await?;
     Ok(IssueCardExtras {
         repo_ref,
         agent: agent.map(|a| a.as_str().to_string()),
@@ -186,6 +207,9 @@ async fn issue_card_fields(
         run_count: u32::try_from(count).unwrap_or(u32::MAX),
         last_run_status: last_status,
         last_run_at: last_at,
+        parent_id,
+        child_done: u32::try_from(child_done).unwrap_or(u32::MAX),
+        child_total: u32::try_from(child_total).unwrap_or(u32::MAX),
     })
 }
 
@@ -264,6 +288,11 @@ pub async fn issues_search(
             run_count: extras.run_count,
             last_run_status: extras.last_run_status,
             last_run_at: extras.last_run_at,
+            parent_id: extras.parent_id,
+            child_total: extras.child_total,
+            child_done: extras.child_done,
+            acceptance_criteria: issue.acceptance_criteria,
+            context_refs: issue.context_refs,
         });
     }
     Ok(out)
@@ -414,8 +443,13 @@ pub async fn agents_list(
 ) -> Result<Vec<ActorRow>, sqlx::Error> {
     let mut out = Vec::new();
 
+    // Fetch the whole workspace's live task counts ONCE (multica buildPresenceMap)
+    // so the per-agent workload dimension is an O(1) map lookup, not an N+1 query.
+    let workload_map = TaskRepo::live_workload_by_workspace(pool, workspace_id).await?;
+
     for agent in AgentRepo::list_by_workspace(pool, workspace_id).await? {
-        out.push(agent_actor_row(pool, &agent).await?);
+        let (running, queued) = workload_map.get(&agent.id).copied().unwrap_or((0, 0));
+        out.push(agent_actor_row_with_counts(pool, &agent, running, queued).await?);
     }
 
     for member in members_of(pool, workspace_id).await? {
@@ -424,6 +458,8 @@ pub async fn agents_list(
             display_name: member.email,
             subtitle: member.role,
             presence: PresenceState::Online,
+            // A human member carries no live task workload — always Idle.
+            workload: Workload::Idle,
             is_agent: false,
             recent_rank: None,
         });
@@ -734,20 +770,41 @@ fn presence_from_status(status: &str) -> PresenceState {
 }
 
 /// Map one store [`Agent`](ainb_hangar_store::repo::agent::Agent) onto its picker
-/// [`ActorRow`], deriving presence from the backing runtime's status.
+/// [`ActorRow`], deriving presence from the backing runtime's status and the
+/// workload dimension from the agent's OWN live task counts.
 ///
-/// Shared by [`agents_list`] and the e38.15 agent-CRUD wrappers
-/// ([`agent_update`] / [`agent_archive`]) so the row a mutation answers with is
-/// byte-identical to the same agent's `agents_list` row. A missing runtime maps
+/// Shared by the e38.15 agent-CRUD wrappers ([`agent_update`] / [`agent_archive`])
+/// so the row a mutation answers with is byte-identical to the same agent's
+/// `agents_list` row. Fetches the single-agent live counts itself (the batch
+/// [`agents_list`] path instead resolves them once and calls
+/// [`agent_actor_row_with_counts`] directly, avoiding an N+1 query).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the runtime or task-count lookup fails.
+async fn agent_actor_row(
+    pool: &SqlitePool,
+    agent: &ainb_hangar_store::repo::agent::Agent,
+) -> Result<ActorRow, sqlx::Error> {
+    let (running, queued) = TaskRepo::live_workload_for_agent(pool, &agent.id).await?;
+    agent_actor_row_with_counts(pool, agent, running, queued).await
+}
+
+/// Build one agent's picker [`ActorRow`] from its store row plus already-resolved
+/// live task counts (`running`, `queued`), deriving presence from the runtime and
+/// workload via [`Workload::derive`]. The counts-taking seam lets [`agents_list`]
+/// batch the workload query once for the whole workspace. A missing runtime maps
 /// to `Offline` (the runtime FK is required, but a deleted-out-of-band runtime
 /// must not panic the snapshot).
 ///
 /// # Errors
 ///
 /// Returns a [`sqlx::Error`] if the runtime lookup fails.
-async fn agent_actor_row(
+async fn agent_actor_row_with_counts(
     pool: &SqlitePool,
     agent: &ainb_hangar_store::repo::agent::Agent,
+    running: i64,
+    queued: i64,
 ) -> Result<ActorRow, sqlx::Error> {
     let presence = match AgentRuntimeRepo::get(pool, &agent.runtime_id).await? {
         Some(rt) => presence_from_status(&rt.status),
@@ -758,6 +815,7 @@ async fn agent_actor_row(
         display_name: agent.name.clone(),
         subtitle: "agent".to_string(),
         presence,
+        workload: Workload::derive(running, queued),
         is_agent: true,
         recent_rank: None,
     })
@@ -1528,6 +1586,11 @@ pub async fn issue_row(
         run_count: extras.run_count,
         last_run_status: extras.last_run_status,
         last_run_at: extras.last_run_at,
+        parent_id: extras.parent_id,
+        child_total: extras.child_total,
+        child_done: extras.child_done,
+        acceptance_criteria: issue.acceptance_criteria,
+        context_refs: issue.context_refs,
     }))
 }
 
@@ -1630,6 +1693,11 @@ async fn read_issue_row(
         run_count: extras.run_count,
         last_run_status: extras.last_run_status,
         last_run_at: extras.last_run_at,
+        parent_id: extras.parent_id,
+        child_total: extras.child_total,
+        child_done: extras.child_done,
+        acceptance_criteria: issue.acceptance_criteria,
+        context_refs: issue.context_refs,
     }))
 }
 
@@ -1715,6 +1783,9 @@ pub async fn issue_create(
     description: Option<&str>,
     creator: &ActorRef,
     external_ref: Option<&str>,
+    parent_issue_id: Option<&str>,
+    acceptance_criteria: &[String],
+    context_refs: &[String],
 ) -> Result<IssueRow, sqlx::Error> {
     use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::issue::NewIssue;
@@ -1741,6 +1812,10 @@ pub async fn issue_create(
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            acceptance_criteria: acceptance_criteria.to_vec(),
+            context_refs: context_refs.to_vec(),
+            parent_issue_id: parent_issue_id.map(ToString::to_string),
+            stage: None,
         },
     )
     .await?;
@@ -1785,6 +1860,15 @@ pub async fn issue_create(
         run_count: 0,
         last_run_status: None,
         last_run_at: None,
+        // 0046: the parent link the create captured (a sub-issue), or `None` for a
+        // top-level issue. A fresh issue has no children yet, so the roll-up is 0/0.
+        parent_id: parent_issue_id.map(str::to_string),
+        child_total: 0,
+        child_done: 0,
+        // The lists the create captured (blank elements already dropped at the
+        // handler boundary), echoed on the response + pushed IssueCreated event.
+        acceptance_criteria: acceptance_criteria.to_vec(),
+        context_refs: context_refs.to_vec(),
     })
 }
 

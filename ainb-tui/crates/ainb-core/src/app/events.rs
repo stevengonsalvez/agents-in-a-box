@@ -10,6 +10,10 @@ use crate::app::{
 use crate::cli::statusline_install::{InstallOutcome, StatuslineStatus, install_statusline};
 use crate::credentials;
 use crate::models::live_window::Source as LiveSource;
+use ainb_plugin_hangar::screen::fleet::{
+    BroadcastReceipt, FleetAction, FleetEvent, FleetFilter, FleetIntent, FleetKey, ReceiptStatus,
+    selected_approval_action,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::time::Instant;
 use tracing::info;
@@ -400,23 +404,29 @@ pub enum AppEvent {
     FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
     FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
     FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
-    FleetPanelNewAtcOpen, // Fleet panel: open the new-ATC name prompt (n)
+    /// Route one canonical reducer key through main ainb Fleet panel.
+    FleetPanelCanonicalKey(FleetKey),
+    /// Apply canonical Fleet roster filter.
+    FleetPanelSetFilter(FleetFilter),
+    /// Request canonical lifecycle or control action.
+    FleetPanelCanonicalAction(FleetAction),
+    FleetPanelNewAtcOpen,       // Fleet panel: open the new-ATC name prompt (n)
     FleetPanelNewAtcType(char), // Fleet panel: type a char into the name prompt
-    FleetPanelNewAtcBackspace, // Fleet panel: delete last char of the name prompt
-    FleetPanelNewAtcCancel, // Fleet panel: cancel the name prompt (Esc)
-    FleetPanelNewAtcSubmit, // Fleet panel: create the ATC (Enter)
-    PanelBack,        // Close a panel screen: pop previous_screen (home if none)
-    GoToHangar,       // Navigate to the Hangar control plane (plugin screen)
-    InboxMoveUp,      // Inbox: move selection up one row
-    InboxMoveDown,    // Inbox: move selection down one row
-    InboxPageUp,      // Inbox: jump 10 rows up
-    InboxPageDown,    // Inbox: jump 10 rows down
-    InboxOpenSelected, // Inbox: mark selected row read (Enter)
-    InboxDismissSelected, // Inbox: dismiss selected row (d)
-    InboxDismissVisible, // Inbox: dismiss every visible row (Shift+C)
-    InboxToggleArchived, // Inbox: toggle dismissed filter (a)
-    InboxCycleAgent,  // Inbox: cycle agent filter (p)
-    InboxRefresh,     // Inbox: force-refresh from store (r)
+    FleetPanelNewAtcBackspace,  // Fleet panel: delete last char of the name prompt
+    FleetPanelNewAtcCancel,     // Fleet panel: cancel the name prompt (Esc)
+    FleetPanelNewAtcSubmit,     // Fleet panel: create the ATC (Enter)
+    PanelBack,                  // Close a panel screen: pop previous_screen (home if none)
+    GoToHangar,                 // Navigate to the Hangar control plane (plugin screen)
+    InboxMoveUp,                // Inbox: move selection up one row
+    InboxMoveDown,              // Inbox: move selection down one row
+    InboxPageUp,                // Inbox: jump 10 rows up
+    InboxPageDown,              // Inbox: jump 10 rows down
+    InboxOpenSelected,          // Inbox: mark selected row read (Enter)
+    InboxDismissSelected,       // Inbox: dismiss selected row (d)
+    InboxDismissVisible,        // Inbox: dismiss every visible row (Shift+C)
+    InboxToggleArchived,        // Inbox: toggle dismissed filter (a)
+    InboxCycleAgent,            // Inbox: cycle agent filter (p)
+    InboxRefresh,               // Inbox: force-refresh from store (r)
     // AINB 2.0: Agent selection events
     // AINB 2.0: Config screen events
     ConfigBack,            // Return to home screen (Esc)
@@ -2949,6 +2959,21 @@ impl EventHandler {
                 _ => None,
             };
         }
+        if state.fleet_panel_state.canonical_modal_open() {
+            let key = match key_event.code {
+                KeyCode::Esc => FleetKey::Esc,
+                KeyCode::Enter => FleetKey::Enter,
+                KeyCode::Backspace => FleetKey::Backspace,
+                KeyCode::Up | KeyCode::BackTab => FleetKey::Up,
+                KeyCode::Down | KeyCode::Tab => FleetKey::Down,
+                KeyCode::Left => FleetKey::Left,
+                KeyCode::Right => FleetKey::Right,
+                KeyCode::Char(' ') => FleetKey::Space,
+                KeyCode::Char(character) => FleetKey::Char(character),
+                _ => return None,
+            };
+            return Some(AppEvent::FleetPanelCanonicalKey(key));
+        }
         match key_event.code {
             KeyCode::Esc | KeyCode::Char('q') => Some(AppEvent::PanelBack),
             KeyCode::Up | KeyCode::Char('k') => Some(AppEvent::FleetPanelMoveUp),
@@ -2962,13 +2987,42 @@ impl EventHandler {
             // advertises) and new-ATC. Context decides: on an APPROVE row `n`
             // denies; anywhere else it opens the new-ATC name prompt.
             KeyCode::Char('n') => {
-                if state.fleet_panel_state.selected_kind() == Some("APPROVE") {
+                let canonical_approval = state
+                    .fleet_panel_state
+                    .canonical
+                    .selected_session()
+                    .map(|row| row.attention_state.eq_ignore_ascii_case("APPROVAL"));
+                if canonical_approval
+                    .unwrap_or_else(|| state.fleet_panel_state.selected_kind() == Some("APPROVE"))
+                {
                     Some(AppEvent::FleetPanelDeny)
                 } else {
                     Some(AppEvent::FleetPanelNewAtcOpen)
                 }
             }
             KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
+            KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
+            KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
+            KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
+            KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Continue)),
+            KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
+            KeyCode::Char('!') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill)),
+            KeyCode::Char('#') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Archive)),
+            KeyCode::Char('t' | 'p') | KeyCode::Right | KeyCode::Char('A') => {
+                let key = match key_event.code {
+                    KeyCode::Right => FleetKey::Right,
+                    KeyCode::Char(character) => FleetKey::Char(character),
+                    _ => unreachable!(),
+                };
+                Some(AppEvent::FleetPanelCanonicalKey(key))
+            }
+            KeyCode::Char('f') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Focus)),
+            KeyCode::Char('o') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Actionable)),
+            KeyCode::Char('m') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Managed)),
+            KeyCode::Char('d') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Degraded)),
+            KeyCode::Char('l') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Claude)),
+            KeyCode::Char('x') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Codex)),
+            KeyCode::Char('v') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
             _ => None,
         }
     }
@@ -3187,6 +3241,265 @@ impl EventHandler {
                 }
             }
         }
+    }
+
+    fn reduce_fleet_event(state: &mut AppState, event: FleetEvent) {
+        let intent = state.fleet_panel_state.reduce_canonical(event);
+        if let Some(intent) = intent {
+            Self::dispatch_fleet_intent(state, intent);
+        }
+    }
+
+    fn dispatch_fleet_intent(state: &mut AppState, intent: FleetIntent) {
+        use ainb_hangar_proto::fleet::{
+            ActionReceiptStatus, ControlAction, FleetActionParams, FleetBroadcastParams,
+        };
+
+        match intent {
+            FleetIntent::Execute {
+                session_key,
+                expected_version,
+                action,
+            } => {
+                if action.is_high_risk() && !state.fleet_panel_state.daemon_online() {
+                    Self::reduce_fleet_event(
+                        state,
+                        FleetEvent::ActionFailed {
+                            session_key,
+                            detail: "Fleet daemon offline, high-risk action disabled".into(),
+                        },
+                    );
+                    return;
+                }
+                let action_label = match &action {
+                    FleetAction::StructuredAnswer { .. } => "answered ask",
+                    FleetAction::Approve { .. } => "approved request",
+                    FleetAction::Deny { .. } => "denied request",
+                    FleetAction::SendText { .. } => "sent prompt",
+                    FleetAction::VerifiedPicker { .. } => "routed picker",
+                    FleetAction::Continue => "continued turn",
+                    FleetAction::Retry => "retried turn",
+                    FleetAction::Interrupt => "interrupted turn",
+                    FleetAction::Stop => "stopped session",
+                    FleetAction::Restart => "restarted session",
+                    FleetAction::Kill => "killed session",
+                    FleetAction::Archive => "archived session",
+                };
+                let action = match action.into_control_action() {
+                    Ok(action) => action,
+                    Err(detail) => {
+                        Self::reduce_fleet_event(
+                            state,
+                            FleetEvent::ActionFailed {
+                                session_key,
+                                detail,
+                            },
+                        );
+                        return;
+                    }
+                };
+                let params = FleetActionParams {
+                    session_key: session_key.clone(),
+                    expected_version,
+                    request_id: format!("fleet-host-{}", uuid::Uuid::new_v4()),
+                    action,
+                };
+                let sink = state.fleet_panel_state.canonical_update_sink();
+                std::thread::spawn(move || {
+                    let events = match crate::fleet::control::execute_fleet_action_blocking(params)
+                    {
+                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => vec![
+                            FleetEvent::ActionSucceeded {
+                                session_key: session_key.clone(),
+                            },
+                            FleetEvent::Feedback(format!(
+                                "{action_label}: {:?}{}",
+                                receipt.status,
+                                receipt
+                                    .detail
+                                    .as_deref()
+                                    .map_or(String::new(), |detail| { format!(": {detail}") })
+                            )),
+                        ],
+                        Ok(receipt) => vec![FleetEvent::ActionFailed {
+                            session_key,
+                            detail: receipt
+                                .detail
+                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
+                        }],
+                        Err(detail) => vec![FleetEvent::ActionFailed {
+                            session_key,
+                            detail,
+                        }],
+                    };
+                    if let Ok(mut updates) = sink.lock() {
+                        updates.extend(events);
+                    }
+                });
+            }
+            FleetIntent::Start {
+                provider,
+                cwd,
+                prompt,
+            } => {
+                if !state.fleet_panel_state.daemon_online() {
+                    Self::reduce_fleet_event(
+                        state,
+                        FleetEvent::ActionFailed {
+                            session_key: "start:codex".into(),
+                            detail: "Fleet daemon offline, managed start disabled".into(),
+                        },
+                    );
+                    return;
+                }
+                let session_key = "start:codex".to_string();
+                let params = FleetActionParams {
+                    session_key: session_key.clone(),
+                    expected_version: 1,
+                    request_id: format!("fleet-host-start-{}", uuid::Uuid::new_v4()),
+                    action: ControlAction::Start {
+                        provider,
+                        cwd,
+                        prompt,
+                    },
+                };
+                let sink = state.fleet_panel_state.canonical_update_sink();
+                std::thread::spawn(move || {
+                    let event = match crate::fleet::control::execute_fleet_action_blocking(params) {
+                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => {
+                            FleetEvent::ActionSucceeded { session_key }
+                        }
+                        Ok(receipt) => FleetEvent::ActionFailed {
+                            session_key,
+                            detail: receipt
+                                .detail
+                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
+                        },
+                        Err(detail) => FleetEvent::ActionFailed {
+                            session_key,
+                            detail,
+                        },
+                    };
+                    if let Ok(mut updates) = sink.lock() {
+                        updates.push(event);
+                    }
+                });
+            }
+            FleetIntent::Broadcast {
+                text,
+                recipient_keys,
+                idempotency_key,
+                max_parallel: _,
+                retry_failures_only: _,
+            } => {
+                let params = FleetBroadcastParams {
+                    target_keys: recipient_keys,
+                    text,
+                    idempotency_key,
+                };
+                let sink = state.fleet_panel_state.canonical_update_sink();
+                std::thread::spawn(move || {
+                    let event =
+                        match crate::fleet::control::execute_fleet_broadcast_blocking(params) {
+                            Ok(result) => FleetEvent::BroadcastReceipts(
+                                result
+                                    .receipts
+                                    .into_iter()
+                                    .map(|receipt| BroadcastReceipt {
+                                        session_key: receipt.session_key,
+                                        status: match receipt.status {
+                                            ActionReceiptStatus::Delivered => {
+                                                ReceiptStatus::Delivered
+                                            }
+                                            ActionReceiptStatus::Failed
+                                            | ActionReceiptStatus::Rejected => {
+                                                ReceiptStatus::Failed
+                                            }
+                                            ActionReceiptStatus::Pending
+                                            | ActionReceiptStatus::Unknown => {
+                                                ReceiptStatus::Unknown
+                                            }
+                                        },
+                                        detail: receipt.detail,
+                                    })
+                                    .collect(),
+                            ),
+                            Err(detail) => FleetEvent::BroadcastFailed { detail },
+                        };
+                    if let Ok(mut updates) = sink.lock() {
+                        updates.push(event);
+                    }
+                });
+            }
+            FleetIntent::AttachEmbedded {
+                session_key,
+                tmux_target,
+            } => {
+                if state.embed.is_some() {
+                    state.release_interactive_pane();
+                }
+                let (terminal_cols, terminal_rows) =
+                    crossterm::terminal::size().unwrap_or((160, 48));
+                match crate::tmux::EmbedClient::attach_target(
+                    &tmux_target,
+                    terminal_rows.saturating_sub(2),
+                    terminal_cols.saturating_div(2),
+                ) {
+                    Ok(client) => {
+                        state.embed = Some(client);
+                        state.embed_session = Some(tmux_target.clone());
+                        state.embed_pane_area = None;
+                        state.focused_pane = crate::app::state::FocusedPane::Preview;
+                        Self::reduce_fleet_event(
+                            state,
+                            FleetEvent::Feedback(format!(
+                                "embedded {session_key} at exact target {tmux_target}"
+                            )),
+                        );
+                    }
+                    Err(error) => Self::reduce_fleet_event(
+                        state,
+                        FleetEvent::Feedback(format!("attach failed: {error}")),
+                    ),
+                }
+            }
+            FleetIntent::AttachFullscreen {
+                session_key,
+                tmux_target,
+            } => match Self::prepare_exact_fleet_attach(&tmux_target) {
+                Ok(session_name) => {
+                    state.pending_async_action = Some(AsyncAction::AttachToOtherTmux(session_name));
+                    Self::reduce_fleet_event(
+                        state,
+                        FleetEvent::Feedback(format!(
+                            "attaching {session_key} at exact target {tmux_target}"
+                        )),
+                    );
+                }
+                Err(detail) => Self::reduce_fleet_event(
+                    state,
+                    FleetEvent::Feedback(format!("attach failed: {detail}")),
+                ),
+            },
+        }
+    }
+
+    fn prepare_exact_fleet_attach(tmux_target: &str) -> Result<String, String> {
+        let session_name =
+            tmux_target.split_once(':').map_or(tmux_target, |(session, _)| session).trim();
+        if session_name.is_empty() {
+            return Err("tmux target has no session name".to_string());
+        }
+        for command in ["select-window", "select-pane"] {
+            let status = std::process::Command::new("tmux")
+                .args([command, "-t", tmux_target])
+                .status()
+                .map_err(|error| format!("tmux {command}: {error}"))?;
+            if !status.success() {
+                return Err(format!("tmux {command} rejected {tmux_target}"));
+            }
+        }
+        Ok(session_name.to_string())
     }
 
     pub fn process_event(event: AppEvent, state: &mut AppState) {
@@ -5827,10 +6140,38 @@ impl EventHandler {
                 // — cheap on the event loop, same as Inbox's refresh-on-entry.
                 state.fleet_panel_state.arm();
             }
-            AppEvent::FleetPanelMoveUp => state.fleet_panel_state.move_up(1),
-            AppEvent::FleetPanelMoveDown => state.fleet_panel_state.move_down(1),
-            AppEvent::FleetPanelOptionNext => state.fleet_panel_state.option_next(),
-            AppEvent::FleetPanelOptionPrev => state.fleet_panel_state.option_prev(),
+            AppEvent::FleetPanelMoveUp => {
+                state.fleet_panel_state.move_up(1);
+            }
+            AppEvent::FleetPanelMoveDown => {
+                state.fleet_panel_state.move_down(1);
+            }
+            AppEvent::FleetPanelOptionNext => {
+                let canonical_ask = state
+                    .fleet_panel_state
+                    .canonical
+                    .selected_session()
+                    .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("ASK"));
+                if canonical_ask {
+                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
+                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Down));
+                } else {
+                    state.fleet_panel_state.option_next();
+                }
+            }
+            AppEvent::FleetPanelOptionPrev => {
+                let canonical_ask = state
+                    .fleet_panel_state
+                    .canonical
+                    .selected_session()
+                    .is_some_and(|row| row.attention_state.eq_ignore_ascii_case("ASK"));
+                if canonical_ask {
+                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
+                    Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Up));
+                } else {
+                    state.fleet_panel_state.option_prev();
+                }
+            }
             AppEvent::FleetPanelRefresh => state.fleet_panel_state.refresh(),
             AppEvent::FleetPanelNewAtcOpen => state.fleet_panel_state.open_new_atc(),
             AppEvent::FleetPanelNewAtcType(c) => state.fleet_panel_state.new_atc_type(c),
@@ -5838,70 +6179,35 @@ impl EventHandler {
             AppEvent::FleetPanelNewAtcCancel => state.fleet_panel_state.new_atc_cancel(),
             AppEvent::FleetPanelNewAtcSubmit => state.fleet_panel_state.new_atc_submit(),
             AppEvent::FleetPanelAnswer => {
-                // Answer the selected ASK by sending the highlighted option's
-                // label to the target session via the EXISTING fleet send path
-                // (tmux send-keys), dispatched off the UI thread. The dispatch is
-                // guarded: in-flight + identical-resend debounce (C3), and the
-                // worker refuses an ambiguous-cwd answer (C1, `is_answer = true`).
-                if let Some((row, answer)) = state.fleet_panel_state.pending_answer() {
-                    if state.fleet_panel_state.guarded_dispatch(
-                        row.session_id,
-                        row.cwd,
-                        answer.clone(),
-                        Some(row.last_event_ts),
-                        "answered ask",
-                        true,
-                    ) {
-                        state
-                            .fleet_panel_state
-                            .set_feedback(format!("answering ask with '{answer}'…"));
-                    }
-                } else {
-                    state
-                        .fleet_panel_state
-                        .set_feedback("select an ASK row with options to answer".to_string());
-                }
+                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
             }
             AppEvent::FleetPanelBroadcast => {
-                // Broadcast a ping prompt to the selected session. v1 has no
-                // text-input widget on this screen, so the prompt is a fixed
-                // nudge; the send itself is real (same fleet send path). Same
-                // in-flight guard; `is_answer = false` (a ping is lower-harm but
-                // still refuses on an ambiguous cwd — the safe call).
-                if let Some(row) = state.fleet_panel_state.selected_row().cloned() {
-                    let prompt = "ping from fleet control panel — status?";
-                    if state.fleet_panel_state.guarded_dispatch(
-                        row.session_id,
-                        row.cwd,
-                        prompt.to_string(),
-                        Some(row.last_event_ts),
-                        "broadcast",
-                        false,
-                    ) {
-                        state.fleet_panel_state.set_feedback("broadcasting ping…".to_string());
-                    }
-                } else {
-                    state
-                        .fleet_panel_state
-                        .set_feedback("no session selected to broadcast to".to_string());
-                }
+                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('B')));
             }
             AppEvent::FleetPanelApprove => {
-                // Approve the selected APPROVE row: deliver a first-class
-                // permission decision to the notifyd approve broker, which
-                // unblocks the parked PermissionRequest hook (it flows back to
-                // Claude as `permissionDecision: allow`). NOT a tmux send.
-                state.fleet_panel_state.guarded_decide(
-                    ainb_plugin_notifyd::broker::DecisionKind::Approve,
-                    "approved",
-                );
+                match selected_approval_action(&state.fleet_panel_state.canonical, true) {
+                    Ok(action) => {
+                        Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
+                    }
+                    Err(detail) => Self::reduce_fleet_event(state, FleetEvent::Feedback(detail)),
+                }
             }
             AppEvent::FleetPanelDeny => {
-                // Deny the selected APPROVE row (broker relays `deny` back to the
-                // blocked hook). Same guard as approve/send.
-                state
-                    .fleet_panel_state
-                    .guarded_decide(ainb_plugin_notifyd::broker::DecisionKind::Deny, "denied");
+                match selected_approval_action(&state.fleet_panel_state.canonical, false) {
+                    Ok(action) => {
+                        Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
+                    }
+                    Err(detail) => Self::reduce_fleet_event(state, FleetEvent::Feedback(detail)),
+                }
+            }
+            AppEvent::FleetPanelCanonicalKey(key) => {
+                Self::reduce_fleet_event(state, FleetEvent::Key(key));
+            }
+            AppEvent::FleetPanelSetFilter(filter) => {
+                Self::reduce_fleet_event(state, FleetEvent::SetFilter(filter));
+            }
+            AppEvent::FleetPanelCanonicalAction(action) => {
+                Self::reduce_fleet_event(state, FleetEvent::RequestAction(action));
             }
             AppEvent::GoToHangar => {
                 tracing::info!("Navigating to Hangar");
@@ -8486,6 +8792,118 @@ mod panel_back_tests {
         );
     }
 
+    #[test]
+    fn fleet_panel_empty_roster_routes_start_filters_and_lifecycle_to_canonical_reducer() {
+        use crossterm::event::{KeyCode, KeyEvent};
+
+        let mut state = AppState::default();
+        state.current_screen = ids::FLEET_PANEL.to_string();
+        let route =
+            |s: &mut AppState, code| EventHandler::handle_key_event(KeyEvent::from(code), s);
+
+        let start = route(&mut state, KeyCode::Char('t'));
+        assert!(matches!(
+            start,
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('t')))
+        ));
+        EventHandler::process_event(start.unwrap(), &mut state);
+        assert!(state.fleet_panel_state.canonical_modal_open());
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('/')),
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('/')))
+        ));
+        EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
+        assert!(!state.fleet_panel_state.canonical_modal_open());
+
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('f')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Focus))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('x')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Codex))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('R')),
+            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('!')),
+            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill))
+        ));
+    }
+
+    #[test]
+    fn fleet_embedded_attach_uses_exact_target_without_fullscreen_async_action() {
+        if std::process::Command::new("tmux").arg("-V").status().is_err() {
+            eprintln!("SKIP: tmux unavailable");
+            return;
+        }
+        let _registry = crate::tmux::pty_wrapper::lock_registry_for_test();
+        let session = format!("ainb-fleet-embed-{}", uuid::Uuid::new_v4().simple());
+        struct SessionGuard(String);
+        impl Drop for SessionGuard {
+            fn drop(&mut self) {
+                let _ = std::process::Command::new("tmux")
+                    .args(["kill-session", "-t", &self.0])
+                    .status();
+            }
+        }
+        let guard = SessionGuard(session.clone());
+        let created = std::process::Command::new("tmux")
+            .args(["new-session", "-d", "-s", &session, "-n", "fleet"])
+            .status()
+            .expect("create exact-target test session");
+        assert!(created.success());
+        let split = std::process::Command::new("tmux")
+            .args(["split-window", "-d", "-t", &format!("{session}:fleet")])
+            .status()
+            .expect("create second pane");
+        assert!(split.success());
+        let panes = std::process::Command::new("tmux")
+            .args([
+                "list-panes",
+                "-t",
+                &format!("{session}:fleet"),
+                "-F",
+                "#{pane_index}",
+            ])
+            .output()
+            .expect("list exact-target panes");
+        let pane = String::from_utf8_lossy(&panes.stdout)
+            .lines()
+            .last()
+            .expect("second pane index")
+            .to_string();
+        let target = format!("{session}:fleet.{pane}");
+
+        let mut state = AppState::default();
+        state.current_screen = ids::FLEET_PANEL.to_string();
+        EventHandler::dispatch_fleet_intent(
+            &mut state,
+            FleetIntent::AttachEmbedded {
+                session_key: "codex:thread-1".into(),
+                tmux_target: target.clone(),
+            },
+        );
+
+        assert!(state.embed.is_some(), "embedded client must be live");
+        assert_eq!(state.embed_session.as_deref(), Some(target.as_str()));
+        assert_eq!(state.focused_pane, crate::app::state::FocusedPane::Preview);
+        assert!(
+            state.pending_async_action.is_none(),
+            "embedded attach must not route through fullscreen AttachHandler"
+        );
+        let active = std::process::Command::new("tmux")
+            .args(["display-message", "-p", "-t", &target, "#{pane_active}"])
+            .output()
+            .expect("read exact pane state");
+        assert_eq!(String::from_utf8_lossy(&active.stdout).trim(), "1");
+
+        state.release_interactive_pane();
+        drop(guard);
+    }
+
     /// Learnings (memory) is a plugin screen — Esc on it resolves to
     /// `PanelBack` (and to the plugin's `ui.close_request` at its root
     /// view), so it must save its origin on entry like stats/skills/
@@ -9295,6 +9713,35 @@ mod slash_command_dispatch_tests {
         assert!(
             EventHandler::slash_command_event("definitely-not-a-command").is_none(),
             "unknown slash commands must not map to an event"
+        );
+    }
+}
+
+#[cfg(test)]
+mod fleet_offline_action_tests {
+    use super::*;
+
+    #[test]
+    fn offline_daemon_refuses_high_risk_action_before_dispatch() {
+        let mut state = AppState::default();
+        assert!(!state.fleet_panel_state.daemon_online());
+
+        EventHandler::dispatch_fleet_intent(
+            &mut state,
+            FleetIntent::Execute {
+                session_key: "codex:thread-1".into(),
+                expected_version: 4,
+                action: FleetAction::Kill,
+            },
+        );
+
+        assert!(state.pending_async_action.is_none());
+        assert!(
+            state
+                .fleet_panel_state
+                .canonical
+                .feedback()
+                .is_some_and(|message| message.contains("high-risk action disabled"))
         );
     }
 }

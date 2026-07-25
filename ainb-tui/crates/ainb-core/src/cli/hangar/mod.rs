@@ -404,6 +404,79 @@ pub enum AgentCommand {
     Archive(AgentArchiveArgs),
     /// Un-archive an agent (restore it to the active picker).
     Unarchive(AgentArchiveArgs),
+    /// Set an agent's invocation permission mode (gap #8: `private`/`public_to`).
+    Permission(AgentPermissionArgs),
+    /// Manage an agent's invocation allow-list (add/revoke/list a target).
+    Allow(AgentAllowArgs),
+    /// Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`).
+    CanInvoke(AgentCanInvokeArgs),
+}
+
+/// Arguments for `hangar agent permission`.
+#[derive(Args, Debug)]
+pub struct AgentPermissionArgs {
+    /// Agent id (ULID) to set the permission mode on.
+    pub id: String,
+    /// The new mode: `private` (owner-only, deny-by-default) or `public_to` (the
+    /// allow-list decides).
+    #[arg(long)]
+    pub mode: String,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar agent allow`.
+///
+/// Adds (or, with `--revoke`, removes) one invocation-target row, or lists the
+/// current allow-list with `--list`. Exactly one target flag (`--workspace` /
+/// `--member` / `--team`) is required unless `--list` is given. Adding a target
+/// implies `permission_mode=public_to` (mirroring multica's "share ⇒ public_to").
+#[derive(Args, Debug)]
+pub struct AgentAllowArgs {
+    /// Agent id (ULID) whose allow-list to manage.
+    pub id: String,
+    /// Grant/revoke the WHOLE workspace (a workspace target). Mutually exclusive
+    /// with `--member` / `--team`.
+    #[arg(long, conflicts_with_all = ["member", "team"])]
+    pub workspace: bool,
+    /// Grant/revoke a specific member (a user id or email). Mutually exclusive with
+    /// `--workspace` / `--team`.
+    #[arg(long, conflicts_with_all = ["workspace", "team"])]
+    pub member: Option<String>,
+    /// Grant/revoke a reserved team target (inert in V1). Mutually exclusive with
+    /// `--workspace` / `--member`.
+    #[arg(long, conflicts_with_all = ["workspace", "member"])]
+    pub team: Option<String>,
+    /// Remove the named target instead of adding it.
+    #[arg(long)]
+    pub revoke: bool,
+    /// Print the current allow-list (ignores the target flags).
+    #[arg(long)]
+    pub list: bool,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace_slug: Option<String>,
+}
+
+/// Arguments for `hangar agent can-invoke`.
+#[derive(Args, Debug)]
+pub struct AgentCanInvokeArgs {
+    /// Agent id (ULID) to test invocation on.
+    pub id: String,
+    /// The invoking user id or email to judge the run by.
+    #[arg(long = "as")]
+    pub as_user: String,
+    /// Treat the invoker as an `agent` actor (no resolved originator) rather than a
+    /// `member`. Exercises the A2A / workspaceBroad path.
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar agent create`.
@@ -420,6 +493,9 @@ pub struct AgentCreateArgs {
     /// Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`.
     #[arg(long)]
     pub provider: Option<String>,
+    /// Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`).
+    #[arg(long)]
+    pub model: Option<String>,
     /// Optional instructions / system prompt for the agent.
     #[arg(long)]
     pub instructions: Option<String>,
@@ -530,6 +606,8 @@ pub struct AgentArchiveArgs {
 /// owner is rejected.
 #[derive(Subcommand, Debug)]
 pub enum MemberCommand {
+    /// Add a human member (find-or-create the user by email, then join).
+    Add(MemberAddArgs),
     /// List the workspace's members (email + role).
     List(MemberListArgs),
     /// Change a member's role (`owner` / `admin` / `member`).
@@ -537,6 +615,21 @@ pub enum MemberCommand {
     SetRole(MemberSetRoleArgs),
     /// Remove a member from the workspace (the user row survives).
     Remove(MemberRemoveArgs),
+}
+
+/// Arguments for `hangar member add`.
+#[derive(Args, Debug)]
+pub struct MemberAddArgs {
+    /// The member's email (find-or-create the user by this address).
+    #[arg(long)]
+    pub email: String,
+    /// The role to grant: `owner`, `admin`, or `member` (default `member`).
+    #[arg(long, value_enum, default_value_t = MemberRoleArg::Member)]
+    pub role: MemberRoleArg,
+    /// Workspace slug to add the member to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar member list`.
@@ -1075,6 +1168,18 @@ pub struct IssueCreateArgs {
     /// is a separate concern; create just records the labels it is handed.
     #[arg(long = "label", action = clap::ArgAction::Append)]
     pub labels: Vec<String>,
+    /// An acceptance criterion (repeatable: `--acceptance "x" --acceptance "y"`).
+    ///
+    /// Persisted as the issue's ordered acceptance-criteria list (migration 0048,
+    /// multica parity); rendered on the detail card's `Acceptance:` block.
+    #[arg(long = "acceptance", action = clap::ArgAction::Append)]
+    pub acceptance_criteria: Vec<String>,
+    /// A context reference — URL / `owner/repo#123` / note (repeatable).
+    ///
+    /// Persisted as the issue's ordered context-reference list (migration 0048,
+    /// multica parity); rendered on the detail card's `Context:` block.
+    #[arg(long = "context-ref", action = clap::ArgAction::Append)]
+    pub context_refs: Vec<String>,
     /// The repo the run executes in: an absolute checkout path, the literal
     /// `scratch`, or a REMOTE (`owner/repo`, a full URL, or `git@…`) — a remote
     /// is cloned once into the shared clone cache and the local path persisted,
@@ -1089,6 +1194,12 @@ pub struct IssueCreateArgs {
     /// issue for later PR automation.
     #[arg(long = "target-branch")]
     pub target_branch: Option<String>,
+    /// Make this a SUB-ISSUE of an existing issue (`issue.id`, migration 0046).
+    ///
+    /// The parent must exist in the same workspace; completing the last child of
+    /// the lowest unfinished stage cascades a roll-up comment onto the parent.
+    #[arg(long)]
+    pub parent: Option<String>,
 }
 
 /// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
@@ -1792,7 +1903,156 @@ async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
         AgentCommand::Edit(args) => run_agent_edit(&store, args).await,
         AgentCommand::Archive(args) => run_agent_set_archived(&store, args, true).await,
         AgentCommand::Unarchive(args) => run_agent_set_archived(&store, args, false).await,
+        AgentCommand::Permission(args) => run_agent_permission(&store, args).await,
+        AgentCommand::Allow(args) => run_agent_allow(&store, args).await,
+        AgentCommand::CanInvoke(args) => run_agent_can_invoke(&store, args).await,
     }
+}
+
+/// Resolve a `user_id_or_email` to a `user.id`: an `@`-bearing token is looked up
+/// in the `user` table (email is UNIQUE); anything else is treated as a ULID id
+/// verbatim. Errors when an email names no user.
+async fn resolve_user_id(store: &Store, token: &str) -> Result<String> {
+    let token = token.trim();
+    if token.contains('@') {
+        let id: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+            .bind(token)
+            .fetch_optional(store.pool())
+            .await
+            .context("look up user by email")?;
+        id.with_context(|| format!("no user with email {token}"))
+    } else {
+        Ok(token.to_string())
+    }
+}
+
+/// Fetch an agent by id, erroring when it does not exist.
+async fn require_agent(store: &Store, id: &str) -> Result<ainb_hangar_store::repo::agent::Agent> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    AgentRepo::get(store.pool(), id)
+        .await
+        .context("look up agent")?
+        .with_context(|| format!("no agent with id {id}"))
+}
+
+/// `hangar agent permission`: set the invocation permission mode + re-derive the
+/// legacy visibility label. Prints the new mode and derived visibility.
+async fn run_agent_permission(store: &Store, args: AgentPermissionArgs) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let mode = args.mode.trim();
+    if mode != "private" && mode != "public_to" {
+        anyhow::bail!("mode must be `private` or `public_to`, got `{mode}`");
+    }
+    let touched = AgentRepo::set_permission_mode(store.pool(), &args.id, mode)
+        .await
+        .with_context(|| format!("set permission mode for agent {}", args.id))?;
+    if !touched {
+        anyhow::bail!("no agent with id {}", args.id);
+    }
+    let agent = require_agent(store, &args.id).await?;
+    println!(
+        "agent {} permission_mode={} visibility={}",
+        args.id, agent.permission_mode, agent.visibility
+    );
+    Ok(())
+}
+
+/// `hangar agent allow`: add / revoke / list one invocation target. Adding a
+/// target flips the agent to `public_to` (so the grant actually takes effect).
+async fn run_agent_allow(store: &Store, args: AgentAllowArgs) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+    use ainb_hangar_store::repo::agent_invocation_target::AgentInvocationTargetRepo;
+
+    let agent = require_agent(store, &args.id).await?;
+
+    if args.list {
+        let targets = AgentInvocationTargetRepo::list(store.pool(), &args.id)
+            .await
+            .context("list invocation targets")?;
+        if targets.is_empty() {
+            println!("agent {} has no invocation targets", args.id);
+        } else {
+            for t in targets {
+                println!("{}|{}", t.target_type, t.target_id);
+            }
+        }
+        return Ok(());
+    }
+
+    // Resolve the (target_type, target_id) from the exactly-one target flag.
+    let (target_type, target_id): (&str, String) = if args.workspace {
+        ("workspace", agent.workspace_id.clone())
+    } else if let Some(member) = args.member.as_deref() {
+        ("member", resolve_user_id(store, member).await?)
+    } else if let Some(team) = args.team.as_deref() {
+        ("team", team.to_string())
+    } else {
+        anyhow::bail!(
+            "pass exactly one of --workspace / --member <id|email> / --team <id> (or --list)"
+        );
+    };
+
+    if args.revoke {
+        let removed =
+            AgentInvocationTargetRepo::remove(store.pool(), &args.id, target_type, &target_id)
+                .await
+                .context("remove invocation target")?;
+        if removed {
+            println!("revoked {target_type}|{target_id} from agent {}", args.id);
+        } else {
+            println!("agent {} had no {target_type}|{target_id} target", args.id);
+        }
+        return Ok(());
+    }
+
+    // Adding a target only matters when the agent is public_to — flip it if needed
+    // (mirrors multica's "share ⇒ public_to").
+    if agent.permission_mode != "public_to" {
+        AgentRepo::set_permission_mode(store.pool(), &args.id, "public_to")
+            .await
+            .context("flip agent to public_to")?;
+    }
+    AgentInvocationTargetRepo::add(
+        store.pool(),
+        &ainb_hangar_core::idgen::SystemIdGen,
+        &ainb_hangar_core::clock::SystemClock,
+        &args.id,
+        target_type,
+        &target_id,
+        None,
+    )
+    .await
+    .context("add invocation target")?;
+    println!("allowed {target_type}|{target_id} on agent {}", args.id);
+    Ok(())
+}
+
+/// `hangar agent can-invoke`: print exactly `ALLOW` or `DENY` (exit 0 either way).
+/// The deterministic readout the acceptance greps.
+async fn run_agent_can_invoke(store: &Store, args: AgentCanInvokeArgs) -> Result<()> {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let agent = require_agent(store, &args.id).await?;
+    // An `--actor agent` invoke carries NO resolved originator (hangar has no
+    // originator column yet), so the user id is dropped for the agent-actor case —
+    // exactly the unattributed A2A path the gate fails closed against for
+    // member/team targets. A `member` actor resolves the id.
+    let is_agent_actor = args.actor.as_deref().map(str::trim) == Some("agent");
+    let (kind, user_id) = if is_agent_actor {
+        (ActorKind::Agent, None)
+    } else {
+        (
+            ActorKind::Member,
+            Some(resolve_user_id(store, &args.as_user).await?),
+        )
+    };
+    let allowed = AgentRepo::can_invoke(store.pool(), &agent, kind, user_id.as_deref())
+        .await
+        .context("evaluate can_invoke")?;
+    println!("{}", if allowed { "ALLOW" } else { "DENY" });
+    Ok(())
 }
 
 /// `hangar agent create`: create one agent from scratch, filling the workspace /
@@ -1826,6 +2086,23 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
     )
     .await
     .context("create agent")?;
+    // Optional model override: mirror the daemon's create-time follow-up so the
+    // CLI create path persists the model too. A blank value is treated as absent
+    // (leaves `model` NULL rather than writing an empty string).
+    if let Some(model) = args.model.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        let update = ainb_hangar_store::repo::agent::AgentConfigUpdate {
+            model: Some(Some(model.to_string())),
+            ..Default::default()
+        };
+        ainb_hangar_store::repo::agent::AgentRepo::update_config(
+            store.pool(),
+            &workspace_id,
+            &agent.id,
+            &update,
+        )
+        .await
+        .context("apply agent model override")?;
+    }
     println!("created agent {}", agent.name);
     Ok(())
 }
@@ -1952,10 +2229,30 @@ fn clear_or_set<T>(clear: bool, value: Option<T>) -> Option<Option<T>> {
 async fn dispatch_member(cmd: MemberCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
+        MemberCommand::Add(args) => run_member_add(&store, args).await,
         MemberCommand::List(args) => run_member_list(&store, args, format).await,
         MemberCommand::SetRole(args) => run_member_set_role(&store, args).await,
         MemberCommand::Remove(args) => run_member_remove(&store, args).await,
     }
+}
+
+/// `hangar member add`: find-or-create the user by email, then join the member
+/// to the workspace. Mirrors [`run_member_set_role`] (talks to the store
+/// directly, not the daemon). Prints the minted/reused user id, email, and role.
+async fn run_member_add(store: &Store, args: MemberAddArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::member::MemberRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let member = MemberRepo::add(store.pool(), &ws, &args.email, args.role.to_repo())
+        .await
+        .map_err(member_cli_err)?;
+    println!(
+        "added member {} ({}) as {}",
+        member.user_id, member.email, member.role
+    );
+    Ok(())
 }
 
 /// `hangar member list`: list the workspace's members (email + role).
@@ -2033,6 +2330,10 @@ fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow
         MemberRepoError::LastOwner => {
             anyhow::anyhow!("a workspace must always keep at least one owner")
         }
+        MemberRepoError::AlreadyMember => {
+            anyhow::anyhow!("that user is already a member of this workspace")
+        }
+        MemberRepoError::EmptyEmail => anyhow::anyhow!("email must not be empty"),
         other => anyhow::Error::new(other).context("member mutation failed"),
     }
 }
@@ -2148,6 +2449,11 @@ fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) 
         WorkspaceRepoError::BadWhitelist { detail } => {
             anyhow::anyhow!("invalid repo whitelist: {detail}")
         }
+        WorkspaceRepoError::BadSlug { detail } => anyhow::anyhow!("invalid slug: {detail}"),
+        WorkspaceRepoError::SlugTaken => {
+            anyhow::anyhow!("a workspace with that slug already exists")
+        }
+        WorkspaceRepoError::LastWorkspace => anyhow::anyhow!("cannot delete the last workspace"),
         db @ WorkspaceRepoError::Db(_) => {
             anyhow::Error::new(db).context("workspace config mutation failed")
         }
@@ -2784,15 +3090,13 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
 
     // Map the present flags onto the partial edit. The two nullable fields use
-    // the clear-flag to distinguish "clear to none" from "leave unchanged".
+    // the clear-flag to distinguish "clear to none" from "leave unchanged". The
+    // assign token is polymorphic: `member:<id>`/`agent:<id>`, or a bare id
+    // (back-compat: a bare id is an agent).
     let assignee = if args.unassign {
         Some(None)
     } else {
-        args.assign
-            .as_deref()
-            .map(|id| ActorRef::new(ActorKind::Agent, id).context("assignee agent id was empty"))
-            .transpose()?
-            .map(Some)
+        args.assign.as_deref().map(parse_assignee).transpose()?.map(Some)
     };
     let due_date = if args.clear_due {
         Some(None)
@@ -2816,6 +3120,19 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         );
     }
 
+    // 0046: capture the pre-update state so a `--state done/cancelled` edit that
+    // completes a sub-issue can fire the child-done → parent cascade below. Read
+    // only when a state edit is requested (the cascade only fires on a transition).
+    let prev_state: Option<String> = if update.state.is_some() {
+        IssueRepo::get_by_id(store.pool(), &args.id)
+            .await
+            .with_context(|| format!("read issue {} before update", args.id))?
+            .filter(|i| i.workspace_id == workspace_id)
+            .map(|i| i.state)
+    } else {
+        None
+    };
+
     let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
         .await
         .with_context(|| format!("update issue {}", args.id))?;
@@ -2824,20 +3141,67 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     }
     println!("updated issue {}", args.id);
 
+    // 0046: a CLI-driven completion also posts the parent roll-up comment, so
+    // CLI and TUI behaviour stay aligned (the CLI has no daemon, so there is no
+    // agent wake — the comment is the observable side). Best-effort: a cascade
+    // fault must not fail an already-committed state edit.
+    if let (Some(prev), Some(new_state)) = (prev_state.as_deref(), update.state.as_deref()) {
+        let idgen = SystemIdGen;
+        let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+        match ainb_hangar_store::service::child_done::cascade_child_done(
+            store.pool(),
+            &workspace_id,
+            &args.id,
+            prev,
+            new_state,
+            now,
+            idgen.new_ulid(),
+        )
+        .await
+        {
+            Ok(Some(c)) => println!(
+                "posted sub-issue roll-up on parent {} ({}/{})",
+                c.parent_id, c.children_done, c.children_total
+            ),
+            Ok(None) => {}
+            Err(e) => eprintln!("warning: child-done cascade skipped: {e}"),
+        }
+    }
+
     // In-product recovery from a dead end: a post-creation assignment that names an
     // AGENT re-dispatches the issue, mirroring the create-time enqueue. Without
     // this an issue stuck in `agent_error` (terminal, non-retryable) had no
     // in-product path back to work short of filing a brand-new issue. The task
     // reads the issue card's persisted repo/branch/agent, and the one-active-run
     // guard means a re-assign while a run is in flight never double-dispatches.
-    if let Some(agent_id) = args.assign.as_deref() {
-        if let Some(task_id) =
-            enqueue_assigned_task(store.pool(), &workspace_id, &args.id, agent_id).await?
-        {
-            println!("queued task {task_id}");
+    // Only an AGENT assignee dispatches a run — a member assignee just commits
+    // (agents-are-team-members symmetry: same column, but a human does no work).
+    if let Some(raw) = args.assign.as_deref() {
+        let assignee = parse_assignee(raw)?;
+        if assignee.kind() == ActorKind::Agent {
+            if let Some(task_id) =
+                enqueue_assigned_task(store.pool(), &workspace_id, &args.id, assignee.id()).await?
+            {
+                println!("queued task {task_id}");
+            }
         }
     }
     Ok(())
+}
+
+/// Parse a CLI `--assign` token into a polymorphic [`ActorRef`].
+///
+/// A token containing `:` is parsed as the canonical `member:<id>`/`agent:<id>`
+/// form. A bare token (no `:`) stays an **agent** for back-compat, so every
+/// existing script and tripwire that passes a raw agent id is byte-unchanged.
+fn parse_assignee(raw: &str) -> Result<ActorRef> {
+    if raw.contains(':') {
+        raw.parse::<ActorRef>().with_context(|| {
+            format!("invalid assignee `{raw}` (expected member:<id> or agent:<id>)")
+        })
+    } else {
+        ActorRef::new(ActorKind::Agent, raw).context("assignee agent id was empty")
+    }
 }
 
 /// Enqueue one `queued` task for `agent_id` on `issue_id`, mirroring the daemon's
@@ -2958,14 +3322,34 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     let creator = ActorRef::new(ActorKind::Member, DEFAULT_CREATOR_ID)
         .expect("default creator id is non-empty");
 
-    // Resolve the assignee (if any): the agent must exist in the workspace; its
-    // runtime is the queue the task lands on. Resolved BEFORE the issue insert so
-    // a bad agent id fails before any write.
-    let assignment = match args.assign.as_deref() {
-        Some(agent_id) => Some(resolve_agent_runtime(pool, &workspace_id, agent_id).await?),
-        None => None,
+    // Resolve the assignee (if any). The token is polymorphic: an AGENT
+    // (`agent:<id>` or a bare id) must exist in the workspace and its runtime is
+    // the queue the task lands on — resolved BEFORE the issue insert so a bad
+    // agent id fails before any write. A MEMBER (`member:<id>`) is stored as-is
+    // and enqueues NO task (agents-are-team-members symmetry: a human does no
+    // work).
+    let parsed_assignee = args.assign.as_deref().map(parse_assignee).transpose()?;
+    let (assignment, member_assignee) = match parsed_assignee {
+        Some(actor) if actor.kind() == ActorKind::Agent => (
+            Some(resolve_agent_runtime(pool, &workspace_id, actor.id()).await?),
+            None,
+        ),
+        Some(actor) => (None, Some(actor)),
+        None => (None, None),
     };
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&clock);
+
+    // 0046: an optional parent makes this a sub-issue. Validate it resolves in the
+    // same workspace BEFORE the insert (mirrors the assignee-resolve contract) — a
+    // foreign / unknown parent is a hard error, never a silent cross-tenant link.
+    let parent_issue_id = args.parent.as_deref().map(str::trim).filter(|s| !s.is_empty());
+    if let Some(parent) = parent_issue_id {
+        let ok = IssueRepo::get_by_id(pool, parent)
+            .await
+            .context("resolve parent issue")?
+            .is_some_and(|p| p.workspace_id == workspace_id);
+        anyhow::ensure!(ok, "parent issue `{parent}` not found in this workspace");
+    }
 
     // e38.21: apply the workspace's issue_prefix to the new title so the prefix
     // actually takes effect on a created issue. An unconfigured workspace leaves
@@ -2985,12 +3369,30 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         state: args.state,
         assignee: assignment
             .as_ref()
-            .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty")),
+            .map(|a| ActorRef::new(ActorKind::Agent, &a.agent_id).expect("agent id non-empty"))
+            .or_else(|| member_assignee.clone()),
         creator,
         created_at: now,
         priority: args.priority,
         due_date: args.due,
         labels: args.labels.clone(),
+        // 0048: trim-drop blank elements — an empty criterion / ref is not data.
+        acceptance_criteria: args
+            .acceptance_criteria
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        context_refs: args
+            .context_refs
+            .iter()
+            .map(|s| s.trim())
+            .filter(|s| !s.is_empty())
+            .map(ToString::to_string)
+            .collect(),
+        parent_issue_id: parent_issue_id.map(ToString::to_string),
+        stage: None,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
 
@@ -4198,8 +4600,11 @@ fn issue_line(i: &Issue) -> String {
     } else {
         format!("  labels={}", i.labels.join(","))
     };
+    // The assignee's canonical `member:<id>`/`agent:<id>` form surfaces the actor
+    // KIND (a human member vs an agent), shown only when the issue is assigned.
+    let assignee = i.assignee.as_ref().map_or_else(String::new, |a| format!("  assignee={a}"));
     format!(
-        "{}  [{}]  priority={}  {}{due}{labels}",
+        "{}  [{}]  priority={}  {}{assignee}{due}{labels}",
         i.id, i.state, i.priority, i.title
     )
 }
@@ -4209,13 +4614,22 @@ fn issue_line(i: &Issue) -> String {
 fn issue_to_json(i: &Issue) -> String {
     let desc = i.description.as_deref().map_or_else(|| "null".to_string(), json_string);
     let due = i.due_date.map_or_else(|| "null".to_string(), |d| d.to_string());
+    // Assignee + creator render as their canonical `member:<id>`/`agent:<id>`
+    // string (the polymorphic actor kind), `null` when the issue is unassigned.
+    let assignee = i
+        .assignee
+        .as_ref()
+        .map_or_else(|| "null".to_string(), |a| json_string(&a.to_string()));
+    let creator = json_string(&i.creator.to_string());
     format!(
-        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"created_at\":{},\"priority\":{},\"due_date\":{},\"labels\":{}}}",
+        "{{\"id\":{},\"workspace_id\":{},\"title\":{},\"description\":{},\"state\":{},\"assignee\":{},\"creator\":{},\"created_at\":{},\"priority\":{},\"due_date\":{},\"labels\":{}}}",
         json_string(&i.id),
         json_string(&i.workspace_id),
         json_string(&i.title),
         desc,
         json_string(&i.state),
+        assignee,
+        creator,
         i.created_at,
         i.priority,
         due,
@@ -4881,16 +5295,18 @@ fn md_cell(s: &str) -> String {
 }
 
 const fn issue_csv_header() -> &'static str {
-    "id,state,title,description,created_at,priority,due_date,labels"
+    "id,state,title,description,assignee,created_at,priority,due_date,labels"
 }
 fn issue_csv_row(i: &Issue) -> String {
     let due = i.due_date.map_or_else(String::new, |d| d.to_string());
+    let assignee = i.assignee.as_ref().map(ToString::to_string).unwrap_or_default();
     format!(
-        "{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{}",
         csv_field(&i.id),
         csv_field(&i.state),
         csv_field(&i.title),
         csv_field(i.description.as_deref().unwrap_or("")),
+        csv_field(&assignee),
         i.created_at,
         i.priority,
         csv_field(&due),
@@ -4898,17 +5314,19 @@ fn issue_csv_row(i: &Issue) -> String {
     )
 }
 const fn issue_md_header() -> &'static str {
-    "| id | state | title | description | priority | due_date | labels |\n\
-     | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| id | state | title | description | assignee | priority | due_date | labels |\n\
+     | --- | --- | --- | --- | --- | --- | --- | --- |\n"
 }
 fn issue_md_row(i: &Issue) -> String {
     let due = i.due_date.map_or_else(String::new, |d| d.to_string());
+    let assignee = i.assignee.as_ref().map(ToString::to_string).unwrap_or_default();
     format!(
-        "| {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} | {} |",
         md_cell(&i.id),
         md_cell(&i.state),
         md_cell(&i.title),
         md_cell(i.description.as_deref().unwrap_or("")),
+        md_cell(&assignee),
         i.priority,
         md_cell(&due),
         md_cell(&i.labels.join(" ")),
@@ -5207,6 +5625,54 @@ mod tests {
     }
 
     #[test]
+    fn parses_issue_create_acceptance_and_context_refs() {
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Ship gap 11",
+            "--acceptance",
+            "cargo build is green",
+            "--acceptance",
+            "detail card shows criteria",
+            "--context-ref",
+            "acme/api#42",
+        ]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert_eq!(
+            args.acceptance_criteria,
+            vec![
+                "cargo build is green".to_string(),
+                "detail card shows criteria".to_string()
+            ],
+            "--acceptance is repeatable and order-preserving"
+        );
+        assert_eq!(
+            args.context_refs,
+            vec!["acme/api#42".to_string()],
+            "--context-ref is repeatable and order-preserving"
+        );
+
+        // Omitted -> both lists empty.
+        let cmd = parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "Plain"]);
+        let HangarCommand::Issue(IssueCommand::Create(args)) = cmd else {
+            panic!("expected issue create, got {cmd:?}");
+        };
+        assert!(
+            args.acceptance_criteria.is_empty(),
+            "no --acceptance means no criteria"
+        );
+        assert!(
+            args.context_refs.is_empty(),
+            "no --context-ref means no context refs"
+        );
+    }
+
+    #[test]
     fn issue_create_rejects_malformed_due_date() {
         let registry = CommandRegistry::built_ins();
         let app = registry.build_clap(crate::cli::root_clap_command());
@@ -5381,6 +5847,142 @@ mod tests {
             task_agent, agent.id,
             "the task routes to the assigned agent"
         );
+    }
+
+    /// `parse_assignee` is polymorphic: a `member:`/`agent:` token keeps its
+    /// kind, a bare id stays an agent (back-compat). Mutation-provable: flip the
+    /// bare-id branch to Member and the last two assertions go red.
+    #[test]
+    fn parse_assignee_is_polymorphic_bare_id_is_agent() {
+        let m = parse_assignee("member:u-1").expect("member ref");
+        assert_eq!(m.kind(), ActorKind::Member);
+        assert_eq!(m.id(), "u-1");
+        let a = parse_assignee("agent:a-1").expect("agent ref");
+        assert_eq!(a.kind(), ActorKind::Agent);
+        assert_eq!(a.id(), "a-1");
+        // Back-compat: a bare id is an agent, unchanged from before.
+        let bare = parse_assignee("a-1").expect("bare id");
+        assert_eq!(bare.kind(), ActorKind::Agent);
+        assert_eq!(bare.id(), "a-1");
+    }
+
+    /// `issue create --assign member:<id>` persists `(member, id)` on the issue
+    /// AND enqueues NO agent task — a human assignee does no work.
+    ///
+    /// Mutation-provable: if the create path silently coerced the member into an
+    /// agent, the assignee kind would read `agent` (first assert) and a task row
+    /// would appear (last assert). Both would go red.
+    #[tokio::test]
+    async fn issue_create_assign_member_persists_and_enqueues_no_task() {
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::member::{MemberRepo, MemberRole};
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws_id = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        let ws = WorkspaceId::from_str(ws_id.clone()).unwrap();
+        let member = MemberRepo::add(store.pool(), &ws, "dana@example.com", MemberRole::Member)
+            .await
+            .expect("add member");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "human task",
+            "--assign",
+            &format!("member:{}", member.user_id),
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let issue = IssueRepo::list_by_workspace_state(store.pool(), &ws_id, DEFAULT_ISSUE_STATE)
+            .await
+            .expect("list issues")
+            .into_iter()
+            .find(|i| i.title == "human task")
+            .expect("created issue present");
+        let assignee = issue.assignee.as_ref().expect("member issue is assigned");
+        assert_eq!(assignee.kind(), ActorKind::Member, "stored as a MEMBER");
+        assert_eq!(assignee.id(), member.user_id, "the member's user id");
+
+        let tasks: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .expect("count tasks");
+        assert_eq!(tasks, 0, "a member assignee enqueues NO agent task");
+
+        // And the read surface shows the polymorphic kind.
+        assert!(
+            issue_to_json(&issue).contains(&format!("\"assignee\":\"member:{}\"", member.user_id)),
+            "json surfaces the member actor-ref"
+        );
+        assert!(
+            issue_line(&issue).contains(&format!("assignee=member:{}", member.user_id)),
+            "text line surfaces the member actor-ref"
+        );
+    }
+
+    /// `issue create --assign agent:<id>` persists `(agent, id)` AND enqueues one
+    /// task — the symmetric agent path still dispatches a run.
+    ///
+    /// Mutation-provable pair to the member test above: this asserts the task IS
+    /// enqueued for an agent, so a change that skipped agent enqueue goes red.
+    #[tokio::test]
+    async fn issue_create_assign_agent_persists_and_enqueues_task() {
+        use ainb_hangar_store::bootstrap;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        bootstrap::ensure_runtime(store.pool(), &bootstrap::default_runtime_id(), 1)
+            .await
+            .expect("ensure runtime");
+        let agent = bootstrap::create_agent(store.pool(), &ws, "robot", "claude", None)
+            .await
+            .expect("create agent");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "robot task",
+            "--repo",
+            "scratch",
+            "--assign",
+            &format!("agent:{}", agent.id),
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let issue = IssueRepo::list_by_workspace_state(store.pool(), &ws, DEFAULT_ISSUE_STATE)
+            .await
+            .expect("list issues")
+            .into_iter()
+            .find(|i| i.title == "robot task")
+            .expect("created issue present");
+        let assignee = issue.assignee.as_ref().expect("agent issue is assigned");
+        assert_eq!(assignee.kind(), ActorKind::Agent, "stored as an AGENT");
+        assert_eq!(assignee.id(), agent.id);
+
+        let tasks: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE agent_id = ?")
+                .bind(&agent.id)
+                .fetch_one(store.pool())
+                .await
+                .expect("count tasks");
+        assert_eq!(tasks, 1, "an agent assignee enqueues exactly one run");
     }
 
     #[test]

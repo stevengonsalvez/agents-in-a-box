@@ -360,10 +360,18 @@ fn issue_list_all_four_formats_are_distinct() {
         json.trim_start().starts_with('['),
         "json not an array:\n{json}"
     );
-    assert!(
-        csv.contains("id,state,title,description,created_at"),
-        "csv header missing:\n{csv}"
-    );
+    // Assert the CSV header carries its core columns individually rather than
+    // as one contiguous run — parity work inserts columns (e.g. `assignee`
+    // between `description` and `created_at`), and a hardcoded substring drifts
+    // every time. A comma-delimited header line with these fields is enough to
+    // prove the CSV format is distinct and structured.
+    let csv_header = csv.lines().next().expect("csv should have a header line");
+    for col in ["id", "state", "title", "description", "created_at"] {
+        assert!(
+            csv_header.split(',').any(|c| c == col),
+            "csv header missing column `{col}`:\n{csv}"
+        );
+    }
     assert!(
         csv.contains("\"Wire, up payments\""),
         "csv must quote the comma-bearing title:\n{csv}"
@@ -420,6 +428,7 @@ fn seed_agent(home: &std::path::Path) {
                 runtime_id: "rt-1".into(),
                 instructions: None,
                 visibility: "workspace".into(),
+                permission_mode: "private".into(),
                 owner_id,
                 archived: false,
                 model: None,
@@ -1048,6 +1057,7 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 runtime_id: "assign-runtime".into(),
                 instructions: None,
                 visibility: "workspace".into(),
+                permission_mode: "private".into(),
                 owner_id: "assign-owner".into(),
                 archived: false,
                 model: None,

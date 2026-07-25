@@ -302,6 +302,11 @@ pub async fn create_agent(
         runtime_id,
         instructions,
         visibility: "workspace".to_string(),
+        // Deny-by-default invocation (migration 0047): a freshly created agent is
+        // private (owner-only) until explicitly shared via an invocation target.
+        // The owner-invoked TUI Run always passes the gate, so this is invisible to
+        // the single-operator path.
+        permission_mode: "private".to_string(),
         owner_id,
         archived: false,
         model: None,

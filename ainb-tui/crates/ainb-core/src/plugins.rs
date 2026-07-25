@@ -17,13 +17,100 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_store::repo::workspace::{WorkspaceRepo, WorkspaceRepoError, validate_slug};
+use ainb_plugin_protocol::errors::RpcError;
 use ainb_plugin_runtime::workspace_store::{
-    StateTomlWorkspaceStore, WorkspaceInfo, default_state_path,
+    StateTomlWorkspaceStore, WorkspaceCatalogueMutator, WorkspaceInfo, default_state_path,
 };
 use ainb_plugin_runtime::{Runtime, RuntimeError, RuntimeHandle};
 use tracing::{debug, info, warn};
 
 use crate::config::PluginsConfig;
+
+/// The production [`WorkspaceCatalogueMutator`]: create/delete workspaces in the
+/// Hangar `hangar.db` (P-multica#4).
+///
+/// The runtime layer can't touch sqlite (it doesn't depend on
+/// `ainb-hangar-store`), so it calls through this DI object. Each mutation opens
+/// `Store::open_default` and runs on a DEDICATED OS thread carrying its own
+/// current-thread runtime — the same nested-runtime dodge
+/// [`load_workspace_catalogue`] uses, because these methods are invoked from
+/// within the app's tokio runtime (the plugin task) where a naive `block_on`
+/// panics.
+struct SqliteWorkspaceMutator;
+
+/// Map a store [`WorkspaceRepoError`] to the JSON-RPC error the plugin sees:
+/// caller-input faults (bad/taken slug, unknown id, last workspace) are `-32602`;
+/// a genuine store fault is `-32603`.
+fn map_workspace_repo_err(e: &WorkspaceRepoError) -> RpcError {
+    match e {
+        WorkspaceRepoError::BadSlug { detail } => RpcError::invalid_params(detail.clone()),
+        WorkspaceRepoError::SlugTaken => {
+            RpcError::invalid_params("a workspace with that slug already exists")
+        }
+        WorkspaceRepoError::LastWorkspace => {
+            RpcError::invalid_params("cannot delete the last workspace")
+        }
+        WorkspaceRepoError::NotFound => RpcError::invalid_params("workspace not found"),
+        other => RpcError::internal(format!("workspace store error: {other}")),
+    }
+}
+
+/// Run `f` against a freshly-opened default `Store` on a dedicated OS thread with
+/// its own current-thread runtime (avoids the nested-runtime panic). Returns the
+/// closure's `Result`, or an internal error if the thread/runtime setup fails.
+fn block_on_store<F, Fut, T>(f: F) -> Result<T, RpcError>
+where
+    F: FnOnce(ainb_hangar_store::Store) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, RpcError>>,
+    T: Send + 'static,
+{
+    std::thread::spawn(move || {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|e| RpcError::internal(format!("workspace mutator runtime: {e}")))?;
+        rt.block_on(async move {
+            let store = ainb_hangar_store::Store::open_default()
+                .await
+                .map_err(|e| RpcError::internal(format!("open hangar store: {e}")))?;
+            f(store).await
+        })
+    })
+    .join()
+    .map_err(|_| RpcError::internal("workspace mutator thread panicked"))?
+}
+
+impl WorkspaceCatalogueMutator for SqliteWorkspaceMutator {
+    fn create(&self, slug: &str, name: &str) -> Result<WorkspaceInfo, RpcError> {
+        let slug = slug.to_string();
+        let name = name.to_string();
+        block_on_store(move |store| async move {
+            let validated = validate_slug(&slug).map_err(|e| map_workspace_repo_err(&e))?;
+            let row = WorkspaceRepo::create(store.pool(), &validated, &name, None)
+                .await
+                .map_err(|e| map_workspace_repo_err(&e))?;
+            Ok(WorkspaceInfo {
+                id: row.id,
+                slug: row.slug,
+                name: row.name,
+            })
+        })
+    }
+
+    fn delete(&self, id: &str) -> Result<(), RpcError> {
+        let id = id.to_string();
+        block_on_store(move |store| async move {
+            let wid = WorkspaceId::from_str(id)
+                .map_err(|e| RpcError::invalid_params(format!("invalid workspace id: {e}")))?;
+            WorkspaceRepo::delete(store.pool(), &wid)
+                .await
+                .map_err(|e| map_workspace_repo_err(&e))?;
+            Ok(())
+        })
+    }
+}
 
 /// Build the host workspace store for the `host/workspace_*` caps (P5.5),
 /// seeding its catalogue from the Hangar `workspace` table.
@@ -37,7 +124,10 @@ use crate::config::PluginsConfig;
 fn build_workspace_store() -> Arc<StateTomlWorkspaceStore> {
     let path = default_state_path().unwrap_or_else(|_| PathBuf::from("state.toml"));
     let catalogue = load_workspace_catalogue();
-    Arc::new(StateTomlWorkspaceStore::new(path, catalogue))
+    Arc::new(
+        StateTomlWorkspaceStore::new(path, catalogue)
+            .with_mutator(Arc::new(SqliteWorkspaceMutator)),
+    )
 }
 
 /// Read the workspace catalogue from the Hangar store DB.
