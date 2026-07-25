@@ -9276,28 +9276,30 @@ impl AppState {
         result
     }
 
-    /// Encode an absolute worktree path the same way Claude Code does for its
-    /// `~/.claude/projects/{encoded}/` transcript directory: every character
-    /// that is not ASCII-alphanumeric becomes `-`. The leading `/` therefore
-    /// yields the leading `-`.
-    ///
-    /// This matters for ainb worktrees, which live under the DOTTED
-    /// `~/.agents-in-a-box/…` path: `/.agents-in-a-box` must encode to
-    /// `--agents-in-a-box` (dot → dash), not `-.agents-in-a-box`. The old
-    /// `/`-only rule (mirroring the equally-buggy `find_transcript_path()` in
-    /// `ainb-toolkit utilities/utils/spawn-agent-lib.sh`) never matched the
-    /// real on-disk project dir, so Claude's resume-history probe always
-    /// returned None and `--continue` was silently dropped.
+    /// Encode an absolute worktree path the way Claude Code names its
+    /// `~/.claude/projects/{encoded}/` transcript directory: every UTF-16
+    /// code unit that is not ASCII-alphanumeric becomes `-` (Claude Code is
+    /// JS, so an astral char like an emoji yields TWO dashes). The leading
+    /// `/` yields the leading `-`; a dotted component like `.agents-in-a-box`
+    /// yields `--agents-in-a-box`. Paths whose encoding exceeds ~200 chars
+    /// may be truncated+hashed by Claude Code; not mirrored here (longest
+    /// observed on disk is 190, and the hash scheme is unverified).
     pub(crate) fn encode_claude_project_dir(worktree_path: &std::path::Path) -> String {
         worktree_path
             .to_string_lossy()
             .chars()
-            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .flat_map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    std::iter::repeat_n(c, 1)
+                } else {
+                    std::iter::repeat_n('-', c.len_utf16())
+                }
+            })
             .collect()
     }
 
     /// Find the most recently modified Claude transcript (`*.jsonl`) for the
-    /// given worktree under `~/.claude/projects/-{encoded}/`.
+    /// given worktree under `~/.claude/projects/{encoded}/`.
     ///
     /// Returns `None` when the project directory is missing or contains no
     /// transcripts.
@@ -9308,14 +9310,23 @@ impl AppState {
 
     /// Test-friendly variant: caller supplies the home directory so unit tests
     /// don't have to mutate process-wide environment.
+    ///
+    /// The worktree path is canonicalized first (falling back to the raw path
+    /// when it does not exist): Claude Code keys the project dir off the
+    /// PHYSICAL cwd, so a symlinked component (`/tmp` → `/private/tmp` on
+    /// macOS) would otherwise encode to a directory that never exists on disk
+    /// and silently drop `--continue`. Canonicalizing also normalizes a
+    /// trailing slash.
     pub(crate) fn find_latest_transcript_in(
         home: &std::path::Path,
         worktree_path: &std::path::Path,
     ) -> Option<std::path::PathBuf> {
+        let physical =
+            std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
         let project_dir = home
             .join(".claude")
             .join("projects")
-            .join(Self::encode_claude_project_dir(worktree_path));
+            .join(Self::encode_claude_project_dir(&physical));
 
         let read = std::fs::read_dir(&project_dir).ok()?;
         let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();

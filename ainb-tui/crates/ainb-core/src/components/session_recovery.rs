@@ -854,8 +854,15 @@ impl SessionRecoveryState {
         // cwd-scoped resume resolves to this worktree's latest session.
         // `has_history` gates Claude's `--continue` — no history → fresh launch,
         // avoiding a dead pane.
+        use crate::app::state::AppState;
         let has_history = agent_type == SessionAgentType::Claude
-            && crate::app::state::AppState::find_latest_transcript(&worktree.path).is_some();
+            && AppState::find_latest_transcript(&worktree.path).is_some();
+        if agent_type == SessionAgentType::Claude && !has_history {
+            tracing::info!(
+                worktree = %worktree.path.display(),
+                "no Claude transcript found for worktree; recovery launches a fresh session"
+            );
+        }
 
         let agent_cmd = match agent_type {
             SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Kiro => {
