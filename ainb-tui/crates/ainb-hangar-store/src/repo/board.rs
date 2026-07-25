@@ -723,21 +723,38 @@ impl BoardRepo {
             // both pass it. The guard means the loser's UPDATE matches 0 rows — so the
             // card lands in the target exactly once and only the winner records a
             // `moved` entry (no duplicate move event / ord churn).
-            let mut tx = pool.begin().await?;
-            let ord = Self::next_card_ord(&mut tx, &board_id, Some(&column_id)).await?;
+            //
+            // ONE statement, no transaction. This used to `BEGIN` (deferred), SELECT
+            // the next `ord`, then UPDATE — a read that takes a snapshot followed by
+            // an upgrade to a write. When any other daemon writer (the claim FSM, a
+            // sweeper, the attention ingest, the outbox drain) commits in that window,
+            // SQLite fails the upgrade with SQLITE_BUSY_SNAPSHOT (517). `busy_timeout`
+            // does NOT cover that: the busy handler is never invoked for a stale
+            // snapshot, the only valid response is rollback-and-retry. The caller
+            // treats a board write as best-effort and merely logs, so the card
+            // silently stayed in its old column FOREVER even though its task had
+            // finished — the ubuntu-only `board auto-move failed; proceeding …
+            // (code: 517) database is locked` seen in CI.
+            //
+            // Computing `ord` in a correlated subquery makes this a bare UPDATE,
+            // which takes the write lock immediately and has no snapshot to
+            // invalidate, so ordinary contention is covered by `busy_timeout`. The
+            // subquery is evaluated against the pre-update table and the row being
+            // moved is by definition not yet in the target column, so it appends at
+            // the end exactly as `next_card_ord` did.
             let res = sqlx::query(
-                "UPDATE board_card SET column_id = ?, ord = ? \
-                 WHERE board_id = ? AND issue_id = ? \
-                   AND (column_id IS NULL OR column_id <> ?)",
+                "UPDATE board_card \
+                    SET column_id = ?1, \
+                        ord = COALESCE((SELECT MAX(ord) + 1 FROM board_card \
+                                         WHERE board_id = ?2 AND column_id IS ?1), 0) \
+                  WHERE board_id = ?2 AND issue_id = ?3 \
+                    AND (column_id IS NULL OR column_id <> ?1)",
             )
             .bind(&column_id)
-            .bind(ord)
             .bind(&board_id)
             .bind(issue_id)
-            .bind(&column_id)
-            .execute(&mut *tx)
+            .execute(pool)
             .await?;
-            tx.commit().await?;
             if res.rows_affected() == 1 {
                 moved.push(AutoMoved {
                     board_id,
@@ -1191,6 +1208,115 @@ mod tests {
             .await
             .unwrap();
         assert!(off.is_empty(), "master toggle off suppresses auto-move");
+    }
+
+    /// The auto-move survives another writer committing underneath it.
+    ///
+    /// Regression for the ubuntu-only lost card move: the hook used to `BEGIN`
+    /// (deferred), SELECT the next `ord`, then UPDATE. That read takes a
+    /// snapshot, and any commit by another connection in the window makes the
+    /// upgrade fail with SQLITE_BUSY_SNAPSHOT (517) — which `busy_timeout` does
+    /// NOT retry. The daemon logs board writes best-effort, so the card silently
+    /// stayed in its old column forever even though its task had finished.
+    ///
+    /// Here a second connection holds an IMMEDIATE (write) transaction and
+    /// commits mid-flight, which is exactly that window. Against the old
+    /// read-then-upgrade implementation the call returns `Err(517)`; the
+    /// single-statement UPDATE simply waits on the lock and lands the move.
+    #[tokio::test]
+    async fn auto_move_survives_a_concurrent_writer() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true)
+            .await
+            .unwrap();
+        seed_issue(pool, "ws-a", "issue-1").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 10)
+            .await
+            .unwrap();
+
+        // A competing writer holds the write lock, then commits — the daemon's
+        // claim FSM / sweepers / attention ingest do exactly this all the time.
+        let blocker_pool = pool.clone();
+        let blocker = tokio::spawn(async move {
+            let mut conn = blocker_pool.acquire().await.unwrap();
+            sqlx::query("BEGIN IMMEDIATE").execute(&mut *conn).await.unwrap();
+            sqlx::query("UPDATE board SET name = 'churn' WHERE id = 'b1'")
+                .execute(&mut *conn)
+                .await
+                .unwrap();
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            sqlx::query("COMMIT").execute(&mut *conn).await.unwrap();
+        });
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+
+        let moved = BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "done")
+            .await
+            .expect("a contended auto-move must not surface a locked-database error");
+        blocker.await.unwrap();
+
+        assert_eq!(moved.len(), 1, "the card moved exactly once");
+        assert_eq!(moved[0].column_id, "c2");
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        assert_eq!(
+            b.cards[0].column_id.as_deref(),
+            Some("c2"),
+            "the card really lands in Done despite the concurrent writer"
+        );
+    }
+
+    /// The auto-move appends at the END of the target column, keeping the
+    /// `ord` semantics the pre-subquery implementation had.
+    #[tokio::test]
+    async fn auto_move_appends_after_existing_cards_in_the_target_column() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        BoardRepo::create(pool, &ws("ws-a"), "b1", "Sprint", 1).await.unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c1", "Todo", None, false)
+            .await
+            .unwrap();
+        BoardRepo::column_add(pool, &ws("ws-a"), "b1", "c2", "Done", Some("done"), true)
+            .await
+            .unwrap();
+        // Two cards already sitting in the target column.
+        for (i, id) in ["issue-a", "issue-b"].iter().enumerate() {
+            seed_issue(pool, "ws-a", id).await;
+            BoardRepo::card_add(pool, &ws("ws-a"), "b1", id, Some("c2"), 10 + i as i64)
+                .await
+                .unwrap();
+        }
+        seed_issue(pool, "ws-a", "issue-1").await;
+        BoardRepo::card_add(pool, &ws("ws-a"), "b1", "issue-1", Some("c1"), 12)
+            .await
+            .unwrap();
+
+        BoardRepo::auto_move_on_state(pool, &ws("ws-a"), "issue-1", "done")
+            .await
+            .unwrap();
+
+        let b = &BoardRepo::list(pool, &ws("ws-a")).await.unwrap()[0];
+        let moved = b.cards.iter().find(|c| c.issue_id == "issue-1").unwrap();
+        let others: Vec<i64> = b
+            .cards
+            .iter()
+            .filter(|c| c.column_id.as_deref() == Some("c2") && c.issue_id != "issue-1")
+            .map(|c| c.ord)
+            .collect();
+        assert_eq!(moved.column_id.as_deref(), Some("c2"));
+        assert!(
+            others.iter().all(|&o| moved.ord > o),
+            "the auto-moved card appends after the column's existing cards \
+             (moved ord {}, existing {others:?})",
+            moved.ord
+        );
     }
 
     /// Cross-tenant mutations are rejected (NotFound), never touching a row.
