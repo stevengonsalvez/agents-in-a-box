@@ -1016,6 +1016,15 @@ impl BurndownPlugin {
                 self.ui.set_period(UsagePeriod::SpecificQuarter(year, q));
             }
             KeyCode::Char { ch: 'a' } => self.ui.set_period(UsagePeriod::All),
+            // Activity owns Left/Right for cursor movement; these must precede
+            // the provider arms below, which are unguarded catch-alls. Provider
+            // switching stays reachable on this tab via `p`.
+            KeyCode::Left if self.ui.active_tab == crate::ui::UsageTab::Activity => {
+                self.ui.heatmap_move(-1, 0)
+            }
+            KeyCode::Right if self.ui.active_tab == crate::ui::UsageTab::Activity => {
+                self.ui.heatmap_move(1, 0)
+            }
             KeyCode::Left => self.ui.prev_provider(),
             KeyCode::Right => self.ui.next_provider(),
             KeyCode::Tab => self.ui.focus_next_panel(),
@@ -1055,6 +1064,17 @@ impl BurndownPlugin {
             // `[`/`]` focus table columns (handled above); when NOT zoomed
             // they cycle the outer UsageTab so every tab — including the
             // Savings observability card — is keyboard-reachable.
+            // ── Activity-tab heatmap navigation. Guarded on the active tab so
+            // these keys keep their existing meaning everywhere else.
+            KeyCode::Up if self.ui.active_tab == crate::ui::UsageTab::Activity => {
+                self.ui.heatmap_move(0, -1)
+            }
+            KeyCode::Down if self.ui.active_tab == crate::ui::UsageTab::Activity => {
+                self.ui.heatmap_move(0, 1)
+            }
+            KeyCode::Char { ch: 'M' } if self.ui.active_tab == crate::ui::UsageTab::Activity => {
+                self.ui.heatmap_cycle_metric()
+            }
             KeyCode::Char { ch: '[' } => self.ui.prev_tab(),
             KeyCode::Char { ch: ']' } => self.ui.next_tab(),
 
@@ -1065,6 +1085,12 @@ impl BurndownPlugin {
             KeyCode::Down if self.ui.is_zoomed() => self.ui.zoom_row_down(),
             KeyCode::Char { ch: 'j' } if self.ui.is_zoomed() && !self.ui.zoom_search_active => {
                 self.ui.zoom_row_down()
+            }
+            // On the Activity tab Enter pivots to the selected day rather than
+            // committing a table row — there are no rows on a heatmap.
+            KeyCode::Enter if self.ui.active_tab == crate::ui::UsageTab::Activity => {
+                self.ui.data = self.data.clone();
+                let _ = self.ui.heatmap_commit_day();
             }
             KeyCode::Enter => {
                 // `commit_focused_row` resolves the row through
@@ -1274,10 +1300,9 @@ mod handle_key_dispatch_tests {
         let mut p = BurndownPlugin::default();
         assert_eq!(p.ui.active_tab, UsageTab::Burndown, "starts on Burndown");
 
-        // `]` walks forward: Burndown → Daily → Weekly → Projects → Optimize → Savings.
+        // `]` walks forward: Burndown → Activity → Projects → Optimize → Savings.
         for expect in [
-            UsageTab::Daily,
-            UsageTab::Weekly,
+            UsageTab::Activity,
             UsageTab::Projects,
             UsageTab::Optimize,
             UsageTab::Savings,
