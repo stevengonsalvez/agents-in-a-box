@@ -2974,7 +2974,7 @@ fn project_matches(call: &ProviderCall, include: &[String], exclude: &[String]) 
 /// (RFC 3339, e.g. `2026-05-11T00:00:00Z`) when set so deterministic
 /// tripwire fixtures can pin the calendar day; otherwise falls back to
 /// the real local clock.
-fn local_now() -> DateTime<Local> {
+pub(crate) fn local_now() -> DateTime<Local> {
     if let Ok(raw) = std::env::var("AINB_NOW") {
         if let Ok(parsed) = DateTime::parse_from_rfc3339(raw.trim()) {
             return parsed.with_timezone(&Local);

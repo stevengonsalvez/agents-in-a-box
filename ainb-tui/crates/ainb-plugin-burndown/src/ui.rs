@@ -266,6 +266,12 @@ pub struct UsageViewState {
     /// True when the zoom view's `/` fuzzy-search overlay is active.
     /// Resets on zoom exit (we deliberately do *not* persist a search
     /// across zoom cycles — the brief is "search clears on zoom exit").
+    /// Metric driving heatmap cell intensity on the Activity tab. Cost by
+    /// default — this is a spend tool — cycled with `M`.
+    pub heat_metric: crate::heatmap::HeatMetric,
+    /// Selected day on the Activity tab. `None` until the first render, which
+    /// seeds it to the most recent day so the cursor never starts off-canvas.
+    pub heatmap_cursor: Option<chrono::NaiveDate>,
     pub zoom_search_active: bool,
     /// Live query buffer for the zoom-mode fuzzy search.
     pub zoom_search_query: String,
@@ -341,6 +347,8 @@ impl Default for UsageViewState {
         Self {
             active_tab: UsageTab::Burndown,
             data: None,
+            heat_metric: crate::heatmap::HeatMetric::default(),
+            heatmap_cursor: None,
             fresh_pivot: false,
             loading: false,
             scroll_offset: 0,
@@ -680,6 +688,45 @@ impl UsageViewState {
     /// resolve the row by index because that's what the user is
     /// looking at when focus is active (we render from filtered_data
     /// at draw time, which is the same source).
+    /// Move the Activity-tab cursor by `dx` weeks / `dy` days, seeding it to
+    /// today on first use. Clamped inside the canvas by the grid itself.
+    pub fn heatmap_move(&mut self, dx: i32, dy: i32) {
+        let today = crate::data::usage::local_now().date_naive();
+        let from = self.heatmap_cursor.unwrap_or(today);
+        let Some(data) = self.data.as_ref() else {
+            self.heatmap_cursor = Some(from);
+            return;
+        };
+        let grid = crate::heatmap::HeatmapGrid::build(
+            data,
+            self.heat_metric,
+            today,
+            crate::heatmap::WEEKS_IN_CANVAS,
+        );
+        self.heatmap_cursor = Some(grid.step(from, dx, dy));
+    }
+
+    /// Cycle the heatmap's intensity metric (cost → tokens → calls → sessions).
+    pub fn heatmap_cycle_metric(&mut self) {
+        self.heat_metric = self.heat_metric.next();
+    }
+
+    /// Pivot every other panel to the selected day.
+    ///
+    /// Implemented as a single-day `Custom` period rather than a new date chip:
+    /// the period range already flows through `filter_usage_data_full`, so this
+    /// needs no new filter machinery, and the chip strip renders the range so
+    /// the narrowed state stays visible.
+    pub fn heatmap_commit_day(&mut self) -> bool {
+        let Some(day) = self.heatmap_cursor.or_else(|| Some(crate::data::usage::local_now().date_naive()))
+        else {
+            return false;
+        };
+        self.period = UsagePeriod::Custom { from: day, to: day };
+        self.scroll_offset = 0;
+        true
+    }
+
     pub fn commit_focused_row(&mut self) -> bool {
         let Some((target, value, owner_project)) = self.resolve_focused_row() else {
             return false;
