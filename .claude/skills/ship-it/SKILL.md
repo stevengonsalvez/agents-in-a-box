@@ -97,10 +97,13 @@ export const meta = {
   description: 'Diff-aware persona fan-out + Codex peer for a PR',
   phases: [{ title: 'Review' }],
 }
-const personas = args.personas // [{key, prompt}], chosen by conductor
+// args may arrive as a JSON string depending on how the host serialises the
+// Workflow args input; guard or personas.map explodes on the first line.
+const A = typeof args === 'string' ? JSON.parse(args) : args
+const personas = A.personas // [{key, prompt}], chosen by conductor
 const thunks = personas.map(p => () =>
   agent(p.prompt, { label: `review:${p.key}`, phase: 'Review', model: 'opus' }))
-thunks.push(() => agent(args.codexPrompt,
+thunks.push(() => agent(A.codexPrompt,
   { label: 'review:codex-peer', phase: 'Review', agentType: 'codex:codex-rescue' }))
 const out = await parallel(thunks)   // codex runs alongside personas, no barrier between them
 return { personas: out.slice(0, personas.length).filter(Boolean),
@@ -154,6 +157,11 @@ gh pr view <N> --json mergeable,reviewDecision
 ```bash
 gh pr merge <N> --merge     # merge commit, NEVER squash
 ```
+
+Honor the repo's landing contract before/after merge: if the project tracks
+work in beads (AGENTS.md mandates it here), run `bd sync`, close or update
+the beads this PR lands, and note the PR URL on them. Skip only in repos
+without an issue-tracking contract.
 
 Report: PR URL, merge commit SHA, iterations used, findings fixed per round.
 
