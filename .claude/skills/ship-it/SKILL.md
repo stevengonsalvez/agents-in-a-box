@@ -1,0 +1,164 @@
+---
+name: ship-it
+description: >
+  End-to-end ship loop: atomic commits, PR, tiered review (lite|heavy), fix
+  every finding, re-review until zero remain, then merge-commit. lite runs a
+  single /review pass; heavy spins up a dynamic Workflow with diff-aware
+  review personas plus a Codex cross-model peer. Use when Stevie says
+  "/ship-it", "ship it", "ship this branch", or wants the full
+  commit-review-fix-merge pipeline run autonomously.
+---
+
+# ship-it
+
+Conductor skill. Runs in the main loop (interactive steps stay interactive).
+The only expensive part, heavy review fan-out, runs as a dynamic Workflow.
+
+```
+/commit ──▶ gh pr create ──▶ REVIEW (lite|heavy) ──▶ fix ALL ──▶ re-REVIEW
+                                                        ▲            │
+                                                        └── loop ────┘ until 0
+                                                                     │
+                                                     CI green ──▶ gh pr merge --merge
+```
+
+## Arguments
+
+`/ship-it [lite|heavy] [pr-number]`
+
+- `lite` (default): single-pass PR review. Cheap, fast.
+- `heavy`: ce-style multi-persona fan-out + Codex cross-model peer.
+- `pr-number`: skip commit/PR-create, start at the review loop on that PR.
+
+## Model routing (hard rules)
+
+| Role | Model |
+|------|-------|
+| Conductor, commit/PR/merge mechanics | session model |
+| Review agents (both tiers) | **Opus, always** (Fable only if Stevie says so in chat) |
+| Codex peer (heavy only) | Codex, **high reasoning effort** (`-c model_reasoning_effort="high"`, tell the rescue agent explicitly) |
+| Applying mechanical fixes | Sonnet (`fast-worker`) for well-specified edits; main loop for judgment calls |
+
+Review is the safety net: never route review to Sonnet or Haiku. lite's
+single pass runs inline only when the session model is Opus-class (Opus or
+Fable); on a Sonnet/Haiku session, spawn a `code-reviewer` agent with
+`model: opus` instead of reviewing inline.
+
+## Step 1: Commit
+
+Invoke the `/commit` skill (Skill tool). It owns cleanup, atomic staging by
+named paths, signed commits, push. Do not reimplement any of it here.
+If the working tree is already clean and the branch is pushed, skip ahead.
+
+## Step 2: Pull request
+
+```bash
+BRANCH=$(git branch --show-current)
+git fetch origin
+git merge origin/main                            # sync stale branch: MERGE, never rebase a pushed PR branch
+gh pr list --head "$BRANCH" --state open --json number,url   # reuse existing PR if open
+gh pr create --fill                              # otherwise create
+```
+
+Sync first: reviewing a branch that is far behind base wastes the whole loop
+on conflicts at merge time. Resolve merge conflicts before the first review
+pass. Roll new commits into an existing open PR for this branch, never open
+a second one. PR body: summary, test evidence, no AI attribution.
+
+## Step 3: Review (tier switch)
+
+### lite
+Invoke the `/review` skill on the PR number. One pass. Collect findings as a
+severity-tagged list (P0 blocker, P1 major, P2 minor, P3 nit).
+
+### heavy
+Spin up a dynamic Workflow (Workflow tool). Template:
+
+- **Persona selection is diff-aware.** Always run: `correctness`,
+  `project-standards`. Add only when the diff touches the area:
+  `security` (auth/input/secrets), `tests` (test files or runtime behavior),
+  `performance` (hot paths, queries), `data-migration` (schema/persisted
+  formats), `api-contract` (public interfaces, wire types).
+- Each persona = one `agent()` on Opus (`model: 'opus'`), **schemaless**
+  (returns markdown findings text; schemas on advisory agents trip
+  StructuredOutput failures and abort the run).
+- Codex peer: one `agent()` using `agentType: 'codex:codex-rescue'`, prompted
+  to review the same diff at high reasoning effort, independent, not shown
+  the personas' output.
+- Synthesis: conductor (not another agent) merges persona + Codex findings,
+  dedupes by file:line, tags P0-P3, promotes confidence when two reviewers
+  agree, discards unverifiable style noise.
+
+Workflow skeleton (adapt persona list to the diff before launching):
+
+```js
+export const meta = {
+  name: 'ship-it-heavy-review',
+  description: 'Diff-aware persona fan-out + Codex peer for a PR',
+  phases: [{ title: 'Review' }],
+}
+const personas = args.personas // [{key, prompt}], chosen by conductor
+const thunks = personas.map(p => () =>
+  agent(p.prompt, { label: `review:${p.key}`, phase: 'Review', model: 'opus' }))
+thunks.push(() => agent(args.codexPrompt,
+  { label: 'review:codex-peer', phase: 'Review', agentType: 'codex:codex-rescue' }))
+const out = await parallel(thunks)   // codex runs alongside personas, no barrier between them
+return { personas: out.slice(0, personas.length).filter(Boolean),
+         codex: out[personas.length] ?? null }   // codex may be null (skipped/dead); synthesis must tolerate that
+```
+
+Every persona prompt must include: repo path, PR diff scope (`gh pr diff N`),
+"report findings only, file:line, one line each, severity P0-P3, no praise,
+no scope creep".
+
+## Step 4: Fix loop
+
+Fix **every** finding, all severities, P3 nits included. No deferral, no
+"follow-up issue" unless Stevie explicitly reclassifies a finding.
+
+Per iteration:
+1. Apply fixes. Mechanical, well-specified edits go to `fast-worker`
+   (Sonnet); judgment calls stay in the main loop. Sonnet output gets a quick
+   conductor sanity pass before commit (advisor rule).
+2. Commit fixes via `/commit` (atomic, signed), push.
+3. Re-review. **Round 1 only** runs the full tier (fan-out for heavy).
+   Rounds 2+ run a single verify-pass instead: one Opus agent that (a)
+   checks each prior finding is actually fixed and (b) reviews only the fix
+   delta (`git diff <pre-fix-sha>..HEAD`). Full fan-out again only if a fix
+   touched files outside the original review scope. This keeps the loop from
+   multiplying heavy-tier cost by iteration count.
+4. Zero findings: exit loop. Findings remain: iterate.
+
+Guards:
+- Max 5 iterations, then stop and escalate to Stevie with the survivors.
+- Same finding survives 2 fix attempts: stop, surface it, do not silently
+  switch strategy.
+- A finding that is wrong (reviewer misread) may be rebutted once with
+  evidence; if it reappears next round, escalate instead of re-rebutting.
+
+## Step 5: Merge
+
+Pre-merge, verify independently (do not collapse to one signal):
+
+```bash
+gh pr checks <N>                 # CI per-job
+gh pr view <N> --json mergeable,reviewDecision
+```
+
+- CI red from THIS PR's code: go back to Step 4.
+- CI red that is pre-existing drift: prove it (git history + clean local
+  test run on base), then present merge options honestly, do not force a
+  cleanup commit into this PR.
+- All green + zero findings:
+
+```bash
+gh pr merge <N> --merge     # merge commit, NEVER squash
+```
+
+Report: PR URL, merge commit SHA, iterations used, findings fixed per round.
+
+## When NOT to use
+
+- Review-only, no shipping intent: use `/review` or `/code-review` directly.
+- Uncommitted WIP mid-feature: finish or use `/commit` alone.
+- Repo without a GitHub remote: nothing to PR against, stop and say so.
