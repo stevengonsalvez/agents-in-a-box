@@ -9234,7 +9234,7 @@ impl AppState {
             let banner: String = match (metadata.agent_type, transcript.as_ref()) {
                 (SessionAgentType::Claude, Some(_)) => "Resumed".to_string(),
                 (SessionAgentType::Claude, None) => {
-                    let encoded = Self::encode_claude_project_dir(&metadata.worktree_path);
+                    let encoded = Self::claude_project_dir_name(&metadata.worktree_path);
                     format!(
                         "No transcript found at ~/.claude/projects/{} - starting fresh",
                         encoded
@@ -9276,14 +9276,27 @@ impl AppState {
         result
     }
 
-    /// Encode an absolute worktree path the way Claude Code names its
+    /// Canonicalize-then-encode a worktree path into Claude Code's project
+    /// directory NAME under `~/.claude/projects/`. Claude Code keys the dir
+    /// off the PHYSICAL cwd, so the symlink-resolved path must be encoded
+    /// (falling back to the raw path when it does not exist). Single source
+    /// of truth for both the transcript probe and any user-facing display of
+    /// the expected directory; if resume ever fails on a very long path,
+    /// check for a truncated+hashed dir name on disk (not mirrored here).
+    pub(crate) fn claude_project_dir_name(worktree_path: &std::path::Path) -> String {
+        let physical =
+            std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
+        Self::encode_claude_project_dir(&physical)
+    }
+
+    /// Encode an absolute path the way Claude Code names its
     /// `~/.claude/projects/{encoded}/` transcript directory: every UTF-16
     /// code unit that is not ASCII-alphanumeric becomes `-` (Claude Code is
     /// JS, so an astral char like an emoji yields TWO dashes). The leading
     /// `/` yields the leading `-`; a dotted component like `.agents-in-a-box`
-    /// yields `--agents-in-a-box`. Paths whose encoding exceeds ~200 chars
-    /// may be truncated+hashed by Claude Code; not mirrored here (longest
-    /// observed on disk is 190, and the hash scheme is unverified).
+    /// yields `--agents-in-a-box`. Callers wanting the on-disk dir for a
+    /// worktree should use [`Self::claude_project_dir_name`], which
+    /// canonicalizes first.
     pub(crate) fn encode_claude_project_dir(worktree_path: &std::path::Path) -> String {
         worktree_path
             .to_string_lossy()
@@ -9311,22 +9324,18 @@ impl AppState {
     /// Test-friendly variant: caller supplies the home directory so unit tests
     /// don't have to mutate process-wide environment.
     ///
-    /// The worktree path is canonicalized first (falling back to the raw path
-    /// when it does not exist): Claude Code keys the project dir off the
-    /// PHYSICAL cwd, so a symlinked component (`/tmp` → `/private/tmp` on
-    /// macOS) would otherwise encode to a directory that never exists on disk
-    /// and silently drop `--continue`. Canonicalizing also normalizes a
-    /// trailing slash.
+    /// The worktree path is canonicalized first via
+    /// [`Self::claude_project_dir_name`]: a symlinked component (`/tmp` →
+    /// `/private/tmp` on macOS) would otherwise encode to a directory that
+    /// never exists on disk and silently drop `--continue`.
     pub(crate) fn find_latest_transcript_in(
         home: &std::path::Path,
         worktree_path: &std::path::Path,
     ) -> Option<std::path::PathBuf> {
-        let physical =
-            std::fs::canonicalize(worktree_path).unwrap_or_else(|_| worktree_path.to_path_buf());
         let project_dir = home
             .join(".claude")
             .join("projects")
-            .join(Self::encode_claude_project_dir(&physical));
+            .join(Self::claude_project_dir_name(worktree_path));
 
         let read = std::fs::read_dir(&project_dir).ok()?;
         let mut candidates: Vec<(std::path::PathBuf, std::time::SystemTime)> = Vec::new();

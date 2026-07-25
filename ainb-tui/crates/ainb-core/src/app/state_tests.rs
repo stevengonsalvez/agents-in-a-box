@@ -246,6 +246,7 @@ mod tests {
     /// to the project dir of the PHYSICAL path, because that is what Claude
     /// Code keys its transcripts on.
     #[test]
+    #[cfg(unix)]
     fn test_find_latest_transcript_resolves_symlinked_worktree() {
         use std::fs;
         let tmp = tempfile::tempdir().expect("tmpdir");
