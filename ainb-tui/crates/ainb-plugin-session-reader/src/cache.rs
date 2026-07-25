@@ -82,7 +82,24 @@ fn with_busy_retry<T>(mut op: impl FnMut() -> rusqlite::Result<T>) -> rusqlite::
 ///
 /// v2: adds the single-row `stable_aggregate` table holding the
 /// bincode'd incremental-refresh rollup. Additive over v1.
-pub const SCHEMA_VERSION: i64 = 2;
+///
+/// v3: **price invalidation, not a shape change.** Cached rows store
+/// `cost_usd` as computed at parse time, so a correction to the rate table
+/// cannot reach an already-cached file — its fingerprint is unchanged, so it
+/// is never re-parsed. v3 drops the cached rows once so the corrected Opus
+/// rate ($15/$75 → $5/$25) actually lands. **Any future rate-table edit needs
+/// the same bump** — see [`RATE_TABLE_REVISION`].
+pub const SCHEMA_VERSION: i64 = 3;
+
+/// Bump this, and `SCHEMA_VERSION` with it, whenever `ainb-model-rates`
+/// changes a published rate.
+///
+/// The cache keys on `(path, mtime, size)`. None of those change when a price
+/// changes, so without a bump the old dollars persist for every already-parsed
+/// file — indefinitely, and invisibly, because the numbers still look
+/// plausible. Correcting a rate without bumping is a silent no-op for existing
+/// users.
+pub const RATE_TABLE_REVISION: i64 = 1;
 
 /// Cache error surface.
 #[derive(Debug, thiserror::Error)]
@@ -325,6 +342,18 @@ impl UsageCache {
             )?;
         }
 
+        if version < 3 {
+            // Price invalidation. Cached blobs carry `cost_usd` frozen at parse
+            // time and their fingerprints don't change when a rate does, so the
+            // rows have to go for a corrected rate to take effect. Dropping
+            // them costs one full re-parse on the next scan — the same work a
+            // `--hard` refresh does, once.
+            conn.execute_batch(
+                "DELETE FROM file_cache;
+                 DELETE FROM stable_aggregate;",
+            )?;
+        }
+
         // Only stamp UP. A db written by a NEWER build (two ainb
         // versions sharing one usage.sqlite) must keep its higher
         // version: stamping it down would make the newer binary re-run
@@ -481,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn v1_db_migrates_to_v2_preserving_file_cache() {
+    fn v1_db_migrates_to_v3_dropping_price_stale_rows() {
         // Hand-build a v1-schema DB (file_cache only, user_version=1)
         // with one row, then open through UsageCache and assert the
         // migration is additive: the parse row survives, the version
@@ -517,14 +546,20 @@ mod tests {
             .conn
             .query_row("PRAGMA user_version", [], |row| row.get(0))
             .expect("pragma");
-        assert_eq!(version, 2, "v1 db migrated to v2");
+        assert_eq!(version, SCHEMA_VERSION, "v1 db migrated to the current schema");
 
-        let hit = cache.lookup("/tmp/v1.jsonl", 5, 6).expect("lookup").expect("hit");
-        assert_eq!(hit[0].id, 7, "pre-migration parse row survives");
+        // v3 drops cached rows on purpose. They carry `cost_usd` frozen at
+        // parse time, and their (path, mtime, size) key does not change when a
+        // rate is corrected — so keeping them would serve the old Opus price
+        // forever on any file already in the cache.
+        assert!(
+            cache.lookup("/tmp/v1.jsonl", 5, 6).expect("lookup").is_none(),
+            "price-stale parse rows must be dropped so corrected rates take effect"
+        );
 
         assert!(
             cache.load_stable().expect("load").is_none(),
-            "fresh v2 upgrade has no stable aggregate yet"
+            "fresh upgrade has no stable aggregate yet"
         );
     }
 
