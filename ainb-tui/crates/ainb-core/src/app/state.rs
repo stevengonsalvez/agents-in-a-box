@@ -9296,17 +9296,23 @@ impl AppState {
     }
 
     /// Encode an absolute worktree path the same way Claude Code does for its
-    /// `~/.claude/projects/-{encoded}/` transcript directory:
-    ///   - replace `/` with `-`
-    ///   - strip leading slash
-    /// Then prefix with `-` (callers do this).
+    /// `~/.claude/projects/{encoded}/` transcript directory: every character
+    /// that is not ASCII-alphanumeric becomes `-`. The leading `/` therefore
+    /// yields the leading `-`.
     ///
-    /// Mirror of `find_transcript_path()` in
-    /// `ainb-toolkit utilities/utils/spawn-agent-lib.sh:30-69`.
+    /// This matters for ainb worktrees, which live under the DOTTED
+    /// `~/.agents-in-a-box/…` path: `/.agents-in-a-box` must encode to
+    /// `--agents-in-a-box` (dot → dash), not `-.agents-in-a-box`. The old
+    /// `/`-only rule (mirroring the equally-buggy `find_transcript_path()` in
+    /// `ainb-toolkit utilities/utils/spawn-agent-lib.sh`) never matched the
+    /// real on-disk project dir, so Claude's resume-history probe always
+    /// returned None and `--continue` was silently dropped.
     pub(crate) fn encode_claude_project_dir(worktree_path: &std::path::Path) -> String {
-        let s = worktree_path.to_string_lossy();
-        let stripped = s.strip_prefix('/').unwrap_or(&s);
-        format!("-{}", stripped.replace('/', "-"))
+        worktree_path
+            .to_string_lossy()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect()
     }
 
     /// Find the most recently modified Claude transcript (`*.jsonl`) for the

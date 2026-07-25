@@ -186,7 +186,7 @@ mod tests {
         ));
     }
 
-    /// Path encoding mirrors `find_transcript_path` in spawn-agent-lib.sh:30-69.
+    /// Path encoding = Claude Code's rule: every non-alphanumeric char → `-`.
     #[test]
     fn test_encode_claude_project_dir() {
         use std::path::PathBuf;
@@ -198,6 +198,37 @@ mod tests {
 
         let p = PathBuf::from("/");
         assert_eq!(AppState::encode_claude_project_dir(&p), "-");
+
+        // Regression: DOTTED path — every ainb worktree lives under
+        // `~/.agents-in-a-box/…`, so the `.` MUST encode to `-`. The old
+        // `/`-only rule produced `-.agents-in-a-box` and never matched the
+        // real on-disk project dir, so Claude never resumed.
+        let p =
+            PathBuf::from("/Users/stevie/.agents-in-a-box/worktrees/by-name/repo--f-x--cc7dbd22");
+        assert_eq!(
+            AppState::encode_claude_project_dir(&p),
+            "-Users-stevie--agents-in-a-box-worktrees-by-name-repo--f-x--cc7dbd22"
+        );
+    }
+
+    /// End-to-end guard for the resume-history probe on a dotted worktree path:
+    /// a transcript under `~/.claude/projects/{encoded}/` must be found so
+    /// `--continue` is emitted. Would have caught the `.`→`-` encoding bug.
+    #[test]
+    fn test_find_latest_transcript_dotted_worktree_path() {
+        use std::fs;
+        use std::path::PathBuf;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let fake_home = tmp.path().to_path_buf();
+
+        let worktree = PathBuf::from("/Users/stevie/.agents-in-a-box/worktrees/by-name/repo--f-x");
+        let encoded = AppState::encode_claude_project_dir(&worktree);
+        let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("sess.jsonl"), "x").unwrap();
+
+        let result = AppState::find_latest_transcript_in(&fake_home, &worktree);
+        assert!(result.is_some(), "dotted worktree transcript must resolve");
     }
 
     /// `find_latest_transcript_in` returns the most recently modified `.jsonl`
