@@ -3345,7 +3345,7 @@ fn render_project_panel(buf: &mut Buffer, area: Rect, rows: &[ProjectUsage], foc
     let value_w = rows
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3365,7 +3365,7 @@ fn render_project_panel(buf: &mut Buffer, area: Rect, rows: &[ProjectUsage], foc
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                format!("{:>w$}", format_cost_or_tokens(&row.bucket), w = value_w),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -3395,7 +3395,7 @@ fn render_branch_panel(buf: &mut Buffer, area: Rect, rows: &[BranchUsage], focus
     let value_w = rows
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3415,7 +3415,7 @@ fn render_branch_panel(buf: &mut Buffer, area: Rect, rows: &[BranchUsage], focus
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                format!("{:>w$}", format_cost_or_tokens(&row.bucket), w = value_w),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -3477,7 +3477,7 @@ fn render_live_panel(buf: &mut Buffer, area: Rect, rows: &[SessionUsage], focus:
     let value_w = rows
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3503,7 +3503,7 @@ fn render_live_panel(buf: &mut Buffer, area: Rect, rows: &[SessionUsage], focus:
                 ),
                 Span::styled(" · ", Style::default().fg(MUTED_GRAY)),
                 Span::styled(
-                    format!("{:>w$}", format_cost(row.bucket.cost_usd), w = value_w),
+                    format!("{:>w$}", format_cost_or_tokens(&row.bucket), w = value_w),
                     Style::default().fg(TERMINAL_ACCENT),
                 ),
             ])
@@ -3717,7 +3717,7 @@ fn render_leaderboard_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focu
         .projects
         .iter()
         .take(cap)
-        .map(|r| format_cost(r.bucket.cost_usd).chars().count())
+        .map(|r| format_cost_or_tokens(&r.bucket).chars().count())
         .max()
         .unwrap_or(7)
         .max(7);
@@ -3753,7 +3753,7 @@ fn render_leaderboard_panel(buf: &mut Buffer, area: Rect, data: &UsageData, focu
             spans.extend(ratio_gradient_spans(cost, max, bar_w));
             spans.push(Span::raw(" "));
             spans.push(Span::styled(
-                format!("{:>w$}", format_cost(project.bucket.cost_usd), w = value_w),
+                format!("{:>w$}", format_cost_or_tokens(&project.bucket), w = value_w),
                 Style::default().fg(TERMINAL_ACCENT),
             ));
             Line::from(spans)
@@ -4659,7 +4659,20 @@ fn input_label(mode: UsageInputMode) -> &'static str {
 
 fn format_cost(cost: Option<f64>) -> String {
     cost.map(|value| format!("${value:.2}"))
-        .unwrap_or_else(|| "cost n/a".to_string())
+        // `—` reads as "no published price"; the old `cost n/a` read as "no
+        // data", which is a different thing and sent people looking for a
+        // parsing bug when the real answer was a missing rate.
+        .unwrap_or_else(|| "\u{2014}".to_string())
+}
+
+/// Value column for the ranked bar panels: a dollar figure when we have a rate
+/// for the model, otherwise an em dash plus the token count so the row still
+/// carries its magnitude instead of reading as empty.
+fn format_cost_or_tokens(bucket: &crate::data::usage::TokenBucket) -> String {
+    match bucket.cost_usd {
+        Some(value) => format!("${value:.2}"),
+        None => format!("\u{2014} {}", crate::data::usage::format_tokens_short(bucket.total())),
+    }
 }
 
 #[cfg(test)]
