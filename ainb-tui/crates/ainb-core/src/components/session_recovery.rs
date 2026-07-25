@@ -854,7 +854,7 @@ impl SessionRecoveryState {
         // `has_history` gates Claude's `--continue` — no history → fresh launch,
         // avoiding a dead pane.
         let has_history = agent_type == SessionAgentType::Claude
-            && Self::find_transcript_for_worktree(worktree).is_some();
+            && crate::app::state::AppState::find_latest_transcript(&worktree.path).is_some();
 
         let agent_cmd = match agent_type {
             SessionAgentType::Shell | SessionAgentType::Ssh | SessionAgentType::Kiro => {
@@ -928,48 +928,6 @@ impl SessionRecoveryState {
         }
         self.refresh();
         result
-    }
-
-    /// Try to find a transcript file associated with this worktree
-    fn find_transcript_for_worktree(worktree: &OrphanedWorktree) -> Option<String> {
-        // Strategy 1: Check ~/.claude/agents/<session-id>.json for transcript_path
-        if let Some(ref id) = worktree.id {
-            if let Some(home) = dirs::home_dir() {
-                let meta_file = home.join(".claude").join("agents").join(format!("{}.json", id));
-                if meta_file.exists() {
-                    if let Ok(content) = std::fs::read_to_string(&meta_file) {
-                        if let Ok(meta) = serde_json::from_str::<serde_json::Value>(&content) {
-                            if let Some(path) = meta["transcript_path"].as_str() {
-                                if std::path::Path::new(path).exists() {
-                                    return Some(path.to_string());
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
-
-        // Strategy 2: Look for .claude-transcript.jsonl in worktree directory
-        let local_transcript = worktree.path.join(".claude-transcript.jsonl");
-        if local_transcript.exists() {
-            return Some(local_transcript.to_string_lossy().to_string());
-        }
-
-        // Strategy 3: Look for any .jsonl file in .claude/ subdirectory of worktree
-        let claude_dir = worktree.path.join(".claude");
-        if claude_dir.exists() {
-            if let Ok(entries) = std::fs::read_dir(&claude_dir) {
-                for entry in entries.flatten() {
-                    let path = entry.path();
-                    if path.extension().map(|e| e == "jsonl").unwrap_or(false) {
-                        return Some(path.to_string_lossy().to_string());
-                    }
-                }
-            }
-        }
-
-        None
     }
 
     /// Archive the selected session
