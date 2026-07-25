@@ -101,7 +101,12 @@ run_one() {
         fi
     else
         printf 'FAIL %s::%s\n' "$pkg" "$test_name" >&2
-        printf '%s\n' "$out" | tail -20 >&2
+        # The panic line FIRST. A failing TUI tripwire dumps a full 40-row tmux
+        # pane into its assertion message, which pushed the actual `panicked
+        # at …` line far outside a plain `tail`, so CI logs showed eight
+        # failures and zero reasons.
+        printf '%s\n' "$out" | grep -A2 'panicked at' >&2
+        printf '%s\n' "$out" | tail -40 >&2
         failures=$((failures + 1))
     fi
 }

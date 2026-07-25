@@ -48,7 +48,10 @@ impl ScreenCapture {
 
     fn row_text(&self, row: u16) -> String {
         (0..self.parser.screen().size().1)
-            .map(|col| self.cell_at(row, col).contents())
+            // `cell_at` hands back an owned `Cell` that dies at the end of this
+            // closure, and `Cell::contents` borrows from it — take the `String`
+            // before the temporary drops.
+            .map(|col| self.cell_at(row, col).contents().to_string())
             .collect()
     }
 }

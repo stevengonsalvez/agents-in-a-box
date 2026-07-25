@@ -84,13 +84,28 @@ fn warning_shown_on_first_provider_use() {
     // NEGATIVE: the accept hint proves it is the modal, not an incidental string.
     assert!(shown.contains("[y]"), "modal accept hint missing:\n{shown}");
 
-    // Accept the warning (single char, no Enter).
-    sess.send_key("y");
-
-    // POSITIVE: the modal is dismissed — the marker disappears from the pane.
-    let dismissed = sess.poll_capture(Instant::now() + Duration::from_secs(10), |c| {
-        !c.contains(WARNING_MARKER)
-    });
+    // Accept the warning (single char, no Enter), re-sending until the modal
+    // actually goes away.
+    //
+    // The host forwards a BOUNDED run of keystrokes to a plugin screen between
+    // its periodic background ticks, so a single `y` sent while the loop is
+    // busy — which is exactly what happens under the full serial suite — is
+    // dropped and the modal stays up. Re-sending behind the observable
+    // condition (no bare sleep, per the tripwire HARD RULES) keeps this a real
+    // regression guard: a modal that never dismisses still fails at the
+    // deadline. Accepting twice is a no-op; the modal is gone after the first.
+    let dismiss_deadline = Instant::now() + Duration::from_secs(20 * common::budget_scale());
+    let dismissed = loop {
+        sess.send_key("y");
+        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(1500), |c| {
+            !c.contains(WARNING_MARKER)
+        }) {
+            break Some(c);
+        }
+        if Instant::now() >= dismiss_deadline {
+            break None;
+        }
+    };
     assert!(
         dismissed.is_some(),
         "warning modal never dismissed after `y`:\n{}",

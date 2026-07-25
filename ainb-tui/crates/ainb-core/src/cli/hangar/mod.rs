@@ -3707,7 +3707,8 @@ const DAEMON_BIN_ENV: &str = "AINB_HANGAR_DAEMON_BIN";
 /// Resolve the path to the daemon's PID file: `<hangar_home>/hangar/daemon.pid`.
 fn daemon_pid_path() -> Result<std::path::PathBuf> {
     let home = ainb_hangar_daemon::hangar_dir().context("resolve hangar home")?;
-    Ok(home.join("hangar").join("daemon.pid"))
+    // One source of truth with the daemon's own boot-time self-registration.
+    Ok(ainb_hangar_daemon::pid_path_in(&home))
 }
 
 /// Path to the file recording the version of the binary that started the

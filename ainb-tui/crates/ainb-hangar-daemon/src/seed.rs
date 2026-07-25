@@ -16,6 +16,7 @@
 //! so it never ships in the production daemon binary.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::clock::HangarClock as _;
 use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
 use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
 use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
@@ -56,7 +57,14 @@ const TODO_ISSUES: &[(&str, &str)] = &[
 ///
 /// Returns a [`sqlx::Error`] if any insert fails.
 pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let now: i64 = 1_700_000_000_000;
+    // LIVE clock, not a frozen 2023 epoch. The daemon's lifecycle sweepers run
+    // unconditionally (they are spawned before the `disable_claim` gate), so a
+    // fixture stamped in the past is instantly past `queued_ttl` /
+    // `running_ttl`: the seeded `running` task and any test-seeded `queued` card
+    // were swept to `failed` within the first sweep tick, and every tripwire
+    // that asserts on a live queued/running card went red for a reason that had
+    // nothing to do with the code under test.
+    let now: i64 = ainb_hangar_core::clock::SystemClock.now_ms();
 
     // Tenancy: workspace + user + member (the agent picker lists the member).
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
