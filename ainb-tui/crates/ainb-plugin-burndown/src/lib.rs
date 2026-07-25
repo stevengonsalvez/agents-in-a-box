@@ -30,6 +30,7 @@ pub mod cache;
 pub mod cli;
 pub mod config;
 pub mod data;
+pub mod heatmap;
 pub mod live_window;
 pub mod output_format;
 pub mod plugin;
