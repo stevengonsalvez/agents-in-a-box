@@ -1997,8 +1997,9 @@ fn sorted_activities(map: HashMap<ActivityCategory, ActivityAccumulator>) -> Vec
         })
         .collect();
     rows.sort_by(|a, b| {
-        bucket_sort_value(&b.bucket)
-            .total_cmp(&bucket_sort_value(&a.bucket))
+        bucket_has_cost(&b.bucket)
+            .cmp(&bucket_has_cost(&a.bucket))
+            .then_with(|| bucket_sort_value(&b.bucket).total_cmp(&bucket_sort_value(&a.bucket)))
             .then_with(|| activity_rank(a.category).cmp(&activity_rank(b.category)))
     });
     rows
@@ -2810,8 +2811,20 @@ fn merge_cost(left: Option<f64>, right: Option<f64>) -> Option<f64> {
     }
 }
 
+/// Ranking weight for a bucket: cost when known, token count as a stand-in when
+/// not — but see [`sort_by_bucket_desc`], which keeps the two apart.
 fn bucket_sort_value(bucket: &TokenBucket) -> f64 {
     bucket.cost_usd.unwrap_or(bucket.total() as f64)
+}
+
+/// `true` when this bucket has a real dollar figure behind it.
+///
+/// Ranking must sort on this *before* the numeric weight. Comparing dollars
+/// against raw token counts puts every unpriced row (a model with no published
+/// rate) above every priced one, because tokens outnumber dollars by ~5 orders
+/// of magnitude — which is what made the top-N panels look empty.
+fn bucket_has_cost(bucket: &TokenBucket) -> bool {
+    bucket.cost_usd.is_some()
 }
 
 /// Sort `rows` in-place by bucket weight (descending), where each row's
@@ -2823,7 +2836,11 @@ fn sort_by_bucket_desc<T, F>(rows: &mut Vec<T>, key: F)
 where
     F: Fn(&T) -> &TokenBucket,
 {
-    rows.sort_by(|a, b| bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a))));
+    rows.sort_by(|a, b| {
+        bucket_has_cost(key(b))
+            .cmp(&bucket_has_cost(key(a)))
+            .then_with(|| bucket_sort_value(key(b)).total_cmp(&bucket_sort_value(key(a))))
+    });
 }
 
 /// Merge `bucket` into the entry at `key` in a `String -> TokenBucket`
