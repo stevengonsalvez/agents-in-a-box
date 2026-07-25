@@ -422,10 +422,7 @@ fn reduce_text_step(
 /// `h`/`k` (or `←`/`↑`) cycle backward through [`SUPPORTED_PROVIDERS`], Enter
 /// advances. The picker can only ever land on a supported provider.
 fn reduce_provider_step(state: &AgentsState, mut draft: CreateDraft, c: char) -> AgentsReduction {
-    let cur = SUPPORTED_PROVIDERS
-        .iter()
-        .position(|p| *p == draft.provider)
-        .unwrap_or(0);
+    let cur = SUPPORTED_PROVIDERS.iter().position(|p| *p == draft.provider).unwrap_or(0);
     let len = SUPPORTED_PROVIDERS.len();
     let next_idx = match c {
         '\n' => {
@@ -1037,10 +1034,7 @@ mod tests {
         let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
         // Name "bot" + Enter; Provider Enter (leave claude); Model Enter (blank);
         // Instructions Enter (blank); Confirm Enter.
-        let out = drive(
-            &opened,
-            &['b', 'o', 't', '\n', '\n', '\n', '\n', '\n'],
-        );
+        let out = drive(&opened, &['b', 'o', 't', '\n', '\n', '\n', '\n', '\n']);
         assert_eq!(
             out.intent,
             Some(AgentsIntent::CreateAgent {
@@ -1077,7 +1071,10 @@ mod tests {
         );
         // Forward: claude -> codex -> copilot -> claude (wrap).
         let fwd = drive(&at_provider, &['l', 'l', 'l']).state;
-        assert_eq!(fwd.create_draft().map(|d| d.provider.as_str()), Some("claude"));
+        assert_eq!(
+            fwd.create_draft().map(|d| d.provider.as_str()),
+            Some("claude")
+        );
         // Backward from claude wraps to copilot.
         let back = drive(&at_provider, &['h']).state;
         assert_eq!(
