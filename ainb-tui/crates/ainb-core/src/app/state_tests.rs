@@ -280,13 +280,15 @@ mod tests {
     #[test]
     fn test_find_latest_transcript_picks_newest_by_mtime() {
         use std::fs::{self, File};
-        use std::path::PathBuf;
         use std::time::{Duration, SystemTime};
 
         let tmp = tempfile::tempdir().expect("tmpdir");
         let fake_home = tmp.path().to_path_buf();
 
-        let worktree = PathBuf::from("/tmp/work-abc-test");
+        // A path inside our tempdir that is never created: canonicalize
+        // always fails and falls back to the raw path, so the fixture dir
+        // built from the raw encoding stays in agreement with the probe.
+        let worktree = tmp.path().join("nonexistent-wt");
         let encoded = AppState::encode_claude_project_dir(&worktree);
         let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
         fs::create_dir_all(&project_dir).unwrap();
@@ -330,10 +332,11 @@ mod tests {
     #[test]
     fn test_find_latest_transcript_empty_dir_returns_none() {
         use std::fs;
-        use std::path::PathBuf;
         let tmp = tempfile::tempdir().expect("tmpdir");
         let fake_home = tmp.path().to_path_buf();
-        let worktree = PathBuf::from("/tmp/empty-work");
+        // Never created: canonicalize falls back to the raw path (see
+        // test_find_latest_transcript_picks_newest_by_mtime).
+        let worktree = tmp.path().join("empty-wt");
         let encoded = AppState::encode_claude_project_dir(&worktree);
         let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
         fs::create_dir_all(&project_dir).unwrap();
