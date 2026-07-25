@@ -2964,8 +2964,10 @@ impl EventHandler {
                 KeyCode::Esc => FleetKey::Esc,
                 KeyCode::Enter => FleetKey::Enter,
                 KeyCode::Backspace => FleetKey::Backspace,
-                KeyCode::Up | KeyCode::BackTab => FleetKey::Up,
-                KeyCode::Down | KeyCode::Tab => FleetKey::Down,
+                KeyCode::Up => FleetKey::Up,
+                KeyCode::Down => FleetKey::Down,
+                KeyCode::Tab => FleetKey::Tab,
+                KeyCode::BackTab => FleetKey::BackTab,
                 KeyCode::Left => FleetKey::Left,
                 KeyCode::Right => FleetKey::Right,
                 KeyCode::Char(' ') => FleetKey::Space,
@@ -9224,6 +9226,12 @@ mod text_input_guard_tests {
         state.start_onboarding(false, None);
         if let Some(o) = state.onboarding_state.as_mut() {
             o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
+            // `start_onboarding` re-populates this form from the HOST's saved
+            // Grafana creds (`otel::read_grafana_creds`), so on a machine that
+            // has OTEL configured the field starts non-empty and the paste
+            // appends to it. Blank it so the assertion is about the paste, not
+            // about the developer's config.
+            o.otel_otlp_endpoint.clear();
         }
 
         let consumed = EventHandler::paste_into_text_input(

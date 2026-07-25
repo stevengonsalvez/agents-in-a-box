@@ -311,6 +311,56 @@ pub fn log_dir() -> anyhow::Result<std::path::PathBuf> {
     Ok(hangar_dir()?.join("hangar").join("logs"))
 }
 
+/// Resolve the daemon's pid file: `<hangar_home>/hangar/daemon.pid`.
+///
+/// The one path both the daemon (which self-registers into it at boot) and the
+/// `ainb hangar daemon status/stop/start` verbs read.
+#[must_use]
+pub fn pid_path_in(dir: &std::path::Path) -> std::path::PathBuf {
+    dir.join("hangar").join("daemon.pid")
+}
+
+/// This daemon's registration in `<hangar_home>/hangar/daemon.pid`, removed on
+/// drop (clean shutdown) so a later `ensure_hangar_daemon` does not read a dead
+/// pid.
+///
+/// A hard kill leaves the file behind; that is already handled — the readers
+/// probe liveness with `kill(pid, 0)` and drop a stale file before respawning.
+#[derive(Debug)]
+pub struct PidFile(Option<std::path::PathBuf>);
+
+impl PidFile {
+    /// Write `std::process::id()` into `<dir>/hangar/daemon.pid`.
+    ///
+    /// Best-effort: an unwritable hangar home yields an unregistered (no-op)
+    /// handle and a warning — pid bookkeeping must never stop a daemon booting.
+    #[must_use]
+    pub fn register(dir: &std::path::Path) -> Self {
+        let path = pid_path_in(dir);
+        if let Some(parent) = path.parent() {
+            if let Err(e) = std::fs::create_dir_all(parent) {
+                tracing::warn!(error = %e, path = %path.display(), "daemon pid dir create failed");
+                return Self(None);
+            }
+        }
+        match std::fs::write(&path, std::process::id().to_string()) {
+            Ok(()) => Self(Some(path)),
+            Err(e) => {
+                tracing::warn!(error = %e, path = %path.display(), "daemon pid file write failed");
+                Self(None)
+            }
+        }
+    }
+}
+
+impl Drop for PidFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 /// Boot the daemon: open the persistence layer and run the claim loop.
 ///
 /// Resolves the database directory the same way every Hangar consumer does
@@ -575,6 +625,18 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     if once {
         return Ok(());
     }
+    // Self-register this pid so EVERY running daemon is discoverable, not just
+    // one started via `ainb hangar daemon start`.
+    //
+    // `ensure_hangar_daemon` (the TUI's autostart) decides "is a daemon already
+    // up?" purely from `<hangar_home>/hangar/daemon.pid`. Only the CLI `start`
+    // verb used to write that file, so a daemon launched any other way — the
+    // `ainb-hangar-daemon` binary directly, systemd/launchd, a test harness —
+    // was invisible: the TUI spawned a SECOND daemon, `rpc::bind` unlinked the
+    // live socket out from under the first, and two claim loops + two sweepers
+    // then raced one SQLite home while the TUI talked to the newcomer's empty
+    // in-memory state. Writing the pid here closes that hole at the source.
+    let _pid_file = PidFile::register(&dir);
     let mut cfg = DaemonConfig::from_env();
     // The claim loop MUST key off the runtime id that is actually registered (and
     // that the seeded/created agents are bound to). A runtime cannot be renamed —

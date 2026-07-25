@@ -2674,6 +2674,12 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+
+EXAMPLES:
+  ainb notifyd status              Install + daemon status
+  ainb notifyd restart             Repair a dead/wedged approve socket
+  ainb notifyd install --all       Install the hook for every agent
+  ainb notifyd list --limit 20     Last 20 persisted notifications
 ```
 
 ### `ainb notifyd run`
@@ -2920,6 +2926,16 @@ Options:
           A label to attach to the issue (repeatable: `--label bug --label p0`).
           
           Persisted as the issue's label list. The full labels table + attach/detach is a separate concern; create just records the labels it is handed.
+
+      --acceptance <ACCEPTANCE_CRITERIA>
+          An acceptance criterion (repeatable: `--acceptance "x" --acceptance "y"`).
+          
+          Persisted as the issue's ordered acceptance-criteria list (migration 0048, multica parity); rendered on the detail card's `Acceptance:` block.
+
+      --context-ref <CONTEXT_REFS>
+          A context reference — URL / `owner/repo#123` / note (repeatable).
+          
+          Persisted as the issue's ordered context-reference list (migration 0048, multica parity); rendered on the detail card's `Context:` block.
 
       --repo <REPO>
           The repo the run executes in: an absolute checkout path, the literal `scratch`, or a REMOTE (`owner/repo`, a full URL, or `git@…`) — a remote is cloned once into the shared clone cache and the local path persisted, exactly like the board card-create path (migration 0032/0042)
@@ -3605,12 +3621,15 @@ Edit, archive, and list workspace agents
 Usage: ainb hangar agent [OPTIONS] <COMMAND>
 
 Commands:
-  create     Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
-  list       List the workspace's agents (active by default; `--all` includes archived)
-  edit       Edit an agent's config knobs (model / args / MCP / thinking / env / name)
-  archive    Archive an agent (hide it from the active picker)
-  unarchive  Un-archive an agent (restore it to the active picker)
-  help       Print this message or the help of the given subcommand(s)
+  create      Create a new agent from scratch (fills workspace/runtime/owner behind the scenes)
+  list        List the workspace's agents (active by default; `--all` includes archived)
+  edit        Edit an agent's config knobs (model / args / MCP / thinking / env / name)
+  archive     Archive an agent (hide it from the active picker)
+  unarchive   Un-archive an agent (restore it to the active picker)
+  permission  Set an agent's invocation permission mode (gap #8: `private`/`public_to`)
+  allow       Manage an agent's invocation allow-list (add/revoke/list a target)
+  can-invoke  Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`)
+  help        Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3631,6 +3650,7 @@ Options:
       --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
       --name <NAME>                  The new agent's name
       --provider <PROVIDER>          Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`
+      --model <MODEL>                Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`)
       --instructions <INSTRUCTIONS>  Optional instructions / system prompt for the agent
       --workspace <WORKSPACE>        Workspace slug to create the agent in. Defaults to the bootstrapped `default` workspace (created if absent)
   -h, --help                         Print help
@@ -3719,6 +3739,79 @@ Arguments:
 
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar agent permission`
+
+Set an agent's invocation permission mode (gap #8: `private`/`public_to`)
+
+```console
+$ ainb hangar agent permission --help
+Set an agent's invocation permission mode (gap #8: `private`/`public_to`)
+
+Usage: ainb hangar agent permission [OPTIONS] --mode <MODE> <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to set the permission mode on
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --mode <MODE>            The new mode: `private` (owner-only, deny-by-default) or `public_to` (the allow-list decides)
+      --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar agent allow`
+
+Manage an agent's invocation allow-list (add/revoke/list a target)
+
+```console
+$ ainb hangar agent allow --help
+Manage an agent's invocation allow-list (add/revoke/list a target)
+
+Usage: ainb hangar agent allow [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) whose allow-list to manage
+
+Options:
+      --format <format>
+          Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace
+          Grant/revoke the WHOLE workspace (a workspace target). Mutually exclusive with `--member` / `--team`
+      --member <MEMBER>
+          Grant/revoke a specific member (a user id or email). Mutually exclusive with `--workspace` / `--team`
+      --team <TEAM>
+          Grant/revoke a reserved team target (inert in V1). Mutually exclusive with `--workspace` / `--member`
+      --revoke
+          Remove the named target instead of adding it
+      --list
+          Print the current allow-list (ignores the target flags)
+      --workspace-slug <WORKSPACE_SLUG>
+          Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help
+          Print help
+```
+
+#### `ainb hangar agent can-invoke`
+
+Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`)
+
+```console
+$ ainb hangar agent can-invoke --help
+Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`)
+
+Usage: ainb hangar agent can-invoke [OPTIONS] --as <AS_USER> <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to test invocation on
+
+Options:
+      --as <AS_USER>           The invoking user id or email to judge the run by
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --actor <ACTOR>          Treat the invoker as an `agent` actor (no resolved originator) rather than a `member`. Exercises the A2A / workspaceBroad path
       --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
