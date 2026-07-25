@@ -55,13 +55,8 @@ pub fn model_rates(model: &str) -> Option<ModelRates> {
     let canonical = canonical_model_name(model);
     let m = canonical.as_str();
 
-    let (input_per_million, output_per_million) = if let Some(r) = anthropic_rates(m) {
-        r
-    } else if let Some(r) = openai_rates(m) {
-        r
-    } else {
-        return None;
-    };
+    let (input_per_million, output_per_million) =
+        anthropic_rates(m).or_else(|| openai_rates(m))?;
 
     let input = input_per_million / 1_000_000.0;
     let output = output_per_million / 1_000_000.0;
