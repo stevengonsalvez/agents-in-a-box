@@ -12,11 +12,13 @@ use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use serde::{Deserialize, Serialize};
 
 const BROADCAST_MAX_PARALLEL: usize = 8;
-const FG: Color = Color::rgb(220, 220, 230);
-const MUTED: Color = Color::rgb(120, 120, 140);
-const GOLD: Color = Color::rgb(255, 215, 0);
-const BLUE: Color = Color::rgb(100, 149, 237);
-const GREEN: Color = Color::rgb(100, 200, 100);
+const FG: Color = Color::rgb(226, 232, 240);
+const MUTED: Color = Color::rgb(148, 163, 184);
+const GOLD: Color = Color::rgb(251, 191, 36);
+const BLUE: Color = Color::rgb(96, 165, 250);
+const GREEN: Color = Color::rgb(94, 234, 212);
+const ALERT: Color = Color::rgb(251, 113, 133);
+const SURFACE: Color = Color::rgb(15, 23, 42);
 
 /// Capability wire shape accepted from current and planned daemon snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -291,6 +293,8 @@ impl FleetFilter {
 pub enum FleetKey {
     Char(char),
     Enter,
+    Tab,
+    BackTab,
     Esc,
     Backspace,
     Up,
@@ -507,10 +511,17 @@ enum FleetMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct AnswerOption {
+    label: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AnswerQuestion {
     id: String,
+    header: String,
     text: String,
-    options: Vec<String>,
+    options: Vec<AnswerOption>,
     multi_select: bool,
 }
 
@@ -604,6 +615,7 @@ impl FleetPaneState {
 
     pub fn set_sessions(&mut self, roster: Vec<FleetSessionRow>) {
         self.roster = roster;
+        self.discard_stale_answer();
         self.preserve_or_reset_selection();
     }
 
@@ -645,6 +657,25 @@ impl FleetPaneState {
                 .iter()
                 .find(|row| self.filter.matches(row))
                 .map(|row| row.session_key.clone());
+        }
+    }
+
+    fn discard_stale_answer(&mut self) {
+        let FleetMode::Answer(answer) = &self.mode else {
+            return;
+        };
+        let fresh = self
+            .roster
+            .iter()
+            .find(|row| row.session_key == answer.session_key)
+            .is_some_and(|row| {
+                row.version == answer.expected_version
+                    && row.current_request_fingerprint.as_deref()
+                        == Some(answer.request_fingerprint.as_str())
+            });
+        if !fresh {
+            self.mode = FleetMode::Browse;
+            self.feedback = Some("interview closed: authoritative request changed".into());
         }
     }
 }
@@ -855,6 +886,10 @@ fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
                 .get("id")
                 .and_then(serde_json::Value::as_str)
                 .map_or_else(|| index.to_string(), str::to_string),
+            header: question
+                .get("header")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| format!("Question {}", index + 1), str::to_string),
             text: question
                 .get("question")
                 .or_else(|| question.get("text"))
@@ -867,10 +902,26 @@ fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
                 .into_iter()
                 .flatten()
                 .filter_map(|option| {
-                    option
-                        .as_str()
-                        .or_else(|| option.get("label").and_then(serde_json::Value::as_str))
-                        .map(str::to_string)
+                    option.as_str().map_or_else(
+                        || {
+                            option.get("label").and_then(serde_json::Value::as_str).map(|label| {
+                                AnswerOption {
+                                    label: label.to_string(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                }
+                            })
+                        },
+                        |label| {
+                            Some(AnswerOption {
+                                label: label.to_string(),
+                                description: String::new(),
+                            })
+                        },
+                    )
                 })
                 .collect(),
             multi_select: question
@@ -923,6 +974,26 @@ fn reduce_answer_key(
         state.feedback = Some("structured question changed before answer".into());
         return None;
     };
+    match key {
+        FleetKey::Tab => {
+            answer.question_index = (answer.question_index + 1) % answer.questions.len();
+            answer.option_cursor = 0;
+            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+            state.mode = FleetMode::Answer(answer);
+            return None;
+        }
+        FleetKey::BackTab => {
+            answer.question_index = answer
+                .question_index
+                .checked_sub(1)
+                .unwrap_or(answer.questions.len().saturating_sub(1));
+            answer.option_cursor = 0;
+            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+            state.mode = FleetMode::Answer(answer);
+            return None;
+        }
+        _ => {}
+    }
     if answer.editing_text {
         match key {
             FleetKey::Backspace => {
@@ -965,7 +1036,7 @@ fn reduce_answer_key(
             let selected_other = answer.selections[answer.question_index]
                 .iter()
                 .filter_map(|index| question.options.get(*index))
-                .any(|option| option.eq_ignore_ascii_case("other"));
+                .any(|option| option.label.eq_ignore_ascii_case("other"));
             if selected_other && answer.texts[answer.question_index].trim().is_empty() {
                 answer.editing_text = true;
             } else {
@@ -989,6 +1060,16 @@ fn advance_or_submit_answer(
         state.mode = FleetMode::Answer(answer);
         return None;
     }
+    if let Some(index) = answer.questions.iter().enumerate().find_map(|(index, question)| {
+        (!answer_question_complete(&answer, index, question)).then_some(index)
+    }) {
+        answer.question_index = index;
+        answer.option_cursor = 0;
+        answer.editing_text = answer.questions[index].options.is_empty();
+        state.feedback = Some("complete every interview question before submit".into());
+        state.mode = FleetMode::Answer(answer);
+        return None;
+    }
     let answers = answer
         .questions
         .iter()
@@ -999,13 +1080,14 @@ fn advance_or_submit_answer(
             let selected_other = selected
                 .iter()
                 .filter_map(|index| question.options.get(*index))
-                .any(|option| option.eq_ignore_ascii_case("other"));
+                .any(|option| option.label.eq_ignore_ascii_case("other"));
             let selected_options = if !question.multi_select && selected_other && text.is_some() {
                 Vec::new()
             } else {
                 selected
                     .iter()
-                    .filter_map(|index| question.options.get(*index).cloned())
+                    .filter_map(|index| question.options.get(*index))
+                    .map(|option| option.label.clone())
                     .collect()
             };
             ainb_hangar_proto::fleet::FleetQuestionAnswer {
@@ -1530,16 +1612,22 @@ pub fn render_fleet(
     if area_width == 0 || bottom <= top {
         return;
     }
-    let list_width = (area_width * 2 / 3).max(48).min(area_width);
+    fill_background(buffer, 0, top, area_width, bottom, SURFACE);
+    let list_width = if area_width >= 96 {
+        (area_width * 3 / 5).max(48).min(area_width)
+    } else {
+        area_width
+    };
     put_str(
         buffer,
         1,
         top,
         &format!(
-            "Fleet  [{}]  {}/{} sessions",
+            "FLEET / COMMAND  [{}]  {}/{} visible  rev:{}",
             state.filter.label(),
             state.visible_sessions().len(),
-            state.roster.len()
+            state.roster.len(),
+            state.head_revision
         ),
         GOLD,
         list_width,
@@ -1549,7 +1637,7 @@ pub fn render_fleet(
             buffer,
             1,
             top + 1,
-            "SESSION         PRV LIFE   ATTN AGE   MODE CONF NET",
+            "SESSION         PVD STATE  NEED AGE   MODE SIGNAL LINK",
             MUTED,
             list_width,
         );
@@ -1570,7 +1658,7 @@ pub fn render_fleet(
             buffer,
             2,
             row_y,
-            "No sessions match filter",
+            "No sessions in this command view",
             MUTED,
             list_width,
         );
@@ -1610,7 +1698,7 @@ fn render_table_row(
     selected: bool,
     now_ms: i64,
 ) {
-    let marker = if selected { '>' } else { ' ' };
+    let marker = if selected { '▸' } else { ' ' };
     let name = truncate(&session.session_name(), 15);
     let provider = truncate(&session.provider, 3).to_uppercase();
     let lifecycle = truncate(&session.lifecycle_state, 6).to_uppercase();
@@ -1627,9 +1715,23 @@ fn render_table_row(
         0,
         row_y,
         &text,
-        if selected { GREEN } else { FG },
+        if selected {
+            GREEN
+        } else {
+            attention_color(&session.attention_state)
+        },
         right,
     );
+}
+
+fn attention_color(attention: &str) -> Color {
+    if attention.eq_ignore_ascii_case("ASK") || attention.eq_ignore_ascii_case("WAITING") {
+        GOLD
+    } else if attention.eq_ignore_ascii_case("ERROR") {
+        ALERT
+    } else {
+        FG
+    }
 }
 
 fn render_divider(buffer: &mut WireBuffer, x: u16, top: u16, bottom: u16) {
@@ -1651,11 +1753,11 @@ fn render_detail(
         return;
     };
     let mut lines = vec![
-        ("Session", session.session_name()),
-        ("Key", session.session_key.clone()),
-        ("Provider", session.provider.clone()),
+        ("Selected", session.session_name()),
+        ("Identity", session.session_key.clone()),
+        ("Provider", session.provider.to_uppercase()),
         (
-            "State",
+            "Status",
             format!("{} / {}", session.lifecycle_state, session.attention_state),
         ),
     ];
@@ -1663,12 +1765,12 @@ fn render_detail(
         lines.extend(request_detail_lines(request));
     }
     if session.attention_state.eq_ignore_ascii_case("ASK") {
-        lines.push(("Action", "Enter answer".into()));
+        lines.push(("Action", "Enter opens structured interview".into()));
     } else if session.attention_state.eq_ignore_ascii_case("APPROVAL") {
         lines.push(("Action", "y approve, n deny".into()));
     }
     lines.push((
-        "Keys",
+        "Controls",
         "p prompt, t start, i interrupt, s stop, r restart, A attach".into(),
     ));
     lines.extend([
@@ -1703,7 +1805,14 @@ fn render_detail(
     }
     if let Some(feedback) = &state.feedback {
         if bottom > top {
-            put_str(buffer, left, bottom - 1, feedback, GOLD, right);
+            put_str(
+                buffer,
+                left,
+                bottom - 1,
+                feedback,
+                attention_color("ASK"),
+                right,
+            );
         }
     }
 }
@@ -1778,42 +1887,7 @@ fn render_mode(
 ) {
     match &state.mode {
         FleetMode::Browse => {}
-        FleetMode::Answer(answer) => {
-            let question = &answer.questions[answer.question_index];
-            let mut lines = vec![
-                format!(
-                    "Question {}/{}: {}",
-                    answer.question_index + 1,
-                    answer.questions.len(),
-                    question.text
-                ),
-                if answer.editing_text {
-                    "Type answer, Enter advances".into()
-                } else if question.multi_select {
-                    "Space toggles, Enter advances".into()
-                } else {
-                    "Up/Down selects, Enter advances, o enters Other text".into()
-                },
-            ];
-            if answer.editing_text {
-                lines.push(format!("> {}", answer.texts[answer.question_index]));
-            } else {
-                for (index, option) in question.options.iter().enumerate() {
-                    let cursor = if index == answer.option_cursor {
-                        '>'
-                    } else {
-                        ' '
-                    };
-                    let mark = if answer.selections[answer.question_index].contains(&index) {
-                        'x'
-                    } else {
-                        ' '
-                    };
-                    lines.push(format!("{cursor}[{mark}] {option}"));
-                }
-            }
-            render_modal(buffer, area_width, top, bottom, "Structured answer", &lines);
-        }
+        FleetMode::Answer(answer) => render_interview(buffer, area_width, top, bottom, answer),
         FleetMode::Start(start) => render_modal(
             buffer,
             area_width,
@@ -1883,6 +1957,168 @@ fn render_mode(
             render_broadcast_modal(buffer, area_width, top, bottom, state, broadcast)
         }
     }
+}
+
+fn render_interview(
+    buffer: &mut WireBuffer,
+    area_width: u16,
+    top: u16,
+    bottom: u16,
+    answer: &AnswerState,
+) {
+    if area_width < 28 || bottom.saturating_sub(top) < 8 {
+        return;
+    }
+    fill_background(buffer, 0, top, area_width, bottom, SURFACE);
+    let left = 2;
+    let right = area_width.saturating_sub(2);
+    let title_y = top.saturating_add(1);
+    put_str(buffer, left, title_y, "STRUCTURED INTERVIEW", GOLD, right);
+    let answered = answer
+        .questions
+        .iter()
+        .enumerate()
+        .filter(|(index, question)| answer_question_complete(answer, *index, question))
+        .count();
+    put_str(
+        buffer,
+        left,
+        title_y.saturating_add(1),
+        &format!(
+            "{}  /  {} answered     session: {}",
+            answered,
+            answer.questions.len(),
+            truncate(&answer.session_key, 28)
+        ),
+        MUTED,
+        right,
+    );
+    let mut tab_x = left;
+    let tab_y = title_y.saturating_add(3);
+    for (index, question) in answer.questions.iter().enumerate() {
+        let active = index == answer.question_index;
+        let done = answer_question_complete(answer, index, question);
+        let marker = if done { "●" } else { "○" };
+        let tab = format!(
+            " {} {} {} ",
+            index + 1,
+            marker,
+            truncate(&question.header, 14)
+        );
+        if tab_x.saturating_add(tab.len() as u16) >= right {
+            break;
+        }
+        put_str(
+            buffer,
+            tab_x,
+            tab_y,
+            &tab,
+            if active { GREEN } else { MUTED },
+            right,
+        );
+        tab_x = tab_x.saturating_add(tab.len() as u16 + 1);
+    }
+    for x in left..right {
+        put_char(buffer, x, tab_y.saturating_add(1), '─', BLUE);
+    }
+    let question = &answer.questions[answer.question_index];
+    let content_top = tab_y.saturating_add(3);
+    put_str(
+        buffer,
+        left,
+        content_top,
+        &format!("{} / {}", answer.question_index + 1, question.header),
+        BLUE,
+        right,
+    );
+    let mut y = content_top.saturating_add(2);
+    for part in wrap_text(
+        &question.text,
+        usize::from(right.saturating_sub(left)).saturating_sub(2),
+    ) {
+        if y >= bottom.saturating_sub(3) {
+            break;
+        }
+        put_str(buffer, left, y, &part, FG, right);
+        y = y.saturating_add(1);
+    }
+    y = y.saturating_add(1);
+    if answer.editing_text {
+        put_str(
+            buffer,
+            left,
+            y,
+            &format!("> {}", answer.texts[answer.question_index]),
+            GREEN,
+            right,
+        );
+    } else {
+        for (index, option) in question.options.iter().enumerate() {
+            if y >= bottom.saturating_sub(4) {
+                break;
+            }
+            let cursor = if index == answer.option_cursor {
+                '▸'
+            } else {
+                ' '
+            };
+            let selected = answer.selections[answer.question_index].contains(&index);
+            let mark = if question.multi_select {
+                if selected { "[x]" } else { "[ ]" }
+            } else if selected {
+                "(●)"
+            } else {
+                "( )"
+            };
+            put_str(
+                buffer,
+                left,
+                y,
+                &format!("{cursor} {mark} {}", option.label),
+                if index == answer.option_cursor {
+                    GREEN
+                } else {
+                    FG
+                },
+                right,
+            );
+            y = y.saturating_add(1);
+            if !option.description.is_empty() && y < bottom.saturating_sub(4) {
+                put_str(
+                    buffer,
+                    left.saturating_add(6),
+                    y,
+                    &option.description,
+                    MUTED,
+                    right,
+                );
+                y = y.saturating_add(1);
+            }
+        }
+    }
+    for x in left..right {
+        put_char(buffer, x, bottom.saturating_sub(2), '─', BLUE);
+    }
+    let help = if answer.editing_text {
+        "Type answer  Enter next  Tab question  Esc cancel"
+    } else if question.multi_select {
+        "Up/Down move  Space toggle  Enter next  Tab question  Esc cancel"
+    } else {
+        "Up/Down move  Enter next  o Other text  Tab question  Esc cancel"
+    };
+    put_str(buffer, left, bottom.saturating_sub(1), help, MUTED, right);
+}
+
+fn answer_question_complete(answer: &AnswerState, index: usize, question: &AnswerQuestion) -> bool {
+    if question.options.is_empty() {
+        return !answer.texts[index].trim().is_empty();
+    }
+    let selected_other = answer.selections[index]
+        .iter()
+        .filter_map(|option_index| question.options.get(*option_index))
+        .any(|option| option.label.eq_ignore_ascii_case("other"));
+    !answer.selections[index].is_empty()
+        && (!selected_other || !answer.texts[index].trim().is_empty())
 }
 
 fn render_broadcast_modal(
@@ -2018,6 +2254,23 @@ fn put_str(buffer: &mut WireBuffer, x: u16, row: u16, value: &str, color: Color,
     }
 }
 
+fn fill_background(
+    buffer: &mut WireBuffer,
+    left: u16,
+    top: u16,
+    right: u16,
+    bottom: u16,
+    color: Color,
+) {
+    for row in top..bottom {
+        for column in left..right {
+            let mut cell = Cell::new(" ");
+            cell.bg = Some(color);
+            buffer.push(Coord::new(column, row), cell);
+        }
+    }
+}
+
 fn put_char(buffer: &mut WireBuffer, x: u16, row: u16, character: char, color: Color) {
     let mut cell = Cell::new(character.to_string());
     cell.fg = Some(color);
@@ -2111,6 +2364,7 @@ mod tests {
             let character = buffer
                 .cells
                 .iter()
+                .rev()
                 .find(|(coord, _)| coord.x == x && coord.y == row)
                 .map_or(' ', |(_, cell)| cell.symbol.chars().next().unwrap_or(' '));
             output.push(character);
@@ -2305,6 +2559,77 @@ mod tests {
         assert_eq!(answers[0].selected_options, ["rg", "ast-grep"]);
         assert_eq!(answers[1].question_id, "ship");
         assert_eq!(answers[1].selected_options, ["Yes"]);
+    }
+
+    #[test]
+    fn interview_tabs_preserve_answers_and_refuse_incomplete_batch() {
+        let mut row = session("claude:interview", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("interview-fingerprint".into());
+        row.current_request = Some(serde_json::json!({
+            "tool_use_id": "interview-tool",
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "Choose scope",
+                    "options": [{"label": "Focused", "description": "one worktree"}]
+                },
+                {
+                    "id": "validation",
+                    "header": "Validation",
+                    "question": "Choose checks",
+                    "multiSelect": true,
+                    "options": [{"label": "Tests"}, {"label": "Tripwire"}]
+                }
+            ]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Tab)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(matches!(state.mode, FleetMode::Answer(_)));
+        assert_eq!(
+            state.feedback(),
+            Some("complete every interview question before submit")
+        );
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
+        let Some(FleetIntent::Execute {
+            action: FleetAction::StructuredAnswer { answers, .. },
+            ..
+        }) = submitted.intent
+        else {
+            panic!("complete tabbed interview must submit one structured action");
+        };
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].selected_options, ["Focused"]);
+        assert_eq!(answers[1].selected_options, ["Tests"]);
+    }
+
+    #[test]
+    fn authoritative_request_change_discards_interview_draft() {
+        let mut row = session("claude:stale", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("before".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Continue?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(matches!(state.mode, FleetMode::Answer(_)));
+
+        row.version += 1;
+        row.current_request_fingerprint = Some("after".into());
+        state.set_sessions(vec![row]);
+        assert!(matches!(state.mode, FleetMode::Browse));
+        assert_eq!(
+            state.feedback(),
+            Some("interview closed: authoritative request changed")
+        );
     }
 
     #[test]
@@ -2762,14 +3087,49 @@ mod tests {
         let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
-        assert!(row_text(&buffer, 0, 120).contains("Fleet  [Focus]"));
+        assert!(row_text(&buffer, 0, 120).contains("FLEET / COMMAND  [Focus]"));
         assert!(row_text(&buffer, 1, 80).contains("SESSION"));
         assert!(row_text(&buffer, 2, 80).contains("CLA"));
         let rendered: String =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("Key: claude:ask"));
-        assert!(rendered.contains("State: IDLE / ASK"));
+        assert!(rendered.contains("Identity: claude:ask"));
+        assert!(rendered.contains("Status: IDLE / ASK"));
         assert!(rendered.contains("Capabilities:"));
+    }
+
+    #[test]
+    fn interview_renderer_exposes_tabs_progress_and_option_descriptions() {
+        let mut row = session("claude:render", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("render-fingerprint".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "What scope should ship?",
+                    "options": [{"label": "Focused", "description": "verified Fleet work only"}]
+                },
+                {
+                    "id": "checks",
+                    "header": "Checks",
+                    "question": "What proof runs?",
+                    "multiSelect": true,
+                    "options": [{"label": "Tripwire", "description": "live terminal proof"}]
+                }
+            ]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let mut buffer = WireBuffer::new(120, 30);
+        render_fleet(&mut buffer, 120, 0, 28, &state);
+        let rendered: String =
+            (0..28).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("STRUCTURED INTERVIEW"));
+        assert!(rendered.contains("Scope"));
+        assert!(rendered.contains("Checks"));
+        assert!(rendered.contains("0  /  2 answered"));
+        assert!(rendered.contains("verified Fleet work only"));
     }
 
     #[test]
