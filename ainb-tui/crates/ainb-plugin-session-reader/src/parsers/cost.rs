@@ -1,80 +1,11 @@
-//! Cost estimation. Lifted verbatim from the Phase 6b plugin so the
-//! Phase 7c subprocess port produces the same dollar figures for the
-//! same input as the wasm cdylib it replaces.
+//! Cost estimation — re-export of the shared rate table.
+//!
+//! The table itself lives in `ainb-model-rates` so the parser, the host's
+//! legacy usage path, and burndown's CLI all price identically. It used to be
+//! copied into all three, which is how every Opus stayed at the retired
+//! $15/$75 rate for three model generations.
 
-struct ModelRates {
-    input: f64,
-    output: f64,
-    cache_write: f64,
-    cache_read: f64,
-}
-
-#[allow(clippy::too_many_arguments)]
-pub fn estimate_cost_usd(
-    model: &str,
-    input_tokens: u64,
-    output_tokens: u64,
-    cache_creation_tokens: u64,
-    cache_read_tokens: u64,
-    reasoning_tokens: u64,
-) -> Option<f64> {
-    let rates = model_rates(model)?;
-    Some(
-        input_tokens as f64 * rates.input
-            + (output_tokens + reasoning_tokens) as f64 * rates.output
-            + cache_creation_tokens as f64 * rates.cache_write
-            + cache_read_tokens as f64 * rates.cache_read,
-    )
-}
-
-fn model_rates(model: &str) -> Option<ModelRates> {
-    let canonical = canonical_model_name(model);
-    let (input_per_million, output_per_million) = if canonical.starts_with("claude-opus") {
-        (15.0, 75.0)
-    } else if canonical.starts_with("claude-sonnet") || canonical.starts_with("claude-3-5-sonnet") {
-        (3.0, 15.0)
-    } else if canonical.starts_with("claude-haiku") || canonical.starts_with("claude-3-5-haiku") {
-        (0.8, 4.0)
-    } else if canonical.starts_with("gpt-5")
-        || canonical.starts_with("gpt-4.1")
-        || canonical.starts_with("gpt-4o")
-    {
-        (1.25, 10.0)
-    } else {
-        return None;
-    };
-
-    let input = input_per_million / 1_000_000.0;
-    let output = output_per_million / 1_000_000.0;
-    Some(ModelRates {
-        input,
-        output,
-        cache_write: input * 1.25,
-        cache_read: input * 0.1,
-    })
-}
-
-fn canonical_model_name(model: &str) -> String {
-    let without_prefix = model
-        .split('@')
-        .next()
-        .unwrap_or(model)
-        .trim_start_matches("anthropic/")
-        .trim_start_matches("openai/")
-        .to_string();
-
-    if without_prefix
-        .rsplit('-')
-        .next()
-        .is_some_and(|suffix| suffix.len() == 8 && suffix.chars().all(|ch| ch.is_ascii_digit()))
-    {
-        without_prefix
-            .rsplit_once('-')
-            .map_or(without_prefix.clone(), |(name, _)| name.to_string())
-    } else {
-        without_prefix
-    }
-}
+pub use ainb_model_rates::estimate_cost_usd;
 
 #[cfg(test)]
 mod tests {
@@ -101,5 +32,34 @@ mod tests {
     fn date_stamped_claude_strips_to_canonical() {
         let cost = estimate_cost_usd("claude-3-5-sonnet-20241022", 1_000_000, 0, 0, 0, 0);
         assert!((cost.unwrap() - 3.0).abs() < 1e-6);
+    }
+
+    /// The parser is the ingest path for every provider, so it is the right
+    /// place to assert the models we actually see in transcripts today are
+    /// priced at all — an unpriced model silently becomes `cost_usd: None`.
+    #[test]
+    fn every_model_seen_in_live_transcripts_is_priced() {
+        for model in [
+            "claude-fable-5",
+            "claude-opus-5",
+            "claude-opus-4-8",
+            "claude-opus-4-7",
+            "claude-opus-4-6",
+            "claude-sonnet-5",
+            "claude-sonnet-4-6",
+            "claude-sonnet-4-5-20250929",
+            "claude-haiku-4-5-20251001",
+            "gpt-5.6-sol",
+            "gpt-5.6-terra",
+            "gpt-5.6-luna",
+            "gpt-5.5",
+            "gpt-5",
+            "gpt-5-mini",
+        ] {
+            assert!(
+                estimate_cost_usd(model, 1_000, 1_000, 0, 0, 0).is_some(),
+                "{model} has no published rate — burndown will render it as `cost n/a`"
+            );
+        }
     }
 }

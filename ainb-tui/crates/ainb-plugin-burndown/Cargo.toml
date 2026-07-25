@@ -21,6 +21,7 @@ name = "ainb-plugin-burndown"
 path = "src/main.rs"
 
 [dependencies]
+ainb-model-rates = { path = "../ainb-model-rates" }
 ainb-plugin-sdk-rust = { path = "../ainb-plugin-sdk-rust" }
 ainb-plugin-types-sessions = { path = "../ainb-plugin-types-sessions" }
 
