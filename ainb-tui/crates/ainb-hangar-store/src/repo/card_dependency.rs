@@ -15,8 +15,8 @@
 //!     dependent's blockers that have not FINISHED (their active set drained with a
 //!     `done`; a card with any unfinished blocker refuses to run and is never
 //!     auto-dispatched);
-//!   - [`CardDependencyRepo::edges_of_workspace`] — every edge in the workspace,
-//!     for the board snapshot's 🔒 blocked-state render;
+//!   - [`CardDependencyRepo::links_of_workspace`] — every typed link in the
+//!     workspace, for the board snapshot's 🔒 blocked-state render;
 //!   - [`CardDependencyRepo::set_auto_run`] / [`CardDependencyRepo::get_auto_run`]
 //!     — the per-card auto-run flag (default OFF) the finalize seam consults when
 //!     the last blocker completes.
@@ -43,9 +43,97 @@
 //! no task, with any still-active task in its latest generation, or whose latest
 //! generation ended `failed`/`cancelled` (no `done`) is UNFINISHED, so the dependent
 //! stays blocked. See [`CardDependencyRepo::unfinished_blockers_of`].
+//!
+//! # Typed links (multica parity #20, migration 0055)
+//!
+//! Every row carries a [`LinkKind`]. At rest the domain is
+//! `{'blocked_by', 'related'}`: `blocks` is the SAME edge read from the other end
+//! and is normalised at write into a swapped `blocked_by` row, so one logical
+//! relation can never be stored two ways. `related` is symmetric, exempt from the
+//! cycle guard, and INVISIBLE to every gating read
+//! ([`CardDependencyRepo::blockers_of`], [`CardDependencyRepo::dependents_of`],
+//! [`CardDependencyRepo::unfinished_blockers_of`], the cycle DFS) — so a related
+//! card can neither refuse a run nor be auto-launched by the finalize seam.
 
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::{Row, SqlitePool};
+
+/// The KIND of a card link (multica parity #20, migration 0055).
+///
+/// multica's `issue_dependency.type` is `IN ('blocks','blocked_by','related')`.
+/// hangar's row is already directional (`dependent -> blocker` == "dependent is
+/// *blocked_by* blocker"), so [`LinkKind::Blocks`] is a write/read DIRECTION, never
+/// a stored value: authoring `A blocks B` normalises into the row
+/// `(dependent = B, blocker = A, link_type = 'blocked_by')`. The at-rest domain is
+/// therefore `{'blocked_by', 'related'}` — see [`LinkKind::as_stored`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkKind {
+    /// FROM blocks TO — normalised at write into the reverse `BlockedBy` row.
+    Blocks,
+    /// FROM is blocked by TO — the gating relation (the historical edge).
+    #[default]
+    BlockedBy,
+    /// FROM and TO are associated. Symmetric, NEVER gating, never auto-runs, and
+    /// exempt from the cycle guard.
+    Related,
+}
+
+impl LinkKind {
+    /// The value persisted in `card_dependency.link_type`. `Blocks` shares
+    /// `BlockedBy`'s storage because the endpoints are swapped at write.
+    #[must_use]
+    pub fn as_stored(self) -> &'static str {
+        match self {
+            Self::Blocks | Self::BlockedBy => LINK_TYPE_BLOCKED_BY,
+            Self::Related => LINK_TYPE_RELATED,
+        }
+    }
+
+    /// Parse a wire / CLI token. Accepts `blocks`, `blocked_by`, `blocked-by` and
+    /// `related` (case-insensitively); anything else is `None`.
+    #[must_use]
+    pub fn parse(s: &str) -> Option<Self> {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "blocks" => Some(Self::Blocks),
+            "blocked_by" | "blocked-by" | "blockedby" => Some(Self::BlockedBy),
+            "related" => Some(Self::Related),
+            _ => None,
+        }
+    }
+
+    /// Whether links of this kind gate dispatch (and drive the auto-run seam).
+    /// `Related` never does.
+    #[must_use]
+    pub fn is_gating(self) -> bool {
+        !matches!(self, Self::Related)
+    }
+
+    /// The rendered token (`"blocks"` / `"blocked_by"` / `"related"`).
+    #[must_use]
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::BlockedBy => LINK_TYPE_BLOCKED_BY,
+            Self::Related => LINK_TYPE_RELATED,
+        }
+    }
+}
+
+/// The gating value stored in `card_dependency.link_type`.
+pub const LINK_TYPE_BLOCKED_BY: &str = "blocked_by";
+/// The non-gating value stored in `card_dependency.link_type`.
+pub const LINK_TYPE_RELATED: &str = "related";
+
+/// One typed link with both endpoints, in AUTHORED (row) order.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CardLink {
+    /// The `dependent` endpoint of the stored row.
+    pub dependent_issue_id: String,
+    /// The `blocker` endpoint of the stored row.
+    pub blocker_issue_id: String,
+    /// The stored kind (never [`LinkKind::Blocks`] — see [`LinkKind`]).
+    pub kind: LinkKind,
+}
 
 /// Stateless typed wrapper over the `card_dependency` table + the `issue.auto_run`
 /// flag (tcp T4 / F7).
@@ -54,9 +142,10 @@ pub struct CardDependencyRepo;
 /// Why a dependency edge could not be added.
 #[derive(Debug, thiserror::Error)]
 pub enum CardDependencyError {
-    /// The dependent and blocker are the same card — a card cannot depend on
-    /// itself (the trivial cycle). Rejected.
-    #[error("a card cannot depend on itself")]
+    /// Both endpoints are the same card — a card cannot link to itself (for
+    /// `blocked_by` that is the trivial cycle; for `related` it is meaningless).
+    /// Rejected for EVERY [`LinkKind`].
+    #[error("a card cannot link to itself")]
     SelfDependency,
     /// The edge would create a dependency CYCLE (the blocker already depends,
     /// transitively, on the dependent). Rejected so the graph stays acyclic and a
@@ -93,35 +182,141 @@ impl CardDependencyRepo {
         blocker_issue_id: &str,
         created_at: i64,
     ) -> Result<(), CardDependencyError> {
-        if dependent_issue_id == blocker_issue_id {
+        Self::add_link(
+            pool,
+            workspace,
+            dependent_issue_id,
+            blocker_issue_id,
+            LinkKind::BlockedBy,
+            created_at,
+        )
+        .await
+    }
+
+    /// Add a TYPED link `from -> to` in `workspace`, idempotently (multica parity
+    /// #20).
+    ///
+    /// - [`LinkKind::Blocks`] is normalised by SWAPPING the endpoints and storing
+    ///   the equivalent `blocked_by` row, so one logical relation is never stored
+    ///   two ways.
+    /// - [`LinkKind::BlockedBy`] keeps the historical behaviour verbatim: both
+    ///   endpoints resolved in `workspace`, then the DFS cycle guard, inside one
+    ///   transaction.
+    /// - [`LinkKind::Related`] is SYMMETRIC and NON-GATING: an existing row in
+    ///   EITHER orientation is retyped to `related` (so `A~B` then `B~A` is one
+    ///   row), and the cycle guard is skipped entirely — a `related` edge can
+    ///   never gate anything, so it cannot deadlock a graph.
+    ///
+    /// Re-adding an existing pair with a different kind REPLACES the kind (the
+    /// composite PK holds at most one relation per ordered pair).
+    ///
+    /// # Errors
+    ///
+    /// [`CardDependencyError::SelfDependency`] (for EVERY kind — a card cannot
+    /// link to itself) / [`CardDependencyError::Cycle`] /
+    /// [`CardDependencyError::NotFound`] / [`CardDependencyError::Db`].
+    pub async fn add_link(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        from_issue_id: &str,
+        to_issue_id: &str,
+        kind: LinkKind,
+        created_at: i64,
+    ) -> Result<(), CardDependencyError> {
+        if from_issue_id == to_issue_id {
             return Err(CardDependencyError::SelfDependency);
         }
+        // `blocks` is the same edge read from the other end: swap and store as
+        // `blocked_by`.
+        let (dependent_issue_id, blocker_issue_id) = match kind {
+            LinkKind::Blocks => (to_issue_id, from_issue_id),
+            LinkKind::BlockedBy | LinkKind::Related => (from_issue_id, to_issue_id),
+        };
+
         let mut tx = pool.begin().await?;
         Self::ensure_issue_in_ws(&mut tx, workspace, dependent_issue_id).await?;
         Self::ensure_issue_in_ws(&mut tx, workspace, blocker_issue_id).await?;
+
+        if kind == LinkKind::Related {
+            // Symmetric: retype an existing row in EITHER orientation rather than
+            // adding a mirrored second row.
+            let updated = sqlx::query(
+                "UPDATE card_dependency SET link_type = ? \
+                 WHERE workspace_id = ? \
+                   AND ((dependent_issue_id = ? AND blocker_issue_id = ?) \
+                     OR (dependent_issue_id = ? AND blocker_issue_id = ?))",
+            )
+            .bind(LINK_TYPE_RELATED)
+            .bind(workspace.as_str())
+            .bind(dependent_issue_id)
+            .bind(blocker_issue_id)
+            .bind(blocker_issue_id)
+            .bind(dependent_issue_id)
+            .execute(&mut *tx)
+            .await?;
+            if updated.rows_affected() == 0 {
+                Self::insert_row(
+                    &mut tx,
+                    workspace,
+                    dependent_issue_id,
+                    blocker_issue_id,
+                    LinkKind::Related,
+                    created_at,
+                )
+                .await?;
+            }
+            tx.commit().await?;
+            return Ok(());
+        }
 
         // Cycle guard: the new edge says "dependent depends on blocker". A cycle
         // exists iff `blocker` can already reach `dependent` by following
         // depends-on edges (blocker -> ... -> dependent) — adding
         // dependent -> blocker would then close the loop. DFS from `blocker` over
-        // its own blockers; if it reaches `dependent`, reject.
+        // its own blockers; if it reaches `dependent`, reject. `related` rows are
+        // invisible to the DFS (they gate nothing).
         if Self::reaches(&mut tx, blocker_issue_id, dependent_issue_id).await? {
             return Err(CardDependencyError::Cycle);
         }
 
+        Self::insert_row(
+            &mut tx,
+            workspace,
+            dependent_issue_id,
+            blocker_issue_id,
+            LinkKind::BlockedBy,
+            created_at,
+        )
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Insert one already-normalised link row, replacing the KIND of an existing
+    /// row for the same ordered pair (the composite PK holds one relation per
+    /// pair, so a re-add with a new kind retypes rather than erroring).
+    async fn insert_row(
+        tx: &mut sqlx::SqliteConnection,
+        workspace: &WorkspaceId,
+        dependent_issue_id: &str,
+        blocker_issue_id: &str,
+        kind: LinkKind,
+        created_at: i64,
+    ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO card_dependency \
-             (workspace_id, dependent_issue_id, blocker_issue_id, created_at) \
-             VALUES (?, ?, ?, ?) \
-             ON CONFLICT (dependent_issue_id, blocker_issue_id) DO NOTHING",
+             (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
+             VALUES (?, ?, ?, ?, ?) \
+             ON CONFLICT (dependent_issue_id, blocker_issue_id) \
+             DO UPDATE SET link_type = excluded.link_type",
         )
         .bind(workspace.as_str())
         .bind(dependent_issue_id)
         .bind(blocker_issue_id)
         .bind(created_at)
+        .bind(kind.as_stored())
         .execute(&mut *tx)
         .await?;
-        tx.commit().await?;
         Ok(())
     }
 
@@ -138,20 +333,68 @@ impl CardDependencyRepo {
         dependent_issue_id: &str,
         blocker_issue_id: &str,
     ) -> Result<(), sqlx::Error> {
+        Self::remove_link(
+            pool,
+            workspace,
+            dependent_issue_id,
+            blocker_issue_id,
+            LinkKind::BlockedBy,
+        )
+        .await
+    }
+
+    /// Remove the TYPED link `from -> to`, idempotently. `Blocks` swaps the
+    /// endpoints (mirroring [`CardDependencyRepo::add_link`]); `Related` deletes
+    /// the row in EITHER orientation, since a related link is symmetric.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn remove_link(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        from_issue_id: &str,
+        to_issue_id: &str,
+        kind: LinkKind,
+    ) -> Result<(), sqlx::Error> {
+        let (dependent_issue_id, blocker_issue_id) = match kind {
+            LinkKind::Blocks => (to_issue_id, from_issue_id),
+            LinkKind::BlockedBy | LinkKind::Related => (from_issue_id, to_issue_id),
+        };
+        if kind == LinkKind::Related {
+            sqlx::query(
+                "DELETE FROM card_dependency \
+                 WHERE workspace_id = ? AND link_type = ? \
+                   AND ((dependent_issue_id = ? AND blocker_issue_id = ?) \
+                     OR (dependent_issue_id = ? AND blocker_issue_id = ?))",
+            )
+            .bind(workspace.as_str())
+            .bind(LINK_TYPE_RELATED)
+            .bind(dependent_issue_id)
+            .bind(blocker_issue_id)
+            .bind(blocker_issue_id)
+            .bind(dependent_issue_id)
+            .execute(pool)
+            .await?;
+            return Ok(());
+        }
         sqlx::query(
             "DELETE FROM card_dependency \
-             WHERE workspace_id = ? AND dependent_issue_id = ? AND blocker_issue_id = ?",
+             WHERE workspace_id = ? AND dependent_issue_id = ? AND blocker_issue_id = ? \
+               AND link_type = ?",
         )
         .bind(workspace.as_str())
         .bind(dependent_issue_id)
         .bind(blocker_issue_id)
+        .bind(LINK_TYPE_BLOCKED_BY)
         .execute(pool)
         .await?;
         Ok(())
     }
 
     /// The blocker issue ids the dependent card depends on (its direct blockers),
-    /// ordered by insertion time then id for a stable render.
+    /// ordered by insertion time then id for a stable render. GATING links only —
+    /// `related` rows are excluded (migration 0055).
     ///
     /// # Errors
     ///
@@ -162,9 +405,49 @@ impl CardDependencyRepo {
     ) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar(
             "SELECT blocker_issue_id FROM card_dependency \
-             WHERE dependent_issue_id = ? ORDER BY created_at, blocker_issue_id",
+             WHERE dependent_issue_id = ? AND link_type = 'blocked_by' \
+             ORDER BY created_at, blocker_issue_id",
         )
         .bind(dependent_issue_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// The issue ids this card BLOCKS — the reverse read direction of its
+    /// `blocked_by` rows (multica parity #20). Identical to
+    /// [`CardDependencyRepo::dependents_of`]; named for the render, which shows it
+    /// as a `blocks` link on the detail card.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn blocks_of(
+        pool: &SqlitePool,
+        blocker_issue_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        Self::dependents_of(pool, blocker_issue_id).await
+    }
+
+    /// This card's RELATED issue ids — the union of both orientations, since a
+    /// `related` link is symmetric. Ordered by insertion time then id for a stable
+    /// render. Never gates and never auto-runs.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn related_of(
+        pool: &SqlitePool,
+        issue_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "SELECT CASE WHEN dependent_issue_id = ?1 THEN blocker_issue_id \
+                         ELSE dependent_issue_id END AS other \
+             FROM card_dependency \
+             WHERE link_type = 'related' \
+               AND (dependent_issue_id = ?1 OR blocker_issue_id = ?1) \
+             ORDER BY created_at, other",
+        )
+        .bind(issue_id)
         .fetch_all(pool)
         .await
     }
@@ -181,7 +464,8 @@ impl CardDependencyRepo {
     ) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar(
             "SELECT dependent_issue_id FROM card_dependency \
-             WHERE blocker_issue_id = ? ORDER BY created_at, dependent_issue_id",
+             WHERE blocker_issue_id = ? AND link_type = 'blocked_by' \
+             ORDER BY created_at, dependent_issue_id",
         )
         .bind(blocker_issue_id)
         .fetch_all(pool)
@@ -238,6 +522,7 @@ impl CardDependencyRepo {
         sqlx::query_scalar(
             "SELECT d.blocker_issue_id FROM card_dependency d \
              WHERE d.dependent_issue_id = ? \
+               AND d.link_type = 'blocked_by' \
                AND NOT ( \
                      EXISTS ( \
                        SELECT 1 FROM agent_task_queue t \
@@ -260,19 +545,20 @@ impl CardDependencyRepo {
         .await
     }
 
-    /// Every dependency edge in `workspace` as `(dependent, blocker)` pairs, for
-    /// the board snapshot's blocked-state render. Ordered by dependent then blocker
-    /// for a deterministic snapshot.
+    /// Every TYPED link in `workspace`, for the board snapshot's blocked-state
+    /// render and the whole-graph read. Ordered by dependent then blocker for a
+    /// deterministic snapshot. An unrecognised stored `link_type` (only reachable
+    /// by a hand-edited database) reads back as the gating default.
     ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] on a store fault.
-    pub async fn edges_of_workspace(
+    pub async fn links_of_workspace(
         pool: &SqlitePool,
         workspace: &WorkspaceId,
-    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+    ) -> Result<Vec<CardLink>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT dependent_issue_id, blocker_issue_id FROM card_dependency \
+            "SELECT dependent_issue_id, blocker_issue_id, link_type FROM card_dependency \
              WHERE workspace_id = ? ORDER BY dependent_issue_id, blocker_issue_id",
         )
         .bind(workspace.as_str())
@@ -280,10 +566,12 @@ impl CardDependencyRepo {
         .await?;
         rows.iter()
             .map(|r| {
-                Ok((
-                    r.try_get("dependent_issue_id")?,
-                    r.try_get("blocker_issue_id")?,
-                ))
+                let raw: String = r.try_get("link_type")?;
+                Ok(CardLink {
+                    dependent_issue_id: r.try_get("dependent_issue_id")?,
+                    blocker_issue_id: r.try_get("blocker_issue_id")?,
+                    kind: LinkKind::parse(&raw).unwrap_or_default(),
+                })
             })
             .collect()
     }
@@ -342,8 +630,11 @@ impl CardDependencyRepo {
             if !visited.insert(node.clone()) {
                 continue;
             }
+            // Only GATING edges can form a deadlocking cycle; `related` rows are
+            // invisible here (migration 0055).
             let next: Vec<String> = sqlx::query_scalar(
-                "SELECT blocker_issue_id FROM card_dependency WHERE dependent_issue_id = ?",
+                "SELECT blocker_issue_id FROM card_dependency \
+                 WHERE dependent_issue_id = ? AND link_type = 'blocked_by'",
             )
             .bind(&node)
             .fetch_all(&mut *tx)
@@ -472,7 +763,7 @@ mod tests {
         deps.sort();
         assert_eq!(deps, vec!["b", "c"]);
         assert_eq!(
-            CardDependencyRepo::edges_of_workspace(pool, &ws("ws-a")).await.unwrap().len(),
+            CardDependencyRepo::links_of_workspace(pool, &ws("ws-a")).await.unwrap().len(),
             2,
             "the idempotent re-add did not double the edge"
         );
@@ -520,7 +811,7 @@ mod tests {
 
         // The two rejected edges were never written.
         assert_eq!(
-            CardDependencyRepo::edges_of_workspace(pool, &ws("ws-a")).await.unwrap().len(),
+            CardDependencyRepo::links_of_workspace(pool, &ws("ws-a")).await.unwrap().len(),
             2
         );
     }
@@ -552,7 +843,7 @@ mod tests {
             "got {foreign:?}"
         );
         assert!(
-            CardDependencyRepo::edges_of_workspace(pool, &ws("ws-a"))
+            CardDependencyRepo::links_of_workspace(pool, &ws("ws-a"))
                 .await
                 .unwrap()
                 .is_empty()
