@@ -87,7 +87,7 @@ jobs:
       - name: Run skill-manager unit + integration test suite
         run: |
           cd ainb-tui
-          cargo test --workspace --no-fail-fast \
+          cargo test --no-fail-fast \
             -p ainb-skill-core \
             -p ainb-fetch \
             -p ainb-adapters-source \
