@@ -903,6 +903,24 @@ async fn prepare_spawn_inputs(
         HANGAR_PARENT_SESSION.to_string(),
     );
 
+    // 0056 / multica parity #21: hand the child its ORIGIN PROVENANCE, the seam
+    // that lets a mention-spawned (or autopilot-fired) run stamp the issues it
+    // creates — multica does the same by injecting the quick-create task id into
+    // the agent's environment (`internal/daemon/daemon.go:1742`). The runner
+    // allowlists both keys; set AFTER `build_task_env` so the daemon's value
+    // always beats an ambient one. A provenance-less task sets NEITHER key, so
+    // an agent's create falls back to `manual` rather than inheriting a stale
+    // pair from the operator's shell.
+    if let Some(origin) = task.origin.as_ref() {
+        task_env.insert(
+            crate::runner::ORIGIN_TYPE_ENV.to_string(),
+            origin.kind_db_str().to_string(),
+        );
+        if let Some(id) = origin.id() {
+            task_env.insert(crate::runner::ORIGIN_ID_ENV.to_string(), id.to_string());
+        }
+    }
+
     // P6.4: materialise the agent's attached skills into the provider's layout,
     // forwarding the `*_HOME` pointer via `task_env`. Non-fatal — a task must
     // still dispatch even if a skill bundle cannot be written.
@@ -4217,5 +4235,134 @@ mod tests {
             Backend::Claude,
             "no per-agent override falls back to the runtime's advertised provider"
         );
+    }
+
+    // ---- ORIGIN PROVENANCE env seam (0056, multica parity #21) -------------
+
+    /// A secret backend that holds nothing — the preamble's credential read is
+    /// irrelevant to the env-key assertions below.
+    struct NoSecretsBackend;
+    impl ainb_hangar_secrets::SecretBackend for NoSecretsBackend {
+        fn get(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<Option<ainb_hangar_secrets::SecretBytes>> {
+            Ok(None)
+        }
+        fn put(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+            _: &[u8],
+        ) -> ainb_hangar_secrets::Result<()> {
+            Ok(())
+        }
+        fn delete(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Build a real queued task, optionally stamped with `origin`, and run the
+    /// dispatch preamble over it. Returns the child `task_env`.
+    async fn task_env_for_origin(
+        origin: Option<&ainb_hangar_core::origin::IssueOrigin>,
+    ) -> std::collections::HashMap<String, String> {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: bootstrap::default_runtime_id(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        if let Some(origin) = origin {
+            TaskRepo::set_origin(pool, &task_id, origin).await.unwrap();
+        }
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+        // Codex backend + a zero cred timeout: the claude-only credential read is
+        // skipped, so the preamble is just the env build we are asserting on.
+        let (task_env, _cred) = prepare_spawn_inputs(
+            pool,
+            &task,
+            &env,
+            Backend::Codex,
+            Arc::new(NoSecretsBackend),
+            Duration::from_millis(1),
+        )
+        .await;
+        task_env
+    }
+
+    /// A mention-spawned task hands its child BOTH provenance keys — the seam
+    /// that lets the agent's `ainb hangar issue create` stamp the issue it
+    /// creates with the comment that asked for it.
+    #[tokio::test]
+    async fn a_mention_task_carries_its_origin_into_the_child_env() {
+        let origin = ainb_hangar_core::origin::IssueOrigin::comment_mention("c-77").unwrap();
+        let env = task_env_for_origin(Some(&origin)).await;
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_TYPE_ENV).map(String::as_str),
+            Some("comment_mention")
+        );
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_ID_ENV).map(String::as_str),
+            Some("c-77")
+        );
+    }
+
+    /// A provenance-less task sets NEITHER key, so the agent's create falls back
+    /// to `manual` instead of inheriting a stale pair.
+    #[tokio::test]
+    async fn a_task_without_origin_sets_neither_env_key() {
+        let env = task_env_for_origin(None).await;
+        assert!(!env.contains_key(crate::runner::ORIGIN_TYPE_ENV));
+        assert!(!env.contains_key(crate::runner::ORIGIN_ID_ENV));
+    }
+
+    /// `manual` carries no id: the kind key is set, the id key is not.
+    #[tokio::test]
+    async fn a_manual_origin_sets_the_kind_key_only() {
+        let origin = ainb_hangar_core::origin::IssueOrigin::manual();
+        let env = task_env_for_origin(Some(&origin)).await;
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_TYPE_ENV).map(String::as_str),
+            Some("manual")
+        );
+        assert!(!env.contains_key(crate::runner::ORIGIN_ID_ENV));
     }
 }
