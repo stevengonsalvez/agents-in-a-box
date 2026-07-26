@@ -3695,6 +3695,7 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
         }
     }

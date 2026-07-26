@@ -4309,6 +4309,7 @@ impl HangarPlugin {
             // The Kanban-synthesized header carries no acceptance / context lists of
             // its own (the daemon owns those on the real issue row).
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
@@ -5728,6 +5729,7 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
         }]);
         p
@@ -5882,6 +5884,7 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
             },
             IssueRow {
@@ -5911,6 +5914,7 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
             },
         ]);
@@ -6101,6 +6105,7 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
         }]);
         p.rebuild_hit_map(120, 24);
@@ -6190,6 +6195,7 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
         }]);
         // The card starts in Backlog.
@@ -6271,6 +6277,7 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
             })
             .collect();
@@ -6356,6 +6363,7 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
             },
             IssueRow {
@@ -6385,6 +6393,7 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
             },
         ]);
@@ -7123,6 +7132,7 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();

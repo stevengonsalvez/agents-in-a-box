@@ -317,6 +317,26 @@ pub const HANGAR_ISSUE_LABEL_ATTACH: &str = "hangar/issue_label_attach";
 /// [`crate::events::HangarEvent::IssueUpdated`].
 pub const HANGAR_ISSUE_LABEL_DETACH: &str = "hangar/issue_label_detach";
 
+/// `hangar/issue_criterion_set` — tick / untick ONE acceptance criterion on one
+/// issue (multica parity #11-rest).
+///
+/// Params: [`crate::snapshots::IssueCriterionSetParams`]
+/// (`{ workspace_id, issue_id, criterion, checked, actor? }` — `criterion` is
+/// either the stable criterion id (`ac-…`) or a 1-BASED ordinal, because an
+/// agent reading the detail card sees positions, not ids). Result: the refreshed
+/// [`crate::events::IssueRow`], or an error.
+///
+/// Idempotent: ticking an already-ticked criterion succeeds without rewriting
+/// its `checked_at` / `checked_by` provenance.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_LABEL_ATTACH`]: the
+/// daemon resolves the workspace and REJECTS a mistyped one (never a silent
+/// no-op); an `(issue_id, workspace_id)` pair matching no row is
+/// `INVALID_PARAMS`, as is a `criterion` matching no element. A committed tick
+/// pushes the matching [`crate::events::HangarEvent::IssueUpdated`] so every
+/// subscribed screen re-renders.
+pub const HANGAR_ISSUE_CRITERION_SET: &str = "hangar/issue_criterion_set";
+
 /// `hangar/comment_add` — append a comment to one issue (e38.5).
 ///
 /// Params: [`crate::snapshots::CommentAddParams`]
@@ -1075,6 +1095,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_UPDATE,
     HANGAR_ISSUE_LABEL_ATTACH,
     HANGAR_ISSUE_LABEL_DETACH,
+    HANGAR_ISSUE_CRITERION_SET,
     HANGAR_COMMENT_ADD,
     HANGAR_AGENT_UPDATE,
     HANGAR_AGENT_ARCHIVE,
@@ -1249,6 +1270,7 @@ mod tests {
             HANGAR_ISSUE_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
+            HANGAR_ISSUE_CRITERION_SET,
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,
@@ -1322,6 +1344,7 @@ mod tests {
             HANGAR_ISSUE_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
+            HANGAR_ISSUE_CRITERION_SET,
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,

@@ -38,6 +38,7 @@ use clap::{Args, Subcommand};
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::autopilot::Autopilot;
@@ -4016,12 +4017,12 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         // label query and diverged the CLI from the daemon's create.
         labels: Vec::new(),
         // 0048: trim-drop blank elements — an empty criterion / ref is not data.
+        // #11-rest: mint a stable per-criterion id at create so an agent can tick
+        // one off by id (the constructor does the trim-drop).
         acceptance_criteria: args
             .acceptance_criteria
             .iter()
-            .map(|s| s.trim())
-            .filter(|s| !s.is_empty())
-            .map(ToString::to_string)
+            .filter_map(|s| AcceptanceCriterion::new(&idgen, s))
             .collect(),
         context_refs: args
             .context_refs
