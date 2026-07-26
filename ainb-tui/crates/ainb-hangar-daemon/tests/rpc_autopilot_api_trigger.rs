@@ -249,9 +249,7 @@ async fn api_trigger_arms_fires_and_records_a_skipped_run() {
         "a dispatch at the concurrency limit is declined: {skipped}"
     );
     assert!(
-        skipped["reason"]
-            .as_str()
-            .is_some_and(|r| r.starts_with("concurrency limit")),
+        skipped["reason"].as_str().is_some_and(|r| r.starts_with("concurrency limit")),
         "the admission reason is reported: {skipped}"
     );
     assert!(skipped["task_id"].is_null(), "a skip enqueues no task");
