@@ -33,12 +33,13 @@ use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use super::boards::{AgentChip, RepoOption, repo_candidates};
 
-/// The number of status columns the board renders — the five canonical
-/// lifecycle statuses (63l.3). Kept as a single constant so the column enum, the
-/// card-board render, and the per-column scroll offsets stay in lockstep.
+/// The number of status columns the board renders — the seven canonical
+/// lifecycle statuses (63l.3, extended with `blocked` / `cancelled`). Kept as a
+/// single constant so the column enum, the card-board render, and the
+/// per-column scroll offsets stay in lockstep.
 pub(crate) const COLUMN_COUNT: usize = IssueLifecycle::ALL.len();
 
-/// The five status columns issues are bucketed into for display, one per
+/// The seven status columns issues are bucketed into for display, one per
 /// canonical [`IssueLifecycle`] status (63l.3).
 ///
 /// The mapping from the wire `state` string to a column is owned by
@@ -59,6 +60,11 @@ pub enum IssueColumn {
     InReview,
     /// Terminal / closed (`"done"`, legacy `"closed"`).
     Done,
+    /// Work cannot proceed (`"blocked"`) — appended right of Done so every
+    /// pre-existing 0..4 column index stays stable.
+    Blocked,
+    /// Abandoned without completing (`"cancelled"`) — terminal alongside Done.
+    Cancelled,
 }
 
 impl IssueColumn {
@@ -84,6 +90,8 @@ impl IssueColumn {
             IssueLifecycle::InProgress => Self::InProgress,
             IssueLifecycle::InReview => Self::InReview,
             IssueLifecycle::Done => Self::Done,
+            IssueLifecycle::Blocked => Self::Blocked,
+            IssueLifecycle::Cancelled => Self::Cancelled,
         }
     }
 
@@ -103,10 +111,13 @@ impl IssueColumn {
             Self::InProgress => IssueLifecycle::InProgress,
             Self::InReview => IssueLifecycle::InReview,
             Self::Done => IssueLifecycle::Done,
+            Self::Blocked => IssueLifecycle::Blocked,
+            Self::Cancelled => IssueLifecycle::Cancelled,
         }
     }
 
-    /// The five columns in left-to-right display order (`backlog` … `done`).
+    /// The seven columns in left-to-right display order (`backlog` …
+    /// `cancelled`).
     #[must_use]
     pub const fn all() -> [Self; COLUMN_COUNT] {
         [
@@ -115,6 +126,8 @@ impl IssueColumn {
             Self::InProgress,
             Self::InReview,
             Self::Done,
+            Self::Blocked,
+            Self::Cancelled,
         ]
     }
 }
@@ -137,6 +150,10 @@ const fn column_glyph(column: IssueColumn) -> char {
         IssueColumn::InProgress => '◔',
         IssueColumn::InReview => '◑',
         IssueColumn::Done => '●',
+        // BMP, single-cell only — a wide/emoji glyph desyncs the column geometry
+        // the mouse hit-test shares with the paint.
+        IssueColumn::Blocked => '⊘',
+        IssueColumn::Cancelled => '⨯',
     }
 }
 
@@ -4393,14 +4410,15 @@ mod tests {
         out
     }
 
-    /// The Issues screen renders through the five-column card-board (63l.4): every
-    /// canonical lifecycle column appears with its live count header, and a
+    /// The Issues screen renders through the seven-column card-board (63l.4):
+    /// every canonical lifecycle column appears with its live count header, and a
     /// representative row is bucketed into each as a CARD (its id painted inside a
-    /// bordered tile). A `backlog` and an `in_review` row prove the two outer
-    /// columns are not dropped, and the legacy `open` / `closed` tokens still land
-    /// under Todo / Done via the canonical helper.
+    /// bordered tile). A `backlog` and an `in_review` row prove the outer columns
+    /// are not dropped, `blocked` / `cancelled` prove the two appended ones
+    /// render, and the legacy `open` / `closed` tokens still land under Todo /
+    /// Done via the canonical helper.
     #[test]
-    fn renders_all_five_canonical_columns_with_counts() {
+    fn renders_all_seven_canonical_columns_with_counts() {
         let s = IssueListState::with_rows(vec![
             row("i-backlog", "backlog", None),
             row("i-todo", "todo", None),
@@ -4409,11 +4427,13 @@ mod tests {
             row("i-review", "in_review", None),
             row("i-done", "done", None),
             row("i-closed", "closed", None), // legacy -> Done
+            row("i-blocked", "blocked", None),
+            row("i-cancelled", "cancelled", None),
         ]);
 
-        // A wide board so every 16-cell column fits its header + card.
-        let mut buf = WireBuffer::new(120, 24);
-        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        // A wide board so every one of the seven columns fits its header + card.
+        let mut buf = WireBuffer::new(168, 24);
+        render_issue_list(&mut buf, 168, 1, 23, &s, 0);
         let painted = painted_text(&buf);
 
         // Every canonical column header with its live count.
@@ -4423,6 +4443,8 @@ mod tests {
             "In Progress (1)",
             "In Review (1)",
             "Done (2)", // done + legacy closed
+            "Blocked (1)",
+            "Cancelled (1)",
         ] {
             assert!(
                 painted.contains(header),
@@ -4439,6 +4461,8 @@ mod tests {
             "i-review",
             "i-done",
             "i-closed",
+            "i-blocked",
+            "i-cancelled",
         ] {
             assert!(
                 painted.contains(id),
@@ -4552,16 +4576,18 @@ mod tests {
     }
 
     /// 63l.4 — the card-board spreads its columns HORIZONTALLY across the full
-    /// width (Backlog left, Done right), not vertically. With a populated fixture
-    /// the leftmost (`Backlog`) and rightmost (`Done`) column headers must sit on
-    /// the SAME header row but at opposite ends of the board — the board uses the
-    /// width, it doesn't stack the sections down the pane.
+    /// width (Backlog left, Cancelled right), not vertically. With a populated
+    /// fixture every column header must sit on the SAME header row, in canonical
+    /// left-to-right order — the board uses the width, it doesn't stack the
+    /// sections down the pane.
     ///
     /// Reverting to the old top-packed vertical band layout stacks the headers down
     /// one column and this side-by-side assertion fails.
     #[test]
     fn columns_spread_horizontally_across_the_board() {
-        const W: u16 = 120;
+        // 168 = 7 × 24, wide enough that every canonical header paints in full
+        // rather than being clipped to a stub the assertions can't find.
+        const W: u16 = 168;
         const H: u16 = 24;
         let top = 1u16;
         let bottom = H - 1; // footer pinned on the last row
@@ -4582,31 +4608,48 @@ mod tests {
         let mut buf = WireBuffer::new(W, H);
         render_issue_list(&mut buf, W, top, bottom, &s, 0);
 
-        // Find the x of the Backlog header glyph and the Done header glyph; they
-        // sit on the same header row at opposite ends of the board.
-        let backlog_x = header_glyph_x(&buf, "Backlog (").expect("Backlog header painted");
-        let done_x = header_glyph_x(&buf, "Done (").expect("Done header painted");
+        // Every canonical header sits on the same row, at strictly increasing x.
+        // Asserted as a SEQUENCE rather than frozen offsets so a width or column
+        // change cannot make the check vacuous.
+        let xs: Vec<u16> = [
+            "Backlog (",
+            "Todo (",
+            "In Progress (",
+            "In Review (",
+            "Done (",
+            "Blocked (",
+            "Cancelled (",
+        ]
+        .iter()
+        .map(|label| {
+            header_glyph_x(&buf, label).unwrap_or_else(|| panic!("{label} header painted"))
+        })
+        .collect();
         assert!(
-            done_x > backlog_x,
-            "Done must sit to the RIGHT of Backlog (horizontal columns): \
-             backlog_x={backlog_x}, done_x={done_x}",
+            xs.windows(2).all(|w| w[1] > w[0]),
+            "columns must spread left-to-right in canonical order, got {xs:?}",
         );
-        // Done sits in the rightmost fifth of a five-column board.
+        // The rightmost column really is at the right edge (not all seven packed
+        // into the left half with a vertical stack below).
+        let cancelled_x = *xs.last().expect("seven headers");
+        let columns = u16::try_from(IssueColumn::all().len()).expect("column count fits");
         assert!(
-            done_x >= W * 4 / 5 - 4,
-            "Done column must occupy the rightmost fifth (done_x={done_x}, w={W})",
+            cancelled_x >= W * (columns - 1) / columns - 4,
+            "Cancelled must occupy the rightmost column (cancelled_x={cancelled_x}, w={W})",
         );
     }
 
     /// The `(x, _)` start column of a header label painted anywhere in the buffer
     /// (the column the card-board painted that header at), scanning row-major.
     fn header_glyph_x(buf: &WireBuffer, label: &str) -> Option<u16> {
+        // Matched over CHARS, never bytes: the header row carries multi-byte
+        // status glyphs (`⊘`, `⨯`, …), so `str::find`'s byte offset is NOT a
+        // screen column and every x comparison built on it would be nonsense.
+        let needle: Vec<char> = label.chars().collect();
         for y in 0..buf.height {
-            let line = row_text(buf, y, buf.width);
-            if let Some(byte_idx) = line.find(label) {
-                // `find` returns a byte index; the header labels are ASCII here, so
-                // the byte index equals the char column.
-                return u16::try_from(byte_idx).ok();
+            let line: Vec<char> = row_text(buf, y, buf.width).chars().collect();
+            if let Some(idx) = line.windows(needle.len()).position(|w| w == needle.as_slice()) {
+                return u16::try_from(idx).ok();
             }
         }
         None

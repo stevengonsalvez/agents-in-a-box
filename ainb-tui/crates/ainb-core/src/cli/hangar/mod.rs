@@ -1109,7 +1109,8 @@ pub struct IssueLabelArgs {
 pub struct IssueUpdateArgs {
     /// Issue id (ULID) to edit.
     pub id: String,
-    /// New lifecycle state (e.g. `in_progress`, `done`); omitted leaves it.
+    /// New lifecycle state — one of `backlog`, `todo`, `in_progress`,
+    /// `in_review`, `done`, `blocked`, `cancelled`; omitted leaves it.
     #[arg(long)]
     pub state: Option<String>,
     /// Reassign the issue to an agent (`agent.id`); omitted leaves the assignee.
@@ -3130,6 +3131,18 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     use ainb_hangar_store::repo::issue::IssueFieldUpdate;
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // 0049: reject a state outside the canonical lifecycle vocabulary BEFORE any
+    // write, so a typo is a clear CLI error naming the seven valid tokens rather
+    // than a migration-0049 trigger ABORT surfacing as an opaque sqlx failure.
+    if let Some(state) = args.state.as_deref() {
+        if ainb_hangar_proto::lifecycle::IssueLifecycle::parse_canonical(state).is_none() {
+            anyhow::bail!(
+                "invalid --state {state:?}; valid values: {}",
+                ainb_hangar_proto::lifecycle::IssueLifecycle::canonical_list()
+            );
+        }
+    }
 
     // Map the present flags onto the partial edit. The two nullable fields use
     // the clear-flag to distinguish "clear to none" from "leave unchanged". The

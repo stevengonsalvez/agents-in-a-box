@@ -99,12 +99,19 @@ pub async fn auto_move_after_transition(pool: &SqlitePool, task: &Task, new_stat
 ///
 /// # Advance-only
 ///
-/// The write is guarded to only ever move the issue FORWARD along the canonical
-/// column order ([`IssueLifecycle::order`]): a target at or behind the issue's
-/// current column is skipped. This mirrors the `if issue.state == …` guard the
-/// PR-merge snapshot uses (snapshots.rs) so a manually-set or PR-merged terminal
-/// state is never regressed — e.g. a re-run's `running` transition can never drag
-/// an already-`done` issue back to `in_progress`.
+/// The write is guarded to only ever move the issue FORWARD along the WORKFLOW
+/// PROGRESS rank ([`IssueLifecycle::advance_rank`]), and never to revive a
+/// terminal issue ([`IssueLifecycle::is_terminal`] — `done` / `cancelled`). This
+/// mirrors the `if issue.state == …` guard the PR-merge snapshot uses
+/// (snapshots.rs) so a manually-set or PR-merged terminal state is never
+/// regressed — e.g. a re-run's `running` transition can never drag an
+/// already-`done` issue back to `in_progress`.
+///
+/// The rank is deliberately NOT [`IssueLifecycle::order`]: `blocked` is APPENDED
+/// at column 5, to the right of `done`, so comparing column order would freeze a
+/// blocked issue forever (every later transition would read as "behind" it).
+/// `advance_rank` ranks `blocked` with `todo`, so unblocking and running an issue
+/// still promotes it.
 ///
 /// # Best-effort
 ///
@@ -124,6 +131,11 @@ pub async fn advance_issue_lifecycle_after_transition(
         "done" => IssueLifecycle::Done,
         // `failed` / `cancelled` / unknown carry no forward issue-lifecycle
         // meaning — leave the issue where it is.
+        //
+        // DELIBERATELY NOT WIRED: a `cancelled` TASK must not set its issue to
+        // the `cancelled` STATE. A cancelled run is normally followed by a
+        // re-run; whether the ISSUE is abandoned is a human/agent decision, not
+        // a consequence of one run being killed.
         _ => return,
     };
     let current = match IssueRepo::get_by_id(pool, issue_id).await {
@@ -135,10 +147,18 @@ pub async fn advance_issue_lifecycle_after_transition(
             return;
         }
     };
-    // Advance-only: never regress an issue that already sits at or beyond the
-    // target column (a manually-set or PR-merged terminal state, or the same
-    // state twice → idempotent no-op).
-    if target.order() <= IssueLifecycle::for_state(&current.state).order() {
+    let current_status = IssueLifecycle::for_state(&current.state);
+    // A TERMINAL issue (done / cancelled) is never revived by a run transition:
+    // a re-run's `running` must not drag a merged issue back to `in_progress`,
+    // and an abandoned issue stays abandoned until a human moves it.
+    if current_status.is_terminal() {
+        return;
+    }
+    // Advance-only, by WORKFLOW PROGRESS rather than board column order:
+    // `blocked` paints at column 5 (right of `done`) but ranks with `todo`, so
+    // comparing `order()` here would freeze a blocked issue forever. Same-rank
+    // targets are an idempotent no-op.
+    if target.advance_rank() <= current_status.advance_rank() {
         return;
     }
     match IssueRepo::update_state(pool, issue_id, target.as_str()).await {

@@ -323,6 +323,11 @@ const fn column_accent(name: &str) -> Color {
         b"In Progress" | b"Running" => Color::rgb(235, 185, 80),
         b"In Review" => Color::rgb(185, 140, 235),
         b"Done" => Color::rgb(110, 200, 130),
+        // Amber: blocked is a stall, NOT a failure — deliberately not the
+        // Failed red.
+        b"Blocked" => Color::rgb(230, 160, 60),
+        // Muted grey: cancelled work recedes.
+        b"Cancelled" => Color::rgb(120, 120, 140),
         b"Failed" => Color::rgb(220, 90, 90),
         _ => GOLD,
     }
@@ -369,9 +374,19 @@ const HEADER_AFFORDANCE_W: u16 = 4;
 ///
 /// The body width `area_w` is split into [`COLUMN_COUNT`]-many equal columns of
 /// at least [`MIN_COL_W`]. When `area_w` cannot fit every column at the minimum
-/// width, the board paints as many whole columns as fit (left-to-right) and
-/// clips the rest — a column is never squeezed below `MIN_COL_W` into an
-/// unreadable sliver. The returned layout contains only the painted columns.
+/// width, the board paints as many whole columns as fit and clips the rest — a
+/// column is never squeezed below `MIN_COL_W` into an unreadable sliver.
+///
+/// # Horizontal window
+///
+/// The painted window SLIDES to keep the selected column inside it, rather than
+/// always painting the leftmost n. With seven columns at `MIN_COL_W`, an 80-cell
+/// area only fits five, so a fixed left-anchored window would make the Blocked
+/// and Cancelled columns invisible AND un-hit-testable — the fail-hidden mode.
+/// [`ColumnLayout::index`] carries the CANONICAL column index (`first_col + i`),
+/// not the painted position, so every hit-test consumer still resolves the right
+/// [`IssueLifecycle`](ainb_hangar_proto::lifecycle::IssueLifecycle) status.
+/// The returned layout contains only the painted columns.
 #[must_use]
 pub fn render_card_board(
     buf: &mut WireBuffer,
@@ -388,20 +403,36 @@ pub fn render_card_board(
     let col_w = (area_w / u16::try_from(n).unwrap_or(u16::MAX)).max(MIN_COL_W);
     let visible_cols = (area_w / col_w).max(1) as usize;
 
+    // Slide the painted window so the SELECTED column is always inside it. A
+    // fixed left-anchored window hides every column past `visible_cols` from
+    // both the paint and the hit-test, which at 80 cells × 7 columns would make
+    // Blocked/Cancelled unreachable.
+    let last_start = columns.len().saturating_sub(visible_cols);
+    let first_col = selected
+        .map_or(0, |(sc, _)| {
+            sc.saturating_sub(visible_cols.saturating_sub(1))
+        })
+        .min(last_start);
+    let painted = visible_cols.min(columns.len().saturating_sub(first_col));
+
     let mut layout = BoardLayout::default();
-    for (i, column) in columns.iter().enumerate().take(visible_cols) {
+    for (i, column) in columns.iter().skip(first_col).enumerate().take(visible_cols) {
         let x0 = u16::try_from(i).unwrap_or(0).saturating_mul(col_w);
         // The last *painted* column absorbs any width remainder so the board
         // fills the area edge-to-edge without a ragged right gutter.
-        let this_w = if i + 1 == visible_cols.min(columns.len()) {
+        let is_last = i + 1 == painted;
+        let this_w = if is_last {
             area_w.saturating_sub(x0)
         } else {
             col_w
         };
-        let sel_card = selected.and_then(|(sc, ci)| (sc == i).then_some(ci));
+        // The CANONICAL index — the position in `columns`, not in the painted
+        // window — so `IssueLifecycle::ALL.get(col.index)` still resolves the
+        // right status for every hit-test consumer.
+        let canonical = first_col + i;
+        let sel_card = selected.and_then(|(sc, ci)| (sc == canonical).then_some(ci));
         let col_rect = Rect::new(x0, top, this_w, bottom.saturating_sub(top));
-        let is_last = i + 1 == visible_cols.min(columns.len());
-        let col_layout = render_column(buf, col_rect, i, column, sel_card, is_last);
+        let col_layout = render_column(buf, col_rect, canonical, column, sel_card, is_last);
         layout.columns.push(col_layout);
     }
     layout
@@ -979,6 +1010,109 @@ mod tests {
         ]
     }
 
+    /// All SEVEN canonical lifecycle columns, one card each — the real board
+    /// shape after `blocked` / `cancelled` were appended.
+    fn seven_columns() -> Vec<BoardColumn> {
+        let mut cols = five_columns();
+        cols[4] = column(
+            '●',
+            "Done",
+            vec![card("HGR-5", "Ship it", PriorityChip::Low, None)],
+        );
+        cols.push(column(
+            '⊘',
+            "Blocked",
+            vec![card("HGR-6", "Waiting on infra", PriorityChip::High, None)],
+        ));
+        cols.push(column(
+            '⨯',
+            "Cancelled",
+            vec![card("HGR-7", "Abandoned spike", PriorityChip::Low, None)],
+        ));
+        cols
+    }
+
+    /// At the documented 80×24 floor only five of the seven columns fit, so the
+    /// painted window must SLIDE to keep the selected column visible — and each
+    /// laid-out column must carry its CANONICAL index, not its position in the
+    /// window, or `IssueLifecycle::ALL.get(col.index)` resolves the wrong status
+    /// for every mouse hit-test.
+    ///
+    /// RED without the sliding window: selecting Cancelled (column 6) would paint
+    /// Backlog..Done and the card would be invisible AND un-hit-testable.
+    #[test]
+    fn selected_column_stays_inside_the_painted_window_at_80_cols() {
+        use ainb_hangar_proto::lifecycle::IssueLifecycle;
+
+        let columns = seven_columns();
+        let mut buf = WireBuffer::new(80, 24);
+        let layout = render_card_board(&mut buf, 80, 0, 23, &columns, Some((6, 0)));
+
+        let cancelled = layout
+            .columns
+            .iter()
+            .find(|c| c.index == 6)
+            .expect("the selected Cancelled column is inside the painted window");
+        assert_eq!(
+            IssueLifecycle::ALL[cancelled.index],
+            IssueLifecycle::Cancelled,
+            "ColumnLayout.index is the canonical status index, not the window slot"
+        );
+        assert_eq!(
+            cancelled.cards.first().map(|c| c.issue_id.as_str()),
+            Some("HGR-7"),
+            "the cancelled card is painted and hit-testable"
+        );
+        // Its rect really resolves under the mouse.
+        let r = cancelled.cards[0].rect;
+        assert_eq!(
+            layout.card_at(r.x + 1, r.y + 1).map(|c| c.issue_id.as_str()),
+            Some("HGR-7")
+        );
+        // The window slid: the leftmost columns dropped out rather than the
+        // selected one.
+        assert!(
+            layout.columns.iter().all(|c| c.index >= 2),
+            "the window is anchored to the right at selection 6, got {:?}",
+            layout.columns.iter().map(|c| c.index).collect::<Vec<_>>()
+        );
+        // And the board still paints edge-to-edge with no out-of-bounds writes.
+        for (coord, _) in &buf.cells {
+            assert!(coord.x < 80 && coord.y < 24, "in-bounds paint");
+        }
+    }
+
+    /// With nothing selected (or the leftmost selected) the window stays anchored
+    /// left, so the pre-existing left-anchored behavior is unchanged.
+    #[test]
+    fn window_stays_left_anchored_without_a_right_selection() {
+        let columns = seven_columns();
+        let mut buf = WireBuffer::new(80, 24);
+        let layout = render_card_board(&mut buf, 80, 0, 23, &columns, None);
+        assert_eq!(
+            layout.columns.first().map(|c| c.index),
+            Some(0),
+            "no selection keeps the leftmost column painted"
+        );
+
+        let mut buf = WireBuffer::new(80, 24);
+        let layout = render_card_board(&mut buf, 80, 0, 23, &columns, Some((1, 0)));
+        assert_eq!(layout.columns.first().map(|c| c.index), Some(0));
+    }
+
+    /// A board wide enough for all seven paints all seven, every index canonical.
+    #[test]
+    fn a_wide_board_paints_every_canonical_column() {
+        let columns = seven_columns();
+        let mut buf = WireBuffer::new(7 * MIN_COL_W, 24);
+        let layout = render_card_board(&mut buf, 7 * MIN_COL_W, 0, 23, &columns, Some((6, 0)));
+        assert_eq!(
+            layout.columns.iter().map(|c| c.index).collect::<Vec<_>>(),
+            (0..7).collect::<Vec<_>>(),
+            "all seven columns, in canonical order"
+        );
+    }
+
     /// Reconstruct a row's text from the buffer; unwritten cells are spaces.
     fn row_text(buf: &WireBuffer, row: u16, width: u16) -> String {
         let mut out = vec![' '; width as usize];
@@ -1151,9 +1285,9 @@ mod tests {
         }
     }
 
-    /// The number of canonical columns the floor test packs (mirrors the
-    /// caller's five-status board).
-    const COLUMN_COUNT_TEST: usize = 5;
+    /// The number of canonical columns the floor test packs. Derived from the
+    /// lifecycle vocabulary so it can never drift behind a newly-added status.
+    const COLUMN_COUNT_TEST: usize = ainb_hangar_proto::lifecycle::IssueLifecycle::ALL.len();
 
     /// The returned layout tags each painted card with its issue id and a rect
     /// that contains the card's cells — the geometry P0.2 hit-tests.

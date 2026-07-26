@@ -47,6 +47,7 @@ use std::time::Instant;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
+use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
@@ -3420,6 +3421,21 @@ async fn handle_issue_update(
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let update = issue_field_update_from_params(&params)?;
 
+    // 0049: the RPC boundary is STRICT about the lifecycle vocabulary — a typo'd
+    // state is a clean INVALID_PARAMS here rather than a trigger ABORT surfacing
+    // as an internal store error, and no partial write happens. Deliberately
+    // stricter than the DB constraint, which must still admit the Beads bridge's
+    // legacy `open` / `closed` writes; the TUI and CLI only ever send canonical
+    // tokens.
+    if let Some(state) = params.state.as_deref() {
+        if IssueLifecycle::parse_canonical(state).is_none() {
+            return Err(invalid_params(&format!(
+                "invalid state {state:?}; valid values: {}",
+                IssueLifecycle::canonical_list()
+            )));
+        }
+    }
+
     // 0046: capture the issue's PRE-update state (only when a state edit is
     // requested) so a completion can fire the child-done → parent cascade below.
     let prev_state = issue_prev_state_for_cascade(pool, &ws, &params.issue_id, &update).await?;
@@ -5089,6 +5105,10 @@ pub(crate) enum CardRunOutcome {
 pub(crate) enum CardRunError {
     /// The card has unfinished blockers (their display ids) — F7 refuse-run.
     Blocked(Vec<String>),
+    /// The card's ISSUE sits in the terminal `cancelled` state. Distinct from
+    /// [`Self::Blocked`], which is the DEPENDENCY refusal — a user must be able
+    /// to tell "waiting on HGR-3" from "you cancelled this".
+    Cancelled,
     /// The card already has an active run (its status).
     ActiveRun(String),
     /// The card has no repo to run in (F2).
@@ -5120,6 +5140,9 @@ fn card_run_err(e: CardRunError) -> RpcError {
             "this card is blocked by unfinished cards ({}); finish them (or remove the dependency) first",
             refs.join(", ")
         )),
+        CardRunError::Cancelled => {
+            invalid_params("this card is cancelled; move it out of Cancelled before running it")
+        }
         CardRunError::ActiveRun(status) => invalid_params(&format!(
             "a run is already active for this card ({status}); cancel it or wait for it to finish"
         )),
@@ -5239,6 +5262,15 @@ pub(crate) async fn run_card(
     if !blockers.is_empty() {
         let refs = blockers.iter().map(|b| crate::rpc::snapshots::short_display_id(b)).collect();
         return Err(CardRunError::Blocked(refs));
+    }
+
+    // 1b. A CANCELLED issue never dispatches. `cancelled` is terminal (multica
+    //     excludes it from the status-change run trigger), so a Run on a
+    //     cancelled card is a user error, not a silent launch. `blocked` stays
+    //     runnable — in hangar it is a human annotation, and the real dependency
+    //     gate is step 1 above.
+    if IssueLifecycle::for_state(&issue.state) == IssueLifecycle::Cancelled {
+        return Err(CardRunError::Cancelled);
     }
 
     // 2. One active run per card (card = issue). Blocks a re-run — and a second

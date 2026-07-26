@@ -58,7 +58,7 @@ use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
 /// snapshot carries the whole board. `IssueRepo` lists by `(workspace, state)`,
-/// so the snapshot unions the FIVE canonical states (the
+/// so the snapshot unions the SEVEN canonical states (the
 /// [`IssueLifecycle`](ainb_hangar_proto::lifecycle::IssueLifecycle) vocabulary
 /// the board buckets through) plus the legacy `open` / `closed` tokens, which
 /// `issue_create` and the Beads inbound sync may still write until they adopt the
@@ -74,6 +74,12 @@ const ISSUE_STATES: &[&str] = &[
     "in_progress",
     "in_review",
     "done",
+    // Appended by migration 0049 (multica gap #19). An omission here is
+    // fail-HIDDEN, not fail-visible: the union is per-state, so an unqueried
+    // token means the row never reaches the client at all rather than landing in
+    // the wrong column.
+    "blocked",
+    "cancelled",
     "open",
     "closed",
 ];
