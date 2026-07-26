@@ -121,6 +121,9 @@ pub enum SkillAction {
     Attach(String),
     /// Detach a skill from the selected agent (`d`) — `hangar/skill_detach`.
     Detach(String),
+    /// Flip a skill's per-agent enablement (`t`) — `hangar/skill_set_enabled`
+    /// (parity #24). The glue derives the target state from the cached link map.
+    ToggleEnabled(String),
 }
 
 /// A deferred daemon RPC raised by the autopilot-manager screen (P7.5).
@@ -1406,6 +1409,9 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     }
                     Some(SkillManagerIntent::Attach(slug)) => Some(SkillAction::Attach(slug)),
                     Some(SkillManagerIntent::Detach(slug)) => Some(SkillAction::Detach(slug)),
+                    Some(SkillManagerIntent::ToggleEnabled(slug)) => {
+                        Some(SkillAction::ToggleEnabled(slug))
+                    }
                     Some(SkillManagerIntent::LoadFiles(_)) | None => None,
                 };
             }
