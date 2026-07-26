@@ -310,9 +310,7 @@ impl SquadsState {
     #[must_use]
     pub fn selected_member_role(&self) -> Option<&str> {
         match self.rows().get(self.selected)? {
-            Row::Member(si, mi) => {
-                Some(self.squads.get(*si)?.members.get(*mi)?.role.as_str())
-            }
+            Row::Member(si, mi) => Some(self.squads.get(*si)?.members.get(*mi)?.role.as_str()),
             Row::Header(_) => None,
         }
     }
@@ -977,7 +975,14 @@ fn render_member(buf: &mut WireBuffer, row: u16, area_w: u16, member: &SquadActo
     // The member's free-text role, if it has one — clipped by `put_str` on a
     // narrow pane. A roleless member paints nothing extra.
     if !member.role.is_empty() {
-        put_str(buf, x, row, &format!("  · {}", member.role), MUTED_GRAY, area_w);
+        put_str(
+            buf,
+            x,
+            row,
+            &format!("  · {}", member.role),
+            MUTED_GRAY,
+            area_w,
+        );
     }
 }
 
@@ -1270,7 +1275,10 @@ mod tests {
             "roled member row: {roled}"
         );
         let roleless = row_text(&buf, 3, 120);
-        assert!(roleless.contains("alice"), "roleless member row: {roleless}");
+        assert!(
+            roleless.contains("alice"),
+            "roleless member row: {roleless}"
+        );
         assert!(
             !roleless.contains("owns the migrations"),
             "the roleless member must not paint a role: {roleless}"
@@ -1279,7 +1287,10 @@ mod tests {
         // A squad with NO instructions paints no pencil (row 4 = s2 header).
         let plain = row_text(&buf, 4, 120);
         assert!(plain.contains("reviewers"), "s2 header: {plain}");
-        assert!(!plain.contains('✎'), "no pencil without instructions: {plain}");
+        assert!(
+            !plain.contains('✎'),
+            "no pencil without instructions: {plain}"
+        );
     }
 
     /// `from_snapshot` resolves each leader/member ref to its display + presence,
@@ -1429,7 +1440,10 @@ mod tests {
         let opened = reduce_squads(&state, SquadsEvent::Key('c')).state;
         let out = reduce_squads(&opened, SquadsEvent::Key('\n'));
         assert!(out.intent.is_none());
-        assert!(out.state.is_capturing(), "blank submit keeps the input open");
+        assert!(
+            out.state.is_capturing(),
+            "blank submit keeps the input open"
+        );
     }
 
     /// `a` adds a member to the selected squad; `x` assigns; both carry the squad id.

@@ -63,7 +63,9 @@ async fn set_member_role_on_a_non_member_writes_nothing() {
     let store = open(&dir).await;
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
     let before = member_count(pool).await;
 
@@ -87,15 +89,23 @@ async fn set_member_role_persists_replaces_and_clears() {
     let store = open(&dir).await;
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &human("u-1")).await.unwrap();
 
     // Set.
     assert!(
-        SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "owns the migrations")
-            .await
-            .unwrap(),
+        SquadRepo::set_member_role(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &agent("a-1"),
+            "owns the migrations"
+        )
+        .await
+        .unwrap(),
         "an existing membership reports an update"
     );
     for squad in [
@@ -119,7 +129,9 @@ async fn set_member_role_persists_replaces_and_clears() {
     );
 
     // Clear.
-    SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "").await.unwrap();
+    SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "")
+        .await
+        .unwrap();
     let s = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap();
     assert_eq!(
         s.members.iter().find(|m| m.actor == agent("a-1")).unwrap().role,
@@ -137,7 +149,9 @@ async fn role_and_instructions_are_workspace_scoped() {
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
     seed_ws(pool, "ws-b").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
     SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "keeper")
         .await
         .unwrap();
@@ -147,7 +161,9 @@ async fn role_and_instructions_are_workspace_scoped() {
         .await
         .unwrap_err();
     assert!(matches!(err, SquadRepoError::NotFound), "got {err:?}");
-    let err = SquadRepo::set_instructions(pool, &ws("ws-b"), "s1", "hijacked").await.unwrap_err();
+    let err = SquadRepo::set_instructions(pool, &ws("ws-b"), "s1", "hijacked")
+        .await
+        .unwrap_err();
     assert!(matches!(err, SquadRepoError::NotFound), "got {err:?}");
 
     let s = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().expect("present");
@@ -164,10 +180,18 @@ async fn re_add_preserves_a_role_unless_a_role_is_supplied() {
     let store = open(&dir).await;
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
-    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "owns the migrations")
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
         .await
         .unwrap();
+    SquadRepo::add_member_with_role(
+        pool,
+        &ws("ws-a"),
+        "s1",
+        &agent("a-1"),
+        "owns the migrations",
+    )
+    .await
+    .unwrap();
 
     // Plain re-add: role survives.
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
@@ -187,7 +211,9 @@ async fn re_add_preserves_a_role_unless_a_role_is_supplied() {
     assert_eq!(s.members[0].role, "owns the CLI");
 
     // An explicit empty role clears it.
-    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "").await.unwrap();
+    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "")
+        .await
+        .unwrap();
     let s = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap();
     assert_eq!(s.members[0].role, "");
 }
@@ -200,13 +226,20 @@ async fn removing_a_member_drops_its_role() {
     let store = open(&dir).await;
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
-    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "keeper").await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
+    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "keeper")
+        .await
+        .unwrap();
     SquadRepo::remove_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
 
     let s = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap();
-    assert_eq!(s.members[0].role, "", "a re-created membership starts roleless");
+    assert_eq!(
+        s.members[0].role, "",
+        "a re-created membership starts roleless"
+    );
 }
 
 /// `set_instructions` round-trips VERBATIM through BOTH read paths, including an
@@ -218,10 +251,14 @@ async fn instructions_round_trip_verbatim_and_clear() {
     let store = open(&dir).await;
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
 
     let text = "Route schema work to the DB owner.\n\n- Escalate a red CI to the reporter.";
-    SquadRepo::set_instructions(pool, &ws("ws-a"), "s1", &format!("  {text}  ")).await.unwrap();
+    SquadRepo::set_instructions(pool, &ws("ws-a"), "s1", &format!("  {text}  "))
+        .await
+        .unwrap();
 
     let via_get = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap();
     assert_eq!(via_get.instructions, text, "verbatim through `get`");
@@ -244,14 +281,22 @@ async fn the_fanout_query_is_role_blind() {
     let store = open(&dir).await;
     let pool = store.pool();
     seed_ws(pool, "ws-a").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
     SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-2")).await.unwrap();
     let roleless = SquadRepo::member_agent_ids(pool, &ws("ws-a"), "s1").await.unwrap();
 
-    SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "owns the migrations")
-        .await
-        .unwrap();
+    SquadRepo::set_member_role(
+        pool,
+        &ws("ws-a"),
+        "s1",
+        &agent("a-1"),
+        "owns the migrations",
+    )
+    .await
+    .unwrap();
     let roled = SquadRepo::member_agent_ids(pool, &ws("ws-a"), "s1").await.unwrap();
 
     assert_eq!(
@@ -271,8 +316,12 @@ async fn workspace_delete_still_cascades_memberships() {
     seed_ws(pool, "ws-a").await;
     // A second workspace so the delete is not blocked by the last-workspace guard.
     seed_ws(pool, "ws-keep").await;
-    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
-    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "keeper").await.unwrap();
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1)
+        .await
+        .unwrap();
+    SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "keeper")
+        .await
+        .unwrap();
     SquadRepo::add_member_with_role(pool, &ws("ws-a"), "s1", &human("u-1"), "reviewer")
         .await
         .unwrap();

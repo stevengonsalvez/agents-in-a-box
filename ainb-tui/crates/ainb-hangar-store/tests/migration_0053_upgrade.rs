@@ -90,12 +90,14 @@ async fn seed_legacy_squad(pool: &SqlitePool) {
     .await
     .expect("insert squad");
     for (kind, id) in [("agent", "ag-1"), ("member", "user-1")] {
-        sqlx::query("INSERT INTO squad_member (squad_id, member_type, member_id) VALUES ('sq-1',?,?)")
-            .bind(kind)
-            .bind(id)
-            .execute(pool)
-            .await
-            .expect("insert membership");
+        sqlx::query(
+            "INSERT INTO squad_member (squad_id, member_type, member_id) VALUES ('sq-1',?,?)",
+        )
+        .bind(kind)
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("insert membership");
     }
 }
 
@@ -138,7 +140,10 @@ async fn upgrades_populated_db_to_empty_role_and_instructions() {
         vec!["sq-1"],
         "a pre-0053 squad stays in the list"
     );
-    assert_eq!(squads[0].instructions, "", "legacy squad has no instructions");
+    assert_eq!(
+        squads[0].instructions, "",
+        "legacy squad has no instructions"
+    );
     assert_eq!(squads[0].members.len(), 2);
     for m in &squads[0].members {
         assert_eq!(m.role, "", "legacy membership {:?} has no role", m.actor);

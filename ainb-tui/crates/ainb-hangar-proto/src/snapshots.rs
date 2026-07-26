@@ -3010,10 +3010,9 @@ mod tests {
         )
         .unwrap();
         assert_eq!(create.instructions, "");
-        let add: SquadMemberParams = serde_json::from_str(
-            r#"{"workspace_id":"ws-1","squad_id":"s1","member":"agent:a-1"}"#,
-        )
-        .unwrap();
+        let add: SquadMemberParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","squad_id":"s1","member":"agent:a-1"}"#)
+                .unwrap();
         assert_eq!(add.role, "");
 
         // Both new param types round-trip.

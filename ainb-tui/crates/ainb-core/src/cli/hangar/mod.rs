@@ -2816,7 +2816,8 @@ async fn run_squad_create(store: &Store, args: SquadCreateArgs) -> Result<()> {
         .map_err(squad_cli_err)?;
     // Optional initial routing guidance (migration 0053). `create`'s signature
     // stays unchanged — the two writes are one logical unit here.
-    if let Some(instructions) = args.instructions.as_deref().map(str::trim).filter(|t| !t.is_empty())
+    if let Some(instructions) =
+        args.instructions.as_deref().map(str::trim).filter(|t| !t.is_empty())
     {
         SquadRepo::set_instructions(store.pool(), &ws, &id, instructions)
             .await
@@ -2889,9 +2890,10 @@ async fn run_squad_member_role(store: &Store, args: SquadMemberRoleArgs) -> Resu
     })?;
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
-    let updated = SquadRepo::set_member_role(store.pool(), &ws, &args.squad_id, &member, &args.role)
-        .await
-        .map_err(squad_cli_err)?;
+    let updated =
+        SquadRepo::set_member_role(store.pool(), &ws, &args.squad_id, &member, &args.role)
+            .await
+            .map_err(squad_cli_err)?;
     if !updated {
         anyhow::bail!(
             "{member} is not a member of squad {} — add it first",
@@ -2924,7 +2926,11 @@ async fn run_squad_instructions(store: &Store, args: SquadInstructionsArgs) -> R
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
 
     if args.set.is_some() || args.clear {
-        let text = if args.clear { "" } else { args.set.as_deref().unwrap_or_default() };
+        let text = if args.clear {
+            ""
+        } else {
+            args.set.as_deref().unwrap_or_default()
+        };
         SquadRepo::set_instructions(store.pool(), &ws, &args.squad_id, text)
             .await
             .map_err(squad_cli_err)?;

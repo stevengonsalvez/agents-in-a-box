@@ -61,13 +61,19 @@ impl SquadMember {
     /// constructor readers and tests use when only the actor matters.
     #[must_use]
     pub fn new(actor: ActorRef) -> Self {
-        Self { actor, role: String::new() }
+        Self {
+            actor,
+            role: String::new(),
+        }
     }
 
     /// A membership carrying `role` verbatim.
     #[must_use]
     pub fn with_role(actor: ActorRef, role: impl Into<String>) -> Self {
-        Self { actor, role: role.into() }
+        Self {
+            actor,
+            role: role.into(),
+        }
     }
 }
 
@@ -619,10 +625,7 @@ impl SquadRepo {
 /// Read one squad's memberships (actor + free-text role), ordered by
 /// `(member_type, member_id)` for a stable render — the one member-read shared by
 /// [`SquadRepo::list_where`] and [`SquadRepo::get`], so both see roles.
-async fn read_members(
-    pool: &SqlitePool,
-    squad_id: &str,
-) -> Result<Vec<SquadMember>, sqlx::Error> {
+async fn read_members(pool: &SqlitePool, squad_id: &str) -> Result<Vec<SquadMember>, sqlx::Error> {
     use sqlx::Row;
     let rows = sqlx::query(
         "SELECT member_type, member_id, role FROM squad_member \

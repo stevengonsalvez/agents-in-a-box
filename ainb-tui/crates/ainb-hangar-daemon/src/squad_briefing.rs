@@ -399,14 +399,18 @@ mod tests {
         )
         .await
         .unwrap();
-        let instructions = "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
+        let instructions =
+            "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
         SquadRepo::set_instructions(pool, &w, "sq-r", instructions).await.unwrap();
 
         let briefing = build_squad_leader_briefing(pool, &w, "sq-r", &leader.id).await.unwrap();
 
         // The roled member's WHOLE line, and the roleless member's whole line.
         assert!(
-            briefing.contains(&format!("- scout — agent — {} — role: owns the migrations\n", a.id)),
+            briefing.contains(&format!(
+                "- scout — agent — {} — role: owns the migrations\n",
+                a.id
+            )),
             "roled member row must carry the role suffix:\n{briefing}"
         );
         assert!(
@@ -427,7 +431,10 @@ mod tests {
         let protocol = briefing.find("## Squad Operating Protocol").unwrap();
         let roster = briefing.find("## Squad Roster").unwrap();
         let instr = briefing.find("## Squad Instructions").unwrap();
-        assert!(protocol < roster && roster < instr, "section order:\n{briefing}");
+        assert!(
+            protocol < roster && roster < instr,
+            "section order:\n{briefing}"
+        );
     }
 
     /// Parity #25 blank-omit: a squad with blank `instructions` emits NO

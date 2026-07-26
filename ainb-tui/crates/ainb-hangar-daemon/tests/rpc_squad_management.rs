@@ -720,7 +720,10 @@ async fn squad_role_and_instructions_persist_through_the_rpcs() {
     .fetch_one(store.pool())
     .await
     .unwrap();
-    assert_eq!(role, "owns the migrations", "a plain re-add must not clear it");
+    assert_eq!(
+        role, "owns the migrations",
+        "a plain re-add must not clear it"
+    );
 
     // `squad_member_role_set` updates it.
     let resp = c
