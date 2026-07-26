@@ -1100,6 +1100,151 @@ fn member_remove_rejects_removing_the_only_owner() {
     );
 }
 
+/// The user-visible proof for parity #26 (agent leg): `ainb hangar agent archive`
+/// records WHO and WHEN, both readable back through `agent list --all`. An ACTIVE
+/// agent's JSON carries `null` for both — the honest "never archived".
+#[test]
+fn agent_archive_records_the_audit_trail_readable_from_the_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "anchor"],
+    );
+    assert!(ok, "bootstrap create failed");
+    seed_agent(tmp.path());
+
+    // Before: an active agent reports no audit at all.
+    let (ok, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "json agent list should exit 0; out={shown}");
+    assert!(
+        shown.contains("\"archived_at\":null") && shown.contains("\"archived_by\":null"),
+        "an active agent must report a null audit pair:\n{shown}"
+    );
+
+    // Archive with an EXPLICIT actor.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "archive", "agent-1", "--by", "user-2"],
+    );
+    assert!(ok, "archive should exit 0; out={out}");
+    assert!(
+        out.contains("archived agent agent-1 by member:user-2 at "),
+        "the ack must name the archiving actor and the stamp:\n{out}"
+    );
+
+    // Both audit columns are readable back, non-null, through `--all`.
+    let (ok, shown) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "agent", "list", "--all"],
+    );
+    assert!(ok, "json agent list --all should exit 0; out={shown}");
+    assert!(
+        shown.contains("\"archived_by\":\"member:user-2\""),
+        "archived_by not persisted:\n{shown}"
+    );
+    assert!(
+        !shown.contains("\"archived_at\":null"),
+        "archived_at must be a real epoch-ms stamp, not null:\n{shown}"
+    );
+    // The text line carries the same audit, and only when stamped.
+    let (_, line) = run(tmp.path(), &["hangar", "agent", "list", "--all"]);
+    assert!(
+        line.contains("archived_by=member:user-2@"),
+        "the text line must carry the audit suffix:\n{line}"
+    );
+
+    // Restoring clears BOTH — a restored agent carries no stale attribution.
+    let (ok, _) = run(tmp.path(), &["hangar", "agent", "unarchive", "agent-1"]);
+    assert!(ok, "unarchive should exit 0");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains("\"archived_at\":null") && shown.contains("\"archived_by\":null"),
+        "restore must clear the audit pair:\n{shown}"
+    );
+    let (_, line) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(
+        !line.contains("archived_by="),
+        "a restored agent's line carries no audit suffix:\n{line}"
+    );
+}
+
+/// The user-visible proof for parity #26 (squad leg): `ainb hangar squad archive`
+/// removes the squad from the default list, `--all` shows it with its stamp, and
+/// `unarchive` restores it.
+#[test]
+fn squad_archive_hides_it_from_list_and_records_the_audit() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            "agent:lead-1",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "archive",
+            &squad_id,
+            "--by",
+            "user-9",
+        ],
+    );
+    assert!(ok, "squad archive should exit 0; out={out}");
+    assert!(
+        out.contains("archived squad") && out.contains("by member:user-9 at "),
+        "the ack must name the archiving actor and the stamp:\n{out}"
+    );
+
+    // The default list is active-only.
+    let (ok, list) = run(tmp.path(), &["hangar", "squad", "list"]);
+    assert!(ok, "squad list should exit 0; out={list}");
+    assert!(
+        !list.contains("shippers"),
+        "an archived squad must leave the default list:\n{list}"
+    );
+
+    // `--all` shows it, with the archive badge and its audit stamp.
+    let (ok, all) = run(tmp.path(), &["hangar", "squad", "list", "--all"]);
+    assert!(ok, "squad list --all should exit 0; out={all}");
+    assert!(
+        all.contains("shippers")
+            && all.contains("[archived]")
+            && all.contains("archived_by=member:user-9@"),
+        "--all must show the archived squad with its audit:\n{all}"
+    );
+
+    // Restoring returns it to the default list and clears the stamp.
+    let (ok, _) = run(tmp.path(), &["hangar", "squad", "unarchive", &squad_id]);
+    assert!(ok, "squad unarchive should exit 0");
+    let (_, json) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "squad", "list"],
+    );
+    assert!(
+        json.contains("shippers")
+            && json.contains("\"archived\":false")
+            && json.contains("\"archived_at\":null")
+            && json.contains("\"archived_by\":null"),
+        "restore must return the squad active with a cleared audit:\n{json}"
+    );
+}
+
 /// The user-visible proof for e38.17: `ainb hangar squad create` + `... add-member`
 /// build a squad with a leader + members, and `ainb hangar squad list` renders the
 /// status view (squad name, leader, members) — a real-binary round-trip through
