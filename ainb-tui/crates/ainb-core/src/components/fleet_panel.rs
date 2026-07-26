@@ -23,6 +23,7 @@
 // cornflower-blue panels, selection-green indicator), matching Inbox/Daemons.
 
 use std::collections::HashMap;
+use std::path::Path;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -56,6 +57,49 @@ const WAIT_AMBER: Color = Color::Rgb(220, 180, 90);
 
 /// Window in which an identical dispatch is treated as an accidental double tap.
 const DUPLICATE_DISPATCH_WINDOW: Duration = Duration::from_secs(2);
+
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+struct FleetGitContext {
+    repository_name: Option<String>,
+    branch_name: Option<String>,
+}
+
+fn resolve_fleet_git_context(cwd: &str) -> FleetGitContext {
+    let Ok(repository) = git2::Repository::discover(Path::new(cwd)) else {
+        return FleetGitContext::default();
+    };
+    let repository_name = repository.workdir().and_then(|worktree_root| {
+        let source_repository =
+            crate::interactive::InteractiveSessionManager::get_source_repository(worktree_root)
+                .unwrap_or_else(|| worktree_root.to_path_buf());
+        source_repository.file_name().and_then(|name| name.to_str()).map(str::to_string)
+    });
+    let branch_name = repository.head().ok().and_then(|head| {
+        if head.is_branch() {
+            head.shorthand().map(str::to_string)
+        } else {
+            head.target().map(|oid| oid.to_string().chars().take(8).collect())
+        }
+    });
+    FleetGitContext {
+        repository_name,
+        branch_name,
+    }
+}
+
+fn fleet_git_contexts<'a>(
+    cwds: impl IntoIterator<Item = &'a str>,
+) -> HashMap<String, FleetGitContext> {
+    let mut contexts = HashMap::new();
+    for cwd in cwds {
+        if !cwd.is_empty() {
+            contexts
+                .entry(cwd.to_string())
+                .or_insert_with(|| resolve_fleet_git_context(cwd));
+        }
+    }
+    contexts
+}
 
 /// Last dispatch memo used for short-window duplicate suppression.
 #[derive(Debug, Clone)]
@@ -189,6 +233,7 @@ impl FleetPanelState {
     fn apply_snapshot(&mut self, snapshot: ainb_hangar_proto::fleet::FleetSnapshot) {
         let sessions = snapshot.sessions;
         let selected_key = self.selected_row().map(|row| row.session_id.clone());
+        let git_contexts = fleet_git_contexts(sessions.iter().map(|session| session.cwd.as_str()));
         self.session_meta = sessions
             .iter()
             .cloned()
@@ -198,7 +243,16 @@ impl FleetPanelState {
         self.rows.sort_by_key(|row| std::cmp::Reverse(row.last_event_ts));
         self.canonical.apply_snapshot(
             snapshot.head_revision,
-            sessions.into_iter().map(FleetSessionRow::from).collect(),
+            sessions
+                .into_iter()
+                .map(|session| {
+                    let context = git_contexts.get(&session.cwd).cloned().unwrap_or_default();
+                    let mut row = FleetSessionRow::from(session);
+                    row.repository_name = context.repository_name;
+                    row.branch_name = context.branch_name;
+                    row
+                })
+                .collect(),
         );
         self.selected = selected_key
             .as_ref()
@@ -865,7 +919,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         ainb_plugin_hangar::screen::fleet::render_degraded_banner(
             &mut wire,
             area.width,
-            content_top,
+            content_top.saturating_add(1),
         );
     }
     let buf = frame.buffer_mut();
@@ -875,22 +929,16 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         }
         if let Some(target) = buf.cell_mut((area.x + coord.x, area.y + coord.y)) {
             target.set_symbol(&cell.symbol);
-            target.set_fg(wire_color(cell.fg));
-            target.set_bg(wire_color(cell.bg));
+            let mut style = Style::default().fg(wire_color(cell.fg)).bg(wire_color(cell.bg));
+            if cell.modifier & 1 != 0 {
+                style = style.add_modifier(Modifier::BOLD);
+            }
+            target.set_style(style);
         }
     }
 
     let total = state.canonical.session_count();
-    let needs = state
-        .rows
-        .iter()
-        .filter(|row| {
-            matches!(
-                row.kind.as_str(),
-                "ASK" | "APPROVE" | "ERR" | "WAIT" | "IDLE"
-            )
-        })
-        .count();
+    let needs = state.canonical.attention_count();
     frame.render_widget(
         Paragraph::new(format!(
             "🛫 Fleet · {total} sessions · {needs} need attention · Hangar"
@@ -909,10 +957,19 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
             Rect::new(area.x + 2, area.y + 3, area.width.saturating_sub(4), 1),
         );
     }
+    let attach_help = state
+        .canonical
+        .selected_session()
+        .map(|session| match session.attachment_label() {
+            "TMUX" => "→ open  a full screen",
+            "REMOTE" => "remote control",
+            _ => "no attachment",
+        })
+        .unwrap_or("no attachment");
     frame.render_widget(
-        Paragraph::new(
-            "↑↓ move  Enter/a answer  B broadcast  p prompt  t start  → attach  A full attach  q/Esc back",
-        )
+        Paragraph::new(format!(
+            "1-5 views  ↑↓ select  Enter answer  {attach_help}  B broadcast  q/Esc back"
+        ))
         .style(Style::default().fg(MUTED_GRAY)),
         Rect::new(
             area.x,
@@ -921,38 +978,6 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
             1,
         ),
     );
-    // Retain legacy fixture status only for revision-zero compatibility tests.
-    // Authoritative Fleet snapshots already render complete detail and feedback;
-    // painting this row over them hides delivery receipts and leaks raw JSON.
-    if area.height > 2 && !state.rows.is_empty() && state.canonical.head_revision() == 0 {
-        let badges = state
-            .rows
-            .iter()
-            .map(|row| match row.kind.as_str() {
-                "APPROVE" => "APRV",
-                "STARTING" => "STRT",
-                "RUNNING" => "RUN",
-                other => other,
-            })
-            .collect::<Vec<_>>()
-            .join(" ");
-        let selected = state.selected_row();
-        let detail = selected.and_then(|row| row.context.as_deref()).unwrap_or_default();
-        let approval = selected
-            .is_some_and(|row| row.kind == "APPROVE")
-            .then_some("needs approval ")
-            .unwrap_or_default();
-        frame.render_widget(
-            Paragraph::new(format!("{badges}  {approval}{detail}"))
-                .style(Style::default().fg(MUTED_GRAY)),
-            Rect::new(
-                area.x,
-                area.y + area.height.saturating_sub(2),
-                area.width,
-                1,
-            ),
-        );
-    }
 }
 
 fn wire_color(color: Option<ainb_plugin_protocol::wire_buffer::Color>) -> Color {
@@ -1020,6 +1045,8 @@ fn canonical_row_from_legacy(row: &StateRow) -> FleetSessionRow {
         ),
         version: 1,
         cwd: row.cwd.clone(),
+        repository_name: None,
+        branch_name: None,
         tmux_target: None,
         display_name: Some(short_session(row)),
         discovered_at: row.last_event_ts,
@@ -1430,8 +1457,82 @@ mod tests {
         buf.content().iter().map(|c| c.symbol()).collect::<String>()
     }
 
+    fn seed_git_repository(path: &Path) -> (git2::Repository, git2::Oid) {
+        std::fs::create_dir_all(path).expect("create repository directory");
+        let repository = git2::Repository::init(path).expect("initialize repository");
+        std::fs::write(path.join("README.md"), "seed\n").expect("write seed file");
+        let mut index = repository.index().expect("open index");
+        index.add_path(Path::new("README.md")).expect("stage seed file");
+        index.write().expect("write index");
+        let tree_id = index.write_tree().expect("write tree");
+        let tree = repository.find_tree(tree_id).expect("find tree");
+        let signature =
+            git2::Signature::now("Fleet Test", "fleet@example.invalid").expect("create signature");
+        let commit = repository
+            .commit(Some("HEAD"), &signature, &signature, "seed", &tree, &[])
+            .expect("create seed commit");
+        drop(tree);
+        (repository, commit)
+    }
+
     #[test]
-    fn renders_title_list_rows_and_kind_badges() {
+    fn git_context_discovers_linked_worktree_from_nested_cwd() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let source_path = temp.path().join("source-repo");
+        let (_source, _commit) = seed_git_repository(&source_path);
+        let worktree_path = temp.path().join("linked-worktree");
+        let output = std::process::Command::new("git")
+            .args(["worktree", "add", "-b", "feature/fleet-labels"])
+            .arg(&worktree_path)
+            .arg("HEAD")
+            .current_dir(&source_path)
+            .output()
+            .expect("run git worktree add");
+        assert!(
+            output.status.success(),
+            "git worktree add failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let nested = worktree_path.join("nested/path");
+        std::fs::create_dir_all(&nested).expect("create nested cwd");
+
+        let context = resolve_fleet_git_context(nested.to_str().expect("utf8 cwd"));
+
+        assert_eq!(context.repository_name.as_deref(), Some("source-repo"));
+        assert_eq!(context.branch_name.as_deref(), Some("feature/fleet-labels"));
+    }
+
+    #[test]
+    fn git_context_uses_short_commit_for_detached_head() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let repository_path = temp.path().join("detached-repo");
+        let (repository, commit) = seed_git_repository(&repository_path);
+        repository.set_head_detached(commit).expect("detach HEAD");
+        let nested = repository_path.join("nested");
+        std::fs::create_dir_all(&nested).expect("create nested cwd");
+
+        let context = resolve_fleet_git_context(nested.to_str().expect("utf8 cwd"));
+
+        assert_eq!(context.repository_name.as_deref(), Some("detached-repo"));
+        let expected_commit = commit.to_string();
+        assert_eq!(context.branch_name.as_deref(), Some(&expected_commit[..8]));
+    }
+
+    #[test]
+    fn git_contexts_deduplicate_cwds_and_skip_missing_metadata() {
+        let temp = tempfile::tempdir().expect("create temp directory");
+        let non_git = temp.path().join("plain");
+        std::fs::create_dir_all(&non_git).expect("create non-git directory");
+        let cwd = non_git.to_str().expect("utf8 cwd");
+
+        let contexts = fleet_git_contexts(["", cwd, cwd]);
+
+        assert_eq!(contexts.len(), 1);
+        assert_eq!(contexts[cwd], FleetGitContext::default());
+    }
+
+    #[test]
+    fn renders_attention_first_operator_view() {
         let mut state = state_with(vec![
             row(
                 "sess-ask",
@@ -1462,26 +1563,38 @@ mod tests {
         // Title + counters.
         assert!(out.contains("Fleet"), "title missing: {out}");
         assert!(out.contains("4 sessions"), "session count missing: {out}");
-        assert!(out.contains("need attention"), "needs counter missing");
-        // Every kind badge renders in the list.
-        assert!(out.contains("ASK"), "ASK badge missing");
-        assert!(out.contains("ERR"), "ERR badge missing");
-        assert!(out.contains("IDLE"), "IDLE badge missing");
-        assert!(out.contains("RUN"), "RUNNING badge missing");
-        // Session short-labels (cwd basename) render.
+        assert!(
+            out.contains("2 need attention"),
+            "needs counter missing: {out}"
+        );
+        assert!(out.contains("1 Needs input 2"), "needs lens missing: {out}");
+        assert!(out.contains("2 Idle 1"), "idle lens missing: {out}");
+        assert!(out.contains("4 Running 1"), "running lens missing: {out}");
+        assert!(out.contains("5 All 4"), "all lens missing: {out}");
+        // Default lens shows only actionable rows.
+        assert!(out.contains("NEEDS INPUT"), "operator state missing: {out}");
         assert!(out.contains("deploy"), "ASK session label missing");
         assert!(out.contains("api"), "ERR session label missing");
-        // The selected (first) row is an ASK → detail shows the question + options.
+        assert!(
+            !out.contains("sess-idle"),
+            "idle row leaked into default lens: {out}"
+        );
+        assert!(
+            !out.contains("sess-run"),
+            "running row leaked into default lens: {out}"
+        );
+        // Browse detail shows one question and action, not raw option payload.
         assert!(
             out.contains("Ship to which env?"),
             "ASK question missing: {out}"
         );
-        assert!(out.contains("staging"), "ASK option 'staging' missing");
-        assert!(out.contains("prod"), "ASK option 'prod' missing");
+        assert!(out.contains("Enter Answer"), "answer action missing: {out}");
+        assert!(!out.contains("staging"), "raw option payload leaked: {out}");
+        assert!(!out.contains("prod"), "raw option payload leaked: {out}");
     }
 
     #[test]
-    fn renders_approve_and_starting_badges() {
+    fn renders_approval_without_raw_payload_or_non_actionable_rows() {
         let mut state = state_with(vec![
             row(
                 "sess-approve",
@@ -1493,23 +1606,27 @@ mod tests {
             row("sess-starting", "/work/boot", "STARTING", None, "hook"),
         ]);
         let out = render_to_string(&mut state, 130, 24);
-        assert!(out.contains("APRV"), "APPROVE badge missing: {out}");
-        assert!(out.contains("STRT"), "STARTING badge missing: {out}");
-        // APPROVE needs attention; the counter reflects it.
         assert!(
             out.contains("1 need attention"),
             "needs counter wrong: {out}"
         );
-        // The selected (first) row is APPROVE → detail shows the tool.
         assert!(
-            out.contains("needs approval"),
+            out.contains("Approval required for Bash."),
             "APPROVE detail missing: {out}"
         );
-        assert!(out.contains("Bash"), "APPROVE tool missing: {out}");
+        assert!(out.contains("y Approve"), "approve action missing: {out}");
+        assert!(
+            !out.contains("rm -rf"),
+            "raw approval payload leaked into operator view: {out}"
+        );
+        assert!(
+            !out.contains("boot"),
+            "starting row leaked into Needs input lens: {out}"
+        );
     }
 
     #[test]
-    fn detail_shows_err_wait_and_idle_context_for_selected_row() {
+    fn detail_summarizes_error_and_waiting_context() {
         // Select the ERR row.
         let mut state = state_with(vec![
             row(
@@ -1528,15 +1645,18 @@ mod tests {
             ),
         ]);
         let out = render_to_string(&mut state, 130, 20);
-        assert!(out.contains("overloaded"), "ERR error_type missing: {out}");
+        assert!(
+            out.contains("Error: overloaded"),
+            "error summary missing: {out}"
+        );
 
         state.move_down(1);
         let out = render_to_string(&mut state, 130, 20);
+        assert!(out.contains("allow Bash?"), "WAIT summary missing: {out}");
         assert!(
-            out.contains("permission_prompt"),
-            "WAIT reason missing: {out}"
+            !out.contains("permission_prompt"),
+            "raw WAIT payload leaked: {out}"
         );
-        assert!(out.contains("allow Bash?"), "WAIT message missing: {out}");
     }
 
     #[test]
@@ -1550,7 +1670,8 @@ mod tests {
             out.contains("Hangar daemon not running") || out.contains("no fleet state"),
             "empty-state hint missing: {out}"
         );
-        assert!(out.contains("Enter/a"), "help bar missing: {out}");
+        assert!(out.contains("1-5 views"), "view help missing: {out}");
+        assert!(out.contains("q/Esc back"), "back help missing: {out}");
     }
 
     #[test]

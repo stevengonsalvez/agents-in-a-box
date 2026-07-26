@@ -7099,6 +7099,8 @@ mod tests {
             cwd: "/work/claude".into(),
             tmux_target: Some("claude:ask:0.0".into()),
             display_name: Some("claude:ask".into()),
+            repository_name: Some("claude".into()),
+            branch_name: Some("main".into()),
             discovered_at: 1_000,
             last_observed_at: 9_000,
             metadata_updated_at: 9_000,
@@ -7729,7 +7731,7 @@ mod tests {
     #[test]
     fn fleet_broadcast_rpc_error_restores_confirmation_for_retry() {
         use crate::screen::fleet::{
-            FleetEvent, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
+            FleetEvent, FleetFilter, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
         };
 
         let mut plugin = HangarPlugin::new();
@@ -7747,6 +7749,11 @@ mod tests {
         .expect("Fleet row");
         plugin.screens.fleet =
             reduce_fleet(&plugin.screens.fleet, FleetEvent::Snapshot(vec![row])).state;
+        plugin.screens.fleet = reduce_fleet(
+            &plugin.screens.fleet,
+            FleetEvent::SetFilter(FleetFilter::All),
+        )
+        .state;
         for event in [
             FleetEvent::Key(FleetKey::Char('b')),
             FleetEvent::Key(FleetKey::Char('x')),
