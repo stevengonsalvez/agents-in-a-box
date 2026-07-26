@@ -16,10 +16,16 @@
 //!   mention-parse pipeline. Hangar has no such trigger, so the protocol
 //!   describes coordination without promising a mention link it cannot honour,
 //!   and roster rows carry `name — <agent|human> — <id>` (no mention markdown).
-//! - **No skills / role / `squad.instructions`.** Those columns are downstream
-//!   gaps (not landed), so roster rows omit skills/role and the
-//!   `## Squad Instructions` section is omitted entirely — exactly as multica
-//!   omits it when `squad.instructions` is blank.
+//! - **No agent SKILLS in roster rows.** Multica's `agentSkillsRosterSegment`
+//!   appends each member's enabled skills to its roster row; hangar's roster
+//!   carries the member's free-text ROLE (migration 0053) but not yet its
+//!   skills — that remainder is tracked as parity `7-rest`, not this item.
+//!
+//! Per-member `role` and `squad.instructions` (migration 0053, parity #25) ARE
+//! rendered: a roled member's row carries a `— role: <label>` suffix, and a
+//! non-blank `squad.instructions` becomes the third section
+//! `## Squad Instructions`, appended VERBATIM. A blank one omits the heading
+//! entirely — exactly as multica omits it when `squad.instructions` is blank.
 
 use ainb_hangar_core::actor::ActorKind;
 use ainb_hangar_core::ids::WorkspaceId;
@@ -72,10 +78,10 @@ member for it.
 /// Build the leader briefing for `squad_id` IF `claiming_agent_id` is the
 /// squad's leader AGENT; otherwise `None`.
 ///
-/// Sections: the Operating Protocol constant, then the Squad Roster (a leader
-/// self-row plus one row per non-archived member). `## Squad Instructions` is
-/// omitted (no `squad.instructions` column yet — parity with multica's
-/// blank-omit).
+/// Sections, in multica's order: the Operating Protocol constant, then the Squad
+/// Roster (a leader self-row plus one row per non-archived member, each carrying
+/// its free-text role when set), then `## Squad Instructions` — which is omitted
+/// ENTIRELY when `squad.instructions` is blank (multica blank-omit parity).
 ///
 /// Returns `None` on:
 /// - squad not found for `(workspace, squad_id)` — the dangling-`squad_id` guard
@@ -102,6 +108,14 @@ pub async fn build_squad_leader_briefing(
     let mut out = String::from(SQUAD_OPERATING_PROTOCOL);
     out.push('\n');
     out.push_str(&render_roster(pool, &squad).await);
+    // Section 3: the user-authored routing guidance, VERBATIM. Blank ⇒ the
+    // heading is not emitted at all (multica blank-omit parity, migration 0053).
+    let instructions = squad.instructions.trim();
+    if !instructions.is_empty() {
+        out.push_str("\n## Squad Instructions\n\n");
+        out.push_str(instructions);
+        out.push('\n');
+    }
     Some(out)
 }
 
@@ -133,23 +147,33 @@ async fn render_roster(pool: &SqlitePool, squad: &Squad) -> String {
 
     let mut rows: Vec<String> = Vec::with_capacity(squad.members.len());
     for m in &squad.members {
-        match m.kind() {
+        let actor = &m.actor;
+        match actor.kind() {
             ActorKind::Agent => {
                 // Skip the leader-as-member dupe (already shown above).
-                if m.id() == leader_id {
+                if actor.id() == leader_id {
                     continue;
                 }
-                match AgentRepo::get(pool, m.id()).await {
+                match AgentRepo::get(pool, actor.id()).await {
                     Ok(Some(agent)) if !agent.archived => {
-                        rows.push(format!("- {} — agent — {}\n", agent.name, m.id()));
+                        rows.push(format!(
+                            "- {} — agent — {}{}\n",
+                            agent.name,
+                            actor.id(),
+                            role_suffix(&m.role)
+                        ));
                     }
                     // Unresolvable or archived agent → skip silently.
                     _ => {}
                 }
             }
             ActorKind::Member => {
-                let label = human_label(pool, m.id()).await;
-                rows.push(format!("- {label} — human — {}\n", m.id()));
+                let label = human_label(pool, actor.id()).await;
+                rows.push(format!(
+                    "- {label} — human — {}{}\n",
+                    actor.id(),
+                    role_suffix(&m.role)
+                ));
             }
         }
     }
@@ -163,6 +187,20 @@ async fn render_roster(pool: &SqlitePool, squad: &Squad) -> String {
         out.push_str(r);
     }
     out
+}
+
+/// The roster row's trailing `— role: <label>` fragment, or `""` when the member
+/// has no stated role (migration 0053).
+///
+/// A blank role renders NOTHING — not an empty `role:` — so a pre-0053 squad's
+/// roster is byte-identical to what it was before the column existed.
+fn role_suffix(role: &str) -> String {
+    let role = role.trim();
+    if role.is_empty() {
+        String::new()
+    } else {
+        format!(" — role: {role}")
+    }
 }
 
 /// Resolve a human member's display label (its `user.email`), falling back to the
