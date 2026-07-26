@@ -2149,6 +2149,114 @@ pub fn seed_autopilot(home: &Path) {
     });
 }
 
+/// The ghost runtime's id — a SECOND runtime the daemon does not own, so the
+/// presence sweeper decays it instead of heart-beating it every tick.
+pub const GHOST_RUNTIME_ID: &str = "rt-ghost";
+/// The agent bound to [`GHOST_RUNTIME_ID`]; its Agents-screen row is the one
+/// whose availability dot walks online → unstable → offline.
+pub const GHOST_AGENT_NAME: &str = "ghostrider";
+
+/// Like [`prepare_pipeline`], plus a SECOND (`rt-ghost`) runtime carrying a
+/// fresh heartbeat and one agent (`ghostrider`) bound to it — for the
+/// availability-decay tripwire.
+///
+/// It must not be the daemon's OWN runtime: the daemon beats for that one every
+/// tick, so it could never decay. The unique index is
+/// `(workspace_id, daemon_id, provider)`, hence the distinct `daemon_id` /
+/// `provider`. `presence_sweep_ms` tightens the sweep cadence so several ticks
+/// land inside the tripwire's budget.
+pub fn prepare_pipeline_ghost_runtime(presence_sweep_ms: &str) -> Pipeline {
+    prepare_pipeline_seeded(
+        &[
+            ("HANGAR_DAEMON_DISABLE_CLAIM", "1"),
+            ("HANGAR_PRESENCE_SWEEP_MS", presence_sweep_ms),
+        ],
+        seed_ghost_runtime,
+    )
+}
+
+/// Seed the ghost runtime + agent into an already-seeded fixture db.
+pub fn seed_ghost_runtime(home: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("ghost-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open ghost-seed store");
+        sqlx::query(
+            "INSERT INTO agent_runtime \
+             (id, workspace_id, daemon_id, provider, runtime_mode, last_seen_at, status) \
+             VALUES (?, ?, 'daemon-ghost', 'ghost', 'local', ?, 'online')",
+        )
+        .bind(GHOST_RUNTIME_ID)
+        .bind(ainb_hangar_daemon::seed::WS_ID)
+        .bind(now)
+        .execute(store.pool())
+        .await
+        .expect("seed ghost runtime");
+        sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('ag-ghost', ?, ?, ?, 'workspace', 'user-1')",
+        )
+        .bind(ainb_hangar_daemon::seed::WS_ID)
+        .bind(GHOST_AGENT_NAME)
+        .bind(GHOST_RUNTIME_ID)
+        .execute(store.pool())
+        .await
+        .expect("seed ghost agent");
+    });
+}
+
+/// Backdate one runtime's heartbeat by `age_ms` relative to now — the sqlite
+/// poke the availability tripwire drives the decay with.
+pub fn backdate_runtime_heartbeat(home: &Path, runtime_id: &str, age_ms: i64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("backdate runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open backdate store");
+        sqlx::query("UPDATE agent_runtime SET last_seen_at = ? WHERE id = ?")
+            .bind(now - age_ms)
+            .bind(runtime_id)
+            .execute(store.pool())
+            .await
+            .expect("backdate heartbeat");
+    });
+}
+
+/// The PERSISTED liveness status of one runtime — proves the sweeper wrote the
+/// row, not merely that the snapshot derived a value.
+#[must_use]
+pub fn runtime_status(home: &Path, runtime_id: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime-status runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        sqlx::query_scalar::<_, String>("SELECT status FROM agent_runtime WHERE id = ?")
+            .bind(runtime_id)
+            .fetch_optional(store.pool())
+            .await
+            .ok()
+            .flatten()
+    })
+}
+
 /// A greppable marker embedded in the seeded log line's message, distinctive
 /// enough that it can never collide with a real daemon log message.
 pub const LOGS_TRIPWIRE_MARKER: &str = "LOGS_TRIPWIRE_MARKER_42";
