@@ -2169,3 +2169,153 @@ fn squad_briefing_on_a_human_leader_squad_exits_non_zero() {
         "the refusal must explain itself:\n{out}"
     );
 }
+
+/// **T10** — the CLI half of multica parity #11-rest: an issue's acceptance
+/// criteria are individually addressable and individually completable through
+/// the real binary.
+///
+/// `issue create --acceptance A --acceptance B` → `criteria list` shows both
+/// unchecked with distinct `ac-` ids → `criteria check <id> 2` ticks the SECOND
+/// → `criteria list` and `issue show` both render `☑` on B and `☐` on A →
+/// checking the SAME criterion by its ID is idempotent → `uncheck` clears it →
+/// an out-of-range ordinal and an unknown id both exit NON-ZERO.
+#[test]
+fn issue_criteria_list_check_uncheck_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Gap 11-rest",
+            "--acceptance",
+            "cargo build is green",
+            "--acceptance",
+            "detail card shows criteria",
+        ],
+    );
+    assert!(ok, "issue create should exit 0; out={out}");
+    let issue_id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .expect("create prints the new issue id")
+        .trim()
+        .to_string();
+
+    // Both criteria list, unchecked, with distinct minted ids.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "list", &issue_id],
+    );
+    assert!(ok, "criteria list should exit 0; out={out}");
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("cargo build is green") || l.contains("detail card shows criteria"))
+        .collect();
+    assert_eq!(lines.len(), 2, "both criteria listed:\n{out}");
+    assert!(lines[0].starts_with("1  ac-"), "ordinal + id: {}", lines[0]);
+    assert!(lines[1].starts_with("2  ac-"), "ordinal + id: {}", lines[1]);
+    assert!(
+        lines[0].contains('☐') && !lines[0].contains('☑'),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains('☐') && !lines[1].contains('☑'),
+        "{}",
+        lines[1]
+    );
+    let second_id = lines[1].split_whitespace().nth(1).expect("criterion id column").to_string();
+    let first_id = lines[0].split_whitespace().nth(1).expect("id").to_string();
+    assert_ne!(first_id, second_id, "ids are per-criterion, not shared");
+
+    // Tick the SECOND by 1-based ORDINAL.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "criteria",
+            "check",
+            &issue_id,
+            "2",
+            "--actor",
+            "agent:builder",
+        ],
+    );
+    assert!(ok, "criteria check should exit 0; out={out}");
+
+    // It persisted, and ONLY the second one moved.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "list", &issue_id],
+    );
+    assert!(ok, "criteria list should exit 0; out={out}");
+    let first = out
+        .lines()
+        .find(|l| l.contains("cargo build is green"))
+        .expect("first criterion listed");
+    let second = out
+        .lines()
+        .find(|l| l.contains("detail card shows criteria"))
+        .expect("second criterion listed");
+    assert!(first.contains('☐') && !first.contains('☑'), "{first}");
+    assert!(second.contains('☑') && !second.contains('☐'), "{second}");
+    assert!(second.contains("agent:builder"), "attribution: {second}");
+    assert!(second.contains(&second_id), "same stable id: {second}");
+
+    // `issue show` renders the same state, with a counted header.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
+    assert!(ok, "issue show should exit 0; out={out}");
+    assert!(out.contains("Acceptance: 1/2"), "counted header:\n{out}");
+    assert!(!out.contains("Acceptance: 0/2"), "decoy 0/2:\n{out}");
+    assert!(!out.contains("Acceptance: 2/2"), "decoy 2/2:\n{out}");
+
+    // Checking the SAME criterion by ID is idempotent (still 1/2).
+    let (ok, _) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "criteria", "check", &issue_id, &second_id,
+        ],
+    );
+    assert!(ok, "a repeat check should exit 0");
+    let (_, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
+    assert!(out.contains("Acceptance: 1/2"), "still 1/2:\n{out}");
+
+    // Uncheck by ID clears it and the attribution.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "criteria", "uncheck", &issue_id, &second_id,
+        ],
+    );
+    assert!(ok, "criteria uncheck should exit 0; out={out}");
+    assert!(
+        !out.contains("agent:builder"),
+        "untick cleared attribution:\n{out}"
+    );
+    let (_, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
+    assert!(out.contains("Acceptance: 0/2"), "back to 0/2:\n{out}");
+
+    // An out-of-range ordinal and an unknown id both FAIL loudly.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "check", &issue_id, "7"],
+    );
+    assert!(!ok, "an out-of-range ordinal must exit non-zero; out={out}");
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "criteria",
+            "check",
+            &issue_id,
+            "ac-does-not-exist",
+        ],
+    );
+    assert!(!ok, "an unknown criterion id must exit non-zero; out={out}");
+}

@@ -16,6 +16,7 @@
 //! a `HashMap` (whose iteration order varies per process and would break
 //! byte-deterministic golden tests); every payload is a field-ordered struct.
 
+use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_core::ids::{AgentId, CommentId, IssueId, TaskId};
 use chrono::{DateTime, Utc};
@@ -490,6 +491,16 @@ pub struct IssueRow {
     /// pre-0048 snapshot decodes to `[]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub acceptance_criteria: Vec<String>,
+    /// Structured acceptance criteria: per-criterion stable id + checked state
+    /// (multica parity #11-rest, migration 0054). The plural TEXTS of these
+    /// elements are ALSO mirrored into [`Self::acceptance_criteria`] for
+    /// pre-#11-rest clients, so no existing consumer changes.
+    ///
+    /// Append-only: an old daemon omits it and a new client falls back to
+    /// [`Self::acceptance_criteria`] (rendering everything unchecked); an old
+    /// client ignores it. A pre-#11-rest snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<AcceptanceCriterion>,
     /// Ordered context-reference strings (`issue.context_refs`, migration 0048):
     /// URL / `owner/repo#123` / free text, one per element. Drives the task-detail
     /// card's `Context:` block. Empty by default; omitted from the wire when empty
@@ -816,6 +827,56 @@ pub struct CommentRow {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// **T6** — the `acceptance` field is APPEND-ONLY: a pre-#11-rest snapshot
+    /// (which carries `acceptance_criteria` but no `acceptance`) still decodes,
+    /// a full row round-trips losslessly, and an empty `acceptance` is OMITTED
+    /// from the wire so an old client sees the byte-identical shape it did before.
+    #[test]
+    fn issue_row_acceptance_is_append_only() {
+        // A snapshot serialised by a pre-#11-rest daemon.
+        let legacy = serde_json::json!({
+            "id": "i-1",
+            "workspace_id": "ws-1",
+            "title": "T",
+            "state": "open",
+            "creator": "member:u1",
+            "created_at": 0,
+            "acceptance_criteria": ["builds", "tests"],
+        });
+        let row: IssueRow = serde_json::from_value(legacy).expect("pre-#11-rest row decodes");
+        assert_eq!(row.acceptance_criteria, vec!["builds", "tests"]);
+        assert!(
+            row.acceptance.is_empty(),
+            "absent structured list decodes to empty, never a panic"
+        );
+
+        // A #11-rest row round-trips losslessly, both fields intact.
+        let mut full = row.clone();
+        full.acceptance = vec![
+            AcceptanceCriterion::with_id("ac-a", "builds").expect("criterion"),
+            AcceptanceCriterion::with_id("ac-b", "tests").expect("criterion"),
+        ];
+        full.acceptance[1].tick(99, Some("agent:builder"));
+        let json = serde_json::to_string(&full).expect("serialize");
+        assert!(json.contains(r#""acceptance":["#), "got {json}");
+        let back: IssueRow = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back, full);
+        assert!(back.acceptance[1].checked);
+        assert_eq!(back.acceptance[1].checked_at, Some(99));
+
+        // An empty structured list is omitted entirely — the pre-#11-rest wire
+        // shape is unchanged for every issue that has not been ticked.
+        let empty = serde_json::to_string(&row).expect("serialize");
+        assert!(
+            !empty.contains("acceptance\":"),
+            "empty acceptance must not appear on the wire, got {empty}"
+        );
+        assert!(
+            empty.contains("acceptance_criteria"),
+            "the text mirror still ships, got {empty}"
+        );
+    }
 
     /// `Workload::derive` folds live counts per the multica precedence:
     /// `running > 0 → Working` beats `queued > 0 → Queued` beats `Idle`.

@@ -1039,6 +1039,31 @@ pub struct IssueLabelParams {
     pub color: Option<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_CRITERION_SET`] (multica parity
+/// #11-rest): tick or untick ONE acceptance criterion on one issue, scoped to a
+/// workspace.
+///
+/// `workspace_id` + `issue_id` identify the target row (the workspace is the
+/// tenant-isolation guard — a foreign-tenant issue id touches nothing).
+/// `criterion` addresses one element either by its stable id or by 1-based
+/// ordinal. `checked` is the state to set (idempotent). `actor` is optional
+/// attribution recorded on a tick and cleared on an untick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueCriterionSetParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose criterion is being (un)ticked (`issue.id`).
+    pub issue_id: String,
+    /// Criterion id (`ac-…`) or 1-BASED ordinal (`"2"`).
+    pub criterion: String,
+    /// The checked state to set. Ticking an already-ticked criterion is a
+    /// success no-op that does NOT rewrite provenance.
+    pub checked: bool,
+    /// Who ticked it (`"<kind>:<id>"`); optional, append-only. Cleared on untick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
 /// Params for [`crate::methods::HANGAR_ISSUE_CREATE`] (e38.29): create one new
 /// issue in a workspace.
 ///
@@ -2374,6 +2399,7 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
             }],
         };

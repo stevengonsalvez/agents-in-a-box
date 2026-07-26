@@ -761,6 +761,7 @@ async fn handle(
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
+        methods::HANGAR_ISSUE_CRITERION_SET => handle_issue_criterion_set(pool, req, events).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
         methods::HANGAR_AGENT_DELETE => handle_agent_delete(pool, req).await,
@@ -3691,6 +3692,76 @@ async fn handle_issue_label(
     // subscribed issue list re-renders the chip.
     events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
     to_value(&row)
+}
+
+/// Dispatch `hangar/issue_criterion_set` (multica parity #11-rest): tick or
+/// untick ONE acceptance criterion on one issue, push the refreshed row, and
+/// answer with it.
+///
+/// Mirrors [`handle_issue_label`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), validates a non-blank `criterion` selector, then drives the
+/// workspace-scoped store mutator. An `(issue_id, workspace)` pair matching no
+/// row, or a selector matching no criterion, is a client error — never a silent
+/// ack of a write that did not happen. Only a committed mutation pushes the
+/// event, reusing `IssueUpdated` so every already-subscribed screen re-renders
+/// with zero new event plumbing.
+async fn handle_issue_criterion_set(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
+
+    let params: ainb_hangar_proto::snapshots::IssueCriterionSetParams = parse_params(
+        req,
+        "{ workspace_id, issue_id, criterion, checked, actor? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.criterion.trim().is_empty() {
+        return Err(invalid_params("criterion must not be empty"));
+    }
+    let row = snapshots::issue_criterion_set(
+        pool,
+        &SystemIdGen,
+        &ws,
+        &params.issue_id,
+        params.criterion.trim(),
+        params.checked,
+        SystemClock.now_ms(),
+        params.actor.as_deref(),
+    )
+    .await
+    .map_err(|e| criterion_repo_err(&e))?;
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    };
+    events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
+    to_value(&row)
+}
+
+/// Map a [`CriterionError`] onto an RPC error: every addressing / isolation
+/// rejection is a client error (`INVALID_PARAMS`), a concurrent-write loss is a
+/// retryable client error, and a store fault is internal.
+///
+/// [`CriterionError`]: ainb_hangar_store::repo::issue::CriterionError
+fn criterion_repo_err(e: &ainb_hangar_store::repo::issue::CriterionError) -> RpcError {
+    use ainb_hangar_store::repo::issue::CriterionError;
+    match e {
+        CriterionError::IssueNotFound => invalid_params("no issue in this workspace"),
+        CriterionError::CriterionNotFound => {
+            invalid_params("no acceptance criterion matches that id or ordinal")
+        }
+        CriterionError::Conflict => {
+            invalid_params("criterion changed concurrently; re-read and retry")
+        }
+        CriterionError::Db(db) => internal(&format!("criterion store error: {db}")),
+    }
 }
 
 /// Map a [`LabelRepoError`] onto an RPC error: the issue-not-found guard is a

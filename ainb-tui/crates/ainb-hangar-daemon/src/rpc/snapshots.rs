@@ -29,6 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
+use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::IdGen;
@@ -46,7 +47,7 @@ use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
-use ainb_hangar_store::repo::issue::IssueRepo;
+use ainb_hangar_store::repo::issue::{CriterionError, IssueRepo};
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
 use ainb_hangar_store::repo::run_history::RunHistoryRepo;
@@ -147,12 +148,21 @@ pub async fn issues_list(
                 parent_id: extras.parent_id,
                 child_total: extras.child_total,
                 child_done: extras.child_done,
-                acceptance_criteria: issue.acceptance_criteria,
+                acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
+                acceptance: issue.acceptance_criteria,
                 context_refs: issue.context_refs,
             });
         }
     }
     Ok(out)
+}
+
+/// The plural criterion TEXTS, mirrored into the pre-#11-rest
+/// `IssueRow.acceptance_criteria` field so every existing client keeps working
+/// while the structured `IssueRow.acceptance` list carries the ids + checked
+/// state. Both fields are always filled from the SAME source.
+fn criteria_texts(items: &[AcceptanceCriterion]) -> Vec<String> {
+    items.iter().map(|c| c.text.clone()).collect()
 }
 
 /// The extra fields a wire [`IssueRow`] carries for the task-detail card (63d):
@@ -309,7 +319,8 @@ pub async fn issues_search(
             parent_id: extras.parent_id,
             child_total: extras.child_total,
             child_done: extras.child_done,
-            acceptance_criteria: issue.acceptance_criteria,
+            acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
+            acceptance: issue.acceptance_criteria,
             context_refs: issue.context_refs,
         });
     }
@@ -1762,7 +1773,8 @@ pub async fn issue_row(
         parent_id: extras.parent_id,
         child_total: extras.child_total,
         child_done: extras.child_done,
-        acceptance_criteria: issue.acceptance_criteria,
+        acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
+        acceptance: issue.acceptance_criteria,
         context_refs: issue.context_refs,
     }))
 }
@@ -1819,6 +1831,42 @@ pub async fn issue_label_detach(
     Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
 }
 
+/// Tick / untick one acceptance criterion on an issue, scoped to `workspace`,
+/// then re-read the issue as a wire [`IssueRow`]
+/// (`hangar/issue_criterion_set`, multica parity #11-rest).
+///
+/// Delegates the whole read-modify-write to [`IssueRepo::set_criterion_checked`]
+/// so the CLI and the daemon share exactly one mutator. `criterion` is either
+/// the criterion id or a 1-based ordinal.
+///
+/// # Errors
+///
+/// Propagates [`CriterionError`] — a foreign issue, an unknown criterion, a lost
+/// update, or a store fault.
+pub async fn issue_criterion_set(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    workspace: &WorkspaceId,
+    issue_id: &str,
+    criterion: &str,
+    checked: bool,
+    at: i64,
+    actor: Option<&str>,
+) -> Result<Option<IssueRow>, CriterionError> {
+    IssueRepo::set_criterion_checked(
+        pool,
+        idgen,
+        workspace.as_str(),
+        issue_id,
+        criterion,
+        checked,
+        at,
+        actor,
+    )
+    .await?;
+    Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
+}
+
 /// Re-read one issue as a wire [`IssueRow`], mapped exactly as `issues_list`
 /// emits it (including the P9 `pr_url` derivation) so a re-read row is
 /// byte-identical to a list snapshot of the same issue. `None` when the id
@@ -1869,7 +1917,8 @@ async fn read_issue_row(
         parent_id: extras.parent_id,
         child_total: extras.child_total,
         child_done: extras.child_done,
-        acceptance_criteria: issue.acceptance_criteria,
+        acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
+        acceptance: issue.acceptance_criteria,
         context_refs: issue.context_refs,
     }))
 }
@@ -2007,6 +2056,13 @@ pub async fn issue_create(
     } = input;
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
+    // #11-rest: the create wire stays TEXT-only; the daemon mints the stable
+    // per-criterion ids server-side so every criterion is addressable from the
+    // moment the issue exists. Blank elements are dropped by the constructor.
+    let minted_criteria: Vec<AcceptanceCriterion> = acceptance_criteria
+        .iter()
+        .filter_map(|text| AcceptanceCriterion::new(idgen, text))
+        .collect();
     // e38.21: apply the workspace's issue_prefix to the new title so the prefix
     // actually takes effect on a created issue (the stored title, the response
     // row, and the pushed IssueCreated event all carry it). An unconfigured
@@ -2030,7 +2086,7 @@ pub async fn issue_create(
             // below, never straight into the JSON cache — the join is the source
             // of truth and `LabelRepo::attach` re-derives the cache from it.
             labels: Vec::new(),
-            acceptance_criteria: acceptance_criteria.to_vec(),
+            acceptance_criteria: minted_criteria.clone(),
             context_refs: context_refs.to_vec(),
             parent_issue_id: parent_issue_id.map(ToString::to_string),
             stage: None,
@@ -2112,7 +2168,8 @@ pub async fn issue_create(
         child_done: 0,
         // The lists the create captured (blank elements already dropped at the
         // handler boundary), echoed on the response + pushed IssueCreated event.
-        acceptance_criteria: acceptance_criteria.to_vec(),
+        acceptance_criteria: criteria_texts(&minted_criteria),
+        acceptance: minted_criteria,
         context_refs: context_refs.to_vec(),
     })
 }

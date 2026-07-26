@@ -1,30 +1,30 @@
-//! Tripwire (P7 / D17): the Squads screen end-to-end over real wire bytes.
+//! Tripwire (multica gap #11-rest): tick ONE acceptance criterion in the REAL
+//! task-detail card, over real wire bytes.
 //!
-//! Drives the **real** [`HangarPlugin`] behind the **real** SDK [`Server`], playing
-//! the host relaying the plugin's reverse `unix_socket_*` calls to a mock daemon
-//! that records each `(method, params)` and answers with seed-shaped results built
-//! from the genuine `ainb-hangar-proto` types. It proves the user-visible P7
-//! journey the phase asks for — "open squads screen, create squad, assign issue,
-//! see member rows":
+//! Drives the REAL [`HangarPlugin`] behind the REAL SDK [`Server`], playing the
+//! host: it relays the plugin's reverse `unix_socket_*` calls to a mock daemon
+//! that answers `hangar/issues_list` with ONE issue carrying THREE all-unchecked
+//! criteria, then sends genuine `plugin/handle_key` frames and captures the
+//! `plugin/render` buffer.
 //!
-//!   * [`squads_screen_shows_leader_and_member_rows`] — pressing `S` renders the
-//!     Squads screen with the seeded squad's name, its leader, and its MEMBER rows
-//!     (resolved from the agents snapshot for live presence). A pre-press negative
-//!     assertion confirms the squad is not on the landing screen.
-//!   * [`create_and_assign_fire_the_squad_rpcs`] — pressing `c`, typing a name, and
-//!     Enter issues a `hangar/squad_create` (leader resolved to the first cached
-//!     agent); pressing `x` issues a `hangar/squad_fanout` for the selected squad
-//!     with the resolved issue — leader-routing dispatch with member fan-out.
+//! The journey: Enter on the board opens the task-detail card (`Acceptance: 0/3`,
+//! three `☐`), `a a` walks the acceptance cursor to the SECOND criterion, `t`
+//! ticks it. The card must then show `☑` on CRITERION-TWO and `☐` on the other
+//! two, with every DECOY (`Acceptance: 0/3`, a `☑` on one or three) asserted
+//! ABSENT, and the plugin must have fired a real `hangar/issue_criterion_set`
+//! naming the SECOND criterion's stable id.
+//!
+//! Hermetic: no tmux, no staged binary (so no macOS AMFI SIGKILL / first-run
+//! wizard flake); every wire byte is a genuine proto envelope. Follows the
+//! `tmux-ui-tripwire` skill's EXACT-substring (never substring-OR) discipline.
 
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::ids::IssueId;
-use ainb_hangar_proto::events::{ActorRow, IssueRow, PresenceState};
-use ainb_hangar_proto::snapshots::{
-    AgentsListResult, IssuesListResult, SquadAssignResult, SquadFanoutResult,
-    SquadMemberDispatchRow, SquadWireRow, SquadsListResult,
-};
+use ainb_hangar_proto::events::IssueRow;
+use ainb_hangar_proto::snapshots::{AgentsListResult, IssuesListResult};
 use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
 use ainb_plugin_protocol::params::{
@@ -79,9 +79,9 @@ async fn read_one_raw_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Op
             let len = content_length?;
             let mut body = vec![0u8; len];
             r.read_exact(&mut body).await.ok()?;
-            let mut out = header;
-            out.extend_from_slice(&body);
-            return Some(out);
+            let mut framed = header;
+            framed.extend_from_slice(&body);
+            return Some(framed);
         }
         if let Some((n, v)) = trimmed.split_once(':') {
             if n.trim().eq_ignore_ascii_case("Content-Length") {
@@ -91,84 +91,69 @@ async fn read_one_raw_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Op
     }
 }
 
-/// The seeded squad the daemon lists: `shippers`, led by `agent:agent-lead`, with
-/// an agent member and a human member.
-fn seeded_squads() -> serde_json::Value {
-    serde_json::to_value(SquadsListResult {
-        squads: vec![SquadWireRow {
-            id: "s1".into(),
-            name: "shippers".into(),
-            leader: "agent:agent-lead".into(),
-            members: vec!["agent:agent-1".into(), "member:user-1".into()],
-            ..SquadWireRow::default()
-        }],
-    })
-    .unwrap()
+/// One wire row carrying `criteria` as its structured acceptance list.
+fn row(id: &str, title: &str, criteria: Vec<AcceptanceCriterion>) -> IssueRow {
+    IssueRow {
+        id: IssueId::from_str(id).unwrap(),
+        display_id: Some(id.to_uppercase()),
+        workspace_id: "default".into(),
+        title: title.into(),
+        description: None,
+        state: "todo".into(),
+        assignee: Some("agent:claude".into()),
+        creator: "member:user-1".into(),
+        created_at: 0,
+        priority: 3,
+        due_date: None,
+        labels: Vec::new(),
+        pr_url: None,
+        branch: None,
+        repo_ref: None,
+        agent: None,
+        source_branch: None,
+        target_branch: None,
+        external_ref: None,
+        run_count: 0,
+        last_run_status: None,
+        last_run_at: None,
+        parent_id: None,
+        child_total: 0,
+        child_done: 0,
+        acceptance_criteria: criteria.iter().map(|c| c.text.clone()).collect(),
+        acceptance: criteria,
+        context_refs: Vec::new(),
+    }
 }
 
-/// The seeded actors backing the squad's leader/member presence resolution.
-fn seeded_agents() -> serde_json::Value {
-    let actor = |actor_ref: &str, name: &str, presence: PresenceState, is_agent: bool| ActorRow {
-        actor_ref: actor_ref.into(),
-        display_name: name.into(),
-        subtitle: String::new(),
-        presence,
-        workload: ainb_hangar_proto::events::Workload::Idle,
-        is_agent,
-        recent_rank: None,
-        ..ActorRow::default()
-    };
-    serde_json::to_value(AgentsListResult {
-        actors: vec![
-            actor("agent:agent-lead", "lead-bot", PresenceState::Online, true),
-            actor("agent:agent-1", "worker-bot", PresenceState::Unstable, true),
-            actor("member:user-1", "alice", PresenceState::Online, false),
-        ],
-    })
-    .unwrap()
+/// A fresh unchecked criterion with a deterministic id.
+fn crit(id: &str, text: &str) -> AcceptanceCriterion {
+    AcceptanceCriterion::with_id(id, text).expect("criterion")
 }
 
-/// One seeded issue so the assign (`x`) resolves an issue to fan out.
+/// ONE issue carrying THREE all-unchecked criteria, so ticking exactly one is
+/// discriminating: the other two must stay `☐`.
 fn seeded_issues() -> serde_json::Value {
     serde_json::to_value(IssuesListResult {
-        issues: vec![IssueRow {
-            id: IssueId::from_str("issue-1").unwrap(),
-            display_id: None,
-            workspace_id: "default".into(),
-            title: "Refactor API".into(),
-            description: None,
-            state: "open".into(),
-            assignee: None,
-            creator: "member:user-1".into(),
-            created_at: 0,
-            priority: 0,
-            due_date: None,
-            labels: Vec::new(),
-            pr_url: None,
-            branch: None,
-            repo_ref: None,
-            agent: None,
-            source_branch: None,
-            target_branch: None,
-            external_ref: None,
-            run_count: 0,
-            last_run_status: None,
-            last_run_at: None,
-            parent_id: None,
-            child_total: 0,
-            child_done: 0,
-            acceptance_criteria: Vec::new(),
-            acceptance: Vec::new(),
-            context_refs: Vec::new(),
-        }],
+        issues: vec![row(
+            "target",
+            "TARGET acceptance issue",
+            vec![
+                crit("ac-one", "CRITERION-ONE"),
+                crit("ac-two", "CRITERION-TWO"),
+                crit("ac-three", "CRITERION-THREE"),
+            ],
+        )],
     })
     .unwrap()
+}
+
+/// No named agents — the issue board only needs the issues snapshot.
+fn seeded_agents() -> serde_json::Value {
+    serde_json::to_value(AgentsListResult { actors: Vec::new() }).unwrap()
 }
 
 /// A mock daemon that records `(method, params)` and answers each request with a
-/// seed-shaped result built from the real proto types (so every wire byte is a
-/// genuine envelope). Squad mutations answer with the refreshed squads list; the
-/// fan-out answers with a leader + one member dispatch.
+/// seed-shaped result built from the real proto types.
 fn spawn_daemon(listener: UnixListener, seen: Seen) {
     tokio::spawn(async move {
         let Ok((stream, _)) = listener.accept().await else {
@@ -199,28 +184,8 @@ fn spawn_daemon(listener: UnixListener, seen: Seen) {
 
 fn result_for(method: &str) -> serde_json::Value {
     match method {
-        m if m == daemon_methods::HANGAR_SQUADS_LIST
-            || m == daemon_methods::HANGAR_SQUAD_CREATE
-            || m == daemon_methods::HANGAR_SQUAD_MEMBER_ADD
-            || m == daemon_methods::HANGAR_SQUAD_MEMBER_REMOVE =>
-        {
-            seeded_squads()
-        }
-        m if m == daemon_methods::HANGAR_SQUAD_FANOUT => serde_json::to_value(SquadFanoutResult {
-            leader: SquadAssignResult {
-                task_id: "task-lead".into(),
-                leader_agent_id: "agent-lead".into(),
-                runtime_id: "runtime-lead".into(),
-            },
-            members: vec![SquadMemberDispatchRow {
-                task_id: "task-m1".into(),
-                agent_id: "agent-1".into(),
-                runtime_id: "runtime-1".into(),
-            }],
-        })
-        .unwrap(),
-        m if m == daemon_methods::HANGAR_AGENTS_LIST => seeded_agents(),
         m if m == daemon_methods::HANGAR_ISSUES_LIST => seeded_issues(),
+        m if m == daemon_methods::HANGAR_AGENTS_LIST => seeded_agents(),
         m if m == daemon_methods::HANGAR_HEALTH => serde_json::json!({
             "socket_path":"/tmp/h.sock","pid":1,"uptime_secs":1,"version":"0.1.0","connected":true
         }),
@@ -337,7 +302,7 @@ where
     host_write
         .write_all(&host_frame(&serde_json::json!({
             "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
-            "params": { "viewport": {"width": 160, "height": 40}, "generation": 0 }
+            "params": { "viewport": {"width": 180, "height": 44}, "generation": 0 }
         })))
         .await
         .unwrap();
@@ -381,8 +346,8 @@ async fn send_char<W: tokio::io::AsyncWrite + Unpin>(host_write: &mut W, ch: cha
 }
 
 /// Boot the plugin + mock daemon, relay the connect handshake, and pump renders
-/// until BOTH the agents and squads snapshots have been fetched + folded (so the
-/// Squads screen has resolved rows). Returns the live handles + recorder.
+/// until the issues snapshot has been fetched + folded (the issue board is the
+/// landing screen). Returns the live handles + recorder.
 #[allow(clippy::type_complexity)]
 async fn boot(
     home: &std::path::Path,
@@ -419,9 +384,7 @@ async fn boot(
         push_data(&mut host_write, stream_id, &ack).await;
     }
 
-    // Pump renders (relaying each pending snapshot send + pushing its reply) until
-    // both the agents and squads snapshots have been fetched — the render loop
-    // flushes the whole fetch_snapshots batch, in send order.
+    // Pump renders until the issues snapshot has been fetched + folded.
     for _ in 0..60 {
         let _ = render_capture(
             &mut host_write,
@@ -431,12 +394,12 @@ async fn boot(
             stream_id,
         )
         .await;
-        let have_both = {
-            let s = seen.lock().unwrap();
-            s.iter().any(|(m, _)| m == daemon_methods::HANGAR_SQUADS_LIST)
-                && s.iter().any(|(m, _)| m == daemon_methods::HANGAR_AGENTS_LIST)
-        };
-        if have_both {
+        let have_issues = seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|(m, _)| m == daemon_methods::HANGAR_ISSUES_LIST);
+        if have_issues {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
@@ -445,118 +408,217 @@ async fn boot(
     (host_write, host_read, daemon_reader, daemon_write, server)
 }
 
-/// Pressing `S` renders the Squads screen with the seeded squad name, its leader,
-/// and its MEMBER rows (resolved from the agents snapshot).
-#[tokio::test]
-async fn squads_screen_shows_leader_and_member_rows() {
-    let body = async {
-        let home = tempfile::tempdir().expect("home");
-        std::env::set_var("AINB_HANGAR_HOME", home.path());
-        let stream_id = format!("sock-squads-{}", std::process::id());
-        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
-        let (mut hw, mut hr, mut dr, mut dw, server) =
-            boot(home.path(), &stream_id, seen.clone()).await;
-
-        // PRE-PRESS NEGATIVE: the landing screen is not the Squads screen.
-        let pre = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
-        assert!(
-            !pre.contains("shippers"),
-            "the squad must not be on the landing screen:\n{pre}"
-        );
-
-        // Press `S` to open the Squads screen, then render.
-        send_char(&mut hw, 'S').await;
-        let mut post = String::new();
-        for _ in 0..30 {
-            post = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
-            if post.contains("shippers") && post.contains("worker-bot") {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
+/// Pump renders until `ok(pane)` holds or the budget of iterations elapses,
+/// returning the last captured pane either way.
+async fn render_until<W, R, DR, DW, F>(
+    hw: &mut W,
+    hr: &mut R,
+    dr: &mut DR,
+    dw: &mut DW,
+    stream_id: &str,
+    mut ok: F,
+) -> String
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+    F: FnMut(&str) -> bool,
+{
+    let mut pane = String::new();
+    for _ in 0..40 {
+        pane = render_capture(hw, hr, dr, dw, stream_id).await;
+        if ok(&pane) {
+            break;
         }
-
-        // POSITIVE: the squad, its leader, and its MEMBER rows all render.
-        assert!(post.contains("shippers"), "squad name missing:\n{post}");
-        assert!(post.contains("lead-bot"), "leader missing:\n{post}");
-        assert!(
-            post.contains("worker-bot"),
-            "agent member row missing:\n{post}"
-        );
-        assert!(post.contains("alice"), "human member row missing:\n{post}");
-        assert!(post.contains("leader:"), "leader tag missing:\n{post}");
-
-        drop(hw);
-        server.abort();
-    };
-    tokio::time::timeout(BUDGET, body).await.expect("exceeded squads-render budget");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    pane
 }
 
-/// Pressing `c` + typing + Enter issues a `hangar/squad_create` (leader = first
-/// cached agent); pressing `x` issues a `hangar/squad_fanout` for the squad.
+/// The painted buffer as one string PER ROW, so a glyph assertion is pinned to
+/// the same line as its criterion rather than anywhere on the screen.
+fn render_rows(render_resp: &serde_json::Value) -> Vec<String> {
+    let cells = render_resp["result"]["buffer"]["cells"].as_array().cloned().unwrap_or_default();
+    let mut by_row: std::collections::BTreeMap<i64, Vec<(i64, String)>> =
+        std::collections::BTreeMap::new();
+    for c in &cells {
+        let x = c[0]["x"].as_i64().unwrap_or(0);
+        let y = c[0]["y"].as_i64().unwrap_or(0);
+        let sym = c[1]["symbol"].as_str().unwrap_or("").to_string();
+        by_row.entry(y).or_default().push((x, sym));
+    }
+    by_row
+        .into_values()
+        .map(|mut row| {
+            row.sort_by_key(|(x, _)| *x);
+            row.into_iter().map(|(_, s)| s).collect::<String>()
+        })
+        .collect()
+}
+
+/// Send one `plugin/render` and return the pane BY ROW (same relay contract as
+/// [`render_capture`], which returns the flattened pane).
+async fn render_capture_rows<W, R, DR, DW>(
+    host_write: &mut W,
+    host_read: &mut R,
+    daemon_reader: &mut DR,
+    daemon_write: &mut DW,
+    stream_id: &str,
+) -> Vec<String>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+{
+    host_write
+        .write_all(&host_frame(&serde_json::json!({
+            "jsonrpc": "2.0", "id": 99, "method": methods::PLUGIN_RENDER,
+            "params": { "viewport": {"width": 180, "height": 44}, "generation": 0 }
+        })))
+        .await
+        .unwrap();
+    loop {
+        let Some(frame) = read_frame(host_read).await else {
+            return Vec::new();
+        };
+        if frame.get("method").and_then(|m| m.as_str()) == Some(methods::HOST_UNIX_SOCKET_SEND) {
+            let send: UnixSocketSendParams =
+                serde_json::from_value(frame["params"].clone()).unwrap();
+            daemon_write.write_all(&send.bytes).await.unwrap();
+            daemon_write.flush().await.unwrap();
+            if let Some(reply) = read_one_raw_frame(daemon_reader).await {
+                push_data(host_write, stream_id, &reply).await;
+            }
+            continue;
+        }
+        if frame.get("id").and_then(serde_json::Value::as_i64) == Some(99) {
+            return render_rows(&frame);
+        }
+    }
+}
+
+/// Pump row-wise renders until `ok(rows)` holds or the iteration budget elapses.
+async fn render_rows_until<W, R, DR, DW, F>(
+    hw: &mut W,
+    hr: &mut R,
+    dr: &mut DR,
+    dw: &mut DW,
+    stream_id: &str,
+    mut ok: F,
+) -> Vec<String>
+where
+    W: tokio::io::AsyncWrite + Unpin,
+    R: tokio::io::AsyncBufRead + Unpin,
+    DR: tokio::io::AsyncBufRead + Unpin,
+    DW: tokio::io::AsyncWrite + Unpin,
+    F: FnMut(&[String]) -> bool,
+{
+    let mut rows = Vec::new();
+    for _ in 0..40 {
+        rows = render_capture_rows(hw, hr, dr, dw, stream_id).await;
+        if ok(&rows) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    rows
+}
+
+/// The single pane row containing `needle`.
+fn line_with<'a>(rows: &'a [String], needle: &str) -> &'a str {
+    rows.iter()
+        .find(|l| l.contains(needle))
+        .unwrap_or_else(|| panic!("no pane row contains `{needle}`:\n{}", rows.join("\n")))
+}
+
+/// `a a t` on the task-detail card ticks the SECOND criterion and ONLY it.
 #[tokio::test]
-async fn create_and_assign_fire_the_squad_rpcs() {
+async fn acceptance_tick_marks_only_the_selected_criterion() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
         std::env::set_var("AINB_HANGAR_HOME", home.path());
-        let stream_id = format!("sock-squadrpc-{}", std::process::id());
+        let stream_id = format!("sock-accept-{}", std::process::id());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let (mut hw, mut hr, mut dr, mut dw, server) =
             boot(home.path(), &stream_id, seen.clone()).await;
 
-        // Open the Squads screen.
-        send_char(&mut hw, 'S').await;
-        let _ = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
+        // Board first, then Enter opens the task-detail card.
+        let _ = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
+            r.iter().any(|l| l.contains("TARGET acceptance issue"))
+        })
+        .await;
+        send_char(&mut hw, '\r').await;
 
-        // Create a squad: `c`, type "qa", Enter.
-        send_char(&mut hw, 'c').await;
-        send_char(&mut hw, 'q').await;
+        // PRE-TICK: three criteria, ALL unchecked, header 0/3.
+        let pre = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
+            r.iter().any(|l| l.contains("Acceptance: 0/3"))
+        })
+        .await;
+        let joined = pre.join("\n");
+        assert!(
+            joined.contains("Acceptance: 0/3"),
+            "detail card did not open with a 0/3 header:\n{joined}"
+        );
+        assert!(
+            !joined.contains('☑'),
+            "nothing is ticked before `t`:\n{joined}"
+        );
+        for name in ["CRITERION-ONE", "CRITERION-TWO", "CRITERION-THREE"] {
+            assert!(line_with(&pre, name).contains('☐'), "{name} must be ☐");
+        }
+
+        // `a a` walks the cursor to the SECOND criterion, `t` ticks it.
         send_char(&mut hw, 'a').await;
-        send_key(&mut hw, KeyCode::Enter).await;
+        send_char(&mut hw, 'a').await;
+        send_char(&mut hw, 't').await;
 
-        // Pump until the daemon records the create with the resolved leader + name.
-        let mut created = false;
-        for _ in 0..60 {
-            let _ = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
-            created = seen.lock().unwrap().iter().any(|(m, p)| {
-                m == daemon_methods::HANGAR_SQUAD_CREATE
-                    && p.get("name").and_then(serde_json::Value::as_str) == Some("qa")
-                    && p.get("leader").and_then(serde_json::Value::as_str)
-                        == Some("agent:agent-lead")
-            });
-            if created {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        assert!(
-            created,
-            "pressing c + name + Enter must issue hangar/squad_create with the resolved leader; saw: {:?}",
-            seen.lock().unwrap()
-        );
+        let post = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
+            r.iter().any(|l| l.contains("Acceptance: 1/3"))
+        })
+        .await;
+        let joined = post.join("\n");
 
-        // Assign the current issue to the squad: `x` → hangar/squad_fanout.
-        send_char(&mut hw, 'x').await;
-        let mut fanned = false;
-        for _ in 0..60 {
-            let _ = render_capture(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id).await;
-            fanned = seen.lock().unwrap().iter().any(|(m, p)| {
-                m == daemon_methods::HANGAR_SQUAD_FANOUT
-                    && p.get("squad_id").and_then(serde_json::Value::as_str) == Some("s1")
-                    && p.get("issue_id").and_then(serde_json::Value::as_str) == Some("issue-1")
-            });
-            if fanned {
-                break;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
+        // The counted header moved, and the DECOY headers are absent.
+        assert!(joined.contains("Acceptance: 1/3"), "header:\n{joined}");
+        assert!(!joined.contains("Acceptance: 0/3"), "decoy 0/3:\n{joined}");
+        assert!(!joined.contains("Acceptance: 3/3"), "decoy 3/3:\n{joined}");
+
+        // ONLY the second criterion is ticked — the decoys stay ☐.
+        let two = line_with(&post, "CRITERION-TWO");
         assert!(
-            fanned,
-            "pressing x must issue hangar/squad_fanout for the squad + issue; saw: {:?}",
-            seen.lock().unwrap()
+            two.contains('☑') && !two.contains('☐'),
+            "CRITERION-TWO must be ☑: {two}"
         );
+        for decoy in ["CRITERION-ONE", "CRITERION-THREE"] {
+            let line = line_with(&post, decoy);
+            assert!(
+                line.contains('☐') && !line.contains('☑'),
+                "{decoy} must stay ☐: {line}"
+            );
+        }
+
+        // The plugin fired a REAL hangar/issue_criterion_set naming the SECOND
+        // criterion's STABLE id — not an ordinal, not the first criterion.
+        let calls = seen.lock().unwrap().clone();
+        let (_, params) = calls
+            .iter()
+            .find(|(m, _)| m == daemon_methods::HANGAR_ISSUE_CRITERION_SET)
+            .unwrap_or_else(|| {
+                panic!(
+                    "no hangar/issue_criterion_set was sent; saw: {:?}",
+                    calls.iter().map(|(m, _)| m).collect::<Vec<_>>()
+                )
+            });
+        assert_eq!(params["criterion"], "ac-two", "params: {params}");
+        assert_eq!(params["issue_id"], "target", "params: {params}");
+        assert_eq!(params["checked"], true, "params: {params}");
 
         drop(hw);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body).await.expect("exceeded squad-rpc budget");
+    tokio::time::timeout(BUDGET, body)
+        .await
+        .expect("exceeded acceptance-tick budget");
 }

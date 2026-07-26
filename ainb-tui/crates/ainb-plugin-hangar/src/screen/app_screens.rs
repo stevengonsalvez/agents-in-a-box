@@ -375,6 +375,24 @@ pub enum IssueCommentAction {
     },
 }
 
+/// A deferred daemon RPC raised by the task-detail acceptance keys (`a` then
+/// `t`, multica parity #11-rest).
+///
+/// Like [`IssueCommentAction`], the sync key router can't `await`; the toggle
+/// stashes the action on [`ScreenStates::pending_criterion_action`] and the
+/// plugin's `render` pass drains it and fires `hangar/issue_criterion_set` over
+/// the daemon socket cap. The daemon's `IssueUpdated` push refreshes the card, so
+/// nothing needs re-pulling here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueCriterionAction {
+    /// The issue the criterion belongs to (`issue.id`).
+    pub issue_id: String,
+    /// The STABLE criterion id (`ac-…`).
+    pub criterion_id: String,
+    /// The checked state to set.
+    pub checked: bool,
+}
+
 /// A deferred daemon RPC chain raised by the issue-list create WIZARD (Phase 5).
 ///
 /// Like [`IssueCommentAction`], the sync key router can't `await`; the wizard's
@@ -650,6 +668,10 @@ pub struct ScreenStates {
     /// non-empty buffer), awaiting the `render` pass to fire `hangar/comment_add`
     /// over the daemon socket (e38.5). `None` when idle.
     pub pending_comment_action: Option<IssueCommentAction>,
+    /// An acceptance-criterion tick raised by the task-detail `t` key, awaiting
+    /// the `render` pass to fire `hangar/issue_criterion_set` over the daemon
+    /// socket (multica parity #11-rest). `None` when idle.
+    pub pending_criterion_action: Option<IssueCriterionAction>,
     /// A create-and-dispatch chain raised by the issue-list create wizard (Enter
     /// on the Agent stage), awaiting the `render` pass to fire
     /// `hangar/issue_create` (then, on its reply, `issue_update` + `issue_run`)
@@ -1119,6 +1141,11 @@ impl ScreenStates {
     /// modal, if any (e38.5).
     pub const fn take_pending_comment_action(&mut self) -> Option<IssueCommentAction> {
         self.pending_comment_action.take()
+    }
+
+    /// Take the deferred acceptance-criterion tick, leaving `None` (#11-rest).
+    pub const fn take_pending_criterion_action(&mut self) -> Option<IssueCriterionAction> {
+        self.pending_criterion_action.take()
     }
 
     /// Take the pending issue-create RPC raised by the issue-list inline create
@@ -1837,6 +1864,20 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
             states.pending_comment_action = Some(IssueCommentAction::Add {
                 issue_id: issue_id.as_str().to_string(),
                 body: body.clone(),
+            });
+        }
+        // #11-rest: `t` on the selected criterion lifts a deferred
+        // `hangar/issue_criterion_set` the `render` pass fires. The daemon's
+        // IssueUpdated push refreshes the card, so no re-pull is armed here.
+        Some(TaskDetailIntent::SetCriterionChecked {
+            issue_id,
+            criterion_id,
+            checked,
+        }) => {
+            states.pending_criterion_action = Some(IssueCriterionAction {
+                issue_id: issue_id.as_str().to_string(),
+                criterion_id: criterion_id.clone(),
+                checked: *checked,
             });
         }
         // The `R` retry on a terminal task lifts into a deferred `hangar/task_retry`

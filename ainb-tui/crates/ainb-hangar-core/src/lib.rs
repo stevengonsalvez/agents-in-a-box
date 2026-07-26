@@ -8,6 +8,10 @@
 //! ([`ainb_hangar_store`](../ainb_hangar_store/index.html)) and the daemon both
 //! depend on it, never the other way around.
 
+/// Structured acceptance criteria: per-criterion stable id + checked state
+/// (multica parity #11-rest), plus the tolerant legacy/structured JSON codec
+/// shared by the store column and the wire.
+pub mod acceptance;
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
 /// The card provider-agent kind (`claude`/`codex`/`copilot`) + the task-create
