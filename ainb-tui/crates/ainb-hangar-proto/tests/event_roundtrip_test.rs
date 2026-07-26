@@ -127,6 +127,7 @@ fn all_variants() -> Vec<HangarEvent> {
             enabled: true,
             last_run_status: Some("completed".to_string()),
             last_run_at: Some(1_699_999_000_000),
+            api_trigger_enabled: true,
         }),
         HangarEvent::AutopilotRunChanged {
             autopilot_id: "ap-1".to_string(),

@@ -370,6 +370,63 @@ pub struct AutopilotSetEnabledParams {
     pub enabled: bool,
 }
 
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`]: the workspace
+/// (tenant guard) plus the autopilot to fire through its `api` trigger.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotTriggerApiParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot to fire.
+    pub autopilot_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`].
+///
+/// Four outcomes, discriminated by [`outcome`](Self::outcome):
+///
+/// - `fired` — admitted; `run_id` + `task_id` are set.
+/// - `skipped` — the admission gate declined it (concurrency limit under the
+///   `skip` policy); `run_id` names the recorded terminal `skipped` run and
+///   `reason` carries the admission reason. This is a SUCCESSFUL, declined
+///   dispatch, not an error.
+/// - `disabled` — the autopilot has not armed `api_trigger_enabled`; nothing was
+///   written (the trigger does not exist, so there is nothing to skip).
+/// - `not_found` — no such autopilot in this workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotTriggerApiResult {
+    /// `fired` | `skipped` | `disabled` | `not_found`.
+    pub outcome: String,
+    /// The run created (`fired`) or recorded (`skipped`).
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// The task enqueued; only set on `fired`.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// The admission reason; only set on `skipped`.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: the
+/// workspace (tenant guard), the autopilot, and the target armed flag.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetApiTriggerParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot to arm / disarm.
+    pub autopilot_id: String,
+    /// `true` arms the `api` trigger; `false` disarms it.
+    pub enabled: bool,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: whether a row
+/// was actually updated (`false` when the id is foreign / absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetApiTriggerResult {
+    /// `true` when the autopilot existed in this workspace and was updated.
+    pub updated: bool,
+}
+
 /// Result of [`crate::methods::HANGAR_TASKS_LIST`]: every task in the workspace
 /// for the Kanban board (P8.4).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -2737,6 +2794,7 @@ mod tests {
                 enabled: true,
                 last_run_status: Some("completed".into()),
                 last_run_at: Some(1_699_000_000_000),
+                api_trigger_enabled: true,
             }],
         };
         let s = serde_json::to_string(&list).unwrap();
@@ -2763,6 +2821,8 @@ mod tests {
                 started_at: 1_699_000_000_000,
                 completed_at: Some(1_699_000_120_000),
                 status: "completed".into(),
+                source: "api".into(),
+                failure_reason: None,
             }],
         };
         let s = serde_json::to_string(&runs).unwrap();
@@ -2791,6 +2851,89 @@ mod tests {
             serde_json::from_str::<AutopilotSetEnabledParams>(&s).unwrap(),
             toggle
         );
+    }
+
+    /// The `api`-trigger envelopes (migration 0057 / parity item 15) round-trip,
+    /// and the two wire structs stay BACKWARDS-COMPATIBLE: a pre-0057 daemon's
+    /// payload — no `api_trigger_enabled`, no `source`, no `failure_reason` —
+    /// still deserialises, via the serde defaults.
+    #[test]
+    fn autopilot_api_trigger_envelopes_roundtrip_and_stay_backwards_compatible() {
+        let params = AutopilotTriggerApiParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotTriggerApiParams>(&s).unwrap(),
+            params
+        );
+
+        for result in [
+            AutopilotTriggerApiResult {
+                outcome: "fired".into(),
+                run_id: Some("run-1".into()),
+                task_id: Some("task-1".into()),
+                reason: None,
+            },
+            AutopilotTriggerApiResult {
+                outcome: "skipped".into(),
+                run_id: Some("run-2".into()),
+                task_id: None,
+                reason: Some("concurrency limit: 1/1 in flight".into()),
+            },
+            AutopilotTriggerApiResult {
+                outcome: "disabled".into(),
+                run_id: None,
+                task_id: None,
+                reason: None,
+            },
+        ] {
+            let s = serde_json::to_string(&result).unwrap();
+            assert_eq!(
+                serde_json::from_str::<AutopilotTriggerApiResult>(&s).unwrap(),
+                result
+            );
+        }
+
+        let arm = AutopilotSetApiTriggerParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            enabled: true,
+        };
+        let s = serde_json::to_string(&arm).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSetApiTriggerParams>(&s).unwrap(),
+            arm
+        );
+        assert!(
+            serde_json::from_str::<AutopilotSetApiTriggerResult>(r#"{"updated":true}"#)
+                .unwrap()
+                .updated
+        );
+
+        // A pre-0057 daemon's payloads, verbatim.
+        let legacy_ap: AutopilotRow = serde_json::from_str(
+            r#"{"id":"ap-1","workspace_id":"ws-1","agent_id":"agent-1","name":"daily",
+                "cron_expr":"0 9 * * *","next_tick_at":null,"enabled":true,
+                "last_run_status":null,"last_run_at":null}"#,
+        )
+        .expect("a pre-0057 AutopilotRow must still deserialise");
+        assert!(
+            !legacy_ap.api_trigger_enabled,
+            "an omitted api trigger flag means UNARMED"
+        );
+
+        let legacy_run: AutopilotRunRow = serde_json::from_str(
+            r#"{"id":"run-1","autopilot_id":"ap-1","started_at":1,"completed_at":null,
+                "status":"running"}"#,
+        )
+        .expect("a pre-0057 AutopilotRunRow must still deserialise");
+        assert_eq!(
+            legacy_run.source, "",
+            "an omitted source is empty, not a guessed provenance"
+        );
+        assert_eq!(legacy_run.failure_reason, None);
     }
 
     /// The P8.4 Kanban task envelopes round-trip through JSON.
