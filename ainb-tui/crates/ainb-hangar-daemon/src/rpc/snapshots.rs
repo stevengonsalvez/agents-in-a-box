@@ -47,7 +47,7 @@ use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
 use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
-use ainb_hangar_store::repo::issue::IssueRepo;
+use ainb_hangar_store::repo::issue::{CriterionError, IssueRepo};
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
 use ainb_hangar_store::repo::run_history::RunHistoryRepo;
@@ -1828,6 +1828,42 @@ pub async fn issue_label_detach(
     name: &str,
 ) -> Result<Option<IssueRow>, LabelRepoError> {
     LabelRepo::detach(pool, workspace, issue_id, name).await?;
+    Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
+}
+
+/// Tick / untick one acceptance criterion on an issue, scoped to `workspace`,
+/// then re-read the issue as a wire [`IssueRow`]
+/// (`hangar/issue_criterion_set`, multica parity #11-rest).
+///
+/// Delegates the whole read-modify-write to [`IssueRepo::set_criterion_checked`]
+/// so the CLI and the daemon share exactly one mutator. `criterion` is either
+/// the criterion id or a 1-based ordinal.
+///
+/// # Errors
+///
+/// Propagates [`CriterionError`] — a foreign issue, an unknown criterion, a lost
+/// update, or a store fault.
+pub async fn issue_criterion_set(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    workspace: &WorkspaceId,
+    issue_id: &str,
+    criterion: &str,
+    checked: bool,
+    at: i64,
+    actor: Option<&str>,
+) -> Result<Option<IssueRow>, CriterionError> {
+    IssueRepo::set_criterion_checked(
+        pool,
+        idgen,
+        workspace.as_str(),
+        issue_id,
+        criterion,
+        checked,
+        at,
+        actor,
+    )
+    .await?;
     Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
 }
 
