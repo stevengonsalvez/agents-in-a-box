@@ -639,6 +639,141 @@ fn agent_create_on_fresh_home_inserts_and_lists() {
     );
 }
 
+/// The user-visible proof for migration 0050 (multica gap #23): a description
+/// supplied at `agent create` survives into `agent list --format json`, and a
+/// SECOND create with the same name is REFUSED — a non-zero exit and a clear
+/// message, never a silent second identically-named row.
+#[test]
+fn agent_create_persists_description_and_refuses_a_duplicate_name() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "a",
+            "--description",
+            "runs the build",
+        ],
+    );
+    assert!(ok, "agent create should exit 0; out={out}");
+
+    let (ok, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "agent list should exit 0; out={shown}");
+    assert!(
+        shown.contains(r#""description":"runs the build""#),
+        "the description must survive into the json listing:\n{shown}"
+    );
+
+    // A SECOND create with the same name fails loudly.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "create", "--name", "a", "--description", "second"],
+    );
+    assert!(!ok, "a duplicate agent name must exit non-zero; out={out}");
+    assert!(
+        out.contains("already exists"),
+        "the refusal must say the name is taken:\n{out}"
+    );
+
+    // …and wrote nothing: still exactly one agent named `a`.
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert_eq!(
+        shown.matches(r#""name":"a""#).count(),
+        1,
+        "the refused create must not have added a second row:\n{shown}"
+    );
+}
+
+/// An over-long `--description` is refused before anything is written (the
+/// 255-code-point cap, multica 060).
+#[test]
+fn agent_create_rejects_an_over_long_description() {
+    let tmp = tempfile::tempdir().unwrap();
+    let too_long = "x".repeat(256);
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "toolong",
+            "--description",
+            &too_long,
+        ],
+    );
+    assert!(!ok, "a 256-character description must exit non-zero; out={out}");
+    assert!(
+        out.contains("255 characters or fewer"),
+        "the message must state the cap:\n{out}"
+    );
+
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        !shown.contains("toolong"),
+        "the rejected create must not have written an agent:\n{shown}"
+    );
+}
+
+/// `agent edit --description` rewrites the blurb, and a rename onto a taken
+/// name is refused with the agent's name intact.
+#[test]
+fn agent_edit_rewrites_description_and_refuses_a_colliding_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["alpha", "beta"] {
+        let (ok, out) = run(tmp.path(), &["hangar", "agent", "create", "--name", name]);
+        assert!(ok, "create {name} should exit 0; out={out}");
+    }
+    // Pull beta's id out of the json listing.
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    let rows: serde_json::Value = serde_json::from_str(shown.trim()).expect("json listing parses");
+    let beta_id = rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|r| r["name"] == "beta")
+        .expect("beta listed")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "edit",
+            &beta_id,
+            "--description",
+            "reviews every PR",
+        ],
+    );
+    assert!(ok, "a description-only edit should exit 0; out={out}");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains(r#""description":"reviews every PR""#),
+        "the edited blurb must show in the listing:\n{shown}"
+    );
+
+    // Renaming beta onto alpha is refused, and beta keeps its name.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "edit", &beta_id, "--name", "alpha"],
+    );
+    assert!(!ok, "a colliding rename must exit non-zero; out={out}");
+    assert!(out.contains("already exists"), "refusal message:\n{out}");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains(r#""name":"beta""#),
+        "the refused rename must leave beta's name alone:\n{shown}"
+    );
+}
+
 /// Create an issue via the CLI and return its id (pulled from the create ack).
 fn create_issue(home: &std::path::Path, title: &str) -> String {
     let (ok, out) = run(home, &["hangar", "issue", "create", "--title", title]);
