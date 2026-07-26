@@ -4676,16 +4676,17 @@ const fn is_ctrl_p(key: &ainb_plugin_sdk::KeyEvent) -> bool {
 /// On a modal screen Esc closes the modal (handled by the screen router); on a
 /// non-modal screen the per-screen reducer may want Esc, so it falls through.
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
+    // A CTRL/ALT chord is never a tab switch: `Ctrl+K` / `Alt+D` belong to the
+    // active screen (or to the host), so the routing layer must not steal them.
+    // SHIFT is untouched — the claimed chars are already uppercase.
+    let chorded = key.mods & (ainb_plugin_sdk::KEY_MOD_CTRL | ainb_plugin_sdk::KEY_MOD_ALT) != 0;
     match &key.code {
-        KeyCode::Char { ch }
-            // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
-            // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
-            // numbered tabs are now contiguous `1`→`4`.
-            if matches!(
-                *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'F' | 'S' | 'P' | 'A' | ',' | '?' | 'q'
-            ) =>
-        {
+        // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
+        // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
+        // numbered tabs are now contiguous `1`→`4`. The claimed set lives once,
+        // in `screen::router::ROUTER_KEYS`, so screens can assert against it
+        // (`no_screen_binds_a_reserved_key`, #450).
+        KeyCode::Char { ch } if !chorded && crate::screen::router::is_router_key(*ch) => {
             Some(AppEvent::Key(*ch))
         }
         // Esc routes through the router to close most modals (agent picker, help).
