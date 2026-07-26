@@ -16,6 +16,7 @@
 //! a `HashMap` (whose iteration order varies per process and would break
 //! byte-deterministic golden tests); every payload is a field-ordered struct.
 
+use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::channel::ChannelSet;
 use ainb_hangar_core::ids::{AgentId, CommentId, IssueId, TaskId};
 use chrono::{DateTime, Utc};
@@ -238,6 +239,124 @@ pub enum PresenceState {
     Offline,
 }
 
+impl PresenceState {
+    /// Heartbeat staleness beyond which a runtime is *degraded* (amber).
+    ///
+    /// Multica `derive-health.ts` `FIVE_MINUTES_MS`. Multica gates its amber band
+    /// behind a server-side 150s liveness sweeper; hangar has no liveness
+    /// authority outside the DB heartbeat, so the band is shifted to "stale for
+    /// longer than 5 minutes" — 10 missed beats at the 30s sweep cadence, the
+    /// same order of margin multica buys with its 15s/150s ratio.
+    pub const UNSTABLE_AFTER_MS: i64 = 5 * 60 * 1000;
+
+    /// End of the unstable grace window — past this the runtime is gone.
+    pub const OFFLINE_AFTER_MS: i64 = 10 * 60 * 1000;
+
+    /// Map a stored `agent_runtime.status` string onto a presence
+    /// (`"online"` → [`Online`](Self::Online), `"unstable"` →
+    /// [`Unstable`](Self::Unstable), anything else → [`Offline`](Self::Offline)).
+    #[must_use]
+    pub fn from_status(status: &str) -> Self {
+        match status {
+            "online" => Self::Online,
+            "unstable" => Self::Unstable,
+            _ => Self::Offline,
+        }
+    }
+
+    /// Severity order for the "worse wins" fold: `Offline` < `Unstable` <
+    /// `Online`. Deliberately NOT a `PartialOrd` derive — the public variant
+    /// order is wire-visible through the serde renames and must not be reordered.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Offline => 0,
+            Self::Unstable => 1,
+            Self::Online => 2,
+        }
+    }
+
+    /// Fold the stored runtime status together with its heartbeat age (multica
+    /// `deriveRuntimeHealth` + `deriveAgentAvailability`).
+    ///
+    /// `last_seen_at == None` yields the status verbatim: a row that never
+    /// carried a heartbeat signal (legacy / CLI-seeded) must not decay just
+    /// because it has no beat to measure.
+    ///
+    /// Otherwise the **worse** of (stored status, heartbeat age) wins, so a
+    /// deregistered runtime with a fresh beat still reads `Offline`, and a
+    /// crashed daemon whose row is frozen at `"online"` still decays to
+    /// `Unstable` then `Offline`. The age fold is the primary mechanism, not
+    /// defence in depth: hangar's sweeper lives INSIDE the daemon, so nothing
+    /// can flip a dead daemon's own row.
+    ///
+    /// Age is `now_ms.saturating_sub(seen)`, so a future stamp (clock skew)
+    /// reads as fresh rather than panicking or flipping.
+    #[must_use]
+    pub fn derive(status: &str, last_seen_at: Option<i64>, now_ms: i64) -> Self {
+        let stored = Self::from_status(status);
+        let Some(seen) = last_seen_at else {
+            return stored;
+        };
+        let age = now_ms.saturating_sub(seen);
+        let by_age = if age > Self::OFFLINE_AFTER_MS {
+            Self::Offline
+        } else if age > Self::UNSTABLE_AFTER_MS {
+            Self::Unstable
+        } else {
+            Self::Online
+        };
+        if by_age.rank() < stored.rank() {
+            by_age
+        } else {
+            stored
+        }
+    }
+}
+
+/// Workload dimension (multica `Workload`), orthogonal to availability.
+///
+/// Derived from LIVE task counts only — terminal tasks
+/// (`done`/`failed`/`cancelled`) are excluded, so history never bleeds into the
+/// list-level dot. An agent is a `(presence, workload)` pair: e.g.
+/// `online · working`, `unstable · queued`, `offline · idle`. `Unstable`
+/// (runtime degraded) must never be conflated with `Queued` (waiting work) — the
+/// two dimensions ([`PresenceState`] and this) are computed independently.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Workload {
+    /// At least one task is `running` (`⚙ working`, green).
+    Working,
+    /// No running task but >=1 `queued`/`dispatched` (`◔ queued`, amber).
+    Queued,
+    /// No live tasks (`· idle`, gray).
+    #[default]
+    Idle,
+}
+
+impl Workload {
+    /// Whether this is the default `Idle` (backs the wire `skip_serializing_if`,
+    /// so an idle workload is omitted from the JSON and the shape only grows for
+    /// a producer that supplies a non-idle value).
+    #[must_use]
+    pub const fn is_idle(&self) -> bool {
+        matches!(self, Self::Idle)
+    }
+
+    /// Derive the workload from an agent's LIVE task counts: `running > 0 →
+    /// Working`, else `queued > 0 → Queued`, else `Idle`. Kept here so the store,
+    /// daemon, and tests share one definition (multica `deriveWorkload`).
+    #[must_use]
+    pub const fn derive(running: i64, queued: i64) -> Self {
+        if running > 0 {
+            Self::Working
+        } else if queued > 0 {
+            Self::Queued
+        } else {
+            Self::Idle
+        }
+    }
+}
+
 /// A wire-side issue row.
 ///
 /// This is the daemon's read model carried to the plugin — distinct from the
@@ -324,6 +443,16 @@ pub struct IssueRow {
     /// task-detail card's `Target:` line (63d). Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
+    /// The card's optional upstream-issue reference (`issue.external_ref`,
+    /// migration 0043): a URL or `owner/repo#123` linking this hangar issue to a
+    /// GitHub/Jira issue for traceability, or `None` when nothing is linked.
+    /// Drives the board card's link glyph + the task-detail card's `Linked:`
+    /// line, and is appended to the dispatched brief so the agent resolves the
+    /// link itself (ainb never fetches it). Omitted from the wire when `None`
+    /// (`skip_serializing_if`) so the shape only grows for a reader that supplies
+    /// it — a pre-0043 snapshot decodes to `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
     /// How many tasks (any lifecycle) have ever run against this issue (63d).
     /// `0` for a never-run issue. Drives the task-detail card's `Runs:` history
     /// line, shown only when non-zero. `#[serde(default)]` keeps a pre-63d snapshot
@@ -339,6 +468,80 @@ pub struct IssueRow {
     /// ran. Drives the `Runs:` line's `<when>`. Omitted from the wire when `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_run_at: Option<i64>,
+    /// This issue's parent, when it is a **sub-issue** (`issue.parent_issue_id`,
+    /// migration 0046), else `None` for a top-level issue. Omitted from the wire
+    /// when `None` (`skip_serializing_if`) so the shape only grows for a reader
+    /// that supplies it — a pre-0046 snapshot decodes to `None` (append-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+    /// How many sub-issues this issue has (`0` when it is not a parent). Drives
+    /// the parent card's `⊟ done/total` roll-up badge. `#[serde(default)]` keeps a
+    /// pre-0046 snapshot decodable (defaults to `0`).
+    #[serde(default)]
+    pub child_total: u32,
+    /// How many of this issue's sub-issues are terminal (`done`/`cancelled`).
+    /// Pairs with [`Self::child_total`] for the roll-up badge. `#[serde(default)]`
+    /// keeps a pre-0046 snapshot decodable (defaults to `0`).
+    #[serde(default)]
+    pub child_done: u32,
+    /// Ordered acceptance-criteria strings (`issue.acceptance_criteria`, migration
+    /// 0048): one criterion per element. Drives the task-detail card's
+    /// `Acceptance:` block. Empty by default; omitted from the wire when empty
+    /// (append-only) so an old client omits it and an old daemon ignores it — a
+    /// pre-0048 snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    /// Structured acceptance criteria: per-criterion stable id + checked state
+    /// (multica parity #11-rest, migration 0054). The plural TEXTS of these
+    /// elements are ALSO mirrored into [`Self::acceptance_criteria`] for
+    /// pre-#11-rest clients, so no existing consumer changes.
+    ///
+    /// Append-only: an old daemon omits it and a new client falls back to
+    /// [`Self::acceptance_criteria`] (rendering everything unchecked); an old
+    /// client ignores it. A pre-#11-rest snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance: Vec<AcceptanceCriterion>,
+    /// Ordered context-reference strings (`issue.context_refs`, migration 0048):
+    /// URL / `owner/repo#123` / free text, one per element. Drives the task-detail
+    /// card's `Context:` block. Empty by default; omitted from the wire when empty
+    /// (append-only) so an old client omits it and an old daemon ignores it — a
+    /// pre-0048 snapshot decodes to `[]`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_refs: Vec<String>,
+    /// This issue's TYPED links (multica parity #20), driving the task-detail
+    /// card's `Links:` block.
+    ///
+    /// Populated ONLY on the single-issue DETAIL path — a list snapshot leaves it
+    /// empty on purpose, because filling it would need an N-query fan-out per row.
+    /// Do not "fix" that by adding one. Empty by default and omitted from the wire
+    /// when empty (append-only), so a pre-#20 daemon decodes to `[]` and the
+    /// detail card simply renders no `Links:` block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<IssueLinkRow>,
+}
+
+/// One TYPED link on an issue's detail card (multica parity #20), always stated
+/// from the SUBJECT issue's point of view: `kind` says what the subject is to the
+/// other issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinkRow {
+    /// The rendered kind token: `"blocks"`, `"blocked_by"` or `"related"`.
+    pub kind: String,
+    /// The OTHER issue's id (the subject is whichever issue was queried).
+    pub issue_id: String,
+    /// The other issue's human display id (`HGR-<n>`), when resolvable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<String>,
+    /// The other issue's title (empty when unresolvable).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// The other issue's state (empty when unresolvable).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// `blocked_by` ONLY: whether that blocker has FINISHED, so it no longer gates
+    /// the subject. Always `false` for `blocks` / `related` (neither gates).
+    #[serde(default)]
+    pub satisfied: bool,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
@@ -358,11 +561,58 @@ pub struct ActorRow {
     pub subtitle: String,
     /// Current presence (drives the inline 3-state dot).
     pub presence: PresenceState,
+    /// Live workload dimension (multica `Workload`), orthogonal to `presence`.
+    /// Derived from the agent's live task counts; `Idle` for members and for a
+    /// pre-workload snapshot (`#[serde(default)]`). Omitted from the wire when
+    /// `Idle` so the shape only grows for a producer that supplies it.
+    #[serde(default, skip_serializing_if = "Workload::is_idle")]
+    pub workload: Workload,
     /// Whether this actor is an agent (`true`) or a human member (`false`).
     pub is_agent: bool,
     /// Recent-use rank: `Some(n)` pins the actor in the `RECENT` section (lower
     /// `n` = more recent); `None` falls into the alphabetical body.
     pub recent_rank: Option<u32>,
+    /// The agent's short blurb (migration 0050); empty for members and for a
+    /// pre-0050 producer. Omitted from the wire when empty so the shape only
+    /// grows for a producer that supplies it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The agent's avatar token (e.g. `"emoji:🦊"`, migration 0050); empty when
+    /// unset and for members. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub avatar: String,
+    /// When the agent was archived (epoch ms, migration 0052 / parity #26);
+    /// absent for an active agent, for a member, for an archive predating 0052,
+    /// and for a pre-0052 producer. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// Who archived the agent, as a canonical actor-ref (migration 0052); empty
+    /// when active / unknown / unattributed. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub archived_by: String,
+}
+
+impl Default for ActorRow {
+    /// The neutral row: an unnamed, offline, idle member with no metadata.
+    ///
+    /// Exists so fixtures can spread it (`ActorRow { display_name: …,
+    /// ..Default::default() }`) and a later append-only field is one struct edit
+    /// rather than a sweep across every test that builds a row.
+    fn default() -> Self {
+        Self {
+            actor_ref: String::new(),
+            display_name: String::new(),
+            subtitle: String::new(),
+            presence: PresenceState::Offline,
+            workload: Workload::default(),
+            is_agent: false,
+            recent_rank: None,
+            description: String::new(),
+            avatar: String::new(),
+            archived_at: None,
+            archived_by: String::new(),
+        }
+    }
 }
 
 /// A wire-side skill row for the skill-manager list (`hangar/skills_list`).
@@ -381,6 +631,33 @@ pub struct SkillRow {
     pub used: bool,
     /// The remote update timestamp (epoch milliseconds).
     pub updated_at: i64,
+}
+
+/// One agent↔skill link on the wire, carrying its per-agent enablement
+/// (`hangar/agent_skills_list`, parity #24).
+///
+/// Deliberately NOT a field bolted onto [`SkillRow`]: `SkillRow` is a
+/// workspace-wide row (its `used` flag means "some agent references this"),
+/// while enablement is per-(agent, skill). Mixing the two would make `SkillRow`
+/// meaningless outside an agent context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSkillLinkRow {
+    /// The linked skill's id.
+    pub skill_id: String,
+    /// The linked skill's normalised (kebab-case) name.
+    pub name: String,
+    /// Whether this link currently materialises for the agent. Defaults to
+    /// `true`, not `false`: a peer that omits the field predates the toggle
+    /// concept, which means "attached and live". Defaulting to `false` would let
+    /// an old peer's payload silently render every skill as disabled.
+    #[serde(default = "default_link_enabled")]
+    pub enabled: bool,
+}
+
+/// `serde(default)` helper for [`AgentSkillLinkRow::enabled`] — an absent field
+/// means the peer has no toggle concept, i.e. ENABLED.
+const fn default_link_enabled() -> bool {
+    true
 }
 
 /// A wire-side file entry within a skill's directory (`hangar/skill_files`).
@@ -579,4 +856,254 @@ pub struct CommentRow {
     pub body: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// **T6** — the `acceptance` field is APPEND-ONLY: a pre-#11-rest snapshot
+    /// (which carries `acceptance_criteria` but no `acceptance`) still decodes,
+    /// a full row round-trips losslessly, and an empty `acceptance` is OMITTED
+    /// from the wire so an old client sees the byte-identical shape it did before.
+    #[test]
+    fn issue_row_acceptance_is_append_only() {
+        // A snapshot serialised by a pre-#11-rest daemon.
+        let legacy = serde_json::json!({
+            "id": "i-1",
+            "workspace_id": "ws-1",
+            "title": "T",
+            "state": "open",
+            "creator": "member:u1",
+            "created_at": 0,
+            "acceptance_criteria": ["builds", "tests"],
+        });
+        let row: IssueRow = serde_json::from_value(legacy).expect("pre-#11-rest row decodes");
+        assert_eq!(row.acceptance_criteria, vec!["builds", "tests"]);
+        assert!(
+            row.acceptance.is_empty(),
+            "absent structured list decodes to empty, never a panic"
+        );
+
+        // A #11-rest row round-trips losslessly, both fields intact.
+        let mut full = row.clone();
+        full.acceptance = vec![
+            AcceptanceCriterion::with_id("ac-a", "builds").expect("criterion"),
+            AcceptanceCriterion::with_id("ac-b", "tests").expect("criterion"),
+        ];
+        full.acceptance[1].tick(99, Some("agent:builder"));
+        let json = serde_json::to_string(&full).expect("serialize");
+        assert!(json.contains(r#""acceptance":["#), "got {json}");
+        let back: IssueRow = serde_json::from_str(&json).expect("round-trip");
+        assert_eq!(back, full);
+        assert!(back.acceptance[1].checked);
+        assert_eq!(back.acceptance[1].checked_at, Some(99));
+
+        // An empty structured list is omitted entirely — the pre-#11-rest wire
+        // shape is unchanged for every issue that has not been ticked.
+        let empty = serde_json::to_string(&row).expect("serialize");
+        assert!(
+            !empty.contains("acceptance\":"),
+            "empty acceptance must not appear on the wire, got {empty}"
+        );
+        assert!(
+            empty.contains("acceptance_criteria"),
+            "the text mirror still ships, got {empty}"
+        );
+    }
+
+    /// `Workload::derive` folds live counts per the multica precedence:
+    /// `running > 0 → Working` beats `queued > 0 → Queued` beats `Idle`.
+    #[test]
+    fn workload_derive_precedence() {
+        assert_eq!(Workload::derive(0, 0), Workload::Idle);
+        assert_eq!(Workload::derive(0, 3), Workload::Queued);
+        assert_eq!(Workload::derive(2, 0), Workload::Working);
+        // running wins even when both are non-zero.
+        assert_eq!(Workload::derive(1, 5), Workload::Working);
+    }
+
+    /// `PresenceState::derive` folds the stored status with the heartbeat age
+    /// across every band (multica `deriveRuntimeHealth` +
+    /// `deriveAgentAvailability`, with the hangar band shift).
+    #[test]
+    fn presence_derive_bands() {
+        const NOW: i64 = 1_700_000_000_000;
+        const UNSTABLE: i64 = PresenceState::UNSTABLE_AFTER_MS;
+        const OFFLINE: i64 = PresenceState::OFFLINE_AFTER_MS;
+        // (status, last_seen_at, expected, why)
+        let cases: &[(&str, Option<i64>, PresenceState, &str)] = &[
+            (
+                "online",
+                None,
+                PresenceState::Online,
+                "legacy row, verbatim",
+            ),
+            ("offline", None, PresenceState::Offline, "verbatim"),
+            ("online", Some(NOW - 10_000), PresenceState::Online, "fresh"),
+            (
+                "online",
+                Some(NOW - (UNSTABLE - 1)),
+                PresenceState::Online,
+                "band edge is inclusive of Online",
+            ),
+            (
+                "online",
+                Some(NOW - (UNSTABLE + 1)),
+                PresenceState::Unstable,
+                "the amber band opens",
+            ),
+            (
+                "online",
+                Some(NOW - OFFLINE),
+                PresenceState::Unstable,
+                "grace boundary is inclusive of Unstable",
+            ),
+            (
+                "online",
+                Some(NOW - (OFFLINE + 1)),
+                PresenceState::Offline,
+                "grace expired",
+            ),
+            (
+                "offline",
+                Some(NOW - 10_000),
+                PresenceState::Offline,
+                "worse wins: a deregistered runtime is not online",
+            ),
+            (
+                "unstable",
+                Some(NOW - 10_000),
+                PresenceState::Unstable,
+                "worse wins: a stored degraded status survives a fresh beat",
+            ),
+            (
+                "online",
+                Some(NOW + 3_600_000),
+                PresenceState::Online,
+                "clock skew must not panic or flip",
+            ),
+        ];
+        for (status, seen, expect, why) in cases {
+            assert_eq!(
+                PresenceState::derive(status, *seen, NOW),
+                *expect,
+                "status={status} last_seen={seen:?}: {why}"
+            );
+        }
+    }
+
+    /// The status mapper is the inverse of the render vocabulary and treats an
+    /// unknown string as `Offline` (never as available).
+    #[test]
+    fn presence_from_status_defaults_offline() {
+        assert_eq!(PresenceState::from_status("online"), PresenceState::Online);
+        assert_eq!(
+            PresenceState::from_status("unstable"),
+            PresenceState::Unstable
+        );
+        assert_eq!(
+            PresenceState::from_status("offline"),
+            PresenceState::Offline
+        );
+        assert_eq!(PresenceState::from_status("weird"), PresenceState::Offline);
+    }
+
+    /// An `ActorRow` JSON without a `workload` key decodes to `Idle` (a
+    /// pre-workload snapshot), and an `Idle` workload is omitted from the wire.
+    #[test]
+    fn actor_row_workload_is_additive_wire() {
+        let json = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent","presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(json).unwrap();
+        assert_eq!(row.workload, Workload::Idle);
+
+        // Idle is skip_serializing_if — the key never appears for an idle row.
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("workload"),
+            "idle workload must be omitted from the wire: {out}"
+        );
+    }
+
+    /// A non-idle workload round-trips through JSON as a `snake_case` token.
+    #[test]
+    fn actor_row_workload_round_trips() {
+        let row = ActorRow {
+            actor_ref: "agent:a1".into(),
+            display_name: "bot".into(),
+            subtitle: "agent".into(),
+            presence: PresenceState::Online,
+            workload: Workload::Working,
+            is_agent: true,
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(out.contains("\"workload\":\"working\""), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
+    }
+
+    /// A PRE-0050 producer's payload — no `description`, no `avatar` — still
+    /// deserializes, both fields defaulting to empty. This is the append-only
+    /// proof (a full round-trip alone would not catch a missing `serde(default)`).
+    #[test]
+    fn actor_row_decodes_a_pre_0050_payload() {
+        let legacy = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent",
+            "presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-0050 payload decodes");
+        assert_eq!(row.description, "", "absent description defaults to empty");
+        assert_eq!(row.avatar, "", "absent avatar defaults to empty");
+        // And a row with no metadata re-serialises WITHOUT the new keys, so the
+        // wire only grows for a producer that actually supplies them.
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("description") && !out.contains("avatar"),
+            "empty metadata must be omitted from the wire: {out}"
+        );
+    }
+
+    /// Populated metadata round-trips verbatim (the other half of append-only).
+    #[test]
+    fn actor_row_metadata_round_trips() {
+        let row = ActorRow {
+            actor_ref: "agent:a1".into(),
+            display_name: "builder".into(),
+            presence: PresenceState::Online,
+            is_agent: true,
+            description: "ships the backend".into(),
+            avatar: "emoji:\u{1F98A}".into(),
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            out.contains("\"description\":\"ships the backend\""),
+            "{out}"
+        );
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
+    }
+
+    /// The parity-#26 archive audit is APPEND-ONLY on `ActorRow`: a pre-0052
+    /// payload decodes with both fields absent, an unstamped row emits neither
+    /// key, and a stamped row round-trips verbatim.
+    #[test]
+    fn actor_row_archive_audit_is_append_only() {
+        let legacy = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent",
+            "presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-0052 payload decodes");
+        assert_eq!(row.archived_at, None);
+        assert_eq!(row.archived_by, "");
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("archived_at") && !out.contains("archived_by"),
+            "an unstamped row must not emit the audit keys: {out}"
+        );
+
+        let stamped = ActorRow {
+            archived_at: Some(1_700_000_000_000),
+            archived_by: "member:user-1".into(),
+            ..row
+        };
+        let out = serde_json::to_string(&stamped).unwrap();
+        assert!(out.contains("\"archived_by\":\"member:user-1\""), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), stamped);
+    }
 }

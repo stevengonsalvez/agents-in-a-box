@@ -24,8 +24,10 @@ fn actor() -> ActorRow {
         display_name: "claude-agent".into(),
         subtitle: "agent · gpt5".into(),
         presence: PresenceState::Online,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent: true,
         recent_rank: Some(0),
+        ..ActorRow::default()
     }
 }
 

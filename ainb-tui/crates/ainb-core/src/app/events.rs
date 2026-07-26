@@ -3014,6 +3014,10 @@ impl EventHandler {
             KeyCode::Char('t' | 'p') | KeyCode::Right | KeyCode::Char('A') => {
                 let key = match key_event.code {
                     KeyCode::Right => FleetKey::Right,
+                    // The pane reducer binds takeover-attach to lowercase `a`
+                    // (uppercase `A` is a reserved hangar router key, #450); the
+                    // host panel keeps its `A` shortcut and forwards onto it.
+                    KeyCode::Char('A') => FleetKey::Char('a'),
                     KeyCode::Char(character) => FleetKey::Char(character),
                     _ => unreachable!(),
                 };
@@ -6183,7 +6187,10 @@ impl EventHandler {
                 Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
             }
             AppEvent::FleetPanelBroadcast => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('B')));
+                // The pane reducer binds broadcast to lowercase `b` (uppercase `B`
+                // is a reserved hangar router key, #450); the host panel's `B`
+                // shortcut forwards onto it.
+                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('b')));
             }
             AppEvent::FleetPanelApprove => {
                 match selected_approval_action(&state.fleet_panel_state.canonical, true) {
@@ -9243,6 +9250,12 @@ mod text_input_guard_tests {
         state.start_onboarding(false, None);
         if let Some(o) = state.onboarding_state.as_mut() {
             o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
+            // `start_onboarding` re-populates this form from the HOST's saved
+            // Grafana creds (`otel::read_grafana_creds`), so on a machine that
+            // has OTEL configured the field starts non-empty and the paste
+            // appends to it. Blank it so the assertion is about the paste, not
+            // about the developer's config.
+            o.otel_otlp_endpoint.clear();
         }
 
         let consumed = EventHandler::paste_into_text_input(

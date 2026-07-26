@@ -503,8 +503,9 @@ fn s_sets_selected_workspace_active() {
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces
-    // Select the non-current workspace (ws2) then press `s`.
-    s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    // Select the non-current workspace (ws2) then press `s`. `]` moves the
+    // in-section list (it was `J` before #450 rebound the pair off `J`/`K`).
+    s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     let out = reduce_settings(&s, SettingsEvent::Key('s'));
     match out.intent {
         Some(SettingsIntent::SwitchWorkspace(id)) => {
@@ -514,15 +515,11 @@ fn s_sets_selected_workspace_active() {
     }
 }
 
-/// P5.5: `d` toggles the default for the selected workspace; `n` opens the
-/// new-workspace flow; `r` renames the selected one. All scoped to the
-/// Workspace pane.
+/// P5.5: `d` toggles the default for the selected workspace; `r` renames the
+/// selected one. All scoped to the Workspace pane.
 #[test]
-fn d_n_r_emit_workspace_intents() {
-    let mut s = state();
-    s = reduce_settings(&s, SettingsEvent::Key('j')).state;
-    s = reduce_settings(&s, SettingsEvent::Key('j')).state;
-    s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces (ws1 selected)
+fn d_r_emit_workspace_intents() {
+    let s = workspaces_pane();
 
     let d = reduce_settings(&s, SettingsEvent::Key('d'));
     assert!(matches!(
@@ -530,14 +527,86 @@ fn d_n_r_emit_workspace_intents() {
         Some(SettingsIntent::ToggleDefault(ref id)) if id == "ws1"
     ));
 
-    let n = reduce_settings(&s, SettingsEvent::Key('n'));
-    assert!(matches!(n.intent, Some(SettingsIntent::NewWorkspace)));
-
     let r = reduce_settings(&s, SettingsEvent::Key('r'));
     assert!(matches!(
         r.intent,
         Some(SettingsIntent::RenameWorkspace(ref id)) if id == "ws1"
     ));
+}
+
+/// A state parked on the Workspaces section (ws1 selected).
+fn workspaces_pane() -> SettingsState {
+    let mut s = state();
+    for _ in 0..3 {
+        s = reduce_settings(&s, SettingsEvent::Key('j')).state;
+    }
+    assert_eq!(s.section(), SettingsSection::Workspaces);
+    s
+}
+
+/// P-multica#4: `n` opens the new-workspace name modal (no intent yet); typing
+/// builds the name; Enter derives the slug and emits `CreateWorkspace`.
+#[test]
+fn n_then_type_then_enter_emits_create_workspace() {
+    let s = workspaces_pane();
+
+    // `n` opens the modal — no intent, buffer present + empty.
+    let open = reduce_settings(&s, SettingsEvent::Key('n'));
+    assert!(open.intent.is_none(), "opening the modal emits no intent");
+    assert_eq!(open.state.workspace_name_input(), Some(""));
+
+    // Type "My Team".
+    let mut s = open.state;
+    for c in "My Team".chars() {
+        s = reduce_settings(&s, SettingsEvent::Key(c)).state;
+    }
+    assert_eq!(s.workspace_name_input(), Some("My Team"));
+
+    // Enter derives slug "my-team" and emits CreateWorkspace, closing the modal.
+    let out = reduce_settings(&s, SettingsEvent::Key('\n'));
+    match out.intent {
+        Some(SettingsIntent::CreateWorkspace { slug, name }) => {
+            assert_eq!(slug, "my-team");
+            assert_eq!(name, "My Team");
+        }
+        other => panic!("expected CreateWorkspace, got {other:?}"),
+    }
+    assert_eq!(out.state.workspace_name_input(), None, "modal closed");
+}
+
+/// P-multica#4: Esc cancels the name modal without emitting an intent.
+#[test]
+fn esc_cancels_new_workspace_modal() {
+    let s = workspaces_pane();
+    let mut s = reduce_settings(&s, SettingsEvent::Key('n')).state;
+    for c in "abc".chars() {
+        s = reduce_settings(&s, SettingsEvent::Key(c)).state;
+    }
+    let out = reduce_settings(&s, SettingsEvent::Esc);
+    assert!(out.intent.is_none());
+    assert_eq!(out.state.workspace_name_input(), None, "modal cancelled");
+}
+
+/// P-multica#4: `x` deletes the SELECTED non-active workspace, emitting
+/// `DeleteWorkspace` with its ULID id; `x` on the active row is a no-op.
+#[test]
+fn x_deletes_selected_non_active_workspace() {
+    let s = workspaces_pane(); // ws1 selected, and ws1 is the active/current row
+
+    // ws1 is active → `x` refuses (no intent).
+    let active = reduce_settings(&s, SettingsEvent::Key('x'));
+    assert!(
+        active.intent.is_none(),
+        "cannot delete the active workspace"
+    );
+
+    // Move to ws2 (non-active) → `x` emits DeleteWorkspace(ws2).
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
+    let out = reduce_settings(&s, SettingsEvent::Key('x'));
+    match out.intent {
+        Some(SettingsIntent::DeleteWorkspace(id)) => assert_eq!(id, "ws2"),
+        other => panic!("expected DeleteWorkspace, got {other:?}"),
+    }
 }
 
 /// The Workspace pane keys are section-scoped: `s`/`d`/`r` do nothing on the
@@ -562,19 +631,20 @@ fn event_daemon_disconnected_flips_connection_section_status_to_red() {
     );
 }
 
-/// tcp T5: `J`/`K` move the kind row and `h`/`l` move the channel column on the
-/// Notifications grid, both clamped to their bounds.
+/// tcp T5: `]`/`[` move the kind row and `h`/`l` move the channel column on the
+/// Notifications grid, both clamped to their bounds. The kind pair was `J`/`K`
+/// until #450 — bare `K` is the router's Kanban tab key, so it never landed here.
 #[test]
 fn notify_grid_cursor_navigates_kinds_and_channels() {
     let s = notify_state();
     assert_eq!(s.notify_cursor(), (0, 0));
 
-    // J moves down the kinds; K back up; clamps at the ends.
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    // `]` moves down the kinds; `[` back up; clamps at the ends.
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     assert_eq!(s.notify_cursor(), (1, 0));
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     assert_eq!(s.notify_cursor(), (2, 0));
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     assert_eq!(
         s.notify_cursor(),
         (2, 0),

@@ -22,10 +22,12 @@
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
+//! | `HANGAR_PRESENCE_SWEEP_MS` | runtime-presence pass interval (heartbeat + availability decay) | `30000` |
 //! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | reference running TTL (2.5h) |
+//! | `HANGAR_SPAWN_SETUP_TIMEOUT_MS` | running→spawn setup-phase umbrella override (tests) | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
 //! | `HANGAR_DAEMON_DISABLE_CLAIM` | skip the claim loop, run sweepers only (tests) | unset |
-//! | `HANGAR_DAEMON_DISABLE_SANDBOX` | set to `1` to run providers UNCONFINED (security downgrade) | unset (sandbox ON) |
+//! | `HANGAR_DAEMON_DISABLE_SANDBOX` | `1` forces providers UNCONFINED (security downgrade); `0` forces the OS sandbox ON | unset (platform default: ON on Linux, OFF on macOS) |
 //!
 //! When `HANGAR_DAEMON_RUNTIME_ID` is unset the claim loop is a no-op (the
 //! daemon still sweeps) — a daemon with no runtime has nothing to claim.
@@ -36,7 +38,7 @@
 #![allow(clippy::duration_suboptimal_units)]
 
 use std::collections::HashSet;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -59,12 +61,44 @@ use crate::health_stats::HealthStats;
 use crate::progress_comment;
 use crate::runner::{Backend, Mode, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
-    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
-    sweep_stale_running,
+    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_runtime_presence,
+    sweep_stale_dispatched, sweep_stale_running,
 };
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
 const DEFAULT_POLL_MS: u64 = 1_000;
+/// How long the daemon waits for the claude credential read before giving up.
+///
+/// The legacy macOS `SecKeychain` read presents a BLOCKING GUI auth prompt when
+/// the calling binary is absent from the keychain item's ACL trusted-app list
+/// (e.g. a rebuilt debug binary whose signature invalidated the ACL). On a
+/// headless daemon that prompt is never answered, so a synchronous read wedges
+/// the async worker forever and the task freezes at `running`. Bounding the read
+/// converts that indefinite hang into a clean "dispatch without a token" fallback.
+const CRED_READ_TIMEOUT: Duration = Duration::from_secs(5);
+/// Umbrella bound on the ENTIRE `running -> provider spawn` setup phase (doctrine
+/// hardening, D-e2e-3).
+///
+/// [`CRED_READ_TIMEOUT`] bounds only the keychain read; this bounds EVERY await
+/// between the `dispatched -> running` commit and the provider spawn as ONE unit:
+/// the `running` board auto-move + the "started" progress comment (both DB
+/// writes) and [`prepare_spawn_inputs`] (env build, cred read, skills/profile
+/// materialise). No await in that span — a wedged DB write, a future blocking
+/// call added here, a pool deadlock, a materialise hang — can freeze a `running`
+/// row forever: on expiry the run is terminalised `running -> failed`
+/// ([`FailureReason::SpawnTimeout`]) with the real cause logged, rather than left
+/// to the multi-hour running-TTL sweep. Defense-in-depth behind the per-step
+/// bounds: the sanctioned slow step is the 5s cred read, so 60s means "genuinely
+/// wedged", never "merely slow". Overridable via [`spawn_setup_timeout`].
+const SPAWN_SETUP_TIMEOUT: Duration = Duration::from_secs(60);
+
+/// The active setup-phase umbrella bound, honouring the test-only
+/// `HANGAR_SPAWN_SETUP_TIMEOUT_MS` override (mirrors `HANGAR_PROVIDER_MAX_RUNTIME_MS`)
+/// so an e2e / unit test can drive the wedge terminalise within a bounded budget.
+/// Defaults to [`SPAWN_SETUP_TIMEOUT`].
+fn spawn_setup_timeout() -> Duration {
+    env_u64_opt("HANGAR_SPAWN_SETUP_TIMEOUT_MS").map_or(SPAWN_SETUP_TIMEOUT, Duration::from_millis)
+}
 /// Provider runtime deadline (reference running TTL: 2.5h).
 const PROVIDER_MAX_RUNTIME: Duration = Duration::from_secs(9_000);
 /// Trailing stdout/stderr lines retained on each run for the audit tail.
@@ -116,9 +150,17 @@ pub struct DaemonConfig {
     /// the sweeper fails it without the loop racing to start it.
     pub disable_claim: bool,
     /// e38.23: confine every provider subprocess in the OS-level FS sandbox.
-    /// **Default ON**; set `HANGAR_DAEMON_DISABLE_SANDBOX=1` to opt out (the
-    /// override seam — e.g. a debug build on a platform whose sandbox primitive
-    /// misbehaves). Disabling it is a security downgrade and is logged.
+    ///
+    /// The env-unset default is **platform-specific** (see [`Self::default_sandbox`]):
+    /// ON where the sandbox primitive can actually boot a Node-based provider
+    /// CLI (Linux/Landlock), OFF on macOS — where the default-on Seatbelt profile
+    /// kills every headless `claude` task before it writes a transcript (exit 65
+    /// in ~825ms even with the credential injected), making headless dispatch
+    /// non-functional. That matches the interactive path, which is already
+    /// deliberately unsandboxed. `HANGAR_DAEMON_DISABLE_SANDBOX` is the explicit
+    /// override in both directions: `=1` forces it OFF (security downgrade),
+    /// `=0` forces it ON (used to exercise the profile on macOS). The resolved
+    /// posture is logged at daemon startup (see [`log_sandbox_posture`]).
     pub sandbox: bool,
 }
 
@@ -131,12 +173,29 @@ impl DaemonConfig {
         // bound to it, so the claim loop (run_loop.rs, skipped when `None`) is
         // enabled out of the box. `HANGAR_DAEMON_RUNTIME_ID` still overrides.
         let runtime_id = Some(ainb_hangar_store::bootstrap::default_runtime_id());
-        let claude_path = std::env::var_os("HANGAR_CLAUDE_PATH")
-            .map_or_else(|| PathBuf::from("claude"), PathBuf::from);
-        let codex_path = std::env::var_os("HANGAR_CODEX_PATH")
-            .map_or_else(|| PathBuf::from("codex"), PathBuf::from);
-        let copilot_path = std::env::var_os("HANGAR_COPILOT_PATH")
-            .map_or_else(|| PathBuf::from("copilot"), PathBuf::from);
+        // Resolve each provider path to an absolute, symlink-canonicalized
+        // binary ONCE here, before it ever reaches `RunnerConfig` and the
+        // sandbox profile generator. A bare default (`claude`/`codex`/`copilot`)
+        // is otherwise emitted into the Seatbelt profile as a meaningless
+        // `(literal "claude")` rule that the kernel never matches, so the OS
+        // sandbox denies exec of the real PATH-resolved binary (e.g. a
+        // `~/.local/bin/claude` symlink outside every system read root) and the
+        // task finalizes `failed` in milliseconds with an empty transcript.
+        let claude_path = resolve_provider_path(
+            std::env::var_os("HANGAR_CLAUDE_PATH")
+                .map_or_else(|| PathBuf::from("claude"), PathBuf::from),
+            "claude",
+        );
+        let codex_path = resolve_provider_path(
+            std::env::var_os("HANGAR_CODEX_PATH")
+                .map_or_else(|| PathBuf::from("codex"), PathBuf::from),
+            "codex",
+        );
+        let copilot_path = resolve_provider_path(
+            std::env::var_os("HANGAR_COPILOT_PATH")
+                .map_or_else(|| PathBuf::from("copilot"), PathBuf::from),
+            "copilot",
+        );
         let poll_interval =
             Duration::from_millis(env_u64("HANGAR_DAEMON_POLL_MS", DEFAULT_POLL_MS));
         let provider_max_runtime = env_u64_opt("HANGAR_PROVIDER_MAX_RUNTIME_MS")
@@ -152,6 +211,12 @@ impl DaemonConfig {
         if let Some(ms) = env_u64_opt("HANGAR_GC_INTERVAL_MS") {
             sweeper.gc_interval = Duration::from_millis(ms);
         }
+        // The runtime-presence cadence is independently tunable so a tripwire can
+        // observe an availability decay inside a bounded budget rather than
+        // waiting out the 30s production tick.
+        if let Some(ms) = env_u64_opt("HANGAR_PRESENCE_SWEEP_MS") {
+            sweeper.presence_interval = Duration::from_millis(ms);
+        }
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_DISPATCHED_TTL_MS") {
             sweeper.dispatched_ttl = Duration::from_millis(ms);
             // Keep the reclaim window strictly below the (now tiny) TTL so a
@@ -159,8 +224,10 @@ impl DaemonConfig {
             sweeper.reclaim_window = sweeper.reclaim_window.min(sweeper.dispatched_ttl / 2);
         }
         let disable_claim = std::env::var_os("HANGAR_DAEMON_DISABLE_CLAIM").is_some();
-        // e38.23: sandbox is ON by default; the env var is an explicit opt-out.
-        let sandbox = std::env::var_os("HANGAR_DAEMON_DISABLE_SANDBOX").is_none_or(|v| v != "1");
+        // e38.23 / hangar-e2e-4: the headless OS sandbox posture is the platform
+        // default (ON on Linux, OFF on macOS) unless the env var overrides it.
+        let sandbox =
+            Self::resolve_sandbox(std::env::var_os("HANGAR_DAEMON_DISABLE_SANDBOX").as_deref());
 
         Self {
             runtime_id,
@@ -172,6 +239,87 @@ impl DaemonConfig {
             sweeper,
             disable_claim,
             sandbox,
+        }
+    }
+
+    /// Resolve the headless OS FS sandbox posture from the explicit
+    /// `HANGAR_DAEMON_DISABLE_SANDBOX` override value (`None` when unset).
+    ///
+    /// `Some("1")` forces the sandbox OFF (the documented security opt-out);
+    /// `Some("0")` forces it ON (needed to exercise the profile on macOS, where
+    /// it is otherwise off by default); any other value — or unset — falls back
+    /// to [`Self::default_sandbox`]. Split out as a pure function so the
+    /// override precedence is testable without mutating process env.
+    fn resolve_sandbox(override_val: Option<&std::ffi::OsStr>) -> bool {
+        match override_val {
+            Some(v) if v == "1" => false,
+            Some(v) if v == "0" => true,
+            _ => Self::default_sandbox(),
+        }
+    }
+
+    /// The env-unset default headless sandbox posture for this platform.
+    ///
+    /// OFF on macOS: the default-on Seatbelt profile ([`ainb_hangar_sandbox`])
+    /// cannot boot a Node-based provider CLI — every headless `claude` task dies
+    /// exit 65 in ~825ms before writing a transcript, even with the credential
+    /// injected — so leaving it on makes headless dispatch non-functional. The
+    /// interactive path is already deliberately unsandboxed. ON everywhere else
+    /// (Linux/Landlock), where the profile runs the CLI fine.
+    #[cfg(target_os = "macos")]
+    const fn default_sandbox() -> bool {
+        false
+    }
+
+    /// The env-unset default headless sandbox posture: ON on Linux/Landlock,
+    /// which can run a Node-based provider CLI under confinement. See the
+    /// macOS variant for why that platform defaults OFF.
+    #[cfg(not(target_os = "macos"))]
+    const fn default_sandbox() -> bool {
+        true
+    }
+}
+
+/// Resolve a provider binary to an absolute, symlink-canonicalized path once at
+/// daemon startup, before it flows into [`RunnerConfig`] and the sandbox profile
+/// generator ([`ainb_hangar_sandbox`]).
+///
+/// A bare name (no path separator, the default `claude`/`codex`/`copilot`) is
+/// located on `$PATH`; an explicit `HANGAR_*_PATH` override is honored as given.
+/// Either way the result is canonicalized so the Seatbelt/Landlock profile
+/// references the real binary the OS will exec (e.g. a `~/.local/bin/claude`
+/// symlink into `~/.local/share/claude/versions/…`), which no system read root
+/// covers. If a bare name resolves nowhere on `$PATH`, falls back to the bare
+/// name and logs a warning so the otherwise-silent sandbox denial is
+/// diagnosable rather than a 40ms `agent_error` with an empty transcript.
+fn resolve_provider_path(raw: PathBuf, provider: &str) -> PathBuf {
+    let is_bare = raw.parent() == Some(Path::new(""));
+    let located = if is_bare {
+        match ainb_hangar_sandbox::find_on_path(&raw) {
+            Some(found) => found,
+            None => {
+                tracing::warn!(
+                    provider,
+                    name = %raw.display(),
+                    "provider binary not found on PATH; the OS sandbox will likely deny \
+                     exec; set the HANGAR_*_PATH override to an absolute binary path"
+                );
+                raw
+            }
+        }
+    } else {
+        raw
+    };
+    match std::fs::canonicalize(&located) {
+        Ok(abs) => abs,
+        Err(e) => {
+            tracing::warn!(
+                provider,
+                path = %located.display(),
+                error = %e,
+                "failed to canonicalize provider path; using as given"
+            );
+            located
         }
     }
 }
@@ -246,6 +394,22 @@ async fn reap_interactive_sessions(sessions: &InteractiveSessions) {
     }
 }
 
+/// Emit the daemon's resolved headless OS-sandbox posture at INFO, once at boot.
+///
+/// `sandbox = true` means every headless provider subprocess is confined in the
+/// OS FS sandbox (Landlock/Seatbelt); `false` means the passthrough (unconfined)
+/// path. `target_os` records which platform default (or env override) produced
+/// it. This is the single startup diagnostic that disambiguates an exit-65
+/// dispatch failure between "confinement on, still failing" and "stale binary".
+/// Factored out of [`run`] so it is unit-testable without booting the daemon.
+fn log_sandbox_posture(cfg: &DaemonConfig) {
+    tracing::info!(
+        sandbox = cfg.sandbox,
+        target_os = std::env::consts::OS,
+        "headless provider sandbox posture"
+    );
+}
+
 /// Run the daemon's steady state: spawn sweepers, then poll-claim-execute until
 /// `Ctrl-C`.
 ///
@@ -271,6 +435,12 @@ pub async fn run(
     stats: Arc<HealthStats>,
     events: EventSink,
 ) -> anyhow::Result<()> {
+    // hangar-e2e-5: record the resolved headless OS-sandbox posture once at boot.
+    // Without this line an exit-65 dispatch failure was ambiguous between "fix
+    // present, still failing" and "stale binary (fix absent)"; the confinement
+    // posture is the missing diagnostic. Emitted before any task runs so triage
+    // (and the e2e harness) can assert `sandbox=false` up front.
+    log_sandbox_posture(&cfg);
     spawn_sweepers(pool.clone(), cfg.sweeper);
     // e38.22: schedule the on-disk workspace GC alongside the row-sweepers, so
     // leaked per-task dirs (no `.gc_meta.json`, mtime past the 72h grace) and
@@ -283,6 +453,18 @@ pub async fn run(
         hangar_home(),
         cfg.sweeper.gc_interval,
         Arc::new(SystemClock),
+    );
+
+    // Runtime presence (multica gap #6): heartbeat our own runtime and decay
+    // every stale one, pushing an `AgentPresence` event per moved agent.
+    // Deliberately spawned BEFORE the `disable_claim` early-return: that mode is
+    // "sweepers only" by its own log line, and presence is a sweeper.
+    let _presence = spawn_runtime_presence(
+        pool.clone(),
+        cfg.runtime_id.clone(),
+        cfg.sweeper.presence_interval,
+        Arc::new(SystemClock),
+        events.clone(),
     );
 
     let Some(runtime_id) = cfg.runtime_id.clone().filter(|_| !cfg.disable_claim) else {
@@ -311,9 +493,9 @@ pub async fn run(
         copilot_path: cfg.copilot_path.clone(),
         max_runtime: cfg.provider_max_runtime,
         tail_lines: TAIL_LINES,
-        // e38.23: confine every provider spawn in the OS-level FS sandbox by
-        // default. Overridable via `HANGAR_DAEMON_DISABLE_SANDBOX=1` (see
-        // `DaemonConfig::from_env`).
+        // e38.23: confine every provider spawn in the OS-level FS sandbox per
+        // the platform default (ON on Linux, OFF on macOS). Overridable via
+        // `HANGAR_DAEMON_DISABLE_SANDBOX` (see `DaemonConfig::from_env`).
         sandbox: cfg.sandbox,
     });
 
@@ -387,7 +569,7 @@ pub async fn run(
                 runs.spawn(async move {
                     let clock = SystemClock;
                     if let Err(e) =
-                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive, secrets.as_ref())
+                        execute_claimed(&pool, &runner, &claimed, &clock, &stats, &events, &interactive, secrets)
                             .await
                     {
                         tracing::error!(task_id = %claimed.id, error = %e, "task execution errored");
@@ -535,6 +717,213 @@ pub fn spawn_gc_sweeper(
     })
 }
 
+/// Schedule the runtime-presence pass: beat for our own runtime, decay everyone
+/// else's by heartbeat age, and push an `AgentPresence` event per agent whose
+/// availability moved (multica gap #6, the availability half).
+///
+/// This is the WRITER half of the presence derivation. The snapshot read folds
+/// the heartbeat age itself, so the Agents screen is correct without a live
+/// daemon; this loop makes the persisted `agent_runtime.status` truthful for
+/// every other reader and — via the event — makes an attached TUI re-render
+/// without polling (the plugin arms `fetch_snapshots` on any non-`TaskMessage`
+/// event, so it needs no change). The reference publishes
+/// `EventDaemonRegister{stale_sweep}` on its own bus for exactly this reason.
+///
+/// `runtime_id` is this daemon's own runtime, beaten first each pass so the
+/// daemon can never sweep itself; `None` for a daemon that advertises none.
+/// A failed pass is logged and the loop continues — presence is observability,
+/// never a reason to down the daemon. Returns the [`JoinHandle`] so a caller can
+/// stop it; the production daemon drops it and relies on process exit, mirroring
+/// [`spawn_gc_sweeper`].
+///
+/// [`JoinHandle`]: tokio::task::JoinHandle
+#[must_use]
+pub fn spawn_runtime_presence(
+    pool: SqlitePool,
+    runtime_id: Option<String>,
+    interval: Duration,
+    clock: Arc<dyn HangarClock>,
+    events: EventSink,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            match sweep_runtime_presence(&pool, clock.as_ref(), runtime_id.as_deref()).await {
+                Ok(sweep) => emit_presence_events(&pool, &events, &sweep).await,
+                Err(e) => tracing::error!(error = %e, kind = "presence", "sweeper pass failed"),
+            }
+        }
+    })
+}
+
+/// Fan an `AgentPresence` event out for every agent backed by a runtime the
+/// presence sweep just moved.
+///
+/// One event per AGENT (not per runtime): the plugin renders agents, and a
+/// runtime typically backs several. A lookup fault is logged and skipped — a
+/// missing notification must never abort the remaining fan-out or the loop.
+async fn emit_presence_events(
+    pool: &SqlitePool,
+    events: &EventSink,
+    sweep: &ainb_hangar_store::repo::agent_runtime::PresenceSweep,
+) {
+    use ainb_hangar_proto::events::{HangarEvent, PresenceState};
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    for (runtimes, state) in [
+        (&sweep.to_unstable, PresenceState::Unstable),
+        (&sweep.to_offline, PresenceState::Offline),
+    ] {
+        for rt in runtimes {
+            match AgentRepo::list_ids_by_runtime(pool, &rt.id).await {
+                Ok(agent_ids) => {
+                    for agent_id in agent_ids {
+                        // A stored PK is non-empty by construction; a malformed
+                        // row is skipped rather than panicking the loop.
+                        let Ok(agent_id) = ainb_hangar_core::ids::AgentId::from_str(agent_id)
+                        else {
+                            continue;
+                        };
+                        events.emit(
+                            &rt.workspace_id,
+                            HangarEvent::AgentPresence { agent_id, state },
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, runtime_id = %rt.id, "presence fan-out failed");
+                }
+            }
+        }
+    }
+}
+
+/// Resolve the claude credential env for `backend`, bounded and off the async
+/// worker.
+///
+/// The credential read ([`claude_cred::keys_for_backend`], which shells out to
+/// `/usr/bin/security` for the system claude login) is a synchronous, unbounded
+/// external call that CAN present a BLOCKING GUI auth prompt — but only ONCE, the
+/// first time before the operator clicks "Always Allow" for the stable Apple-signed
+/// `security` binary (unlike the legacy in-process read, whose ACL trust was
+/// re-invalidated by every rebuilt daemon binary). Answered by nobody, that first
+/// prompt would wedge the calling async worker, freezing the task at `running`
+/// (the zombie-dispatch defect). We run it on [`tokio::task::spawn_blocking`]
+/// (same pattern as [`cap_parent_inbox`]) and race it against `timeout`.
+///
+/// On timeout OR a join error we log a clear warning and return an EMPTY env, so
+/// the dispatch proceeds without an injected `CLAUDE_CODE_OAUTH_TOKEN`: the run
+/// then either succeeds (env-override / no-ACL path) or reaches claude and fails
+/// loudly + actionably (the `finalize_failure` seam turns that into a terminal
+/// `FAILED`) instead of hanging at `running` indefinitely.
+///
+/// The `info!` on entry and exit close the ~29-min silent span that made the
+/// original hang un-observable (the black hole was itself a defect).
+async fn resolve_cred_env(
+    backend: Backend,
+    secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
+    daemon_env: std::collections::HashMap<String, String>,
+    timeout: Duration,
+) -> Vec<(String, String)> {
+    tracing::info!(backend = backend.name(), "resolving claude credential");
+    let read = tokio::task::spawn_blocking(move || {
+        crate::claude_cred::keys_for_backend(backend, secrets.as_ref(), &daemon_env)
+    });
+    match tokio::time::timeout(timeout, read).await {
+        Ok(Ok(env)) => {
+            tracing::info!(injected = env.len(), "claude credential resolved");
+            env
+        }
+        Ok(Err(e)) => {
+            tracing::warn!(
+                error = %e,
+                "keychain credential read task failed; dispatching without injected CLAUDE_CODE_OAUTH_TOKEN"
+            );
+            Vec::new()
+        }
+        Err(_) => {
+            tracing::warn!(
+                timeout_secs = timeout.as_secs(),
+                "keychain credential read timed out; dispatching without injected CLAUDE_CODE_OAUTH_TOKEN"
+            );
+            Vec::new()
+        }
+    }
+}
+
+/// Build the provider's child env + resolved credential for a `running` task —
+/// the env / cred / skills-materialise portion of the pre-spawn preamble. Its
+/// caller runs it INSIDE the [`SPAWN_SETUP_TIMEOUT`] umbrella (alongside the
+/// started-side DB writes) so a wedge in any of these steps terminalises the run
+/// rather than freezing it; see [`execute_claimed`].
+///
+/// Returns `(task_env, cred_env)`: the allowlist-filtered, skills/profile-augmented
+/// child env, and the daemon-resolved claude credential that rides `extra_env`
+/// (claude children only). Every step is best-effort — a materialise or cred
+/// fault degrades the run (no skills / no token) but never fails it. The hard
+/// guarantee is the caller's timeout, which turns a WEDGED step (not a slow one)
+/// into a terminal `spawn_timeout` instead of a forever-`running` row.
+async fn prepare_spawn_inputs(
+    pool: &SqlitePool,
+    task: &Task,
+    env: &crate::execenv::ExecEnv,
+    backend: Backend,
+    secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
+    cred_timeout: Duration,
+) -> (
+    std::collections::HashMap<String, String>,
+    Vec<(String, String)>,
+) {
+    // Snapshot the daemon's env into an owned map *before* any await: the
+    // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
+    // make this future non-`Send`. P5.3: apply the configurable env-allowlist
+    // policy here (the authoritative pass), layering keychain-resident API keys
+    // on top via `dispatch::build_task_env`.
+    let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
+    let policy = load_env_policy();
+    let mut task_env = crate::dispatch::build_task_env(&daemon_env, std::iter::empty(), &policy);
+
+    // The daemon-resolved claude credential rides `extra_env` (the unfiltered
+    // append), NOT `task_env` — so it bypasses the deny-by-default allowlist and
+    // reaches a claude child only (`keys_for_backend` is empty for codex/copilot).
+    // The read is bounded + moved off the async worker (`resolve_cred_env`): a
+    // legacy keychain GUI auth prompt on a headless daemon would otherwise wedge
+    // this future and freeze the task at `running`. On timeout we proceed with NO
+    // token so the run reaches claude and fails loudly rather than hanging.
+    let cred_env = resolve_cred_env(backend, secrets, daemon_env.clone(), cred_timeout).await;
+
+    // ccc / D11: name the hangar daemon as the child's parent session so the run
+    // is a legitimate fleet member (its AskUserQuestion reaches the attention
+    // pipeline). The runner allowlists this key so it survives the deny-by-default
+    // filter; set AFTER `build_task_env` so the daemon's value wins over any
+    // ambient one.
+    task_env.insert(
+        ainb_fleet_core::session_registry::PARENT_ENV.to_string(),
+        HANGAR_PARENT_SESSION.to_string(),
+    );
+
+    // P6.4: materialise the agent's attached skills into the provider's layout,
+    // forwarding the `*_HOME` pointer via `task_env`. Non-fatal — a task must
+    // still dispatch even if a skill bundle cannot be written.
+    if let Some((key, path)) = materialise_skills(pool, task, env).await {
+        task_env.insert(key, path.to_string_lossy().into_owned());
+    }
+
+    // P5 (D16): compile-on-dispatch — if a profile master matches this task's
+    // agent slug, materialise its resolved tool-native files and forward the same
+    // `*_HOME` pointer (idempotent when both wrote one). Non-fatal.
+    if let Some((key, path)) = materialise_agent_profile(pool, task, env, backend.name()).await {
+        task_env.insert(key, path.to_string_lossy().into_owned());
+    }
+
+    // P5.6: warn about `danger-full-access` on the first invocation of this
+    // provider in this session. Non-fatal — never block a dispatch on it.
+    warn_danger_access(task, backend.name());
+
+    (task_env, cred_env)
+}
+
 /// Walk one claimed task through `dispatched -> running -> done|failed`.
 ///
 /// Re-reads the full row (for `workspace_id` / `issue_id`), resolves the
@@ -551,6 +940,27 @@ pub fn spawn_gc_sweeper(
 // Bundling them into a context struct is a larger refactor than this credential
 // change warrants; the sibling run functions here carry the same shape.
 #[allow(clippy::too_many_arguments)]
+/// The claim-time squad-leader briefing (migration 0045 / gap #7).
+///
+/// When a claimed task carries a `squad_id`, log the injection point (keyed off
+/// the `squad_id` + `task_id`, so the seam stays observable) and build the
+/// leader briefing. Returns `Some(briefing)` ONLY when the claiming agent is the
+/// squad's leader agent (member tasks / non-squad tasks → `None`); the caller
+/// appends it to the run's `CLAUDE.md`. A dangling `squad_id`, a human-leader
+/// squad, or a workspace-id parse fault all resolve to `None` silently — the
+/// task still dispatches.
+async fn squad_leader_briefing(pool: &SqlitePool, task: &Task) -> Option<String> {
+    let squad_id = task.squad_id.as_deref()?;
+    tracing::info!(
+        task_id = %task.id,
+        squad_id = %squad_id,
+        "squad briefing hook: leader-briefing injection point"
+    );
+    let workspace = ainb_hangar_core::ids::WorkspaceId::from_str(task.workspace_id.clone()).ok()?;
+    crate::squad_briefing::build_squad_leader_briefing(pool, &workspace, squad_id, &task.agent_id)
+        .await
+}
+
 async fn execute_claimed(
     pool: &SqlitePool,
     runner: &Runner,
@@ -559,29 +969,56 @@ async fn execute_claimed(
     stats: &HealthStats,
     events: &EventSink,
     interactive: &InteractiveSessions,
-    secrets: &(dyn ainb_hangar_secrets::SecretBackend + Send + Sync),
+    secrets: Arc<dyn ainb_hangar_secrets::SecretBackend + Send + Sync>,
 ) -> anyhow::Result<()> {
     let task: Task = TaskRepo::get_by_id(pool, &claimed.id)
         .await?
         .ok_or_else(|| anyhow::anyhow!("claimed task {} vanished", claimed.id))?;
-    let ws_slug = workspace_slug(pool, &task.workspace_id).await?;
+    // Pre-run setup faults (slug lookup / execenv prep / F5 provision below) must
+    // TERMINALISE the still-`dispatched` task as failed rather than propagate: a
+    // propagated setup error left the row `dispatched`, and the stale-dispatch
+    // sweeper reclaimed + re-dispatched it into the SAME fault, looping invisibly
+    // (the board card never leaves Todo, the detail never shows an error) until
+    // the 5min dispatch TTL relabelled it `timeout` with no cause. See
+    // `finalize_setup_failure`.
+    let ws_slug = match workspace_slug(pool, &task.workspace_id).await {
+        Ok(s) => s,
+        Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
+    };
     let home = hangar_home();
-    let env = prepare_env(&task, &ws_slug, &home, clock)?;
+    let env = match prepare_env(&task, &ws_slug, &home, clock) {
+        Ok(env) => env,
+        Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
+    };
 
-    // e38.21: inject the workspace's context prompt into the task's execenv as a
-    // `CLAUDE.md` so the agent run actually sees the per-workspace context (the
-    // provider reads `CLAUDE.md` from its CWD). An unconfigured workspace writes
-    // no file (the v1 behaviour); a config-read or write fault is non-fatal — a
-    // task must still dispatch even if its context cannot be materialised.
-    match workspace_context_prompt(pool, &task.workspace_id).await {
-        Ok(prompt) => {
-            if let Err(e) = write_context_prompt(&env, prompt.as_deref()) {
-                tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
-            }
-        }
+    // e38.21 + gap #7: materialise ONE `CLAUDE.md` in the task's execenv carrying
+    // the workspace context prompt AND (for a squad-LEADER task) the claim-time
+    // squad-leader briefing. The provider reads `CLAUDE.md` from its CWD, so this
+    // is the single seam that makes both provable on disk / in transcript.
+    //
+    // Both parts are best-effort: an unconfigured workspace writes no context
+    // (v1 behaviour), a non-squad or member task gets no briefing, and a
+    // config-read / write fault is non-fatal — a task must still dispatch even if
+    // its context cannot be materialised. Fires BEFORE provider dispatch so the
+    // briefing is injected even when the run later fails to spawn.
+    let ws_prompt = match workspace_context_prompt(pool, &task.workspace_id).await {
+        Ok(p) => p,
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "context prompt read failed");
+            None
         }
+    };
+    let briefing = squad_leader_briefing(pool, &task).await;
+    // Append-only / no-replace: the workspace context stays authoritative and the
+    // briefing stacks after it (multica daemon.go append semantics).
+    let combined = match (ws_prompt, briefing) {
+        (Some(p), Some(b)) => Some(format!("{p}\n\n{b}")),
+        (Some(p), None) => Some(p),
+        (None, Some(b)) => Some(b),
+        (None, None) => None,
+    };
+    if let Err(e) = write_context_prompt(&env, combined.as_deref()) {
+        tracing::warn!(error = %e, task_id = %task.id, "context prompt injection failed");
     }
 
     // e38.16: resolve which provider exec path this task routes to (agent →
@@ -647,14 +1084,22 @@ async fn execute_claimed(
         || run_slug.clone(),
         |issue| format!("{}-{}", issue, task.agent_id),
     );
-    let run_wd = crate::workdir_provision::provision(
+    let run_wd = match crate::workdir_provision::provision(
         task.repo_ref.as_deref(),
         &run_slug,
         &scratch_slug,
         &home,
         &env.workdir,
         task.source_branch.as_deref(),
-    )?;
+    ) {
+        Ok(wd) => wd,
+        // F5 provision failed (e.g. the card's `repo_ref` could not be
+        // worktree-added) while the row is still `dispatched`. Terminalise it as
+        // failed with the real error instead of propagating — the propagate path
+        // left it `dispatched` to be reclaimed + re-dispatched into the same fault
+        // forever, invisible to the board/detail.
+        Err(e) => return finalize_setup_failure(pool, &task, &e, clock, stats, events).await,
+    };
     let location = run_location_for(&run_wd);
     tracing::info!(task_id = %task.id, cwd = %run_wd.path().display(), "run workdir provisioned");
 
@@ -698,95 +1143,93 @@ async fn execute_claimed(
     // race is greppable in the daemon log next to the store's `task.start` span.
     tracing::info!(task_id = %task.id, lifecycle = lifecycle.state().as_db_str(), "task running");
     // e38.2: announce the start to subscribed plugins (best-effort push; the
-    // next snapshot pull reconciles if no subscriber is connected).
+    // next snapshot pull reconciles if no subscriber is connected). This is a
+    // non-blocking channel push (not awaited), so it stays outside the umbrella.
     emit_task_started(events, &task, clock);
-    // P4 / D8: auto-move the task's issue card into any board's `running`
-    // auto-move column (best-effort; never blocks the FSM).
-    crate::board::auto_move_after_transition(pool, &task, "running").await;
-    // e38.6: write a durable, agent-authored "started" comment to the task's
-    // issue so the agent's activity survives beyond the bounded transcript
-    // buffer. A NULL-issue chat task writes nothing; a write fault is logged,
-    // never blocks the FSM (the `running` transition has already committed).
-    progress_comment::emit_checkpoint(
-        pool,
-        &SystemIdGen,
-        clock,
-        &task,
-        progress_comment::Checkpoint::Started,
-    )
+
+    // P10 / D19: the provider that executed this run, recorded on the run-history
+    // row + the OTLP task->run span. Captured up front (a `&'static str`) so the
+    // spawn-timeout terminalise below can attribute the failed run, and BEFORE
+    // `provider_run` moves `dispatch` (the async block takes `dispatch.agent_env`
+    // by value). The `cancel_guard` was registered up front (before the start).
+    let provider = dispatch.backend.name();
+
+    // Doctrine hardening (D-e2e-3): bound EVERY await between the `running` commit
+    // and the provider spawn as ONE unit. `resolve_cred_env` already bounds the
+    // keychain read (the known zombie-dispatch wedge), but the `running` board
+    // auto-move + the "started" progress comment are ALSO post-`running` DB awaits
+    // — a wedge in either (a pool deadlock, a contended writer) is the exact
+    // forever-`running` black hole, merely relocated past the cred read. So the
+    // umbrella opens the instant the row is `running` and closes only once the
+    // spawn inputs are built: the two started-side DB writes AND
+    // [`prepare_spawn_inputs`] all run inside it. On expiry we terminalise
+    // `running -> failed` with the real cause logged, so a wedge ANYWHERE in the
+    // span is a loud, immediate, terminal failure — never a silent forever-run.
+    //
+    // The two DB writes stay best-effort INSIDE the block (a write fault is
+    // logged, never blocks the FSM); only an unbounded HANG is caught by the
+    // timeout, which is exactly the wedge class this guards.
+    let setup = tokio::time::timeout(spawn_setup_timeout(), async {
+        // P4 / D8: auto-move the task's issue card into any board's `running`
+        // auto-move column.
+        crate::board::auto_move_after_transition(pool, &task, "running").await;
+        // The default issue board buckets by `issue.state`, not the durable
+        // `board_card` the auto-move touches — so also forward-advance the issue's
+        // own lifecycle to `in_progress`, or a plain task's card strands in Todo
+        // through its whole run. Advance-only + best-effort.
+        crate::board::advance_issue_lifecycle_after_transition(pool, &task, "running").await;
+        // e38.6: write a durable, agent-authored "started" comment to the task's
+        // issue so the agent's activity survives beyond the bounded transcript
+        // buffer. A NULL-issue chat task writes nothing.
+        progress_comment::emit_checkpoint(
+            pool,
+            &SystemIdGen,
+            clock,
+            &task,
+            progress_comment::Checkpoint::Started,
+        )
+        .await;
+        prepare_spawn_inputs(
+            pool,
+            &task,
+            &env,
+            dispatch.backend,
+            secrets.clone(),
+            CRED_READ_TIMEOUT,
+        )
+        .await
+    })
     .await;
 
-    // Snapshot the daemon's env into an owned map *before* the await: the
-    // `std::env::Vars` iterator is `!Send`, so holding it across `.await` would
-    // make this future non-`Send` and unusable on the multi-thread runtime.
-    //
-    // P5.3: apply the configurable env-allowlist policy here (the authoritative
-    // pass), layering keychain-resident API keys on top via
-    // `dispatch::build_task_env`. The policy is loaded from
-    // `~/.agents-in-a-box/hangar/env.allow.toml` (operator defaults when absent).
-    let daemon_env: std::collections::HashMap<String, String> = std::env::vars().collect();
-    let policy = load_env_policy();
-    let mut task_env = crate::dispatch::build_task_env(&daemon_env, std::iter::empty(), &policy);
-
-    // The daemon-resolved claude credential. It rides `extra_env` (the unfiltered
-    // append below), NOT `task_env`/`source_env` — so it does not go through, and
-    // does not have to widen, the deny-by-default allowlist. An *ambient*
-    // `CLAUDE_CODE_OAUTH_TOKEN` in the daemon's own env stays dropped for every
-    // provider (it is not on the runner's exact-match allowlist), while the
-    // *resolved* value reaches a claude child only. `keys_for_backend` returns an
-    // empty vec for codex/copilot, so a claude token can never leak into their
-    // children even though every backend shares this seam.
-    let cred_env = crate::claude_cred::keys_for_backend(dispatch.backend, secrets, &daemon_env);
-
-    // ccc / D11: mark this daemon-spawned session as a legitimate fleet member by
-    // stamping AINB_PARENT_SESSION into the provider's child env. The lifecycle
-    // hook gates its `events.jsonl` append on fleet membership (resolvable parent
-    // | non-empty inbox | ATC cwd); a card run has none, so its AskUserQuestion
-    // never reached the attention pipeline (the control centre showed "0 need you"
-    // with the picker open — INV-3 / D11). Naming the hangar daemon as the parent
-    // resolves membership for BOTH provider paths at once: the headless
-    // (`run_claude` / `run_codex_with_env`) and interactive (`run_interactive`)
-    // spawns each compose their child env from `task_env`, and the runner
-    // allowlists this key so it survives the deny-by-default filter. It is set
-    // AFTER `build_task_env` so the daemon's own value always wins over any
-    // ambient one.
-    task_env.insert(
-        ainb_fleet_core::session_registry::PARENT_ENV.to_string(),
-        HANGAR_PARENT_SESSION.to_string(),
-    );
-
-    // P6.4: materialise the agent's attached skills into the provider's layout
-    // before spawning. Home-style providers (claude/codex/cursor) land their
-    // skills under the *task root* (sibling of `workdir`, so the git worktree
-    // stays clean) and are pointed there via a `*_HOME` env var, which is
-    // folded into `task_env` here so the runner forwards it. A materialisation
-    // fault is non-fatal — a task must still dispatch even if a skill bundle
-    // cannot be written (the agent simply runs without its skills).
-    if let Some((key, path)) = materialise_skills(pool, &task, &env).await {
-        task_env.insert(key, path.to_string_lossy().into_owned());
-    }
-
-    // P5 (D16): compile-on-dispatch — if a profile master matches this task's
-    // agent slug, materialise the resolved tool-native files (Claude `.md` /
-    // Codex config+prompt) into the task's execution env and forward the same
-    // `*_HOME` pointer the skills layout uses (idempotent when both wrote one).
-    // Best-effort: a missing profile or a write fault is logged and skipped — a
-    // task must still dispatch without its profile.
-    if let Some((key, path)) =
-        materialise_agent_profile(pool, &task, &env, dispatch.backend.name()).await
-    {
-        task_env.insert(key, path.to_string_lossy().into_owned());
-    }
-
-    // P5.6: warn about `danger-full-access` on the first invocation of this
-    // provider in this session. The decision + ack persistence are authoritative
-    // here (a task may be dispatched from the CLI with no TUI attached); a
-    // re-dispatch in the same session is suppressed, a fresh session re-warns.
-    // The "session" is the resumed provider session id when present, else the
-    // task id (a fresh run is a fresh warning surface). A warning-IO fault is
-    // non-fatal — never block a dispatch on it. e38.16: keyed on the resolved
-    // backend, so a codex task warns under `codex` rather than always `claude`.
-    warn_danger_access(&task, dispatch.backend.name());
+    let (task_env, cred_env) = match setup {
+        Ok(inputs) => inputs,
+        Err(_elapsed) => {
+            tracing::error!(
+                task_id = %task.id,
+                timeout_ms = u64::try_from(spawn_setup_timeout().as_millis()).unwrap_or(u64::MAX),
+                "run setup wedged before provider spawn; failing task"
+            );
+            // running -> failed: type the terminal edge before the store finalize,
+            // then flow through the SAME `finalize_failure` seam the provider-spawn
+            // failure uses (teardown / run-history / event). `SpawnTimeout` is
+            // `NoRetry`: a wedged setup will not self-heal on a re-dispatch.
+            lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
+            finalize_failure(
+                pool,
+                &task,
+                &run_wd,
+                &env,
+                ainb_hangar_store::service::fail::FailureReason::SpawnTimeout,
+                crate::runner::RunnerResult::default(),
+                provider,
+                clock,
+                stats,
+                events,
+            )
+            .await?;
+            return Ok(());
+        }
+    };
 
     // ccc / D6: an `interactive` task launches the provider inside a REAL,
     // attachable tmux session (not the headless pipe-capture path). The session
@@ -807,12 +1250,9 @@ async fn execute_claimed(
     // kill) is torn down by its exact name below. Both settle as
     // `RunOutcome::Cancelled`, finalised through the dedicated cancelled seam
     // (never the failure path, so a cancel neither auto-moves to `failed` nor
-    // spawns a retry child).
-    // P10 / D19: the provider that executed this run, recorded on the run-history
-    // row + the OTLP task->run span. Captured BEFORE `provider_run` moves
-    // `dispatch` (the async block takes `dispatch.agent_env` by value). The
-    // `cancel_guard` was registered up front (before the start transition).
-    let provider = dispatch.backend.name();
+    // spawns a retry child). `provider` was captured up front (before the setup
+    // umbrella) so both the timeout terminalise and this run attribute the same
+    // backend.
     let provider_run = async {
         if mode == Mode::Interactive {
             // The interactive path is DELIBERATELY unsandboxed (see
@@ -929,7 +1369,7 @@ async fn execute_claimed(
             // running -> failed: type the terminal edge before the store finalize.
             lifecycle.fire(crate::fsm::LifecycleEvent::Fail)?;
             finalize_failure(
-                pool, &task, &run_wd, reason, result, provider, clock, stats, events,
+                pool, &task, &run_wd, &env, reason, result, provider, clock, stats, events,
             )
             .await?;
         }
@@ -1210,6 +1650,10 @@ async fn finalize_success(
     // card does not slide to `done` while its leader / other members still run.
     // Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // Twin the durable-card move on the issue's own `state` (the default board
+    // buckets by it): an aggregate-`done` set promotes the issue to `done`;
+    // failed/cancelled sets leave it untouched. Advance-only + best-effort.
+    crate::board::advance_and_cascade_child(pool, task, events).await;
     // tcp T4 / F7 + FANOUT-SEMANTICS: a task of this card just went terminal, so
     // re-evaluate every card that DEPENDS on it — a dependent whose blockers are now
     // all FINISHED (their active sets drained with a `done`) becomes runnable (the 🔒
@@ -1246,10 +1690,70 @@ async fn finalize_success(
 ///
 /// Propagates a [`persist_session_id`] or [`FailTaskService`] FSM/DB fault. The
 /// progress comment and the retry evaluation are best-effort and never error.
+/// Compose the human-readable `result`-column detail for a failed run from the
+/// runner's captured output tails. Never returns nothing — every failure path
+/// leaves a diagnosable `result`, closing the black hole a bare `fail` (no
+/// stored detail) used to leave.
+///
+/// BOTH tails are folded, each under its own labelled section, when at least
+/// one is present, because the two providers surface their terminal error on
+/// different streams: `claude --output-format stream-json` writes the failing
+/// `{"type":"result",...}` line to STDOUT, while a crashed CLI or a shell
+/// wrapper writes to STDERR. Persisting only stderr (the previous behaviour)
+/// therefore dropped exactly the evidence an exit-65 claude agent_error leaves
+/// behind.
+///
+/// A zero-output death (e.g. a sandboxed CLI killed exit 65 before writing a
+/// byte) leaves BOTH tails empty; that failure is synthesised from what we DO
+/// know — the reason, exit code, and provider (e.g. "agent_error: provider
+/// claude exit 65 with no output") — instead of storing `result = NULL` and
+/// making the crash undiagnosable from the DB alone. Signal-killed runs have no
+/// exit code.
+fn failure_detail(
+    reason: ainb_hangar_store::service::fail::FailureReason,
+    provider: &str,
+    exit_code: Option<i32>,
+    stdout_tail: &str,
+    stderr_tail: &str,
+) -> String {
+    let stdout = stdout_tail.trim();
+    let stderr = stderr_tail.trim();
+    if stdout.is_empty() && stderr.is_empty() {
+        let exit = exit_code.map_or_else(
+            || "no exit code (killed)".to_string(),
+            |c| format!("exit {c}"),
+        );
+        return format!(
+            "{}: provider {provider} {exit} with no output",
+            reason.as_db_str()
+        );
+    }
+    let mut detail = format!("run failed ({}):", reason.as_db_str());
+    if !stdout.is_empty() {
+        detail.push_str("\n\nstdout:\n");
+        detail.push_str(stdout);
+    }
+    if !stderr.is_empty() {
+        detail.push_str("\n\nstderr:\n");
+        detail.push_str(stderr);
+    }
+    detail
+}
+
+/// hangar-e2e-6 escape hatch: when `HANGAR_KEEP_FAILED_RUNS=1` the daemon
+/// PRESERVES a failed run's worktree + provider-log dir instead of tearing the
+/// clean worktree down, so the e2e loop can inspect the transcript
+/// (`{logs}/claude.jsonl`) of a zero-output failure. Off by default — production
+/// keeps the keep-if-dirty teardown so a clean failed run never leaks disk.
+fn keep_failed_runs() -> bool {
+    std::env::var_os("HANGAR_KEEP_FAILED_RUNS").is_some_and(|v| v == "1")
+}
+
 async fn finalize_failure(
     pool: &SqlitePool,
     task: &Task,
     run_wd: &crate::workdir_provision::RunWorkdir,
+    env: &crate::execenv::ExecEnv,
     reason: ainb_hangar_store::service::fail::FailureReason,
     result: crate::runner::RunnerResult,
     provider: &str,
@@ -1260,7 +1764,27 @@ async fn finalize_failure(
     // Persist the session id (if any) before failing so a retry can resume the
     // provider conversation.
     persist_session_id(pool, &task.id, result.session_id.as_deref()).await?;
-    match FailTaskService::fail(pool, &task.id, reason, clock).await {
+    // Persist a diagnostic into the `result` column (in the TaskResult
+    // `{"content": ...}` shape the detail surface renders) on EVERY failure, so a
+    // crash is diagnosable from stored evidence alone. The bare `fail` path left
+    // `result` blank, making every crash undiagnosable from the DB. Both tails
+    // are folded when present — `claude --output-format stream-json` writes its
+    // terminal ERROR line to STDOUT, so persisting only stderr dropped exactly
+    // the evidence an exit-65 agent_error leaves behind. A zero-output death
+    // (e.g. a sandboxed CLI killed exit 65 before writing a byte) leaves BOTH
+    // tails empty; `failure_detail` synthesises a diagnostic there from what we
+    // DO know (reason + exit code + provider), so no failure path leaves
+    // `result` NULL.
+    let detail = failure_detail(
+        reason,
+        provider,
+        result.exit_code,
+        &result.stdout_tail,
+        &result.stderr_tail,
+    );
+    let fail_outcome =
+        FailTaskService::fail_with_detail(pool, &task.id, reason, &detail, clock).await;
+    match fail_outcome {
         Ok(_) => {}
         // tcp T3 / F6: a human cancel (`running -> cancelled`) beat this failure to
         // the conditional finalize. Cancelled wins — skip the failure side-effects
@@ -1325,6 +1849,10 @@ async fn finalize_failure(
     // and one failed sibling lands the whole card in the `failed` column (aggregate
     // precedence). Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // Twin on `issue.state`: the aggregate is `failed`/`cancelled` here (this
+    // task's own failure is in the set), so this no-ops — but it keeps the
+    // lifecycle seam symmetric with the board seam. Advance-only + best-effort.
+    crate::board::advance_and_cascade_child(pool, task, events).await;
     // tcp T4 / F7 + FANOUT-SEMANTICS: this member going terminal may have drained a
     // blocker whose set already held a `done` sibling — re-evaluate dependents so a
     // squad blocker that finished on a mixed done/failed drain still unblocks. The
@@ -1341,13 +1869,29 @@ async fn finalize_failure(
         progress_comment::Checkpoint::Failed { reason },
     )
     .await;
-    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed");
+    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), stderr_tail = %result.stderr_tail, "task failed");
     // F5: tear down the run's provisioned worktree (keep-if-dirty). A failed run
     // that left a dirty checkout keeps it (the partial work is preserved for a
     // rerun / inspection); a clean one is removed. Done BEFORE the retry spawn so
     // a retryable failure's fresh child re-provisions a clean worktree rather than
     // resuming into this run's residue.
-    teardown_workdir(run_wd, &task.id);
+    //
+    // hangar-e2e-6: the escape hatch preserves BOTH the worktree AND the
+    // provider-log dir for a clean (zero-work) failure so the e2e loop can read
+    // `{logs}/claude.jsonl` — the transcript a 36ms exit-65 crash would otherwise
+    // lose to keep-if-dirty teardown. The retry child is a NEW task row with a
+    // NEW full-id-keyed worktree, so keeping this run's residue never collides.
+    if keep_failed_runs() {
+        tracing::warn!(
+            task_id = %task.id,
+            reason = reason.as_db_str(),
+            worktree = %run_wd.path().display(),
+            logs_dir = %env.logs.display(),
+            "HANGAR_KEEP_FAILED_RUNS=1: preserving failed run's worktree + provider logs for inspection"
+        );
+    } else {
+        teardown_workdir(run_wd, &task.id);
+    }
     // F06 retry chain: a retryable (infra) failure with attempts remaining
     // spawns a fresh `queued` child carrying `parent_task_id`, which the next
     // claim pass re-dispatches. A terminal reason (`agent_error` / `user_cancel`
@@ -1356,6 +1900,92 @@ async fn finalize_failure(
     // already-pending outcome (a sibling holds the slot), logged not propagated,
     // so one failed retry never downs the claim loop.
     maybe_spawn_retry(pool, &task.id, clock).await;
+    Ok(())
+}
+
+/// Terminalise a task that faulted during PRE-RUN setup — before the
+/// `dispatched -> running` start transition — as `failed`, surfacing the real
+/// error instead of stranding the row.
+///
+/// The claim loop resolves the workspace slug, prepares the isolated execenv,
+/// and provisions the run's working directory (F5) while the row is still
+/// `dispatched`. A fault in that window (a `repo_ref` that will not clone, an
+/// execenv that cannot be built) used to propagate out of [`execute_claimed`]
+/// with the row left `dispatched`: the stale-dispatch sweeper then reclaimed it
+/// past the 90s window and re-dispatched it into the SAME fault, looping
+/// invisibly — the board card never left Todo and the detail never showed an
+/// error — until the 5min dispatch TTL relabelled it `timeout` with no cause.
+///
+/// This seam finalises the row to `failed` AT ONCE, from `dispatched`, recording
+/// the real error (persisted into `result` so the detail renders it) under the
+/// terminal, no-retry
+/// [`FailureReason::ProvisionError`](ainb_hangar_store::service::fail::FailureReason::ProvisionError) —
+/// so the failure is terminal, attributed, and visible on the board + detail. The
+/// side-effects (stats / event / card auto-move / comment) mirror
+/// [`finalize_failure`], minus teardown + retry: there is no worktree to reclaim
+/// and a deterministic setup fault does not warrant a retry.
+///
+/// Always returns `Ok(())` so the claim loop treats the fault as HANDLED and
+/// never re-logs it as an unhandled execution error. A concurrent cancel that won
+/// the row (`dispatched -> cancelled`) is honoured (failure side-effects skipped),
+/// and a terminalise that itself faults (row vanished / DB error) is left to the
+/// dispatch-TTL sweeper backstop rather than looping.
+async fn finalize_setup_failure(
+    pool: &SqlitePool,
+    task: &Task,
+    // `Send + Sync` so the enclosing claim-loop future stays `Send` across the
+    // `.await`s below (a bare `&dyn Display` would make it un-spawnable).
+    error: &(dyn std::fmt::Display + Send + Sync),
+    clock: &dyn HangarClock,
+    stats: &HealthStats,
+    events: &EventSink,
+) -> anyhow::Result<()> {
+    use ainb_hangar_store::service::fail::FailureReason;
+    let reason = FailureReason::ProvisionError;
+    let message = format!("run setup failed before the agent started: {error}");
+    tracing::error!(task_id = %task.id, error = %error, "task setup failed before run; failing task");
+    match FailTaskService::fail_setup(pool, &task.id, reason, &message, clock).await {
+        Ok(_) => {}
+        // A human cancel won the row first (`dispatched -> cancelled`). Honour it:
+        // skip the failure side-effects and do not log a benign race as an error.
+        Err(FinalizeError::TerminalMismatch {
+            found: TaskState::Cancelled,
+            ..
+        }) => {
+            tracing::info!(task_id = %task.id, "setup failed but task was cancelled first; honoring cancel");
+            return Ok(());
+        }
+        // Could not terminalise (row vanished / already moved / DB fault). The
+        // dispatch-TTL sweeper is the backstop; do not loop-log as an execution error.
+        Err(e) => {
+            tracing::warn!(task_id = %task.id, error = %e, "could not terminalize setup failure; leaving to sweeper backstop");
+            return Ok(());
+        }
+    }
+    // The row is terminal: record the outcome, push the terminal event, and
+    // auto-move the card so the board and detail surface the failure (the whole
+    // point of the fix). All best-effort, never blocking the claim loop.
+    stats.record_failed(clock.now_ms() / 1_000);
+    emit_task_finished(
+        events,
+        task,
+        ainb_hangar_proto::events::TaskResult::Failure,
+        clock,
+    );
+    crate::board::auto_move_after_terminal(pool, task).await;
+    // Twin on `issue.state`; no-ops on the failed aggregate, kept for symmetry
+    // with the board seam. Advance-only + best-effort.
+    crate::board::advance_and_cascade_child(pool, task, events).await;
+    crate::board::unblock_dependents_after_terminal(pool, task).await;
+    progress_comment::emit_checkpoint(
+        pool,
+        &SystemIdGen,
+        clock,
+        task,
+        progress_comment::Checkpoint::Failed { reason },
+    )
+    .await;
+    tracing::warn!(task_id = %task.id, reason = reason.as_db_str(), "task failed during setup");
     Ok(())
 }
 
@@ -1754,6 +2384,14 @@ async fn build_prompt(
                 brief.push_str("\n\n");
                 brief.push_str(&desc);
             }
+            // 0043: when the issue links an upstream GitHub/Jira issue, append it as
+            // a `Linked issue:` line so the agent resolves the link itself at
+            // runtime (ainb never fetches it). Appended even to a title-only brief,
+            // so a linked issue with no description still hands the agent the ref.
+            if let Some(ext) = issue.external_ref.filter(|e| !e.trim().is_empty()) {
+                brief.push_str("\n\nLinked issue: ");
+                brief.push_str(ext.trim());
+            }
             if !brief.trim().is_empty() {
                 return brief;
             }
@@ -2093,6 +2731,1004 @@ fn warn_danger_access(task: &Task, provider: &str) {
 mod tests {
     use super::*;
 
+    /// hangar-e2e-6: a failed run whose runner captured BOTH stdout and stderr
+    /// tails must surface BOTH in the persisted failure detail. This is the core
+    /// observability fix: `claude --output-format stream-json` writes its terminal
+    /// error line to STDOUT, so the previous stderr-only detail left an exit-65
+    /// `agent_error` diagnosable ONLY if the crash happened to also write stderr —
+    /// which the 36ms zero-output failure did not.
+    #[test]
+    fn failure_detail_folds_both_stdout_and_stderr_tails() {
+        use ainb_hangar_store::service::fail::FailureReason;
+        let detail = failure_detail(
+            FailureReason::AgentError,
+            "claude",
+            Some(1),
+            r#"{"type":"result","subtype":"error_during_execution","error":"boom"}"#,
+            "node: fatal: could not start",
+        );
+        assert!(
+            detail.contains("agent_error"),
+            "detail must name the reason: {detail}"
+        );
+        assert!(
+            detail.contains("boom"),
+            "detail must carry the STDOUT tail (claude writes its error there): {detail}"
+        );
+        assert!(
+            detail.contains("node: fatal: could not start"),
+            "detail must carry the STDERR tail: {detail}"
+        );
+    }
+
+    /// The regression this fix closes: a failure with output ONLY on stdout (the
+    /// exit-65 claude shape — a stream-json error line, empty stderr) must still
+    /// produce a stored detail. The old code keyed solely on the stderr tail and
+    /// returned the blank `fail` for exactly this case.
+    #[test]
+    fn failure_detail_surfaces_stdout_only_failures() {
+        use ainb_hangar_store::service::fail::FailureReason;
+        let detail = failure_detail(
+            FailureReason::AgentError,
+            "claude",
+            Some(65),
+            r#"{"type":"result","subtype":"error","error":"exit 65"}"#,
+            "   ",
+        );
+        assert!(
+            detail.contains("exit 65"),
+            "the stdout error line must survive into the detail: {detail}"
+        );
+    }
+
+    /// No captured output on EITHER stream → a SYNTHESIZED diagnostic naming the
+    /// exit code, reason, and provider (never a blank `fail` / NULL `result`),
+    /// and whitespace-only tails count as empty.
+    #[test]
+    fn failure_detail_synthesizes_diagnostic_when_no_output_captured() {
+        use ainb_hangar_store::service::fail::FailureReason;
+        let detail = failure_detail(FailureReason::AgentError, "claude", Some(65), "   ", "\n\t");
+        assert!(
+            detail.contains("65"),
+            "the synthesized diagnostic must name the exit code: {detail}"
+        );
+        assert!(
+            detail.contains("agent_error"),
+            "the synthesized diagnostic must name the failure reason: {detail}"
+        );
+        assert!(
+            detail.contains("claude"),
+            "the synthesized diagnostic must name the provider: {detail}"
+        );
+    }
+
+    /// hangar-e2e-4: the `HANGAR_DAEMON_DISABLE_SANDBOX` override wins in both
+    /// directions regardless of platform default — `=1` forces the headless OS
+    /// sandbox OFF, `=0` forces it ON (the latter is how the durable follow-up
+    /// exercises the Seatbelt profile on macOS, where it is otherwise off).
+    #[test]
+    fn resolve_sandbox_env_override_forces_off_and_on() {
+        use std::ffi::OsStr;
+        assert!(
+            !DaemonConfig::resolve_sandbox(Some(OsStr::new("1"))),
+            "HANGAR_DAEMON_DISABLE_SANDBOX=1 must force the sandbox OFF"
+        );
+        assert!(
+            DaemonConfig::resolve_sandbox(Some(OsStr::new("0"))),
+            "HANGAR_DAEMON_DISABLE_SANDBOX=0 must force the sandbox ON"
+        );
+    }
+
+    /// hangar-e2e-4: with the env var unset, the headless sandbox posture is the
+    /// PLATFORM default. On macOS it must be OFF — the default-on Seatbelt
+    /// profile cannot boot the Node `claude` CLI, so every headless task died
+    /// exit 65 before writing a transcript; on Linux/Landlock it stays ON. This
+    /// is the fix's core assertion: before it, macOS defaulted ON (dispatch
+    /// broken); after, OFF (dispatch restored), matching the already-unsandboxed
+    /// interactive path.
+    #[test]
+    fn resolve_sandbox_unset_uses_platform_default() {
+        let posture = DaemonConfig::resolve_sandbox(None);
+        #[cfg(target_os = "macos")]
+        assert!(
+            !posture,
+            "macOS: headless sandbox must default OFF (Seatbelt cannot boot the claude Node CLI)"
+        );
+        #[cfg(not(target_os = "macos"))]
+        assert!(
+            posture,
+            "non-macOS: headless sandbox must default ON (Landlock runs the CLI fine)"
+        );
+    }
+
+    /// A bare provider name is resolved to an absolute binary via `$PATH`:
+    /// `sh` stands in for `claude`, reliably present on `$PATH` on any unix host.
+    /// Before this fix the bare `PathBuf::from("claude")` flowed unresolved into
+    /// the sandbox profile as a `(literal "claude")` rule the kernel never
+    /// matched.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_provider_path_resolves_bare_name_to_absolute() {
+        let resolved = resolve_provider_path(PathBuf::from("sh"), "claude");
+        assert!(
+            resolved.is_absolute(),
+            "bare provider name must resolve to an absolute path: {resolved:?}"
+        );
+        assert!(
+            resolved.is_file(),
+            "resolved provider path must be a real file: {resolved:?}"
+        );
+    }
+
+    /// An explicit override path is canonicalized (symlink-resolved) so the
+    /// profile references the real target the OS execs.
+    #[cfg(unix)]
+    #[test]
+    fn resolve_provider_path_canonicalizes_explicit_symlink() {
+        use std::os::unix::fs::{PermissionsExt, symlink};
+
+        let dir = tempfile::tempdir().unwrap();
+        let real = dir.path().join("real-claude");
+        std::fs::write(&real, "#!/bin/sh\nexit 0\n").unwrap();
+        std::fs::set_permissions(&real, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let link = dir.path().join("claude-link");
+        symlink(&real, &link).unwrap();
+
+        let resolved = resolve_provider_path(link.clone(), "claude");
+        assert_eq!(
+            resolved,
+            std::fs::canonicalize(&real).unwrap(),
+            "explicit path must be symlink-canonicalized to its real target"
+        );
+        assert!(resolved.is_absolute());
+    }
+
+    /// A bare name absent from `$PATH` falls back to the bare name (and warns) so
+    /// the daemon still boots; the sandbox denial is diagnosable, not a panic.
+    #[test]
+    fn resolve_provider_path_falls_back_when_absent() {
+        let bare = PathBuf::from("definitely-not-a-real-provider-xyz123");
+        let resolved = resolve_provider_path(bare.clone(), "claude");
+        assert_eq!(
+            resolved, bare,
+            "an unresolvable bare name is returned as-is"
+        );
+    }
+
+    /// hangar-e2e-5: the daemon must emit its resolved OS-sandbox posture at
+    /// boot. Without this INFO line an exit-65 headless dispatch failure was
+    /// indistinguishable from a stale binary (fix absent); a full e2e cycle was
+    /// burned on that ambiguity. Capture the event and assert both the message
+    /// and that the `sandbox` field carries the configured posture verbatim.
+    #[test]
+    fn log_sandbox_posture_emits_posture_at_boot() {
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default, Clone)]
+        struct Event {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        type EventLog = Arc<Mutex<Vec<Event>>>;
+
+        struct Collector<'a>(&'a mut Event);
+        impl Visit for Collector<'_> {
+            fn record_bool(&mut self, field: &Field, value: bool) {
+                self.0.fields.push((field.name().to_string(), value.to_string()));
+            }
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.0.message = value.to_string();
+                } else {
+                    self.0.fields.push((field.name().to_string(), value.to_string()));
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}");
+                if field.name() == "message" {
+                    self.0.message = rendered;
+                } else {
+                    self.0.fields.push((field.name().to_string(), rendered));
+                }
+            }
+        }
+
+        struct CollectLayer {
+            log: EventLog,
+        }
+        impl<S> Layer<S> for CollectLayer
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut captured = Event::default();
+                event.record(&mut Collector(&mut captured));
+                self.log.lock().expect("event log lock").push(captured);
+            }
+        }
+
+        let log: EventLog = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(CollectLayer { log: log.clone() });
+
+        // Two configs proving the field mirrors the posture, not a constant.
+        let mut cfg = DaemonConfig::from_env();
+        tracing::subscriber::with_default(subscriber, || {
+            cfg.sandbox = false;
+            log_sandbox_posture(&cfg);
+            cfg.sandbox = true;
+            log_sandbox_posture(&cfg);
+        });
+
+        let events: Vec<Event> = log.lock().expect("event log").clone();
+        let posture: Vec<&Event> = events
+            .iter()
+            .filter(|e| e.message == "headless provider sandbox posture")
+            .collect();
+        assert_eq!(
+            posture.len(),
+            2,
+            "expected one sandbox-posture log per boot call, got {}",
+            posture.len()
+        );
+        let sandbox_field = |e: &Event| {
+            e.fields
+                .iter()
+                .find(|(k, _)| k == "sandbox")
+                .map(|(_, v)| v.clone())
+                .expect("posture log must carry a `sandbox` field")
+        };
+        assert_eq!(
+            sandbox_field(posture[0]),
+            "false",
+            "OFF posture must log sandbox=false"
+        );
+        assert_eq!(
+            sandbox_field(posture[1]),
+            "true",
+            "ON posture must log sandbox=true"
+        );
+        assert!(
+            posture[0].fields.iter().any(|(k, _)| k == "target_os"),
+            "posture log must carry the resolving platform in `target_os`"
+        );
+    }
+
+    /// A secret backend whose `get` blocks far longer than any test timeout.
+    /// Stands in for the headless keychain GUI-prompt hang that wedged dispatch.
+    struct HangingBackend;
+    impl ainb_hangar_secrets::SecretBackend for HangingBackend {
+        fn get(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<Option<ainb_hangar_secrets::SecretBytes>> {
+            // The real hang is unbounded (a GUI prompt nobody answers); 3s is
+            // 30x the sub-second test timeout ("effectively forever" for the
+            // assertion), without making the leaked blocking thread stall process
+            // exit for long.
+            std::thread::sleep(Duration::from_secs(3));
+            Ok(Some(ainb_hangar_secrets::SecretBytes::from(
+                b"tok".as_slice(),
+            )))
+        }
+        fn put(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+            _: &[u8],
+        ) -> ainb_hangar_secrets::Result<()> {
+            unreachable!("the hang test never writes")
+        }
+        fn delete(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<()> {
+            unreachable!("the hang test never deletes")
+        }
+    }
+
+    /// The zombie-dispatch regression: a keychain read that never returns must
+    /// NOT wedge dispatch. `resolve_cred_env` bounds it, so a hung read yields an
+    /// empty env within the timeout instead of blocking the async worker forever.
+    #[tokio::test]
+    async fn cred_read_times_out_instead_of_wedging_dispatch() {
+        let started = std::time::Instant::now();
+        let env = resolve_cred_env(
+            Backend::Claude,
+            Arc::new(HangingBackend),
+            std::collections::HashMap::new(),
+            Duration::from_millis(100),
+        )
+        .await;
+
+        assert!(
+            env.is_empty(),
+            "a wedged keychain read must inject no token (got {env:?})"
+        );
+        // Generous bound: the point is it returned at all, near the 100ms timeout
+        // rather than after the 3s sleep. Before the fix this call never returns.
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "resolve_cred_env blocked on the hung read for {:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The happy path still works: a fast backend's token is resolved and injected
+    /// as `CLAUDE_CODE_OAUTH_TOKEN` (the bounding must not drop a real credential).
+    #[tokio::test]
+    async fn cred_read_returns_token_when_fast() {
+        use ainb_hangar_secrets::SecretBackend as _;
+        let b = ainb_hangar_secrets::InMemoryBackend::new();
+        b.put(
+            &ainb_hangar_secrets::Scope::Global,
+            crate::claude_cred::SECRET_KEY,
+            b"tok",
+        )
+        .unwrap();
+
+        let env = resolve_cred_env(
+            Backend::Claude,
+            Arc::new(b),
+            std::collections::HashMap::new(),
+            Duration::from_secs(5),
+        )
+        .await;
+
+        assert_eq!(
+            env,
+            vec![(
+                crate::claude_cred::CHILD_ENV_VAR.to_string(),
+                "tok".to_string()
+            )]
+        );
+    }
+
+    /// Doctrine hardening (D-e2e-3): the WHOLE `running -> provider spawn` preamble
+    /// is bounded as ONE unit, not just the keychain read. A setup step that wedges
+    /// — here a keychain backend that never returns, with the INNER cred timeout
+    /// set far above the umbrella so only the outer bound can cut it — must be cut
+    /// off promptly and surface as a timeout, never run to the inner bound and
+    /// never forever. This is what turns a wedged setup into a terminal
+    /// `spawn_timeout` in `execute_claimed` instead of a forever-`running` row.
+    #[tokio::test]
+    async fn spawn_setup_preamble_is_bounded_as_one_unit() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // A real queued task, read back as a `Task` so the preamble's agent /
+        // workspace lookups resolve against real rows.
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: bootstrap::default_runtime_id(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        // A throwaway execenv rooted in the tempdir (the wedge fires in the cred
+        // read, before any materialise step touches these paths).
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+
+        // Inner cred timeout (30s) far above the umbrella (300ms): ONLY the outer
+        // umbrella can cut off the hung keychain read.
+        let started = std::time::Instant::now();
+        let bounded = tokio::time::timeout(
+            Duration::from_millis(300),
+            prepare_spawn_inputs(
+                pool,
+                &task,
+                &env,
+                Backend::Claude,
+                Arc::new(HangingBackend),
+                Duration::from_secs(30),
+            ),
+        )
+        .await;
+
+        assert!(
+            bounded.is_err(),
+            "a wedged preamble must be cut off by the umbrella, not run to the inner cred bound"
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(5),
+            "the umbrella must bound the wedge promptly (took {:?})",
+            started.elapsed()
+        );
+    }
+
+    /// Real-path mutation guard for the umbrella: drive the ACTUAL
+    /// `execute_claimed` seam (not `prepare_spawn_inputs` in isolation) with a
+    /// wedged keychain read and the umbrella tightened via
+    /// `HANGAR_SPAWN_SETUP_TIMEOUT_MS`. The row MUST terminalise
+    /// `running -> failed` with `spawn_timeout`. Deleting the `tokio::time::timeout`
+    /// wrap in `execute_claimed` turns this RED: the bounded (5s) cred read then
+    /// returns, the run reaches a provider spawn against a non-existent binary, and
+    /// the row lands `failed`/`spawn_error` (or hangs) — never `spawn_timeout`.
+    #[tokio::test]
+    async fn execute_claimed_terminalizes_a_wedged_setup_via_the_umbrella() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+        use ainb_hangar_store::service::claim::ClaimTaskService;
+
+        // Serialise with every other `$AINB_HANGAR_HOME`-mutating test, and set a
+        // tiny umbrella so the 3s wedged cred read blows the bound deterministically.
+        let _env = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hangar-home");
+        let prior_home = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        let prior_to = std::env::var_os("HANGAR_SPAWN_SETUP_TIMEOUT_MS");
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+        std::env::set_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS", "50");
+
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+
+        let clock = SystemClock;
+        let claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the queued task must claim");
+
+        // Provider paths that do not resolve: under the mutation (no umbrella) the
+        // run would reach a spawn that ENOENT-fails as `spawn_error` — a DIFFERENT
+        // reason than the `spawn_timeout` asserted below.
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "/nonexistent/hangar-test-claude".into(),
+            codex_path: "/nonexistent/hangar-test-codex".into(),
+            copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+        let interactive = InteractiveSessions::default();
+
+        let outcome = execute_claimed(
+            pool,
+            &runner,
+            &claimed,
+            &clock,
+            &stats,
+            &events,
+            &interactive,
+            Arc::new(HangingBackend),
+        )
+        .await;
+
+        // Restore env BEFORE asserting so a failed assertion never leaks it.
+        match prior_home {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+        match prior_to {
+            Some(v) => std::env::set_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS", v),
+            None => std::env::remove_var("HANGAR_SPAWN_SETUP_TIMEOUT_MS"),
+        }
+
+        outcome.expect("execute_claimed handles the wedge internally (never Err)");
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "failed",
+            "a wedged setup must terminalise, not stay running"
+        );
+        assert_eq!(
+            row.failure_reason.as_deref(),
+            Some("spawn_timeout"),
+            "the umbrella must attribute the wedge as spawn_timeout (got {:?})",
+            row.failure_reason
+        );
+    }
+
+    /// migration 0045 / gap #7: driving the REAL `execute_claimed` seam for a
+    /// LEADER task stamped with a `squad_id` must (a) emit the claim-time
+    /// squad-briefing hook line — carrying BOTH `task_id` and `squad_id` — BEFORE
+    /// the provider spawn, AND (b) materialise the leader briefing into the run's
+    /// `CLAUDE.md` (Operating Protocol + Roster with the member's name). The
+    /// provider paths are nonexistent so the run fails, yet both happen first (the
+    /// injection is pre-spawn). A MEMBER task carrying the same `squad_id` gets NO
+    /// roster (only the workspace context, which is unset here → no file). Deleting
+    /// the hook/inject wiring from `execute_claimed` turns this RED.
+    #[tokio::test]
+    async fn execute_claimed_injects_the_squad_leader_briefing_before_spawn() {
+        use ainb_hangar_core::actor::{ActorKind, ActorRef};
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::squad::SquadRepo;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+        use ainb_hangar_store::service::claim::ClaimTaskService;
+        use std::sync::{Arc, Mutex};
+        use tracing::field::{Field, Visit};
+        use tracing_subscriber::Layer;
+        use tracing_subscriber::layer::{Context, SubscriberExt};
+        use tracing_subscriber::registry::LookupSpan;
+
+        #[derive(Default, Clone)]
+        struct Ev {
+            message: String,
+            fields: Vec<(String, String)>,
+        }
+        type Log = Arc<Mutex<Vec<Ev>>>;
+        struct Collect<'a>(&'a mut Ev);
+        impl Visit for Collect<'_> {
+            fn record_str(&mut self, field: &Field, value: &str) {
+                if field.name() == "message" {
+                    self.0.message = value.to_string();
+                } else {
+                    self.0.fields.push((field.name().to_string(), value.to_string()));
+                }
+            }
+            fn record_debug(&mut self, field: &Field, value: &dyn std::fmt::Debug) {
+                let rendered = format!("{value:?}");
+                if field.name() == "message" {
+                    self.0.message = rendered;
+                } else {
+                    self.0.fields.push((field.name().to_string(), rendered));
+                }
+            }
+        }
+        struct CollectLayer {
+            log: Log,
+        }
+        impl<S> Layer<S> for CollectLayer
+        where
+            S: tracing::Subscriber + for<'a> LookupSpan<'a>,
+        {
+            fn on_event(&self, event: &tracing::Event<'_>, _ctx: Context<'_, S>) {
+                let mut captured = Ev::default();
+                event.record(&mut Collect(&mut captured));
+                self.log.lock().expect("event log lock").push(captured);
+            }
+        }
+
+        // Serialise with every other `$AINB_HANGAR_HOME`-mutating test.
+        let _env = ainb_hangar_store::test_support::lock_env();
+        let dir = tempfile::tempdir().unwrap();
+        let home = dir.path().join("hangar-home");
+        let prior_home = std::env::var_os(ainb_hangar_core::paths::HANGAR_HOME_ENV);
+        std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, &home);
+
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        // A squad "alpha" led by `captain`, with `scout` as a member — so the
+        // leader-task claim resolves a real roster to inject.
+        let captain = bootstrap::create_agent(pool, &ws, "captain", "claude", None).await.unwrap();
+        let scout = bootstrap::create_agent(pool, &ws, "scout", "claude", None).await.unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        SquadRepo::create(
+            pool,
+            &ws_id,
+            "squad-alpha",
+            "alpha",
+            &ActorRef::new(ActorKind::Agent, captain.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member_with_role(
+            pool,
+            &ws_id,
+            "squad-alpha",
+            &ActorRef::new(ActorKind::Agent, scout.id.clone()).unwrap(),
+            "owns the migrations",
+        )
+        .await
+        .unwrap();
+        let instructions =
+            "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
+        SquadRepo::set_instructions(pool, &ws_id, "squad-alpha", instructions)
+            .await
+            .unwrap();
+        // scout's skills, exercising BOTH suppression levers through the real
+        // claim seam: `alpha` + `gamma` materialise, `beta` is link-disabled and
+        // `delta` is suppressed by name on the agent row — neither may be
+        // advertised on the roster the leader actually receives.
+        {
+            use ainb_hangar_core::ids::AgentId;
+            use ainb_hangar_store::repo::agent::AgentRepo;
+            use ainb_hangar_store::repo::skill::SkillRepo;
+
+            let scout_id = AgentId::from_str(scout.id.clone()).unwrap();
+            let mut skill_ids = Vec::new();
+            for name in ["alpha", "beta", "gamma", "delta"] {
+                let id = SkillRepo::create(pool, &ws_id, name, None, Some("# body"), vec![])
+                    .await
+                    .unwrap();
+                SkillRepo::attach_to_agent(pool, &ws_id, &scout_id, &id).await.unwrap();
+                skill_ids.push((name, id));
+            }
+            let beta = &skill_ids.iter().find(|(n, _)| *n == "beta").unwrap().1;
+            SkillRepo::set_enabled(pool, &ws_id, &scout_id, beta, false).await.unwrap();
+            AgentRepo::set_disabled_runtime_skills(pool, &scout.id, &["delta".to_string()])
+                .await
+                .unwrap();
+        }
+
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: captain.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        // Stamp the dispatching squad, exactly as a squad dispatch would, so the
+        // claimed task carries it into `execute_claimed`.
+        TaskRepo::set_squad_id(pool, &task_id, "squad-alpha").await.unwrap();
+
+        let clock = SystemClock;
+        let claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the queued task must claim");
+
+        // Nonexistent provider paths: the run fails to spawn, but the squad hook
+        // must have fired first (it is placed BEFORE provider dispatch).
+        let runner = Runner::new(RunnerConfig {
+            claude_path: "/nonexistent/hangar-test-claude".into(),
+            codex_path: "/nonexistent/hangar-test-codex".into(),
+            copilot_path: "/nonexistent/hangar-test-copilot".into(),
+            max_runtime: Duration::from_secs(1),
+            tail_lines: 1,
+            sandbox: false,
+        });
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+        let interactive = InteractiveSessions::default();
+
+        let log: Log = Arc::default();
+        let subscriber = tracing_subscriber::registry().with(CollectLayer { log: log.clone() });
+        let outcome = {
+            // Current-thread runtime: the guard holds the subscriber across every
+            // `.await` in `execute_claimed`, so the inline hook event is captured.
+            let _guard = tracing::subscriber::set_default(subscriber);
+            execute_claimed(
+                pool,
+                &runner,
+                &claimed,
+                &clock,
+                &stats,
+                &events,
+                &interactive,
+                Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
+            )
+            .await
+        };
+
+        // A MEMBER task (agent `scout`, same squad) claimed + dispatched next: the
+        // builder returns `None` for a non-leader claimer, so with no workspace
+        // context configured NO `CLAUDE.md` is written. Runs inside the env window
+        // (before the restore below), outside the log-capture guard so the
+        // leader-only hook-once assertion holds.
+        let member_task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: member_task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: scout.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 2,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        TaskRepo::set_squad_id(pool, &member_task_id, "squad-alpha").await.unwrap();
+        let member_claimed = ClaimTaskService::claim_for_runtime(pool, &rt, &clock)
+            .await
+            .unwrap()
+            .expect("the member task must claim");
+        execute_claimed(
+            pool,
+            &runner,
+            &member_claimed,
+            &clock,
+            &stats,
+            &events,
+            &interactive,
+            Arc::new(ainb_hangar_secrets::InMemoryBackend::new()),
+        )
+        .await
+        .expect("member execute_claimed handles the spawn failure internally");
+
+        // Resolve the on-disk materialised prompts while env is still set.
+        let ws_slug = workspace_slug(pool, &ws).await.unwrap();
+        let leader_md = crate::execenv::task_root(&home, &ws_slug, &task_id)
+            .join("workdir")
+            .join(crate::execenv::CONTEXT_PROMPT_FILE);
+        let member_md = crate::execenv::task_root(&home, &ws_slug, &member_task_id)
+            .join("workdir")
+            .join(crate::execenv::CONTEXT_PROMPT_FILE);
+
+        // Restore env BEFORE asserting so a failed assertion never leaks it.
+        match prior_home {
+            Some(v) => std::env::set_var(ainb_hangar_core::paths::HANGAR_HOME_ENV, v),
+            None => std::env::remove_var(ainb_hangar_core::paths::HANGAR_HOME_ENV),
+        }
+        outcome.expect("execute_claimed handles the spawn failure internally (never Err)");
+
+        // The LEADER task's materialised `CLAUDE.md` carries the full briefing.
+        let leader_prompt = std::fs::read_to_string(&leader_md)
+            .expect("the leader task's CLAUDE.md must be materialised pre-spawn");
+        assert!(
+            leader_prompt.contains("## Squad Operating Protocol"),
+            "leader briefing missing the operating protocol:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("## Squad Roster"),
+            "leader briefing missing the roster:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("Leader (you)"),
+            "leader briefing missing the leader self-row:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("captain"),
+            "leader briefing missing the leader name:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("scout"),
+            "leader briefing missing the member name in the roster:\n{leader_prompt}"
+        );
+        // Parity #25 + `7-rest` acceptance, through the REAL claim → materialise
+        // seam: the member's WHOLE row, carrying role AND the skills it will
+        // actually have on disk. A whole-line assertion, never a bare substring —
+        // a half-rendered row must not pass.
+        assert!(
+            leader_prompt.contains(&format!(
+                "- scout — agent — {} — role: owns the migrations — skills: alpha, gamma\n",
+                scout.id
+            )),
+            "the materialised roster row must carry the role and the live skills:\n{leader_prompt}"
+        );
+        assert!(
+            !leader_prompt.contains("beta"),
+            "a link-disabled skill must never reach the leader's prompt:\n{leader_prompt}"
+        );
+        assert!(
+            !leader_prompt.contains("delta"),
+            "a disabled_runtime_skills name must never reach the leader's prompt:\n\
+             {leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("## Squad Instructions"),
+            "the materialised briefing must carry the instructions section:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains(instructions),
+            "the instructions must be materialised VERBATIM (embedded newline \
+             preserved):\n{leader_prompt}"
+        );
+
+        // The MEMBER task gets no roster and no instructions (no file at all,
+        // since no workspace ctx).
+        assert!(
+            !member_md.exists()
+                || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Roster"),
+            "a member task must NOT receive the leader briefing"
+        );
+        assert!(
+            !member_md.exists()
+                || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Instructions"),
+            "a member task must NOT receive the squad instructions"
+        );
+
+        let events: Vec<Ev> = log.lock().expect("event log").clone();
+        let hook: Vec<&Ev> =
+            events.iter().filter(|e| e.message.contains("squad briefing hook")).collect();
+        assert_eq!(
+            hook.len(),
+            1,
+            "exactly one claim-time squad-briefing hook line must fire"
+        );
+        let field =
+            |e: &Ev, k: &str| e.fields.iter().find(|(name, _)| name == k).map(|(_, v)| v.clone());
+        assert_eq!(
+            field(hook[0], "squad_id").as_deref(),
+            Some("squad-alpha"),
+            "the hook line must carry the dispatching squad_id"
+        );
+        assert_eq!(
+            field(hook[0], "task_id").as_deref(),
+            Some(task_id.as_str()),
+            "the hook line must carry the claimed task_id"
+        );
+
+        // The run still terminalised (nonexistent provider) — proving the hook
+        // fired on the path to a FAILED run, before the spawn, not only on success.
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(
+            row.status, "failed",
+            "the nonexistent provider must terminalise the run"
+        );
+    }
+
+    /// hangar-e2e-7 REGRESSION: a failure whose runner captured NO output (both
+    /// tails empty — the zero-output death, e.g. a sandboxed CLI killed exit 65
+    /// before writing a byte) must STILL persist a synthesized diagnostic into the
+    /// `result` column, not leave it NULL. Cycle-2 #437 only closed the
+    /// non-empty-stderr leg; the empty-tail leg went through the bare `fail`,
+    /// storing `result = NULL` and making the crash undiagnosable from the DB
+    /// alone. After the fix the synthesized `result` names the exit code + reason
+    /// + provider, so any future no-output provider death is self-describing.
+    #[tokio::test]
+    async fn finalize_failure_with_empty_tails_persists_synthetic_diagnostic() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let rt = bootstrap::default_runtime_id();
+        bootstrap::ensure_runtime(pool, &rt, 1).await.unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        // A `queued` task is a legal `fail` source state (same as `running`), so
+        // we can drive `finalize_failure` directly without walking the full FSM.
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: rt.clone(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        // The zero-output crash: a non-zero exit code, NO stdout, NO stderr — the
+        // exact shape the macOS sandbox exit-65 death produces.
+        let result = crate::runner::RunnerResult {
+            exit_code: Some(65),
+            session_id: None,
+            usage: None,
+            stdout_tail: String::new(),
+            stderr_tail: String::new(),
+        };
+        // A scratch workdir: teardown + branch reclaim are no-ops for it, so the
+        // finalize is exercised without provisioning a real worktree.
+        let run_wd = crate::workdir_provision::RunWorkdir::Scratch {
+            path: dir.path().join("scratch"),
+        };
+        // A throwaway execenv rooted in the tempdir; `finalize_failure` only
+        // reads `env.logs` for the `HANGAR_KEEP_FAILED_RUNS` diagnostic log line
+        // (unset here), so the paths need not exist.
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+        let clock = SystemClock;
+        let stats = HealthStats::default();
+        let events = crate::events::EventBroker::new().sink();
+
+        finalize_failure(
+            pool,
+            &task,
+            &run_wd,
+            &env,
+            ainb_hangar_store::service::fail::FailureReason::AgentError,
+            result,
+            "claude",
+            &clock,
+            &stats,
+            &events,
+        )
+        .await
+        .expect("finalize_failure handles a zero-output crash");
+
+        let row = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+        assert_eq!(row.status, "failed", "the row must terminalise as failed");
+        // The core regression: `result` must be NON-NULL and self-describe the
+        // crash from the exit code + reason (before the fix it was NULL here).
+        let result_json = row
+            .result
+            .expect("a zero-output failure must NOT leave `result` NULL — it is the black hole this fix closes");
+        assert!(
+            result_json.contains("65"),
+            "the synthesized diagnostic must name the exit code, got {result_json:?}"
+        );
+        assert!(
+            result_json.contains("agent_error"),
+            "the synthesized diagnostic must name the failure reason, got {result_json:?}"
+        );
+        assert!(
+            result_json.contains("claude"),
+            "the synthesized diagnostic must name the provider, got {result_json:?}"
+        );
+    }
+
     /// The shutdown-reap tracker records a live interactive session and hands
     /// it back exactly once on drain, so `Ctrl-C` kills every live session
     /// — and only live ones — by exact name.
@@ -2186,6 +3822,10 @@ mod tests {
                 assignee: None,
                 due_date: None,
                 labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
             },
         )
         .await
@@ -2240,6 +3880,95 @@ mod tests {
             "a prompt is never empty"
         );
         assert_eq!(disp.invocation.prompt, FALLBACK_PROMPT);
+    }
+
+    /// A linked upstream issue (0043) appends a `Linked issue:` line to the brief so
+    /// the agent resolves the ref itself — appended even to a title-only brief, and
+    /// absent entirely when no ref is set.
+    #[tokio::test]
+    async fn dispatch_appends_linked_issue_when_external_ref_set() {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+
+        let seed = |title: &'static str, desc: Option<&'static str>| {
+            let ws = ws.clone();
+            async move {
+                let id =
+                    ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+                IssueRepo::insert(
+                    pool,
+                    &NewIssue {
+                        id: id.clone(),
+                        workspace_id: ws.clone(),
+                        title: title.into(),
+                        description: desc.map(Into::into),
+                        state: "open".into(),
+                        creator: ainb_hangar_core::actor::ActorRef::new(
+                            ainb_hangar_core::actor::ActorKind::Member,
+                            "stevie",
+                        )
+                        .unwrap(),
+                        created_at: 1,
+                        priority: 0,
+                        assignee: None,
+                        due_date: None,
+                        labels: Vec::new(),
+                        parent_issue_id: None,
+                        stage: None,
+                        acceptance_criteria: Vec::new(),
+                        context_refs: Vec::new(),
+                    },
+                )
+                .await
+                .unwrap();
+                id
+            }
+        };
+
+        // A brief WITH a linked ref: the ref appends as a trailing line.
+        let with_ref = seed("Fix login", Some("It 500s on empty password.")).await;
+        CardParityRepo::set_issue_external_ref(pool, &ws, &with_ref, Some("acme/api#42"))
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&with_ref), Mode::Headless)
+            .await
+            .unwrap();
+        assert_eq!(
+            disp.invocation.prompt,
+            "Fix login\n\nIt 500s on empty password.\n\nLinked issue: acme/api#42",
+            "a set external_ref appends the Linked issue line"
+        );
+
+        // The SAME issue with no ref set: the brief is unchanged (no trailing line).
+        let no_ref = seed("Fix login", Some("It 500s on empty password.")).await;
+        let disp = resolve_dispatch(pool, &agent.id, Some(&no_ref), Mode::Headless).await.unwrap();
+        assert_eq!(
+            disp.invocation.prompt, "Fix login\n\nIt 500s on empty password.",
+            "no external_ref → no Linked issue line"
+        );
+
+        // A title-only issue (no description) still gets the linked line.
+        let title_only = seed("Wire the webhook", None).await;
+        CardParityRepo::set_issue_external_ref(pool, &ws, &title_only, Some("https://x/y/1"))
+            .await
+            .unwrap();
+        let disp = resolve_dispatch(pool, &agent.id, Some(&title_only), Mode::Headless)
+            .await
+            .unwrap();
+        assert_eq!(
+            disp.invocation.prompt, "Wire the webhook\n\nLinked issue: https://x/y/1",
+            "a linked issue with no brief still hands the agent the ref"
+        );
     }
 
     /// A task row whose `mode` says "interactive" must never be handed a
@@ -2477,15 +4206,9 @@ mod tests {
             runtime_id: bootstrap::default_runtime_id(),
             instructions: None,
             visibility: "workspace".into(),
+            permission_mode: "private".into(),
             owner_id: owner,
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
         let disp = resolve_dispatch(pool, "bare-agent", None, Mode::Headless).await.unwrap();

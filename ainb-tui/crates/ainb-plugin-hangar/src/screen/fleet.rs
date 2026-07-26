@@ -893,12 +893,19 @@ fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> 
     }
 }
 
-fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
+/// Fold one key into the Fleet pane's BROWSE mode (no modal open).
+///
+/// Crate-visible so `reserved_key_invariant_tests` can prove none of the
+/// reserved router/host chars is bound here (#450).
+pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
     match key {
         FleetKey::Down | FleetKey::Char('j') => move_selection(state, 1),
         FleetKey::Up | FleetKey::Char('k') => move_selection(state, -1),
         FleetKey::Right => return attach_intent(state, false),
-        FleetKey::Char('A') => return attach_intent(state, true),
+        // `a` attaches with takeover. It was `A` until #450 — the hangar router
+        // claims bare `A` as the Agents tab, so the advertised `→/A:attach` hint
+        // navigated away instead of attaching.
+        FleetKey::Char('a') => return attach_intent(state, true),
         FleetKey::Enter => begin_structured_answer(state),
         FleetKey::Char('t') => {
             state.mode = FleetMode::Start(StartState {
@@ -913,7 +920,9 @@ fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetI
                 text: String::new(),
             }
         }
-        FleetKey::Char('b' | 'B') => state.mode = FleetMode::Broadcast(BroadcastState::default()),
+        // Broadcast is `b` only: the uppercase alias was dead (the hangar router
+        // claims bare `B` as the Boards tab) (#450).
+        FleetKey::Char('b') => state.mode = FleetMode::Broadcast(BroadcastState::default()),
         _ => {}
     }
     None
@@ -2871,7 +2880,7 @@ mod tests {
     }
 
     #[test]
-    fn right_and_uppercase_a_emit_exact_attach_intents() {
+    fn right_and_lowercase_a_emit_exact_attach_intents() {
         let state = state_with_roster();
         assert_eq!(
             apply(&state, FleetEvent::Key(FleetKey::Right)).intent,
@@ -2881,7 +2890,7 @@ mod tests {
             })
         );
         assert_eq!(
-            apply(&state, FleetEvent::Key(FleetKey::Char('A'))).intent,
+            apply(&state, FleetEvent::Key(FleetKey::Char('a'))).intent,
             Some(FleetIntent::AttachFullscreen {
                 session_key: "claude:ask".into(),
                 tmux_target: "claude:ask:0.0".into(),

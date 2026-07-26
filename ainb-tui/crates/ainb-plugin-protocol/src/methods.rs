@@ -170,6 +170,24 @@ pub const HOST_WORKSPACE_SET_ACTIVE: &str = "host/workspace_set_active";
 /// workspace: setting the default never changes `active_workspace`.
 pub const HOST_WORKSPACE_SET_DEFAULT: &str = "host/workspace_set_default";
 
+/// Plugin asks the host to create a new workspace.
+///
+/// Capability-gated by `workspace:write` (`-32001` when omitted). Inserts a
+/// `workspace` row plus an owner `member` row in the daemon's `SQLite` store; the
+/// created workspace is immediately usable by every daemon RPC (they resolve
+/// id-or-slug per request against the same DB). Params `{ slug, name }`; an
+/// invalid slug or a taken slug is `-32602 INVALID_PARAMS`. Result:
+/// `{ workspace: WorkspaceEntry }` (the new row, `active`/`default` false).
+pub const HOST_WORKSPACE_CREATE: &str = "host/workspace_create";
+
+/// Plugin asks the host to delete a workspace.
+///
+/// Capability-gated by `workspace:write` (`-32001` when omitted). Removes the
+/// workspace and every workspace-scoped child row in one transaction. Refuses to
+/// delete the effective-active workspace and the last remaining workspace
+/// (`-32602 INVALID_PARAMS`). Params `{ workspace_id }`; result `{}`.
+pub const HOST_WORKSPACE_DELETE: &str = "host/workspace_delete";
+
 /// Every method name registered by the protocol, in stable order.
 ///
 /// Used by the runtime's static method-existence check and by the CTS
@@ -201,6 +219,8 @@ pub const ALL_METHODS: &[&str] = &[
     HOST_WORKSPACE_GET_ACTIVE,
     HOST_WORKSPACE_SET_ACTIVE,
     HOST_WORKSPACE_SET_DEFAULT,
+    HOST_WORKSPACE_CREATE,
+    HOST_WORKSPACE_DELETE,
 ];
 
 #[cfg(test)]
@@ -269,6 +289,8 @@ mod tests {
             HOST_WORKSPACE_GET_ACTIVE,
             HOST_WORKSPACE_SET_ACTIVE,
             HOST_WORKSPACE_SET_DEFAULT,
+            HOST_WORKSPACE_CREATE,
+            HOST_WORKSPACE_DELETE,
         ] {
             assert!(m.starts_with("host/"), "{m} missing host/ namespace");
         }
@@ -281,6 +303,8 @@ mod tests {
             HOST_WORKSPACE_GET_ACTIVE,
             HOST_WORKSPACE_SET_ACTIVE,
             HOST_WORKSPACE_SET_DEFAULT,
+            HOST_WORKSPACE_CREATE,
+            HOST_WORKSPACE_DELETE,
         ] {
             assert!(
                 ALL_METHODS.contains(&m),
@@ -291,6 +315,8 @@ mod tests {
         assert_eq!(HOST_WORKSPACE_GET_ACTIVE, "host/workspace_get_active");
         assert_eq!(HOST_WORKSPACE_SET_ACTIVE, "host/workspace_set_active");
         assert_eq!(HOST_WORKSPACE_SET_DEFAULT, "host/workspace_set_default");
+        assert_eq!(HOST_WORKSPACE_CREATE, "host/workspace_create");
+        assert_eq!(HOST_WORKSPACE_DELETE, "host/workspace_delete");
     }
 
     #[test]

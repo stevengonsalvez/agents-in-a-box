@@ -154,6 +154,12 @@ pub struct Task {
     /// [`super::card_parity::CardParityRepo::set_task_source_branch_in_tx`],
     /// read back here so dispatch provisions from the claimed row.
     pub source_branch: Option<String>,
+    /// The squad that dispatched this task (migration 0045), or `None` for a
+    /// single-agent task. Stamped post-insert by
+    /// [`SquadAssignService`](crate::service::squad_assign::SquadAssignService);
+    /// read back so the daemon claim path can key a leader-briefing injection off
+    /// it. An infra-retry child copies it verbatim.
+    pub squad_id: Option<String>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
@@ -254,6 +260,48 @@ impl TaskRepo {
             .bind(branch)
             .bind(id)
             .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Stamp the dispatching `squad_id` onto a task row (migration 0045), the
+    /// non-transactional sibling of [`set_squad_id_in_tx`](Self::set_squad_id_in_tx).
+    /// Used by the CLI leader-only assign path, which inserts the leader task in its
+    /// own transaction and then stamps the squad ref on the committed row. Returns
+    /// `true` iff exactly one row was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_squad_id(
+        pool: &SqlitePool,
+        id: &str,
+        squad_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent_task_queue SET squad_id = ? WHERE id = ?")
+            .bind(squad_id)
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// Stamp the dispatching squad onto a task row WITHIN a fan-out transaction
+    /// (migration 0045), so the stamp commits atomically with the fanned-out task
+    /// inserts. Returns `true` iff exactly one row was updated.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_squad_id_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        id: &str,
+        squad_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent_task_queue SET squad_id = ? WHERE id = ?")
+            .bind(squad_id)
+            .bind(id)
+            .execute(&mut **tx)
             .await?;
         Ok(res.rows_affected() == 1)
     }
@@ -472,6 +520,78 @@ impl TaskRepo {
         rows.iter().map(task_from_row).collect()
     }
 
+    /// Live (non-terminal) task counts per agent for a whole workspace, in one
+    /// O(N) pass — the batch backing for `agents_list`'s workload dimension
+    /// (multica `buildPresenceMap`). Returns `agent_id -> (running, queued)`
+    /// where `queued` folds Hangar's `queued` + `dispatched` (claimed-but-not-yet-
+    /// running is still "waiting to work"). Terminal rows (`done`/`failed`/
+    /// `cancelled`) are excluded, so history never reaches the list-level dot.
+    /// An agent with zero live tasks is absent from the map (the caller defaults
+    /// it to `Idle`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn live_workload_by_workspace(
+        pool: &SqlitePool,
+        workspace_id: &str,
+    ) -> Result<std::collections::HashMap<String, (i64, i64)>, sqlx::Error> {
+        // SQLite booleans are 0/1, so `SUM(status = 'running')` counts the running
+        // rows (same idiom as `issue_aggregate_terminal_state`). The predicate
+        // pre-filters to live rows so the GROUP BY only spans agents with work.
+        let rows = sqlx::query(
+            "SELECT agent_id, \
+                    COALESCE(SUM(status = 'running'), 0) AS running, \
+                    COALESCE(SUM(status IN ('queued','dispatched')), 0) AS queued \
+               FROM agent_task_queue \
+              WHERE workspace_id = ? \
+                AND status IN ('queued','dispatched','running') \
+              GROUP BY agent_id",
+        )
+        .bind(workspace_id)
+        .fetch_all(pool)
+        .await?;
+        rows.iter()
+            .map(|row| {
+                Ok((
+                    row.try_get::<String, _>("agent_id")?,
+                    (
+                        row.try_get::<i64, _>("running")?,
+                        row.try_get::<i64, _>("queued")?,
+                    ),
+                ))
+            })
+            .collect()
+    }
+
+    /// Live (non-terminal) counts for ONE agent — the single-row backing for the
+    /// `agent_update` / `agent_archive` CRUD responses, so their row's workload
+    /// is byte-identical to the same agent's `agents_list` row. Returns
+    /// `(running, queued)`, or `(0, 0)` when the agent has no live task.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn live_workload_for_agent(
+        pool: &SqlitePool,
+        agent_id: &str,
+    ) -> Result<(i64, i64), sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT COALESCE(SUM(status = 'running'), 0) AS running, \
+                    COALESCE(SUM(status IN ('queued','dispatched')), 0) AS queued \
+               FROM agent_task_queue \
+              WHERE agent_id = ? \
+                AND status IN ('queued','dispatched','running')",
+        )
+        .bind(agent_id)
+        .fetch_one(pool)
+        .await?;
+        Ok((
+            row.try_get::<i64, _>("running")?,
+            row.try_get::<i64, _>("queued")?,
+        ))
+    }
+
     /// Move one task to `to_status`, **scoped to `workspace_id`**, stamping the
     /// lifecycle timestamps the new status implies. Backs the Kanban card-move
     /// (P8.4): `Shift+←/→` drags a card to a new column.
@@ -542,7 +662,7 @@ impl TaskRepo {
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
      priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
-     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch";
+     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch, squad_id";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -573,6 +693,7 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         branch: row.try_get("branch")?,
         generation: row.try_get("generation")?,
         source_branch: row.try_get("source_branch")?,
+        squad_id: row.try_get("squad_id")?,
     })
 }
 

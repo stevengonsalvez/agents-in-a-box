@@ -239,6 +239,62 @@ async fn migration_0002_creates_skill_tables_with_composite_keys() {
         agent_skill.contains("PRIMARY KEY (agent_id, skill_id)"),
         "agent_skill composite PK: {agent_skill}"
     );
+    // Migration 0051 (parity #24): per-agent enable/disable toggle. `ALTER TABLE
+    // ... ADD COLUMN` rewrites `sqlite_master.sql`, so the added column is
+    // visible in the stored DDL text.
+    assert!(
+        agent_skill.contains("enabled INTEGER NOT NULL DEFAULT 1"),
+        "agent_skill.enabled default-true (0051): {agent_skill}"
+    );
+
+    // Migration 0051 (parity #24, multica 206): per-agent runtime-level skill
+    // suppression list, JSON array text defaulting to the empty array.
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains("disabled_runtime_skills TEXT NOT NULL DEFAULT '[]'"),
+        "agent.disabled_runtime_skills (0051): {agent}"
+    );
+
+    // Migration 0052 (parity #26, multica 031/085): the archive AUDIT sidecar.
+    // Both columns are NULLABLE with no default — a pre-0052 archived row keeps
+    // NULL (an honest unknown), and there is deliberately no CHECK tying
+    // `archived = 1` to a non-null stamp.
+    assert!(
+        agent.contains("archived_at INTEGER"),
+        "agent.archived_at (0052): {agent}"
+    );
+    assert!(
+        agent.contains("archived_by TEXT"),
+        "agent.archived_by (0052): {agent}"
+    );
+
+    let squad = table_sql(&pool, "squad").await;
+    assert!(
+        squad.contains("archived INTEGER NOT NULL DEFAULT 0"),
+        "squad.archived default-false (0052): {squad}"
+    );
+    assert!(
+        squad.contains("archived_at INTEGER"),
+        "squad.archived_at (0052): {squad}"
+    );
+    assert!(
+        squad.contains("archived_by TEXT"),
+        "squad.archived_by (0052): {squad}"
+    );
+
+    // Migration 0053 (parity #25, multica 084/088): per-member ROLE + per-squad
+    // INSTRUCTIONS. Both are NOT NULL DEFAULT '' — "unset" is the empty string,
+    // which is also the "omit this fragment" sentinel the leader briefing
+    // renders against. Free text, no CHECK (role is a label, not a vocabulary).
+    assert!(
+        squad.contains("instructions TEXT NOT NULL DEFAULT ''"),
+        "squad.instructions (0053): {squad}"
+    );
+    let squad_member = table_sql(&pool, "squad_member").await;
+    assert!(
+        squad_member.contains("role TEXT NOT NULL DEFAULT ''"),
+        "squad_member.role (0053): {squad_member}"
+    );
 
     pool.close().await;
 }
@@ -888,7 +944,13 @@ async fn migration_0019_adds_autopilot_execution_mode_and_concurrency_policy_col
 }
 
 #[tokio::test]
-async fn all_migrations_create_exactly_thirty_six_tables() {
+async fn all_migrations_preserve_every_core_table() {
+    // Guards against a migration DROPPING or renaming a core table. This used
+    // to assert an exact table count, which broke on every PR that added a
+    // migration (the multica-parity work adds new tables continuously): the
+    // exact count was never the point, catching a lost table is. So this
+    // checks that every table in `expected` still exists by name (a floor,
+    // not a ceiling): new tables are fine, a missing one fails loudly.
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = fresh_pool(dir.path()).await;
 
@@ -949,7 +1011,14 @@ async fn all_migrations_create_exactly_thirty_six_tables() {
         "user",
         "workspace",
     ];
-    assert_eq!(names.len(), 37, "expected 37 v1 tables, got {names:?}");
+    // Floor, not a frozen ceiling: new migrations are free to add tables, but
+    // the table count must never drop below the known core set.
+    assert!(
+        names.len() >= expected.len(),
+        "expected at least {} core tables, got {} ({names:?})",
+        expected.len(),
+        names.len()
+    );
     for table in expected {
         assert!(
             names.iter().any(|n| n == table),
@@ -1244,6 +1313,90 @@ async fn migration_0034_adds_board_card_ord_defaulting_zero() {
     assert!(
         bc.contains("PRIMARY KEY (board_id, issue_id)"),
         "board_card keeps its (board_id, issue_id) PK: {bc}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0047_adds_permission_mode_and_invocation_target() {
+    // Gap #8 / multica 130: agent invocation-permission. `agent.permission_mode`
+    // is the authoritative deny-by-default invoke source; `agent_invocation_target`
+    // is the FK-less allow-list. A fresh DB (no legacy rows) has the column with a
+    // 'private' default and an empty target table.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains(
+            "permission_mode TEXT NOT NULL DEFAULT 'private' CHECK (permission_mode IN ('private', 'public_to'))"
+        ),
+        "agent.permission_mode column + CHECK: {agent}"
+    );
+
+    let target = table_sql(&pool, "agent_invocation_target").await;
+    assert!(
+        target.contains("id TEXT PRIMARY KEY"),
+        "agent_invocation_target.id PK: {target}"
+    );
+    assert!(
+        target.contains("agent_id TEXT NOT NULL"),
+        "agent_invocation_target.agent_id NOT NULL (FK-less): {target}"
+    );
+    assert!(
+        target.contains(
+            "target_type TEXT NOT NULL CHECK (target_type IN ('workspace', 'member', 'team'))"
+        ),
+        "agent_invocation_target.target_type CHECK: {target}"
+    );
+    assert!(
+        target.contains("UNIQUE (agent_id, target_type, target_id)"),
+        "agent_invocation_target dedup UNIQUE: {target}"
+    );
+    // No FK on agent_id (matches the (actor_type, actor_id) FK-less convention).
+    assert!(
+        !target.contains("REFERENCES"),
+        "agent_invocation_target is FK-less by design: {target}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0055_types_card_dependency_links() {
+    // multica parity #20: `issue_dependency.type IN ('blocks','blocked_by','related')`.
+    // hangar's row IS the blocked_by relation, so 0055 adds the KIND column with a
+    // constant DEFAULT 'blocked_by' — every pre-0055 row backfills to today's
+    // semantics with no table rewrite — plus the (workspace_id, link_type) index the
+    // typed graph read uses. 0036 is UNTOUCHED (an applied migration is immutable).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let cols = sqlx::query("PRAGMA table_info(card_dependency)")
+        .fetch_all(&pool)
+        .await
+        .expect("table_info");
+    let link_type = cols
+        .iter()
+        .find(|r| {
+            let name: String = r.get("name");
+            name == "link_type"
+        })
+        .expect("card_dependency.link_type exists");
+    let notnull: i64 = link_type.get("notnull");
+    let dflt: Option<String> = link_type.get("dflt_value");
+    assert_eq!(notnull, 1, "link_type is NOT NULL");
+    assert_eq!(
+        dflt.as_deref().map(|d| d.trim_matches('\'')),
+        Some("blocked_by"),
+        "the constant default backfills every pre-0055 row as a gating edge"
+    );
+
+    let idx = index_sql(&pool, "idx_card_dependency_ws_type").await;
+    assert!(
+        idx.contains("card_dependency") && idx.contains("link_type"),
+        "idx_card_dependency_ws_type serves the typed graph read: {idx}"
     );
 
     pool.close().await;

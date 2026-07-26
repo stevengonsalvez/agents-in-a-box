@@ -347,10 +347,11 @@ async fn drag_card_across_columns_issues_issue_update_state() {
         .await;
 
         // A render builds the board hit-map for the 120×40 viewport. The board
-        // body runs from row 2; each of the five columns is 24 cells wide. The
-        // single backlog card (`issue-1`) sits in column 0 (x in [0, 24)); its
-        // body card spans rows 4..10. The In Progress column is column 2 (x in
-        // [48, 72)); its drop zone is the column body below the header.
+        // body runs from row 2; each of the SEVEN lifecycle columns is 17 cells
+        // wide (120 / 7). The single backlog card (`issue-1`) sits in column 0
+        // (x in [0, 17)); its body card spans rows 4..10. The In Progress column
+        // is column 2 (x in [34, 51)); its drop zone is the column body below
+        // the header.
         relay_one_send_or_render(
             &mut host_write,
             &mut host_read,
@@ -376,7 +377,7 @@ async fn drag_card_across_columns_issues_issue_update_state() {
             MouseKind::Drag {
                 button: MouseButton::Left,
             },
-            55,
+            40,
             15,
         )
         .await;
@@ -385,7 +386,7 @@ async fn drag_card_across_columns_issues_issue_update_state() {
             MouseKind::Up {
                 button: MouseButton::Left,
             },
-            55,
+            40,
             15,
         )
         .await;

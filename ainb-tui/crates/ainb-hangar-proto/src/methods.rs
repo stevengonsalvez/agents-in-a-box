@@ -113,6 +113,25 @@ pub const HANGAR_SKILL_ATTACH: &str = "hangar/skill_attach";
 /// link is a no-op) and workspace-scoped like [`HANGAR_SKILL_ATTACH`].
 pub const HANGAR_SKILL_DETACH: &str = "hangar/skill_detach";
 
+/// `hangar/skill_set_enabled` — flip one agent↔skill link's `enabled` flag
+/// (parity #24).
+///
+/// Params: `{ workspace_id: String, agent_id: String, skill_id: String,
+/// enabled: bool }`. Result: `{ toggled: bool }` — `false` when the pair is not
+/// attached (a no-op, not an error). Orthogonal to attach/detach: the link stays
+/// attached, it just stops materialising. Idempotent and workspace-scoped like
+/// [`HANGAR_SKILL_ATTACH`].
+pub const HANGAR_SKILL_SET_ENABLED: &str = "hangar/skill_set_enabled";
+
+/// `hangar/agent_skills_list` — list one agent's skill attachments WITH their
+/// enablement (parity #24).
+///
+/// Params: `{ workspace_id: String, agent_id: String }`. Result: a
+/// [`crate::snapshots::AgentSkillsListResult`] listing every link — enabled and
+/// disabled alike — ordered by skill name. A foreign agent id yields an empty
+/// list rather than another tenant's rows.
+pub const HANGAR_AGENT_SKILLS_LIST: &str = "hangar/agent_skills_list";
+
 /// `hangar/autopilots_list` — snapshot the autopilots of a workspace.
 ///
 /// Params: `{ workspace_id: String }`. Result: a
@@ -163,6 +182,19 @@ pub const HANGAR_TASKS_LIST: &str = "hangar/tasks_list";
 /// [`ainb_hangar_core::task_status::TaskStatus`] wire tokens; an illegal token or
 /// transition is an `INVALID_PARAMS` error.
 pub const HANGAR_TASK_TRANSITION: &str = "hangar/task_transition";
+
+/// `hangar/task_retry` — force-requeue one terminal task at an operator's explicit
+/// request (the Task Kanban failed-column / task-detail `R`).
+///
+/// Params: [`crate::snapshots::TaskRetryParams`] (`{ workspace_id, task_id }`).
+/// Result: `{ new_task_id: String }` on a fresh queued attempt, or
+/// `{ new_task_id: null }` when the task was not terminal (nothing to requeue).
+/// Unlike the automatic retry, this is a HUMAN override: it bypasses the
+/// `RetryDisposition` reason gate AND the `max_attempts` cap, so a terminal
+/// `agent_error` (which never auto-retries) still re-queues a `parent_task_id`-
+/// chained child. Workspace-scoped: a foreign task id is an `INVALID_PARAMS`
+/// rejection (the mutating handler must not silently no-op on a typo).
+pub const HANGAR_TASK_RETRY: &str = "hangar/task_retry";
 
 /// `hangar/issue_update` — edit fields of one existing issue (e38.8).
 ///
@@ -285,6 +317,26 @@ pub const HANGAR_ISSUE_LABEL_ATTACH: &str = "hangar/issue_label_attach";
 /// [`crate::events::HangarEvent::IssueUpdated`].
 pub const HANGAR_ISSUE_LABEL_DETACH: &str = "hangar/issue_label_detach";
 
+/// `hangar/issue_criterion_set` — tick / untick ONE acceptance criterion on one
+/// issue (multica parity #11-rest).
+///
+/// Params: [`crate::snapshots::IssueCriterionSetParams`]
+/// (`{ workspace_id, issue_id, criterion, checked, actor? }` — `criterion` is
+/// either the stable criterion id (`ac-…`) or a 1-BASED ordinal, because an
+/// agent reading the detail card sees positions, not ids). Result: the refreshed
+/// [`crate::events::IssueRow`], or an error.
+///
+/// Idempotent: ticking an already-ticked criterion succeeds without rewriting
+/// its `checked_at` / `checked_by` provenance.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_LABEL_ATTACH`]: the
+/// daemon resolves the workspace and REJECTS a mistyped one (never a silent
+/// no-op); an `(issue_id, workspace_id)` pair matching no row is
+/// `INVALID_PARAMS`, as is a `criterion` matching no element. A committed tick
+/// pushes the matching [`crate::events::HangarEvent::IssueUpdated`] so every
+/// subscribed screen re-renders.
+pub const HANGAR_ISSUE_CRITERION_SET: &str = "hangar/issue_criterion_set";
+
 /// `hangar/comment_add` — append a comment to one issue (e38.5).
 ///
 /// Params: [`crate::snapshots::CommentAddParams`]
@@ -348,6 +400,23 @@ pub const HANGAR_AGENT_ARCHIVE: &str = "hangar/agent_archive";
 /// id, not provider), and the daemon spawns the recorded provider's backend per
 /// task — so a `codex` agent runs codex.
 pub const HANGAR_AGENT_CREATE: &str = "hangar/agent_create";
+
+/// `hangar/agent_delete` — delete one named agent from a workspace (the Agents
+/// screen `x` remove, slice 2).
+///
+/// Params: [`crate::snapshots::AgentDeleteParams`] (`{ workspace_id, agent_id }`).
+/// Result: the refreshed [`crate::snapshots::AgentsListResult`] (the same shape
+/// [`HANGAR_AGENT_CREATE`] answers with) so the client folds the shrunk roster
+/// back into the cache that drives the Agents/Squads pickers.
+///
+/// Mutating + workspace-scoped like [`HANGAR_AGENT_ARCHIVE`]: a foreign-tenant or
+/// unknown `agent_id` is rejected as not-found (never a cross-tenant delete). The
+/// delete is REFUSED while the agent has any ACTIVE task (queued / dispatched /
+/// running) — the caller must cancel the run first — and refused when the agent
+/// still carries run HISTORY the schema pins by foreign key (archive it instead);
+/// both surface as `INVALID_PARAMS` so a fresh, never-run agent deletes cleanly
+/// while a live/historical one is guarded rather than silently orphaned.
+pub const HANGAR_AGENT_DELETE: &str = "hangar/agent_delete";
 
 /// `hangar/members_list` — snapshot the human members of a workspace (e38.11).
 ///
@@ -454,6 +523,52 @@ pub const HANGAR_SQUAD_MEMBER_REMOVE: &str = "hangar/squad_member_remove";
 /// `INVALID_PARAMS`. A squad with a human-member leader (no agent to dispatch to)
 /// or an unknown squad is rejected (`INVALID_PARAMS`).
 pub const HANGAR_SQUAD_ASSIGN: &str = "hangar/squad_assign";
+
+/// `hangar/squad_archive` — archive or un-archive one squad, recording WHO and
+/// WHEN (parity #26, migration 0052).
+///
+/// Params: [`crate::snapshots::SquadArchiveParams`]. Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`] (ACTIVE squads only), so a caller
+/// re-renders from the response without a `squads_list` round-trip — the same
+/// envelope `squad_create` / `squad_member_*` answer with.
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a squad id that does
+/// not belong to the resolved workspace is rejected with `INVALID_PARAMS`, never
+/// a cross-tenant write. Archiving removes the squad from the active list AND
+/// makes it refuse new assignments ([`HANGAR_SQUAD_ASSIGN`] /
+/// [`HANGAR_SQUAD_FANOUT`] answer `INVALID_PARAMS`); un-archiving restores it and
+/// CLEARS the audit pair.
+pub const HANGAR_SQUAD_ARCHIVE: &str = "hangar/squad_archive";
+
+/// `hangar/squad_member_role_set` — set or clear one EXISTING squad membership's
+/// free-text ROLE (parity #25, migration 0053, multica `UpdateSquadMemberRole`).
+///
+/// Params: [`crate::snapshots::SquadMemberRoleParams`]. Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`], the same envelope `squad_create` /
+/// `squad_member_*` / `squad_archive` answer with, so a caller re-renders from
+/// the response without a `squads_list` round-trip.
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a squad id from
+/// another tenant is rejected with `INVALID_PARAMS`, never a cross-tenant write.
+/// **Never a silent no-op:** an actor that is not already a member is rejected
+/// with `INVALID_PARAMS` rather than answering success — this method edits an
+/// existing membership and never inserts one. An empty `role` CLEARS the label.
+/// The role is advisory metadata the squad LEADER reads in its claim-time
+/// briefing; nothing dispatches on it.
+pub const HANGAR_SQUAD_MEMBER_ROLE_SET: &str = "hangar/squad_member_role_set";
+
+/// `hangar/squad_instructions_set` — set or clear one squad's user-authored
+/// routing guidance (parity #25, migration 0053, multica 088).
+///
+/// Params: [`crate::snapshots::SquadInstructionsParams`]. Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`].
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a squad id from
+/// another tenant is rejected with `INVALID_PARAMS` and writes nothing. The text
+/// is stored VERBATIM — it is rendered as the leader briefing's
+/// `## Squad Instructions` section, which is omitted entirely when the field is
+/// blank (multica blank-omit parity).
+pub const HANGAR_SQUAD_INSTRUCTIONS_SET: &str = "hangar/squad_instructions_set";
 
 /// `hangar/squad_fanout` — fan an issue out across the WHOLE squad: brief the
 /// LEADER *and* enqueue one task per distinct `agent` member, all on the same
@@ -786,6 +901,40 @@ pub const HANGAR_BOARD_CARD_DEP_ADD: &str = "hangar/board_card_dep_add";
 /// no-op. Mutating + workspace-scoped via the board.
 pub const HANGAR_BOARD_CARD_DEP_REMOVE: &str = "hangar/board_card_dep_remove";
 
+/// `hangar/issue_link_add` — add a TYPED link between two issues (multica parity
+/// #20), independent of any board.
+///
+/// Params: [`crate::snapshots::IssueLinkParams`] (`{ workspace_id, issue_id,
+/// other_issue_id, link_type? }`). Result: the refreshed
+/// [`crate::snapshots::IssueLinksResult`]. `link_type` defaults to `blocked_by`
+/// (the gating relation, identical to `board_card_dep_add`); `blocks` is
+/// normalised into the reverse `blocked_by` row; `related` is a symmetric
+/// NON-gating association that never refuses a run and never auto-launches a card.
+/// A self-link, a cycle (gating kinds only), or an endpoint outside the workspace
+/// is rejected (`INVALID_PARAMS`). Re-adding a pair with a new kind replaces the
+/// kind. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_LINK_ADD: &str = "hangar/issue_link_add";
+
+/// `hangar/issue_link_remove` — remove a TYPED link between two issues (multica
+/// parity #20).
+///
+/// Params: [`crate::snapshots::IssueLinkParams`]. Result: the refreshed
+/// [`crate::snapshots::IssueLinksResult`]. Removing an absent link is an
+/// idempotent no-op; a `related` link is removed from EITHER orientation (it is
+/// symmetric). Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_LINK_REMOVE: &str = "hangar/issue_link_remove";
+
+/// `hangar/issue_links` — read one issue's whole TYPED link graph (multica parity
+/// #20).
+///
+/// Params: [`crate::snapshots::IssueLinksParams`] (`{ workspace_id, issue_id }`).
+/// Result: [`crate::snapshots::IssueLinksResult`] — one
+/// [`crate::events::IssueLinkRow`] per link in render order (`blocked_by`, then
+/// `blocks`, then `related`), each carrying the OTHER issue's display id, title
+/// and state, plus `satisfied` for a blocker that has already finished.
+/// Read-only + workspace-scoped.
+pub const HANGAR_ISSUE_LINKS: &str = "hangar/issue_links";
+
 /// `hangar/board_card_set_auto_run` — flip a card's auto-run flag (tcp T4 / F7).
 ///
 /// Params: [`crate::snapshots::BoardCardAutoRunParams`] (`{ workspace_id, board_id,
@@ -968,15 +1117,19 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SKILLS_SYNC,
     HANGAR_SKILL_ATTACH,
     HANGAR_SKILL_DETACH,
+    HANGAR_SKILL_SET_ENABLED,
+    HANGAR_AGENT_SKILLS_LIST,
     HANGAR_AUTOPILOTS_LIST,
     HANGAR_AUTOPILOT_RUNS,
     HANGAR_AUTOPILOT_FIRE_NOW,
     HANGAR_AUTOPILOT_SET_ENABLED,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
+    HANGAR_TASK_RETRY,
     HANGAR_ISSUE_UPDATE,
     HANGAR_ISSUE_LABEL_ATTACH,
     HANGAR_ISSUE_LABEL_DETACH,
+    HANGAR_ISSUE_CRITERION_SET,
     HANGAR_COMMENT_ADD,
     HANGAR_AGENT_UPDATE,
     HANGAR_AGENT_ARCHIVE,
@@ -988,6 +1141,9 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SQUAD_MEMBER_ADD,
     HANGAR_SQUAD_MEMBER_REMOVE,
     HANGAR_SQUAD_ASSIGN,
+    HANGAR_SQUAD_ARCHIVE,
+    HANGAR_SQUAD_MEMBER_ROLE_SET,
+    HANGAR_SQUAD_INSTRUCTIONS_SET,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     HANGAR_USAGE_ROLLUP,
@@ -1064,6 +1220,14 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_DELETE,
     // Issue-scoped cancel-active (board-less cancel-and-delete), likewise appended.
     HANGAR_ISSUE_CANCEL_ACTIVE,
+    // Agent delete (Agents screen `x` remove) is APPENDED at the catalogue tail —
+    // append-only wire.
+    HANGAR_AGENT_DELETE,
+    // Typed issue links (multica parity #20) are APPENDED at the catalogue tail —
+    // append-only wire.
+    HANGAR_ISSUE_LINK_ADD,
+    HANGAR_ISSUE_LINK_REMOVE,
+    HANGAR_ISSUE_LINKS,
     // Fleet control-plane methods are appended at the wire catalogue tail.
     FLEET_SNAPSHOT,
     FLEET_SUBSCRIBE,
@@ -1133,15 +1297,19 @@ mod tests {
             HANGAR_SKILLS_SYNC,
             HANGAR_SKILL_ATTACH,
             HANGAR_SKILL_DETACH,
+            HANGAR_SKILL_SET_ENABLED,
+            HANGAR_AGENT_SKILLS_LIST,
             HANGAR_AUTOPILOTS_LIST,
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
+            HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
+            HANGAR_ISSUE_CRITERION_SET,
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,
@@ -1153,6 +1321,9 @@ mod tests {
             HANGAR_SQUAD_MEMBER_ADD,
             HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_SQUAD_ASSIGN,
+            HANGAR_SQUAD_ARCHIVE,
+            HANGAR_SQUAD_MEMBER_ROLE_SET,
+            HANGAR_SQUAD_INSTRUCTIONS_SET,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
@@ -1172,6 +1343,7 @@ mod tests {
             HANGAR_SQUAD_FANOUT,
             HANGAR_RUN_HISTORY,
             HANGAR_AGENT_CREATE,
+            HANGAR_AGENT_DELETE,
             HANGAR_ISSUE_DELETE,
         ] {
             assert!(m.starts_with("hangar/"), "{m:?} not under hangar/");
@@ -1199,15 +1371,19 @@ mod tests {
             HANGAR_SKILLS_SYNC,
             HANGAR_SKILL_ATTACH,
             HANGAR_SKILL_DETACH,
+            HANGAR_SKILL_SET_ENABLED,
+            HANGAR_AGENT_SKILLS_LIST,
             HANGAR_AUTOPILOTS_LIST,
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
+            HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
+            HANGAR_ISSUE_CRITERION_SET,
             HANGAR_COMMENT_ADD,
             HANGAR_AGENT_UPDATE,
             HANGAR_AGENT_ARCHIVE,
@@ -1219,6 +1395,9 @@ mod tests {
             HANGAR_SQUAD_MEMBER_ADD,
             HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_SQUAD_ASSIGN,
+            HANGAR_SQUAD_ARCHIVE,
+            HANGAR_SQUAD_MEMBER_ROLE_SET,
+            HANGAR_SQUAD_INSTRUCTIONS_SET,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
@@ -1265,9 +1444,13 @@ mod tests {
             HANGAR_DAEMON_CONFIG_GET,
             HANGAR_DAEMON_CONFIG_SET,
             HANGAR_AGENT_CREATE,
+            HANGAR_AGENT_DELETE,
             HANGAR_DAEMON_CONFIG_LIST,
             HANGAR_ISSUE_DELETE,
             HANGAR_ISSUE_CANCEL_ACTIVE,
+            HANGAR_ISSUE_LINK_ADD,
+            HANGAR_ISSUE_LINK_REMOVE,
+            HANGAR_ISSUE_LINKS,
             FLEET_SNAPSHOT,
             FLEET_SUBSCRIBE,
             FLEET_ACTION,

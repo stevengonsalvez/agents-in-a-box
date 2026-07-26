@@ -60,7 +60,15 @@ run_one() {
 }
 
 # ── hangar crates: every non-tripwire, non-helper integration test target.
-for pkg in ainb-hangar-store ainb-hangar-proto ainb-hangar-sandbox ainb-hangar-daemon; do
+#
+# `ainb-plugin-hangar` is in this list because NOTHING else in CI compiled its
+# integration targets: the `Test` job runs nextest with no `-p`/`--workspace`, so
+# `default-members` (ainb-core + ainb-hangar-daemon) is all it builds, and
+# `run_all_tripwires.sh` only ever builds `tripwire_*`. Its ~35 non-tripwire
+# targets were therefore ungated and silently rotted (a golden pinned the
+# workspace version and stayed 1.15.0 into 1.16.1). They gate here now.
+for pkg in ainb-hangar-store ainb-hangar-proto ainb-hangar-sandbox ainb-hangar-daemon \
+           ainb-plugin-hangar; do
     for f in crates/"$pkg"/tests/*.rs; do
         [ -e "$f" ] || continue
         name="$(basename "$f" .rs)"

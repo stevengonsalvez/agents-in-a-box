@@ -495,6 +495,16 @@ fn prepare_pipeline_board_run_seeded(
     seed_first_run_ack(home.path());
     seed_notify_prompt_dismissed(home.path());
     seed_board_and_profile(&hangar_dir);
+    // Free the fixture's claim slot BEFORE the claim-enabled daemon starts.
+    //
+    // The P4 fixture seeds `agent-1` at the schema default cap of 1 and leaves
+    // its `task-1` in `running`, which fully consumes that one slot — so the
+    // card this pipeline's tripwire enqueues could never be claimed. It only
+    // ever worked by accident: the fixture used to be stamped in 2023, so the
+    // stale-running sweeper failed `task-1` on its first tick and freed the
+    // slot. With the fixture on a live clock that accident is gone, so the slot
+    // is now freed deliberately (`task-1` is a render-only prop here).
+    set_agent_concurrency(home.path(), 10);
     pre_spawn(home.path());
 
     let fake_claude = write_executable(home.path(), "fake-claude.sh", fake_agent_body);
@@ -755,10 +765,22 @@ pub fn enqueue_task_with_repo(home: &Path, suffix: &str, repo_ref: &str) -> Stri
 pub const T4_SQUAD_ID: &str = "squad-t4";
 /// The squad card's issue id (assigned to [`T4_SQUAD_ID`], placed on the board).
 pub const T4_SQUAD_CARD_ISSUE: &str = "issue-squad-card";
+/// The free-text ROLE stamped on squad member `agent-m1` (parity #25).
+pub const T4_SQUAD_M1_ROLE: &str = "owns the migrations";
+/// The skill attached (enabled) to squad member `agent-m1` (parity `7-rest`).
+pub const T4_SQUAD_M1_SKILL: &str = "pathfinding";
+/// The squad's user-authored routing instructions (parity #25), rendered
+/// VERBATIM into the leader briefing.
+pub const T4_SQUAD_INSTRUCTIONS: &str = "Route schema work to the DB owner.";
 /// The dependency-chain BLOCKER card's issue id (card A).
 pub const T4_DEP_BLOCKER_ISSUE: &str = "issue-dep-a";
 /// The dependency-chain DEPENDENT card's issue id (card B, depends-on A, auto-run on).
 pub const T4_DEP_DEPENDENT_ISSUE: &str = "issue-dep-b";
+/// The card RELATED to the blocker (multica parity #20): it is seeded into the
+/// SAME dep-chain pipeline (a second pipeline would double the fixture cost, and
+/// this suite already flakes under concurrency) with `auto_run` ON, so the only
+/// thing that can explain it never auto-running is its link KIND.
+pub const T4_REL_ISSUE: &str = "issue-dep-r";
 
 /// An agent actor-ref for the T4 squad seeding.
 fn t4_agent_ref(id: &str) -> ainb_hangar_core::actor::ActorRef {
@@ -873,12 +895,38 @@ pub fn prepare_pipeline_squad_card() -> Pipeline {
                 )
                 .await
                 .expect("create squad");
-                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1"))
-                    .await
-                    .expect("add m1");
+                // m1 carries a ROLE and a live SKILL, and the squad carries
+                // INSTRUCTIONS, so the leader-briefing tripwire can read all three
+                // fragments off the CLAUDE.md the real daemon materialises
+                // (parity #25 + `7-rest`). m2 stays bare, pinning the blank-omit.
+                SquadRepo::add_member_with_role(
+                    pool,
+                    &ws,
+                    T4_SQUAD_ID,
+                    &t4_agent_ref("agent-m1"),
+                    T4_SQUAD_M1_ROLE,
+                )
+                .await
+                .expect("add m1");
                 SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2"))
                     .await
                     .expect("add m2");
+                SquadRepo::set_instructions(pool, &ws, T4_SQUAD_ID, T4_SQUAD_INSTRUCTIONS)
+                    .await
+                    .expect("set squad instructions");
+                {
+                    use ainb_hangar_core::ids::AgentId;
+                    use ainb_hangar_store::repo::skill::SkillRepo;
+
+                    let m1 = AgentId::from_str("agent-m1".to_string()).expect("m1 id");
+                    let skill =
+                        SkillRepo::create(pool, &ws, T4_SQUAD_M1_SKILL, None, Some("# b"), vec![])
+                            .await
+                            .expect("create m1 skill");
+                    SkillRepo::attach_to_agent(pool, &ws, &m1, &skill)
+                        .await
+                        .expect("attach m1 skill");
+                }
 
                 seed_card_issue(
                     pool,
@@ -945,6 +993,26 @@ pub fn prepare_pipeline_dep_chain() -> Pipeline {
                 CardDependencyRepo::set_auto_run(pool, &ws, T4_DEP_DEPENDENT_ISSUE, true)
                     .await
                     .expect("B auto-run on");
+
+                // multica parity #20: R is RELATED to A and also opts into
+                // auto-run. A related link never gates and is invisible to the
+                // finalize seam, so R must neither refuse a run nor gain a task
+                // when A finishes — with auto_run equal on B and R, the LINK KIND
+                // is the only difference between them.
+                seed_card_issue(pool, T4_REL_ISSUE, "DepRelatedR", &repo_path, now + 2).await;
+                CardDependencyRepo::add_link(
+                    pool,
+                    &ws,
+                    T4_REL_ISSUE,
+                    T4_DEP_BLOCKER_ISSUE,
+                    ainb_hangar_store::repo::card_dependency::LinkKind::Related,
+                    now,
+                )
+                .await
+                .expect("R related-to A");
+                CardDependencyRepo::set_auto_run(pool, &ws, T4_REL_ISSUE, true)
+                    .await
+                    .expect("R auto-run on");
                 free_fixture_running_task(pool).await;
             });
         },
@@ -1018,6 +1086,26 @@ pub fn newest_active_task_for_issue(home: &Path, issue_id: &str) -> Option<Strin
         .ok()
         .flatten()
     })
+}
+
+/// The `CLAUDE.md` the daemon materialised into `task_id`'s task tree, or `None`
+/// when it has not been written (yet).
+///
+/// This is the file the squad-leader briefing is appended to pre-spawn, so a
+/// tripwire that reads it is asserting on the REAL injected prompt rather than a
+/// re-built string. It lives in the TASK tree (not the run worktree), and the
+/// tree is reclaimed after finalize — read it while the run is still held.
+#[must_use]
+pub fn materialised_context_prompt(home: &Path, task_id: &str) -> Option<String> {
+    let path = home
+        .join(".agents-in-a-box")
+        .join("hangar")
+        .join("workspaces")
+        .join(ainb_hangar_daemon::seed::WS_SLUG)
+        .join(task_id)
+        .join("workdir")
+        .join("CLAUDE.md");
+    std::fs::read_to_string(path).ok()
 }
 
 /// Read one task row's status by its exact `task_id` in the fixture store, or `None`
@@ -2137,6 +2225,114 @@ pub fn seed_autopilot(home: &Path) {
         .await
         .expect("seed daily-triage autopilot");
     });
+}
+
+/// The ghost runtime's id — a SECOND runtime the daemon does not own, so the
+/// presence sweeper decays it instead of heart-beating it every tick.
+pub const GHOST_RUNTIME_ID: &str = "rt-ghost";
+/// The agent bound to [`GHOST_RUNTIME_ID`]; its Agents-screen row is the one
+/// whose availability dot walks online → unstable → offline.
+pub const GHOST_AGENT_NAME: &str = "ghostrider";
+
+/// Like [`prepare_pipeline`], plus a SECOND (`rt-ghost`) runtime carrying a
+/// fresh heartbeat and one agent (`ghostrider`) bound to it — for the
+/// availability-decay tripwire.
+///
+/// It must not be the daemon's OWN runtime: the daemon beats for that one every
+/// tick, so it could never decay. The unique index is
+/// `(workspace_id, daemon_id, provider)`, hence the distinct `daemon_id` /
+/// `provider`. `presence_sweep_ms` tightens the sweep cadence so several ticks
+/// land inside the tripwire's budget.
+pub fn prepare_pipeline_ghost_runtime(presence_sweep_ms: &str) -> Pipeline {
+    prepare_pipeline_seeded(
+        &[
+            ("HANGAR_DAEMON_DISABLE_CLAIM", "1"),
+            ("HANGAR_PRESENCE_SWEEP_MS", presence_sweep_ms),
+        ],
+        seed_ghost_runtime,
+    )
+}
+
+/// Seed the ghost runtime + agent into an already-seeded fixture db.
+pub fn seed_ghost_runtime(home: &Path) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("ghost-seed runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open ghost-seed store");
+        sqlx::query(
+            "INSERT INTO agent_runtime \
+             (id, workspace_id, daemon_id, provider, runtime_mode, last_seen_at, status) \
+             VALUES (?, ?, 'daemon-ghost', 'ghost', 'local', ?, 'online')",
+        )
+        .bind(GHOST_RUNTIME_ID)
+        .bind(ainb_hangar_daemon::seed::WS_ID)
+        .bind(now)
+        .execute(store.pool())
+        .await
+        .expect("seed ghost runtime");
+        sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('ag-ghost', ?, ?, ?, 'workspace', 'user-1')",
+        )
+        .bind(ainb_hangar_daemon::seed::WS_ID)
+        .bind(GHOST_AGENT_NAME)
+        .bind(GHOST_RUNTIME_ID)
+        .execute(store.pool())
+        .await
+        .expect("seed ghost agent");
+    });
+}
+
+/// Backdate one runtime's heartbeat by `age_ms` relative to now — the sqlite
+/// poke the availability tripwire drives the decay with.
+pub fn backdate_runtime_heartbeat(home: &Path, runtime_id: &str, age_ms: i64) {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("backdate runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir)
+            .await
+            .expect("open backdate store");
+        sqlx::query("UPDATE agent_runtime SET last_seen_at = ? WHERE id = ?")
+            .bind(now - age_ms)
+            .bind(runtime_id)
+            .execute(store.pool())
+            .await
+            .expect("backdate heartbeat");
+    });
+}
+
+/// The PERSISTED liveness status of one runtime — proves the sweeper wrote the
+/// row, not merely that the snapshot derived a value.
+#[must_use]
+pub fn runtime_status(home: &Path, runtime_id: &str) -> Option<String> {
+    let hangar_dir = home.join(".agents-in-a-box");
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime-status runtime");
+    rt.block_on(async {
+        let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.ok()?;
+        sqlx::query_scalar::<_, String>("SELECT status FROM agent_runtime WHERE id = ?")
+            .bind(runtime_id)
+            .fetch_optional(store.pool())
+            .await
+            .ok()
+            .flatten()
+    })
 }
 
 /// A greppable marker embedded in the seeded log line's message, distinctive

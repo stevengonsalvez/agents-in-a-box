@@ -42,7 +42,7 @@ const ACTIVE_TAB_BG: Color = Color::rgb(40, 40, 60);
 /// `Autopilots` shifted down to `3`/`4` to close the hole (e38.38). `Issues`/`Task`
 /// keep their `1`/`2` muscle memory; only the two tabs that sat past the removed
 /// `Agents` slot renumber, and only by one.
-const PRIMARY_TABS: [(char, &str); 15] = [
+const PRIMARY_TABS: [(char, &str); 16] = [
     ('1', "Issues"),
     ('2', "Task"),
     ('3', "Skills"),
@@ -57,6 +57,7 @@ const PRIMARY_TABS: [(char, &str); 15] = [
     ('F', "Fleet"),
     ('S', "Squads"),
     ('P', "Profiles"),
+    ('A', "Agents"),
     (',', "Settings"),
 ];
 
@@ -171,15 +172,25 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
             vec![
                 ("a", "assign"),
                 ("c", "create"),
+                ("s", "sub-issue"),
+                ("d", "done"),
                 ("x", "delete"),
+                ("f", "facets"),
                 ("/", "filter"),
+                ("tab", "chip"),
             ]
         }
-        Screen::TaskDetail(_) => vec![("R", "retry"), ("X", "cancel"), ("x", "delete")],
+        Screen::TaskDetail(_) => vec![
+            ("R", "retry"),
+            ("X", "cancel"),
+            ("x", "delete"),
+            ("a", "criterion"),
+            ("t", "tick"),
+        ],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
-        Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move")],
+        Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move"), ("R", "retry")],
         Screen::Boards => vec![
             ("↵", "run"),
             ("a", "attach"),
@@ -200,7 +211,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::Fleet => vec![
             ("j/k", "sessions"),
             ("b", "broadcast"),
-            ("→/A", "attach"),
+            ("→/a", "attach"),
             ("s/r", "stop/restart"),
         ],
         // The squads screen: create a squad + edit membership + assign an issue
@@ -213,6 +224,9 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         ],
         // The profile editor: navigate the roster + cycle the selected tier (P5).
         Screen::Profiles => vec![("j/k", "profiles"), ("t", "cycle tier")],
+        // The Agents roster: create + delete a named agent (slice 2). The
+        // `[n]/[x]` hints also render on the screen header row.
+        Screen::Agents => vec![("n", "create"), ("x", "delete"), ("j/k", "agents")],
         Screen::Settings => vec![("n", "add key"), ("enter", "switch")],
         // The help overlay only needs the close hint; `?` is already pressed.
         Screen::Help => vec![("esc", "close")],
@@ -251,6 +265,7 @@ const fn tab_is_active(active: &Screen, hotkey: char) -> bool {
         'F' => matches!(active, Screen::Fleet),
         'S' => matches!(active, Screen::Squads),
         'P' => matches!(active, Screen::Profiles),
+        'A' => matches!(active, Screen::Agents),
         ',' => matches!(active, Screen::Settings),
         _ => false,
     }
@@ -338,6 +353,66 @@ mod tests {
         assert!(!tab_is_active(&Screen::AgentPicker(issue), '1'));
     }
 
+    /// #450 HYGIENE: no per-screen footer hint may advertise a char the global
+    /// router (or the host) eats first — such a hint is a lie: pressing it
+    /// navigates away instead of doing what the footer says.
+    ///
+    /// The trailing GLOBAL hints (`^P`, `?`, `q`) are exempt: those ARE the
+    /// reserved keys, advertised by the layer that owns them.
+    ///
+    /// Fails on `main`: the Fleet footer advertised `→/A:attach`, but bare `A`
+    /// switches to the Agents tab.
+    #[test]
+    fn footer_hint_keys_never_collide_with_reserved_router_keys() {
+        use crate::screen::router::is_reserved_key;
+        let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
+        let task = ainb_hangar_core::ids::TaskId::from_str("01HANGARTASK000000000001").unwrap();
+        let screens = [
+            Screen::IssueList,
+            Screen::TaskDetail(task),
+            Screen::AgentPicker(issue),
+            Screen::SkillManager,
+            Screen::Autopilots,
+            Screen::Kanban,
+            Screen::Boards,
+            Screen::DaemonHealth,
+            Screen::Usage,
+            Screen::Logs,
+            Screen::Inbox,
+            Screen::ControlCenter,
+            Screen::Fleet,
+            Screen::Squads,
+            Screen::Profiles,
+            Screen::Agents,
+            Screen::Settings,
+            Screen::Help,
+            Screen::CommandPalette,
+        ];
+        // The globals the footer appends unconditionally — reserved BY DESIGN.
+        let global = [("^P", "search"), ("?", "help"), ("q", "quit")];
+        for active in screens {
+            for hint in footer_hints(&active) {
+                if global.contains(&hint) {
+                    continue;
+                }
+                // A hint key may be a compound label (`j/k`, `→/a`, `enter`);
+                // check every single ASCII char token inside it.
+                for token in hint.0.split('/') {
+                    let mut chars = token.chars();
+                    let (Some(ch), None) = (chars.next(), chars.next()) else {
+                        continue;
+                    };
+                    assert!(
+                        !is_reserved_key(ch),
+                        "{active:?} footer advertises `{}` but `{ch}` is a reserved \
+                         router/host key — the screen never sees it",
+                        hint.0
+                    );
+                }
+            }
+        }
+    }
+
     /// Footer always ends with the global `?:help q:quit` hints regardless of
     /// the active screen.
     #[test]
@@ -364,6 +439,16 @@ mod tests {
         );
     }
 
+    /// The issue-list footer advertises the `f:facets` faceted-filter panel
+    /// keybinding (multica-gap #10) so the panel is discoverable.
+    #[test]
+    fn footer_advertises_facets_on_issue_list() {
+        assert!(
+            footer_hints(&Screen::IssueList).contains(&("f", "facets")),
+            "issue list footer must show f:facets"
+        );
+    }
+
     /// The right cluster yields to the tabs: when there isn't room after the
     /// tabs it is dropped entirely (returns `None`), never overlapping.
     #[test]
@@ -382,10 +467,11 @@ mod tests {
     /// floor is covered by `chrome_renders_at_80x24_floor_without_overflow`.
     #[test]
     fn top_bar_renders_tabs_and_slug() {
-        // Wide enough that the full fourteen-tab strip (P4 added `[B]Boards`, P7
-        // `[S]Squads`, P5 `[P]Profiles` — ~155 cols) AND the right-side
-        // workspace-slug cluster both fit; the tabs win width contention, so a
-        // narrower buffer drops the slug (covered by the 80x24 floor smoke).
+        // Wide enough that the full fifteen-tab strip (P4 added `[B]Boards`, P7
+        // `[S]Squads`, P5 `[P]Profiles`, slice 2 `[A]Agents` — ~168 cols) AND the
+        // right-side workspace-slug cluster both fit; the tabs win width
+        // contention, so a narrower buffer drops the slug (covered by the 80x24
+        // floor smoke).
         let mut buf = WireBuffer::new(200, 24);
         render_top_bar(&mut buf, 200, &Screen::IssueList, "acme", Presence::Online);
         // Reconstruct row 0 text from the wire buffer cells.

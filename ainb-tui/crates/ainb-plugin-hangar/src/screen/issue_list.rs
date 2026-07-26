@@ -24,7 +24,7 @@
 //! the task's issue into In Progress without waiting for an `IssueUpdated`,
 //! because the daemon reports task lifecycle before it rewrites the issue row.
 
-use std::collections::HashMap;
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use ainb_hangar_core::ids::IssueId;
 use ainb_hangar_proto::events::{HangarEvent, IssueRow};
@@ -33,12 +33,13 @@ use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use super::boards::{AgentChip, RepoOption, repo_candidates};
 
-/// The number of status columns the board renders — the five canonical
-/// lifecycle statuses (63l.3). Kept as a single constant so the column enum, the
-/// card-board render, and the per-column scroll offsets stay in lockstep.
+/// The number of status columns the board renders — the seven canonical
+/// lifecycle statuses (63l.3, extended with `blocked` / `cancelled`). Kept as a
+/// single constant so the column enum, the card-board render, and the
+/// per-column scroll offsets stay in lockstep.
 pub(crate) const COLUMN_COUNT: usize = IssueLifecycle::ALL.len();
 
-/// The five status columns issues are bucketed into for display, one per
+/// The seven status columns issues are bucketed into for display, one per
 /// canonical [`IssueLifecycle`] status (63l.3).
 ///
 /// The mapping from the wire `state` string to a column is owned by
@@ -59,6 +60,11 @@ pub enum IssueColumn {
     InReview,
     /// Terminal / closed (`"done"`, legacy `"closed"`).
     Done,
+    /// Work cannot proceed (`"blocked"`) — appended right of Done so every
+    /// pre-existing 0..4 column index stays stable.
+    Blocked,
+    /// Abandoned without completing (`"cancelled"`) — terminal alongside Done.
+    Cancelled,
 }
 
 impl IssueColumn {
@@ -84,6 +90,8 @@ impl IssueColumn {
             IssueLifecycle::InProgress => Self::InProgress,
             IssueLifecycle::InReview => Self::InReview,
             IssueLifecycle::Done => Self::Done,
+            IssueLifecycle::Blocked => Self::Blocked,
+            IssueLifecycle::Cancelled => Self::Cancelled,
         }
     }
 
@@ -103,10 +111,13 @@ impl IssueColumn {
             Self::InProgress => IssueLifecycle::InProgress,
             Self::InReview => IssueLifecycle::InReview,
             Self::Done => IssueLifecycle::Done,
+            Self::Blocked => IssueLifecycle::Blocked,
+            Self::Cancelled => IssueLifecycle::Cancelled,
         }
     }
 
-    /// The five columns in left-to-right display order (`backlog` … `done`).
+    /// The seven columns in left-to-right display order (`backlog` …
+    /// `cancelled`).
     #[must_use]
     pub const fn all() -> [Self; COLUMN_COUNT] {
         [
@@ -115,6 +126,8 @@ impl IssueColumn {
             Self::InProgress,
             Self::InReview,
             Self::Done,
+            Self::Blocked,
+            Self::Cancelled,
         ]
     }
 }
@@ -137,6 +150,10 @@ const fn column_glyph(column: IssueColumn) -> char {
         IssueColumn::InProgress => '◔',
         IssueColumn::InReview => '◑',
         IssueColumn::Done => '●',
+        // BMP, single-cell only — a wide/emoji glyph desyncs the column geometry
+        // the mouse hit-test shares with the paint.
+        IssueColumn::Blocked => '⊘',
+        IssueColumn::Cancelled => '⨯',
     }
 }
 
@@ -176,6 +193,30 @@ impl FilterChip {
         [Self::All, Self::Members, Self::Agents, Self::Mine]
     }
 
+    /// The next chip in display order, wrapping `Mine → All`. Drives the
+    /// `Tab` chip-cycle binding on the Issues screen.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::All => Self::Members,
+            Self::Members => Self::Agents,
+            Self::Agents => Self::Mine,
+            Self::Mine => Self::All,
+        }
+    }
+
+    /// The previous chip in display order, wrapping `All → Mine`. Drives the
+    /// `Shift+Tab` chip-cycle binding on the Issues screen.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::All => Self::Mine,
+            Self::Members => Self::All,
+            Self::Agents => Self::Members,
+            Self::Mine => Self::Agents,
+        }
+    }
+
     /// Whether `row` passes this filter.
     ///
     /// An unassigned row passes only the [`FilterChip::All`] / [`FilterChip::Mine`]
@@ -209,6 +250,424 @@ fn assignee_kind(row: &IssueRow) -> Option<ActorKind> {
     }
 }
 
+/// Seven days in epoch milliseconds — the width of the [`DateFacet::DueSoon`]
+/// window (deadline within a week from `now`).
+const SEVEN_DAYS_MS: i64 = 7 * 24 * 60 * 60 * 1000;
+
+/// The structured facet dimensions the filter panel narrows on (multica-gap #10).
+///
+/// Mirrors `issueTableQuerySpec.Filters`: status, priority, label, assignee kind,
+/// due date — the five sections the panel cycles left-to-right, and the key
+/// `facet_counts` / `FacetFilters` dispatch on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FacetKind {
+    /// The lifecycle status facet (`todo` / `in_progress` / …).
+    Status,
+    /// The priority facet (P0..P3).
+    Priority,
+    /// The label facet (exact label names).
+    Label,
+    /// The assignee-kind facet (member / agent / unassigned).
+    Assignee,
+    /// The due-date bucket facet (overdue / due soon / no due date).
+    Due,
+}
+
+impl FacetKind {
+    /// The five facet sections in panel display order.
+    pub const ALL: [Self; 5] = [
+        Self::Status,
+        Self::Priority,
+        Self::Label,
+        Self::Assignee,
+        Self::Due,
+    ];
+
+    /// The section header rendered on the panel's left rail.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Status => "Status",
+            Self::Priority => "Priority",
+            Self::Label => "Label",
+            Self::Assignee => "Assignee",
+            Self::Due => "Due",
+        }
+    }
+
+    /// The next section in display order (wraps `Due → Status`) — drives the
+    /// panel's `Right` / `Tab` section switch.
+    #[must_use]
+    pub const fn next(self) -> Self {
+        match self {
+            Self::Status => Self::Priority,
+            Self::Priority => Self::Label,
+            Self::Label => Self::Assignee,
+            Self::Assignee => Self::Due,
+            Self::Due => Self::Status,
+        }
+    }
+
+    /// The previous section in display order (wraps `Status → Due`) — drives the
+    /// panel's `Left` / `Shift+Tab` section switch.
+    #[must_use]
+    pub const fn prev(self) -> Self {
+        match self {
+            Self::Status => Self::Due,
+            Self::Priority => Self::Status,
+            Self::Label => Self::Priority,
+            Self::Assignee => Self::Label,
+            Self::Due => Self::Assignee,
+        }
+    }
+}
+
+/// The assignee-kind facet value (multica-gap #10).
+///
+/// Supersedes the legacy `Members`/`Agents` chips as a proper facet dimension
+/// (they still coexist; both predicates AND). `Unassigned` matches a row whose
+/// `assignee` is `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum AssigneeFacet {
+    /// Assigned to a human member (`member:*`).
+    Member,
+    /// Assigned to an agent (`agent:*`).
+    Agent,
+    /// No assignee.
+    Unassigned,
+}
+
+impl AssigneeFacet {
+    /// The facet value display label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Member => "Member",
+            Self::Agent => "Agent",
+            Self::Unassigned => "Unassigned",
+        }
+    }
+
+    /// The compact token used in the closed-panel active-facet summary chip.
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Member => "member",
+            Self::Agent => "agent",
+            Self::Unassigned => "none",
+        }
+    }
+
+    /// Classify a row's assignee into its facet bucket.
+    fn of_row(row: &IssueRow) -> Self {
+        match assignee_kind(row) {
+            Some(ActorKind::Member) => Self::Member,
+            Some(ActorKind::Agent) => Self::Agent,
+            None => Self::Unassigned,
+        }
+    }
+}
+
+/// The due-date bucket facet value (a simplified `Date{Field=due,Start,End}`).
+///
+/// Single-select: [`FacetFilters::date`] is `Option<DateFacet>`, and a row falls
+/// into at most one bucket at a given `now`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum DateFacet {
+    /// `due_date < now` — past its deadline.
+    Overdue,
+    /// `now <= due_date <= now + 7d` — due within a week.
+    DueSoon,
+    /// `due_date` is `None` — no deadline set.
+    NoDueDate,
+}
+
+impl DateFacet {
+    /// The three buckets in panel display order.
+    pub const ALL: [Self; 3] = [Self::Overdue, Self::DueSoon, Self::NoDueDate];
+
+    /// The facet value display label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Overdue => "Overdue",
+            Self::DueSoon => "Due soon",
+            Self::NoDueDate => "No due date",
+        }
+    }
+
+    /// The compact token used in the closed-panel active-facet summary chip.
+    const fn token(self) -> &'static str {
+        match self {
+            Self::Overdue => "overdue",
+            Self::DueSoon => "due-soon",
+            Self::NoDueDate => "no-due",
+        }
+    }
+
+    /// The bucket `row` falls into at `now_ms`, or `None` when it has a future
+    /// deadline outside the week-long [`Self::DueSoon`] window.
+    const fn bucket_of(row: &IssueRow, now_ms: i64) -> Option<Self> {
+        match row.due_date {
+            None => Some(Self::NoDueDate),
+            Some(due) if due < now_ms => Some(Self::Overdue),
+            Some(due) if due <= now_ms.saturating_add(SEVEN_DAYS_MS) => Some(Self::DueSoon),
+            Some(_) => None,
+        }
+    }
+
+    /// Whether `row` falls into this bucket at `now_ms`.
+    fn accepts(self, row: &IssueRow, now_ms: i64) -> bool {
+        Self::bucket_of(row, now_ms) == Some(self)
+    }
+}
+
+/// The priority label (`P0`..`P3`) for a wire priority scalar (`0..3` = P3..P0,
+/// HIGHER = MORE URGENT). Clamped so an out-of-range scalar never panics.
+fn priority_label(priority: i64) -> String {
+    format!("P{}", (3 - priority).clamp(0, 3))
+}
+
+/// One selectable value in a facet section (multica-gap #10).
+///
+/// The tagged union the panel cursor points at and [`FacetFilters::toggle`]
+/// flips. `Ord` (deterministic) so the per-value count map iterates stably for
+/// snapshots.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub enum FacetValue {
+    /// A lifecycle status value.
+    Status(IssueLifecycle),
+    /// A priority value (`0..3` = P3..P0).
+    Priority(i64),
+    /// A label name.
+    Label(String),
+    /// An assignee-kind value.
+    Assignee(AssigneeFacet),
+    /// A due-date bucket value.
+    Due(DateFacet),
+}
+
+impl FacetValue {
+    /// The facet section this value belongs to.
+    #[must_use]
+    pub const fn kind(&self) -> FacetKind {
+        match self {
+            Self::Status(_) => FacetKind::Status,
+            Self::Priority(_) => FacetKind::Priority,
+            Self::Label(_) => FacetKind::Label,
+            Self::Assignee(_) => FacetKind::Assignee,
+            Self::Due(_) => FacetKind::Due,
+        }
+    }
+
+    /// The value's display label (`Todo`, `P0`, `bug`, `Member`, `Overdue`).
+    #[must_use]
+    pub fn label(&self) -> String {
+        match self {
+            Self::Status(s) => s.label().to_string(),
+            Self::Priority(p) => priority_label(*p),
+            Self::Label(l) => l.clone(),
+            Self::Assignee(a) => a.label().to_string(),
+            Self::Due(d) => d.label().to_string(),
+        }
+    }
+}
+
+/// The structured facet selection layered ON TOP OF the assignee chip + `/` query.
+///
+/// Mirrors multica `issueTableQuerySpec.Filters`. OR within a facet, AND across
+/// facets: a row passes iff — for every NON-EMPTY facet — it matches at least one
+/// selected value in that facet. An empty facet imposes no constraint.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FacetFilters {
+    /// Selected lifecycle statuses. Empty = all.
+    pub statuses: BTreeSet<IssueLifecycle>,
+    /// Selected priorities (`0..3` = P3..P0). Empty = all.
+    pub priorities: BTreeSet<i64>,
+    /// Selected label names (exact, case-sensitive as stored). Empty = all.
+    pub labels: BTreeSet<String>,
+    /// Selected assignee kinds. Empty = all.
+    pub assignees: BTreeSet<AssigneeFacet>,
+    /// Selected due-date bucket. `None` = all (no date constraint).
+    pub date: Option<DateFacet>,
+}
+
+impl FacetFilters {
+    /// Whether NO facet is selected (the panel imposes no narrowing).
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.statuses.is_empty()
+            && self.priorities.is_empty()
+            && self.labels.is_empty()
+            && self.assignees.is_empty()
+            && self.date.is_none()
+    }
+
+    /// Whether `row` passes every non-empty facet (OR within, AND across).
+    fn accepts(&self, row: &IssueRow, now_ms: i64) -> bool {
+        if !self.statuses.is_empty()
+            && !self.statuses.contains(&IssueLifecycle::for_state(&row.state))
+        {
+            return false;
+        }
+        if !self.priorities.is_empty() && !self.priorities.contains(&row.priority) {
+            return false;
+        }
+        if !self.labels.is_empty() && !row.labels.iter().any(|l| self.labels.contains(l)) {
+            return false;
+        }
+        if !self.assignees.is_empty() && !self.assignees.contains(&AssigneeFacet::of_row(row)) {
+            return false;
+        }
+        if let Some(date) = self.date {
+            if !date.accepts(row, now_ms) {
+                return false;
+            }
+        }
+        true
+    }
+
+    /// Flip one value's membership in its facet set. The due facet is
+    /// single-select (toggling the active bucket clears it; a different bucket
+    /// replaces it).
+    fn toggle(&mut self, value: &FacetValue) {
+        match value {
+            FacetValue::Status(s) => flip(&mut self.statuses, *s),
+            FacetValue::Priority(p) => flip(&mut self.priorities, *p),
+            FacetValue::Label(l) => {
+                if !self.labels.remove(l) {
+                    self.labels.insert(l.clone());
+                }
+            }
+            FacetValue::Assignee(a) => flip(&mut self.assignees, *a),
+            FacetValue::Due(d) => {
+                self.date = if self.date == Some(*d) {
+                    None
+                } else {
+                    Some(*d)
+                };
+            }
+        }
+    }
+
+    /// Whether `value` is currently selected.
+    #[must_use]
+    pub fn contains(&self, value: &FacetValue) -> bool {
+        match value {
+            FacetValue::Status(s) => self.statuses.contains(s),
+            FacetValue::Priority(p) => self.priorities.contains(p),
+            FacetValue::Label(l) => self.labels.contains(l),
+            FacetValue::Assignee(a) => self.assignees.contains(a),
+            FacetValue::Due(d) => self.date == Some(*d),
+        }
+    }
+
+    /// Blank out one facet section's own selection — used to compute the
+    /// drill-down counts for that section (multica: a facet's option counts are
+    /// against the set filtered by all OTHER facets).
+    fn without_kind(&self, kind: FacetKind) -> Self {
+        let mut probe = self.clone();
+        match kind {
+            FacetKind::Status => probe.statuses.clear(),
+            FacetKind::Priority => probe.priorities.clear(),
+            FacetKind::Label => probe.labels.clear(),
+            FacetKind::Assignee => probe.assignees.clear(),
+            FacetKind::Due => probe.date = None,
+        }
+        probe
+    }
+
+    /// A compact single-line summary of the active facets for the closed-panel
+    /// chip (`⛃ status:todo priority:P0 label:bug`), or `None` when nothing is
+    /// selected. Values inside a facet are `/`-joined (the OR-within reading).
+    #[must_use]
+    pub fn summary(&self) -> Option<String> {
+        if self.is_empty() {
+            return None;
+        }
+        let mut parts: Vec<String> = Vec::new();
+        if !self.statuses.is_empty() {
+            let vals = self.statuses.iter().map(|s| s.as_str()).collect::<Vec<_>>();
+            parts.push(format!("status:{}", vals.join("/")));
+        }
+        if !self.priorities.is_empty() {
+            // Highest urgency first (P0 before P3) in the summary too.
+            let vals = self.priorities.iter().rev().map(|p| priority_label(*p)).collect::<Vec<_>>();
+            parts.push(format!("priority:{}", vals.join("/")));
+        }
+        if !self.labels.is_empty() {
+            let vals = self.labels.iter().cloned().collect::<Vec<_>>();
+            parts.push(format!("label:{}", vals.join("/")));
+        }
+        if !self.assignees.is_empty() {
+            let vals = self.assignees.iter().map(|a| a.token()).collect::<Vec<_>>();
+            parts.push(format!("assignee:{}", vals.join("/")));
+        }
+        if let Some(date) = self.date {
+            parts.push(format!("due:{}", date.token()));
+        }
+        Some(format!("⛃ {}", parts.join(" ")))
+    }
+}
+
+/// Flip `value`'s membership in `set` (remove if present, else insert).
+fn flip<T: Ord + Clone>(set: &mut BTreeSet<T>, value: T) {
+    if !set.remove(&value) {
+        set.insert(value);
+    }
+}
+
+/// The values a row contributes to one facet section (for the drill-down count
+/// tally). A row contributes to EACH of its labels; to at most one due bucket;
+/// to exactly one status/priority/assignee value.
+fn facet_values_of_row(kind: FacetKind, row: &IssueRow, now_ms: i64) -> Vec<FacetValue> {
+    match kind {
+        FacetKind::Status => vec![FacetValue::Status(IssueLifecycle::for_state(&row.state))],
+        FacetKind::Priority => vec![FacetValue::Priority(row.priority)],
+        FacetKind::Label => row.labels.iter().map(|l| FacetValue::Label(l.clone())).collect(),
+        FacetKind::Assignee => vec![FacetValue::Assignee(AssigneeFacet::of_row(row))],
+        FacetKind::Due => DateFacet::bucket_of(row, now_ms)
+            .map(|d| vec![FacetValue::Due(d)])
+            .unwrap_or_default(),
+    }
+}
+
+/// The open filter-panel's transient cursor (multica-gap #10).
+///
+/// Which facet section is active and which value row the cursor points at. Lives
+/// on [`IssueListState`] only while the panel is open
+/// ([`IssueListMode::FilterPanel`]).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FilterPanelState {
+    /// The active (focused) facet section.
+    section: FacetKind,
+    /// The cursor row within the active section's value list.
+    cursor: usize,
+}
+
+impl Default for FilterPanelState {
+    /// A fresh panel: Status section, cursor on the first value.
+    fn default() -> Self {
+        Self {
+            section: FacetKind::Status,
+            cursor: 0,
+        }
+    }
+}
+
+impl FilterPanelState {
+    /// The active facet section.
+    #[must_use]
+    pub const fn section(&self) -> FacetKind {
+        self.section
+    }
+
+    /// The cursor row within the active section.
+    #[must_use]
+    pub const fn cursor(&self) -> usize {
+        self.cursor
+    }
+}
+
 /// Whether the screen is in normal navigation, filter-text-entry, or
 /// the staged create-wizard mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -237,6 +696,12 @@ pub enum IssueListMode {
     /// is captured. Entered from the plugin glue on the daemon's active-tasks
     /// delete rejection, never directly by a key press.
     ConfirmCancelDelete,
+    /// `f` faceted-filter panel (multica-gap #10): a modal overlay
+    /// ([`IssueListState::filter_panel`]) for selecting structured status /
+    /// priority / label / assignee / due facets. Arrow/`hjkl` navigate,
+    /// Space/Enter toggle the value under the cursor, `C` clears, Esc/`f` close
+    /// (the applied facets REMAIN applied); every other key is captured.
+    FilterPanel,
 }
 
 /// The target of an open `x` delete-confirm overlay (63d): the issue id the
@@ -288,6 +753,39 @@ pub enum WizardKey {
 pub enum WizardRow {
     /// The issue title text row (REQUIRED — a blank title blocks create).
     Title,
+    /// The multi-line brief text row (OPTIONAL): free-form task description that
+    /// becomes `issue.description` and, via `build_prompt`, the `claude -p`
+    /// prompt. Enter here inserts a NEWLINE (never fires create); printable chars
+    /// append, Backspace edits. A `/name` typed in it reaches the agent verbatim.
+    Brief,
+    /// The linked-issue text row (OPTIONAL, single-line): a free-form upstream
+    /// reference (a URL or `owner/repo#123`) stored as `issue.external_ref` for
+    /// traceability and appended to the dispatched brief. Enter here commits like
+    /// the other single-line rows; blank is fine.
+    Link,
+    /// The multi-line acceptance-criteria row (OPTIONAL): each non-blank line is
+    /// one criterion, stored as `issue.acceptance_criteria` (migration 0048).
+    /// Enter here inserts a NEWLINE (like `Brief`); printable chars append,
+    /// Backspace edits.
+    Acceptance,
+    /// The multi-line context-references row (OPTIONAL): each non-blank line is one
+    /// reference (URL / `owner/repo#123` / note), stored as `issue.context_refs`
+    /// (migration 0048). Enter here inserts a NEWLINE (like `Brief`).
+    Context,
+    /// The priority PICKER row (←/→ cycle `0..3`, wrapping; migration 0014).
+    /// The wire scale is HIGHER = MORE URGENT, so `0` is P3 (routine, the
+    /// default) and `3` is P0. Typing / Backspace are ignored here, exactly like
+    /// `Agent`.
+    Priority,
+    /// The due-date text row (OPTIONAL, single-line): a `YYYY-MM-DD` calendar day
+    /// parsed at UTC midnight into `issue.due_date` (migration 0014). Blank = no
+    /// deadline; an unparseable buffer paints red and BLOCKS create (focus jumps
+    /// back here) rather than silently dropping the date.
+    Due,
+    /// The labels text row (OPTIONAL, single-line): comma-separated label NAMES,
+    /// each resolve-or-created in the workspace and joined to the new issue
+    /// (migration 0016). Blanks and repeats are dropped.
+    Labels,
     /// The repo picker row (REQUIRED — `@` fuzzy dropdown or ←/→ cycle; a
     /// repo-less create is impossible).
     Repo,
@@ -300,10 +798,18 @@ pub enum WizardRow {
 }
 
 impl WizardRow {
-    /// The rows in render / focus-cycle order (Title → Repo → Source → Target →
-    /// Agent).
-    pub const ALL: [Self; 5] = [
+    /// The rows in render / focus-cycle order: the issue's own attributes first
+    /// (Title → Brief → Link → Acceptance → Context → Priority → Due → Labels),
+    /// then the dispatch tail (Repo → Source → Target → Agent).
+    pub const ALL: [Self; 12] = [
         Self::Title,
+        Self::Brief,
+        Self::Link,
+        Self::Acceptance,
+        Self::Context,
+        Self::Priority,
+        Self::Due,
+        Self::Labels,
         Self::Repo,
         Self::Source,
         Self::Target,
@@ -314,6 +820,24 @@ impl WizardRow {
     fn index(self) -> usize {
         Self::ALL.iter().position(|r| *r == self).unwrap_or(0)
     }
+}
+
+/// One NAMED workspace agent the create wizard's Agent row can target (V3-F3).
+///
+/// Injected by the glue from the same `hangar/agents_list` snapshot the `a`
+/// assign picker uses (agent actors only — members are filtered out). `actor_ref`
+/// is the canonical `agent:<id>` form persisted as the new issue's assignee and
+/// carried as the run's assignee override, so the dispatch routes to THIS agent
+/// (not the alphabetically-first fallback). `label` is the display name.
+///
+/// When the roster is empty (a workspace with no named agents yet) the Agent row
+/// falls back to the [`AgentChip`] provider chips, so a create is never blocked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WizardAgent {
+    /// Canonical `agent:<id>` reference (the assignee wire form).
+    pub actor_ref: String,
+    /// Human-readable agent name shown on the row.
+    pub label: String,
 }
 
 /// The Issues create wizard (Phase 5): a single centered form showing every field
@@ -332,6 +856,31 @@ pub struct CreateWizard {
     focus: WizardRow,
     /// The title typed so far (REQUIRED — trimmed-blank blocks create).
     title: String,
+    /// The multi-line brief typed so far (OPTIONAL): free text with embedded
+    /// newlines, carried through to `issue.description`. Blank is allowed.
+    brief: String,
+    /// The single-line linked-issue reference typed so far (OPTIONAL): a URL or
+    /// `owner/repo#123` carried through to `issue.external_ref`. Blank is allowed.
+    link: String,
+    /// The multi-line acceptance-criteria buffer (OPTIONAL): free text with
+    /// embedded newlines; each non-blank line becomes one `issue.acceptance_criteria`
+    /// element (migration 0048). Blank is allowed.
+    acceptance: String,
+    /// The multi-line context-references buffer (OPTIONAL): free text with embedded
+    /// newlines; each non-blank line becomes one `issue.context_refs` element
+    /// (migration 0048). Blank is allowed.
+    context: String,
+    /// The picked urgency on the wire scale `0..3` (P3..P0, HIGHER = MORE
+    /// URGENT; migration 0014). Defaults to `0` (P3), the schema default, so an
+    /// untouched wizard creates exactly what it did before this row existed.
+    priority: i64,
+    /// The single-line due-date buffer (OPTIONAL): a `YYYY-MM-DD` calendar day
+    /// converted to epoch ms at UTC midnight for `issue.due_date`. Blank = no
+    /// deadline; an unparseable value BLOCKS create rather than being dropped.
+    due: String,
+    /// The single-line labels buffer (OPTIONAL): comma-separated label names
+    /// attached through the 0016 join at create. Blank is allowed.
+    labels: String,
     /// The picked repo's wire ref, or `None` until one is chosen (REQUIRED).
     repo_ref: Option<String>,
     /// The post-`@` fuzzy query filtering the repo dropdown.
@@ -344,6 +893,16 @@ pub struct CreateWizard {
     target_branch: String,
     /// The highlighted agent chip (index into [`AgentChip::ALL`]).
     agent_cursor: usize,
+    /// 0046 sub-issues: when the wizard was opened as an "add sub-issue" (`s` on a
+    /// highlighted row, or the context-menu `Add sub-issue`), the parent issue's
+    /// wire id, carried into the `hangar/issue_create` payload so the daemon links
+    /// the new issue as a child. `None` = a top-level issue (the plain `c` create).
+    /// Never user-typed: it is only ever pre-bound from the highlighted row.
+    parent_issue_id: Option<String>,
+    /// The parent issue's human display (its `HGR-<n>` id + title) shown in the
+    /// read-only `Sub-issue of …` banner atop the wizard. Set iff `parent_issue_id`
+    /// is set.
+    parent_display: Option<String>,
 }
 
 impl Default for CreateWizard {
@@ -353,12 +912,21 @@ impl Default for CreateWizard {
         Self {
             focus: WizardRow::Title,
             title: String::new(),
+            brief: String::new(),
+            link: String::new(),
+            acceptance: String::new(),
+            context: String::new(),
+            priority: 0,
+            due: String::new(),
+            labels: String::new(),
             repo_ref: None,
             repo_query: String::new(),
             repo_dropdown: None,
             source_branch: "main".to_string(),
             target_branch: "main".to_string(),
             agent_cursor: 0,
+            parent_issue_id: None,
+            parent_display: None,
         }
     }
 }
@@ -374,6 +942,67 @@ impl CreateWizard {
     #[must_use]
     pub fn title(&self) -> &str {
         &self.title
+    }
+
+    /// The multi-line brief typed so far (may contain embedded newlines; may be
+    /// empty).
+    #[must_use]
+    pub fn brief(&self) -> &str {
+        &self.brief
+    }
+
+    /// The single-line linked-issue reference typed so far (may be empty).
+    #[must_use]
+    pub fn link(&self) -> &str {
+        &self.link
+    }
+
+    /// The multi-line acceptance-criteria buffer typed so far (may contain embedded
+    /// newlines; may be empty).
+    #[must_use]
+    pub fn acceptance(&self) -> &str {
+        &self.acceptance
+    }
+
+    /// The multi-line context-references buffer typed so far (may contain embedded
+    /// newlines; may be empty).
+    #[must_use]
+    pub fn context(&self) -> &str {
+        &self.context
+    }
+
+    /// The picked urgency on the wire scale `0..3` (P3..P0, HIGHER = MORE
+    /// URGENT). `0` on an untouched wizard.
+    #[must_use]
+    pub const fn priority(&self) -> i64 {
+        self.priority
+    }
+
+    /// The raw due-date buffer typed so far (a `YYYY-MM-DD` calendar day; may be
+    /// empty, and may be mid-typing and therefore unparseable).
+    #[must_use]
+    pub fn due(&self) -> &str {
+        &self.due
+    }
+
+    /// The raw comma-separated labels buffer typed so far (may be empty).
+    #[must_use]
+    pub fn labels(&self) -> &str {
+        &self.labels
+    }
+
+    /// The parent issue's wire id when this wizard is an "add sub-issue" (`s` /
+    /// context-menu `Add sub-issue`), else `None` (a top-level `c` create).
+    #[must_use]
+    pub fn parent_issue_id(&self) -> Option<&str> {
+        self.parent_issue_id.as_deref()
+    }
+
+    /// The parent issue's human display for the `Sub-issue of …` banner, set iff
+    /// [`Self::parent_issue_id`] is set.
+    #[must_use]
+    pub fn parent_display(&self) -> Option<&str> {
+        self.parent_display.as_deref()
     }
 
     /// The picked repo ref, or `None` until one is chosen.
@@ -441,6 +1070,11 @@ pub struct IssueListState {
     /// (favorites-first + recency order preserved). `scratch` is NOT in here —
     /// [`repo_candidates`] prepends it always.
     repos: Vec<RepoOption>,
+    /// The NAMED workspace-agent roster the wizard's Agent row cycles (V3-F3),
+    /// injected by the glue from the same `hangar/agents_list` snapshot the `a`
+    /// assign picker uses (agent actors only). Empty on a workspace with no named
+    /// agents, in which case the Agent row falls back to the provider chips.
+    agents: Vec<WizardAgent>,
     /// A transient status note (create/run dispatch feedback or failure),
     /// rendered on the bottom row and replaced by the next note / cleared when a
     /// new wizard opens. Errors surface HERE, never silently dropped.
@@ -465,6 +1099,16 @@ pub struct IssueListState {
     /// [`IssueListMode::ConfirmCancelDelete`] (armed by the plugin glue when a
     /// delete is refused for active tasks). `None` otherwise.
     confirm_cancel_delete: Option<PendingDelete>,
+    /// The structured facet selection (multica-gap #10) layered on top of the
+    /// chip + `/` query. Empty by default (no narrowing).
+    facets: FacetFilters,
+    /// The wall-clock the date facet evaluates against (epoch ms), seeded by the
+    /// render glue's clock ([`set_now_ms`](Self::set_now_ms)). `0` on a fresh
+    /// state; the reducer stays pure by reading this field rather than a clock.
+    now_ms: i64,
+    /// The open `f` facet-panel cursor, set while `mode` is
+    /// [`IssueListMode::FilterPanel`]. `None` otherwise.
+    filter_panel: Option<FilterPanelState>,
 }
 
 impl Default for IssueListState {
@@ -478,12 +1122,16 @@ impl Default for IssueListState {
             mode: IssueListMode::Normal,
             wizard: None,
             repos: Vec::new(),
+            agents: Vec::new(),
             note: None,
             task_issue: HashMap::new(),
             scroll_offsets: [0; COLUMN_COUNT],
             hovered_id: None,
             confirm_delete: None,
             confirm_cancel_delete: None,
+            facets: FacetFilters::default(),
+            now_ms: 0,
+            filter_panel: None,
         }
     }
 }
@@ -521,7 +1169,38 @@ impl IssueListState {
                 | IssueListMode::CreateInput
                 | IssueListMode::ConfirmDelete
                 | IssueListMode::ConfirmCancelDelete
+                | IssueListMode::FilterPanel
         )
+    }
+
+    /// The structured facet selection (multica-gap #10).
+    #[must_use]
+    pub const fn facets(&self) -> &FacetFilters {
+        &self.facets
+    }
+
+    /// The open `f` facet-panel cursor, or `None` when the panel is closed — the
+    /// renderer draws the overlay from this.
+    #[must_use]
+    pub const fn filter_panel(&self) -> Option<&FilterPanelState> {
+        self.filter_panel.as_ref()
+    }
+
+    /// Seed the wall-clock the date facet evaluates against (epoch ms), from the
+    /// render glue's clock. Keeps the reducer pure — it reads this field rather
+    /// than calling a clock itself.
+    pub const fn set_now_ms(&mut self, now_ms: i64) {
+        self.now_ms = now_ms;
+    }
+
+    /// Close the `f` facet panel (Esc / `f`): drop the overlay and return to
+    /// normal navigation in one press. The APPLIED facets REMAIN applied (closing
+    /// the picker is not clearing it). A no-op when the panel is not open.
+    pub fn abort_filter_panel(&mut self) {
+        if self.mode == IssueListMode::FilterPanel {
+            self.mode = IssueListMode::Normal;
+            self.filter_panel = None;
+        }
     }
 
     /// Abort the create wizard (Esc): drop the WHOLE staged overlay — whatever
@@ -657,6 +1336,19 @@ impl IssueListState {
         self.repos = repos;
     }
 
+    /// Inject the NAMED workspace-agent roster the wizard's Agent row targets
+    /// (V3-F3), from the glue's cached `hangar/agents_list` snapshot (agent actors
+    /// only). Empty leaves the Agent row on the provider-chip fallback.
+    pub fn set_agents(&mut self, agents: Vec<WizardAgent>) {
+        self.agents = agents;
+    }
+
+    /// The NAMED workspace-agent roster the wizard's Agent row cycles (V3-F3).
+    #[must_use]
+    pub fn agents(&self) -> &[WizardAgent] {
+        &self.agents
+    }
+
     /// The transient status note (dispatch feedback / failure), if any.
     #[must_use]
     pub fn note(&self) -> Option<&str> {
@@ -670,12 +1362,83 @@ impl IssueListState {
         self.note = Some(note.into());
     }
 
-    /// Iterate the rows passing the active chip + query, in daemon order.
+    /// Iterate the rows passing the active chip + query + facets, in daemon
+    /// order. Because `rows_in_column` / `board_columns` / `column_count` all
+    /// derive from THIS, the column-header `(N)` counts reflect the facets for
+    /// free (multica-gap #10).
     pub fn visible_rows(&self) -> impl Iterator<Item = &IssueRow> {
         let q = self.query.to_lowercase();
+        let now = self.now_ms;
         self.rows.iter().filter(move |r| {
-            self.filter.accepts(r) && (q.is_empty() || r.title.to_lowercase().contains(&q))
+            self.filter.accepts(r)
+                && (q.is_empty() || r.title.to_lowercase().contains(&q))
+                && self.facets.accepts(r, now)
         })
+    }
+
+    /// Per-value counts for one facet section (multica `ListIssueTableFacets`),
+    /// computed against the rows passing the chip + query + ALL OTHER facets (but
+    /// NOT this section's own selection) — drill-down count semantics, so a user
+    /// sees "if I also pick this value, I get N more". Only values with count > 0
+    /// are returned. Deterministically ordered: status by lifecycle order, labels
+    /// alphabetically, assignee/due by their display order, priority MOST-URGENT
+    /// FIRST (P0 before P3). This backs the panel's per-value counts.
+    #[must_use]
+    pub fn facet_counts(&self, kind: FacetKind) -> Vec<(FacetValue, usize)> {
+        let probe = self.facets.without_kind(kind);
+        let q = self.query.to_lowercase();
+        let now = self.now_ms;
+        let mut tally: BTreeMap<FacetValue, usize> = BTreeMap::new();
+        for row in self.rows.iter().filter(|r| {
+            self.filter.accepts(r)
+                && (q.is_empty() || r.title.to_lowercase().contains(&q))
+                && probe.accepts(r, now)
+        }) {
+            for value in facet_values_of_row(kind, row, now) {
+                *tally.entry(value).or_insert(0) += 1;
+            }
+        }
+        let mut out: Vec<(FacetValue, usize)> = tally.into_iter().collect();
+        // Priority renders most-urgent-first (P0 before P3): reverse the natural
+        // ascending-i64 `BTreeMap` order. All entries are `Priority(_)` here, so
+        // reversing the whole vec is safe.
+        if kind == FacetKind::Priority {
+            out.reverse();
+        }
+        out
+    }
+
+    /// Build the render snapshot for the `f` facet panel (multica-gap #10): every
+    /// facet section with its in-scope value rows (`[x]` selection + drill-down
+    /// count), the active section flagged, and the cursor index carried on the
+    /// active section only. Zero-count values are already omitted by
+    /// [`facet_counts`](Self::facet_counts).
+    #[must_use]
+    pub fn facet_panel_sections(&self) -> Vec<crate::widgets::facet_panel::FacetSectionView> {
+        use crate::widgets::facet_panel::{FacetSectionView, FacetValueRow};
+        let active = self.filter_panel.as_ref().map(|p| p.section);
+        let cursor = self.filter_panel.as_ref().map(|p| p.cursor);
+        FacetKind::ALL
+            .into_iter()
+            .map(|kind| {
+                let is_active = active == Some(kind);
+                let values = self
+                    .facet_counts(kind)
+                    .into_iter()
+                    .map(|(value, count)| FacetValueRow {
+                        label: value.label(),
+                        count,
+                        selected: self.facets.contains(&value),
+                    })
+                    .collect();
+                FacetSectionView {
+                    label: kind.label().to_string(),
+                    active: is_active,
+                    values,
+                    cursor: if is_active { cursor } else { None },
+                }
+            })
+            .collect()
     }
 
     /// Iterate the visible rows that fall into `column`, in daemon order.
@@ -719,6 +1482,11 @@ impl IssueListState {
                             assignee_initial: r.assignee.as_deref().and_then(|a| {
                                 a.split_once(':').map_or(a, |(_, id)| id).chars().next()
                             }),
+                            linked: r.external_ref.as_deref().is_some_and(|e| !e.trim().is_empty()),
+                            // 0046: the sub-issue roll-up, so a PARENT card shows a
+                            // `⊟ done/total` badge that flips to gold `1/1` when its
+                            // last child completes. `None` for a childless issue.
+                            subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
                         })
                         .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
@@ -891,13 +1659,15 @@ impl IssueListState {
 
     /// Select the row whose issue id matches `id` (e38.13 command-palette jump).
     ///
-    /// Resets the chip filter to `All` and clears the query first so the target is
-    /// guaranteed visible (a search hit may live under any state, and the active
-    /// filter could otherwise hide it), then points the selection at its visible
-    /// index. A no-op when no cached row carries that id (a stale palette hit).
+    /// Resets the chip filter to `All`, clears the query, AND clears the facets
+    /// first so the target is guaranteed visible (a search hit may live under any
+    /// state / priority / label, and an active facet could otherwise hide it),
+    /// then points the selection at its visible index. A no-op when no cached row
+    /// carries that id (a stale palette hit).
     pub fn select_by_id(&mut self, id: &str) {
         self.filter = FilterChip::All;
         self.query.clear();
+        self.facets = FacetFilters::default();
         let idx = self.visible_rows().position(|r| r.id.as_str() == id);
         if let Some(idx) = idx {
             self.selected = idx;
@@ -917,6 +1687,23 @@ impl IssueListState {
             self.selected = 0;
         } else if self.selected >= len {
             self.selected = len - 1;
+        }
+    }
+
+    /// Clamp the open panel's cursor into its active section's value list after a
+    /// facet toggle shrank the in-scope value set (a drilled-down section can
+    /// drop options). A no-op when the panel is closed.
+    fn clamp_panel_cursor(&mut self) {
+        let Some(section) = self.filter_panel.as_ref().map(|p| p.section) else {
+            return;
+        };
+        let len = self.facet_counts(section).len();
+        if let Some(panel) = self.filter_panel.as_mut() {
+            panel.cursor = if len == 0 {
+                0
+            } else {
+                panel.cursor.min(len - 1)
+            };
         }
     }
 }
@@ -941,8 +1728,39 @@ pub enum IssueListEvent {
     Wizard(WizardKey),
     /// The active filter chip was changed.
     SetFilter(FilterChip),
+    /// A structured navigation key for the open `f` facet panel (multica-gap
+    /// #10): arrows / toggle / clear / close. Ignored when no panel is open.
+    Panel(PanelKey),
+    /// Flip one value in one facet set (multica-gap #10). Raised by the panel's
+    /// Space/Enter on the value under the cursor; usable directly by tests.
+    ToggleFacet(FacetKind, FacetValue),
+    /// Clear ALL facet selections (the panel's `C` "clear all", multica-gap #10).
+    ClearFacets,
     /// A domain event arrived on the subscribed stream.
     Event(HangarEvent),
+}
+
+/// A structured key folded into the open `f` facet panel (multica-gap #10).
+///
+/// The panel needs arrows (which a plain `char` can't carry) and a Space/Enter
+/// toggle, so — like the create wizard's [`WizardKey`] — the router maps the raw
+/// key vocabulary onto these before handing them to the reducer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PanelKey {
+    /// Move the value cursor up (`Up` / `k`).
+    Up,
+    /// Move the value cursor down (`Down` / `j`).
+    Down,
+    /// Switch to the previous facet section (`Left` / `Shift+Tab` / `h`).
+    Left,
+    /// Switch to the next facet section (`Right` / `Tab` / `l`).
+    Right,
+    /// Toggle the value under the cursor (`Space` / `Enter`).
+    Toggle,
+    /// Clear all facet selections (`C`).
+    Clear,
+    /// Close the panel, keeping the applied facets (`Esc` / `f`).
+    Close,
 }
 
 /// A side-effect the plugin glue performs after an issue-list [`reduce_issue_list`].
@@ -964,6 +1782,33 @@ pub enum IssueListIntent {
     CreateAndRun {
         /// The non-blank title typed in stage 1.
         title: String,
+        /// The multi-line brief (OPTIONAL): free text carried through to
+        /// `issue.description` and the `claude -p` prompt. `None` when blank.
+        brief: Option<String>,
+        /// The linked-issue reference (OPTIONAL): a URL or `owner/repo#123` carried
+        /// through to `issue.external_ref` for traceability. `None` when blank.
+        external_ref: Option<String>,
+        /// The acceptance criteria (OPTIONAL, migration 0048): each non-blank line
+        /// of the Acceptance row, carried through to `issue.acceptance_criteria`.
+        /// Empty when the row was left blank.
+        acceptance_criteria: Vec<String>,
+        /// The context references (OPTIONAL, migration 0048): each non-blank line of
+        /// the Context row, carried through to `issue.context_refs`. Empty when the
+        /// row was left blank.
+        context_refs: Vec<String>,
+        /// The urgency picked on the Priority row (migration 0014), on the wire
+        /// scale `0..3` (P3..P0, HIGHER = MORE URGENT). `0` when the row was left
+        /// alone — the schema default.
+        priority: i64,
+        /// The deadline typed on the Due row (migration 0014) as epoch ms at UTC
+        /// midnight. `None` when the row was left blank. A non-blank but
+        /// unparseable buffer never reaches here: the create guard keeps the
+        /// wizard open on the Due row instead.
+        due_date: Option<i64>,
+        /// The label NAMES typed on the Labels row (migration 0016), comma-split,
+        /// trimmed, blank-and-duplicate-dropped. Each is resolve-or-created in the
+        /// workspace and joined to the new issue. Empty when the row was blank.
+        labels: Vec<String>,
         /// The repo picked in stage 2 (REQUIRED — an absolute path, `scratch`, or
         /// a remote indicator the daemon clones).
         repo_ref: String,
@@ -971,10 +1816,27 @@ pub enum IssueListIntent {
         source_branch: Option<String>,
         /// The target branch a future PR lands INTO; `None` = unset.
         target_branch: Option<String>,
-        /// The provider agent wire token (`claude` / `codex` / `copilot`) —
-        /// always a real token, never empty.
-        agent: String,
+        /// The provider agent wire token (`claude` / `codex` / `copilot`) when the
+        /// Agent row fell back to the provider chips (no named agents in the
+        /// workspace); `None` when a NAMED agent was targeted instead (its own
+        /// provider drives the run — see [`Self::CreateAndRun::assignee`]).
+        agent: Option<String>,
+        /// The NAMED workspace agent targeted by the Agent row, as its canonical
+        /// `agent:<id>` ref (V3-F3): persisted as the new issue's assignee AND
+        /// carried as the run's assignee override so the dispatch routes to it.
+        /// `None` when the roster was empty and a provider chip was chosen instead.
+        assignee: Option<String>,
+        /// 0046 sub-issues: the parent issue's wire id when the wizard was opened
+        /// as an "add sub-issue" (`s` / context-menu `Add sub-issue`), threaded into
+        /// `hangar/issue_create` so the daemon links the new issue as a child.
+        /// `None` for a top-level `c` create.
+        parent_issue_id: Option<String>,
     },
+    /// 0046 sub-issues: mark the highlighted issue **Done** from the keyboard
+    /// (`d`), the same lifecycle move the context-menu `Move to ▸ Done` raises,
+    /// so it routes through `hangar/issue_update{state:"done"}` on the daemon and
+    /// fires the child-done → parent cascade. Carries the target issue id.
+    MarkDone(IssueId),
     /// Delete the confirmed issue (63d): raised ONLY by Enter on the `x` RED
     /// confirm overlay. The plugin glue lifts it into `hangar/issue_delete`; the
     /// daemon's `IssueDeleted` push then drops the row from the list.
@@ -1004,6 +1866,9 @@ pub fn reduce_issue_list(state: &IssueListState, ev: IssueListEvent) -> IssueLis
         IssueListEvent::Key(c) => reduce_key(state, c),
         IssueListEvent::Wizard(k) => reduce_wizard_key(state, k),
         IssueListEvent::SetFilter(chip) => set_filter(state, chip),
+        IssueListEvent::Panel(k) => reduce_panel_key(state, k),
+        IssueListEvent::ToggleFacet(kind, value) => toggle_facet(state, kind, &value),
+        IssueListEvent::ClearFacets => clear_facets(state),
         IssueListEvent::Event(event) => fold_event(state, event),
     }
 }
@@ -1018,6 +1883,10 @@ fn reduce_key(state: &IssueListState, c: char) -> IssueListReduction {
         IssueListMode::CreateInput => reduce_wizard_key(state, wizard_key_from_char(c)),
         IssueListMode::ConfirmDelete => reduce_confirm_delete_key(state, c),
         IssueListMode::ConfirmCancelDelete => reduce_confirm_cancel_delete_key(state, c),
+        // The facet panel is driven by the structured [`IssueListEvent::Panel`]
+        // vocabulary (the router maps its keys), so a plain `char` here is an
+        // unmodelled no-op rather than leaking to the board underneath.
+        IssueListMode::FilterPanel => unchanged(state),
         IssueListMode::Normal => reduce_normal_key(state, c),
     }
 }
@@ -1037,7 +1906,24 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
         'j' => move_selection_down(state),
         'k' => move_selection_up(state),
         '/' => enter_filter_mode(state),
+        // `f` opens the faceted-filter panel (multica-gap #10). `f` is free on the
+        // issues screen (lowercase: the host reserves UPPERCASE `F` for the Fleet
+        // tab-switch).
+        'f' => open_filter_panel(state),
         'c' => enter_create_mode(state),
+        // 0046: `s` opens the create wizard as an "add sub-issue" with the
+        // highlighted row pre-bound as the parent (never user-typed). Lowercase so
+        // it falls through to this reducer: the host reserves UPPERCASE `S` as the
+        // global Squads tab-switch (`routing_event`).
+        's' => enter_create_subissue_mode(state),
+        // 0046: `d` marks the highlighted issue Done through the daemon
+        // (`hangar/issue_update{state:"done"}`), firing the child-done cascade
+        // when the row is a sub-issue. No-op when nothing is selected. Lowercase:
+        // UPPERCASE `D` is the host's global Daemon-health tab-switch.
+        'd' => state.selected_row().map_or_else(
+            || unchanged(state),
+            |row| with_intent(state.clone(), IssueListIntent::MarkDone(row.id.clone())),
+        ),
         'x' => enter_confirm_delete(state),
         'a' => state.selected_row().map_or_else(
             || unchanged(state),
@@ -1113,6 +1999,30 @@ fn enter_create_mode(state: &IssueListState) -> IssueListReduction {
     next.mode = IssueListMode::CreateInput;
     next.wizard = Some(CreateWizard::default());
     // A fresh wizard supersedes any stale dispatch note.
+    next.note = None;
+    no_intent(next)
+}
+
+/// Open the create wizard as an "add sub-issue" (`s`, 0046): identical to the
+/// plain `c` create except the highlighted row is pre-bound as the parent (its
+/// wire id + a `HGR-<n> title` display for the read-only banner). No-op when
+/// nothing is selected (a sub-issue always needs a parent row to hang from).
+fn enter_create_subissue_mode(state: &IssueListState) -> IssueListReduction {
+    let Some(row) = state.selected_row() else {
+        return unchanged(state);
+    };
+    // Prefer the human display id (`HGR-7`) with the title; fall back to the raw
+    // id when a pre-63l.3 snapshot lacks a display id (mirrors `arm_confirm_delete`).
+    let display = match &row.display_id {
+        Some(d) => format!("{d} {}", row.title),
+        None => row.title.clone(),
+    };
+    let mut wizard = CreateWizard::default();
+    wizard.parent_issue_id = Some(row.id.as_str().to_string());
+    wizard.parent_display = Some(display);
+    let mut next = state.clone();
+    next.mode = IssueListMode::CreateInput;
+    next.wizard = Some(wizard);
     next.note = None;
     no_intent(next)
 }
@@ -1216,7 +2126,7 @@ fn cancel_confirm_cancel_delete(state: &IssueListState) -> IssueListReduction {
 /// edits the focused text row, and Enter creates (or jumps to the missing
 /// required row). A wizard key with no wizard open is a no-op.
 fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReduction {
-    let Some(wizard) = state.wizard.clone() else {
+    let Some(mut wizard) = state.wizard.clone() else {
         return unchanged(state);
     };
     if key == WizardKey::Esc {
@@ -1228,6 +2138,34 @@ fn reduce_wizard_key(state: &IssueListState, key: WizardKey) -> IssueListReducti
         return wizard_dropdown_key(state, wizard, key);
     }
     match key {
+        // Enter on the Brief inserts a NEWLINE (multi-line editing) and must NOT
+        // fire create; every other row's Enter is the existing commit point.
+        // Guard the empty buffer: Enter with nothing typed is a no-op, never a
+        // seeded leading `\n`. That newline would otherwise reach
+        // `issue.description` byte-verbatim (see `wizard_try_create`, which sends
+        // the brief EXACTLY as typed and only trims to detect all-blank),
+        // displacing any leading `/name` skill line off position 0 and breaking
+        // headless dispatch under `claude -p`.
+        WizardKey::Enter if wizard.focus == WizardRow::Brief => {
+            if !wizard.brief.is_empty() {
+                wizard.brief.push('\n');
+            }
+            set_wizard(state, wizard)
+        }
+        // 0048: the multi-line list rows insert a newline on Enter (each line is
+        // one element), never firing create — same guard as `Brief`.
+        WizardKey::Enter if wizard.focus == WizardRow::Acceptance => {
+            if !wizard.acceptance.is_empty() {
+                wizard.acceptance.push('\n');
+            }
+            set_wizard(state, wizard)
+        }
+        WizardKey::Enter if wizard.focus == WizardRow::Context => {
+            if !wizard.context.is_empty() {
+                wizard.context.push('\n');
+            }
+            set_wizard(state, wizard)
+        }
         WizardKey::Enter => wizard_try_create(state, wizard),
         WizardKey::Tab | WizardKey::Down => wizard_move_focus(state, wizard, true),
         WizardKey::BackTab | WizardKey::Up => wizard_move_focus(state, wizard, false),
@@ -1293,16 +2231,41 @@ fn wizard_cycle_value(
             wizard.repo_ref = Some(candidates[next].repo_ref.clone());
         }
         WizardRow::Agent => {
-            wizard.agent_cursor = ring_step(wizard.agent_cursor, AgentChip::ALL.len(), forward);
+            // Cycle the NAMED workspace-agent roster when the glue injected one
+            // (V3-F3); otherwise cycle the provider chips (the fallback for a
+            // workspace with no named agents). `agent_cursor` indexes whichever is
+            // active — the fixed roster length keeps the cursor in range.
+            let n = if state.agents.is_empty() {
+                AgentChip::ALL.len()
+            } else {
+                state.agents.len()
+            };
+            wizard.agent_cursor = ring_step(wizard.agent_cursor, n, forward);
         }
-        WizardRow::Title | WizardRow::Source | WizardRow::Target => {}
+        WizardRow::Priority => {
+            // 0014: cycle the four-value urgency ring (P3..P0), wrapping — the
+            // same idiom as the Agent row. `usize` for `ring_step`, back to the
+            // wire scalar after.
+            let cur = usize::try_from(wizard.priority).unwrap_or(0).min(3);
+            wizard.priority = i64::try_from(ring_step(cur, 4, forward)).unwrap_or(0);
+        }
+        WizardRow::Title
+        | WizardRow::Brief
+        | WizardRow::Link
+        | WizardRow::Acceptance
+        | WizardRow::Context
+        | WizardRow::Due
+        | WizardRow::Labels
+        | WizardRow::Source
+        | WizardRow::Target => {}
     }
     set_wizard(state, wizard)
 }
 
 /// Type one char into the focused row: append to the focused text row (Title /
-/// Source / Target), or open the `@` repo dropdown on the Repo row. Any other key
-/// on a picker row is ignored.
+/// Brief / Link / Acceptance / Context / Source / Target), or open the `@` repo
+/// dropdown on the Repo row.
+/// Any other key on a picker row is ignored.
 fn wizard_type_char(
     state: &IssueListState,
     mut wizard: CreateWizard,
@@ -1310,6 +2273,12 @@ fn wizard_type_char(
 ) -> IssueListReduction {
     match wizard.focus {
         WizardRow::Title => wizard.title.push(c),
+        WizardRow::Brief => wizard.brief.push(c),
+        WizardRow::Link => wizard.link.push(c),
+        WizardRow::Acceptance => wizard.acceptance.push(c),
+        WizardRow::Context => wizard.context.push(c),
+        WizardRow::Due => wizard.due.push(c),
+        WizardRow::Labels => wizard.labels.push(c),
         WizardRow::Source => wizard.source_branch.push(c),
         WizardRow::Target => wizard.target_branch.push(c),
         WizardRow::Repo => {
@@ -1321,7 +2290,8 @@ fn wizard_type_char(
             // Any non-`@` char on the closed repo row is ignored — the picker is
             // driven by `@` / ←→, not free text.
         }
-        WizardRow::Agent => {}
+        // Picker rows: ←→ only, never free text.
+        WizardRow::Priority | WizardRow::Agent => {}
     }
     set_wizard(state, wizard)
 }
@@ -1333,13 +2303,31 @@ fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueLi
         WizardRow::Title => {
             wizard.title.pop();
         }
+        WizardRow::Brief => {
+            wizard.brief.pop();
+        }
+        WizardRow::Link => {
+            wizard.link.pop();
+        }
+        WizardRow::Acceptance => {
+            wizard.acceptance.pop();
+        }
+        WizardRow::Context => {
+            wizard.context.pop();
+        }
+        WizardRow::Due => {
+            wizard.due.pop();
+        }
+        WizardRow::Labels => {
+            wizard.labels.pop();
+        }
         WizardRow::Source => {
             wizard.source_branch.pop();
         }
         WizardRow::Target => {
             wizard.target_branch.pop();
         }
-        WizardRow::Repo | WizardRow::Agent => {}
+        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => {}
     }
     set_wizard(state, wizard)
 }
@@ -1400,11 +2388,55 @@ fn wizard_dropdown_key(
 /// field is missing, DO NOT create — jump focus to it (and open the `@` dropdown
 /// for the repo) so the user is guided, never silently blocked. This is the whole
 /// guard: an agent-less / repo-less / title-only issue is impossible to create.
+/// Split a multi-line wizard buffer (Acceptance / Context) into its list elements:
+/// one per line, each trimmed, dropping blank lines (a blank line is a UI artefact,
+/// not data). Order-preserving (migration 0048).
+fn split_lines(raw: &str) -> Vec<String> {
+    raw.lines()
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(ToString::to_string)
+        .collect()
+}
+
+/// Split the single-line Labels buffer into label NAMES: comma-separated, each
+/// trimmed, blanks dropped, repeats dropped preserving first-seen order (0016).
+/// `LabelRepo::attach` is idempotent so a repeat could not corrupt the join, but
+/// the create payload should not imply the repetition meant anything.
+fn split_labels(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !out.iter().any(|seen| seen == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// The Due row's buffer as epoch ms at UTC midnight: `Ok(None)` when blank (no
+/// deadline), `Ok(Some(ms))` for a valid `YYYY-MM-DD`, `Err(())` when the buffer
+/// is non-blank and unparseable — which the create guard turns into "stay open,
+/// focus the row" and the renderer paints red.
+fn wizard_due_ms(raw: &str) -> Result<Option<i64>, ()> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    ainb_hangar_proto::dates::parse_calendar_date_ms(t).map(Some).map_err(|_| ())
+}
+
 fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
     if wizard.title.trim().is_empty() {
         wizard.focus = WizardRow::Title;
         return set_wizard(state, wizard);
     }
+    // 0014: a typed-but-invalid deadline must never be silently dropped — the
+    // same "guide, never silently block" contract the Title / Repo guards use.
+    // The row itself paints the error, so no note plumbing is needed.
+    let Ok(due_date) = wizard_due_ms(&wizard.due) else {
+        wizard.focus = WizardRow::Due;
+        return set_wizard(state, wizard);
+    };
     let Some(repo_ref) = wizard.repo_ref.clone() else {
         // Repo REQUIRED: guide the user to it with the dropdown open at scratch.
         wizard.focus = WizardRow::Repo;
@@ -1415,7 +2447,8 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
     let mut next = state.clone();
     next.mode = IssueListMode::Normal;
     next.wizard = None;
-    // Blank branch inputs mean "unset" — the daemon resolves the default.
+    // Blank branch inputs mean "unset" — the daemon resolves the default. Branch
+    // refs are trimmed (whitespace in a ref is never meaningful).
     let opt = |s: &str| {
         let t = s.trim();
         if t.is_empty() {
@@ -1424,14 +2457,53 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
             Some(t.to_string())
         }
     };
+    // The Brief is the opposite: it reaches `issue.description` VERBATIM (it may
+    // carry leading `/name` skill lines and embedded newlines that `claude -p`
+    // executes at dispatch). Only a wholly-blank brief collapses to `None`; a
+    // present brief is sent EXACTLY as typed — never trimmed, escaped, or
+    // normalised.
+    let brief = if wizard.brief.trim().is_empty() {
+        None
+    } else {
+        Some(wizard.brief.clone())
+    };
+    // The Agent row resolves to EITHER a named workspace agent (its `agent:<id>`
+    // ref becomes the issue's assignee + the run's assignee override, so dispatch
+    // routes to it) OR — when the roster is empty — a provider chip (today's
+    // deterministic fallback: no assignee, so the daemon resolves the workspace's
+    // first agent under the chosen provider). Exactly one of the two is set.
+    let (agent, assignee) = match state.agents.get(wizard.agent_cursor) {
+        Some(named) => (None, Some(named.actor_ref.clone())),
+        None => (
+            Some(AgentChip::at(wizard.agent_cursor).wire().to_string()),
+            None,
+        ),
+    };
     with_intent(
         next,
         IssueListIntent::CreateAndRun {
             title: wizard.title.trim().to_string(),
+            brief,
+            // The linked-issue ref is trimmed (surrounding whitespace in a URL /
+            // `owner/repo#123` is never meaningful); blank collapses to `None`.
+            external_ref: opt(&wizard.link),
+            // 0048: split each multi-line buffer on newlines, trim, drop blank
+            // lines — each surviving line is one list element (order-preserving).
+            acceptance_criteria: split_lines(&wizard.acceptance),
+            context_refs: split_lines(&wizard.context),
+            // 0014/0016: the authored urgency, the parsed deadline (already
+            // validated above), and the comma-split label names.
+            priority: wizard.priority,
+            due_date,
+            labels: split_labels(&wizard.labels),
             repo_ref,
             source_branch: opt(&wizard.source_branch),
             target_branch: opt(&wizard.target_branch),
-            agent: AgentChip::at(wizard.agent_cursor).wire().to_string(),
+            agent,
+            assignee,
+            // 0046: carry the pre-bound parent through so an `s`-opened wizard
+            // creates a CHILD (the daemon links it); a plain `c` create is `None`.
+            parent_issue_id: wizard.parent_issue_id.clone(),
         },
     )
 }
@@ -1441,6 +2513,107 @@ fn set_filter(state: &IssueListState, chip: FilterChip) -> IssueListReduction {
     let mut next = state.clone();
     next.filter = chip;
     next.clamp_selection();
+    no_intent(next)
+}
+
+/// Open the `f` faceted-filter panel (multica-gap #10) on the Status section with
+/// the cursor on the first value. No intent — the panel folds facet toggles
+/// locally; the board narrows live as facets are picked.
+fn open_filter_panel(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::FilterPanel;
+    next.filter_panel = Some(FilterPanelState::default());
+    next.clamp_panel_cursor();
+    no_intent(next)
+}
+
+/// Close the panel (Esc / `f`): back to normal navigation, the APPLIED facets
+/// REMAIN applied (closing the picker is not clearing it — multica parity).
+fn close_filter_panel(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.mode = IssueListMode::Normal;
+    next.filter_panel = None;
+    no_intent(next)
+}
+
+/// Fold one structured panel key (multica-gap #10). A no-op when the panel is
+/// not open (defensive — the router only sends these in `FilterPanel` mode).
+fn reduce_panel_key(state: &IssueListState, key: PanelKey) -> IssueListReduction {
+    let Some(panel) = state.filter_panel.clone() else {
+        return unchanged(state);
+    };
+    match key {
+        PanelKey::Close => close_filter_panel(state),
+        PanelKey::Clear => clear_facets(state),
+        PanelKey::Up => move_panel_cursor(state, -1),
+        PanelKey::Down => move_panel_cursor(state, 1),
+        PanelKey::Left => switch_panel_section(state, panel.section.prev()),
+        PanelKey::Right => switch_panel_section(state, panel.section.next()),
+        PanelKey::Toggle => toggle_panel_value(state, &panel),
+    }
+}
+
+/// Move the panel's value cursor by `delta` (−1 up / +1 down), saturating at the
+/// active section's value-list bounds.
+fn move_panel_cursor(state: &IssueListState, delta: i32) -> IssueListReduction {
+    let Some(section) = state.filter_panel.as_ref().map(|p| p.section) else {
+        return unchanged(state);
+    };
+    let len = state.facet_counts(section).len();
+    let mut next = state.clone();
+    if let Some(panel) = next.filter_panel.as_mut() {
+        if delta < 0 {
+            panel.cursor = panel.cursor.saturating_sub(1);
+        } else if len > 0 {
+            panel.cursor = (panel.cursor + 1).min(len - 1);
+        }
+    }
+    no_intent(next)
+}
+
+/// Switch the panel's active facet section, resetting the value cursor to the
+/// top of the new section.
+fn switch_panel_section(state: &IssueListState, section: FacetKind) -> IssueListReduction {
+    let mut next = state.clone();
+    if let Some(panel) = next.filter_panel.as_mut() {
+        panel.section = section;
+        panel.cursor = 0;
+    }
+    no_intent(next)
+}
+
+/// Toggle the facet value under the panel cursor (Space / Enter). A no-op when
+/// the active section has no in-scope values (an empty drilled-down list).
+fn toggle_panel_value(state: &IssueListState, panel: &FilterPanelState) -> IssueListReduction {
+    let counts = state.facet_counts(panel.section);
+    let Some((value, _)) = counts.get(panel.cursor) else {
+        return unchanged(state);
+    };
+    toggle_facet(state, panel.section, value)
+}
+
+/// Flip one value in one facet set (multica-gap #10), re-clamping the board
+/// selection AND the panel cursor (the visible set / value list may have shrunk).
+/// The `kind`/`value` mismatch guard keeps a caller from toggling a Priority
+/// value into the Status set.
+fn toggle_facet(state: &IssueListState, kind: FacetKind, value: &FacetValue) -> IssueListReduction {
+    if value.kind() != kind {
+        return unchanged(state);
+    }
+    let mut next = state.clone();
+    next.facets.toggle(value);
+    next.clamp_selection();
+    next.clamp_panel_cursor();
+    no_intent(next)
+}
+
+/// Clear every facet selection (the panel's `C`), re-clamping the selection and
+/// panel cursor into the (re-widened) visible set.
+fn clear_facets(state: &IssueListState) -> IssueListReduction {
+    let mut next = state.clone();
+    next.facets = FacetFilters::default();
+    next.clamp_selection();
+    next.clamp_panel_cursor();
     no_intent(next)
 }
 
@@ -1543,7 +2716,22 @@ pub fn render_issue_list(
     // chips render identically here and on the skill manager (P4.6).
     let chip_labels: Vec<&str> = FilterChip::all().iter().map(|c| c.label()).collect();
     let active_chip = FilterChip::all().iter().position(|c| *c == state.filter).unwrap_or(0);
-    crate::widgets::filter_chip::render_chip_bar(buf, top, area_w, &chip_labels, active_chip);
+    let chip_end =
+        crate::widgets::filter_chip::render_chip_bar(buf, top, area_w, &chip_labels, active_chip);
+    // multica-gap #10: a compact gold active-facet summary trails the chips when
+    // ANY facet is applied, so the board reads as filtered even with the panel
+    // closed (fail-visible). Clipped ahead of the right-aligned working chip.
+    if let Some(summary) = state.facets.summary() {
+        let summary_right = area_w.saturating_sub(10);
+        put_str(
+            buf,
+            chip_end.saturating_add(1),
+            top,
+            &summary,
+            GOLD,
+            summary_right,
+        );
+    }
     // Working-agents avatar stack, right-aligned on the same chip row.
     crate::widgets::working_chip::render_working_chip(buf, top, area_w, working_count);
 
@@ -1571,8 +2759,25 @@ pub fn render_issue_list(
     // whole body region; the `x` delete-confirm is the RED bottom-strip overlay;
     // otherwise a transient dispatch note (launch feedback / failure) paints on
     // the bottom row.
-    if let Some(wizard) = state.wizard() {
-        render_wizard(buf, area_w, col_top, bottom, wizard, &state.repos);
+    if state.mode == IssueListMode::FilterPanel {
+        // multica-gap #10: the faceted-filter panel over the board.
+        crate::widgets::facet_panel::render(
+            buf,
+            area_w,
+            col_top,
+            bottom,
+            &state.facet_panel_sections(),
+        );
+    } else if let Some(wizard) = state.wizard() {
+        render_wizard(
+            buf,
+            area_w,
+            col_top,
+            bottom,
+            wizard,
+            &state.repos,
+            &state.agents,
+        );
     } else if let Some(pending) = state.confirm_delete() {
         // 63d: the RED delete-confirm overlay on the two bottom rows.
         render_confirm_delete(
@@ -1690,10 +2895,17 @@ const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 const WIZARD_TITLE: &str = "✦ New task";
 /// The in-card footer hint naming the nav keys.
 const WIZARD_HINT: &str = "↑↓ row   ←→ value   Enter create   Esc cancel";
-/// The card's COMPACT height (dropdown closed): top border + 5 field rows +
-/// spacer + hint + bottom border. The card grows past this by the number of
-/// visible dropdown rows while the `@` repo picker is open (see [`render_wizard`]).
-const WIZARD_CARD_H: u16 = 9;
+/// The card's FIXED-row height: top border + the 9 single-line field rows
+/// (Title / Link / Priority / Due / Labels / Repo / Source / Target / Agent) +
+/// spacer + hint + bottom border. The multi-line Brief / Acceptance / Context
+/// rows add their wrapped-line counts on top of this, and the `@` repo picker
+/// adds its visible dropdown rows while open (see [`render_wizard`]); the card is
+/// exactly this tall only in the degenerate all-empty single-line-brief case.
+const WIZARD_CARD_H: u16 = 13;
+/// The most wrapped Brief lines the card shows at once; a longer brief
+/// scroll-follows the newest text within this window. Bounds card growth so the
+/// Brief never blows the viewport.
+const BRIEF_WINDOW: u16 = 5;
 /// The card's preferred width (clamped to the viewport minus insets).
 const WIZARD_CARD_W: u16 = 54;
 /// The most repo candidates the open `@` dropdown shows at once; a longer roster
@@ -1716,6 +2928,7 @@ fn render_wizard(
     bottom: u16,
     wizard: &CreateWizard,
     repos: &[RepoOption],
+    agents: &[WizardAgent],
 ) {
     let inset: u16 = 2;
     let max_w = area_w.saturating_sub(inset * 2);
@@ -1723,7 +2936,9 @@ fn render_wizard(
     let region_h = bottom.saturating_sub(top).saturating_add(1);
 
     // Degenerate viewport: paint at least the title + hint (never panic / empty).
-    if card_w < 24 || region_h < WIZARD_CARD_H {
+    // The Brief always adds at least one line, so the true minimum is one row
+    // taller than the fixed-row height.
+    if card_w < 24 || region_h < WIZARD_CARD_H + 1 {
         put_card_str(buf, 0, top, WIZARD_TITLE, GOLD, area_w, false);
         put_card_str(
             buf,
@@ -1737,12 +2952,44 @@ fn render_wizard(
         return;
     }
 
+    // The Brief row grows the card by its visible wrapped-line count (always >= 1).
+    // The value column starts 12 in from the card's left and the Brief marker eats
+    // a further 2, so the wrap width is `card_w - 15` (matched inside
+    // [`render_brief`] so the counted rows equal the painted lines).
+    let brief_value_w = card_w.saturating_sub(15);
+    let brief_rows = brief_visible_rows(wizard, brief_value_w, region_h);
+    // 0048: the Acceptance + Context rows are multi-line like the Brief (each
+    // non-blank line is one list element). Each takes the wrapped-line count within
+    // whatever budget survives after the fixed frame + the earlier multi-line rows,
+    // so the card never spills past `region_h`.
+    let acceptance_rows = multiline_visible_rows(
+        wizard.acceptance(),
+        brief_value_w,
+        region_h.saturating_sub(WIZARD_CARD_H + brief_rows),
+    );
+    let context_rows = multiline_visible_rows(
+        wizard.context(),
+        brief_value_w,
+        region_h.saturating_sub(WIZARD_CARD_H + brief_rows + acceptance_rows),
+    );
+    let multiline_rows = brief_rows + acceptance_rows + context_rows;
     // While the `@` dropdown is open the card GROWS by the number of candidate
     // rows it shows (filter line reuses the Repo row itself). The window is capped
     // at [`REPO_DROPDOWN_WINDOW`] and further shrunk to whatever the viewport can
-    // hold, so the card never spills past `region_h` — compact again on close.
-    let dropdown_rows = repo_dropdown_visible_rows(wizard, repos, region_h);
-    let card_h = WIZARD_CARD_H + dropdown_rows;
+    // hold AFTER the multi-line rows have taken theirs, so the card never spills
+    // past `region_h` — compact again on close.
+    let dropdown_rows =
+        repo_dropdown_visible_rows(wizard, repos, region_h.saturating_sub(multiline_rows));
+    // 0046: an "add sub-issue" wizard (`s`) shows a read-only `Sub-issue of …`
+    // banner on its own row above the fields. It grows the card by 1 only when the
+    // viewport still has room after the multi-line rows + dropdown have taken
+    // theirs, so a tight viewport degrades gracefully (banner dropped, fields
+    // intact). A plain `c` create has no parent, so the card is byte-identical.
+    let banner_rows = u16::from(
+        wizard.parent_display().is_some()
+            && region_h > WIZARD_CARD_H + multiline_rows + dropdown_rows,
+    );
+    let card_h = WIZARD_CARD_H + multiline_rows + dropdown_rows + banner_rows;
 
     let left = (area_w.saturating_sub(card_w)) / 2;
     let right = left + card_w; // exclusive
@@ -1769,17 +3016,67 @@ fn render_wizard(
     let value_x = left + 12;
     let text_right = right.saturating_sub(1);
     let mut y = card_top + 1;
+    // 0046: the read-only `Sub-issue of <HGR-n title>` banner (only when the wizard
+    // was opened via `s` with a pre-bound parent). Cornflower so it reads as chrome,
+    // not an editable field; it precedes the Title row and never takes focus.
+    if banner_rows > 0 {
+        if let Some(parent) = wizard.parent_display() {
+            put_card_str(
+                buf,
+                label_x,
+                y,
+                &format!("Sub-issue of {parent}"),
+                CORNFLOWER_BLUE,
+                text_right,
+                true,
+            );
+        }
+        y = y.saturating_add(banner_rows);
+    }
     for field in WizardRow::ALL {
         let focused = wizard.focus() == field;
         let label = wizard_row_label(field);
         let label_colour = if focused { GOLD } else { MUTED_GRAY };
         put_card_str(buf, label_x, y, label, label_colour, value_x, true);
+        if field == WizardRow::Brief {
+            render_brief(buf, value_x, y, text_right, wizard, brief_rows);
+            y = y.saturating_add(brief_rows);
+            continue;
+        }
+        if field == WizardRow::Acceptance {
+            render_multiline(
+                buf,
+                value_x,
+                y,
+                text_right,
+                wizard.acceptance(),
+                focused,
+                ACCEPTANCE_PLACEHOLDER,
+                acceptance_rows,
+            );
+            y = y.saturating_add(acceptance_rows);
+            continue;
+        }
+        if field == WizardRow::Context {
+            render_multiline(
+                buf,
+                value_x,
+                y,
+                text_right,
+                wizard.context(),
+                focused,
+                CONTEXT_PLACEHOLDER,
+                context_rows,
+            );
+            y = y.saturating_add(context_rows);
+            continue;
+        }
         if field == WizardRow::Repo && wizard.repo_dropdown().is_some() {
             render_repo_dropdown(buf, value_x, y, text_right, wizard, repos, dropdown_rows);
             y = y.saturating_add(1 + dropdown_rows);
             continue;
         }
-        render_wizard_field(buf, value_x, y, text_right, field, wizard, repos);
+        render_wizard_field(buf, value_x, y, text_right, field, wizard, repos, agents);
         y = y.saturating_add(1);
     }
 
@@ -1811,10 +3108,156 @@ fn repo_dropdown_visible_rows(wizard: &CreateWizard, repos: &[RepoOption], regio
     want.min(budget)
 }
 
+/// How many wrapped lines the Brief row paints: the brief's wrapped-line count
+/// (at `value_w`), floored at 1 (the empty brief still shows one row for its
+/// placeholder / cursor), capped at [`BRIEF_WINDOW`], then shrunk so the grown
+/// card still fits `region_h` (the fixed frame plus these rows). Keeps the growth
+/// bounded and the small-viewport fallback intact.
+fn brief_visible_rows(wizard: &CreateWizard, value_w: u16, region_h: u16) -> u16 {
+    multiline_visible_rows(
+        wizard.brief(),
+        value_w,
+        region_h.saturating_sub(WIZARD_CARD_H),
+    )
+}
+
+/// How many wrapped lines a multi-line list row (Acceptance / Context) paints:
+/// its wrapped-line count at `value_w`, floored at 1 (an empty row still shows one
+/// placeholder / cursor line), capped at [`BRIEF_WINDOW`], then shrunk to the
+/// caller-supplied `budget` (the rows still free after the fixed frame + the
+/// earlier multi-line rows have taken theirs). Mirrors [`brief_visible_rows`] so
+/// the counted rows equal the painted lines.
+fn multiline_visible_rows(text: &str, value_w: u16, budget: u16) -> u16 {
+    let lines = u16::try_from(wrap_text(text, value_w as usize).len())
+        .unwrap_or(u16::MAX)
+        .max(1);
+    let want = lines.min(BRIEF_WINDOW);
+    // The fixed rows always fit (the degenerate check guaranteed region_h >=
+    // WIZARD_CARD_H + 1), so the budget is at least 1.
+    want.min(budget.max(1))
+}
+
+/// Wrap `text` into display lines at most `width` chars wide, honouring embedded
+/// `\n` as hard breaks. Char-boundary wrapping (not word-aware) — a brief is
+/// free text and the cells are what the card must fit. Always returns at least
+/// one (possibly empty) line so the Brief row is never zero-height.
+fn wrap_text(text: &str, width: usize) -> Vec<String> {
+    let width = width.max(1);
+    let mut out = Vec::new();
+    for segment in text.split('\n') {
+        let chars: Vec<char> = segment.chars().collect();
+        if chars.is_empty() {
+            out.push(String::new());
+            continue;
+        }
+        let mut i = 0;
+        while i < chars.len() {
+            let end = (i + width).min(chars.len());
+            out.push(chars[i..end].iter().collect());
+            i = end;
+        }
+    }
+    if out.is_empty() {
+        out.push(String::new());
+    }
+    out
+}
+
+/// The placeholder shown on an empty, unfocused Brief row so the optional field
+/// reads as skippable rather than broken.
+const BRIEF_PLACEHOLDER: &str = "(optional — describe the task)";
+/// The placeholder for the empty, unfocused Acceptance row (one criterion / line).
+const ACCEPTANCE_PLACEHOLDER: &str = "(optional — one criterion per line)";
+/// The placeholder for the empty, unfocused Context row (one reference / line).
+const CONTEXT_PLACEHOLDER: &str = "(optional — one reference per line)";
+/// The placeholder for the empty, unfocused Due row — it also DOCUMENTS the only
+/// accepted format, so the red invalid state is reachable only by ignoring it.
+const DUE_PLACEHOLDER: &str = "YYYY-MM-DD";
+/// The placeholder for the empty, unfocused Labels row (comma-separated names).
+const LABELS_PLACEHOLDER: &str = "bug, p0";
+/// The colour a non-blank, unparseable Due buffer paints in: the always-visible
+/// "Enter will not create with this" signal.
+const DUE_INVALID: Color = Color::rgb(220, 90, 90);
+
+/// Render the multi-line Brief value at `(x, y)` over `rows` lines (see
+/// [`render_multiline`]).
+fn render_brief(
+    buf: &mut WireBuffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    wizard: &CreateWizard,
+    rows: u16,
+) {
+    render_multiline(
+        buf,
+        x,
+        y,
+        right,
+        wizard.brief(),
+        wizard.focus() == WizardRow::Brief,
+        BRIEF_PLACEHOLDER,
+        rows,
+    );
+}
+
+/// Render a multi-line free-text value (`raw`) at `(x, y)` over `rows` lines,
+/// clipped at `right`. The focused row gets a `▶` marker + green text and a block
+/// cursor on the last line; unfocused shows soft-white (or the muted `placeholder`
+/// when empty). A value longer than `rows` scroll-follows its newest line (an
+/// editor caret stays visible while typing). The marker sits on the first painted
+/// line; continuation lines indent to align under it. Shared by the Brief,
+/// Acceptance, and Context rows.
+#[allow(clippy::too_many_arguments)]
+fn render_multiline(
+    buf: &mut WireBuffer,
+    x: u16,
+    y: u16,
+    right: u16,
+    raw: &str,
+    focused: bool,
+    placeholder: &str,
+    rows: u16,
+) {
+    let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
+    let marker = if focused { "▶ " } else { "  " };
+    let value_x = x.saturating_add(2);
+    let width = right.saturating_sub(value_x).max(1) as usize;
+    if raw.is_empty() && !focused {
+        put_card_str(buf, x, y, marker, value_colour, right, true);
+        put_card_str(buf, value_x, y, placeholder, MUTED_GRAY, right, true);
+        return;
+    }
+    let mut lines = wrap_text(raw, width);
+    if focused {
+        // A block cursor on the newest line — appended after wrapping so it never
+        // forces an extra wrap.
+        if let Some(last) = lines.last_mut() {
+            last.push('\u{2588}');
+        }
+    }
+    // Show the LAST `rows` wrapped lines so the caret stays in view while typing.
+    let rows = rows.max(1) as usize;
+    let start = lines.len().saturating_sub(rows);
+    for (i, line) in lines[start..].iter().enumerate() {
+        let ly = y.saturating_add(u16::try_from(i).unwrap_or(u16::MAX));
+        let m = if i == 0 { marker } else { "  " };
+        let cx = put_card_str(buf, x, ly, m, value_colour, right, true);
+        put_card_str(buf, cx, ly, line, value_colour, right, true);
+    }
+}
+
 /// The label shown in the card's left column for `row`.
 const fn wizard_row_label(row: WizardRow) -> &'static str {
     match row {
         WizardRow::Title => "Title",
+        WizardRow::Brief => "Brief",
+        WizardRow::Link => "Linked",
+        WizardRow::Acceptance => "Accept",
+        WizardRow::Context => "Context",
+        WizardRow::Priority => "Priority",
+        WizardRow::Due => "Due",
+        WizardRow::Labels => "Labels",
         WizardRow::Repo => "Repo",
         WizardRow::Source => "Source",
         WizardRow::Target => "Target",
@@ -1826,6 +3269,7 @@ const fn wizard_row_label(row: WizardRow) -> &'static str {
 /// row gets a `▶` marker + green value; the others a blank marker + soft-white.
 /// The Repo row expands the inline `@` dropdown when it is open; the Target row
 /// shows `(unset)` only when blank + unfocused.
+#[allow(clippy::too_many_arguments)]
 fn render_wizard_field(
     buf: &mut WireBuffer,
     x: u16,
@@ -1834,6 +3278,7 @@ fn render_wizard_field(
     row: WizardRow,
     wizard: &CreateWizard,
     repos: &[RepoOption],
+    agents: &[WizardAgent],
 ) {
     let focused = wizard.focus() == row;
     let value_colour = if focused { SELECTION_GREEN } else { SOFT_WHITE };
@@ -1849,6 +3294,68 @@ fn render_wizard_field(
     match row {
         WizardRow::Title => {
             put_card_str(buf, cx, y, &text(wizard.title()), value_colour, right, true);
+        }
+        // The multi-line Brief / Acceptance / Context rows are painted by
+        // [`render_multiline`] (they span several rows), so the single-row path
+        // never routes here.
+        WizardRow::Brief | WizardRow::Acceptance | WizardRow::Context => {}
+        WizardRow::Link => {
+            let raw = wizard.link();
+            let shown = if focused {
+                text(raw)
+            } else if raw.is_empty() {
+                "(optional — link an upstream issue)".to_string()
+            } else {
+                raw.to_string()
+            };
+            let colour = if !focused && raw.is_empty() {
+                MUTED_GRAY
+            } else {
+                value_colour
+            };
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
+        WizardRow::Priority => {
+            // 0014: `P0..P3` plus the urgency word, painted in the SAME chip
+            // colour the board cards use so the two surfaces read alike. A
+            // focused row takes the gold focus colour instead.
+            let chip = crate::widgets::card_board::PriorityChip::from_priority(wizard.priority());
+            let colour = if focused { GOLD } else { chip.color() };
+            let shown = format!("{}  {}", priority_label(wizard.priority()), chip.label());
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
+        WizardRow::Due => {
+            // A non-blank, unparseable buffer paints RED: the always-visible
+            // signal that Enter will refuse to create (never a silent drop).
+            let raw = wizard.due();
+            let invalid = wizard_due_ms(raw).is_err();
+            let shown = if raw.is_empty() && !focused {
+                DUE_PLACEHOLDER.to_string()
+            } else {
+                text(raw)
+            };
+            let colour = if invalid {
+                DUE_INVALID
+            } else if raw.is_empty() && !focused {
+                MUTED_GRAY
+            } else {
+                value_colour
+            };
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
+        WizardRow::Labels => {
+            let raw = wizard.labels();
+            let shown = if raw.is_empty() && !focused {
+                LABELS_PLACEHOLDER.to_string()
+            } else {
+                text(raw)
+            };
+            let colour = if raw.is_empty() && !focused {
+                MUTED_GRAY
+            } else {
+                value_colour
+            };
+            put_card_str(buf, cx, y, &shown, colour, right, true);
         }
         WizardRow::Repo => {
             // The open-dropdown case is painted by the caller ([`render_wizard`])
@@ -1878,7 +3385,13 @@ fn render_wizard_field(
             put_card_str(buf, cx, y, &shown, value_colour, right, true);
         }
         WizardRow::Agent => {
-            let label = AgentChip::at(wizard.agent_cursor()).label();
+            // A named workspace agent when the roster is injected (V3-F3), else the
+            // provider-chip fallback label. `agent_cursor` indexes whichever list
+            // is active; an out-of-range cursor degrades to the provider chip.
+            let label = agents.get(wizard.agent_cursor()).map_or_else(
+                || AgentChip::at(wizard.agent_cursor()).label(),
+                |named| named.label.as_str(),
+            );
             put_card_str(buf, cx, y, label, value_colour, right, true);
         }
     }
@@ -2174,9 +3687,17 @@ mod tests {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
+            context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -2447,6 +3968,7 @@ mod tests {
         for needle in [
             "New task",
             "Title",
+            "Brief",
             "Repo",
             "Source",
             "Target",
@@ -2470,6 +3992,88 @@ mod tests {
         assert!(
             has_gold_corner,
             "card must have a gold rounded top-left corner"
+        );
+    }
+
+    /// A multi-line Brief renders its wrapped value inside the card AND grows the
+    /// card's painted-row span versus an empty Brief — the dynamic-height contract
+    /// the repo dropdown already established, reused for the Brief region.
+    #[test]
+    fn wizard_brief_renders_wrapped_and_grows_card() {
+        let painted_row_span = |s: &IssueListState| -> u16 {
+            let mut buf = WireBuffer::new(120, 24);
+            render_issue_list(&mut buf, 120, 1, 23, s, 0);
+            let ys: Vec<u16> = buf
+                .cells
+                .iter()
+                .filter(|(_, c)| c.fg == Some(GOLD) && (c.symbol == "│" || c.symbol == "╭"))
+                .map(|(coord, _)| coord.y)
+                .collect();
+            let (min, max) = (ys.iter().min().copied(), ys.iter().max().copied());
+            max.unwrap_or(0).saturating_sub(min.unwrap_or(0))
+        };
+
+        // Empty-Brief baseline card span.
+        let empty = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let empty_span = painted_row_span(&empty);
+
+        // Focus Brief, type enough to wrap onto several lines.
+        let s = reduce_issue_list(&empty, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+        let long = "reproduce the login 500 then patch the handler and add a regression test";
+        let s = type_into(&s, long);
+
+        let mut buf = WireBuffer::new(120, 24);
+        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        let painted = painted_text(&buf);
+        // A leading slice of the brief renders inside the card.
+        assert!(
+            painted.contains("reproduce the login"),
+            "wrapped brief value must render:\n{painted}"
+        );
+        // The card grew to make room for the wrapped brief lines.
+        assert!(
+            painted_row_span(&s) > empty_span,
+            "card must grow for a multi-line brief ({} !> {empty_span})",
+            painted_row_span(&s)
+        );
+    }
+
+    /// Enter on an EMPTY Brief must be a no-op — never seed a leading `\n`. That
+    /// stray newline would flow byte-verbatim into `issue.description` and shove a
+    /// leading `/name` skill line off position 0, breaking headless `claude -p`
+    /// dispatch. Enter AFTER typed text still inserts a newline for genuine
+    /// multi-line editing, and no leading newline ever appears.
+    #[test]
+    fn wizard_brief_enter_on_empty_does_not_seed_leading_newline() {
+        // Open the wizard, focus the Brief row.
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
+        assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
+
+        // Enter on the empty buffer: no-op (RED before the fix — would be "\n").
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        assert_eq!(
+            s.wizard().unwrap().brief(),
+            "",
+            "Enter on an empty Brief must not seed a leading newline"
+        );
+        // Enter still does NOT fire create — the wizard is still open.
+        assert!(s.wizard().is_some(), "Enter on Brief must not create");
+
+        // Type text, Enter (inserts a newline), type more: the embedded newline is
+        // preserved and there is no leading newline.
+        let s = type_into(&s, "Read");
+        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Enter)).state;
+        let s = type_into(&s, "the docs");
+        assert_eq!(
+            s.wizard().unwrap().brief(),
+            "Read\nthe docs",
+            "mid-content Enter must preserve embedded newlines with no leading \\n"
+        );
+        assert!(
+            !s.wizard().unwrap().brief().starts_with('\n'),
+            "brief must never begin with a newline"
         );
     }
 
@@ -2501,8 +4105,8 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
-        // Move focus to the Repo row, then open the dropdown.
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        // Move focus past Brief to the Repo row, then open the dropdown.
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
@@ -2545,8 +4149,8 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
-        // Focus Repo, cycle ←→ to pick the `rosetta` scan (scratch=0, rosetta=1).
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        // Focus Repo (past Brief), cycle ←→ to pick `rosetta` (scratch=0, rosetta=1).
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // scratch
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // rosetta
         assert_eq!(
@@ -2584,7 +4188,7 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
@@ -2630,7 +4234,7 @@ mod tests {
             reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         base.set_repos(repo_roster());
         let base = type_into(&base, "Fix");
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let base = focus_wizard_row(base, WizardRow::Repo);
 
         let painted_row_span = |s: &IssueListState| -> u16 {
             let mut buf = WireBuffer::new(120, 24);
@@ -2663,6 +4267,65 @@ mod tests {
         );
     }
 
+    /// Parity 28: the card paints the three new rows, the Priority row shows the
+    /// picked `P0` + its urgency word after →×3, and a non-blank unparseable Due
+    /// buffer paints in the error colour (the always-visible "Enter will refuse"
+    /// signal) while a valid one does not.
+    #[test]
+    fn wizard_card_paints_priority_due_and_labels_rows() {
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let s = type_into(&s, "Fix");
+
+        let paint = |s: &IssueListState| -> String {
+            let mut buf = WireBuffer::new(120, 30);
+            render_issue_list(&mut buf, 120, 1, 29, s, 0);
+            painted_text(&buf)
+        };
+
+        // The three labels are on the card at rest.
+        let text = paint(&s);
+        for needle in [
+            "Priority",
+            "Due",
+            "Labels",
+            DUE_PLACEHOLDER,
+            LABELS_PLACEHOLDER,
+        ] {
+            assert!(text.contains(needle), "missing {needle:?}:\n{text}");
+        }
+        assert!(text.contains("P3"), "the default urgency reads P3:\n{text}");
+
+        // →×3 on the Priority row paints P0 + the Urgent chip word.
+        let s = focus_wizard_row(s, WizardRow::Priority);
+        let s = (0..3).fold(s, |s, _| {
+            reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state
+        });
+        let text = paint(&s);
+        assert!(text.contains("P0"), "→×3 must paint P0:\n{text}");
+        assert!(
+            text.contains("Urgent"),
+            "the urgency word is shown:\n{text}"
+        );
+
+        // A garbage Due buffer paints red; a valid one does not.
+        let painted_in_error = |s: &IssueListState| -> bool {
+            let mut buf = WireBuffer::new(120, 30);
+            render_issue_list(&mut buf, 120, 1, 29, s, 0);
+            buf.cells.iter().any(|(_, c)| c.fg == Some(DUE_INVALID))
+        };
+        let s = focus_wizard_row(s, WizardRow::Due);
+        let bad = type_into(&s, "31-12-2026");
+        assert!(
+            painted_in_error(&bad),
+            "an unparseable due date must paint in the error colour"
+        );
+        let good = type_into(&s, "2026-08-01");
+        assert!(
+            !painted_in_error(&good),
+            "a valid due date must not paint in the error colour"
+        );
+    }
+
     /// A roster longer than the visible window scrolls: paging the cursor Down past
     /// the window reveals a later candidate that was off-screen at open.
     #[test]
@@ -2678,7 +4341,7 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state;
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
 
         // At open the last repo is off-window (13 candidates incl. scratch, window 6).
@@ -2716,6 +4379,19 @@ mod tests {
     }
 
     /// Type a string into the focused wizard row, char by char.
+    /// Move the open wizard's focus to `row` by pressing Down until it lands
+    /// there. Position-INDEPENDENT so adding a wizard row does not re-number
+    /// every render fixture below.
+    fn focus_wizard_row(mut state: IssueListState, row: WizardRow) -> IssueListState {
+        for _ in 0..=WizardRow::ALL.len() {
+            if state.wizard().expect("wizard is open").focus() == row {
+                return state;
+            }
+            state = reduce_issue_list(&state, IssueListEvent::Wizard(WizardKey::Down)).state;
+        }
+        panic!("focus never reached {row:?}");
+    }
+
     fn type_into(state: &IssueListState, text: &str) -> IssueListState {
         text.chars().fold(state.clone(), |s, ch| {
             reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char(ch))).state
@@ -2736,14 +4412,15 @@ mod tests {
         out
     }
 
-    /// The Issues screen renders through the five-column card-board (63l.4): every
-    /// canonical lifecycle column appears with its live count header, and a
+    /// The Issues screen renders through the seven-column card-board (63l.4):
+    /// every canonical lifecycle column appears with its live count header, and a
     /// representative row is bucketed into each as a CARD (its id painted inside a
-    /// bordered tile). A `backlog` and an `in_review` row prove the two outer
-    /// columns are not dropped, and the legacy `open` / `closed` tokens still land
-    /// under Todo / Done via the canonical helper.
+    /// bordered tile). A `backlog` and an `in_review` row prove the outer columns
+    /// are not dropped, `blocked` / `cancelled` prove the two appended ones
+    /// render, and the legacy `open` / `closed` tokens still land under Todo /
+    /// Done via the canonical helper.
     #[test]
-    fn renders_all_five_canonical_columns_with_counts() {
+    fn renders_all_seven_canonical_columns_with_counts() {
         let s = IssueListState::with_rows(vec![
             row("i-backlog", "backlog", None),
             row("i-todo", "todo", None),
@@ -2752,11 +4429,13 @@ mod tests {
             row("i-review", "in_review", None),
             row("i-done", "done", None),
             row("i-closed", "closed", None), // legacy -> Done
+            row("i-blocked", "blocked", None),
+            row("i-cancelled", "cancelled", None),
         ]);
 
-        // A wide board so every 16-cell column fits its header + card.
-        let mut buf = WireBuffer::new(120, 24);
-        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        // A wide board so every one of the seven columns fits its header + card.
+        let mut buf = WireBuffer::new(168, 24);
+        render_issue_list(&mut buf, 168, 1, 23, &s, 0);
         let painted = painted_text(&buf);
 
         // Every canonical column header with its live count.
@@ -2766,6 +4445,8 @@ mod tests {
             "In Progress (1)",
             "In Review (1)",
             "Done (2)", // done + legacy closed
+            "Blocked (1)",
+            "Cancelled (1)",
         ] {
             assert!(
                 painted.contains(header),
@@ -2782,6 +4463,8 @@ mod tests {
             "i-review",
             "i-done",
             "i-closed",
+            "i-blocked",
+            "i-cancelled",
         ] {
             assert!(
                 painted.contains(id),
@@ -2895,16 +4578,18 @@ mod tests {
     }
 
     /// 63l.4 — the card-board spreads its columns HORIZONTALLY across the full
-    /// width (Backlog left, Done right), not vertically. With a populated fixture
-    /// the leftmost (`Backlog`) and rightmost (`Done`) column headers must sit on
-    /// the SAME header row but at opposite ends of the board — the board uses the
-    /// width, it doesn't stack the sections down the pane.
+    /// width (Backlog left, Cancelled right), not vertically. With a populated
+    /// fixture every column header must sit on the SAME header row, in canonical
+    /// left-to-right order — the board uses the width, it doesn't stack the
+    /// sections down the pane.
     ///
     /// Reverting to the old top-packed vertical band layout stacks the headers down
     /// one column and this side-by-side assertion fails.
     #[test]
     fn columns_spread_horizontally_across_the_board() {
-        const W: u16 = 120;
+        // 168 = 7 × 24, wide enough that every canonical header paints in full
+        // rather than being clipped to a stub the assertions can't find.
+        const W: u16 = 168;
         const H: u16 = 24;
         let top = 1u16;
         let bottom = H - 1; // footer pinned on the last row
@@ -2925,31 +4610,48 @@ mod tests {
         let mut buf = WireBuffer::new(W, H);
         render_issue_list(&mut buf, W, top, bottom, &s, 0);
 
-        // Find the x of the Backlog header glyph and the Done header glyph; they
-        // sit on the same header row at opposite ends of the board.
-        let backlog_x = header_glyph_x(&buf, "Backlog (").expect("Backlog header painted");
-        let done_x = header_glyph_x(&buf, "Done (").expect("Done header painted");
+        // Every canonical header sits on the same row, at strictly increasing x.
+        // Asserted as a SEQUENCE rather than frozen offsets so a width or column
+        // change cannot make the check vacuous.
+        let xs: Vec<u16> = [
+            "Backlog (",
+            "Todo (",
+            "In Progress (",
+            "In Review (",
+            "Done (",
+            "Blocked (",
+            "Cancelled (",
+        ]
+        .iter()
+        .map(|label| {
+            header_glyph_x(&buf, label).unwrap_or_else(|| panic!("{label} header painted"))
+        })
+        .collect();
         assert!(
-            done_x > backlog_x,
-            "Done must sit to the RIGHT of Backlog (horizontal columns): \
-             backlog_x={backlog_x}, done_x={done_x}",
+            xs.windows(2).all(|w| w[1] > w[0]),
+            "columns must spread left-to-right in canonical order, got {xs:?}",
         );
-        // Done sits in the rightmost fifth of a five-column board.
+        // The rightmost column really is at the right edge (not all seven packed
+        // into the left half with a vertical stack below).
+        let cancelled_x = *xs.last().expect("seven headers");
+        let columns = u16::try_from(IssueColumn::all().len()).expect("column count fits");
         assert!(
-            done_x >= W * 4 / 5 - 4,
-            "Done column must occupy the rightmost fifth (done_x={done_x}, w={W})",
+            cancelled_x >= W * (columns - 1) / columns - 4,
+            "Cancelled must occupy the rightmost column (cancelled_x={cancelled_x}, w={W})",
         );
     }
 
     /// The `(x, _)` start column of a header label painted anywhere in the buffer
     /// (the column the card-board painted that header at), scanning row-major.
     fn header_glyph_x(buf: &WireBuffer, label: &str) -> Option<u16> {
+        // Matched over CHARS, never bytes: the header row carries multi-byte
+        // status glyphs (`⊘`, `⨯`, …), so `str::find`'s byte offset is NOT a
+        // screen column and every x comparison built on it would be nonsense.
+        let needle: Vec<char> = label.chars().collect();
         for y in 0..buf.height {
-            let line = row_text(buf, y, buf.width);
-            if let Some(byte_idx) = line.find(label) {
-                // `find` returns a byte index; the header labels are ASCII here, so
-                // the byte index equals the char column.
-                return u16::try_from(byte_idx).ok();
+            let line: Vec<char> = row_text(buf, y, buf.width).chars().collect();
+            if let Some(idx) = line.windows(needle.len()).position(|w| w == needle.as_slice()) {
+                return u16::try_from(idx).ok();
             }
         }
         None

@@ -43,8 +43,9 @@
 //! run of [`THINKING_COLLAPSE_THRESHOLD`] or more into a single collapsed-group
 //! entry so reasoning doesn't bury the prose + tool flow.
 
+use ainb_hangar_core::acceptance::{AcceptanceCriterion, checked_count, legacy_placeholder_id};
 use ainb_hangar_core::ids::TaskId;
-use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
+use ainb_hangar_proto::events::{HangarEvent, IssueLinkRow, IssueRow, MessageKind, TaskResult};
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -82,6 +83,9 @@ const CARD_VALUE: Color = Color::rgb(220, 220, 230);
 const CARD_LABEL: Color = Color::rgb(120, 120, 140);
 /// The em-dash placeholder painted for an unset card field (63d).
 const CARD_UNSET: &str = "—";
+/// Selection green for the `▶` marker on the criterion under the acceptance
+/// cursor (the repo-wide TUI selection colour).
+const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
 /// The leading glyph + label painted before the branch name (`⎇ branch `).
 const BRANCH_PREFIX: &str = "⎇ branch ";
 /// Accent for the comment-compose input bar (a calm emerald, distinct from the
@@ -242,6 +246,10 @@ pub struct TaskDetailState {
     /// the opening task card's [`TaskCardRow::branch`](ainb_hangar_proto::events::TaskCardRow);
     /// rendered as a branch line under the PR badge (progressive disclosure).
     branch: Option<String>,
+    /// Which acceptance criterion the `a` cursor sits on (multica parity
+    /// #11-rest), or `None` when none is selected yet. `t` toggles the selected
+    /// one; both keys are no-ops on an issue with no criteria.
+    acceptance_cursor: Option<usize>,
 }
 
 /// The all-`Unknown` PR status, const-constructible so [`TaskDetailState::new`]
@@ -269,6 +277,7 @@ impl TaskDetailState {
             compose: None,
             pr_status: UNKNOWN_PR_STATUS,
             branch: None,
+            acceptance_cursor: None,
         }
     }
 
@@ -447,6 +456,19 @@ pub enum TaskDetailIntent {
         /// The typed comment body (guaranteed non-empty by the reducer).
         body: String,
     },
+    /// Tick / untick ONE acceptance criterion (`a` to select, `t` to toggle;
+    /// multica parity #11-rest). The plugin glue fires
+    /// `hangar/issue_criterion_set`; the daemon's `IssueUpdated` push refreshes
+    /// the card, so the glue only surfaces an error note on failure.
+    SetCriterionChecked {
+        /// The issue the criterion belongs to (the bound `issue.id`).
+        issue_id: ainb_hangar_core::ids::IssueId,
+        /// The stable criterion id (`ac-…`) — never a positional index, so a
+        /// future reorder cannot tick the wrong criterion.
+        criterion_id: String,
+        /// The state to set (the inverse of what is currently rendered).
+        checked: bool,
+    },
 }
 
 /// The result of folding one [`TaskDetailEvent`] into a [`TaskDetailState`].
@@ -509,8 +531,65 @@ fn reduce_key(state: &TaskDetailState, c: char) -> TaskDetailReduction {
         // Not lifecycle-gated: the daemon rejects a delete with active tasks and
         // that rejection surfaces as a note, so the confirm always opens.
         'x' => open_delete_modal(state),
+        // #11-rest: `a` walks the acceptance cursor, `t` toggles the selected
+        // criterion. Both are no-ops on an issue without criteria.
+        'a' => advance_acceptance_cursor(state),
+        't' => toggle_selected_criterion(state),
         _ => unchanged(state),
     }
+}
+
+/// Move the acceptance cursor to the next criterion, wrapping; select the FIRST
+/// when none is selected. A no-op when the issue has no criteria.
+fn advance_acceptance_cursor(state: &TaskDetailState) -> TaskDetailReduction {
+    let len = acceptance_view(state.issue()).len();
+    if len == 0 {
+        return unchanged(state);
+    }
+    let mut next = state.clone();
+    next.acceptance_cursor = Some(match state.acceptance_cursor {
+        Some(idx) => (idx + 1) % len,
+        None => 0,
+    });
+    TaskDetailReduction {
+        state: next,
+        intent: None,
+    }
+}
+
+/// Toggle the criterion under the acceptance cursor, emitting
+/// [`TaskDetailIntent::SetCriterionChecked`] for its STABLE id. A no-op when
+/// nothing is selected or the cursor has fallen off a shortened list.
+///
+/// The glyph flips OPTIMISTICALLY on the card (the same
+/// move-then-arm-the-durable-RPC pattern the issue list's `d` uses) so the tick
+/// is immediate; the daemon's `IssueUpdated` push then reconciles the row —
+/// including undoing this flip if the mutation was rejected.
+fn toggle_selected_criterion(state: &TaskDetailState) -> TaskDetailReduction {
+    let mut criteria = acceptance_view(state.issue());
+    let Some(idx) = state.acceptance_cursor else {
+        return unchanged(state);
+    };
+    let Some(criterion) = criteria.get(idx) else {
+        return unchanged(state);
+    };
+    let (criterion_id, checked) = (criterion.id.clone(), !criterion.checked);
+    if checked {
+        criteria[idx].tick(0, None);
+    } else {
+        criteria[idx].untick();
+    }
+    let mut next = state.clone();
+    next.issue.acceptance_criteria = criteria.iter().map(|c| c.text.clone()).collect();
+    next.issue.acceptance = criteria;
+    with_intent(
+        next,
+        TaskDetailIntent::SetCriterionChecked {
+            issue_id: state.issue.id.clone(),
+            criterion_id,
+            checked,
+        },
+    )
 }
 
 /// Compose-modal key handling (e38.5): Enter submits a non-empty body (closing
@@ -731,7 +810,7 @@ pub fn render_task_detail(
     // 63d: the issue DETAIL CARD spans the top of the area, so even a never-run
     // issue reads as a real card. The PR badge / branch / transcript start on the
     // first row BELOW it (+ its optional `Runs:` line).
-    let card_bottom = render_detail_card(buf, area_w, top, bottom, state.issue());
+    let card_bottom = render_detail_card(buf, area_w, top, bottom, state);
 
     // The PR badge (P9.2) takes the first row below the card when present,
     // pushing the transcript + sidebar down one row. When absent there is NO
@@ -917,8 +996,9 @@ fn render_detail_card(
     area_w: u16,
     top: u16,
     bottom: u16,
-    issue: &IssueRow,
+    state: &TaskDetailState,
 ) -> u16 {
+    let issue = state.issue();
     let card_w = area_w;
     let available = bottom.saturating_sub(top);
 
@@ -1018,19 +1098,121 @@ fn render_detail_card(
     );
     row = row.saturating_add(1);
 
-    // --- Labels ---
+    // --- Labels / Due (0014: the deadline shares the Labels row, so the card
+    //     height is unchanged and an issue's whole triage state reads in one
+    //     glance: Priority above, Labels + Due here) ---
     let labels = if issue.labels.is_empty() {
         CARD_UNSET.to_string()
     } else {
         issue.labels.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ")
     };
+    let due = issue.due_date.map_or_else(|| CARD_UNSET.to_string(), fmt_card_date);
     card_field_row(
         buf,
         card_w,
         row,
-        &[("Labels: ", CARD_LABEL), (&labels, CARD_VALUE)],
+        &[
+            ("Labels: ", CARD_LABEL),
+            (&labels, CARD_VALUE),
+            ("   Due: ", CARD_LABEL),
+            (&due, CARD_VALUE),
+        ],
     );
     row = row.saturating_add(1);
+
+    // --- Linked upstream issue (0043): only when the card links one, so an
+    //     unlinked card reads unchanged. `⧉` marks the traceability ref. ---
+    if let Some(link) = issue.external_ref.as_deref().filter(|l| !l.trim().is_empty()) {
+        card_field_row(
+            buf,
+            card_w,
+            row,
+            &[
+                ("Linked: ", CARD_LABEL),
+                ("⧉ ", CARD_LABEL),
+                (link, CARD_VALUE),
+            ],
+        );
+        row = row.saturating_add(1);
+    }
+
+    // --- Acceptance criteria (0048 + #11-rest): a `Acceptance: <done>/<total>`
+    //     header then one `☑`/`☐ <criterion>` line per element, rendered ONLY when
+    //     non-empty so an issue without them reads unchanged (mirrors the Linked
+    //     conditional). A checked line is dimmed to CARD_LABEL so the eye lands on
+    //     what is still outstanding. ---
+    let criteria = acceptance_view(issue);
+    if !criteria.is_empty() {
+        let header = format!(
+            "Acceptance: {}/{}",
+            checked_count(&criteria),
+            criteria.len()
+        );
+        card_field_row(buf, card_w, row, &[(&header, CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for (idx, criterion) in criteria.iter().enumerate() {
+            let marker = if state.acceptance_cursor == Some(idx) {
+                "▶ "
+            } else {
+                "  "
+            };
+            let glyph = if criterion.checked { "☑ " } else { "☐ " };
+            let text_style = if criterion.checked {
+                CARD_LABEL
+            } else {
+                CARD_VALUE
+            };
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[
+                    (marker, SELECTION_GREEN),
+                    (glyph, CARD_LABEL),
+                    (&criterion.text, text_style),
+                ],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
+    // --- Context references (0048): a header row then one `⧉ <ref>` line per
+    //     element, rendered ONLY when non-empty. ---
+    if !issue.context_refs.is_empty() {
+        card_field_row(buf, card_w, row, &[("Context:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for reference in &issue.context_refs {
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[("  ⧉ ", CARD_LABEL), (reference, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
+    // --- Typed links (multica parity #20): one line per link, glyphed by kind so
+    //     the gating ones read differently from the associations —
+    //     🔒 an UNFINISHED blocker, ✓ a satisfied one, → what this card blocks,
+    //     ~ a related card. Rendered ONLY when non-empty, so an old daemon (which
+    //     sends no `dependencies`) leaves the card byte-identical. ---
+    if !issue.dependencies.is_empty() {
+        card_field_row(buf, card_w, row, &[("Links:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for link in &issue.dependencies {
+            let (glyph, kind_label) = link_glyph_and_label(link);
+            let reference = link.display_id.clone().unwrap_or_else(|| link.issue_id.clone());
+            let head = format!("  {glyph} {kind_label:<10} {reference}  ");
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[(&head, CARD_LABEL), (&link.title, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
 
     // --- divider ---
     draw_card_divider(buf, row, card_w);
@@ -1090,9 +1272,44 @@ fn draw_card_divider(buf: &mut WireBuffer, row: u16, card_w: u16) {
     put_clipped(buf, 0, row, &s, CARD_BORDER, card_w);
 }
 
+/// The structured acceptance criteria to render for `issue`.
+///
+/// Prefers the #11-rest structured list. When it is empty and the legacy text
+/// mirror is not — an OLD daemon that predates #11-rest — the texts are rendered
+/// as all-unchecked criteria. That fallback is what keeps the append-only wire
+/// rule honest: a new plugin against an old daemon degrades, it never blanks.
+fn acceptance_view(issue: &IssueRow) -> Vec<AcceptanceCriterion> {
+    if !issue.acceptance.is_empty() {
+        return issue.acceptance.clone();
+    }
+    issue
+        .acceptance_criteria
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, text)| AcceptanceCriterion::with_id(&legacy_placeholder_id(idx), text))
+        .collect()
+}
+
 /// Draw one card content row: the `│` left+right edges in the border colour, then
 /// the label/value `segments` laid out left-to-right from the inner column,
 /// clipped by **chars** at the right edge (63d, utf8-safe).
+/// The glyph + rendered kind label for one typed link (multica parity #20).
+///
+/// `blocked_by` is the only kind that can gate, so it is the only one whose glyph
+/// varies: 🔒 while the blocker is unfinished, ✓ once it is satisfied. An
+/// unrecognised kind token (a newer daemon) falls back to the neutral association
+/// glyph rather than being dropped.
+fn link_glyph_and_label(
+    link: &ainb_hangar_proto::events::IssueLinkRow,
+) -> (&'static str, &'static str) {
+    match link.kind.as_str() {
+        "blocked_by" if link.satisfied => ("✓", "blocked-by"),
+        "blocked_by" => ("🔒", "blocked-by"),
+        "blocks" => ("→", "blocks"),
+        _ => ("~", "related"),
+    }
+}
+
 fn card_field_row(buf: &mut WireBuffer, card_w: u16, row: u16, segments: &[(&str, Color)]) {
     let inner_right = card_w.saturating_sub(2);
     // Edges first; the content overlays the interior between them.
@@ -1236,6 +1453,23 @@ mod card_tests {
         out
     }
 
+    /// The painted buffer as one string PER ROW, so an assertion can pin a glyph
+    /// to the same line as its criterion instead of anywhere on the screen.
+    fn painted_rows(buf: &WireBuffer) -> Vec<String> {
+        (0..buf.height)
+            .map(|y| {
+                let mut row: Vec<(u16, &str)> = buf
+                    .cells
+                    .iter()
+                    .filter(|(coord, _)| coord.y == y)
+                    .map(|(coord, cell)| (coord.x, cell.symbol.as_str()))
+                    .collect();
+                row.sort_by_key(|(x, _)| *x);
+                row.into_iter().map(|(_, sym)| sym).collect::<String>()
+            })
+            .collect()
+    }
+
     /// A fully-populated issue row for the card render assertions (63d).
     fn full_issue() -> IssueRow {
         IssueRow {
@@ -1257,9 +1491,17 @@ mod card_tests {
             agent: Some("codex".into()),
             source_branch: Some("main".into()),
             target_branch: Some("release".into()),
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
+            context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }
     }
 
@@ -1325,6 +1567,325 @@ mod card_tests {
             "em-dash placeholder for unset repo/agent"
         );
         assert!(text.contains("no description"), "unset description");
+    }
+
+    /// Parity 28: the deadline renders on the card next to the labels — a real
+    /// `YYYY-MM-DD` when set, the unset placeholder when not. Without this the
+    /// wizard could author a due date the user could never see.
+    #[test]
+    fn detail_card_renders_the_due_date() {
+        // Set: the calendar day appears under a `Due:` label.
+        let mut issue = full_issue();
+        issue.due_date = Some(1_785_542_400_000); // 2026-08-01 UTC midnight
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Due: "), "due label: {text}");
+        assert!(text.contains("2026-08-01"), "due value: {text}");
+
+        // Unset: the label still renders, with the em-dash placeholder.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Due: "), "due label when unset: {text}");
+        assert!(
+            !text.contains("2026-08-01"),
+            "no stale date on a deadline-less issue: {text}"
+        );
+    }
+
+    /// A linked upstream issue (0043) renders a subtle `Linked: ⧉ <ref>` line on
+    /// the detail card; an unlinked issue shows no such line.
+    #[test]
+    fn detail_card_renders_linked_line_only_when_linked() {
+        // Linked: the ref + the ⧉ glyph appear.
+        let mut issue = full_issue();
+        issue.external_ref = Some("acme/api#42".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Linked: "), "linked label: {text}");
+        assert!(text.contains('⧉'), "link glyph");
+        assert!(text.contains("acme/api#42"), "linked ref value");
+
+        // Unlinked: no Linked line at all.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        assert!(
+            !painted_text(&buf).contains("Linked: "),
+            "an unlinked issue shows no Linked line"
+        );
+    }
+
+    /// One typed link row for the render tests.
+    fn link_row(kind: &str, display: &str, title: &str, satisfied: bool) -> IssueLinkRow {
+        IssueLinkRow {
+            kind: kind.into(),
+            issue_id: format!("issue-{display}"),
+            display_id: Some(display.into()),
+            title: title.into(),
+            state: "open".into(),
+            satisfied,
+        }
+    }
+
+    /// multica parity #20: all three kinds render in a `Links:` block, each with
+    /// its own glyph — 🔒 for an unfinished blocker, ✓ once it is satisfied,
+    /// → for what this card blocks, ~ for a related card.
+    #[test]
+    fn detail_card_renders_a_links_block_per_kind() {
+        let mut issue = full_issue();
+        issue.dependencies = vec![
+            link_row("blocked_by", "HGR-4", "Build the parser", false),
+            link_row("blocked_by", "HGR-3", "Land the schema", true),
+            link_row("blocks", "HGR-9", "Ship the CLI", false),
+            link_row("related", "HGR-7", "Docs sweep", false),
+        ];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("Links:"), "the block header: {text}");
+        for want in [
+            "🔒 blocked-by HGR-4",
+            "✓ blocked-by HGR-3",
+            "→ blocks",
+            "~ related",
+        ] {
+            let squashed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let want_squashed = want.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squashed.contains(&want_squashed),
+                "missing {want:?} in {text}"
+            );
+        }
+        assert!(text.contains("Build the parser"), "the link title: {text}");
+        assert!(text.contains("Docs sweep"), "the related title: {text}");
+    }
+
+    /// An issue with NO links renders no `Links:` line at all — an old daemon
+    /// sends no `dependencies`, so the card degrades to exactly today's render.
+    #[test]
+    fn detail_card_omits_the_links_block_when_empty() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        assert!(
+            !painted_text(&buf).contains("Links:"),
+            "no links ⇒ no block (an old daemon leaves the card unchanged)"
+        );
+    }
+
+    /// A fresh unchecked criterion with a deterministic id.
+    fn crit(id: &str, text: &str) -> AcceptanceCriterion {
+        AcceptanceCriterion::with_id(id, text).expect("criterion")
+    }
+
+    /// An issue whose SECOND criterion is ticked.
+    fn issue_with_one_ticked() -> IssueRow {
+        let mut issue = full_issue();
+        let mut second = crit("ac-b", "tests green");
+        second.tick(1_700, Some("agent:builder"));
+        issue.acceptance = vec![crit("ac-a", "builds"), second];
+        issue.acceptance_criteria = issue.acceptance.iter().map(|c| c.text.clone()).collect();
+        issue
+    }
+
+    /// 0048: an issue carrying acceptance criteria renders an `Acceptance:` header
+    /// then one line per criterion; an empty list renders NO header.
+    #[test]
+    fn detail_card_renders_acceptance_block_only_when_present() {
+        let mut issue = full_issue();
+        issue.acceptance = vec![crit("ac-a", "builds"), crit("ac-b", "tests green")];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Acceptance:"), "acceptance header: {text}");
+        assert!(text.contains("builds"), "first criterion");
+        assert!(text.contains("tests green"), "second criterion");
+
+        // Empty list: no header at all.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        assert!(
+            !painted_text(&buf).contains("Acceptance:"),
+            "an issue with no criteria shows no Acceptance header"
+        );
+    }
+
+    /// **T7** — the detail-render half of the #11-rest acceptance: a checked
+    /// criterion paints `☑`, an unchecked one `☐`, and the header counts them.
+    /// The decoys (`☑` on an all-unchecked issue, a `0/2` or `2/2` header) must be
+    /// ABSENT.
+    #[test]
+    fn task_detail_renders_checked_criterion() {
+        let s = state_for(issue_with_one_ticked());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("Acceptance: 1/2"), "counted header: {text}");
+        assert!(!text.contains("Acceptance: 0/2"), "decoy 0/2: {text}");
+        assert!(!text.contains("Acceptance: 2/2"), "decoy 2/2: {text}");
+
+        // Line-precise: the unchecked criterion carries ☐, the ticked one ☑.
+        let rows = painted_rows(&buf);
+        let unchecked_line = rows
+            .iter()
+            .find(|l| l.contains("builds"))
+            .unwrap_or_else(|| panic!("no line for the unchecked criterion: {text}"));
+        assert!(
+            unchecked_line.contains('☐') && !unchecked_line.contains('☑'),
+            "unchecked line must be ☐ only: {unchecked_line}"
+        );
+        let checked_line = rows
+            .iter()
+            .find(|l| l.contains("tests green"))
+            .unwrap_or_else(|| panic!("no line for the checked criterion: {text}"));
+        assert!(
+            checked_line.contains('☑') && !checked_line.contains('☐'),
+            "checked line must be ☑ only: {checked_line}"
+        );
+
+        // Decoy: an all-unchecked issue paints NO ☑ anywhere.
+        let mut plain = full_issue();
+        plain.acceptance = vec![crit("ac-a", "builds"), crit("ac-b", "tests green")];
+        let s = state_for(plain);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Acceptance: 0/2"), "header: {text}");
+        assert!(
+            !text.contains('☑'),
+            "an all-unchecked issue paints no ☑: {text}"
+        );
+    }
+
+    /// The append-only wire fallback: an OLD daemon sends only the text mirror,
+    /// so the card still renders the criteria (all unchecked) rather than
+    /// blanking the block.
+    #[test]
+    fn task_detail_falls_back_to_text_mirror_from_an_old_daemon() {
+        let mut issue = full_issue();
+        issue.acceptance_criteria = vec!["builds".into(), "tests green".into()];
+        issue.acceptance = Vec::new();
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Acceptance: 0/2"), "header: {text}");
+        assert!(
+            text.contains("builds") && text.contains("tests green"),
+            "{text}"
+        );
+        assert!(
+            !text.contains('☑'),
+            "an old daemon's rows are unchecked: {text}"
+        );
+    }
+
+    /// **T8** — `a` selects the first criterion, `t` emits the toggle intent for
+    /// that exact STABLE id, and a second `t` on an already-ticked criterion
+    /// emits `checked: false`.
+    #[test]
+    fn task_detail_a_then_t_emits_set_criterion_intent() {
+        let s = state_for(issue_with_one_ticked());
+
+        // `t` with no selection is a no-op — never a blind tick of criterion 1.
+        let out = reduce_task_detail(&s, TaskDetailEvent::Key('t'));
+        assert_eq!(out.intent, None, "t before a raises nothing");
+
+        // `a` selects the FIRST criterion; `t` toggles it to checked.
+        let out = reduce_task_detail(&s, TaskDetailEvent::Key('a'));
+        assert_eq!(out.state.acceptance_cursor, Some(0));
+        let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('t'));
+        assert_eq!(
+            out.intent,
+            Some(TaskDetailIntent::SetCriterionChecked {
+                issue_id: s.issue().id.clone(),
+                criterion_id: "ac-a".to_string(),
+                checked: true,
+            }),
+            "t ticks the SELECTED criterion by its stable id"
+        );
+
+        // A second `a` walks to the ALREADY-ticked criterion; `t` unticks it.
+        let out = reduce_task_detail(&s, TaskDetailEvent::Key('a'));
+        let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('a'));
+        assert_eq!(out.state.acceptance_cursor, Some(1));
+        let out = reduce_task_detail(&out.state, TaskDetailEvent::Key('t'));
+        assert_eq!(
+            out.intent,
+            Some(TaskDetailIntent::SetCriterionChecked {
+                issue_id: s.issue().id.clone(),
+                criterion_id: "ac-b".to_string(),
+                checked: false,
+            }),
+            "t on a ticked criterion unticks it"
+        );
+
+        // A third `a` WRAPS back to the first.
+        let mut st = s.clone();
+        for _ in 0..3 {
+            st = reduce_task_detail(&st, TaskDetailEvent::Key('a')).state;
+        }
+        assert_eq!(st.acceptance_cursor, Some(0), "the cursor wraps");
+
+        // On an issue with NO criteria both keys are inert.
+        let empty = state_for(full_issue());
+        let out = reduce_task_detail(&empty, TaskDetailEvent::Key('a'));
+        assert_eq!(out.state.acceptance_cursor, None);
+        assert_eq!(out.intent, None);
+        assert_eq!(
+            reduce_task_detail(&out.state, TaskDetailEvent::Key('t')).intent,
+            None
+        );
+    }
+
+    /// The `▶` selection marker lands on the criterion under the acceptance
+    /// cursor, and nowhere before `a` is pressed.
+    #[test]
+    fn acceptance_cursor_paints_the_selection_marker() {
+        let s = state_for(issue_with_one_ticked());
+        let selected = reduce_task_detail(&s, TaskDetailEvent::Key('a')).state;
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &selected);
+        let rows = painted_rows(&buf);
+        let line = rows.iter().find(|l| l.contains("builds")).expect("criterion line");
+        assert!(line.contains('▶'), "marker on the selected line: {line}");
+        let other = rows.iter().find(|l| l.contains("tests green")).expect("criterion line");
+        assert!(!other.contains('▶'), "marker only on one line: {other}");
+    }
+
+    /// 0048: an issue carrying context references renders a `Context:` header then
+    /// one line per reference; an empty list renders NO header.
+    #[test]
+    fn detail_card_renders_context_block_only_when_present() {
+        let mut issue = full_issue();
+        issue.context_refs = vec!["acme/api#42".into(), "https://docs".into()];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Context:"), "context header: {text}");
+        assert!(text.contains("acme/api#42"), "first reference");
+        assert!(text.contains("https://docs"), "second reference");
+
+        // Empty list: no header at all.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        assert!(
+            !painted_text(&buf).contains("Context:"),
+            "an issue with no context refs shows no Context header"
+        );
     }
 
     /// An issue with run history renders the `Runs:` line below the card with the

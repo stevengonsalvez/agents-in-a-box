@@ -1,0 +1,13 @@
+-- 0043: link a hangar issue to an upstream GitHub/Jira issue for traceability.
+--
+-- `issue.external_ref` holds a free-form reference to an UPSTREAM issue — a URL
+-- or a short form like `owner/repo#123`. It is captured in the create wizard,
+-- shown on the board card + detail card, and appended to the dispatched brief as
+-- a `Linked issue: <ref>` line so the agent resolves the link itself at runtime.
+-- ainb never fetches it. NULL for every pre-0043 issue and for issues created
+-- without a link (the common case).
+--
+-- ALTER TABLE ... ADD COLUMN with no default is an O(1) catalog change in SQLite
+-- (no table rewrite), so this is safe on populated databases (mirrors 0042
+-- adding nullable branch columns to `issue`). Every pre-existing row reads NULL.
+ALTER TABLE issue ADD COLUMN external_ref TEXT;

@@ -153,8 +153,10 @@ mod tests {
             display_name: "name".into(),
             subtitle: "sub".into(),
             presence,
+            workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent,
             recent_rank: None,
+            ..ActorRow::default()
         }
     }
 

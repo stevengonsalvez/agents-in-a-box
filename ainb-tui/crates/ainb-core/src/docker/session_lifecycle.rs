@@ -173,7 +173,7 @@ impl SessionLifecycleManager {
             request.mode.clone(),
             request.boss_prompt.clone(),
             request.agent_type,
-            request.model,
+            request.model.and_then(|model| model.cli_value().map(str::to_string)),
         );
         session.id = request.session_id;
         session.branch_name = request.branch_name.clone();
@@ -1037,7 +1037,7 @@ impl SessionLifecycleManager {
             request.mode.clone(),
             request.boss_prompt.clone(),
             request.agent_type,
-            request.model,
+            request.model.and_then(|model| model.cli_value().map(str::to_string)),
         );
         session.id = request.session_id;
         session.branch_name = request.branch_name.clone();
@@ -1097,7 +1097,7 @@ impl SessionLifecycleManager {
             request.mode.clone(),
             request.boss_prompt.clone(),
             request.agent_type,
-            request.model,
+            request.model.and_then(|model| model.cli_value().map(str::to_string)),
         );
         session.id = request.session_id;
         session.branch_name = request.branch_name.clone();

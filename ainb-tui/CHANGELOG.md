@@ -7,6 +7,221 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.16.1] - 2026-07-23
+### Added
+- Merge pull request #457 from stevengonsalvez/feat/hangar-agents-screen
+- **hangar-daemon**: wire the hangar/agent_delete handler
+- **hangar-plugin**: add a first-class Agents screen (nav A, create, delete)
+- **hangar-proto**: add hangar/agent_delete method + params
+- **hangar-store**: add AgentRepo::delete guarded on active tasks + FK history
+
+### Fixed
+- Merge pull request #456 from stevengonsalvez/f/headroom-stats
+- **burndown**: retain headroom lifetime savings
+
+
+## [1.16.0] - 2026-07-23
+### Added
+- Merge pull request #400 from stevengonsalvez/feat/autostandup-default-off-toggle
+- Merge pull request #401 from stevengonsalvez/feat/hangar-auto-bootstrap
+- Merge pull request #402 from stevengonsalvez/feat/hangar-daemon-config-surface
+- Merge pull request #408 from stevengonsalvez/feat/hangar-credential-model
+- Merge pull request #415 from stevengonsalvez/feat/hangar-health-db-drift
+- Merge pull request #419 from stevengonsalvez/feat/hangar-daemon-version-skew
+- Merge pull request #420 from stevengonsalvez/feat/hangar-task-agent-model
+- Merge pull request #423 from stevengonsalvez/feat/hangar-delete-everywhere
+- Merge pull request #424 from stevengonsalvez/feat/hangar-create-wizard-modal
+- Merge pull request #426 from stevengonsalvez/feat/hangar-wizard-repo-picker
+- Merge pull request #427 from stevengonsalvez/feat/hangar-issue-brief
+- Merge pull request #428 from stevengonsalvez/feat/hangar-issue-linked-ref
+- Merge pull request #442 from stevengonsalvez/fix/hangar-e2e-5-daemon-sandbox-posture-not-logged-at-startup
+- **cli**: add 'ainb hangar daemon config' list/get/set
+- **cli**: hangar daemon cred status|set|clear
+- **hangar**: 0042 schema — agent token budget + task source/target branch
+- **hangar**: ConfirmCancelDelete overlay state + reducer on the Issues board
+- **hangar**: Issues create wizard — staged, agent-required, dispatches
+- **hangar**: TUI flags a version-skewed daemon on the health pane
+- **hangar**: add SpawnTimeout failure reason for wedged run setup
+- **hangar**: add daemon-config knob registry (single source of truth)
+- **hangar**: add issue.external_ref column (migration 0043)
+- **hangar**: add issue_cancel_active RPC handler
+- **hangar**: add issue_run assignee override param
+- **hangar**: advertise x:delete in the issue-list and task-detail footers
+- **hangar**: agent create-from-scratch via RPC + CLI (Seam C)
+- **hangar**: append a Linked issue line to the dispatched brief
+- **hangar**: auto-start the daemon on TUI launch (Seam D)
+- **hangar**: capture + show an issue's linked upstream ref in the TUI
+- **hangar**: capture a multi-line Brief in the issue create wizard
+- **hangar**: centered full-form create-issue wizard card
+- **hangar**: cycle Issues filter chip with Tab/Shift+Tab
+- **hangar**: daemon status flags a version skew via a daemon.version file
+- **hangar**: daemon-health pane screams on db drift instead of silent zeros
+- **hangar**: daemon_config_list RPC + registry-validated set
+- **hangar**: default auto-standup OFF (opt-in)
+- **hangar**: delete an issue — guarded cascade, RPC, CLI
+- **hangar**: delete the bound issue from the task-detail screen
+- **hangar**: enable context-menu Delete into the issue confirm overlay
+- **hangar**: include stdout/stderr tails in generic runner_failed warn
+- **hangar**: live-prove remote-clone + source-branch dispatch end to end
+- **hangar**: log raw terminal tail + provider on contract drift
+- **hangar**: log resolved OS-sandbox posture at daemon startup
+- **hangar**: match wizard repo row to new-session repo picker
+- **hangar**: observe codex turn.failed message + name drift canary
+- **hangar**: read + partially-update issue.external_ref in the store
+- **hangar**: registry-driven daemon-config editor in Settings
+- **hangar**: route issue run to the assigned agent, not alphabetical
+- **hangar**: select Issues filter chip by mouse click
+- **hangar**: tag the active-tasks delete refusal with a machine-readable marker
+- **hangar**: target a named workspace agent from the create wizard
+- **hangar**: task-detail issue card + x-to-delete on the Issues screen
+- **hangar**: thread external_ref through the wire + guard issue_run
+- **hangar**: toggle auto-standup from the Settings screen
+- **hangar**: wire cancel-then-delete on the Issues board
+- **hangar-daemon**: add a real Backend::Copilot exec path
+- **hangar-daemon**: default claim runtime id on a fresh home (Seam B)
+- **hangar-daemon**: honour per-agent provider at dispatch
+- **hangar-daemon**: resolve the claude credential daemon-side and inject it
+- **hangar-daemon**: seed default workspace + runtime + starter agent on boot
+- **hangar-daemon**: serve hangar/task_retry force-requeue RPC
+- **hangar-daemon**: worktrees branch off a chosen source branch + board-less issue_run
+- **hangar-plugin**: wire manual R retry to hangar/task_retry
+- **hangar-proto**: add hangar/task_retry method + params
+- **hangar-proto**: add issue_cancel_active method + params/result
+- **hangar-store**: add FailTaskService::fail_with_detail
+- **hangar-store**: add ProviderContractDrift failure reason (NoRetry)
+- **hangar-store**: add RetryService::force_requeue for manual retry
+- **hangar-store**: add SpawnError failure reason
+- **hangar-store**: add nullable agent.provider column (migration 0041)
+- **hangar-store**: schema_drift probe detects a stale binary serving a newer db
+- **hangar-store**: shared fresh-home bootstrap module (Seam A)
+- **hangar-tui**: 'n' create-agent prompt on the Squads screen
+- add disk-space-cleaner skill
+- fix(hangar): keep every Settings section on screen
+
+### Fixed
+- Merge pull request #399 from stevengonsalvez/fix/hangar-stuck-keys
+- Merge pull request #403 from stevengonsalvez/feat/hangar-auto-bootstrap
+- Merge pull request #404 from stevengonsalvez/feat/hangar-auto-bootstrap
+- Merge pull request #405 from stevengonsalvez/fix/hangar-headless-followups
+- Merge pull request #407 from stevengonsalvez/fix/hangar-task-stranding
+- Merge pull request #410 from stevengonsalvez/fix/hangar-completion-signal
+- Merge pull request #411 from stevengonsalvez/fix/hangar-completion-robustness
+- Merge pull request #413 from stevengonsalvez/fix/codex-weekly-window-routing
+- Merge pull request #416 from stevengonsalvez/fix/fleet-discover-stale-ainb-bin
+- Merge pull request #425 from stevengonsalvez/feat/hangar-zombie-dispatch-delete
+- Merge pull request #430 from stevengonsalvez/fix/hangar-e2e-1-issue-wizard-repo-ref-no-clone
+- Merge pull request #431 from stevengonsalvez/fix/hangar-e2e-1-issue-run-failure-never-terminalizes-invisible
+- Merge pull request #433 from stevengonsalvez/fix/hangar-e2e-named-agent
+- Merge pull request #434 from stevengonsalvez/fix/hangar-e2e-1-issue-list-filter-chip-unreachable
+- Merge pull request #435 from stevengonsalvez/fix/hangar-e2e-3-zombie-dispatch-keychain-block
+- Merge pull request #436 from stevengonsalvez/fix/hangar-e2e-spawn-wedge
+- Merge pull request #437 from stevengonsalvez/fix/hangar-e2e-2-finalize-failure-drops-stderr-tail
+- Merge pull request #438 from stevengonsalvez/fix/hangar-e2e-2-no-in-product-recovery-from-agent-error
+- Merge pull request #439 from stevengonsalvez/fix/hangar-e2e-2-agent-picker-modal-no-opaque-background
+- Merge pull request #440 from stevengonsalvez/fix/hangar-e2e-3-sandboxed-provider-path-not-resolved-to-absolute
+- Merge pull request #441 from stevengonsalvez/fix/hangar-e2e-4-macos-seatbelt-sandbox-kills-headless-claude-dispatch
+- Merge pull request #443 from stevengonsalvez/fix/hangar-e2e-6-exit65-agent-error-failure-path-unobservable
+- Merge pull request #444 from stevengonsalvez/fix/hangar-e2e-6-manual-retry-noop-on-agent-error-task
+- Merge pull request #445 from stevengonsalvez/fix/hangar-e2e-7-stale-daemon-binary-defeats-hangar-fixes
+- Merge pull request #446 from stevengonsalvez/fix/hangar-e2e-7-finalize-failure-null-result-on-empty-tails
+- Merge pull request #447 from stevengonsalvez/fix/hangar-e2e-8-issue-state-never-advances-on-plain-task-lifecycle
+- Merge pull request #449 from stevengonsalvez/fix/hangar-e2e-3-issue-update-drops-source-branch-and-preempts-run
+- Merge pull request #452 from stevengonsalvez/fix/hangar-e2e-8-wizard-brief-leading-newline-pr448-macos-test-red
+- **cli**: emit csv and markdown for daemon config list/get
+- **cli**: hold the cred token as SecretBytes and drop the length disclosure
+- **cli**: trim the daemon config key
+- **codex-statusline**: route wham windows by limit_window_seconds
+- **fleet**: discover shells current_exe, not a stale $PATH ainb
+- **hangar**: Esc cancels create-card overlay from any stage
+- **hangar**: advance issue lifecycle at task FSM seams
+- **hangar**: allowlist claude terminal classification, fail closed on drift
+- **hangar**: assigning an agent re-dispatches the issue
+- **hangar**: bind the daemon config cursor to the arrow keys
+- **hangar**: bound daemon claude credential read off the async worker
+- **hangar**: bound the whole running->spawn setup phase, terminalize on wedge
+- **hangar**: clone remote-only repo pick in Issues-wizard create/run path
+- **hangar**: default headless OS sandbox OFF on macOS
+- **hangar**: fail closed to ProviderContractDrift on missing structured terminal
+- **hangar**: fail sweeper rows with a NULL age column
+- **hangar**: finalize provider runs on structured outcome, not exit 0
+- **hangar**: floor the auto-standup cooldown at one minute
+- **hangar**: guard the config overlay as a text-capture surface
+- **hangar**: guard wizard Brief Enter against seeding a leading newline
+- **hangar**: keep every Settings section on screen
+- **hangar**: make agent_error failure path self-diagnosing
+- **hangar**: make the daemon config overlay correctable and clipped
+- **hangar**: move agent_create req-id clear of the daemon-config pair
+- **hangar**: open the spawn-setup umbrella at the running commit
+- **hangar**: paint opaque background under agent-picker modal
+- **hangar**: persist a diagnostic on zero-output run failures
+- **hangar**: persist issue_update source/target branch before auto-dispatch
+- **hangar**: persist runner stderr tail into result on run failure
+- **hangar**: pin codex exec to danger-full-access sandbox
+- **hangar**: q escapes hangar panels via ui.close_request
+- **hangar**: queue daemon-config writes instead of one slot
+- **hangar**: reclaim dispatched rows with a NULL dispatched_at
+- **hangar**: reconcile auto-standup toggle on write failure + tolerant decode
+- **hangar**: refuse overlapping delete / cancel-and-delete flows
+- **hangar**: refuse runtime rename, existing id wins (FKs are ON)
+- **hangar**: reject unknown keys on the daemon_config set RPC
+- **hangar**: repair acceptance fixtures broken by the 0042 enrich migration
+- **hangar**: skip a stale sibling daemon binary at start time
+- **hangar**: terminalize pre-run setup faults instead of looping dispatched
+- **hangar-daemon**: build the provider argv for the mode it is spawned in
+- **hangar-daemon**: codex needs --skip-git-repo-check to run headless
+- **hangar-daemon**: copilot argv carries verified non-interactive flags + exec test
+- **hangar-daemon**: deliver the task brief to the provider (headless never worked)
+- **hangar-daemon**: fail task on provider spawn error instead of stranding it
+- **hangar-daemon**: give claude an explicit permission posture
+- **hangar-daemon**: inject the claude credential via extra_env, not the allowlist
+- **hangar-daemon**: resolve provider paths to absolute at startup
+- **hangar-sandbox**: resolve bare program name to absolute binary in profile
+- **hangar-store**: declare foreign_keys(true) explicitly and pin it in CI
+- **hangar-store**: harden bootstrap ensure_* for id-change and concurrent writers
+
+### Documentation
+- Merge pull request #421 from stevengonsalvez/docs/reflect-serve-ui
+- Merge pull request #422 from stevengonsalvez/fix/reflect-cli-version
+- Merge pull request #451 from stevengonsalvez/docs/hangar-cli-reference-freshness-429
+- Merge pull request #454 from stevengonsalvez/ainb/01KY56ZCQHBNKX2DABFJEBA7RC
+- Merge pull request #455 from stevengonsalvez/docs/hangar-e2e-evidence
+- **assets**: add reflect memory browser screenshots
+- **codex-statusline**: correct module doc on window identification
+- **codex-statusline**: scope tripwire claim to render path
+- **hangar**: add hangar e2e validation campaign narrative
+- **hangar**: archive hangar e2e validation campaign artifacts
+- **hangar**: clarify retry wording in task-failure taxonomy
+- **hangar**: document task failure taxonomy and retry dispositions
+- **hangar**: drop root REVIEW.md handover scratch from PR
+- **hangar**: repoint deleted-fn links, fix PK-collision rationale, state copilot permission policy
+- **hangar-daemon**: note the codex confinement boundary is pending daemon-sandbox-on
+- **hangar-store**: correct the stale 'PRAGMA foreign_keys is off' claims
+- **reflect**: add memory browser (reflect serve) page
+- **reflect**: correct CLI version to 0.3.0 in the version streams table
+- **reflect**: mention the web memory browser on the reflect plugin and CLI pages
+- **site**: add Memory browser to the Reflect Memory sidebar
+- correct Hangar Settings keybindings to match shipped reducer
+- regenerate CLI reference from current binary
+- update Hangar TUI keybindings to shipped behavior
+
+### Other
+- Merge pull request #417 from stevengonsalvez/chore/just-dev-recipe
+- Merge pull request #418 from stevengonsalvez/chore/just-dev-build-plugins
+- **dev**: `just dev` restages ALL plugins via build-plugins.sh
+- **dev**: add `just dev` — rebuild both binaries + restart daemon + run TUI
+- **hangar**: daemon + plugin inherit workspace version
+- pin reflect plugin to v5.2.1
+- pin reflect plugin to v5.2.2
+- pin reflect plugin to v5.2.3
+- **hangar**: keep the sweeper age predicates index-friendly
+- **codex-statusline**: fold weekly-only seed into seed_codex_cache
+- **hangar**: borrow the primary task in issue_cancel_active
+- **hangar**: derive registry defaults from the daemon's typed consts
+- **hangar**: point standup + card-agent keys at the config registry
+- **hangar**: tidy wizard ring_step + auto-commit repo pick on tab-away
+- **hangar-store**: ensure_runtime returns the id it settled on
+
+
 ## [1.15.0] - 2026-07-13
 ### Fixed
 - **hangar**: self-exec fallback for daemon start

@@ -115,6 +115,8 @@ impl AutopilotsState {
                     title: format!("{} · {state} · last {last}", ap.cron_expr),
                     priority: PriorityChip::from_priority(0),
                     assignee_initial: ap.name.chars().next(),
+                    linked: false,
+                    subtasks: None,
                 }
             })
             .collect::<Vec<_>>();

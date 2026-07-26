@@ -16,8 +16,8 @@ use ainb_hangar_core::channel::ChannelSet;
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
-    ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow, IssueRow, SkillFile,
-    SkillRow, TaskCardRow,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow,
+    IssueRow, SkillFile, SkillRow, TaskCardRow,
 };
 
 /// `serde(default)` helper — an absent `is_answer` defaults to `true`.
@@ -280,6 +280,41 @@ pub struct SkillAttachParams {
     pub agent_id: String,
     /// The skill being (de)attached.
     pub skill_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SKILL_SET_ENABLED`] (parity #24).
+///
+/// The same `(workspace, agent, skill)` triple `SkillAttachParams` carries, plus
+/// the target state. Explicit rather than a flip so the call is idempotent and
+/// two racing clients converge instead of ping-ponging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSetEnabledParams {
+    /// The subscribed workspace both ids must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent whose link is being toggled.
+    pub agent_id: String,
+    /// The skill whose link is being toggled.
+    pub skill_id: String,
+    /// The target state: `true` = the link materialises, `false` = it stays
+    /// attached but is suppressed.
+    pub enabled: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_AGENT_SKILLS_LIST`] (parity #24).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSkillsListParams {
+    /// The subscribed workspace the agent must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent whose attachments are listed.
+    pub agent_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_AGENT_SKILLS_LIST`]: one agent's skill
+/// links, enabled and disabled alike, ordered by skill name (parity #24).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSkillsListResult {
+    /// Every link on the agent — a disabled one is still listed, flagged.
+    pub links: Vec<AgentSkillLinkRow>,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOTS_LIST`]: the workspace's
@@ -864,6 +899,25 @@ pub struct TaskTransitionParams {
     pub to_status: String,
 }
 
+/// Params for [`crate::methods::HANGAR_TASK_RETRY`]: the workspace (tenant guard)
+/// and the terminal task to force-requeue at an operator's explicit request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRetryParams {
+    /// The subscribed workspace the task must belong to.
+    pub workspace_id: String,
+    /// The terminal task to requeue.
+    pub task_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_TASK_RETRY`]: the id of the freshly-queued
+/// child attempt, or `None` when the task was not terminal (nothing to requeue).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskRetryResult {
+    /// The `parent_task_id`-chained child that was enqueued, or `None` when the
+    /// task was not in a terminal state.
+    pub new_task_id: Option<String>,
+}
+
 /// A three-state edit instruction for a nullable issue field (e38.8).
 ///
 /// A bare `Option<T>` collapses "leave this field unchanged" and "clear this
@@ -955,6 +1009,11 @@ pub struct IssueUpdateParams {
     /// it. Stored now, consumed by later PR automation. Append-only.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub target_branch: Option<String>,
+    /// New upstream-issue reference (a URL or `owner/repo#123`, migration 0043);
+    /// `None` leaves it unchanged. Persisted on the issue for traceability and
+    /// appended to the dispatched brief. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_LABEL_ATTACH`] /
@@ -980,6 +1039,31 @@ pub struct IssueLabelParams {
     pub color: Option<String>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_CRITERION_SET`] (multica parity
+/// #11-rest): tick or untick ONE acceptance criterion on one issue, scoped to a
+/// workspace.
+///
+/// `workspace_id` + `issue_id` identify the target row (the workspace is the
+/// tenant-isolation guard — a foreign-tenant issue id touches nothing).
+/// `criterion` addresses one element either by its stable id or by 1-based
+/// ordinal. `checked` is the state to set (idempotent). `actor` is optional
+/// attribution recorded on a tick and cleared on an untick.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueCriterionSetParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose criterion is being (un)ticked (`issue.id`).
+    pub issue_id: String,
+    /// Criterion id (`ac-…`) or 1-BASED ordinal (`"2"`).
+    pub criterion: String,
+    /// The checked state to set. Ticking an already-ticked criterion is a
+    /// success no-op that does NOT rewrite provenance.
+    pub checked: bool,
+    /// Who ticked it (`"<kind>:<id>"`); optional, append-only. Cleared on untick.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
 /// Params for [`crate::methods::HANGAR_ISSUE_CREATE`] (e38.29): create one new
 /// issue in a workspace.
 ///
@@ -1000,6 +1084,50 @@ pub struct IssueCreateParams {
     pub description: Option<String>,
     /// The creating actor in canonical `member:<id>` / `agent:<id>` form.
     pub creator: String,
+    /// Optional upstream-issue reference (a URL or `owner/repo#123`) linking this
+    /// hangar issue to a GitHub/Jira issue for traceability (migration 0043);
+    /// omitted when unset. Persisted on the created issue and appended to the
+    /// dispatched brief so the agent resolves the link itself (ainb never fetches
+    /// it). Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub external_ref: Option<String>,
+    /// Optional parent issue id: when set, the created issue is a **sub-issue** of
+    /// that parent (migration 0046). The daemon validates the parent exists in the
+    /// same workspace and rejects a foreign/unknown parent. Append-only field: an
+    /// old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_issue_id: Option<String>,
+    /// Ordered acceptance-criteria strings authored in the create wizard/CLI
+    /// (migration 0048, multica parity): one criterion per element. Persisted on
+    /// the created issue and rendered on the detail card. Append-only field: an
+    /// old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    /// Ordered context-reference strings (URL / `owner/repo#123` / note) authored
+    /// in the create wizard/CLI (migration 0048, multica parity): one per element.
+    /// Persisted on the created issue and rendered on the detail card. Append-only
+    /// field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub context_refs: Vec<String>,
+    /// New issue urgency `0..3` (P3..P0, HIGHER = MORE URGENT, migration 0014).
+    /// `None` = the schema default 0 (P3). An out-of-range value is REJECTED by
+    /// the daemon (multica's `validateIssueEnum` contract), never clamped.
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    /// Optional deadline as epoch milliseconds at UTC midnight (migration 0014).
+    /// Clients author a `YYYY-MM-DD` calendar day and convert with
+    /// [`crate::dates::parse_calendar_date_ms`]; `None` = no due date.
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<i64>,
+    /// Label NAMES to attach at create (migration 0016): each is resolve-or-created
+    /// in the workspace and joined to the new issue through the `label` /
+    /// `issue_label` tables (the join is the source of truth; `issue.labels` stays
+    /// the derived read-cache). Append-only field: an old client omits it, an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
@@ -1051,6 +1179,19 @@ pub struct AgentUpdateParams {
     /// (back to unlimited), a value sets it (migration 0042).
     #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
     pub token_budget: FieldUpdate<i64>,
+    /// New description, ≤255 CHARACTERS; `None` leaves it unchanged (the column
+    /// is NOT NULL — its cleared state is `""`, so no [`FieldUpdate`]).
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// New avatar token; omitted leaves it, `null` clears it, a value sets it
+    /// (migration 0050).
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub avatar_url: FieldUpdate<String>,
+    /// New Codex service tier; omitted leaves it, `null` clears it (back to
+    /// inheriting the local config), a value sets it (migration 0050).
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub service_tier: FieldUpdate<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_CREATE`]: create one agent from
@@ -1077,9 +1218,31 @@ pub struct AgentCreateParams {
     /// Optional free-form system prompt / instructions.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub instructions: Option<String>,
+    /// Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`); absent =
+    /// the provider default. Applied as a create-time config follow-up.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
     /// Optional token budget (rtk/headroom); absent = unlimited (migration 0042).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<i64>,
+    /// Optional short blurb, ≤255 CHARACTERS (migration 0050); absent = `""`.
+    /// The daemon rejects an over-long value with `INVALID_PARAMS`.
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional avatar token (e.g. `"emoji:🦊"`); absent/blank makes the daemon
+    /// mint a random emoji so an agent is never avatar-less (migration 0050).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// Optional Codex service tier (runtime-native catalog id, e.g. `"priority"`);
+    /// absent = inherit the local Codex config (migration 0050). Stored +
+    /// surfaced only — no dispatch-time override reads it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    // NOTE: `kind` / `system_key` are DELIBERATELY absent from the create wire.
+    // A `system` agent is a hidden internal carrier minted by the agent-builder
+    // (gap #9-rest), never by a client, so exposing it here would let any peer
+    // manufacture an agent no roster can see.
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_ARCHIVE`] (e38.15): archive or
@@ -1097,6 +1260,29 @@ pub struct AgentArchiveParams {
     pub agent_id: String,
     /// `true` archives (hides from the active picker); `false` restores.
     pub archived: bool,
+    /// The user id recorded as `archived_by` (migration 0052, parity #26).
+    /// APPEND-ONLY: omitted (`None`) defaults to the workspace OWNER — the
+    /// ordinary single-operator archive — mirroring
+    /// [`SquadAssignParams::invoker_user_id`]. An old client omits it; an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_by_user_id: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_AGENT_DELETE`]: delete one named agent
+/// from a workspace (the Agents screen `x` remove, slice 2).
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// scopes the delete by `(agent_id, workspace_id)` so a foreign-tenant agent id
+/// deletes nothing. The daemon refuses the delete while the agent has an active
+/// task or still carries FK-pinned run history (see
+/// [`crate::methods::HANGAR_AGENT_DELETE`]).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct AgentDeleteParams {
+    /// The subscribed workspace the agent must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent to delete (`agent.id`).
+    pub agent_id: String,
 }
 
 /// Params for [`crate::methods::HANGAR_COMMENT_ADD`] (e38.5): append one comment
@@ -1188,7 +1374,7 @@ pub struct MemberRemoveParams {
 /// canonical actor-ref (`member:<id>` / `agent:<id>`) — the actor a squad-assigned
 /// task routes to; `members` are the squad's member actor-refs in the same form.
 /// A pure wire row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SquadWireRow {
     /// The squad's id (`squad.id`) — what `squad_member_add`/`remove` key off.
     pub id: String,
@@ -1199,6 +1385,68 @@ pub struct SquadWireRow {
     pub leader: String,
     /// The squad's member actor-refs (`member:<id>` / `agent:<id>`), ordered.
     pub members: Vec<String>,
+    /// `true` when the squad is archived (migration 0052, parity #26).
+    /// APPEND-ONLY: absent on the wire when `false`, so a pre-0052 producer's
+    /// payload still parses and a consumer sees the active default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// When the squad was archived (epoch ms), absent when active / unstamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// Who archived the squad, as a canonical actor-ref; empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub archived_by: String,
+    /// The user-authored per-squad routing guidance (`squad.instructions`,
+    /// migration 0053, parity #25). APPEND-ONLY: absent on the wire when empty,
+    /// so a pre-0053 producer's payload still parses and a consumer sees `""`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
+    /// Per-member ROLE labels. One entry per membership that HAS a role — a
+    /// roleless squad omits the field entirely, keeping the payload
+    /// byte-identical to a pre-0053 producer's. APPEND-ONLY:
+    /// [`members`](Self::members) is NOT retyped, so an old consumer keeps
+    /// parsing it unchanged; `members` stays the ordering authority and a
+    /// consumer joins these rows by the [`member`](SquadMemberWireRow::member)
+    /// ref, NEVER by index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_roles: Vec<SquadMemberWireRow>,
+}
+
+/// One squad membership on the wire: the member actor-ref plus its free-text
+/// ROLE (migration 0053, parity #25).
+///
+/// Carried in [`SquadWireRow::member_roles`] only for members that actually have
+/// a role — a roleless membership contributes no row at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadMemberWireRow {
+    /// The member in canonical `member:<id>` / `agent:<id>` form.
+    pub member: String,
+    /// The member's free-text role label; empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_ARCHIVE`] (parity #26): archive or
+/// un-archive one squad, recording who + when.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// scopes the flip by `(squad_id, workspace_id)` so a foreign-tenant squad id
+/// archives nothing. `archived: true` removes the squad from the active list and
+/// makes it refuse new assignments; `false` restores it and CLEARS the audit
+/// pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadArchiveParams {
+    /// The subscribed workspace the squad must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to (un)archive (`squad.id`).
+    pub squad_id: String,
+    /// `true` archives; `false` restores.
+    pub archived: bool,
+    /// The user id recorded as `archived_by`. APPEND-ONLY: omitted (`None`)
+    /// defaults to the workspace OWNER, same resolution as
+    /// [`AgentArchiveParams::archived_by_user_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_by_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_SQUADS_LIST`] and the refreshed view the
@@ -1231,6 +1479,11 @@ pub struct SquadCreateParams {
     pub name: String,
     /// The squad leader in canonical `member:<id>` / `agent:<id>` form.
     pub leader: String,
+    /// Optional initial `squad.instructions` (migration 0053, parity #25).
+    /// APPEND-ONLY: omitted ⇒ `""`, i.e. a squad created with no routing
+    /// guidance, exactly as a pre-0053 client's create behaves.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ADD`] and
@@ -1249,6 +1502,52 @@ pub struct SquadMemberParams {
     pub squad_id: String,
     /// The member actor in canonical `member:<id>` / `agent:<id>` form.
     pub member: String,
+    /// Optional role for the ADDED member (migration 0053, parity #25).
+    /// Honoured by [`crate::methods::HANGAR_SQUAD_MEMBER_ADD`] and **ignored by**
+    /// [`crate::methods::HANGAR_SQUAD_MEMBER_REMOVE`] (a removal has no role to
+    /// carry). APPEND-ONLY: omitted ⇒ `""`, which leaves an EXISTING member's
+    /// role untouched — a plain re-add never clears a role an operator set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ROLE_SET`] (parity #25): set
+/// or clear one EXISTING membership's free-text role.
+///
+/// `workspace_id` is the tenant-isolation guard, scoping the update by
+/// `(workspace_id, squad_id)` so a cross-tenant squad touches no row. `member` is
+/// a canonical actor-ref (`"agent:<id>"` / `"member:<id>"`) that must ALREADY be
+/// a member — the daemon answers `INVALID_PARAMS` rather than inserting a
+/// membership as a side effect. An empty `role` clears the label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadMemberRoleParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to mutate (`squad.id`).
+    pub squad_id: String,
+    /// The existing member in canonical `member:<id>` / `agent:<id>` form.
+    pub member: String,
+    /// The free-text role label; empty clears it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_INSTRUCTIONS_SET`] (parity #25): set
+/// or clear one squad's user-authored routing guidance.
+///
+/// `workspace_id` is the tenant-isolation guard. The text is stored VERBATIM (it
+/// reaches an agent's materialised `CLAUDE.md` through the leader briefing);
+/// empty clears it, which makes the briefing omit the `## Squad Instructions`
+/// section entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadInstructionsParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to mutate (`squad.id`).
+    pub squad_id: String,
+    /// The routing guidance; empty clears it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): route a task to a
@@ -1276,6 +1575,13 @@ pub struct SquadAssignParams {
     /// Claim urgency (0..3, higher = more urgent); omitted defaults to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i64>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the assignment by. APPEND-ONLY: omitted (`None`) defaults to the
+    /// workspace owner (the ordinary single-operator assign, which the gate always
+    /// admits). A multi-user caller names a non-owner member here to be gated
+    /// against the leader's / each member's allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): the enqueued task
@@ -1378,6 +1684,16 @@ pub struct BoardCardWireRow {
     /// F7). APPEND-ONLY: default `false` (explicit run stays the default).
     #[serde(default, skip_serializing_if = "is_false")]
     pub auto_run: bool,
+    /// The DISPLAY IDS of the cards this card BLOCKS — the reverse read direction
+    /// of its `blocked_by` rows (multica parity #20). Render-only: it neither
+    /// gates this card nor changes its runnable state. APPEND-ONLY.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
+    /// The DISPLAY IDS of this card's RELATED cards (multica parity #20) — a
+    /// symmetric, NON-gating association. Never affects dispatch or auto-run; the
+    /// board renders a `↔n` count and the detail card the full list. APPEND-ONLY.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<String>,
 }
 
 /// One squad member's task chip on a fanned-out card (tcp T4 / F7): which agent
@@ -1632,6 +1948,22 @@ pub struct IssueRunParams {
     /// persisted `source_branch`, else the repo's default branch.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_branch: Option<String>,
+    /// A run-time ASSIGNEE override (`agent:<id>`) naming the NAMED workspace
+    /// agent the run dispatches under (V3-F3). APPEND-ONLY: omitted (`None`)
+    /// resolves the run agent from the issue's persisted `assignee`, else the
+    /// workspace's alphabetically-first agent. Passed ALONGSIDE the persisting
+    /// `issue_update{assignee}` (mirroring the repo/branch override discipline) so
+    /// dispatch never depends on the persist landing first — the create wizard
+    /// targets a named agent by carrying it here.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub assignee: Option<String>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the run by. APPEND-ONLY: omitted (`None`) defaults to the
+    /// workspace owner (the ordinary single-operator Run, which the gate always
+    /// admits — so this is invisible to existing callers). A multi-user caller
+    /// names a non-owner member here to be gated against the agent's allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_ISSUE_DELETE`] (63d): delete one issue and
@@ -1699,6 +2031,14 @@ pub struct BoardCardRunParams {
     /// (`None`) uses the issue's persisted `source_branch`, else `main`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_branch: Option<String>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the run by — for the single-agent enqueue AND for every target of
+    /// a SQUAD fan-out. APPEND-ONLY: omitted (`None`) defaults to the workspace owner
+    /// (the ordinary single-operator TUI Run, which the gate always admits — so this
+    /// is invisible to existing callers). Mirrors
+    /// [`IssueRunParams::invoker_user_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6): the enqueued
@@ -1801,20 +2141,104 @@ pub struct BoardCardAssignSquadParams {
     pub squad_id: Option<String>,
 }
 
+/// The KIND of a card link on the wire (multica parity #20), mirroring
+/// `ainb_hangar_store::repo::card_dependency::LinkKind`.
+///
+/// `BlockedBy` is the DEFAULT, and that is the append-only contract: a pre-#20
+/// client that omits `link_type` gets exactly today's gating edge, and the daemon
+/// omits the field when it is the default so the wire stays byte-identical.
+/// `Blocks` is a write/read DIRECTION — the daemon normalises it into a swapped
+/// `blocked_by` row, so it is never a stored value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKindWire {
+    /// FROM blocks TO (stored as the reverse `blocked_by` row).
+    Blocks,
+    /// FROM is blocked by TO — the gating relation, and the wire default.
+    #[default]
+    BlockedBy,
+    /// FROM and TO are associated: symmetric, never gating, never auto-running.
+    Related,
+}
+
+impl LinkKindWire {
+    /// serde `skip_serializing_if` helper: omit the field when it carries the
+    /// pre-#20 meaning, so an old client sees an unchanged payload.
+    #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub const fn is_default(&self) -> bool {
+        matches!(self, Self::BlockedBy)
+    }
+
+    /// The rendered token (`"blocks"` / `"blocked_by"` / `"related"`).
+    #[must_use]
+    pub const fn as_token(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::BlockedBy => "blocked_by",
+            Self::Related => "related",
+        }
+    }
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_DEP_ADD`] and
-/// [`crate::methods::HANGAR_BOARD_CARD_DEP_REMOVE`] (tcp T4 / F7): a `depends-on`
-/// edge between two cards on the board. The DEPENDENT is blocked until the BLOCKER
-/// finishes.
+/// [`crate::methods::HANGAR_BOARD_CARD_DEP_REMOVE`] (tcp T4 / F7): a typed link
+/// between two cards on the board.
+///
+/// Since multica parity #20 the two positional fields are FROM
+/// (`dependent_issue_id`) and TO (`blocker_issue_id`) and their meaning depends on
+/// `link_type`; the historical names are KEPT for wire compatibility. With the
+/// default `link_type` (`blocked_by`) they read exactly as before: the DEPENDENT
+/// is blocked until the BLOCKER finishes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BoardCardDepParams {
     /// The subscribed workspace the board belongs to (tenant guard).
     pub workspace_id: String,
     /// The board both cards sit on.
     pub board_id: String,
-    /// The DEPENDENT card's issue (the one that gets blocked).
+    /// The FROM card's issue (the DEPENDENT under the default `blocked_by`).
     pub dependent_issue_id: String,
-    /// The BLOCKER card's issue (must finish before the dependent runs).
+    /// The TO card's issue (the BLOCKER under the default `blocked_by`).
     pub blocker_issue_id: String,
+    /// The link's kind (multica parity #20). APPEND-ONLY: omitted ⇒ `blocked_by`,
+    /// i.e. exactly the pre-#20 gating edge.
+    #[serde(default, skip_serializing_if = "LinkKindWire::is_default")]
+    pub link_type: LinkKindWire,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_LINK_ADD`] /
+/// [`crate::methods::HANGAR_ISSUE_LINK_REMOVE`] (multica parity #20): a typed link
+/// between two issues, independent of any board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinkParams {
+    /// The subscribed workspace both issues belong to (tenant guard).
+    pub workspace_id: String,
+    /// The FROM issue (the one the link is authored on).
+    pub issue_id: String,
+    /// The TO issue (the other end).
+    pub other_issue_id: String,
+    /// The link's kind. APPEND-ONLY: omitted ⇒ `blocked_by`.
+    #[serde(default, skip_serializing_if = "LinkKindWire::is_default")]
+    pub link_type: LinkKindWire,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_LINKS`] (multica parity #20): read
+/// one issue's whole typed link graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinksParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose links to read.
+    pub issue_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUE_LINKS`]: every link on one issue, in
+/// render order (`blocked_by`, then `blocks`, then `related`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinksResult {
+    /// The issue's typed links. Empty ⇒ the issue has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<crate::events::IssueLinkRow>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_SET_AUTO_RUN`] (tcp T4 / F7):
@@ -1997,7 +2421,7 @@ pub struct DaemonConfigListResult {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::events::PresenceState;
+    use crate::events::{PresenceState, Workload};
 
     /// The params + result envelopes round-trip through JSON.
     #[test]
@@ -2061,9 +2485,17 @@ mod tests {
                 agent: None,
                 source_branch: None,
                 target_branch: None,
+                external_ref: None,
                 run_count: 0,
                 last_run_status: None,
                 last_run_at: None,
+                parent_id: None,
+                child_total: 0,
+                child_done: 0,
+                acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
+                context_refs: Vec::new(),
+                dependencies: Vec::new(),
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
@@ -2078,8 +2510,10 @@ mod tests {
                 display_name: "claude-agent".into(),
                 subtitle: "agent · claude".into(),
                 presence: PresenceState::Online,
+                workload: Workload::Working,
                 is_agent: true,
                 recent_rank: Some(0),
+                ..Default::default()
             }],
         };
         let s = serde_json::to_string(&actors).unwrap();
@@ -2212,6 +2646,63 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SkillAttachParams>(&s).unwrap(),
             attach
+        );
+    }
+
+    /// The parity-#24 per-agent skill-toggle envelopes round-trip through JSON,
+    /// and an old peer's row (no `enabled` key) reads back as ENABLED.
+    #[test]
+    fn skill_toggle_envelopes_roundtrip() {
+        let toggle = SkillSetEnabledParams {
+            workspace_id: "ws-1".into(),
+            agent_id: "agent-1".into(),
+            skill_id: "skill-review".into(),
+            enabled: false,
+        };
+        let s = serde_json::to_string(&toggle).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SkillSetEnabledParams>(&s).unwrap(),
+            toggle
+        );
+
+        let params = AgentSkillsListParams {
+            workspace_id: "ws-1".into(),
+            agent_id: "agent-1".into(),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSkillsListParams>(&s).unwrap(),
+            params
+        );
+
+        let result = AgentSkillsListResult {
+            links: vec![
+                AgentSkillLinkRow {
+                    skill_id: "s-1".into(),
+                    name: "commit".into(),
+                    enabled: true,
+                },
+                AgentSkillLinkRow {
+                    skill_id: "s-2".into(),
+                    name: "review".into(),
+                    enabled: false,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSkillsListResult>(&s).unwrap(),
+            result
+        );
+
+        // Append-only tolerance: a peer that predates the toggle concept omits
+        // the field entirely. It MUST read back as enabled — defaulting to
+        // `false` would render every skill on an old peer as disabled.
+        let legacy: AgentSkillLinkRow =
+            serde_json::from_str(r#"{"skill_id":"s","name":"n"}"#).unwrap();
+        assert!(
+            legacy.enabled,
+            "an omitted `enabled` means the peer has no toggle concept = ENABLED"
         );
     }
 
@@ -2424,6 +2915,7 @@ mod tests {
             agent: Some("codex".into()),
             source_branch: Some("develop".into()),
             target_branch: Some("main".into()),
+            external_ref: Some("acme/api#42".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<IssueUpdateParams>(&s).unwrap(), full);
@@ -2486,6 +2978,9 @@ mod tests {
             thinking: FieldUpdate::Set("high".into()),
             agent_env: Some(vec![("FOO".into(), "bar".into())]),
             token_budget: FieldUpdate::Set(500_000),
+            description: Some("ships the backend".into()),
+            avatar_url: FieldUpdate::Set("emoji:\u{1F98A}".into()),
+            service_tier: FieldUpdate::Set("priority".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentUpdateParams>(&s).unwrap(), full);
@@ -2501,6 +2996,11 @@ mod tests {
         assert!(p.mcp_config.is_keep(), "absent mcp_config leaves it");
         assert!(p.thinking.is_keep(), "absent thinking leaves it");
         assert_eq!(p.agent_env, None, "absent agent_env leaves it");
+        // Migration-0050 metadata: a PRE-0050 producer sends none of these keys,
+        // and each must decode to leave-unchanged (the append-only proof).
+        assert_eq!(p.description, None, "absent description leaves it");
+        assert!(p.avatar_url.is_keep(), "absent avatar_url leaves it");
+        assert!(p.service_tier.is_keep(), "absent service_tier leaves it");
         assert_eq!(serde_json::to_string(&p).unwrap(), minimal);
 
         // An explicit `null` is the CLEAR instruction, distinct from omission.
@@ -2517,11 +3017,146 @@ mod tests {
             workspace_id: "ws-1".into(),
             agent_id: "agent-1".into(),
             archived: true,
+            archived_by_user_id: Some("user-2".into()),
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
             serde_json::from_str::<AgentArchiveParams>(&s).unwrap(),
             params
+        );
+    }
+
+    /// The parity-#26 archive-audit fields are APPEND-ONLY on the wire: a LEGACY
+    /// payload without them still parses (defaulting to "unattributed"), and a
+    /// value-less row does not emit the keys — so an old peer's shape is
+    /// unchanged in both directions.
+    #[test]
+    fn archive_audit_fields_are_append_only_on_the_wire() {
+        // A pre-0052 client payload (no `archived_by_user_id`) still parses.
+        let legacy = r#"{"workspace_id":"ws-1","agent_id":"agent-1","archived":true}"#;
+        let p: AgentArchiveParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            p.archived_by_user_id, None,
+            "an omitted archiver defaults to None (the daemon then falls back to the owner)"
+        );
+        assert!(
+            !serde_json::to_string(&p).unwrap().contains("archived_by_user_id"),
+            "an unset archiver is not emitted"
+        );
+
+        // The squad params carry the same append-only field.
+        let legacy = r#"{"workspace_id":"ws-1","squad_id":"s1","archived":true}"#;
+        let p: SquadArchiveParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.archived_by_user_id, None);
+        assert!(p.archived);
+
+        // A round-trip with the field present preserves it.
+        let full = SquadArchiveParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            archived: true,
+            archived_by_user_id: Some("user-2".into()),
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadArchiveParams>(&s).unwrap(),
+            full
+        );
+
+        // An ACTIVE squad row emits none of the three audit keys, so a pre-0052
+        // consumer sees byte-identical JSON to what it saw before.
+        let active = SquadWireRow {
+            id: "s1".into(),
+            name: "alpha".into(),
+            leader: "agent:a-lead".into(),
+            ..SquadWireRow::default()
+        };
+        let s = serde_json::to_string(&active).unwrap();
+        for key in ["archived", "archived_at", "archived_by"] {
+            assert!(!s.contains(key), "active row must not emit `{key}`: {s}");
+        }
+
+        // An ARCHIVED row carries all three, and a legacy payload without them
+        // parses back to the active default.
+        let archived = SquadWireRow {
+            archived: true,
+            archived_at: Some(1_700_000_000_000),
+            archived_by: "member:user-1".into(),
+            ..active.clone()
+        };
+        let s = serde_json::to_string(&archived).unwrap();
+        assert_eq!(serde_json::from_str::<SquadWireRow>(&s).unwrap(), archived);
+        let legacy_row = r#"{"id":"s1","name":"alpha","leader":"agent:a-lead","members":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<SquadWireRow>(legacy_row).unwrap(),
+            active
+        );
+    }
+
+    /// Parity #25 (migration 0053) is APPEND-ONLY on the squad wire: a pre-0053
+    /// payload parses to the empty defaults, a roleless / instruction-less row
+    /// serialises without the two new keys (byte-identical to a pre-0053
+    /// producer's), and a populated row round-trips.
+    #[test]
+    fn squad_role_and_instructions_are_append_only() {
+        // A pre-0053 row (no `instructions`, no `member_roles`) parses.
+        let legacy: SquadWireRow = serde_json::from_str(
+            r#"{"id":"s1","name":"alpha","leader":"agent:a-lead","members":["agent:a-1"]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.instructions, "");
+        assert!(legacy.member_roles.is_empty());
+
+        // A roleless row emits NEITHER new key.
+        let s = serde_json::to_string(&legacy).unwrap();
+        for key in ["instructions", "member_roles"] {
+            assert!(!s.contains(key), "roleless row must not emit `{key}`: {s}");
+        }
+
+        // A populated row round-trips with both.
+        let full = SquadWireRow {
+            instructions: "Escalate schema questions to the DB owner.".into(),
+            member_roles: vec![SquadMemberWireRow {
+                member: "agent:a-1".into(),
+                role: "owns the migrations".into(),
+            }],
+            ..legacy.clone()
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<SquadWireRow>(&s).unwrap(), full);
+
+        // Legacy params (no `instructions` / no `role`) parse to the defaults.
+        let create: SquadCreateParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","name":"alpha","leader":"agent:a-lead"}"#,
+        )
+        .unwrap();
+        assert_eq!(create.instructions, "");
+        let add: SquadMemberParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","squad_id":"s1","member":"agent:a-1"}"#)
+                .unwrap();
+        assert_eq!(add.role, "");
+
+        // Both new param types round-trip.
+        let role = SquadMemberRoleParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            member: "agent:a-1".into(),
+            role: "owns the migrations".into(),
+        };
+        let s = serde_json::to_string(&role).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadMemberRoleParams>(&s).unwrap(),
+            role
+        );
+        let instr = SquadInstructionsParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            instructions: "Line one.\nLine two.".into(),
+        };
+        let s = serde_json::to_string(&instr).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadInstructionsParams>(&s).unwrap(),
+            instr
         );
     }
 
@@ -2535,7 +3170,11 @@ mod tests {
             name: "reviewer".into(),
             provider: Some("codex".into()),
             instructions: Some("be terse".into()),
+            model: Some("gpt-5-codex".into()),
             token_budget: Some(250_000),
+            description: Some("reviews every PR".into()),
+            avatar_url: Some("emoji:\u{1F98A}".into()),
+            service_tier: Some("priority".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentCreateParams>(&s).unwrap(), full);
@@ -2546,6 +3185,12 @@ mod tests {
         assert!(minimal.workspace_id.is_none());
         assert!(minimal.provider.is_none());
         assert!(minimal.instructions.is_none());
+        assert!(minimal.model.is_none());
+        // Migration-0050 metadata: a PRE-0050 payload carries none of these keys
+        // and still deserializes, each defaulting to "unset" (append-only proof).
+        assert!(minimal.description.is_none());
+        assert!(minimal.avatar_url.is_none());
+        assert!(minimal.service_tier.is_none());
         // The optional fields are omitted from the serialized form when absent.
         assert_eq!(
             serde_json::to_string(&minimal).unwrap(),
@@ -2604,6 +3249,7 @@ mod tests {
                 name: "alpha".into(),
                 leader: "agent:a-lead".into(),
                 members: vec!["agent:a-1".into(), "member:u-1".into()],
+                ..SquadWireRow::default()
             }],
         };
         let s = serde_json::to_string(&list).unwrap();
@@ -2613,6 +3259,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             name: "alpha".into(),
             leader: "agent:a-lead".into(),
+            instructions: "Route schema work to the DB owner.".into(),
         };
         let s = serde_json::to_string(&create).unwrap();
         assert_eq!(
@@ -2624,6 +3271,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             squad_id: "s1".into(),
             member: "agent:a-1".into(),
+            role: "owns the migrations".into(),
         };
         let s = serde_json::to_string(&member).unwrap();
         assert_eq!(
@@ -2637,6 +3285,7 @@ mod tests {
             issue_id: Some("issue-1".into()),
             work_dir: Some("/tmp/run".into()),
             priority: Some(2),
+            invoker_user_id: Some("user-1".into()),
         };
         let s = serde_json::to_string(&assign).unwrap();
         assert_eq!(
@@ -2691,6 +3340,9 @@ mod tests {
         assert_eq!(minimal.issue_id, None);
         assert_eq!(minimal.work_dir, None);
         assert_eq!(minimal.priority, None);
+        // gap #8: the invoker override is append-only — a pre-gap-#8 caller omits
+        // it and the service falls back to the workspace owner.
+        assert_eq!(minimal.invoker_user_id, None);
         // The serialized form drops the absent optionals entirely.
         let s = serde_json::to_string(&minimal).unwrap();
         assert_eq!(s, r#"{"workspace_id":"ws-1","squad_id":"s1"}"#);
@@ -2723,6 +3375,8 @@ mod tests {
                         member_states: Vec::new(),
                         blocked_by: Vec::new(),
                         auto_run: false,
+                        blocks: Vec::new(),
+                        related: Vec::new(),
                     }],
                 }],
                 unmapped: Vec::new(),
@@ -2777,6 +3431,8 @@ mod tests {
             ],
             blocked_by: vec!["ock-2".into()],
             auto_run: true,
+            blocks: Vec::new(),
+            related: Vec::new(),
         };
         let s = serde_json::to_string(&squad_card).unwrap();
         assert_eq!(
@@ -2804,6 +3460,8 @@ mod tests {
             member_states: Vec::new(),
             blocked_by: Vec::new(),
             auto_run: false,
+            blocks: Vec::new(),
+            related: Vec::new(),
         };
         let s = serde_json::to_string(&plain).unwrap();
         for k in ["squad_id", "member_states", "blocked_by", "auto_run"] {
@@ -2881,12 +3539,91 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.repo_ref, None);
         assert_eq!(legacy.agent, None);
+        // gap #8: the invoker override is append-only too — a legacy frame omits it
+        // and `run_card` falls back to the workspace owner.
+        assert_eq!(legacy.invoker_user_id, None);
 
         let over: BoardCardRunParams = serde_json::from_str(
-            r#"{"workspace_id":"ws-1","board_id":"b1","issue_id":"i1","mode":"interactive","repo_ref":"/repos/app","agent":"claude"}"#,
+            r#"{"workspace_id":"ws-1","board_id":"b1","issue_id":"i1","mode":"interactive","repo_ref":"/repos/app","agent":"claude","invoker_user_id":"bob"}"#,
         )
         .unwrap();
         assert_eq!(over.repo_ref.as_deref(), Some("/repos/app"));
         assert_eq!(over.agent.as_deref(), Some("claude"));
+        assert_eq!(over.invoker_user_id.as_deref(), Some("bob"));
+    }
+
+    /// multica parity #20 append-only contract: a PRE-#20 client omits
+    /// `link_type` and gets the gating `blocked_by` edge, and the daemon omits the
+    /// field from the wire when it carries that default — so the payload an old
+    /// client sees is byte-identical to before.
+    #[test]
+    fn board_card_dep_params_link_type_is_append_only() {
+        let old: BoardCardDepParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","dependent_issue_id":"i2","blocker_issue_id":"i1"}"#,
+        )
+        .expect("a pre-#20 payload still decodes");
+        assert_eq!(
+            old.link_type,
+            LinkKindWire::BlockedBy,
+            "an omitted link_type means the historical gating edge"
+        );
+        assert!(
+            !serde_json::to_string(&old).unwrap().contains("link_type"),
+            "the default kind is omitted from the wire"
+        );
+
+        let related = BoardCardDepParams {
+            link_type: LinkKindWire::Related,
+            ..old
+        };
+        let s = serde_json::to_string(&related).unwrap();
+        assert!(s.contains(r#""link_type":"related""#), "{s}");
+        assert_eq!(
+            serde_json::from_str::<BoardCardDepParams>(&s).unwrap(),
+            related
+        );
+    }
+
+    /// Every wire kind round-trips through its `snake_case` token.
+    #[test]
+    fn link_kind_wire_round_trips_snake_case() {
+        for (kind, token) in [
+            (LinkKindWire::Blocks, "blocks"),
+            (LinkKindWire::BlockedBy, "blocked_by"),
+            (LinkKindWire::Related, "related"),
+        ] {
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{token}\"")
+            );
+            assert_eq!(kind.as_token(), token);
+            assert_eq!(
+                serde_json::from_str::<LinkKindWire>(&format!("\"{token}\"")).unwrap(),
+                kind
+            );
+        }
+        assert_eq!(LinkKindWire::default(), LinkKindWire::BlockedBy);
+    }
+
+    /// A pre-#20 card row (no `blocks` / `related`) decodes, and an empty typed
+    /// graph is omitted from the wire.
+    #[test]
+    fn board_card_wire_row_typed_links_are_append_only() {
+        let row: BoardCardWireRow = serde_json::from_str(
+            r#"{"issue_id":"i1","title":"t","display_id":"HGR-1","blocked_by":["HGR-2"]}"#,
+        )
+        .expect("a pre-#20 card row still decodes");
+        assert!(row.blocks.is_empty() && row.related.is_empty());
+        assert_eq!(
+            row.blocked_by,
+            vec!["HGR-2"],
+            "blocked_by keeps its meaning"
+        );
+
+        let s = serde_json::to_string(&row).unwrap();
+        assert!(
+            !s.contains("\"blocks\"") && !s.contains("\"related\""),
+            "{s}"
+        );
     }
 }

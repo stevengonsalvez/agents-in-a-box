@@ -1,0 +1,60 @@
+{
+  "phase": "V3 Pattern A (solo)",
+  "pass": false,
+  "artifacts": {
+    "v3Branch": null,
+    "cloneDir": null,
+    "issueId": "01KY1WWXKN5SETXQC6EN662E07",
+    "taskId": "01KY1WWXNVCE5P1Y99VA71V752",
+    "dispatchedAgent": "claude (01KY1W2BYT1XM4S8DDFBDV2RSJ) — NOT dev; alphabetical fallback",
+    "briefVerbatimMd5": "f77485c0eae8d855a6a4ae50d3c61e6a",
+    "evidenceDir": "/Users/stevengonsalvez/.claude/jobs/cc83c6a4/tmp/hangar-e2e/cycle-2"
+  },
+  "wizard_steps_verified": [
+    "c opens '✦ New task' card (v3_02_wizard_open.txt)",
+    "Title typed verbatim (v3_02..v3_08 dumps)",
+    "Brief: Enter INSIDE Brief inserts newline, does not create — 8-line brief accepted (v3_03_brief_typed.txt, v3_03b)",
+    "Linked URL typed (v3_08_pre_submit.txt)",
+    "Repo @ dropdown lists ★☁ agents-in-a-box remote favorite; fuzzy filter + pick works (v3_04, v3_05, v3_06)",
+    "Enter creates: HGR-1 card appears in Todo (v3_09_post_submit.txt)",
+    "DB: issue row exists, description byte-identical to typed brief incl newlines (md5 match), external_ref == GH issue URL, repo_ref == 'stevengonsalvez/agents-in-a-box' (v3_db_evidence.txt)"
+  ],
+  "failures": [
+    {
+      "id": "V3-F1",
+      "summary": "Issues create-wizard remote-favorite pick is unrunnable: issue_update/issue_run persist and pass repo_ref RAW ('stevengonsalvez/agents-in-a-box'), never calling resolve_card_repo_ref (the pv8 ensure_clone resolution the Boards path does at rpc/mod.rs:2605-2609). provision() treats the bare owner/repo as a local path -> hard error every attempt.",
+      "evidence": [
+        "crates/ainb-hangar-daemon/src/rpc/mod.rs:1437-1477 (handle_issue_update persists repo_ref raw)",
+        "crates/ainb-hangar-daemon/src/rpc/mod.rs:2817-2829 (handle_issue_run passes params.repo_ref raw as run_override)",
+        "crates/ainb-hangar-daemon/src/rpc/mod.rs:2648 (resolve_card_repo_ref exists, only wired to the Boards card path at :2605)",
+        "crates/ainb-hangar-daemon/src/workdir_provision.rs:229-233 (the exact error emitted)",
+        "daemon log: 3x 'source branch `main` not found in stevengonsalvez/agents-in-a-box (tried `main` and `origin/main`)' (v3_daemon_errors.txt)",
+        "DB: issue.repo_ref='stevengonsalvez/agents-in-a-box' (raw remote, not a clone path); no clones/ dir ever created under home-c2"
+      ]
+    },
+    {
+      "id": "V3-F2",
+      "summary": "Provision-failure zombie loop: a deterministic provision error leaves the row 'dispatched'; the sweeper reclaims it (attempt UNCHANGED, dispatched_at RESET) every ~90-120s, so the 300s DISPATCHED_TTL hard-fail cutoff never fires — the task loops forever, never reaching a terminal state, and the board card sits in Todo with no failure signal to the user.",
+      "evidence": [
+        "crates/ainb-hangar-daemon/src/run_loop.rs:614-625 (provision fault -> row stays dispatched for sweeper reclaim, by design)",
+        "crates/ainb-hangar-daemon/src/sweeper.rs:57-81 (DISPATCHED_TTL=300s, RECLAIM_WINDOW=90s) + :292-319 (fail cutoff keyed on dispatched_at, which each reclaim/redispatch resets)",
+        "observed: dispatched_at 1784622876814 -> 1784622997087, attempt stuck at 1, daemon error count 2 -> 3 across cycles (v3_poll.log, v3_daemon_errors.txt)",
+        "board pane: HGR-1 stuck in Todo, chip '◇ None', zero user-visible failure (v3_pane_poll_6.txt)"
+      ]
+    },
+    {
+      "id": "V3-F3",
+      "summary": "Create wizard cannot target a named agent — Agent row is a provider chip (AgentChip::ALL = claude/codex/copilot), dispatch falls back to alphabetically-first workspace agent (resolve_run_agent_opt -> AgentRepo::list_by_workspace ORDER BY name), so dev->reviewer assignment semantics (Pattern B's premise) are inexpressible from the TUI.",
+      "evidence": [
+        "crates/ainb-plugin-hangar/src/screen/boards.rs:328-357 (AgentChip: providers only)",
+        "crates/ainb-hangar-daemon/src/rpc/mod.rs:3163-3182 (resolve_run_agent_opt: assignee else list_by_workspace().next())",
+        "crates/ainb-hangar-store/src/repo/agent.rs:202-212 (list_by_workspace ORDER BY name)",
+        "observed: task 01KY1WWXNVCE5P1Y99VA71V752 ran under agent 'claude' (01KY1W2BYT1XM4S8DDFBDV2RSJ), not 'dev' — alphabetical accident (v3_db_evidence.txt)"
+      ]
+    }
+  ],
+  "environment_notes": [
+    "tmux session hangar-e2e-v3-c2-1784622404 and the cycle daemon were externally terminated ~09:38 local (same sweep that SIGKILLed a sleeping foreground bash, exit 137). All assertions predating that are from captured artifacts; the verdict is unaffected — the failure loop was already proven deterministic.",
+    "Daemon stopped (was already dead) and tmux session confirmed gone at cleanup."
+  ]
+}

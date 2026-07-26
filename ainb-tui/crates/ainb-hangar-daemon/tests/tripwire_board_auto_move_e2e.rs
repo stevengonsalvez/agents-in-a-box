@@ -70,6 +70,10 @@ async fn board_card_auto_moves_and_greens_on_run_success() {
             priority: 0,
             due_date: None,
             labels: Vec::new(),
+            parent_issue_id: None,
+            stage: None,
+            acceptance_criteria: Vec::new(),
+            context_refs: Vec::new(),
         },
     )
     .await
@@ -152,11 +156,22 @@ async fn board_card_auto_moves_and_greens_on_run_success() {
     .expect("enqueue task");
 
     // Wait for the task to walk the FSM to `done`.
-    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(30)).await;
+    let scale = u64::from(tripwire_support::budget_scale());
+    let _ = wait_for_db(&pool, task_id, "done", Duration::from_secs(30 * scale)).await;
 
     // The auto-move hook fires AFTER the terminal finalize; poll the board until
     // the card lands in the Done column (bounded, to avoid a finalize/hook race).
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    //
+    // The gap between the `done` commit and the move is NOT atomic: finalize
+    // commits the status and only then walks a chain of best-effort steps
+    // (`persist_usage` → `persist_run_branch` → `record_run_history` →
+    // `emit_task_finished`) before reaching `auto_move_after_terminal`, each one
+    // a SQLite write. Scaling this deadline (it was the one budget in the suite
+    // that never did) removes runner speed as a variable — but note the measured
+    // gap on a dev box is 0.3-2.7ms against a 10s budget, so slowness alone does
+    // NOT explain the ubuntu-only failures. That is what the daemon-log dump
+    // below is for: `auto_move_after_terminal` logs its own decision.
+    let deadline = std::time::Instant::now() + Duration::from_secs(10 * scale);
     let mut card_col = None;
     while std::time::Instant::now() < deadline {
         let boards = BoardRepo::list(&pool, &ws).await.expect("list after");
@@ -171,10 +186,16 @@ async fn board_card_auto_moves_and_greens_on_run_success() {
     drop(session); // kill the tmux session by exact name before assertions
 
     // POSITIVE: the card auto-moved from Todo to the `done`-mapped Done column.
+    // On failure, fold in the daemon's own log: `auto_move_after_terminal` logs
+    // its decision (`issue active set not drained`, an aggregate read fault, a
+    // failed move UPDATE), so a CI-only failure is diagnosable without a local
+    // Linux repro instead of being a bare left/right mismatch.
     assert_eq!(
         card_col.as_deref(),
         Some("col-done"),
-        "the card must auto-move to the Done column when its task reaches done"
+        "the card must auto-move to the Done column when its task reaches done\n\
+         daemon logs:\n{}",
+        tripwire_support::dump_daemon_logs(home.path())
     );
 
     // POSITIVE (card-green): the boards_list snapshot the TUI renders reports the

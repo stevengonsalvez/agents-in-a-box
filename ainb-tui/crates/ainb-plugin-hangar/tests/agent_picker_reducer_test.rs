@@ -34,8 +34,10 @@ fn actor(
             "backend dev".into()
         },
         presence,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: recent,
+        ..ActorRow::default()
     }
 }
 

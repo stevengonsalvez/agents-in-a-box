@@ -149,9 +149,41 @@ fn a_committed_card_run_surfaces_its_branch_and_pr_on_the_card() {
         "the branch must survive teardown in the origin repo (the durable artifact)"
     );
     // The clean worktree is torn down, but the branch remains — that is the point.
+    //
+    // Bounded wait, because teardown is NOT atomic with the status write that
+    // the loop above polls on. `finalize` commits `done`, and `teardown_workdir`
+    // is the LAST step of the success path — after `persist_usage`,
+    // `persist_run_branch`, `record_run_history`, `emit_task_finished`, the
+    // board auto-move + cascade, the dependent re-evaluation and a durable
+    // progress comment, every one of them a SQLite write. So observing `done`
+    // guarantees the teardown is coming, not that it has happened; on a
+    // contended runner the gap is wide enough that this bare assert lost the
+    // race. The assertion is unchanged — a worktree that is never torn down
+    // still fails at the deadline.
+    let teardown_deadline = Instant::now() + Duration::from_secs(30 * scale);
+    while worktree.exists() && Instant::now() < teardown_deadline {
+        std::thread::sleep(Duration::from_millis(200));
+    }
+    // A worktree still present after the wait is NOT a lost race — teardown is
+    // keep-if-DIRTY, so the live alternative is that the run left the checkout
+    // dirty and the daemon deliberately kept it. Report which: `git status` of
+    // the worktree plus the daemon's own teardown log line (it logs the
+    // outcome: `Removed` / `KeptDirty` / `NoOp`).
     assert!(
         !worktree.exists(),
-        "the clean worktree is torn down after the run"
+        "the clean worktree is torn down after the run\n\
+         git status --porcelain in {}:\n{}\n\
+         daemon logs:\n{}",
+        worktree.display(),
+        std::process::Command::new("git")
+            .args(["status", "--porcelain"])
+            .current_dir(&worktree)
+            .output()
+            .map_or_else(
+                |e| format!("(git status failed: {e})"),
+                |o| String::from_utf8_lossy(&o.stdout).into_owned()
+            ),
+        dump_daemon_logs(pipe.home())
     );
 
     // POSITIVE (tcp T2): the Kanban board's TASK card SHOWS the durable branch AND

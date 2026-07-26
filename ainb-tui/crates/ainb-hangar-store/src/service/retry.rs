@@ -6,8 +6,9 @@
 //! attempts remaining spawns a fresh `queued` child row whose `parent_task_id`
 //! chains back to the failed task and whose `attempt` is `parent.attempt + 1`.
 //! Everything else (workspace / runtime / agent / issue / work_dir / priority /
-//! max_attempts / **repo_ref / agent_kind**) is inherited verbatim so the retry
-//! re-provisions the SAME repo's worktree under the SAME provider (tcp 19n); all
+//! max_attempts / **repo_ref / agent_kind / squad_id**) is inherited verbatim so
+//! the retry re-provisions the SAME repo's worktree under the SAME provider (tcp
+//! 19n) and stays keyed to the SAME dispatching squad (migration 0045); all
 //! per-run timestamps, outputs, and the recorded `branch` reset.
 //!
 //! # Retry/resume taxonomy (reference migration 055 + `GetLastTaskSession`)
@@ -125,15 +126,21 @@ pub enum RetryDecision {
 /// retry is a NEW ATTEMPT of the SAME logical run, so it belongs to the parent's
 /// run generation — the card-state folds must fold the retry child together with
 /// its parent's siblings, not treat it as a fresh generation.
+/// `squad_id` is copied from the parent (migration 0045): a retried squad task is
+/// still that squad's task, so the child must carry the same squad ref — dropping
+/// it on retry would silently disarm the daemon's claim-time briefing hook for the
+/// child (the same class of bug as the `repo_ref` / `generation` drops guarded
+/// above).
 /// Binds, in order: `id`, `workspace_id`, `runtime_id`, `agent_id`, `issue_id`,
 /// `work_dir`, `priority`, `attempt`, `max_attempts`, `parent_task_id`,
-/// `session_id`, `repo_ref`, `agent_kind`, `generation`, `created_at`.
+/// `session_id`, `repo_ref`, `agent_kind`, `generation`, `source_branch`,
+/// `squad_id`, `created_at`.
 const SPAWN_CHILD_SQL: &str = "\
 INSERT INTO agent_task_queue \
  (id, workspace_id, runtime_id, agent_id, issue_id, status, work_dir, priority, \
   attempt, max_attempts, parent_task_id, session_id, repo_ref, agent_kind, generation, \
-  source_branch, created_at) \
- VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
+  source_branch, squad_id, created_at) \
+ VALUES (?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)";
 
 /// Stateless retry service over `agent_task_queue`.
 pub struct RetryService;
@@ -185,31 +192,7 @@ impl RetryService {
         };
 
         let attempt = failed_task.attempt + 1;
-        // One atomic INSERT: the child lands fully-formed (status='queued',
-        // attempt / max_attempts / parent_task_id / session_id all set) or not at
-        // all. There is no intermediate row with the schema defaults, so a crash
-        // here can never strand an orphan that resets the chain cap or loses its
-        // parent linkage. The remaining per-run columns (result / failure_reason /
-        // started_at / finished_at / dispatched_at) reset by being omitted (NULL).
-        sqlx::query(SPAWN_CHILD_SQL)
-            .bind(new_id)
-            .bind(&failed_task.workspace_id)
-            .bind(&failed_task.runtime_id)
-            .bind(&failed_task.agent_id)
-            .bind(&failed_task.issue_id)
-            .bind(&failed_task.work_dir)
-            .bind(failed_task.priority)
-            .bind(attempt)
-            .bind(failed_task.max_attempts)
-            .bind(&failed_task.id)
-            .bind(child_session_id)
-            .bind(&failed_task.repo_ref)
-            .bind(&failed_task.agent_kind)
-            .bind(failed_task.generation)
-            .bind(&failed_task.source_branch)
-            .bind(clock.now_ms())
-            .execute(pool)
-            .await?;
+        Self::spawn_child(pool, failed_task, new_id, child_session_id, clock).await?;
 
         // `task_disposition` already guaranteed `failure_reason` is `Some` (it
         // returns `None` otherwise), so the parent always has a reason to log.
@@ -225,6 +208,112 @@ impl RetryService {
         Ok(RetryDecision::Spawned {
             new_task_id: new_id.to_string(),
         })
+    }
+
+    /// Force-requeue a terminal task at an operator's **explicit** request (the
+    /// manual `R` retry in the Task Kanban's failed column / task-detail),
+    /// bypassing BOTH the [`RetryDisposition`] reason gate AND the `max_attempts`
+    /// cap.
+    ///
+    /// The automatic [`Self::maybe_retry_failed`] path correctly refuses an
+    /// `AgentError` / `UserCancel` / exhausted-chain terminal: a re-dispatch under
+    /// the same daemon config would only re-fail identically, so an *auto* retry
+    /// there burns the chain for nothing. A HUMAN retry is a different contract —
+    /// an explicit override. The operator has judged the terminal recoverable
+    /// (edited the issue, fixed the environment, updated the CLI, …), so *any*
+    /// terminal reason re-queues a fresh attempt; without this the operator has no
+    /// in-product recovery for a terminal `agent_error` and the `R` key silently
+    /// no-ops.
+    ///
+    /// Inserts the same `parent_task_id`-chained `queued` child as the auto path
+    /// (`attempt = parent.attempt + 1`; repo / provider / priority / generation
+    /// inherited) via the one atomic [`SPAWN_CHILD_SQL`] INSERT, so the row is
+    /// correct-or-absent. Session inheritance follows the recorded reason's
+    /// disposition where it *resumes* (an infra terminal carries the parent's
+    /// `session_id`), else starts fresh — a force-requeued `agent_error` clears
+    /// `session_id` so the override never re-enters a wedged conversation.
+    ///
+    /// Returns [`RetryDecision::DoNotRetry`] only when the task is NOT terminal (a
+    /// `running` / `queued` / `dispatched` task is still in-flight and must not be
+    /// forked); otherwise [`RetryDecision::Spawned`] with the child id.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the child insert fails — notably the
+    /// `idx_one_pending_task_per_issue_agent` UNIQUE violation when another pending
+    /// task already holds the per-(issue, agent) slot (mirroring the auto path).
+    pub async fn force_requeue(
+        pool: &SqlitePool,
+        task: &Task,
+        new_id: &str,
+        clock: &dyn HangarClock,
+    ) -> Result<RetryDecision, sqlx::Error> {
+        // Only a terminal task can be requeued; a live task is already in-flight.
+        if !matches!(task.status.as_str(), "failed" | "cancelled") {
+            return Ok(RetryDecision::DoNotRetry);
+        }
+        // Resume the parent's session only when its recorded reason is an infra
+        // ResumeRetry; every other reason (agent_error, timeout, …) starts fresh
+        // so the override does not re-enter a poisoned conversation.
+        let child_session_id: Option<&str> = match Self::task_disposition(task) {
+            Some(d) if d.resumes_session() => task.session_id.as_deref(),
+            _ => None,
+        };
+        Self::spawn_child(pool, task, new_id, child_session_id, clock).await?;
+
+        tracing::info!(
+            parent_task_id = %task.id,
+            new_task_id = new_id,
+            attempt = task.attempt + 1,
+            reason = task.failure_reason.as_deref().unwrap_or_default(),
+            "task_manual_requeue",
+        );
+
+        Ok(RetryDecision::Spawned {
+            new_task_id: new_id.to_string(),
+        })
+    }
+
+    /// The single atomic child INSERT shared by the auto ([`Self::maybe_retry_failed`])
+    /// and manual ([`Self::force_requeue`]) retry paths.
+    ///
+    /// Writes `status='queued'` together with the retry bookkeeping
+    /// (`attempt = parent.attempt + 1`, `max_attempts`, `parent_task_id`,
+    /// `session_id`) in one statement so the child is correct-or-absent rather than
+    /// transiently carrying the schema defaults. `repo_ref` / `agent_kind` /
+    /// `priority` / `generation` / `source_branch` / `squad_id` are inherited; the
+    /// per-run columns (`result` / `failure_reason` / `started_at` / `finished_at`
+    /// / `dispatched_at` / `branch`) reset by being omitted (NULL). `session_id` is
+    /// bound by the caller per the retry/resume taxonomy.
+    async fn spawn_child(
+        pool: &SqlitePool,
+        parent: &Task,
+        new_id: &str,
+        session_id: Option<&str>,
+        clock: &dyn HangarClock,
+    ) -> Result<(), sqlx::Error> {
+        let attempt = parent.attempt + 1;
+        sqlx::query(SPAWN_CHILD_SQL)
+            .bind(new_id)
+            .bind(&parent.workspace_id)
+            .bind(&parent.runtime_id)
+            .bind(&parent.agent_id)
+            .bind(&parent.issue_id)
+            .bind(&parent.work_dir)
+            .bind(parent.priority)
+            .bind(attempt)
+            .bind(parent.max_attempts)
+            .bind(&parent.id)
+            .bind(session_id)
+            .bind(&parent.repo_ref)
+            .bind(&parent.agent_kind)
+            .bind(parent.generation)
+            .bind(&parent.source_branch)
+            .bind(&parent.squad_id)
+            .bind(clock.now_ms())
+            .execute(pool)
+            .await?;
+        Ok(())
     }
 
     /// Classify a [`FailureReason`] into its [`RetryDisposition`] — the
@@ -254,7 +343,12 @@ impl RetryService {
             | FailureReason::UserCancel
             | FailureReason::Timeout
             | FailureReason::SpawnError
+            | FailureReason::SpawnTimeout
             | FailureReason::ProviderContractDrift
+            // A provisioning setup fault (bad repo_ref / execenv) is deterministic:
+            // it re-fails identically on re-dispatch, so a retry only burns the
+            // chain — terminal, no retry.
+            | FailureReason::ProvisionError
             | FailureReason::Unknown => RetryDisposition::NoRetry,
         }
     }
@@ -286,6 +380,8 @@ const FAILURE_REASONS: &[FailureReason] = &[
     FailureReason::SemanticInactivity,
     FailureReason::SpawnError,
     FailureReason::ProviderContractDrift,
+    FailureReason::ProvisionError,
+    FailureReason::SpawnTimeout,
     FailureReason::Unknown,
 ];
 
@@ -311,6 +407,8 @@ mod tests {
             FailureReason::SemanticInactivity,
             FailureReason::SpawnError,
             FailureReason::ProviderContractDrift,
+            FailureReason::ProvisionError,
+            FailureReason::SpawnTimeout,
             FailureReason::Unknown,
         ] {
             assert!(
@@ -320,7 +418,7 @@ mod tests {
         }
         assert_eq!(
             FAILURE_REASONS.len(),
-            11,
+            13,
             "FAILURE_REASONS length drifted from the FailureReason variant count",
         );
     }
@@ -354,6 +452,10 @@ mod tests {
             RetryService::retry_disposition(ProviderContractDrift),
             NoRetry
         );
+        assert_eq!(RetryService::retry_disposition(ProvisionError), NoRetry);
+        // A wedged setup must NOT retry: a re-dispatch into the same daemon /
+        // environment would only re-wedge, looping the chain invisibly.
+        assert_eq!(RetryService::retry_disposition(SpawnTimeout), NoRetry);
         assert_eq!(RetryService::retry_disposition(Unknown), NoRetry);
     }
 }

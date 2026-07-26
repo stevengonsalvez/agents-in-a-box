@@ -36,7 +36,8 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_BOARD, DaemonRpc, INTERACTIVE_RELEASE_SENTINEL, T4_SQUAD_CARD_ISSUE,
-    WORKTREE_REPO_NAME, budget_scale, daemon_bin, git_available, git_branch_exists,
+    T4_SQUAD_INSTRUCTIONS, T4_SQUAD_M1_ROLE, T4_SQUAD_M1_SKILL, WORKTREE_REPO_NAME, budget_scale,
+    daemon_bin, git_available, git_branch_exists, materialised_context_prompt,
     prepare_pipeline_squad_card, skip, task_count_for_issue, task_short_id, task_status_by_id,
     worktree_branch, worktree_dir,
 };
@@ -291,6 +292,121 @@ fn running_a_squad_card_interactive_is_rejected() {
         dispatched, 0,
         "a refused interactive squad run must not dispatch any task"
     );
+}
+
+/// tcp T4 / parity #25 + `7-rest` — the LEADER of a fanned squad card actually
+/// RECEIVES the briefing: protocol + roster (with each member's role and the
+/// skills it will materialise) + the squad's instructions.
+///
+/// The strongest available proof: the REAL daemon binary claims the real fan-out
+/// and materialises a real `CLAUDE.md`, which this reads off disk. The read
+/// happens INSIDE the window where the blocking fake agent still holds all three
+/// runs — the task tree is reclaimed after finalize, so reading later would race
+/// teardown.
+#[test]
+fn squad_card_leader_run_materialises_the_briefing_with_roles_and_skills() {
+    if daemon_bin().is_none() || !git_available() {
+        skip("tcp_squad_card_leader_briefing_e2e");
+        return;
+    }
+
+    let pipe = prepare_pipeline_squad_card();
+    let scale = budget_scale();
+    let mut rpc = DaemonRpc::connect_and_auth(pipe.home());
+
+    let run = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        serde_json::json!({
+            "workspace_id": ainb_hangar_daemon::seed::WS_SLUG,
+            "board_id": BOARD_RUN_BOARD,
+            "issue_id": T4_SQUAD_CARD_ISSUE,
+            "mode": "headless",
+        }),
+    );
+    assert!(
+        run["error"].is_null(),
+        "squad card run must ack, got: {run}"
+    );
+    let leader_task = run["result"]["task_id"].as_str().unwrap_or("").to_string();
+    assert!(
+        !leader_task.is_empty(),
+        "run result must carry a leader task id: {run}"
+    );
+    let member_tasks: Vec<String> = run["result"]["member_task_ids"]
+        .as_array()
+        .unwrap_or_else(|| panic!("run result must carry member_task_ids: {run}"))
+        .iter()
+        .map(|v| v.as_str().unwrap().to_string())
+        .collect();
+
+    // Poll for the leader's materialised prompt while every run is still held.
+    let deadline = Instant::now() + Duration::from_secs(45 * scale);
+    let mut leader_prompt = String::new();
+    loop {
+        if let Some(text) = materialised_context_prompt(pipe.home(), &leader_task) {
+            if text.contains("## Squad Roster") {
+                leader_prompt = text;
+                break;
+            }
+        }
+        if Instant::now() >= deadline {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(150));
+    }
+    // Snapshot the member prompts inside the same window for the negative.
+    let member_prompts: Vec<Option<String>> = member_tasks
+        .iter()
+        .map(|id| materialised_context_prompt(pipe.home(), id))
+        .collect();
+
+    // Release + tear down BEFORE asserting so a failure never leaks the daemon.
+    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go")
+        .expect("write release sentinel");
+    drop(rpc);
+    drop(pipe);
+
+    assert!(
+        !leader_prompt.is_empty(),
+        "the real daemon must materialise a CLAUDE.md carrying the squad roster \
+         for the leader task {leader_task}"
+    );
+    assert!(
+        leader_prompt.contains("## Squad Operating Protocol"),
+        "the injected prompt must carry the operating protocol:\n{leader_prompt}"
+    );
+    // The roled + skilled member's WHOLE row — role THEN skills, never a bare
+    // substring, so a half-rendered row cannot pass.
+    assert!(
+        leader_prompt.contains(&format!(
+            "- member-one — agent — agent-m1 — role: {T4_SQUAD_M1_ROLE} — \
+             skills: {T4_SQUAD_M1_SKILL}\n"
+        )),
+        "the injected roster row must carry the member's role and skills:\n{leader_prompt}"
+    );
+    // The bare member pins the blank-omit: identity only, no empty fragments.
+    assert!(
+        leader_prompt.contains("- member-two — agent — agent-m2\n"),
+        "a member with neither role nor skills must render identity only:\n{leader_prompt}"
+    );
+    assert!(
+        leader_prompt.contains("## Squad Instructions"),
+        "the injected prompt must carry the instructions section:\n{leader_prompt}"
+    );
+    assert!(
+        leader_prompt.contains(T4_SQUAD_INSTRUCTIONS),
+        "the instructions must be injected VERBATIM:\n{leader_prompt}"
+    );
+
+    // NEGATIVE: a MEMBER run is never briefed — the roster belongs to the leader.
+    for (id, prompt) in member_tasks.iter().zip(&member_prompts) {
+        if let Some(text) = prompt {
+            assert!(
+                !text.contains("## Squad Roster") && !text.contains("## Squad Instructions"),
+                "member task {id} must NOT receive the leader briefing:\n{text}"
+            );
+        }
+    }
 }
 
 /// Whether the worktree at `dir` exists AND `branch` is registered in `repo`.

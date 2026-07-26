@@ -31,7 +31,9 @@
 use std::fmt::Write as _;
 use std::path::Path;
 
-use crate::{Enforcement, SandboxError, SandboxPolicy, SandboxedCommand, canonical_or_self};
+use crate::{
+    Enforcement, SandboxError, SandboxPolicy, SandboxedCommand, canonical_or_self, resolve_program,
+};
 
 /// The system launcher that applies a Seatbelt profile to a child process.
 const SANDBOX_EXEC: &str = "/usr/bin/sandbox-exec";
@@ -83,8 +85,11 @@ fn render_profile(program: &Path, policy: &SandboxPolicy) -> String {
         let _ = writeln!(p, "(allow file-read* (subpath {}))", sb_quote(&c));
     }
     // The program binary itself must be readable even if its dir is not a
-    // configured read root (e.g. a test stand-in under a tempdir).
-    let prog = canonical_or_self(program);
+    // configured read root (e.g. a test stand-in under a tempdir). A bare name
+    // (the daemon's default, e.g. `claude`) is PATH-resolved to the absolute
+    // binary the OS will exec; otherwise the rule would be a meaningless
+    // `(literal "claude")` the kernel never matches, and the sandbox denies exec.
+    let prog = resolve_program(program);
     let _ = writeln!(p, "(allow file-read* (literal {}))", sb_quote(&prog));
     if let Some(dir) = prog.parent() {
         let _ = writeln!(p, "(allow file-read* (subpath {}))", sb_quote(dir));
@@ -185,6 +190,43 @@ mod tests {
         assert!(
             !prof.contains("mach-lookup"),
             "the default task policy must grant no mach service: {prof}"
+        );
+    }
+
+    /// A bare provider name (the daemon default, e.g. `claude`) must never
+    /// survive into the profile as a `(literal "claude")` rule: that path is
+    /// relative, matches nothing the kernel resolves, and the sandbox then
+    /// denies exec of the real PATH-resolved binary. `sh` stands in as a bare
+    /// name reliably present on `$PATH` on any unix host.
+    #[cfg(unix)]
+    #[test]
+    fn bare_program_name_resolves_to_absolute_binary() {
+        let policy = SandboxPolicy {
+            read_roots: vec![PathBuf::from("/usr")],
+            write_roots: vec![PathBuf::from("/tmp/task")],
+            allow_network: true,
+            disabled: false,
+        };
+        let prof = render_profile(Path::new("sh"), &policy);
+
+        // The bare name must not appear as a literal read rule.
+        assert!(
+            !prof.contains("(allow file-read* (literal \"sh\"))"),
+            "bare program name must not survive into the profile: {prof}"
+        );
+
+        // The emitted program read rule must reference an absolute path.
+        let resolved = resolve_program(Path::new("sh"));
+        assert!(
+            resolved.is_absolute(),
+            "resolved program must be absolute: {resolved:?}"
+        );
+        assert!(
+            prof.contains(&format!(
+                "(allow file-read* (literal {}))",
+                sb_quote(&resolved)
+            )),
+            "profile must allow the resolved absolute binary {resolved:?}: {prof}"
         );
     }
 

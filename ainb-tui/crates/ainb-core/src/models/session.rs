@@ -6,6 +6,12 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
+/// Whether a model value requests the provider's configured default.
+pub(crate) fn is_default_model(value: &str) -> bool {
+    let trimmed = value.trim();
+    trimmed.is_empty() || trimmed.eq_ignore_ascii_case("default")
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SessionMode {
     // PascalCase variants are the canonical wire format for
@@ -488,11 +494,9 @@ pub struct Session {
     #[serde(default)]
     pub agent_type: SessionAgentType, // The AI agent or shell for this session
     #[serde(default)]
-    pub model: Option<ClaudeModel>, // Claude model for this session (only for Claude agent)
-    /// Codex model (only meaningful when `agent_type == Codex`). Mirrors
-    /// `model` for the Claude agent: `Some(SystemDefault)` and `None` both
-    /// cause `--model` to be omitted from the spawned `codex` command;
-    /// anything else emits `--model <id>`.
+    pub model: Option<String>, // Raw provider model ID passed through to the CLI
+    /// Legacy Codex model field retained for old serialized Session values.
+    /// New launch paths use the provider-agnostic raw `model` field.
     #[serde(default)]
     pub codex_model: Option<CodexModel>,
     #[serde(default)]
@@ -710,7 +714,7 @@ impl Session {
         mode: SessionMode,
         boss_prompt: Option<String>,
         agent_type: SessionAgentType,
-        model: Option<ClaudeModel>,
+        model: Option<String>,
     ) -> Self {
         let now = Utc::now();
         let branch_name = format!("ainb/{}", name.replace(' ', "-").to_lowercase());
@@ -817,5 +821,17 @@ impl Session {
     pub fn set_tmux_session_name(&mut self, name: String) {
         self.tmux_session_name = Some(name);
         self.update_last_accessed();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_default_model;
+
+    #[test]
+    fn default_model_sentinels_are_recognized_after_trimming() {
+        assert!(is_default_model(""));
+        assert!(is_default_model("  DEFAULT  "));
+        assert!(!is_default_model("claude-opus-4-8"));
     }
 }

@@ -22,8 +22,10 @@ fn actor(actor_ref: &str, name: &str, presence: PresenceState, is_agent: bool) -
         display_name: name.into(),
         subtitle: String::new(),
         presence,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
+        ..ActorRow::default()
     }
 }
 
@@ -33,6 +35,7 @@ fn wire_squad(id: &str, name: &str, leader: &str, members: &[&str]) -> SquadWire
         name: name.into(),
         leader: leader.into(),
         members: members.iter().map(|m| (*m).to_string()).collect(),
+        ..SquadWireRow::default()
     }
 }
 
@@ -89,7 +92,10 @@ fn render_empty_shows_help() {
         full.contains("Press 'n' to create an agent, 'c' to create a squad"),
         "empty help line missing:\n{full}"
     );
-    assert!(full.contains("[n]ew-agent"), "new-agent hint missing:\n{full}");
+    assert!(
+        full.contains("[n]ew-agent"),
+        "new-agent hint missing:\n{full}"
+    );
     assert!(full.contains("[c]reate"), "create hint missing:\n{full}");
 }
 
@@ -282,4 +288,59 @@ fn render_narrow_width_stays_in_bounds() {
             coord.x
         );
     }
+}
+
+/// Parity #25: a squad carrying `instructions` paints the `✎` glyph on its
+/// header, and a ROLED member paints its role on its row — while the roleless
+/// member on the same squad renders exactly as before.
+#[test]
+fn render_paints_member_roles_and_the_instructions_glyph() {
+    let mut snapshot = SquadsListResult {
+        squads: vec![
+            wire_squad(
+                "s1",
+                "shippers",
+                "agent:a-lead",
+                &["agent:a-1", "member:u-1"],
+            ),
+            wire_squad("s2", "reviewers", "agent:a-rev", &["agent:a-2"]),
+        ],
+    };
+    snapshot.squads[0].instructions = "Route schema work to the DB owner.".into();
+    snapshot.squads[0].member_roles = vec![ainb_hangar_proto::snapshots::SquadMemberWireRow {
+        member: "agent:a-1".into(),
+        role: "owns the migrations".into(),
+    }];
+    let actors = vec![
+        actor("agent:a-lead", "lead-bot", PresenceState::Online, true),
+        actor("agent:a-1", "worker-bot", PresenceState::Unstable, true),
+        actor("agent:a-rev", "review-bot", PresenceState::Online, true),
+        actor("agent:a-2", "second-bot", PresenceState::Offline, true),
+        actor("member:u-1", "alice", PresenceState::Online, false),
+    ];
+    let state = SquadsState::from_snapshot(&snapshot, &actors);
+
+    let mut buf = WireBuffer::new(100, 14);
+    render_squads(&mut buf, 100, 0, 14, &state);
+    let full = glyph_map(&buf, 100);
+    insta::assert_snapshot!(full);
+
+    // POSITIVE: the roled member carries its role, the squad carries the pencil.
+    assert!(
+        full.contains("worker-bot  · agent  · owns the migrations"),
+        "the roled member row must carry the role:\n{full}"
+    );
+    assert!(
+        full.contains("shippers  leader: ● lead-bot  (2 members)  ✎"),
+        "the instructed squad header must carry the pencil:\n{full}"
+    );
+    // NEGATIVE: the roleless member and the instruction-less squad are unchanged.
+    assert!(
+        full.contains("● alice  · human\n"),
+        "the roleless member row must paint nothing extra:\n{full}"
+    );
+    assert!(
+        full.contains("reviewers  leader: ● review-bot  (1 member)\n"),
+        "a squad with no instructions paints no pencil:\n{full}"
+    );
 }

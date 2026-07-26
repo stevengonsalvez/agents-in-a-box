@@ -370,6 +370,24 @@ pub fn read_sessions_json(home: &Path) -> Option<serde_json::Value> {
     serde_json::from_str(&text).ok()
 }
 
+/// Multiplier applied to poll budgets, read from `HANGAR_TRIPWIRE_BUDGET_SCALE`
+/// (default `1`, floored at `1`).
+///
+/// The same knob the P4 tmux harness uses. A hosted runner running the full
+/// serial suite is far slower than a dev box, and a tripwire that hardcodes a
+/// dev-tuned deadline goes red on runner speed rather than on a regression —
+/// which is a worse failure than no test, because it trains everyone to ignore
+/// the gate. Scaling keeps single-run rigor: a real regression still fails at
+/// the scaled deadline.
+#[must_use]
+pub fn budget_scale() -> u32 {
+    std::env::var("HANGAR_TRIPWIRE_BUDGET_SCALE")
+        .ok()
+        .and_then(|v| v.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1)
+}
+
 /// Read the daemon's structured JSONL logs under
 /// `<home>/.agents-in-a-box/hangar/logs/` and return the tail of every `daemon.*`
 /// file (newest file last, last 200 lines each). The daemon logs at `info` by

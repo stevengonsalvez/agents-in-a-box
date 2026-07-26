@@ -81,12 +81,30 @@ fn daemon_health_sparkline_renders_with_red_failure_band() {
         ("HANGAR_DAEMON_POLL_MS", "200"),
     ]);
 
-    // 2. Free the fixture's running slot + raise the agent's concurrency, then
+    // 2. Launch the TUI FIRST, before any task runs.
+    //
+    // The throughput ring is a rolling THROUGHPUT_WINDOW (60s) of one-second
+    // buckets: a bucket older than the window is aged out on the next
+    // `advance_to`. Running the batch and only THEN launching `ainb tui` (which
+    // spawns the host, dials the plugin subprocess and paints the Hangar landing
+    // — tens of seconds on a loaded box, longer at HANGAR_TRIPWIRE_BUDGET_SCALE)
+    // let the whole batch age out of the ring before the `D` pane was ever
+    // polled, so the sparkline was legitimately empty and the tripwire failed on
+    // its own setup latency rather than on the code under test. Paying the TUI
+    // launch cost up front keeps the run→assert distance inside the window.
+    let bin = ainb_bin().expect("gated by can_run_tripwire");
+    let (session, landing) = TuiSession::launch_to_hangar(&bin, pipeline.home());
+    assert!(
+        landing.contains(READY_MARKER),
+        "expected the Hangar issue-list landing before pressing D:\n{landing}"
+    );
+
+    // 3. Free the fixture's running slot + raise the agent's concurrency, then
     //    enqueue the batch the daemon will claim and finalise.
     set_agent_concurrency(pipeline.home(), 10);
     enqueue_tasks(pipeline.home(), "health", SEED_TASKS);
 
-    // 3. Wait for the daemon to finalise the whole batch (driving the ring).
+    // 4. Wait for the daemon to finalise the whole batch (driving the ring).
     let terminal = wait_for_terminal(
         pipeline.home(),
         "health",
@@ -97,14 +115,6 @@ fn daemon_health_sparkline_renders_with_red_failure_band() {
         terminal, SEED_TASKS,
         "daemon should finalise all {SEED_TASKS} seeded tasks (got {terminal}); \
          the throughput ring needs them to drive the sparkline"
-    );
-
-    // 4. Launch the TUI under the same $HOME, open Hangar, then the `D` pane.
-    let bin = ainb_bin().expect("gated by can_run_tripwire");
-    let (session, landing) = TuiSession::launch_to_hangar(&bin, pipeline.home());
-    assert!(
-        landing.contains(READY_MARKER),
-        "expected the Hangar issue-list landing before pressing D:\n{landing}"
     );
 
     // Press `D` (single-char nav, no Enter) until the health pane chrome is on

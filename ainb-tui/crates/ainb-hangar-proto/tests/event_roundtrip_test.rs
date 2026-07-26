@@ -49,9 +49,17 @@ fn sample_issue() -> IssueRow {
         agent: None,
         source_branch: None,
         target_branch: None,
+        external_ref: None,
         run_count: 0,
         last_run_status: None,
         last_run_at: None,
+        parent_id: None,
+        child_total: 0,
+        child_done: 0,
+        acceptance_criteria: Vec::new(),
+        acceptance: Vec::new(),
+        context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 
@@ -243,6 +251,149 @@ fn issue_row_priority_due_date_labels_roundtrip_and_default() {
     let legacy = r#"{"id":"issue-1","workspace_id":"default","title":"t","description":null,"state":"open","assignee":null,"creator":"member:alice","created_at":0}"#;
     let legacy_row: IssueRow = serde_json::from_str(legacy).expect("decode legacy");
     assert_eq!(legacy_row.priority, 0, "default priority is 0");
+    assert_eq!(legacy_row.due_date, None, "default due_date is None");
+    assert!(legacy_row.labels.is_empty(), "default labels is empty");
+}
+
+/// 0046: the sub-issue wire fields (`parent_id` + the `child_total`/`child_done`
+/// roll-up) round-trip, and a pre-0046 snapshot (none of the three keys) decodes
+/// to their defaults — append-only proof (an old client omits, an old daemon
+/// ignores).
+#[test]
+fn issue_row_subtask_fields_roundtrip_and_default() {
+    let row = IssueRow {
+        parent_id: Some("parent-issue".to_string()),
+        child_total: 3,
+        child_done: 1,
+        ..sample_issue()
+    };
+    let json = serde_json::to_string(&row).expect("encode");
+    let back: IssueRow = serde_json::from_str(&json).expect("decode");
+    assert_eq!(back, row, "parent_id/child_total/child_done round-trip");
+
+    // A top-level issue omits parent_id entirely (skip_serializing_if), and a zero
+    // roll-up omits nothing that breaks an old reader.
+    let top = IssueRow {
+        child_total: 0,
+        child_done: 0,
+        ..sample_issue()
+    };
+    let json = serde_json::to_string(&top).expect("encode");
+    assert!(
+        !json.contains("parent_id"),
+        "a top-level issue omits parent_id, got {json}"
+    );
+
+    // A pre-0046 snapshot (no new keys) decodes to defaults.
+    let legacy = r#"{"id":"issue-1","workspace_id":"default","title":"t","description":null,"state":"open","assignee":null,"creator":"member:alice","created_at":0}"#;
+    let legacy_row: IssueRow = serde_json::from_str(legacy).expect("decode legacy");
+    assert_eq!(legacy_row.parent_id, None, "default parent_id is None");
+    assert_eq!(legacy_row.child_total, 0, "default child_total is 0");
+    assert_eq!(legacy_row.child_done, 0, "default child_done is 0");
+}
+
+/// 0046: `IssueCreateParams` carries an optional `parent_issue_id`, omitted from
+/// the wire when unset, and a pre-0046 payload (no key) decodes to `None`
+/// (append-only).
+#[test]
+fn issue_create_params_parent_is_additive() {
+    use ainb_hangar_proto::snapshots::IssueCreateParams;
+
+    // `..Default::default()` on purpose: this fixture asserts ONE field, so a
+    // later append-only field must not red-gate it (the exhaustive literal did).
+    let sub = IssueCreateParams {
+        workspace_id: "default".to_string(),
+        title: "child".to_string(),
+        creator: "member:alice".to_string(),
+        parent_issue_id: Some("parent-1".to_string()),
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&sub).expect("encode");
+    let back: IssueCreateParams = serde_json::from_str(&json).expect("decode");
+    assert_eq!(back.parent_issue_id.as_deref(), Some("parent-1"));
+
+    // A top-level create omits the key entirely.
+    let top = IssueCreateParams {
+        parent_issue_id: None,
+        ..sub
+    };
+    let json = serde_json::to_string(&top).expect("encode");
+    assert!(
+        !json.contains("parent_issue_id"),
+        "omitted when None, got {json}"
+    );
+
+    // A pre-0046 payload decodes parent_issue_id to None.
+    let legacy = r#"{"workspace_id":"default","title":"t","creator":"member:alice"}"#;
+    let legacy_row: IssueCreateParams = serde_json::from_str(legacy).expect("decode legacy");
+    assert_eq!(
+        legacy_row.parent_issue_id, None,
+        "default parent_issue_id is None"
+    );
+}
+
+/// Parity 28: `parse_calendar_date_ms` is the ONE calendar-date parser every
+/// hangar client uses — exact `YYYY-MM-DD`, UTC midnight, loud on anything else
+/// (multica's `util.ParseCalendarDate` contract).
+#[test]
+fn calendar_date_parses_at_utc_midnight_and_rejects_other_shapes() {
+    use ainb_hangar_proto::dates::parse_calendar_date_ms;
+
+    assert_eq!(
+        parse_calendar_date_ms("2026-08-01"),
+        Ok(1_785_542_400_000),
+        "2026-08-01 is UTC midnight epoch ms"
+    );
+    assert_eq!(parse_calendar_date_ms("1970-01-01"), Ok(0));
+    for bad in ["31-12-2026", "2026-13-01", "", "2026/08/01"] {
+        assert!(
+            parse_calendar_date_ms(bad).is_err(),
+            "{bad:?} must be rejected, never coerced to a silent no-due-date"
+        );
+    }
+}
+
+/// Parity 28: `priority` / `due_date` / `labels` are append-only on
+/// `IssueCreateParams` — absent from the wire when defaulted, and a pre-28
+/// payload decodes them to `None` / `None` / `[]`.
+#[test]
+fn issue_create_params_priority_due_labels_are_additive() {
+    use ainb_hangar_proto::snapshots::IssueCreateParams;
+
+    let rich = IssueCreateParams {
+        workspace_id: "default".to_string(),
+        title: "urgent".to_string(),
+        creator: "member:alice".to_string(),
+        priority: Some(3),
+        due_date: Some(1_785_542_400_000),
+        labels: vec!["bug".to_string(), "p0".to_string()],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&rich).expect("encode");
+    let back: IssueCreateParams = serde_json::from_str(&json).expect("decode");
+    assert_eq!(back.priority, Some(3));
+    assert_eq!(back.due_date, Some(1_785_542_400_000));
+    assert_eq!(back.labels, vec!["bug".to_string(), "p0".to_string()]);
+
+    // An unadorned create's wire shape is byte-identical to pre-28.
+    let plain = IssueCreateParams {
+        priority: None,
+        due_date: None,
+        labels: Vec::new(),
+        ..rich
+    };
+    let json = serde_json::to_string(&plain).expect("encode");
+    for key in ["priority", "due_date", "labels"] {
+        assert!(
+            !json.contains(key),
+            "{key} must be omitted when unset, got {json}"
+        );
+    }
+
+    // A pre-28 payload decodes to the schema defaults.
+    let legacy = r#"{"workspace_id":"default","title":"t","creator":"member:alice"}"#;
+    let legacy_row: IssueCreateParams = serde_json::from_str(legacy).expect("decode legacy");
+    assert_eq!(legacy_row.priority, None, "default priority is None (P3)");
     assert_eq!(legacy_row.due_date, None, "default due_date is None");
     assert!(legacy_row.labels.is_empty(), "default labels is empty");
 }

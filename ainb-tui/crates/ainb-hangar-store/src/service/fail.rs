@@ -77,6 +77,29 @@ pub enum FailureReason {
     /// identically, so a retry only burns the chain — the fix is updating the
     /// parser, not re-running.
     ProviderContractDrift,
+    /// The run could not be SET UP before the agent started — the pre-run
+    /// provisioning failed (e.g. the card's `repo_ref` could not be cloned /
+    /// worktree-added, or the isolated execenv could not be prepared). Distinct
+    /// from [`Self::SpawnError`] (the provider binary itself is missing): here the
+    /// working directory the agent needs never materialised, so no provider was
+    /// even reached. Terminal (no retry): a provisioning fault is observed by the
+    /// daemon deterministically (a bad repo path does not self-heal on a
+    /// re-dispatch), so failing the row immediately with the real error beats the
+    /// alternative it replaces — the row stranded `dispatched`, reclaimed past the
+    /// 90s window, re-dispatched, and re-failing invisibly until the 5min dispatch
+    /// TTL relabelled it `timeout` with no cause recorded.
+    ProvisionError,
+    /// The `running -> provider spawn` setup phase WEDGED past its umbrella bound
+    /// (`SPAWN_SETUP_TIMEOUT`) — a step between marking the row `running` and
+    /// spawning the provider (e.g. a headless keychain read that never returns, a
+    /// pool deadlock, a materialise hang) blocked the run indefinitely. Distinct
+    /// from [`Self::SpawnError`] (the provider binary is missing / unspawnable —
+    /// the setup finished but the OS exec failed) and [`Self::Timeout`] (a TTL
+    /// sweeper relabelled a stalled row with no cause): here the daemon caught the
+    /// wedge itself, at the bound, and recorded WHY — so a forever-`running` black
+    /// hole becomes a loud, immediate terminal. Terminal (no retry): a wedged
+    /// environment does not self-heal on a re-dispatch with the same daemon.
+    SpawnTimeout,
     /// An unclassified failure.
     Unknown,
 }
@@ -101,6 +124,8 @@ impl FailureReason {
             Self::SemanticInactivity => "semantic_inactivity",
             Self::SpawnError => "spawn_error",
             Self::ProviderContractDrift => "provider_contract_drift",
+            Self::ProvisionError => "provision_error",
+            Self::SpawnTimeout => "spawn_timeout",
             Self::Unknown => "unknown",
         }
     }
@@ -145,6 +170,124 @@ impl FailTaskService {
         )
         .await
     }
+
+    /// Transition `task_id` to `failed` like [`Self::fail`], additionally
+    /// persisting a human-readable `detail` into the `result` column so the
+    /// task-detail surface renders WHY the run failed. Legal source states are
+    /// `running` (runner failure) and `queued` (queued-TTL sweep) — the same set
+    /// [`Self::fail`] accepts.
+    ///
+    /// Where [`Self::fail`] records only the terminal + `reason`, this variant also
+    /// captures a diagnostic (e.g. the provider's captured stderr tail) so an
+    /// `agent_error` crash is diagnosable from stored evidence alone instead of
+    /// leaving `result` blank. The `detail` rides the `result` column as
+    /// `{"content": detail}` — the same
+    /// [`TaskResult`](ainb_hangar_core::result::TaskResult) shape a completed run
+    /// (and [`Self::fail_setup`]) writes — so the existing detail rendering
+    /// surfaces it with no special-casing.
+    ///
+    /// Idempotent, like [`Self::fail`].
+    ///
+    /// # Errors
+    ///
+    /// - [`FinalizeError::TerminalMismatch`] if the row is already `done` /
+    ///   `cancelled`.
+    /// - [`FinalizeError::IllegalState`] if the row is `dispatched` or absent.
+    /// - [`FinalizeError::Db`] on an underlying database error.
+    #[tracing::instrument(
+        name = "task.fail_with_detail",
+        skip(pool, detail, clock),
+        fields(task_id = %task_id, failure_reason = reason.as_db_str())
+    )]
+    pub async fn fail_with_detail(
+        pool: &SqlitePool,
+        task_id: &str,
+        reason: FailureReason,
+        detail: &str,
+        clock: &dyn HangarClock,
+    ) -> Result<FinalizeOutcome, FinalizeError> {
+        let now = clock.now_ms();
+        let reason_str = reason.as_db_str();
+        // Persist the diagnostic into `result` in the TaskResult shape so the
+        // task-detail surface renders it (a `content`-only JSON is a legal,
+        // round-tripping TaskResult).
+        let result_json = serde_json::json!({ "content": detail }).to_string();
+        finalize_idempotent(
+            pool,
+            task_id,
+            TaskState::Failed,
+            &[TaskState::Running, TaskState::Queued],
+            "UPDATE agent_task_queue \
+             SET status = 'failed', failure_reason = ?1, result = ?2, finished_at = ?3 \
+             WHERE id = ?4 AND status IN ('running','queued')",
+            move |q| q.bind(reason_str).bind(result_json).bind(now).bind(task_id),
+        )
+        .await
+    }
+
+    /// Terminalise a task that faulted during PRE-RUN setup: `dispatched ->
+    /// failed`, recording `reason`, a human-readable `message` (persisted into the
+    /// `result` column so the task-detail surface shows WHY), and
+    /// `finished_at = clock.now_ms()`.
+    ///
+    /// The daemon claims a task (`queued -> dispatched`) and then provisions its
+    /// working directory BEFORE the `dispatched -> running` start transition. A
+    /// fault in that window (a `repo_ref` that cannot be cloned, an execenv that
+    /// cannot be prepared) leaves the row `dispatched` — a state [`Self::fail`]
+    /// deliberately rejects (its source set is `running` / `queued`, since the
+    /// stale-dispatch sweeper owns the *timeout* path). Without a dedicated seam
+    /// such a fault propagated out of the run loop with the row still `dispatched`,
+    /// so the sweeper reclaimed it past the 90s window and re-dispatched it into
+    /// the same fault, looping invisibly. This seam finalises it AT ONCE, from
+    /// `dispatched`, so the failure is terminal and visible.
+    ///
+    /// The `message` rides the `result` column as `{"content": message}` — the
+    /// same [`TaskResult`](ainb_hangar_core::result::TaskResult) shape a completed
+    /// run writes — so the existing detail rendering surfaces the setup error with
+    /// no special-casing.
+    ///
+    /// Idempotent, like [`Self::fail`]: a replayed call on an already-`failed` row
+    /// returns [`FinalizeOutcome::AlreadyTerminal`]; a row that a concurrent cancel
+    /// won (`dispatched -> cancelled`) returns [`FinalizeError::TerminalMismatch`]
+    /// so the caller can honour the cancel.
+    ///
+    /// # Errors
+    ///
+    /// - [`FinalizeError::TerminalMismatch`] if the row is already `done` /
+    ///   `cancelled`.
+    /// - [`FinalizeError::IllegalState`] if the row is not `dispatched` (e.g. it
+    ///   already started, or the row is absent).
+    /// - [`FinalizeError::Db`] on an underlying database error.
+    #[tracing::instrument(
+        name = "task.fail_setup",
+        skip(pool, message, clock),
+        fields(task_id = %task_id, failure_reason = reason.as_db_str())
+    )]
+    pub async fn fail_setup(
+        pool: &SqlitePool,
+        task_id: &str,
+        reason: FailureReason,
+        message: &str,
+        clock: &dyn HangarClock,
+    ) -> Result<FinalizeOutcome, FinalizeError> {
+        let now = clock.now_ms();
+        let reason_str = reason.as_db_str();
+        // Persist the real error into `result` in the TaskResult shape so the
+        // task-detail surface renders it (a killed/no-work run's `content`-only
+        // JSON is a legal, round-tripping TaskResult).
+        let result_json = serde_json::json!({ "content": message }).to_string();
+        finalize_idempotent(
+            pool,
+            task_id,
+            TaskState::Failed,
+            &[TaskState::Dispatched],
+            "UPDATE agent_task_queue \
+             SET status = 'failed', failure_reason = ?1, result = ?2, finished_at = ?3 \
+             WHERE id = ?4 AND status = 'dispatched'",
+            move |q| q.bind(reason_str).bind(result_json).bind(now).bind(task_id),
+        )
+        .await
+    }
 }
 
 #[cfg(test)]
@@ -166,6 +309,8 @@ mod tests {
             FailureReason::SemanticInactivity,
             FailureReason::SpawnError,
             FailureReason::ProviderContractDrift,
+            FailureReason::ProvisionError,
+            FailureReason::SpawnTimeout,
             FailureReason::Unknown,
         ] {
             let serde_token = serde_json::to_value(reason)

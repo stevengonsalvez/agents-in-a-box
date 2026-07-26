@@ -163,6 +163,11 @@ opentelemetry-otlp = { version = "0.30", optional = true, default-features = fal
 tracing-opentelemetry = { version = "0.31", optional = true }
 
 [dev-dependencies]
+# multica-gap #10 acceptance (`rpc_issue_facets_sqlite`): the facet reducer is
+# run over the rows the REAL daemon put on the wire, so the screen-side numbers
+# are anchored in SQLite instead of in a mock. Acyclic — the plugin depends only
+# on sdk-rust / proto / core, never on the daemon.
+ainb-plugin-hangar = { path = "../ainb-plugin-hangar" }
 # The in-memory secret double, so credential tests never touch the real Keychain.
 ainb-hangar-secrets = { path = "../ainb-hangar-secrets", features = ["test-backend"] }
 assert_cmd = "2"

@@ -37,8 +37,12 @@ use super::outbound::SyncError;
 
 /// The Hangar issue lifecycle state a closed `bd` issue maps to.
 const HANGAR_STATE_DONE: &str = "done";
-/// The Hangar issue lifecycle state any non-closed `bd` issue maps to.
+/// The Hangar issue lifecycle state any other non-closed `bd` issue maps to.
 const HANGAR_STATE_OPEN: &str = "open";
+/// The Hangar issue lifecycle state a `bd`-blocked issue maps to (migration
+/// 0049): `bd` has a first-class `blocked` status and hangar now has its twin,
+/// so the bridge stops collapsing it into `open`.
+const HANGAR_STATE_BLOCKED: &str = "blocked";
 /// The `bd` label the inbound poll filters on — only issues tagged for sync.
 pub const SYNC_LABEL: &str = "hangar-v1";
 
@@ -205,27 +209,39 @@ impl<'a> InboundSync<'a> {
 
 /// Map a `bd` lifecycle status onto the Hangar issue state string.
 ///
-/// `bd`'s terminal `closed` maps to Hangar `done`; every other status (open,
-/// in-progress, blocked, or any unknown token) maps to `open` — Hangar's issue
-/// model is binary (open / done) for sync purposes.
+/// `bd`'s terminal `closed` maps to Hangar `done` and `bd`'s `blocked` maps to
+/// Hangar `blocked` (migration 0049 gave hangar the twin status); every other
+/// status (open, in-progress, or any unknown token) maps to `open`.
 const fn hangar_state_for(status: &BdStatus) -> &'static str {
     match status {
         BdStatus::Closed => HANGAR_STATE_DONE,
+        // 0049: bd's `blocked` now has a hangar twin — stop throwing it away.
+        BdStatus::Blocked => HANGAR_STATE_BLOCKED,
         _ => HANGAR_STATE_OPEN,
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{HANGAR_STATE_DONE, HANGAR_STATE_OPEN, InboundSync, hangar_state_for};
+    use super::{
+        HANGAR_STATE_BLOCKED, HANGAR_STATE_DONE, HANGAR_STATE_OPEN, InboundSync, hangar_state_for,
+    };
     use crate::beads_adapter::BdStatus;
 
+    /// `bd`'s `blocked` round-trips into hangar's own `blocked` state (0049)
+    /// instead of being collapsed into `open`; `closed` still maps to `done` and
+    /// every remaining status still falls back to `open`.
     #[test]
-    fn closed_maps_to_done_others_to_open() {
+    fn blocked_maps_to_blocked_closed_to_done_rest_to_open() {
+        assert_eq!(hangar_state_for(&BdStatus::Blocked), HANGAR_STATE_BLOCKED);
+        assert_eq!(
+            HANGAR_STATE_BLOCKED,
+            ainb_hangar_proto::lifecycle::IssueLifecycle::Blocked.as_str(),
+            "the bridge writes the canonical lifecycle token, not a private one"
+        );
         assert_eq!(hangar_state_for(&BdStatus::Closed), HANGAR_STATE_DONE);
         assert_eq!(hangar_state_for(&BdStatus::Open), HANGAR_STATE_OPEN);
         assert_eq!(hangar_state_for(&BdStatus::InProgress), HANGAR_STATE_OPEN);
-        assert_eq!(hangar_state_for(&BdStatus::Blocked), HANGAR_STATE_OPEN);
         assert_eq!(
             hangar_state_for(&BdStatus::Other("triaged".into())),
             HANGAR_STATE_OPEN

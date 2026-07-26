@@ -164,3 +164,99 @@ fn filter_unused_shows_only_orphans() {
     assert_eq!(visible.len(), 1);
     assert_eq!(visible[0].slug, "orphan");
 }
+
+// ---- Per-agent skill enablement (parity #24) --------------------------------
+
+/// `t` raises the toggle intent for the SELECTED skill, not the first one.
+#[test]
+fn t_raises_toggle_enabled_intent_for_selected_skill() {
+    let s = reduce_skill_manager(&state(), SkillManagerEvent::Key('j')).state;
+    let out = reduce_skill_manager(&s, SkillManagerEvent::Key('t'));
+    assert_eq!(
+        out.intent,
+        Some(SkillManagerIntent::ToggleEnabled("handover".into())),
+        "t toggles the selected skill's link"
+    );
+}
+
+/// Reserved-key invariant: `t` maps to the toggle and NOTHING else on this
+/// screen. A future rebind of `t` collides here loudly instead of silently
+/// stealing the toggle.
+#[test]
+fn t_is_unbound_elsewhere() {
+    let s = state();
+    for c in ['j', 'k', 's', 'i', 'd', '\n', '\r', 'r'] {
+        let intent = reduce_skill_manager(&s, SkillManagerEvent::Key(c)).intent;
+        assert_ne!(
+            intent,
+            Some(SkillManagerIntent::ToggleEnabled("commit".into())),
+            "`{c}` must not also raise the toggle intent"
+        );
+    }
+    // …and every OTHER skill-manager intent must not be reachable via `t`.
+    let via_t = reduce_skill_manager(&s, SkillManagerEvent::Key('t')).intent;
+    assert_eq!(
+        via_t,
+        Some(SkillManagerIntent::ToggleEnabled("commit".into())),
+        "`t` raises exactly the toggle intent"
+    );
+}
+
+/// `LinksLoaded` marks the disabled rows — and only those — in the rendered
+/// card titles.
+#[test]
+fn links_loaded_marks_disabled_rows() {
+    use ainb_hangar_proto::events::AgentSkillLinkRow;
+
+    let s = reduce_skill_manager(
+        &state(),
+        SkillManagerEvent::LinksLoaded(vec![
+            AgentSkillLinkRow {
+                skill_id: "commit".into(),
+                name: "Commit".into(),
+                enabled: true,
+            },
+            AgentSkillLinkRow {
+                skill_id: "handover".into(),
+                name: "Handover".into(),
+                enabled: false,
+            },
+        ]),
+    )
+    .state;
+
+    assert!(!s.link_disabled("commit"), "an enabled link is not marked");
+    assert!(s.link_disabled("handover"), "a disabled link is marked");
+    assert!(
+        !s.link_disabled("orphan"),
+        "an unreported link is never rendered as disabled"
+    );
+
+    let cards = &s.board_columns()[0].cards;
+    let title = |slug: &str| {
+        cards
+            .iter()
+            .find(|c| c.issue_id == slug)
+            .unwrap_or_else(|| panic!("no card for {slug}"))
+            .title
+            .clone()
+    };
+    assert!(
+        !title("commit").contains("disabled"),
+        "enabled row is unmarked: {}",
+        title("commit")
+    );
+    assert!(
+        title("handover").contains("disabled"),
+        "disabled row carries the marker: {}",
+        title("handover")
+    );
+
+    // A later reply that no longer lists `handover` (it was detached) must clear
+    // the marker rather than leave it stale.
+    let cleared = reduce_skill_manager(&s, SkillManagerEvent::LinksLoaded(vec![])).state;
+    assert!(
+        !cleared.link_disabled("handover"),
+        "a wholesale reload drops markers for links that are gone"
+    );
+}

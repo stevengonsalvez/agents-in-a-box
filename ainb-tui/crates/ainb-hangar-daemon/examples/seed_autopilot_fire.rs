@@ -186,15 +186,9 @@ async fn seed_minimal_tenancy(pool: &sqlx::SqlitePool) {
             runtime_id: RUNTIME_ID.to_string(),
             instructions: None,
             visibility: "workspace".to_string(),
+            permission_mode: "private".to_string(),
             owner_id: USER_ID.to_string(),
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         },
     )
     .await

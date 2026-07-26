@@ -27,8 +27,8 @@ pub const CAVEMAN_OUTPUT_RATIO: f64 = 0.74;
 pub struct SavingsData {
     /// Whether the Headroom proxy responded successfully.
     pub headroom_running: bool,
-    /// `savings.total_tokens` from Headroom /stats (NOT `summary.tokens_saved_total`,
-    /// which does not exist and silently parsed to 0 — see HeadroomStats below).
+    /// Lifetime total from Headroom `/stats`, preferring the persisted counter
+    /// so proxy restarts do not reset Burndown's measured savings.
     pub headroom_tokens_saved: u64,
     /// Whether `rtk` was found on PATH and exited successfully.
     pub rtk_installed: bool,
@@ -48,16 +48,27 @@ impl SavingsData {
 
 // ── Headroom /stats response shape ───────────────────────────────────────────
 
-// Real headroom 0.26 `/stats` shape (verified against a live proxy 2026-06-19):
-// the canonical total is `savings.total_tokens`; request count is
-// `summary.api_requests`. An earlier guess at `summary.tokens_saved_total`
-// silently parsed to 0 because that key does not exist.
+// Headroom 0.26 exposes a resettable current-proxy counter at
+// `savings.total_tokens` and a durable lifetime counter at
+// `persistent_savings.lifetime.tokens_saved`. Burndown reports the latter so
+// measured savings survive proxy restarts, while retaining the former as a
+// compatibility fallback for older Headroom payloads.
 #[derive(Debug, Default, Deserialize)]
 pub struct HeadroomStats {
     #[serde(default)]
     pub summary: HeadroomSummary,
     #[serde(default)]
     pub savings: HeadroomSavings,
+    #[serde(default)]
+    pub persistent_savings: HeadroomPersistentSavings,
+}
+
+impl HeadroomStats {
+    /// Return durable lifetime savings, falling back to the current proxy
+    /// counter when an older Headroom version omits persistent savings.
+    pub fn tokens_saved(&self) -> u64 {
+        self.persistent_savings.lifetime.tokens_saved.max(self.savings.total_tokens)
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -70,6 +81,18 @@ pub struct HeadroomSummary {
 pub struct HeadroomSavings {
     #[serde(default)]
     pub total_tokens: u64,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct HeadroomPersistentSavings {
+    #[serde(default)]
+    pub lifetime: HeadroomLifetimeSavings,
+}
+
+#[derive(Debug, Default, Deserialize)]
+pub struct HeadroomLifetimeSavings {
+    #[serde(default)]
+    pub tokens_saved: u64,
 }
 
 // ── RTK gain response shape ───────────────────────────────────────────────────
@@ -126,7 +149,7 @@ async fn fetch_headroom() -> (bool, u64) {
 
     match client.get(&url).send().await {
         Ok(resp) if resp.status().is_success() => match resp.json::<HeadroomStats>().await {
-            Ok(stats) => (true, stats.savings.total_tokens),
+            Ok(stats) => (true, stats.tokens_saved()),
             Err(_) => (false, 0),
         },
         _ => (false, 0),
@@ -159,16 +182,41 @@ mod tests {
     use super::*;
 
     #[test]
-    fn headroom_stats_deserialises_from_real_shape() {
-        // Real headroom 0.26 /stats shape (live-verified): savings.total_tokens
-        // is the canonical total; summary.api_requests is the request count.
+    fn headroom_stats_prefers_persisted_lifetime_savings() {
+        // Real Headroom 0.26 /stats shape (live-verified). The current-proxy
+        // counter resets when Headroom restarts, but persisted lifetime savings
+        // continue to represent all proxied sessions.
         let json = r#"{
             "summary":{"api_requests":120,"compression":{"total_tokens_removed":1}},
-            "savings":{"total_tokens":42000,"per_project":{}}
+            "savings":{"total_tokens":0,"per_project":{}},
+            "persistent_savings":{"lifetime":{"tokens_saved":44075490}}
         }"#;
         let stats: HeadroomStats = serde_json::from_str(json).expect("parse HeadroomStats");
-        assert_eq!(stats.savings.total_tokens, 42000);
+        assert_eq!(stats.persistent_savings.lifetime.tokens_saved, 44_075_490);
+        assert_eq!(stats.tokens_saved(), 44_075_490);
         assert_eq!(stats.summary.api_requests, 120);
+    }
+
+    #[test]
+    fn headroom_stats_falls_back_to_current_proxy_savings() {
+        // Older Headroom payloads omit persistent_savings. Keep their active
+        // counter visible rather than treating the missing field as a failure.
+        let json = r#"{
+            "summary":{"api_requests":120},
+            "savings":{"total_tokens":42000}
+        }"#;
+        let stats: HeadroomStats = serde_json::from_str(json).expect("parse legacy HeadroomStats");
+        assert_eq!(stats.tokens_saved(), 42_000);
+    }
+
+    #[test]
+    fn headroom_stats_uses_the_larger_available_counter() {
+        let json = r#"{
+            "savings":{"total_tokens":42000},
+            "persistent_savings":{"lifetime":{"tokens_saved":41000}}
+        }"#;
+        let stats: HeadroomStats = serde_json::from_str(json).expect("parse HeadroomStats");
+        assert_eq!(stats.tokens_saved(), 42_000);
     }
 
     #[test]

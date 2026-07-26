@@ -360,10 +360,18 @@ fn issue_list_all_four_formats_are_distinct() {
         json.trim_start().starts_with('['),
         "json not an array:\n{json}"
     );
-    assert!(
-        csv.contains("id,state,title,description,created_at"),
-        "csv header missing:\n{csv}"
-    );
+    // Assert the CSV header carries its core columns individually rather than
+    // as one contiguous run — parity work inserts columns (e.g. `assignee`
+    // between `description` and `created_at`), and a hardcoded substring drifts
+    // every time. A comma-delimited header line with these fields is enough to
+    // prove the CSV format is distinct and structured.
+    let csv_header = csv.lines().next().expect("csv should have a header line");
+    for col in ["id", "state", "title", "description", "created_at"] {
+        assert!(
+            csv_header.split(',').any(|c| c == col),
+            "csv header missing column `{col}`:\n{csv}"
+        );
+    }
     assert!(
         csv.contains("\"Wire, up payments\""),
         "csv must quote the comma-bearing title:\n{csv}"
@@ -420,15 +428,9 @@ fn seed_agent(home: &std::path::Path) {
                 runtime_id: "rt-1".into(),
                 instructions: None,
                 visibility: "workspace".into(),
+                permission_mode: "private".into(),
                 owner_id,
-                archived: false,
-                model: None,
-                cli_args: Vec::new(),
-                mcp_config: None,
-                thinking: None,
-                agent_env: Vec::new(),
-                provider: None,
-                token_budget: None,
+                ..Agent::default()
             },
         )
         .await
@@ -637,6 +639,152 @@ fn agent_create_on_fresh_home_inserts_and_lists() {
     );
 }
 
+/// The user-visible proof for migration 0050 (multica gap #23): a description
+/// supplied at `agent create` survives into `agent list --format json`, and a
+/// SECOND create with the same name is REFUSED — a non-zero exit and a clear
+/// message, never a silent second identically-named row.
+#[test]
+fn agent_create_persists_description_and_refuses_a_duplicate_name() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "a",
+            "--description",
+            "runs the build",
+        ],
+    );
+    assert!(ok, "agent create should exit 0; out={out}");
+
+    let (ok, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "agent list should exit 0; out={shown}");
+    assert!(
+        shown.contains(r#""description":"runs the build""#),
+        "the description must survive into the json listing:\n{shown}"
+    );
+
+    // A SECOND create with the same name fails loudly.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "a",
+            "--description",
+            "second",
+        ],
+    );
+    assert!(!ok, "a duplicate agent name must exit non-zero; out={out}");
+    assert!(
+        out.contains("already exists"),
+        "the refusal must say the name is taken:\n{out}"
+    );
+
+    // …and wrote nothing: still exactly one agent named `a`.
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert_eq!(
+        shown.matches(r#""name":"a""#).count(),
+        1,
+        "the refused create must not have added a second row:\n{shown}"
+    );
+}
+
+/// An over-long `--description` is refused before anything is written (the
+/// 255-code-point cap, multica 060).
+#[test]
+fn agent_create_rejects_an_over_long_description() {
+    let tmp = tempfile::tempdir().unwrap();
+    let too_long = "x".repeat(256);
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "toolong",
+            "--description",
+            &too_long,
+        ],
+    );
+    assert!(
+        !ok,
+        "a 256-character description must exit non-zero; out={out}"
+    );
+    assert!(
+        out.contains("255 characters or fewer"),
+        "the message must state the cap:\n{out}"
+    );
+
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        !shown.contains("toolong"),
+        "the rejected create must not have written an agent:\n{shown}"
+    );
+}
+
+/// `agent edit --description` rewrites the blurb, and a rename onto a taken
+/// name is refused with the agent's name intact.
+#[test]
+fn agent_edit_rewrites_description_and_refuses_a_colliding_rename() {
+    let tmp = tempfile::tempdir().unwrap();
+    for name in ["alpha", "beta"] {
+        let (ok, out) = run(tmp.path(), &["hangar", "agent", "create", "--name", name]);
+        assert!(ok, "create {name} should exit 0; out={out}");
+    }
+    // Pull beta's id out of the json listing.
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    let rows: serde_json::Value = serde_json::from_str(shown.trim()).expect("json listing parses");
+    let beta_id = rows
+        .as_array()
+        .expect("array")
+        .iter()
+        .find(|r| r["name"] == "beta")
+        .expect("beta listed")["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "edit",
+            &beta_id,
+            "--description",
+            "reviews every PR",
+        ],
+    );
+    assert!(ok, "a description-only edit should exit 0; out={out}");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains(r#""description":"reviews every PR""#),
+        "the edited blurb must show in the listing:\n{shown}"
+    );
+
+    // Renaming beta onto alpha is refused, and beta keeps its name.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "edit", &beta_id, "--name", "alpha"],
+    );
+    assert!(!ok, "a colliding rename must exit non-zero; out={out}");
+    assert!(out.contains("already exists"), "refusal message:\n{out}");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains(r#""name":"beta""#),
+        "the refused rename must leave beta's name alone:\n{shown}"
+    );
+}
+
 /// Create an issue via the CLI and return its id (pulled from the create ack).
 fn create_issue(home: &std::path::Path, title: &str) -> String {
     let (ok, out) = run(home, &["hangar", "issue", "create", "--title", title]);
@@ -692,6 +840,65 @@ fn issue_label_attach_then_detach_persist_through_show() {
     assert!(
         out.contains("\"labels\":[]"),
         "detach did not clear the label in json show:\n{out}"
+    );
+}
+
+/// Parity 28: `hangar issue create --label` routes through the 0016 label join,
+/// not just the `issue.labels` JSON cache — so a created label is visible to the
+/// SAME reads a later `label attach` would produce, and a repeated `--label` is
+/// idempotent (one chip, not two).
+#[test]
+fn issue_create_labels_route_through_the_label_join() {
+    let tmp = tempfile::tempdir().unwrap();
+    // `bug` twice on purpose: the repeat must collapse to one attachment.
+    let args = [
+        "hangar",
+        "issue",
+        "create",
+        "--title",
+        "Labelled at birth",
+        "--label",
+        "bug",
+        "--label",
+        "bug",
+        "--label",
+        "p0",
+    ];
+    let (ok, out) = run(tmp.path(), &args);
+    assert!(ok, "issue create --label should exit 0; out={out}");
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .map(|s| s.trim().to_string())
+        .expect("create output carries an id");
+
+    // The read-cache reflects the join (attach re-derives it), deduped.
+    let (ok, out) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "json show should exit 0; out={out}");
+    assert!(
+        out.contains("\"labels\":[\"bug\",\"p0\"]"),
+        "create labels missing / duplicated in json show:\n{out}"
+    );
+
+    // The join is the source of truth: detaching through the label verb (which
+    // only ever touches `issue_label`) must be able to REMOVE what create wrote.
+    // Before this change create wrote the cache only, so the detach was a no-op.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "label", "detach", &id, "bug"],
+    );
+    assert!(ok, "label detach should exit 0; out={out}");
+    let (ok, out) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "json show should exit 0; out={out}");
+    assert!(
+        out.contains("\"labels\":[\"p0\"]"),
+        "detach did not remove a create-authored label:\n{out}"
     );
 }
 
@@ -893,6 +1100,141 @@ fn member_remove_rejects_removing_the_only_owner() {
     );
 }
 
+/// The user-visible proof for parity #26 (agent leg): `ainb hangar agent archive`
+/// records WHO and WHEN, both readable back through `agent list --all`. An ACTIVE
+/// agent's JSON carries `null` for both — the honest "never archived".
+#[test]
+fn agent_archive_records_the_audit_trail_readable_from_the_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, _) = run(
+        tmp.path(),
+        &["hangar", "issue", "create", "--title", "anchor"],
+    );
+    assert!(ok, "bootstrap create failed");
+    seed_agent(tmp.path());
+
+    // Before: an active agent reports no audit at all.
+    let (ok, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "json agent list should exit 0; out={shown}");
+    assert!(
+        shown.contains("\"archived_at\":null") && shown.contains("\"archived_by\":null"),
+        "an active agent must report a null audit pair:\n{shown}"
+    );
+
+    // Archive with an EXPLICIT actor.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "archive", "agent-1", "--by", "user-2"],
+    );
+    assert!(ok, "archive should exit 0; out={out}");
+    assert!(
+        out.contains("archived agent agent-1 by member:user-2 at "),
+        "the ack must name the archiving actor and the stamp:\n{out}"
+    );
+
+    // Both audit columns are readable back, non-null, through `--all`.
+    let (ok, shown) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "agent", "list", "--all"],
+    );
+    assert!(ok, "json agent list --all should exit 0; out={shown}");
+    assert!(
+        shown.contains("\"archived_by\":\"member:user-2\""),
+        "archived_by not persisted:\n{shown}"
+    );
+    assert!(
+        !shown.contains("\"archived_at\":null"),
+        "archived_at must be a real epoch-ms stamp, not null:\n{shown}"
+    );
+    // The text line carries the same audit, and only when stamped.
+    let (_, line) = run(tmp.path(), &["hangar", "agent", "list", "--all"]);
+    assert!(
+        line.contains("archived_by=member:user-2@"),
+        "the text line must carry the audit suffix:\n{line}"
+    );
+
+    // Restoring clears BOTH — a restored agent carries no stale attribution.
+    let (ok, _) = run(tmp.path(), &["hangar", "agent", "unarchive", "agent-1"]);
+    assert!(ok, "unarchive should exit 0");
+    let (_, shown) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(
+        shown.contains("\"archived_at\":null") && shown.contains("\"archived_by\":null"),
+        "restore must clear the audit pair:\n{shown}"
+    );
+    let (_, line) = run(tmp.path(), &["hangar", "agent", "list"]);
+    assert!(
+        !line.contains("archived_by="),
+        "a restored agent's line carries no audit suffix:\n{line}"
+    );
+}
+
+/// The user-visible proof for parity #26 (squad leg): `ainb hangar squad archive`
+/// removes the squad from the default list, `--all` shows it with its stamp, and
+/// `unarchive` restores it.
+#[test]
+fn squad_archive_hides_it_from_list_and_records_the_audit() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            "agent:lead-1",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "squad", "archive", &squad_id, "--by", "user-9"],
+    );
+    assert!(ok, "squad archive should exit 0; out={out}");
+    assert!(
+        out.contains("archived squad") && out.contains("by member:user-9 at "),
+        "the ack must name the archiving actor and the stamp:\n{out}"
+    );
+
+    // The default list is active-only.
+    let (ok, list) = run(tmp.path(), &["hangar", "squad", "list"]);
+    assert!(ok, "squad list should exit 0; out={list}");
+    assert!(
+        !list.contains("shippers"),
+        "an archived squad must leave the default list:\n{list}"
+    );
+
+    // `--all` shows it, with the archive badge and its audit stamp.
+    let (ok, all) = run(tmp.path(), &["hangar", "squad", "list", "--all"]);
+    assert!(ok, "squad list --all should exit 0; out={all}");
+    assert!(
+        all.contains("shippers")
+            && all.contains("[archived]")
+            && all.contains("archived_by=member:user-9@"),
+        "--all must show the archived squad with its audit:\n{all}"
+    );
+
+    // Restoring returns it to the default list and clears the stamp.
+    let (ok, _) = run(tmp.path(), &["hangar", "squad", "unarchive", &squad_id]);
+    assert!(ok, "squad unarchive should exit 0");
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("shippers")
+            && json.contains("\"archived\":false")
+            && json.contains("\"archived_at\":null")
+            && json.contains("\"archived_by\":null"),
+        "restore must return the squad active with a cleared audit:\n{json}"
+    );
+}
+
 /// The user-visible proof for e38.17: `ainb hangar squad create` + `... add-member`
 /// build a squad with a leader + members, and `ainb hangar squad list` renders the
 /// status view (squad name, leader, members) — a real-binary round-trip through
@@ -1017,14 +1359,18 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 .fetch_one(pool)
                 .await
                 .expect("default workspace exists after bootstrap");
-        // `agent.owner_id` FKs to `user(id)`; seed the owner.
-        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES (?, ?, ?)")
-            .bind("assign-owner")
-            .bind("owner@example.com")
-            .bind(0_i64)
-            .execute(pool)
-            .await
-            .unwrap();
+        // `agent.owner_id` FKs to `user(id)`. Own the agent with the workspace's
+        // OWNER (what `bootstrap::create_agent` does), not a synthetic user: the
+        // gap #8 invocation gate resolves the workspace owner as the default
+        // invoker, so a foreign-owned private agent would be uninvocable — a
+        // fixture artefact, not the routing behaviour under test.
+        let owner_id: String = sqlx::query_scalar(
+            "SELECT user_id FROM member WHERE workspace_id = ? AND role = 'owner' LIMIT 1",
+        )
+        .bind(&ws_id)
+        .fetch_one(pool)
+        .await
+        .expect("the bootstrapped workspace has an owner member");
         AgentRuntimeRepo::insert(
             pool,
             &AgentRuntime {
@@ -1043,20 +1389,14 @@ fn seed_assignable_agent(home: &std::path::Path) {
             pool,
             &Agent {
                 id: "assign-agent".into(),
-                workspace_id: ws_id,
+                workspace_id: ws_id.clone(),
                 name: "lead".into(),
                 runtime_id: "assign-runtime".into(),
                 instructions: None,
                 visibility: "workspace".into(),
-                owner_id: "assign-owner".into(),
-                archived: false,
-                model: None,
-                cli_args: Vec::new(),
-                mcp_config: None,
-                thinking: None,
-                agent_env: Vec::new(),
-                provider: None,
-                token_budget: None,
+                permission_mode: "private".into(),
+                owner_id: owner_id.clone(),
+                ..Agent::default()
             },
         )
         .await
@@ -1226,4 +1566,900 @@ fn workspace_config_clear_flags_unset_knobs() {
         out.contains("no prefix here") && !out.contains("[OPS] no prefix here"),
         "a cleared prefix must leave the title verbatim:\n{out}"
     );
+}
+
+/// gap #8 ACCEPTANCE (multica `validateAssigneePair` / squad-private-leader 403),
+/// daemon-free through the real binary: `ainb hangar squad assign --fanout
+/// --invoker <non-owner>` against a squad whose LEADER is private exits non-zero
+/// with the invocation-refusal message, and sqlite holds NO `agent_task_queue`
+/// row. Allow-listing that member on the leader then makes the identical command
+/// land the leader brief — proving a decision, not blanket denial.
+#[test]
+fn squad_fanout_gates_a_private_leader_against_a_non_owner_member() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+    seed_assignable_agent(tmp.path());
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "member",
+            "add",
+            "--email",
+            "bob@example.com",
+            "--role",
+            "member",
+        ],
+    );
+    assert!(ok, "member add should exit 0; out={out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "privsquad",
+            "--leader",
+            "agent:assign-agent",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    // DENY: bob is a plain member, the leader is private and owned by the owner.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "assign",
+            &squad_id,
+            "--fanout",
+            "--invoker",
+            "bob@example.com",
+        ],
+    );
+    assert!(
+        !ok,
+        "a non-owner fan-out through a private leader must fail; out={out}"
+    );
+    assert!(
+        out.contains("not invocable"),
+        "the gap #8 refusal must surface:\n{out}"
+    );
+    assert_eq!(
+        queued_task_count(tmp.path()),
+        0,
+        "a refused fan-out writes NO task row"
+    );
+
+    // `agent can-invoke` agrees with the path that just refused.
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "can-invoke",
+            "assign-agent",
+            "--as",
+            "bob@example.com",
+        ],
+    );
+    assert!(
+        out.contains("DENY"),
+        "can-invoke must agree it is denied:\n{out}"
+    );
+
+    // CONTROL: share the leader with bob (`agent allow` implies public_to).
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "allow",
+            "assign-agent",
+            "--member",
+            "bob@example.com",
+        ],
+    );
+    assert!(ok, "agent allow should exit 0; out={out}");
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "can-invoke",
+            "assign-agent",
+            "--as",
+            "bob@example.com",
+        ],
+    );
+    assert!(out.contains("ALLOW"), "can-invoke must now allow:\n{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "assign",
+            &squad_id,
+            "--fanout",
+            "--invoker",
+            "bob@example.com",
+        ],
+    );
+    assert!(
+        ok,
+        "the allow-listed member's fan-out should exit 0; out={out}"
+    );
+    assert!(
+        out.contains("briefed leader assign-agent"),
+        "the fan-out must brief the leader:\n{out}"
+    );
+    assert_eq!(
+        queued_task_count(tmp.path()),
+        1,
+        "the leader brief landed (the squad has no agent members)"
+    );
+}
+
+/// Rows in `agent_task_queue` for the isolated hangar home — the acceptance
+/// assertion that a refused dispatch wrote NOTHING.
+fn queued_task_count(home: &std::path::Path) -> i64 {
+    use ainb_hangar_store::Store;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.unwrap();
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    })
+}
+
+/// Parity #24 end-to-end through the REAL binary: sync two skills, attach both
+/// to an agent, disable one, and prove the listing reflects it — then re-attach
+/// the disabled one and prove the attach did NOT resurrect it (deviation D2).
+#[test]
+fn skill_toggle_round_trips_through_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("src");
+    for name in ["commit", "review"] {
+        let dir = source.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: the {name} skill\n---\n\n# {name}\n"),
+        )
+        .unwrap();
+    }
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "sync",
+            "--source",
+            source.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "skills sync should exit 0; out={out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "create", "--name", "Tester"],
+    );
+    assert!(ok, "agent create should exit 0; out={out}");
+
+    for skill in ["commit", "review"] {
+        let (ok, out) = run(
+            tmp.path(),
+            &["hangar", "skills", "attach", skill, "--agent", "Tester"],
+        );
+        assert!(ok, "attach {skill} should exit 0; out={out}");
+    }
+
+    // Both attachments start live.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
+        ],
+    );
+    assert!(ok, "skills list --agent should exit 0; out={out}");
+    let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
+    let state = |v: &serde_json::Value, name: &str| -> bool {
+        v.as_array()
+            .expect("array")
+            .iter()
+            .find(|l| l["name"] == name)
+            .unwrap_or_else(|| panic!("no link named {name} in {v}"))["enabled"]
+            .as_bool()
+            .expect("enabled bool")
+    };
+    assert!(state(&links, "commit"), "commit starts enabled: {links}");
+    assert!(state(&links, "review"), "review starts enabled: {links}");
+
+    // Disable one.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "toggle",
+            "review",
+            "--agent",
+            "Tester",
+            "--enabled",
+            "false",
+        ],
+    );
+    assert!(ok, "skills toggle should exit 0; out={out}");
+    assert!(
+        out.contains("disabled review"),
+        "missing toggle ack:\n{out}"
+    );
+
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
+        ],
+    );
+    let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
+    assert!(state(&links, "commit"), "commit stays enabled: {links}");
+    assert!(
+        !state(&links, "review"),
+        "review reads back disabled — and is still LISTED, i.e. still attached: {links}"
+    );
+
+    // D2: re-attaching must NOT resurrect it (seed/templates re-attach on every
+    // re-run; a re-enabling attach would silently undo the operator's disable).
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "skills", "attach", "review", "--agent", "Tester"],
+    );
+    assert!(ok, "re-attach should exit 0; out={out}");
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
+        ],
+    );
+    let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
+    assert!(
+        !state(&links, "review"),
+        "attach must never re-enable a deliberately disabled link: {links}"
+    );
+}
+
+/// The user-visible proof for parity #25 through the REAL binary: create a squad
+/// with `--instructions`, add a member with `--role`, read both back out of
+/// `squad list --format json`, change the role with `squad member-role`, clear
+/// the instructions with `squad instructions --clear`, and see each step land.
+#[test]
+fn squad_role_and_instructions_round_trip_through_the_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            "agent:lead-1",
+            "--instructions",
+            "Route schema work to the DB owner.",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "add-member",
+            &squad_id,
+            "--member",
+            "agent:worker-1",
+            "--role",
+            "owns the migrations",
+        ],
+    );
+    assert!(ok, "add-member --role should exit 0; out={out}");
+    assert!(
+        out.contains("with role \"owns the migrations\""),
+        "the ack must name the role:\n{out}"
+    );
+
+    // Both land in the JSON view.
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("\"instructions\":\"Route schema work to the DB owner.\""),
+        "instructions in the JSON view:\n{json}"
+    );
+    assert!(
+        json.contains("\"member\":\"agent:worker-1\"")
+            && json.contains("\"role\":\"owns the migrations\""),
+        "the member role in the JSON view:\n{json}"
+    );
+
+    // The TEXT view carries the role inline and the instructions on their own line.
+    let (_, text) = run(tmp.path(), &["hangar", "squad", "list"]);
+    assert!(
+        text.contains("agent:worker-1 (role: owns the migrations)"),
+        "the text view must carry the role:\n{text}"
+    );
+    assert!(
+        text.contains("instructions: Route schema work to the DB owner."),
+        "the text view must carry the instructions:\n{text}"
+    );
+
+    // `member-role` changes it in place.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "member-role",
+            &squad_id,
+            "--member",
+            "agent:worker-1",
+            "--role",
+            "owns the CLI",
+        ],
+    );
+    assert!(ok, "member-role should exit 0; out={out}");
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("\"role\":\"owns the CLI\"") && !json.contains("owns the migrations"),
+        "the role must be replaced:\n{json}"
+    );
+
+    // A NON-member role-set fails loudly rather than reporting "ok" on a no-op.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "member-role",
+            &squad_id,
+            "--member",
+            "agent:ghost",
+            "--role",
+            "nobody",
+        ],
+    );
+    assert!(!ok, "a non-member role-set must exit non-zero; out={out}");
+
+    // `instructions --clear` empties the field; a bare read then says so.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "squad", "instructions", &squad_id, "--clear"],
+    );
+    assert!(ok, "instructions --clear should exit 0; out={out}");
+    let (ok, out) = run(tmp.path(), &["hangar", "squad", "instructions", &squad_id]);
+    assert!(ok, "instructions read should exit 0; out={out}");
+    assert!(
+        out.contains("has no instructions"),
+        "the cleared field must read as empty:\n{out}"
+    );
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("\"instructions\":\"\""),
+        "the JSON view must show the cleared field:\n{json}"
+    );
+}
+
+/// The user-visible PROMPT-INSPECTION proof for parity #7 / `7-rest`:
+/// `ainb hangar squad briefing <id>` prints the exact text the daemon would
+/// inject into a leader run — the operating protocol, the roster with each
+/// member's role AND materialisable skills, and the squad instructions.
+///
+/// Driven entirely through the real binary: agents are created, skills imported
+/// and attached (one of them disabled, which must NOT be advertised), the squad
+/// is built with a roled member and instructions, and the briefing is read back.
+#[test]
+fn squad_briefing_prints_protocol_roster_roles_skills_and_instructions() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    // Two skills on disk for `skills sync` to import.
+    let skills_src = tempfile::tempdir().unwrap();
+    for name in ["pathfinding", "demolition"] {
+        let dir = skills_src.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\n---\n\n# {name}\n"),
+        )
+        .unwrap();
+    }
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "sync",
+            "--source",
+            skills_src.path().to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "skills sync should exit 0; out={out}");
+
+    for name in ["captain", "scout"] {
+        let (ok, out) = run(tmp.path(), &["hangar", "agent", "create", "--name", name]);
+        assert!(ok, "agent create should exit 0; out={out}");
+    }
+    // Resolve the two agent ids from the JSON listing.
+    let (ok, agents_json) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "agent list should exit 0; out={agents_json}");
+    let agent_id = |name: &str| -> String {
+        // Each agent object carries both "id" and "name"; split on the name to
+        // find its object, then walk back to that object's id.
+        let marker = format!("\"name\":\"{name}\"");
+        let upto = &agents_json[..agents_json.find(&marker).expect("agent in listing")];
+        let id_at = upto.rfind("\"id\":\"").expect("id before the name");
+        let rest = &upto[id_at + 6..];
+        rest[..rest.find('"').unwrap()].to_string()
+    };
+    let captain = agent_id("captain");
+    let scout = agent_id("scout");
+
+    // scout gets both skills, then `demolition` is DISABLED — the roster must
+    // advertise only what scout will actually materialise.
+    for skill in ["pathfinding", "demolition"] {
+        let (ok, out) = run(
+            tmp.path(),
+            &["hangar", "skills", "attach", skill, "--agent", &scout],
+        );
+        assert!(ok, "skills attach should exit 0; out={out}");
+    }
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "toggle",
+            "demolition",
+            "--agent",
+            &scout,
+            "--enabled",
+            "false",
+        ],
+    );
+    assert!(ok, "skills toggle should exit 0; out={out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "briefed",
+            "--leader",
+            &format!("agent:{captain}"),
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "add-member",
+            &squad_id,
+            "--member",
+            &format!("agent:{scout}"),
+        ],
+    );
+    assert!(ok, "squad add-member should exit 0; out={out}");
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "member-role",
+            &squad_id,
+            "--member",
+            &format!("agent:{scout}"),
+            "--role",
+            "owns the migrations",
+        ],
+    );
+    assert!(ok, "squad member-role should exit 0; out={out}");
+    let instructions = "Route schema work to the DB owner.";
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "instructions",
+            &squad_id,
+            "--set",
+            instructions,
+        ],
+    );
+    assert!(ok, "squad instructions should exit 0; out={out}");
+
+    let (ok, briefing) = run(tmp.path(), &["hangar", "squad", "briefing", &squad_id]);
+    assert!(ok, "squad briefing should exit 0; out={briefing}");
+    assert!(
+        briefing.contains("## Squad Operating Protocol"),
+        "protocol section:\n{briefing}"
+    );
+    assert!(
+        briefing.contains("## Squad Roster"),
+        "roster section:\n{briefing}"
+    );
+    // The member's WHOLE row — role AND the live skill, never a bare substring.
+    assert!(
+        briefing.contains(&format!(
+            "- scout — agent — {scout} — role: owns the migrations — skills: pathfinding\n"
+        )),
+        "member row must carry role + materialisable skills:\n{briefing}"
+    );
+    assert!(
+        !briefing.contains("demolition"),
+        "a disabled skill link must never be advertised:\n{briefing}"
+    );
+    assert!(
+        briefing.contains("## Squad Instructions"),
+        "instructions section:\n{briefing}"
+    );
+    assert!(
+        briefing.contains(instructions),
+        "instructions rendered verbatim:\n{briefing}"
+    );
+}
+
+/// A squad whose leader is a human `member` has no agent runtime to brief:
+/// `hangar squad briefing` refuses with an explanation rather than printing a
+/// half-built prompt.
+#[test]
+fn squad_briefing_on_a_human_leader_squad_exits_non_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "humans",
+            "--leader",
+            "member:user-9",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(tmp.path(), &["hangar", "squad", "briefing", &squad_id]);
+    assert!(!ok, "a human-leader squad must exit non-zero; out={out}");
+    assert!(
+        out.contains("has a human leader; no agent briefing is built"),
+        "the refusal must explain itself:\n{out}"
+    );
+}
+
+/// **T10** — the CLI half of multica parity #11-rest: an issue's acceptance
+/// criteria are individually addressable and individually completable through
+/// the real binary.
+///
+/// `issue create --acceptance A --acceptance B` → `criteria list` shows both
+/// unchecked with distinct `ac-` ids → `criteria check <id> 2` ticks the SECOND
+/// → `criteria list` and `issue show` both render `☑` on B and `☐` on A →
+/// checking the SAME criterion by its ID is idempotent → `uncheck` clears it →
+/// an out-of-range ordinal and an unknown id both exit NON-ZERO.
+#[test]
+fn issue_criteria_list_check_uncheck_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Gap 11-rest",
+            "--acceptance",
+            "cargo build is green",
+            "--acceptance",
+            "detail card shows criteria",
+        ],
+    );
+    assert!(ok, "issue create should exit 0; out={out}");
+    let issue_id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .expect("create prints the new issue id")
+        .trim()
+        .to_string();
+
+    // Both criteria list, unchecked, with distinct minted ids.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "list", &issue_id],
+    );
+    assert!(ok, "criteria list should exit 0; out={out}");
+    let lines: Vec<&str> = out
+        .lines()
+        .filter(|l| l.contains("cargo build is green") || l.contains("detail card shows criteria"))
+        .collect();
+    assert_eq!(lines.len(), 2, "both criteria listed:\n{out}");
+    assert!(lines[0].starts_with("1  ac-"), "ordinal + id: {}", lines[0]);
+    assert!(lines[1].starts_with("2  ac-"), "ordinal + id: {}", lines[1]);
+    assert!(
+        lines[0].contains('☐') && !lines[0].contains('☑'),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains('☐') && !lines[1].contains('☑'),
+        "{}",
+        lines[1]
+    );
+    let second_id = lines[1].split_whitespace().nth(1).expect("criterion id column").to_string();
+    let first_id = lines[0].split_whitespace().nth(1).expect("id").to_string();
+    assert_ne!(first_id, second_id, "ids are per-criterion, not shared");
+
+    // Tick the SECOND by 1-based ORDINAL.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "criteria",
+            "check",
+            &issue_id,
+            "2",
+            "--actor",
+            "agent:builder",
+        ],
+    );
+    assert!(ok, "criteria check should exit 0; out={out}");
+
+    // It persisted, and ONLY the second one moved.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "list", &issue_id],
+    );
+    assert!(ok, "criteria list should exit 0; out={out}");
+    let first = out
+        .lines()
+        .find(|l| l.contains("cargo build is green"))
+        .expect("first criterion listed");
+    let second = out
+        .lines()
+        .find(|l| l.contains("detail card shows criteria"))
+        .expect("second criterion listed");
+    assert!(first.contains('☐') && !first.contains('☑'), "{first}");
+    assert!(second.contains('☑') && !second.contains('☐'), "{second}");
+    assert!(second.contains("agent:builder"), "attribution: {second}");
+    assert!(second.contains(&second_id), "same stable id: {second}");
+
+    // `issue show` renders the same state, with a counted header.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
+    assert!(ok, "issue show should exit 0; out={out}");
+    assert!(out.contains("Acceptance: 1/2"), "counted header:\n{out}");
+    assert!(!out.contains("Acceptance: 0/2"), "decoy 0/2:\n{out}");
+    assert!(!out.contains("Acceptance: 2/2"), "decoy 2/2:\n{out}");
+
+    // Checking the SAME criterion by ID is idempotent (still 1/2).
+    let (ok, _) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "criteria", "check", &issue_id, &second_id,
+        ],
+    );
+    assert!(ok, "a repeat check should exit 0");
+    let (_, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
+    assert!(out.contains("Acceptance: 1/2"), "still 1/2:\n{out}");
+
+    // Uncheck by ID clears it and the attribution.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "criteria", "uncheck", &issue_id, &second_id,
+        ],
+    );
+    assert!(ok, "criteria uncheck should exit 0; out={out}");
+    assert!(
+        !out.contains("agent:builder"),
+        "untick cleared attribution:\n{out}"
+    );
+    let (_, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
+    assert!(out.contains("Acceptance: 0/2"), "back to 0/2:\n{out}");
+
+    // An out-of-range ordinal and an unknown id both FAIL loudly.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "check", &issue_id, "7"],
+    );
+    assert!(!ok, "an out-of-range ordinal must exit non-zero; out={out}");
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "criteria",
+            "check",
+            &issue_id,
+            "ac-does-not-exist",
+        ],
+    );
+    assert!(!ok, "an unknown criterion id must exit non-zero; out={out}");
+}
+
+/// multica parity #20, the sqlite half of the acceptance, with NO daemon: a link
+/// authored as `blocked-by` persists as `blocked_by`, renders with 🔒 while the
+/// blocker is unfinished, and shows up on `issue show`; the reverse `blocks`
+/// direction renders from the other end; a `related` link persists as `related`
+/// and renders with `~`; and NO `'blocks'` row is ever written.
+#[test]
+fn issue_link_add_list_persists_typed_links() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let create = |title: &str| -> String {
+        let (ok, out) = run(tmp.path(), &["hangar", "issue", "create", "--title", title]);
+        assert!(ok, "issue create should exit 0; out={out}");
+        out.lines()
+            .find_map(|l| l.strip_prefix("created issue "))
+            .expect("create prints the new issue id")
+            .trim()
+            .to_string()
+    };
+    let schema = create("schema");
+    let parser = create("parser");
+    let docs = create("docs");
+
+    // parser is blocked-by schema; parser is related to docs.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "link",
+            "add",
+            &parser,
+            &schema,
+            "--kind",
+            "blocked-by",
+        ],
+    );
+    assert!(ok, "link add should exit 0; out={out}");
+    assert!(
+        out.contains("🔒") && out.contains("blocked-by") && out.contains("schema"),
+        "the add prints the refreshed link list with a lock:\n{out}"
+    );
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "link", "add", &parser, &docs, "--kind", "related",
+        ],
+    );
+    assert!(ok, "related link add should exit 0; out={out}");
+
+    // parser's links: a locked blocker AND a related card.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "list", &parser]);
+    assert!(ok, "link list should exit 0; out={out}");
+    let blocked_line = out
+        .lines()
+        .find(|l| l.contains("blocked-by"))
+        .unwrap_or_else(|| panic!("a blocked-by row in:\n{out}"));
+    assert!(
+        blocked_line.contains('🔒') && blocked_line.contains("schema"),
+        "an unfinished blocker renders locked: {blocked_line}"
+    );
+    let related_line = out
+        .lines()
+        .find(|l| l.contains("related"))
+        .unwrap_or_else(|| panic!("a related row in:\n{out}"));
+    assert!(
+        related_line.contains('~') && related_line.contains("docs"),
+        "a related link renders with ~: {related_line}"
+    );
+
+    // The REVERSE direction renders from schema's end.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "list", &schema]);
+    assert!(ok, "link list should exit 0; out={out}");
+    let blocks_line = out
+        .lines()
+        .find(|l| l.contains("blocks"))
+        .unwrap_or_else(|| panic!("a blocks row in:\n{out}"));
+    assert!(
+        blocks_line.contains('→') && blocks_line.contains("parser"),
+        "the blocker renders what it blocks: {blocks_line}"
+    );
+
+    // `issue show` carries the same section.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &parser]);
+    assert!(ok, "issue show should exit 0; out={out}");
+    assert!(out.contains("Links:"), "the show block:\n{out}");
+    assert!(out.contains("blocked-by"), "the gating link:\n{out}");
+
+    // An issue with NO links shows no section and says so on `link list`.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "list", &docs]);
+    assert!(ok, "link list should exit 0; out={out}");
+    assert!(
+        out.contains("related"),
+        "docs reads the symmetric relation back:\n{out}"
+    );
+
+    // Removing the related link from the OTHER end works (it is symmetric).
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "link", "remove", &docs, &parser, "--kind", "related",
+        ],
+    );
+    assert!(ok, "link remove should exit 0; out={out}");
+    assert!(out.contains("no links"), "docs has no links left:\n{out}");
+}
+
+/// A self-link and a cycle are refused with a NON-ZERO exit, never a silent
+/// no-op.
+#[test]
+fn issue_link_refuses_a_self_link_and_a_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let create = |title: &str| -> String {
+        let (ok, out) = run(tmp.path(), &["hangar", "issue", "create", "--title", title]);
+        assert!(ok, "issue create should exit 0; out={out}");
+        out.lines()
+            .find_map(|l| l.strip_prefix("created issue "))
+            .expect("create prints the new issue id")
+            .trim()
+            .to_string()
+    };
+    let a = create("a");
+    let b = create("b");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "add", &a, &a]);
+    assert!(!ok, "a self-link must exit non-zero; out={out}");
+    assert!(out.contains("itself"), "kind-agnostic refusal:\n{out}");
+
+    let (ok, _) = run(tmp.path(), &["hangar", "issue", "link", "add", &a, &b]);
+    assert!(ok, "the first gating link lands");
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "add", &b, &a]);
+    assert!(!ok, "the closing edge must exit non-zero; out={out}");
+    assert!(out.contains("cycle"), "cycle refusal:\n{out}");
+
+    // A `related` pair in BOTH orientations is fine — it gates nothing.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "link", "add", &b, &a, "--kind", "related",
+        ],
+    );
+    assert!(ok, "a related link is cycle-exempt; out={out}");
 }

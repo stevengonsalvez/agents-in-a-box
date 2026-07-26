@@ -205,6 +205,14 @@ pub struct CardView {
     pub blocked_by: Vec<String>,
     /// Whether this card auto-launches when its last blocker completes (tcp T4 / F7).
     pub auto_run: bool,
+    /// The DISPLAY IDS of the cards this card BLOCKS — the reverse read direction
+    /// (multica parity #20). Render-only: it never makes THIS card blocked.
+    pub blocks: Vec<String>,
+    /// The DISPLAY IDS of this card's RELATED cards (multica parity #20). A
+    /// symmetric NON-gating association: it never blocks and never auto-runs, so
+    /// the board renders only a `↔n` count and the full list lives on the detail
+    /// card.
+    pub related: Vec<String>,
 }
 
 impl CardView {
@@ -221,6 +229,8 @@ impl CardView {
             member_states: w.member_states.clone(),
             blocked_by: w.blocked_by.clone(),
             auto_run: w.auto_run,
+            blocks: w.blocks.clone(),
+            related: w.related.clone(),
         }
     }
 
@@ -564,7 +574,59 @@ pub enum BoardsOverlay {
         dependent_issue_id: String,
         /// The highlighted candidate blocker (index into the other-cards list).
         cursor: usize,
+        /// The link KIND the Enter will author (multica parity #20), cycled with
+        /// Tab. Defaults to `blocked-by`, so the overlay behaves exactly as it did
+        /// before typed links unless the user asks for another kind.
+        kind: LinkKindPick,
     },
+}
+
+/// The link kind the depends-on overlay will author (multica parity #20).
+///
+/// Overlay-local: cycled with Tab, never bound globally (the host reserves its own
+/// keys, and `w` already opens this overlay).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum LinkKindPick {
+    /// The focused card is blocked by the pick — the gating default.
+    #[default]
+    BlockedBy,
+    /// The focused card blocks the pick (stored as the reverse gating edge).
+    Blocks,
+    /// The two cards are merely associated — never gating.
+    Related,
+}
+
+impl LinkKindPick {
+    /// The next kind in the `blocked-by -> blocks -> related -> blocked-by` cycle.
+    #[must_use]
+    pub fn next(self) -> Self {
+        match self {
+            Self::BlockedBy => Self::Blocks,
+            Self::Blocks => Self::Related,
+            Self::Related => Self::BlockedBy,
+        }
+    }
+
+    /// The label rendered on the overlay header.
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::BlockedBy => "blocked-by",
+            Self::Blocks => "blocks",
+            Self::Related => "related",
+        }
+    }
+
+    /// The wire kind this pick authors.
+    #[must_use]
+    pub fn to_wire(self) -> ainb_hangar_proto::snapshots::LinkKindWire {
+        use ainb_hangar_proto::snapshots::LinkKindWire;
+        match self {
+            Self::BlockedBy => LinkKindWire::BlockedBy,
+            Self::Blocks => LinkKindWire::Blocks,
+            Self::Related => LinkKindWire::Related,
+        }
+    }
 }
 
 /// A raw key folded into an open [`BoardsOverlay`]. The reducer interprets each
@@ -572,6 +634,9 @@ pub enum BoardsOverlay {
 /// `Up`/`Down` move a picker cursor but are ignored in an input).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BoardsKey {
+    /// Tab — overlay-local kind cycling in the depends-on picker (multica parity
+    /// #20). Ignored by every other overlay.
+    Tab,
     /// A printable character.
     Char(char),
     /// Backspace (delete the last input char).
@@ -987,16 +1052,16 @@ pub enum BoardsEvent {
     /// agent), prefilled from the card, and commits at the agent stage as an
     /// `issue_update` rather than a create. A no-op with no card focused.
     EditFocusedCard,
-    /// Move the focused column one place left (`⇧←`).
+    /// Move the focused column one place left (`⇧←` / `<`).
     ReorderColumnLeft,
-    /// Move the focused column one place right (`⇧→`).
+    /// Move the focused column one place right (`⇧→` / `>`).
     ReorderColumnRight,
     /// Toggle the focused board's auto-move master toggle (`m`).
     ToggleAutoMove,
-    /// Assign a SQUAD to the focused card (`q`, tcp T4 / F7) — opens a picker over
+    /// Assign a SQUAD to the focused card (`s`, tcp T4 / F7) — opens a picker over
     /// the injected squad roster (plus a "clear" row). A no-op with no card focused.
     AssignSquad,
-    /// Add a `depends-on` blocker to the focused card (`D`, tcp T4 / F7) — opens a
+    /// Add a `depends-on` blocker to the focused card (`w`, tcp T4 / F7) — opens a
     /// picker over the board's OTHER cards. A no-op with no card focused.
     AddDependency,
     /// Toggle the focused card's auto-run flag (`R`, tcp T4 / F7) — the card
@@ -1152,10 +1217,13 @@ pub enum BoardsIntent {
     AddDependency {
         /// The board both cards sit on.
         board_id: String,
-        /// The DEPENDENT card's issue (the one that gets blocked).
+        /// The FROM card's issue (the DEPENDENT under the default kind).
         dependent_issue_id: String,
-        /// The BLOCKER card's issue (must finish first).
+        /// The TO card's issue (the BLOCKER under the default kind).
         blocker_issue_id: String,
+        /// The link KIND authored (multica parity #20). `BlockedBy` is the
+        /// default and reproduces the pre-#20 gating edge.
+        link_type: LinkKindPick,
     },
     /// Flip the card's auto-run flag (`hangar/board_card_set_auto_run`, tcp T4 / F7).
     ToggleAutoRun {
@@ -1262,6 +1330,7 @@ pub fn reduce_boards(state: &BoardsState, ev: BoardsEvent) -> BoardsReduction {
         BoardsEvent::AddDependency => open_overlay(state, |_, c| BoardsOverlay::DepPick {
             dependent_issue_id: c.issue_id.clone(),
             cursor: 0,
+            kind: LinkKindPick::default(),
         }),
         // Toggle-auto-run flips the focused card's flag directly (no overlay — a
         // single boolean the daemon persists).
@@ -1315,7 +1384,8 @@ fn reduce_overlay_key(state: &BoardsState, key: BoardsKey) -> BoardsReduction {
         BoardsOverlay::DepPick {
             dependent_issue_id,
             cursor,
-        } => dep_pick_key(state, &dependent_issue_id, cursor, key),
+            kind,
+        } => dep_pick_key(state, &dependent_issue_id, cursor, kind, key),
     }
 }
 
@@ -1386,7 +1456,7 @@ fn squad_pick_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
             state,
             BoardsOverlay::SquadPick {
                 issue_id: issue_id.to_string(),
@@ -1420,25 +1490,25 @@ fn dep_pick_key(
     state: &BoardsState,
     dependent_issue_id: &str,
     cursor: usize,
+    kind: LinkKindPick,
     key: BoardsKey,
 ) -> BoardsReduction {
     let candidates = dep_candidate_ids(state, dependent_issue_id);
+    let repick = |cursor: usize, kind: LinkKindPick| BoardsOverlay::DepPick {
+        dependent_issue_id: dependent_issue_id.to_string(),
+        cursor,
+        kind,
+    };
     match key {
         BoardsKey::Esc => close_overlay(state),
-        BoardsKey::Up => set_overlay(
-            state,
-            BoardsOverlay::DepPick {
-                dependent_issue_id: dependent_issue_id.to_string(),
-                cursor: cursor.saturating_sub(1),
-            },
-        ),
+        BoardsKey::Up => set_overlay(state, repick(cursor.saturating_sub(1), kind)),
         BoardsKey::Down => set_overlay(
             state,
-            BoardsOverlay::DepPick {
-                dependent_issue_id: dependent_issue_id.to_string(),
-                cursor: (cursor + 1).min(candidates.len().saturating_sub(1)),
-            },
+            repick((cursor + 1).min(candidates.len().saturating_sub(1)), kind),
         ),
+        // multica parity #20: Tab cycles the KIND in place, leaving the highlighted
+        // candidate alone, so one overlay authors all three relations.
+        BoardsKey::Tab => set_overlay(state, repick(cursor, kind.next())),
         BoardsKey::Enter => {
             let Some(board) = state.focused_board() else {
                 return close_overlay(state);
@@ -1455,16 +1525,11 @@ fn dep_pick_key(
                     board_id: board.id.clone(),
                     dependent_issue_id: dependent_issue_id.to_string(),
                     blocker_issue_id: blocker.clone(),
+                    link_type: kind,
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
-            state,
-            BoardsOverlay::DepPick {
-                dependent_issue_id: dependent_issue_id.to_string(),
-                cursor,
-            },
-        ),
+        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(state, repick(cursor, kind)),
     }
 }
 
@@ -1490,7 +1555,11 @@ fn remove_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
             }
         }
         BoardsKey::Esc => close_overlay(state),
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => set_overlay(
+        BoardsKey::Char(_)
+        | BoardsKey::Backspace
+        | BoardsKey::Up
+        | BoardsKey::Down
+        | BoardsKey::Tab => set_overlay(
             state,
             BoardsOverlay::RemoveConfirm {
                 issue_id: issue_id.to_string(),
@@ -1522,7 +1591,11 @@ fn cancel_confirm_key(state: &BoardsState, issue_id: &str, key: BoardsKey) -> Bo
             }
         }
         BoardsKey::Esc => close_overlay(state),
-        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Up | BoardsKey::Down => set_overlay(
+        BoardsKey::Char(_)
+        | BoardsKey::Backspace
+        | BoardsKey::Up
+        | BoardsKey::Down
+        | BoardsKey::Tab => set_overlay(
             state,
             BoardsOverlay::CancelConfirm {
                 issue_id: issue_id.to_string(),
@@ -1551,6 +1624,15 @@ fn card_title_key(
                 },
             )
         }
+        // Tab carries no meaning in a text input — ignore it rather than typing a
+        // stray glyph into the title.
+        BoardsKey::Tab => set_overlay(
+            state,
+            BoardsOverlay::CardTitle {
+                column_id: column_id.to_string(),
+                title,
+            },
+        ),
         BoardsKey::Char(c) => {
             title.push(c);
             set_overlay(
@@ -1652,6 +1734,8 @@ fn card_repo_key(
             query.pop();
             reopen(state, query, Some(0))
         }
+        // Tab is the dep picker's kind cycle; here it is inert.
+        (Some(cursor), BoardsKey::Tab) => reopen(state, query, Some(cursor)),
         (Some(cursor), BoardsKey::Up) => reopen(state, query, Some(cursor.saturating_sub(1))),
         (Some(cursor), BoardsKey::Down) => {
             let n = repo_candidates(state.repos(), &query).len();
@@ -1762,7 +1846,7 @@ fn card_agent_key(
                 },
             ),
         },
-        BoardsKey::Char(_) | BoardsKey::Backspace => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
     }
 }
 
@@ -1815,7 +1899,7 @@ fn card_profile_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => reopen(state, cursor),
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => reopen(state, cursor),
     }
 }
 
@@ -1846,7 +1930,7 @@ fn column_rename_key(
             name.push(c);
             reopen(state, name)
         }
-        BoardsKey::Up | BoardsKey::Down => reopen(state, name),
+        BoardsKey::Up | BoardsKey::Down | BoardsKey::Tab => reopen(state, name),
         BoardsKey::Enter => {
             if name.trim().is_empty() {
                 return reopen(state, name);
@@ -1908,7 +1992,7 @@ fn run_mode_key(
                 }),
             }
         }
-        BoardsKey::Char(_) | BoardsKey::Backspace => set_overlay(
+        BoardsKey::Char(_) | BoardsKey::Backspace | BoardsKey::Tab => set_overlay(
             state,
             BoardsOverlay::RunMode {
                 issue_id: issue_id.to_string(),
@@ -2428,15 +2512,15 @@ fn render_overlay(
         BoardsOverlay::DepPick {
             dependent_issue_id,
             cursor,
+            kind,
         } => {
-            put_str(
-                buf,
-                0,
-                row,
-                "Depends on (↑↓ pick a blocker card, Enter commit, Esc cancel):",
-                GOLD,
-                area_w,
+            // The header carries the KIND selector (multica parity #20): Tab cycles
+            // it in place, so one overlay authors blocked-by / blocks / related.
+            let header = format!(
+                "Link [{}] (Tab kind, ↑↓ pick a card, Enter commit, Esc cancel):",
+                kind.label()
             );
+            put_str(buf, 0, row, &header, GOLD, area_w);
             let candidates = dep_candidate_ids(state, dependent_issue_id);
             if candidates.is_empty() {
                 put_str(
@@ -2545,33 +2629,41 @@ fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsS
     }
 }
 
+/// The Boards key-hint band, as `(key, description)` pairs.
+///
+/// Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a runnable
+/// card AND reruns a finished/failed/cancelled one (same launch path), `X`
+/// cancels a running one. `feedback_keybinding_hints_near_control`. The
+/// lifecycle verbs lead so they render even when a narrow pane clips the
+/// trailing column verbs. `⇧↑↓` reorders a card within its column, `d` removes
+/// it.
+///
+/// Crate-visible so the tests can prove every advertised single-char key is
+/// actually reachable — i.e. none of them is a reserved router/host key that
+/// would be eaten before the boards reducer sees it (#450).
+pub(crate) const BOARDS_HINTS: [(&str, &str); 16] = [
+    ("↵", "run/rerun"),
+    ("a", "attach"),
+    ("X", "cancel"),
+    ("t", "timeline"),
+    ("e", "edit"),
+    ("d", "remove"),
+    ("s", "squad"),
+    ("w", "depends-on"),
+    ("R", "auto-run"),
+    ("⇧↑↓", "move card"),
+    ("n", "add col"),
+    ("r", "rename"),
+    ("x", "del col"),
+    ("c", "add card"),
+    ("⇧←→", "reorder col"),
+    ("m", "auto-move"),
+];
+
 /// The key-hint band rendered under the board title — the column/card bindings
 /// next to the widget they drive.
 fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
-    // Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a
-    // runnable card AND reruns a finished/failed/cancelled one (same launch
-    // path), `X` cancels a running one. `feedback_keybinding_hints_near_control`.
-    // Card-lifecycle verbs (F6) lead so they render even when a narrow pane clips
-    // the trailing column verbs. `⇧↑↓` reorders a card within its column, `d`
-    // removes it. `feedback_keybinding_hints_near_control`.
-    let hints: [(&str, &str); 16] = [
-        ("↵", "run/rerun"),
-        ("a", "attach"),
-        ("X", "cancel"),
-        ("t", "timeline"),
-        ("e", "edit"),
-        ("d", "remove"),
-        ("q", "squad"),
-        ("D", "depends-on"),
-        ("R", "auto-run"),
-        ("⇧↑↓", "move card"),
-        ("n", "add col"),
-        ("r", "rename"),
-        ("x", "del col"),
-        ("c", "add card"),
-        ("⇧←→", "reorder col"),
-        ("m", "auto-move"),
-    ];
+    let hints = BOARDS_HINTS;
     let mut x = 0u16;
     for (key, desc) in hints {
         x = put_str(buf, x, row, key, GOLD, area_w);
@@ -2636,6 +2728,8 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         title: card_title_with_t4_badges(c),
         priority: PriorityChip::from_priority(0),
         assignee_initial: c.title.chars().next(),
+        linked: false,
+        subtasks: None,
     }
 }
 
@@ -2647,6 +2741,12 @@ fn card_title_with_t4_badges(c: &CardView) -> String {
     let mut title = c.title.clone();
     if !c.blocked_by.is_empty() {
         title.push_str(&format!(" 🔒[{}]", c.blocked_by.join(",")));
+    }
+    // multica parity #20: a COUNT only — the board stays dense, and the full typed
+    // graph lives on the detail card. `related` never gates, so this badge is
+    // deliberately distinct from the 🔒 above.
+    if !c.related.is_empty() {
+        title.push_str(&format!(" ↔{}", c.related.len()));
     }
     if !c.member_states.is_empty() {
         let chips = c
@@ -2697,6 +2797,8 @@ mod tests {
             member_states: Vec::new(),
             blocked_by: Vec::new(),
             auto_run: false,
+            blocks: Vec::new(),
+            related: Vec::new(),
         }
     }
 
@@ -3788,6 +3890,46 @@ mod tests {
         assert!(bc.title.contains('⏵'), "auto-run marker: {}", bc.title);
     }
 
+    /// multica parity #20: a `related` card renders the `↔n` COUNT badge and is
+    /// NOT blocked; a `blocked_by` card still renders `🔒[…]`. The two dimensions
+    /// are independent — `related` never turns `is_blocked()` on.
+    #[test]
+    fn related_renders_a_count_badge_and_never_blocks() {
+        let related_only = CardView::from_wire(&BoardCardWireRow {
+            related: vec!["HGR-7".into(), "HGR-9".into()],
+            ..card("issue-1", "Docs", None)
+        });
+        assert!(
+            !related_only.is_blocked(),
+            "a related link never blocks the card"
+        );
+        let bc = card_view_to_board_card(&related_only);
+        assert!(bc.title.contains("↔2"), "related count badge: {}", bc.title);
+        assert!(!bc.title.contains('🔒'), "no lock badge: {}", bc.title);
+        assert!(
+            !bc.display_id.starts_with("🔒 #"),
+            "no blocked marker: {}",
+            bc.display_id
+        );
+
+        // A card carrying BOTH renders both badges, and stays blocked.
+        let both = CardView::from_wire(&BoardCardWireRow {
+            blocked_by: vec!["ock-9".into()],
+            related: vec!["HGR-7".into()],
+            blocks: vec!["HGR-2".into()],
+            ..card("issue-2", "Parser", None)
+        });
+        assert!(both.is_blocked(), "the blocked_by dimension is untouched");
+        assert_eq!(
+            both.blocks,
+            vec!["HGR-2".to_string()],
+            "the reverse direction is carried"
+        );
+        let bc = card_view_to_board_card(&both);
+        assert!(bc.title.contains("🔒[ock-9]"), "lock badge: {}", bc.title);
+        assert!(bc.title.contains("↔1"), "related badge: {}", bc.title);
+    }
+
     /// `q` opens the squad picker; Enter on the "clear" row (cursor 0) emits an
     /// AssignSquad with `squad_id: None`, Enter on a roster row assigns that squad.
     #[test]
@@ -3930,8 +4072,48 @@ mod tests {
                 board_id: "b1".into(),
                 dependent_issue_id: "issue-1".into(),
                 blocker_issue_id: "issue-2".into(),
+                link_type: LinkKindPick::BlockedBy,
             }),
-            "the dependent is the focused card; the blocker is the other card"
+            "the dependent is the focused card; the blocker is the other card, \
+             and the kind defaults to the pre-#20 gating edge"
+        );
+    }
+
+    /// multica parity #20: Tab cycles the KIND in the depends-on overlay without
+    /// moving the highlighted candidate, and Enter authors that kind.
+    #[test]
+    fn tab_cycles_the_link_kind_in_the_dep_picker() {
+        let state = BoardsState::from_snapshot(&one_board());
+        let opened = reduce_boards(&state, BoardsEvent::AddDependency);
+        let kind_of = |s: &BoardsState| match s.overlay() {
+            Some(BoardsOverlay::DepPick { kind, .. }) => *kind,
+            other => panic!("expected the dep picker, got {other:?}"),
+        };
+        assert_eq!(kind_of(&opened.state), LinkKindPick::BlockedBy, "default");
+
+        let mut cur = opened.state;
+        for want in [
+            LinkKindPick::Blocks,
+            LinkKindPick::Related,
+            LinkKindPick::BlockedBy,
+        ] {
+            cur = reduce_boards(&cur, BoardsEvent::Key(BoardsKey::Tab)).state;
+            assert_eq!(kind_of(&cur), want, "the cycle wraps");
+        }
+
+        // Two Tabs land on `related`; Enter authors exactly that.
+        cur = reduce_boards(&cur, BoardsEvent::Key(BoardsKey::Tab)).state;
+        cur = reduce_boards(&cur, BoardsEvent::Key(BoardsKey::Tab)).state;
+        let picked = reduce_boards(&cur, BoardsEvent::Key(BoardsKey::Enter));
+        assert_eq!(
+            picked.intent,
+            Some(BoardsIntent::AddDependency {
+                board_id: "b1".into(),
+                dependent_issue_id: "issue-1".into(),
+                blocker_issue_id: "issue-2".into(),
+                link_type: LinkKindPick::Related,
+            }),
+            "Enter authors the kind the header shows"
         );
     }
 

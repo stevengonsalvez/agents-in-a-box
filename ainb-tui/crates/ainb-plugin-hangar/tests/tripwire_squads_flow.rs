@@ -100,6 +100,7 @@ fn seeded_squads() -> serde_json::Value {
             name: "shippers".into(),
             leader: "agent:agent-lead".into(),
             members: vec!["agent:agent-1".into(), "member:user-1".into()],
+            ..SquadWireRow::default()
         }],
     })
     .unwrap()
@@ -112,8 +113,10 @@ fn seeded_agents() -> serde_json::Value {
         display_name: name.into(),
         subtitle: String::new(),
         presence,
+        workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
+        ..ActorRow::default()
     };
     serde_json::to_value(AgentsListResult {
         actors: vec![
@@ -147,9 +150,17 @@ fn seeded_issues() -> serde_json::Value {
             agent: None,
             source_branch: None,
             target_branch: None,
+            external_ref: None,
             run_count: 0,
             last_run_status: None,
             last_run_at: None,
+            parent_id: None,
+            child_total: 0,
+            child_done: 0,
+            acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
+            context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }],
     })
     .unwrap()

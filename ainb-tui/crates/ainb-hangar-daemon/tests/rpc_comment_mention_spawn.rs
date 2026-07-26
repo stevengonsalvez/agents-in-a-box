@@ -15,6 +15,9 @@
 //!  - NEGATIVE: an unknown `@nobody` handle AND a plain comment each enqueue
 //!    NOTHING (no agent resolves, so no task spawns — an unknown handle is
 //!    ignored, never an error).
+//!  - GATED (gap #8): a mention by a member who may not invoke the resolved agent
+//!    lands the comment but enqueues NOTHING; allow-listing that member makes the
+//!    identical comment spawn exactly one task.
 
 use std::time::{Duration, Instant};
 
@@ -129,13 +132,19 @@ impl Client {
     }
 
     async fn comment(&mut self, issue_id: &str, body: &str) -> serde_json::Value {
+        self.comment_as("member:user-1", issue_id, body).await
+    }
+
+    /// Post a comment under an explicit AUTHOR ref — the gap #8 effective invoker
+    /// the mention gate judges each `@`-target by.
+    async fn comment_as(&mut self, author: &str, issue_id: &str, body: &str) -> serde_json::Value {
         let resp = self
             .call(
                 methods::HANGAR_COMMENT_ADD,
                 serde_json::json!({
                     "workspace_id": WS_SLUG,
                     "issue_id": issue_id,
-                    "author": "member:user-1",
+                    "author": author,
                     "body": body,
                 }),
             )
@@ -347,5 +356,68 @@ async fn mention_is_workspace_scoped_no_foreign_agent_spawn() {
     assert_eq!(
         foreign, 0,
         "a foreign-tenant agent sharing the name must never get a mention task"
+    );
+}
+
+/// gap #8 (multica `resolveMentionedAgentCommentTriggers`): the mention gate over
+/// the REAL framed socket + real sqlite. A plain workspace member `@`-mentioning a
+/// PRIVATE agent they do not own gets their comment persisted (the trigger is
+/// best-effort by design and must never fail the write) but NO task row is
+/// enqueued. Allow-listing that member on the agent then makes the identical
+/// comment spawn exactly one task — proving a decision, not blanket denial.
+#[tokio::test]
+async fn a_non_invocable_mention_lands_the_comment_but_spawns_no_task() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    // A second, NON-owner member of the fixture workspace.
+    sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('bob', 'bob@example.com', 0)")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, 'bob', 'member')")
+        .bind(WS_ID)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+    c.subscribe(WS_SLUG).await;
+
+    // DENY: `agent-1` is private and owned by `user-1`, not by bob.
+    let resp = c.comment_as("member:bob", "issue-3", "@claude-agent go").await;
+    assert_eq!(
+        resp["result"]["issue_id"], "issue-3",
+        "the comment itself must still land"
+    );
+    let spawned: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = 'issue-3'")
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(
+        spawned, 0,
+        "a mention by a member who cannot invoke the agent enqueues NOTHING"
+    );
+
+    // ALLOW: share the agent with bob (public_to + a `member` target).
+    sqlx::query("UPDATE agent SET permission_mode = 'public_to' WHERE id = 'agent-1'")
+        .execute(store.pool())
+        .await
+        .unwrap();
+    sqlx::query(
+        "INSERT INTO agent_invocation_target (id, agent_id, target_type, target_id, created_at) \
+         VALUES ('ait-bob', 'agent-1', 'member', 'bob', 0)",
+    )
+    .execute(store.pool())
+    .await
+    .unwrap();
+
+    c.comment_as("member:bob", "issue-3", "@claude-agent go again").await;
+    let spawned = task_count(&store, "agent-1", "issue-3").await;
+    assert_eq!(
+        spawned, 1,
+        "the allow-listed member's identical mention spawns exactly one task"
     );
 }

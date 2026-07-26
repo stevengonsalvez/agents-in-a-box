@@ -1,9 +1,9 @@
 ---
 source: crates/ainb-plugin-hangar/tests/snapshot_daemon_health.rs
-expression: full
+expression: redact_version(&full)
 ---
 Daemon health
-daemon: 1.15.0
+daemon: <VERSION>
 
 runtime: claude  ● connected  pid 14829
 

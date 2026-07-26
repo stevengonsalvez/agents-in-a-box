@@ -284,6 +284,90 @@ pub async fn create_agent(
     provider: &str,
     instructions: Option<String>,
 ) -> Result<Agent, sqlx::Error> {
+    create_agent_from(
+        pool,
+        workspace_id,
+        AgentDraft {
+            name: name.to_string(),
+            provider: provider.to_string(),
+            instructions,
+            ..AgentDraft::default()
+        },
+    )
+    .await
+}
+
+/// Everything a create may specify about a new agent (migration 0050).
+///
+/// `Default` is the plain `claude`, user-kind, no-metadata agent, so a caller sets
+/// only what it means and a later column add is one struct field, not a signature
+/// break across ~20 call sites.
+#[derive(Debug, Clone, Default)]
+pub struct AgentDraft {
+    /// Human-readable agent name. Must be unique within the workspace (migration
+    /// 0050) — a collision surfaces as a `sqlx` error for which
+    /// [`crate::repo::agent::is_duplicate_name`] is `true`.
+    pub name: String,
+    /// Provider token, already through [`normalize_provider`]. Empty = the
+    /// [`DEFAULT_PROVIDER`].
+    pub provider: String,
+    /// Free-form system prompt / instructions.
+    pub instructions: Option<String>,
+    /// Short blurb (multica 060). Trimmed here; the ≤255-char cap is validated by
+    /// the CALLER (handler/CLI) so the user sees a clear message, with the schema
+    /// `CHECK` as the last line of defence.
+    pub description: String,
+    /// Avatar token. Absent/blank mints a random `"emoji:…"` value so an agent is
+    /// never avatar-less (multica `newAgentAvatar`).
+    pub avatar_url: Option<String>,
+    /// Provider model override; `None` = the provider default.
+    pub model: Option<String>,
+    /// Codex service tier (runtime-native catalog id). Stored + surfaced only.
+    pub service_tier: Option<String>,
+    /// `None` (the default) = `"user"`. `Some("system")` mints a hidden carrier
+    /// agent — internal callers only (gap #9-rest); no RPC exposes this.
+    pub kind: Option<String>,
+    /// Identity key for a system agent; `None` for user agents.
+    pub system_key: Option<String>,
+}
+
+/// Multica's 24-emoji avatar palette (`agent_avatar.go:13-25`). One is picked at
+/// create when the caller supplies no avatar, so every agent renders a glyph.
+const AVATAR_EMOJI: [&str; 24] = [
+    "🐙", "🦊", "🦉", "🐝", "🐼", "🐸", "🐯", "🦁", "🐨", "🐵", "🐧", "🐳", "🦋", "🌞", "🌙", "⭐",
+    "🔥", "⚡", "🍀", "🌈", "🚀", "🤖", "👾", "🧠",
+];
+
+/// Mint a `"emoji:<glyph>"` avatar token from [`AVATAR_EMOJI`].
+///
+/// The pick is derived from the wall clock rather than an RNG dependency — the
+/// value is cosmetic, so "varies between creates" is the whole requirement.
+fn random_emoji_avatar() -> String {
+    let idx = usize::try_from(SystemClock.now_ms().unsigned_abs() % AVATAR_EMOJI.len() as u64)
+        .unwrap_or(0);
+    format!("emoji:{}", AVATAR_EMOJI[idx])
+}
+
+/// Create one agent from a [`AgentDraft`], filling every FK behind the scenes
+/// (migration 0050's metadata-aware entry point).
+///
+/// Keeps every invariant of [`create_agent`] (ensure the runtime and bind the id
+/// that upsert SETTLED on, resolve the default owner, mint a ULID,
+/// `visibility: "workspace"`, `permission_mode: "private"`) and additionally
+/// defaults the avatar to a random emoji token, trims the description, and
+/// defaults `kind` to `"user"`.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if there is no workspace / owner user yet, if the
+/// runtime upsert fails, or if the insert fails — notably the migration-0050
+/// `(workspace_id, name)` UNIQUE violation, for which
+/// [`crate::repo::agent::is_duplicate_name`] is `true`.
+pub async fn create_agent_from(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    draft: AgentDraft,
+) -> Result<Agent, sqlx::Error> {
     let now = SystemClock.now_ms();
     // ONE atomic upsert: ensure the runtime FK exists (a fresh home may have none
     // — the CLI create path runs with no daemon) and take back the id it settled
@@ -295,22 +379,51 @@ pub async fn create_agent(
 
     let owner_id = default_owner_id(pool).await?.ok_or_else(|| sqlx::Error::RowNotFound)?;
 
+    let provider = if draft.provider.is_empty() {
+        DEFAULT_PROVIDER.to_string()
+    } else {
+        draft.provider
+    };
+    // An agent is never avatar-less: a blank/absent token mints one (multica
+    // `newAgentAvatar`), so every roster row renders a glyph.
+    let avatar_url = draft
+        .avatar_url
+        .map(|a| a.trim().to_string())
+        .filter(|a| !a.is_empty())
+        .unwrap_or_else(random_emoji_avatar);
+
     let agent = Agent {
         id: SystemIdGen.new_ulid(),
         workspace_id: workspace_id.to_string(),
-        name: name.to_string(),
+        name: draft.name,
         runtime_id,
-        instructions,
+        instructions: draft.instructions,
         visibility: "workspace".to_string(),
+        // Deny-by-default invocation (migration 0047): a freshly created agent is
+        // private (owner-only) until explicitly shared via an invocation target.
+        // The owner-invoked TUI Run always passes the gate, so this is invisible to
+        // the single-operator path.
+        permission_mode: "private".to_string(),
         owner_id,
         archived: false,
-        model: None,
+        // Never archived, so there is nothing to attribute (migration 0052).
+        archived_at: None,
+        archived_by: None,
+        model: draft.model,
         cli_args: Vec::new(),
         mcp_config: None,
         thinking: None,
         agent_env: Vec::new(),
-        provider: Some(provider.to_string()),
+        provider: Some(provider),
         token_budget: None,
+        description: draft.description.trim().to_string(),
+        avatar_url: Some(avatar_url),
+        kind: draft.kind.unwrap_or_else(|| crate::repo::agent::AGENT_KIND_USER.to_string()),
+        system_key: draft.system_key,
+        service_tier: draft.service_tier,
+        // Nothing suppressed at create: an operator opts individual skills out
+        // afterwards (migration 0051).
+        disabled_runtime_skills: Vec::new(),
     };
     AgentRepo::insert(pool, &agent).await?;
     Ok(agent)

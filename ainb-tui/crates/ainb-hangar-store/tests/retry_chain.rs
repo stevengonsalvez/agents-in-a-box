@@ -265,6 +265,58 @@ async fn child_inherits_repo_ref_and_agent_kind_but_not_branch() {
 }
 
 #[tokio::test]
+async fn child_inherits_parent_squad_id() {
+    // migration 0045: a retried squad task is still that squad's task. The child
+    // INSERT must copy the parent's `squad_id` verbatim — dropping it would silently
+    // disarm the daemon's claim-time leader-briefing hook for the child (the same
+    // class of bug as the `repo_ref` drop guarded above).
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t-squad",
+        None,
+        None,
+        1,
+        3,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    // Stamp the dispatching squad on the parent, exactly as a squad dispatch would.
+    sqlx::query("UPDATE agent_task_queue SET squad_id = ? WHERE id = ?")
+        .bind("squad-alpha")
+        .bind(&parent_seed.id)
+        .execute(store.pool())
+        .await
+        .expect("stamp squad_id on parent");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id)
+        .await
+        .unwrap()
+        .expect("parent re-reads");
+    assert_eq!(parent.squad_id.as_deref(), Some("squad-alpha"));
+
+    let clock = FixedClock(NOW_MS);
+    let decision = RetryService::maybe_retry_failed(store.pool(), &parent, "child-squad", &clock)
+        .await
+        .expect("retry ok");
+    assert_eq!(
+        decision,
+        RetryDecision::Spawned {
+            new_task_id: "child-squad".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "child-squad")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    assert_eq!(
+        child.squad_id.as_deref(),
+        Some("squad-alpha"),
+        "child inherits the parent's squad_id (the briefing hook stays armed)"
+    );
+}
+
+#[tokio::test]
 async fn child_inherits_parent_priority() {
     // A retried urgent task must stay urgent: the child row inherits the
     // parent's `priority` (0..3 = P3..P0, higher = more urgent) so it keeps
@@ -542,6 +594,167 @@ async fn retry_chain_walk_via_parent_task_id() {
     // Attempts ascend root(1) -> mid(2) -> leaf(3).
     let attempts: Vec<i64> = chain.iter().rev().map(|t| t.attempt).collect();
     assert_eq!(attempts, vec![1, 2, 3]);
+}
+
+#[tokio::test]
+async fn force_requeue_agent_error_spawns_child_despite_no_retry_disposition() {
+    // A human-initiated manual retry (the Task Kanban failed-column / task-detail
+    // `R`) is an explicit override: it MUST re-queue a fresh attempt for a terminal
+    // `agent_error` task that the AUTOMATIC path (`maybe_retry_failed`) correctly
+    // refuses (AgentError => RetryDisposition::NoRetry). Without this the operator
+    // has no in-product recovery and `R` silently no-ops.
+    let (_dir, store) = open_seeded().await;
+    let parent = seed_failed_task(
+        &store,
+        "t1",
+        None,
+        Some("/tmp/wd"),
+        1,
+        2,
+        FailureReason::AgentError,
+    )
+    .await;
+    let clock = FixedClock(NOW_MS);
+
+    // The auto path refuses agent_error: no child row.
+    let auto = RetryService::maybe_retry_failed(store.pool(), &parent, "auto-child", &clock)
+        .await
+        .expect("auto decision ok");
+    assert_eq!(auto, RetryDecision::DoNotRetry);
+    assert!(
+        TaskRepo::get_by_id(store.pool(), "auto-child").await.unwrap().is_none(),
+        "the automatic path must not spawn a child for agent_error"
+    );
+
+    // The manual force path overrides the reason gate and spawns the child.
+    let forced = RetryService::force_requeue(store.pool(), &parent, "manual-child", &clock)
+        .await
+        .expect("force ok");
+    assert_eq!(
+        forced,
+        RetryDecision::Spawned {
+            new_task_id: "manual-child".to_string()
+        }
+    );
+
+    let child = TaskRepo::get_by_id(store.pool(), "manual-child")
+        .await
+        .unwrap()
+        .expect("manual child row exists");
+    assert_eq!(child.parent_task_id.as_deref(), Some("t1"));
+    assert_eq!(child.attempt, parent.attempt + 1);
+    assert_eq!(child.status, "queued");
+    assert_eq!(child.workspace_id, parent.workspace_id);
+    assert_eq!(child.agent_id, parent.agent_id);
+    assert_eq!(child.work_dir.as_deref(), Some("/tmp/wd"));
+    // An agent_error requeue starts a FRESH session (never resumes a wedged one).
+    assert_eq!(child.session_id, None);
+    // Per-run columns reset on the fresh attempt.
+    assert_eq!(child.failure_reason, None);
+    assert_eq!(child.result, None);
+    assert_eq!(child.started_at, None);
+    assert_eq!(child.finished_at, None);
+}
+
+#[tokio::test]
+async fn force_requeue_bypasses_max_attempts_cap() {
+    // Chain exhausted (attempt == max_attempts): the auto path caps regardless of
+    // reason, but a human override still re-queues a fresh attempt.
+    let (_dir, store) = open_seeded().await;
+    let parent = seed_failed_task(&store, "t1", None, None, 2, 2, FailureReason::AgentError).await;
+    let clock = FixedClock(NOW_MS);
+
+    let forced = RetryService::force_requeue(store.pool(), &parent, "child-1", &clock)
+        .await
+        .expect("force ok");
+    assert_eq!(
+        forced,
+        RetryDecision::Spawned {
+            new_task_id: "child-1".to_string()
+        }
+    );
+    let child = TaskRepo::get_by_id(store.pool(), "child-1")
+        .await
+        .unwrap()
+        .expect("child row exists");
+    assert_eq!(
+        child.attempt, 3,
+        "attempt grows past the cap on a deliberate manual override"
+    );
+}
+
+#[tokio::test]
+async fn force_requeue_refuses_non_terminal_task() {
+    // A running task is still in-flight; force_requeue must not fork a live run.
+    let (_dir, store) = open_seeded().await;
+    TaskRepo::insert(
+        store.pool(),
+        &NewTask {
+            id: "t1".to_string(),
+            workspace_id: "ws-1".to_string(),
+            runtime_id: "rt-1".to_string(),
+            agent_id: "agent-1".to_string(),
+            issue_id: None,
+            work_dir: None,
+            priority: 0,
+            created_at: 1,
+            autopilot_run_id: None,
+            generation: 0,
+        },
+    )
+    .await
+    .expect("enqueue");
+    sqlx::query("UPDATE agent_task_queue SET status='running' WHERE id='t1'")
+        .execute(store.pool())
+        .await
+        .expect("force running");
+    let running = TaskRepo::get_by_id(store.pool(), "t1").await.unwrap().unwrap();
+    let clock = FixedClock(NOW_MS);
+
+    let decision = RetryService::force_requeue(store.pool(), &running, "child-1", &clock)
+        .await
+        .expect("decision ok");
+    assert_eq!(decision, RetryDecision::DoNotRetry);
+    assert!(TaskRepo::get_by_id(store.pool(), "child-1").await.unwrap().is_none());
+}
+
+#[tokio::test]
+async fn force_requeue_resumes_session_for_infra_terminal() {
+    // A force-requeued RuntimeOffline (infra) terminal follows the resume
+    // disposition: the child carries the parent's session_id so the manual retry
+    // continues the intact conversation rather than starting cold.
+    let (_dir, store) = open_seeded().await;
+    let parent_seed = seed_failed_task(
+        &store,
+        "t1",
+        None,
+        None,
+        1,
+        2,
+        FailureReason::RuntimeOffline,
+    )
+    .await;
+    sqlx::query("UPDATE agent_task_queue SET session_id = ? WHERE id = ?")
+        .bind("sess-abc")
+        .bind(&parent_seed.id)
+        .execute(store.pool())
+        .await
+        .expect("stamp session on parent");
+    let parent = TaskRepo::get_by_id(store.pool(), &parent_seed.id).await.unwrap().unwrap();
+
+    let clock = FixedClock(NOW_MS);
+    RetryService::force_requeue(store.pool(), &parent, "child-1", &clock)
+        .await
+        .expect("force ok");
+    let child = TaskRepo::get_by_id(store.pool(), "child-1")
+        .await
+        .unwrap()
+        .expect("child exists");
+    assert_eq!(
+        child.session_id.as_deref(),
+        Some("sess-abc"),
+        "an infra terminal's manual requeue resumes the parent's session"
+    );
 }
 
 #[tokio::test]

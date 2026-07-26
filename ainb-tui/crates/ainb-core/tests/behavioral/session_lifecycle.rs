@@ -68,7 +68,7 @@ fn test_session_serialization_roundtrip_preserves_all_fields() {
         SessionMode::Boss,
         Some("Implement feature X".to_string()), // boss_prompt
         SessionAgentType::Claude,
-        Some(ClaudeModel::Opus),
+        Some("claude-opus-4-8".to_string()),
     );
 
     // Manually set additional fields that new_with_options doesn't set
