@@ -1136,6 +1136,19 @@ fn render_detail_card(
         row = row.saturating_add(1);
     }
 
+    // --- Origin provenance (0056, multica parity #21): the badge is shown only
+    //     for a PLATFORM-created card. A human-authored card ('manual') and a
+    //     pre-0056 card (no origin_type) need no badge, so they read unchanged. ---
+    if let Some(badge) = origin_badge(issue.origin_type.as_deref()) {
+        card_field_row(
+            buf,
+            card_w,
+            row,
+            &[("Origin: ", CARD_LABEL), (badge, CARD_VALUE)],
+        );
+        row = row.saturating_add(1);
+    }
+
     // --- Acceptance criteria (0048 + #11-rest): a `Acceptance: <done>/<total>`
     //     header then one `☑`/`☐ <criterion>` line per element, rendered ONLY when
     //     non-empty so an issue without them reads unchanged (mirrors the Linked
@@ -1307,6 +1320,21 @@ fn link_glyph_and_label(
         "blocked_by" => ("🔒", "blocked-by"),
         "blocks" => ("→", "blocks"),
         _ => ("~", "related"),
+    }
+}
+
+/// The `Origin:` badge text for a wire `origin_type`, or `None` when no badge
+/// belongs on the card (migration 0056, multica parity #21).
+///
+/// A badge marks a card the PLATFORM created, so it is deliberately suppressed
+/// for `manual` (a human authored it — the unremarkable case) and for a
+/// pre-0056 card whose provenance is simply unknown. An unrecognised value is
+/// treated like `manual` and shows nothing, mirroring the lenient read side.
+fn origin_badge(origin_type: Option<&str>) -> Option<&'static str> {
+    match origin_type?.trim() {
+        "autopilot" => Some("⚙ autopilot"),
+        "comment_mention" => Some("💬 comment mention"),
+        _ => None,
     }
 }
 
@@ -1621,6 +1649,54 @@ mod card_tests {
             !painted_text(&buf).contains("Linked: "),
             "an unlinked issue shows no Linked line"
         );
+    }
+
+    /// 0056 / multica parity #21: a PLATFORM-created card wears an `Origin:`
+    /// badge naming the provenance kind; a human-authored (`manual`) or
+    /// provenance-less card wears none.
+    #[test]
+    fn detail_card_renders_origin_badge_only_for_platform_created_cards() {
+        for (kind, expected) in [
+            ("autopilot", "autopilot"),
+            ("comment_mention", "comment mention"),
+        ] {
+            let mut issue = full_issue();
+            issue.origin_type = Some(kind.into());
+            issue.origin_id = Some("prov-1".into());
+            let s = state_for(issue);
+            let mut buf = WireBuffer::new(80, 30);
+            render_task_detail(&mut buf, 80, 0, 29, &s);
+            let text = painted_text(&buf);
+            assert!(text.contains("Origin: "), "origin label for {kind}: {text}");
+            assert!(text.contains(expected), "origin value for {kind}: {text}");
+        }
+
+        for manual in [Some("manual".to_string()), None] {
+            let mut issue = full_issue();
+            issue.origin_type = manual.clone();
+            let s = state_for(issue);
+            let mut buf = WireBuffer::new(80, 30);
+            render_task_detail(&mut buf, 80, 0, 29, &s);
+            assert!(
+                !painted_text(&buf).contains("Origin: "),
+                "no badge for {manual:?}"
+            );
+        }
+    }
+
+    /// The badge mapper itself: only the two platform kinds earn a badge, and an
+    /// unrecognised (future) kind degrades to no badge rather than painting a raw
+    /// token.
+    #[test]
+    fn origin_badge_is_platform_kinds_only() {
+        assert_eq!(origin_badge(Some("autopilot")), Some("⚙ autopilot"));
+        assert_eq!(
+            origin_badge(Some("comment_mention")),
+            Some("💬 comment mention")
+        );
+        assert_eq!(origin_badge(Some("manual")), None);
+        assert_eq!(origin_badge(None), None);
+        assert_eq!(origin_badge(Some("from_the_future")), None);
     }
 
     /// One typed link row for the render tests.
