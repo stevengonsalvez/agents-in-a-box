@@ -2863,14 +2863,15 @@ Manage Hangar issues
 Usage: ainb hangar issue [OPTIONS] <COMMAND>
 
 Commands:
-  create  Create a new issue (bootstraps a default workspace on first use)
-  list    List issues in the default workspace
-  search  Search issues by title, description, or comment body (ranked)
-  show    Show one issue by id
-  update  Edit an existing issue's state, assignee, priority, or due date
-  delete  Delete an issue and all its history (dry-run without `--yes`)
-  label   Attach or detach a label on an issue
-  help    Print this message or the help of the given subcommand(s)
+  create    Create a new issue (bootstraps a default workspace on first use)
+  list      List issues in the default workspace
+  search    Search issues by title, description, or comment body (ranked)
+  show      Show one issue by id
+  update    Edit an existing issue's state, assignee, priority, or due date
+  delete    Delete an issue and all its history (dry-run without `--yes`)
+  label     Attach or detach a label on an issue
+  criteria  Inspect or tick off an issue's acceptance criteria
+  help      Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3092,6 +3093,27 @@ Commands:
   attach  Attach a label to an issue (resolve-or-creates the label; idempotent)
   detach  Detach a label from an issue (idempotent; the definition is kept)
   help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue criteria`
+
+Inspect or tick off an issue's acceptance criteria
+
+```console
+$ ainb hangar issue criteria --help
+Inspect or tick off an issue's acceptance criteria
+
+Usage: ainb hangar issue criteria [OPTIONS] <COMMAND>
+
+Commands:
+  list     List an issue's acceptance criteria with ordinal, id, and ☑/☐ state
+  check    Tick a criterion off (by id or 1-based ordinal). Idempotent
+  uncheck  Un-tick a criterion (by id or 1-based ordinal). Idempotent
+  help     Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
