@@ -901,6 +901,40 @@ pub const HANGAR_BOARD_CARD_DEP_ADD: &str = "hangar/board_card_dep_add";
 /// no-op. Mutating + workspace-scoped via the board.
 pub const HANGAR_BOARD_CARD_DEP_REMOVE: &str = "hangar/board_card_dep_remove";
 
+/// `hangar/issue_link_add` — add a TYPED link between two issues (multica parity
+/// #20), independent of any board.
+///
+/// Params: [`crate::snapshots::IssueLinkParams`] (`{ workspace_id, issue_id,
+/// other_issue_id, link_type? }`). Result: the refreshed
+/// [`crate::snapshots::IssueLinksResult`]. `link_type` defaults to `blocked_by`
+/// (the gating relation, identical to `board_card_dep_add`); `blocks` is
+/// normalised into the reverse `blocked_by` row; `related` is a symmetric
+/// NON-gating association that never refuses a run and never auto-launches a card.
+/// A self-link, a cycle (gating kinds only), or an endpoint outside the workspace
+/// is rejected (`INVALID_PARAMS`). Re-adding a pair with a new kind replaces the
+/// kind. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_LINK_ADD: &str = "hangar/issue_link_add";
+
+/// `hangar/issue_link_remove` — remove a TYPED link between two issues (multica
+/// parity #20).
+///
+/// Params: [`crate::snapshots::IssueLinkParams`]. Result: the refreshed
+/// [`crate::snapshots::IssueLinksResult`]. Removing an absent link is an
+/// idempotent no-op; a `related` link is removed from EITHER orientation (it is
+/// symmetric). Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_LINK_REMOVE: &str = "hangar/issue_link_remove";
+
+/// `hangar/issue_links` — read one issue's whole TYPED link graph (multica parity
+/// #20).
+///
+/// Params: [`crate::snapshots::IssueLinksParams`] (`{ workspace_id, issue_id }`).
+/// Result: [`crate::snapshots::IssueLinksResult`] — one
+/// [`crate::events::IssueLinkRow`] per link in render order (`blocked_by`, then
+/// `blocks`, then `related`), each carrying the OTHER issue's display id, title
+/// and state, plus `satisfied` for a blocker that has already finished.
+/// Read-only + workspace-scoped.
+pub const HANGAR_ISSUE_LINKS: &str = "hangar/issue_links";
+
 /// `hangar/board_card_set_auto_run` — flip a card's auto-run flag (tcp T4 / F7).
 ///
 /// Params: [`crate::snapshots::BoardCardAutoRunParams`] (`{ workspace_id, board_id,
@@ -1189,6 +1223,11 @@ pub const ALL_METHODS: &[&str] = &[
     // Agent delete (Agents screen `x` remove) is APPENDED at the catalogue tail —
     // append-only wire.
     HANGAR_AGENT_DELETE,
+    // Typed issue links (multica parity #20) are APPENDED at the catalogue tail —
+    // append-only wire.
+    HANGAR_ISSUE_LINK_ADD,
+    HANGAR_ISSUE_LINK_REMOVE,
+    HANGAR_ISSUE_LINKS,
     // Fleet control-plane methods are appended at the wire catalogue tail.
     FLEET_SNAPSHOT,
     FLEET_SUBSCRIBE,
@@ -1409,6 +1448,9 @@ mod tests {
             HANGAR_DAEMON_CONFIG_LIST,
             HANGAR_ISSUE_DELETE,
             HANGAR_ISSUE_CANCEL_ACTIVE,
+            HANGAR_ISSUE_LINK_ADD,
+            HANGAR_ISSUE_LINK_REMOVE,
+            HANGAR_ISSUE_LINKS,
             FLEET_SNAPSHOT,
             FLEET_SUBSCRIBE,
             FLEET_ACTION,

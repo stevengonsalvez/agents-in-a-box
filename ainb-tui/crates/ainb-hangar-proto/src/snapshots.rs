@@ -1684,6 +1684,16 @@ pub struct BoardCardWireRow {
     /// F7). APPEND-ONLY: default `false` (explicit run stays the default).
     #[serde(default, skip_serializing_if = "is_false")]
     pub auto_run: bool,
+    /// The DISPLAY IDS of the cards this card BLOCKS — the reverse read direction
+    /// of its `blocked_by` rows (multica parity #20). Render-only: it neither
+    /// gates this card nor changes its runnable state. APPEND-ONLY.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocks: Vec<String>,
+    /// The DISPLAY IDS of this card's RELATED cards (multica parity #20) — a
+    /// symmetric, NON-gating association. Never affects dispatch or auto-run; the
+    /// board renders a `↔n` count and the detail card the full list. APPEND-ONLY.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub related: Vec<String>,
 }
 
 /// One squad member's task chip on a fanned-out card (tcp T4 / F7): which agent
@@ -2131,20 +2141,104 @@ pub struct BoardCardAssignSquadParams {
     pub squad_id: Option<String>,
 }
 
+/// The KIND of a card link on the wire (multica parity #20), mirroring
+/// `ainb_hangar_store::repo::card_dependency::LinkKind`.
+///
+/// `BlockedBy` is the DEFAULT, and that is the append-only contract: a pre-#20
+/// client that omits `link_type` gets exactly today's gating edge, and the daemon
+/// omits the field when it is the default so the wire stays byte-identical.
+/// `Blocks` is a write/read DIRECTION — the daemon normalises it into a swapped
+/// `blocked_by` row, so it is never a stored value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum LinkKindWire {
+    /// FROM blocks TO (stored as the reverse `blocked_by` row).
+    Blocks,
+    /// FROM is blocked by TO — the gating relation, and the wire default.
+    #[default]
+    BlockedBy,
+    /// FROM and TO are associated: symmetric, never gating, never auto-running.
+    Related,
+}
+
+impl LinkKindWire {
+    /// serde `skip_serializing_if` helper: omit the field when it carries the
+    /// pre-#20 meaning, so an old client sees an unchanged payload.
+    #[must_use]
+    #[allow(clippy::trivially_copy_pass_by_ref)]
+    pub fn is_default(&self) -> bool {
+        matches!(self, Self::BlockedBy)
+    }
+
+    /// The rendered token (`"blocks"` / `"blocked_by"` / `"related"`).
+    #[must_use]
+    pub fn as_token(self) -> &'static str {
+        match self {
+            Self::Blocks => "blocks",
+            Self::BlockedBy => "blocked_by",
+            Self::Related => "related",
+        }
+    }
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_DEP_ADD`] and
-/// [`crate::methods::HANGAR_BOARD_CARD_DEP_REMOVE`] (tcp T4 / F7): a `depends-on`
-/// edge between two cards on the board. The DEPENDENT is blocked until the BLOCKER
-/// finishes.
+/// [`crate::methods::HANGAR_BOARD_CARD_DEP_REMOVE`] (tcp T4 / F7): a typed link
+/// between two cards on the board.
+///
+/// Since multica parity #20 the two positional fields are FROM
+/// (`dependent_issue_id`) and TO (`blocker_issue_id`) and their meaning depends on
+/// `link_type`; the historical names are KEPT for wire compatibility. With the
+/// default `link_type` (`blocked_by`) they read exactly as before: the DEPENDENT
+/// is blocked until the BLOCKER finishes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct BoardCardDepParams {
     /// The subscribed workspace the board belongs to (tenant guard).
     pub workspace_id: String,
     /// The board both cards sit on.
     pub board_id: String,
-    /// The DEPENDENT card's issue (the one that gets blocked).
+    /// The FROM card's issue (the DEPENDENT under the default `blocked_by`).
     pub dependent_issue_id: String,
-    /// The BLOCKER card's issue (must finish before the dependent runs).
+    /// The TO card's issue (the BLOCKER under the default `blocked_by`).
     pub blocker_issue_id: String,
+    /// The link's kind (multica parity #20). APPEND-ONLY: omitted ⇒ `blocked_by`,
+    /// i.e. exactly the pre-#20 gating edge.
+    #[serde(default, skip_serializing_if = "LinkKindWire::is_default")]
+    pub link_type: LinkKindWire,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_LINK_ADD`] /
+/// [`crate::methods::HANGAR_ISSUE_LINK_REMOVE`] (multica parity #20): a typed link
+/// between two issues, independent of any board.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinkParams {
+    /// The subscribed workspace both issues belong to (tenant guard).
+    pub workspace_id: String,
+    /// The FROM issue (the one the link is authored on).
+    pub issue_id: String,
+    /// The TO issue (the other end).
+    pub other_issue_id: String,
+    /// The link's kind. APPEND-ONLY: omitted ⇒ `blocked_by`.
+    #[serde(default, skip_serializing_if = "LinkKindWire::is_default")]
+    pub link_type: LinkKindWire,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_LINKS`] (multica parity #20): read
+/// one issue's whole typed link graph.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinksParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose links to read.
+    pub issue_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUE_LINKS`]: every link on one issue, in
+/// render order (`blocked_by`, then `blocks`, then `related`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinksResult {
+    /// The issue's typed links. Empty ⇒ the issue has none.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<crate::events::IssueLinkRow>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_SET_AUTO_RUN`] (tcp T4 / F7):
@@ -2401,6 +2495,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             }],
         };
         let s = serde_json::to_string(&issues).unwrap();
@@ -3280,6 +3375,8 @@ mod tests {
                         member_states: Vec::new(),
                         blocked_by: Vec::new(),
                         auto_run: false,
+                        blocks: Vec::new(),
+                        related: Vec::new(),
                     }],
                 }],
                 unmapped: Vec::new(),
@@ -3334,6 +3431,8 @@ mod tests {
             ],
             blocked_by: vec!["ock-2".into()],
             auto_run: true,
+            blocks: Vec::new(),
+            related: Vec::new(),
         };
         let s = serde_json::to_string(&squad_card).unwrap();
         assert_eq!(
@@ -3361,6 +3460,8 @@ mod tests {
             member_states: Vec::new(),
             blocked_by: Vec::new(),
             auto_run: false,
+            blocks: Vec::new(),
+            related: Vec::new(),
         };
         let s = serde_json::to_string(&plain).unwrap();
         for k in ["squad_id", "member_states", "blocked_by", "auto_run"] {
@@ -3449,5 +3550,70 @@ mod tests {
         assert_eq!(over.repo_ref.as_deref(), Some("/repos/app"));
         assert_eq!(over.agent.as_deref(), Some("claude"));
         assert_eq!(over.invoker_user_id.as_deref(), Some("bob"));
+    }
+
+    /// multica parity #20 append-only contract: a PRE-#20 client omits
+    /// `link_type` and gets the gating `blocked_by` edge, and the daemon omits the
+    /// field from the wire when it carries that default — so the payload an old
+    /// client sees is byte-identical to before.
+    #[test]
+    fn board_card_dep_params_link_type_is_append_only() {
+        let old: BoardCardDepParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","board_id":"b1","dependent_issue_id":"i2","blocker_issue_id":"i1"}"#,
+        )
+        .expect("a pre-#20 payload still decodes");
+        assert_eq!(
+            old.link_type,
+            LinkKindWire::BlockedBy,
+            "an omitted link_type means the historical gating edge"
+        );
+        assert!(
+            !serde_json::to_string(&old).unwrap().contains("link_type"),
+            "the default kind is omitted from the wire"
+        );
+
+        let related = BoardCardDepParams {
+            link_type: LinkKindWire::Related,
+            ..old
+        };
+        let s = serde_json::to_string(&related).unwrap();
+        assert!(s.contains(r#""link_type":"related""#), "{s}");
+        assert_eq!(
+            serde_json::from_str::<BoardCardDepParams>(&s).unwrap(),
+            related
+        );
+    }
+
+    /// Every wire kind round-trips through its snake_case token.
+    #[test]
+    fn link_kind_wire_round_trips_snake_case() {
+        for (kind, token) in [
+            (LinkKindWire::Blocks, "blocks"),
+            (LinkKindWire::BlockedBy, "blocked_by"),
+            (LinkKindWire::Related, "related"),
+        ] {
+            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{token}\""));
+            assert_eq!(kind.as_token(), token);
+            assert_eq!(
+                serde_json::from_str::<LinkKindWire>(&format!("\"{token}\"")).unwrap(),
+                kind
+            );
+        }
+        assert_eq!(LinkKindWire::default(), LinkKindWire::BlockedBy);
+    }
+
+    /// A pre-#20 card row (no `blocks` / `related`) decodes, and an empty typed
+    /// graph is omitted from the wire.
+    #[test]
+    fn board_card_wire_row_typed_links_are_append_only() {
+        let row: BoardCardWireRow = serde_json::from_str(
+            r#"{"issue_id":"i1","title":"t","display_id":"HGR-1","blocked_by":["HGR-2"]}"#,
+        )
+        .expect("a pre-#20 card row still decodes");
+        assert!(row.blocks.is_empty() && row.related.is_empty());
+        assert_eq!(row.blocked_by, vec!["HGR-2"], "blocked_by keeps its meaning");
+
+        let s = serde_json::to_string(&row).unwrap();
+        assert!(!s.contains("\"blocks\"") && !s.contains("\"related\""), "{s}");
     }
 }

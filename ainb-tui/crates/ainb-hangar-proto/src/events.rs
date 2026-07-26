@@ -508,6 +508,40 @@ pub struct IssueRow {
     /// pre-0048 snapshot decodes to `[]`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_refs: Vec<String>,
+    /// This issue's TYPED links (multica parity #20), driving the task-detail
+    /// card's `Links:` block.
+    ///
+    /// Populated ONLY on the single-issue DETAIL path — a list snapshot leaves it
+    /// empty on purpose, because filling it would need an N-query fan-out per row.
+    /// Do not "fix" that by adding one. Empty by default and omitted from the wire
+    /// when empty (append-only), so a pre-#20 daemon decodes to `[]` and the
+    /// detail card simply renders no `Links:` block.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub dependencies: Vec<IssueLinkRow>,
+}
+
+/// One TYPED link on an issue's detail card (multica parity #20), always stated
+/// from the SUBJECT issue's point of view: `kind` says what the subject is to the
+/// other issue.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueLinkRow {
+    /// The rendered kind token: `"blocks"`, `"blocked_by"` or `"related"`.
+    pub kind: String,
+    /// The OTHER issue's id (the subject is whichever issue was queried).
+    pub issue_id: String,
+    /// The other issue's human display id (`HGR-<n>`), when resolvable.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub display_id: Option<String>,
+    /// The other issue's title (empty when unresolvable).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub title: String,
+    /// The other issue's state (empty when unresolvable).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub state: String,
+    /// `blocked_by` ONLY: whether that blocker has FINISHED, so it no longer gates
+    /// the subject. Always `false` for `blocks` / `related` (neither gates).
+    #[serde(default)]
+    pub satisfied: bool,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
