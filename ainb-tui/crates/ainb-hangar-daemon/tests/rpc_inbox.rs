@@ -201,6 +201,8 @@ async fn wait_for_inbox_count(store: &Store, ws_id: &str, want: i64) {
 
 fn issue_event() -> HangarEvent {
     HangarEvent::IssueCreated(IssueRow {
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("issue-1").unwrap(),
         display_id: None,
         workspace_id: WS_ID.into(),

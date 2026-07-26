@@ -4316,6 +4316,8 @@ impl HangarPlugin {
         // renders the task's title + status; the streaming transcript folds events
         // addressed to this task id, exactly as the issue board's open does.
         let issue = ainb_hangar_proto::events::IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str(format!("task-{task_id}")).unwrap_or_else(
                 |_| ainb_hangar_core::ids::IssueId::from_str("task").expect("non-empty"),
             ),
@@ -5753,6 +5755,8 @@ mod tests {
         p.conn.on_dialed("s1");
         p.conn.on_subscribe_ack();
         p.screens.set_issues(vec![IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),
@@ -5909,6 +5913,8 @@ mod tests {
         // more than one column (the press must resolve the RIGHT card).
         p.screens.set_issues(vec![
             IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
                 display_id: Some("HGR-1".into()),
                 workspace_id: "default".into(),
@@ -5940,6 +5946,8 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
                 display_id: Some("HGR-2".into()),
                 workspace_id: "default".into(),
@@ -6132,6 +6140,8 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "default".into(),
@@ -6223,6 +6233,8 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "default".into(),
@@ -6306,6 +6318,8 @@ mod tests {
         // Several Todo cards so a scroll offset is observable.
         let rows: Vec<IssueRow> = (0..4)
             .map(|i| IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str(format!("t{i}")).unwrap(),
                 display_id: Some(format!("HGR-{i}")),
                 workspace_id: "default".into(),
@@ -6393,6 +6407,8 @@ mod tests {
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![
             IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-a").unwrap(),
                 display_id: Some("HGR-1".into()),
                 workspace_id: "default".into(),
@@ -6424,6 +6440,8 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
                 display_id: Some("HGR-2".into()),
                 workspace_id: "default".into(),
@@ -7168,6 +7186,8 @@ mod tests {
 
         // Open the task detail for a fresh issue.
         let issue = IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),

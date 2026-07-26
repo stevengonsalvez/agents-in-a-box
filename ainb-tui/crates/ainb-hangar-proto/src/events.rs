@@ -453,6 +453,19 @@ pub struct IssueRow {
     /// it — a pre-0043 snapshot decodes to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// The card's ORIGIN PROVENANCE kind (`issue.origin_type`, migration 0056,
+    /// multica parity #21): `autopilot` | `comment_mention` | `manual`, or
+    /// `None` for a pre-0056 row whose provenance is unknown. Drives the
+    /// task-detail card's `Origin:` badge. Append-only: omitted from the wire
+    /// when `None` (`skip_serializing_if`), so a pre-0056 snapshot decodes to
+    /// `None` and an old daemon simply never sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_type: Option<String>,
+    /// The ORIGIN PROVENANCE id (`issue.origin_id`): the autopilot id for
+    /// `autopilot`, the comment id for `comment_mention`, `None` for `manual`.
+    /// Append-only, same contract as [`Self::origin_type`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
     /// How many tasks (any lifecycle) have ever run against this issue (63d).
     /// `0` for a never-run issue. Drives the task-detail card's `Runs:` history
     /// line, shown only when non-zero. `#[serde(default)]` keeps a pre-63d snapshot

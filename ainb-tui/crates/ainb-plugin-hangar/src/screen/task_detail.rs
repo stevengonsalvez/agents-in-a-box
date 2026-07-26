@@ -1473,6 +1473,8 @@ mod card_tests {
     /// A fully-populated issue row for the card render assertions (63d).
     fn full_issue() -> IssueRow {
         IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str("i1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "ws".into(),

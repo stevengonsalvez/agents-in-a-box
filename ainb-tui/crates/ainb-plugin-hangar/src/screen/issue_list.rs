@@ -3669,6 +3669,8 @@ mod tests {
 
     fn row(id: &str, state: &str, assignee: Option<&str>) -> IssueRow {
         IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str(id).unwrap(),
             display_id: None,
             workspace_id: "ws".into(),

@@ -1091,6 +1091,21 @@ pub struct IssueCreateParams {
     /// it). Append-only field: an old client omits it, an old daemon ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// Optional ORIGIN PROVENANCE kind for the created issue (migration 0056,
+    /// multica parity #21): `autopilot` | `comment_mention` | `manual`. ABSENT
+    /// ⇒ the daemon stamps `manual` (a human authored it). Validated against the
+    /// closed allow-list at the handler, with multica's pair rule
+    /// (`internal/handler/issue.go:1213-1231`): supplying one half of the pair
+    /// without the other, or a kind outside the list, is `INVALID_PARAMS` —
+    /// never a silent drop. Append-only field: an old client omits it, an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_type: Option<String>,
+    /// Optional ORIGIN PROVENANCE id: the autopilot id for `autopilot`, the
+    /// comment id for `comment_mention`. REQUIRED for every kind but `manual`.
+    /// Append-only, same contract as [`Self::origin_type`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
     /// Optional parent issue id: when set, the created issue is a **sub-issue** of
     /// that parent (migration 0046). The daemon validates the parent exists in the
     /// same workspace and rejects a foreign/unknown parent. Append-only field: an
@@ -2467,6 +2482,8 @@ mod tests {
 
         let issues = IssuesListResult {
             issues: vec![IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("i1").unwrap(),
                 display_id: None,
                 workspace_id: "ws-1".into(),

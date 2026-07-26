@@ -23,6 +23,8 @@ use ainb_plugin_sdk::WireBuffer;
 
 fn issue_with_pr(pr_url: Option<&str>) -> IssueRow {
     IssueRow {
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("i1").unwrap(),
         display_id: None,
         workspace_id: "ws".into(),

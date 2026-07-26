@@ -123,6 +123,8 @@ pub async fn issues_list(
             // task-detail card.
             let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
+                origin_type: None,
+                origin_id: None,
                 id,
                 display_id,
                 workspace_id: issue.workspace_id,
@@ -295,6 +297,8 @@ pub async fn issues_search(
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
+            origin_type: None,
+            origin_id: None,
             id,
             display_id,
             workspace_id: issue.workspace_id,
@@ -1769,6 +1773,8 @@ pub async fn issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
+        origin_type: None,
+        origin_id: None,
         id,
         display_id,
         workspace_id: issue.workspace_id,
@@ -1968,6 +1974,8 @@ async fn read_issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
+        origin_type: None,
+        origin_id: None,
         id,
         display_id,
         workspace_id: issue.workspace_id,
@@ -2207,6 +2215,8 @@ pub async fn issue_create(
     // shows.
     let display_id = issue_display_row(pool, workspace_id, &id, prefix.as_deref()).await?;
     Ok(IssueRow {
+        origin_type: None,
+        origin_id: None,
         id: issue_id,
         display_id,
         workspace_id: workspace_id.to_string(),
