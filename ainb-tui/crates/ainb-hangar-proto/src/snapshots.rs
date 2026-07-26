@@ -12,6 +12,7 @@
 //! These are **pure wire types** — `serde` only, no host deps — matching the
 //! rest of `ainb-hangar-proto`.
 
+use ainb_hangar_core::agent_env::AgentEnvInput;
 use ainb_hangar_core::channel::ChannelSet;
 use serde::{Deserialize, Serialize};
 
@@ -1245,8 +1246,13 @@ pub struct AgentUpdateParams {
     pub thinking: FieldUpdate<String>,
     /// New per-agent env map (ordered key-value pairs); `None` leaves it (an
     /// empty list is a valid "no env").
+    ///
+    /// Typed [`AgentEnvInput`] rather than a bare `Vec` so a `Debug` of these
+    /// params (an `INVALID_PARAMS` context, a trace span) masks the VALUES
+    /// (multica parity #30). `#[serde(transparent)]` keeps the wire bytes
+    /// (`[["FOO","bar"]]`) byte-identical — a pure type change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_env: Option<Vec<(String, String)>>,
+    pub agent_env: Option<AgentEnvInput>,
     /// New token budget (rtk/headroom); omitted leaves it, `null` clears it
     /// (back to unlimited), a value sets it (migration 0042).
     #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
@@ -3136,7 +3142,7 @@ mod tests {
             cli_args: Some(vec!["--verbose".into()]),
             mcp_config: FieldUpdate::Set(r#"{"servers":{}}"#.into()),
             thinking: FieldUpdate::Set("high".into()),
-            agent_env: Some(vec![("FOO".into(), "bar".into())]),
+            agent_env: Some(vec![("FOO".into(), "bar".into())].into()),
             token_budget: FieldUpdate::Set(500_000),
             description: Some("ships the backend".into()),
             avatar_url: FieldUpdate::Set("emoji:\u{1F98A}".into()),

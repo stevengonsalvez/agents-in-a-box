@@ -603,6 +603,37 @@ pub struct ActorRow {
     /// when active / unknown / unattributed. Omitted from the wire when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub archived_by: String,
+    /// How many per-agent env vars the agent carries (multica parity #30,
+    /// multica's derived `has_custom_env` is simply `> 0`). `0` for members and
+    /// for a pre-#30 producer. Omitted from the wire when zero.
+    ///
+    /// This is a COUNT, never a value: the wire deliberately has no field that
+    /// can carry an env VALUE, so no consumer can render one.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub agent_env_key_count: u32,
+    /// The per-agent env var NAMES, in stored order (multica ships keys too —
+    /// only values are secret). Empty for members and for a pre-#30 producer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_env_keys: Vec<String>,
+    /// Mirrors multica's `custom_env_redacted` (`agent.go:42`): `true` iff the
+    /// agent has env vars, i.e. what the caller sees is a MASKED view. Hangar
+    /// masks unconditionally (deviation D-1), so this is always
+    /// `agent_env_key_count > 0`. Omitted from the wire when `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_env_redacted: bool,
+}
+
+/// `skip_serializing_if` helper: omit a zero count from the wire so a
+/// metadata-less agent serialises byte-identically to a pre-#30 producer.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires the `&` signature
+const fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+/// `skip_serializing_if` helper: omit a `false` flag from the wire.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires the `&` signature
+const fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Default for ActorRow {
@@ -624,6 +655,9 @@ impl Default for ActorRow {
             avatar: String::new(),
             archived_at: None,
             archived_by: String::new(),
+            agent_env_key_count: 0,
+            agent_env_keys: Vec::new(),
+            agent_env_redacted: false,
         }
     }
 }
@@ -1133,5 +1167,38 @@ mod tests {
         let out = serde_json::to_string(&stamped).unwrap();
         assert!(out.contains("\"archived_by\":\"member:user-1\""), "{out}");
         assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), stamped);
+    }
+
+    /// The parity-#30 per-agent-env metadata is APPEND-ONLY on `ActorRow`: a
+    /// pre-#30 payload decodes with all three fields at their neutral values,
+    /// an env-less row emits none of the keys, and a populated row round-trips.
+    ///
+    /// It also pins the shape itself: the wire carries KEY NAMES and a COUNT,
+    /// never a value — there is no field a consumer could render a secret from.
+    #[test]
+    fn actor_row_agent_env_metadata_is_append_only_and_value_free() {
+        let legacy = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent",
+            "presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-#30 payload decodes");
+        assert_eq!(row.agent_env_key_count, 0);
+        assert!(row.agent_env_keys.is_empty());
+        assert!(!row.agent_env_redacted);
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("agent_env"),
+            "an env-less row must not emit any agent_env key: {out}"
+        );
+
+        let with_env = ActorRow {
+            agent_env_key_count: 1,
+            agent_env_keys: vec!["SECRET_TOKEN".into()],
+            agent_env_redacted: true,
+            ..row
+        };
+        let out = serde_json::to_string(&with_env).unwrap();
+        assert!(out.contains("\"agent_env_key_count\":1"), "{out}");
+        assert!(out.contains("\"agent_env_keys\":[\"SECRET_TOKEN\"]"), "{out}");
+        assert!(out.contains("\"agent_env_redacted\":true"), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), with_env);
     }
 }
