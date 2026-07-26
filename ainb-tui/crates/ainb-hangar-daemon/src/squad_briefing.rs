@@ -537,6 +537,12 @@ mod tests {
             !briefing.contains("— role:"),
             "a roleless member must not emit a role fragment:\n{briefing}"
         );
+        assert!(
+            !briefing.contains("— skills:"),
+            "a skill-less member must not emit a skills fragment (parity 7-rest \
+             blank-omit — the briefing stays byte-identical to the pre-skills \
+             render):\n{briefing}"
+        );
 
         // Clearing a previously-set value re-omits the section.
         SquadRepo::set_instructions(pool, &w, "sq-b", "temporary").await.unwrap();
@@ -553,6 +559,184 @@ mod tests {
                 .unwrap()
                 .contains("## Squad Instructions"),
             "cleared instructions re-omit the section"
+        );
+    }
+
+    /// Parity `7-rest`: an agent member's roster row carries the skills it will
+    /// actually MATERIALISE — enabled links only, minus the by-name
+    /// `disabled_runtime_skills` suppression — and every fragment (role, skills)
+    /// is independently omittable. Human rows and the leader self-row never grow
+    /// a skills segment.
+    #[tokio::test]
+    async fn roster_rows_carry_enabled_skill_names() {
+        use ainb_hangar_core::ids::{AgentId, SkillId};
+        use ainb_hangar_store::repo::skill::SkillRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws_id = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let w = ws(&ws_id);
+
+        let leader =
+            bootstrap::create_agent(pool, &ws_id, "captain", "claude", None).await.unwrap();
+        // scout: role AND skills. medic: skills, NO role. sapper: role, NO skills.
+        let scout = bootstrap::create_agent(pool, &ws_id, "scout", "claude", None).await.unwrap();
+        let medic = bootstrap::create_agent(pool, &ws_id, "medic", "claude", None).await.unwrap();
+        let sapper = bootstrap::create_agent(pool, &ws_id, "sapper", "claude", None).await.unwrap();
+
+        // Attach four skills to scout: alpha + gamma stay live, beta is
+        // link-disabled (0051), delta is suppressed by name on the agent row.
+        let mut ids: Vec<(String, SkillId)> = Vec::new();
+        for name in ["alpha", "beta", "gamma", "delta"] {
+            let id = SkillRepo::create(pool, &w, name, None, Some("# body"), vec![])
+                .await
+                .unwrap();
+            ids.push((name.to_string(), id));
+        }
+        let scout_id = AgentId::from_str(scout.id.clone()).unwrap();
+        for (_, id) in &ids {
+            SkillRepo::attach_to_agent(pool, &w, &scout_id, id).await.unwrap();
+        }
+        let beta = &ids.iter().find(|(n, _)| n == "beta").unwrap().1;
+        SkillRepo::set_enabled(pool, &w, &scout_id, beta, false).await.unwrap();
+        AgentRepo::set_disabled_runtime_skills(pool, &scout.id, &["delta".to_string()])
+            .await
+            .unwrap();
+
+        // medic gets one live skill and no role. The LEADER also gets one, to
+        // prove the self-row stays skill-less.
+        let medic_id = AgentId::from_str(medic.id.clone()).unwrap();
+        let recon = SkillRepo::create(pool, &w, "recon", None, Some("# body"), vec![])
+            .await
+            .unwrap();
+        SkillRepo::attach_to_agent(pool, &w, &medic_id, &recon).await.unwrap();
+        let leader_id = AgentId::from_str(leader.id.clone()).unwrap();
+        SkillRepo::attach_to_agent(pool, &w, &leader_id, &recon).await.unwrap();
+
+        SquadRepo::create(
+            pool,
+            &w,
+            "sq-s",
+            "skilled",
+            &ActorRef::new(ActorKind::Agent, leader.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member_with_role(
+            pool,
+            &w,
+            "sq-s",
+            &ActorRef::new(ActorKind::Agent, scout.id.clone()).unwrap(),
+            "owns the migrations",
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(
+            pool,
+            &w,
+            "sq-s",
+            &ActorRef::new(ActorKind::Agent, medic.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member_with_role(
+            pool,
+            &w,
+            "sq-s",
+            &ActorRef::new(ActorKind::Agent, sapper.id.clone()).unwrap(),
+            "runs the drills",
+        )
+        .await
+        .unwrap();
+
+        let briefing = build_squad_leader_briefing(pool, &w, "sq-s", &leader.id).await.unwrap();
+
+        // Whole lines, never bare substrings — a half-rendered row must fail.
+        assert!(
+            briefing.contains(&format!(
+                "- scout — agent — {} — role: owns the migrations — skills: alpha, gamma\n",
+                scout.id
+            )),
+            "role THEN skills, name-ordered, enabled only:\n{briefing}"
+        );
+        assert!(
+            briefing.contains(&format!("- medic — agent — {} — skills: recon\n", medic.id)),
+            "skills with no role must not emit an empty role fragment:\n{briefing}"
+        );
+        assert!(
+            briefing.contains(&format!(
+                "- sapper — agent — {} — role: runs the drills\n",
+                sapper.id
+            )),
+            "a skill-less member emits no skills fragment at all:\n{briefing}"
+        );
+        assert!(
+            !briefing.contains("beta"),
+            "a link-disabled skill must never be advertised:\n{briefing}"
+        );
+        assert!(
+            !briefing.contains("delta"),
+            "a disabled_runtime_skills name must never be advertised:\n{briefing}"
+        );
+        // The leader self-row is skill-less even though the leader HAS `recon`.
+        assert!(
+            briefing.contains(&format!("- captain — agent — {}\n", leader.id)),
+            "leader self-row carries identity only:\n{briefing}"
+        );
+    }
+
+    /// A human `member` row never grows a skills segment — multica appends
+    /// skills "for agents", and a human has no skill set to materialise.
+    #[tokio::test]
+    async fn human_member_row_has_no_skills_segment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws_id = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let w = ws(&ws_id);
+        let leader =
+            bootstrap::create_agent(pool, &ws_id, "captain", "claude", None).await.unwrap();
+        SquadRepo::create(
+            pool,
+            &w,
+            "sq-h2",
+            "mixed",
+            &ActorRef::new(ActorKind::Agent, leader.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        let human = ainb_hangar_store::repo::member::MemberRepo::add(
+            pool,
+            &w,
+            "hank@example.com",
+            ainb_hangar_store::repo::member::MemberRole::Member,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member_with_role(
+            pool,
+            &w,
+            "sq-h2",
+            &ActorRef::new(ActorKind::Member, human.user_id.clone()).unwrap(),
+            "product owner",
+        )
+        .await
+        .unwrap();
+
+        let briefing = build_squad_leader_briefing(pool, &w, "sq-h2", &leader.id).await.unwrap();
+        assert!(
+            briefing.contains(&format!(
+                "- hank@example.com — human — {} — role: product owner\n",
+                human.user_id
+            )),
+            "human row: role yes, skills never:\n{briefing}"
+        );
+        assert!(
+            !briefing.contains("— skills:"),
+            "no skills fragment anywhere in a human-only roster:\n{briefing}"
         );
     }
 
