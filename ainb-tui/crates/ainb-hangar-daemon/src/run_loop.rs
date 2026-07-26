@@ -1312,7 +1312,8 @@ async fn execute_claimed(
                     .run_codex_in(
                         &env,
                         task_env,
-                        dispatch.agent_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
                         &dispatch.invocation,
                         &location,
                     )
@@ -1322,7 +1323,8 @@ async fn execute_claimed(
                     .run_copilot_in(
                         &env,
                         task_env,
-                        dispatch.agent_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
                         &dispatch.invocation,
                         &location,
                     )
@@ -1464,7 +1466,8 @@ async fn run_interactive(
     // agent's `agent_env`; the claude path layers nothing (parity with
     // `execute_claimed`).
     let extra_env = match dispatch.backend {
-        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone(),
+        // The ONE permitted plaintext escape: the child env.
+        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone().expose_for_child_env(),
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
@@ -2281,7 +2284,12 @@ struct ResolvedDispatch {
     invocation: ProviderInvocation,
     /// The agent's per-agent env (`agent_env`), layered onto the child env
     /// after the deny-by-default ambient allowlist.
-    agent_env: Vec<(String, String)>,
+    ///
+    /// Typed [`AgentEnv`](ainb_hangar_core::agent_env::AgentEnv), so this
+    /// struct's derived `Debug` (a `tracing::debug!(?dispatch)`, an `anyhow`
+    /// context, a panic message) masks the VALUES (parity #30). The plaintext
+    /// is reached only at the compose seam, via `expose_for_child_env`.
+    agent_env: ainb_hangar_core::agent_env::AgentEnv,
 }
 
 /// The `tasks.mode` column value that asks for an attachable session (ccc / D6,
@@ -2328,7 +2336,7 @@ impl ResolvedDispatch {
                 model: None,
                 cli_args: Vec::new(),
             },
-            agent_env: Vec::new(),
+            agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         }
     }
 }
@@ -4033,7 +4041,7 @@ mod tests {
             backend,
             mode: dispatch_mode("interactive"),
             invocation: inv.clone(),
-            agent_env: Vec::new(),
+            agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         };
 
         // The argv an INTERACTIVE task row actually gets, through the same
@@ -4117,7 +4125,7 @@ mod tests {
                 backend: Backend::Codex,
                 mode: dispatch_mode("interactive"),
                 invocation: inv.clone(),
-                agent_env: Vec::new(),
+                agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
             },
         );
         assert!(

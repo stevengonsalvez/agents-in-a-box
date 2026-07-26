@@ -2698,6 +2698,28 @@ fn parse_params<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Deserialize a SECRET-BEARING request's `params` into `T` with a CONTENT-FREE
+/// error message.
+///
+/// Identical to [`parse_params`] except the `serde_json` error is DROPPED. That
+/// is deliberate, and it is multica's rule (`cmd_agent.go:757-759`): serde
+/// echoes the offending scalar in its message (`invalid type: integer \`31337\`,
+/// expected a string`), so a malformed `agent_env` value would be reflected
+/// straight back to the caller — and into whatever log captured the response.
+///
+/// Only the two handlers that accept `agent_env` use this; every other handler
+/// keeps [`parse_params`] and its richer diagnostics.
+fn parse_params_secret<T: serde::de::DeserializeOwned>(
+    req: &RpcRequest,
+    shape: &str,
+) -> Result<T, RpcError> {
+    serde_json::from_value(req.params.clone()).map_err(|_| RpcError {
+        code: INVALID_PARAMS,
+        message: format!("expected {shape}"),
+        data: None,
+    })
+}
+
 /// Resolve a wire workspace identifier (slug OR id) to the real row id,
 /// returning `None` when no workspace matches and mapping a store fault to an
 /// internal error. The id-bearing P6.5 handlers use this (they carry their own
@@ -3905,7 +3927,9 @@ async fn handle_agent_create(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params(
+    // Content-free parse error: this params shape is adjacent to the secret
+    // `agent_env` write channel, so it uses the same rule as agent_update.
+    let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params_secret(
         req,
         "{ workspace_id?, name, provider?, model?, instructions?, description?, avatar_url?, \
          service_tier? }",
@@ -4019,7 +4043,9 @@ async fn handle_agent_update(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentUpdateParams = parse_params(
+    // `agent_env` carries SECRETS, so a shape mismatch must not echo the input
+    // back (parity #30 / multica `cmd_agent.go:757-759`).
+    let params: ainb_hangar_proto::snapshots::AgentUpdateParams = parse_params_secret(
         req,
         "{ workspace_id, agent_id, name?, instructions?, model?, cli_args?, mcp_config?, \
          thinking?, agent_env?, description?, avatar_url?, service_tier? }",
@@ -4114,7 +4140,10 @@ fn agent_config_update_from_params(
         mcp_config: field_to_nested(&params.mcp_config),
         thinking: field_to_nested(&params.thinking),
         token_budget: field_to_nested(&params.token_budget),
-        agent_env: params.agent_env.clone(),
+        agent_env: params
+            .agent_env
+            .clone()
+            .map(ainb_hangar_core::agent_env::AgentEnvInput::into_agent_env),
         // Migration 0050. `description` is NOT NULL, so it maps straight through
         // like `name`; the other two are nullable and use the FieldUpdate bridge.
         description: params.description.as_deref().map(|d| d.trim().to_string()),
