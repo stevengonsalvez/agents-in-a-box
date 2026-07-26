@@ -206,7 +206,7 @@ mod tests {
         let a = bootstrap::create_agent(pool, &ws_id, "scout", "claude", None).await.unwrap();
         let b = bootstrap::create_agent(pool, &ws_id, "medic", "claude", None).await.unwrap();
         let c = bootstrap::create_agent(pool, &ws_id, "ghost", "claude", None).await.unwrap();
-        AgentRepo::set_archived(pool, &ws_id, &c.id, true).await.unwrap();
+        AgentRepo::set_archived(pool, &ws_id, &c.id, true, None, 0).await.unwrap();
 
         SquadRepo::create(
             pool,
