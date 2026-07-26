@@ -2953,6 +2953,16 @@ Options:
           
           The parent must exist in the same workspace; completing the last child of the lowest unfinished stage cascades a roll-up comment onto the parent.
 
+      --origin-type <ORIGIN_TYPE>
+          Provenance of this issue: `autopilot` | `comment_mention` | `manual` (migration 0056, multica parity #21).
+          
+          Defaults to `$HANGAR_ORIGIN_TYPE` — the daemon injects it into a dispatched agent's environment, so an issue an agent creates mid-run is attributable back to the comment / autopilot that asked for it. With neither flag nor env, a create is stamped `manual`.
+
+      --origin-id <ORIGIN_ID>
+          The provenance id: the autopilot id for `autopilot`, the comment id for `comment_mention`. REQUIRED for every kind except `manual`.
+          
+          Defaults to `$HANGAR_ORIGIN_ID`. Supplying an id with no `--origin-type` is an error, never a silent drop.
+
   -h, --help
           Print help (see a summary with '-h')
 ```
