@@ -688,7 +688,7 @@ pub struct SkillFile {
 /// A cron-scheduled autopilot (P7). The manager table (P7.5) renders these; the
 /// daemon flattens its rich store row (typed ids, epoch-ms `next_tick_at`) into
 /// this flat shape. The plugin owns zero domain data — it only renders the row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotRow {
     /// The autopilot id (ULID string, the stable id the table rows carry).
     pub id: String,
@@ -711,13 +711,19 @@ pub struct AutopilotRow {
     pub last_run_status: Option<String>,
     /// The most recent run's start instant (epoch-ms), or `None` when never run.
     pub last_run_at: Option<i64>,
+    /// Whether the bare programmatic `api` trigger is armed (migration 0057).
+    ///
+    /// Append-only + `serde(default)`: a pre-0057 daemon's payload omits it and
+    /// deserialises as `false`, and an older plugin ignores it.
+    #[serde(default)]
+    pub api_trigger_enabled: bool,
 }
 
 /// A wire-side autopilot run row for the history pane (`hangar/autopilot_runs`).
 ///
 /// One firing of an autopilot. The run-history pane (P7.5) renders these
 /// latest-first below the selected autopilot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotRunRow {
     /// The run id (ULID string).
     pub id: String,
@@ -728,8 +734,17 @@ pub struct AutopilotRunRow {
     /// When the run finished (epoch-ms); `None` while in flight.
     pub completed_at: Option<i64>,
     /// Lifecycle status (`running` / `completed` / `failed` / `cancelled` /
-    /// `skipped`).
+    /// `skipped`). `skipped` is terminal — a dispatch the admission gate
+    /// intentionally declined (migration 0057).
     pub status: String,
+    /// Which trigger fired this run: `schedule` | `manual` | `webhook` | `api`.
+    /// Empty when produced by a pre-0057 daemon.
+    #[serde(default)]
+    pub source: String,
+    /// Why a `skipped` run was declined (the admission reason); `None` for every
+    /// other status, and for pre-0057 payloads.
+    #[serde(default)]
+    pub failure_reason: Option<String>,
 }
 
 /// A wire-side task card row for the Kanban board (`hangar/tasks_list`, P8.4).

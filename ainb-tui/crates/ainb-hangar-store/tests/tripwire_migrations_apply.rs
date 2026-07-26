@@ -655,13 +655,21 @@ async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
         run.contains("completed_at INTEGER"),
         "autopilot_run.completed_at nullable: {run}"
     );
+    // Per-token membership rather than a frozen whole-CHECK literal: 0057
+    // WIDENS this constraint (adding `skipped`) and later migrations may widen
+    // it again, but every token below must survive and the default must stay
+    // `running`.
     assert!(
-        run.contains(
-            "status TEXT NOT NULL DEFAULT 'running' CHECK (status IN \
-             ('running', 'completed', 'failed', 'cancelled'))"
-        ),
-        "autopilot_run.status default + CHECK: {run}"
+        run.contains("status TEXT NOT NULL DEFAULT 'running'"),
+        "autopilot_run.status default: {run}"
     );
+    let status_check = &run[run.find("CHECK (status IN").expect("status CHECK present")..];
+    for token in ["'running'", "'completed'", "'failed'", "'cancelled'"] {
+        assert!(
+            status_check.contains(token),
+            "autopilot_run.status CHECK must still admit {token}: {run}"
+        );
+    }
 
     pool.close().await;
 }

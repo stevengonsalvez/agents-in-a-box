@@ -92,6 +92,7 @@ async fn seed_autopilot(store: &Store) -> ainb_hangar_store::repo::autopilot::Au
             max_concurrent_runs: 1,
             execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
             concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
+            api_trigger_enabled: false,
         },
     )
     .await

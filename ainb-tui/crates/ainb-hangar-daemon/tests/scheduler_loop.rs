@@ -223,11 +223,32 @@ async fn skip_when_prior_run_in_flight() {
         }
         other => panic!("expected TickSkipped, got {other:?}"),
     }
-    // No new run, no new task — only the pre-seeded run remains.
-    assert_eq!(count(&pool, "SELECT count(*) FROM autopilot_run").await, 1);
+    // No new LIVE run, no task — only the pre-seeded run remains …
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run WHERE status <> 'skipped'"
+        )
+        .await,
+        1
+    );
     assert_eq!(
         count(&pool, "SELECT count(*) FROM agent_task_queue").await,
         0
+    );
+    // … but the decline itself IS recorded (migration 0057): a terminal
+    // `skipped` run carrying the trigger source and the admission reason, so it
+    // is visible to every read path instead of only to the log.
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run \
+             WHERE status = 'skipped' AND source = 'schedule' \
+               AND completed_at IS NOT NULL \
+               AND failure_reason LIKE 'concurrency limit%'"
+        )
+        .await,
+        1
     );
     // But it was still rescheduled forward (rejoins the schedule next slot).
     let next: Option<i64> = sqlx::query("SELECT next_tick_at FROM autopilot WHERE id = 'ap-skip'")

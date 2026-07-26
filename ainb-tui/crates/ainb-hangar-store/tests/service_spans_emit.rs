@@ -250,6 +250,7 @@ async fn store_fsm_and_autopilot_emit_named_spans_with_required_fields() {
             max_concurrent_runs: 1,
             execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
             concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
+            api_trigger_enabled: false,
         },
     )
     .await

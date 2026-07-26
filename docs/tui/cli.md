@@ -4319,14 +4319,16 @@ Create and control cron-scheduled autopilots
 Usage: ainb hangar autopilot [OPTIONS] <COMMAND>
 
 Commands:
-  create      Create a cron-scheduled autopilot (rejects an invalid cron expression)
-  list        List the workspace's autopilots (cron, next tick, last run, enabled)
-  disable     Disable an autopilot so the scheduler stops firing it
-  enable      Re-enable an autopilot, recomputing its next tick from now
-  run         Fire one tick immediately (manual run), bypassing the schedule
-  webhook     Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
-  deliveries  List the autopilot's recent webhook deliveries (audit log)
-  help        Print this message or the help of the given subcommand(s)
+  create       Create a cron-scheduled autopilot (rejects an invalid cron expression)
+  list         List the workspace's autopilots (cron, next tick, last run, enabled)
+  disable      Disable an autopilot so the scheduler stops firing it
+  enable       Re-enable an autopilot, recomputing its next tick from now
+  run          Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
+  api-trigger  Arm (or `--disable`) the bare programmatic `api` trigger
+  runs         List the autopilot's recent runs (status, trigger source, reason)
+  webhook      Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
+  deliveries   List the autopilot's recent webhook deliveries (audit log)
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -4423,6 +4425,7 @@ Arguments:
   <ID>  The autopilot id (`autopilot.id`)
 
 Options:
+      --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
@@ -4442,6 +4445,7 @@ Arguments:
   <ID>  The autopilot id (`autopilot.id`)
 
 Options:
+      --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
@@ -4449,19 +4453,77 @@ Options:
 
 #### `ainb hangar autopilot run`
 
-Fire one tick immediately (manual run), bypassing the schedule
+Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
 
 ```console
 $ ainb hangar autopilot run --help
-Fire one tick immediately (manual run), bypassing the schedule
+Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
 
 Usage: ainb hangar autopilot run [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --source <SOURCE>
+          Which trigger to record on the run (`manual` | `api`)
+
+          Possible values:
+          - manual: An operator firing by hand (the default)
+          - api:    The bare programmatic `api` trigger; requires it to be armed
+          
+          [default: manual]
+
+      --workspace <WORKSPACE>
+          Workspace slug the autopilot belongs to. Defaults to `default`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar autopilot api-trigger`
+
+Arm (or `--disable`) the bare programmatic `api` trigger
+
+```console
+$ ainb hangar autopilot api-trigger --help
+Arm (or `--disable`) the bare programmatic `api` trigger
+
+Usage: ainb hangar autopilot api-trigger [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --disable                Turn the trigger OFF instead of on (`api-trigger` only)
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot runs`
+
+List the autopilot's recent runs (status, trigger source, reason)
+
+```console
+$ ainb hangar autopilot runs --help
+List the autopilot's recent runs (status, trigger source, reason)
+
+Usage: ainb hangar autopilot runs [OPTIONS] <ID>
 
 Arguments:
   <ID>  The autopilot id (`autopilot.id`)
 
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          Maximum number of runs to show (latest-first) [default: 20]
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```

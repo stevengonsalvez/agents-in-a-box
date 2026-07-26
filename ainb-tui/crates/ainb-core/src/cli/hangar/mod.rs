@@ -229,8 +229,13 @@ pub enum AutopilotCommand {
     Disable(AutopilotIdArgs),
     /// Re-enable an autopilot, recomputing its next tick from now.
     Enable(AutopilotIdArgs),
-    /// Fire one tick immediately (manual run), bypassing the schedule.
-    Run(AutopilotIdArgs),
+    /// Fire one tick immediately, bypassing the schedule (`--source` picks the
+    /// trigger recorded on the run: `manual` by default, or `api`).
+    Run(AutopilotRunNowArgs),
+    /// Arm (or `--disable`) the bare programmatic `api` trigger.
+    ApiTrigger(AutopilotIdArgs),
+    /// List the autopilot's recent runs (status, trigger source, reason).
+    Runs(AutopilotRunsArgs),
     /// Configure the HTTP webhook trigger (enable/disable, rotate secret, filter).
     Webhook(AutopilotWebhookArgs),
     /// List the autopilot's recent webhook deliveries (audit log).
@@ -373,11 +378,57 @@ pub struct AutopilotListArgs {
     pub workspace: Option<String>,
 }
 
-/// Arguments for the id-only autopilot verbs (`disable`, `enable`, `run`).
+/// Arguments for the id-only autopilot verbs (`disable`, `enable`,
+/// `api-trigger`).
 #[derive(Args, Debug)]
 pub struct AutopilotIdArgs {
     /// The autopilot id (`autopilot.id`).
     pub id: String,
+    /// Turn the trigger OFF instead of on (`api-trigger` only).
+    #[arg(long)]
+    pub disable: bool,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Which trigger a manual `hangar autopilot run` records on the run it creates
+/// (`autopilot_run.source`, migration 0057).
+///
+/// `manual` is the operator's explicit override and always allowed. `api` is the
+/// bare programmatic trigger and is REFUSED unless the autopilot has armed it
+/// (`hangar autopilot api-trigger <id>`) — a half-configured trigger is never
+/// firable, exactly like the webhook one.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunSourceArg {
+    /// An operator firing by hand (the default).
+    #[default]
+    Manual,
+    /// The bare programmatic `api` trigger; requires it to be armed.
+    Api,
+}
+
+/// Arguments for `hangar autopilot run <id>`.
+#[derive(Args, Debug)]
+pub struct AutopilotRunNowArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Which trigger to record on the run (`manual` | `api`).
+    #[arg(long, value_enum, default_value_t = RunSourceArg::Manual)]
+    pub source: RunSourceArg,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot runs <id>` (the run-history read surface).
+#[derive(Args, Debug)]
+pub struct AutopilotRunsArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Maximum number of runs to show (latest-first).
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
     /// Workspace slug the autopilot belongs to. Defaults to `default`.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -1917,6 +1968,8 @@ async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Resu
         AutopilotCommand::Disable(args) => run_autopilot_set_enabled(&store, args, false).await,
         AutopilotCommand::Enable(args) => run_autopilot_set_enabled(&store, args, true).await,
         AutopilotCommand::Run(args) => run_autopilot_run_now(&store, args).await,
+        AutopilotCommand::ApiTrigger(args) => run_autopilot_api_trigger(&store, args).await,
+        AutopilotCommand::Runs(args) => run_autopilot_runs(&store, args, format).await,
         AutopilotCommand::Webhook(args) => run_autopilot_webhook(&store, args).await,
         AutopilotCommand::Deliveries(args) => run_autopilot_deliveries(&store, args, format).await,
     }
@@ -1941,6 +1994,7 @@ async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Resul
         max_concurrent_runs: args.max_concurrent_runs,
         execution_mode: args.execution_mode.into(),
         concurrency_policy: args.concurrency_policy.into(),
+        api_trigger_enabled: false,
     };
 
     let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
@@ -2028,12 +2082,24 @@ async fn run_autopilot_set_enabled(
     Ok(())
 }
 
-/// `hangar autopilot run <id>`: fire one tick immediately via the P7.4 enqueue
-/// path, bypassing the schedule. Workspace-scoped: a foreign id is rejected.
-async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<()> {
+/// `hangar autopilot run <id> [--source manual|api]`: dispatch one tick
+/// immediately, bypassing the schedule. Workspace-scoped: a foreign id is
+/// rejected.
+///
+/// `--source api` is REFUSED unless the autopilot has armed its api trigger —
+/// a half-configured trigger is never firable (the same discipline as the
+/// webhook one).
+///
+/// The dispatch goes through the SAME admission gate the scheduler uses, so at
+/// the concurrency limit under the `skip` policy it is DECLINED and recorded as
+/// a terminal `skipped` run. That is a successful, no-op dispatch (exit 0), not
+/// an error — matching multica's dispatch contract.
+async fn run_autopilot_run_now(store: &Store, args: AutopilotRunNowArgs) -> Result<()> {
     use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
     use ainb_hangar_store::repo::autopilot::AutopilotRepo;
-    use ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick;
+    use ainb_hangar_store::repo::autopilot_run::{
+        DispatchOutcome, RunSource, dispatch_with_admission,
+    };
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
@@ -2044,10 +2110,80 @@ async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<(
         .context("look up autopilot")?
         .with_context(|| format!("no autopilot `{}` in this workspace", args.id))?;
 
-    let (run_id, task_id) = fire_autopilot_tick(store.pool(), &SystemClock, &autopilot)
+    let source = match args.source {
+        RunSourceArg::Manual => RunSource::Manual,
+        RunSourceArg::Api => {
+            anyhow::ensure!(
+                autopilot.api_trigger_enabled,
+                "api trigger not enabled for autopilot {} — run `ainb hangar autopilot api-trigger {}`",
+                args.id,
+                args.id
+            );
+            RunSource::Api
+        }
+    };
+
+    match dispatch_with_admission(store.pool(), &SystemClock, &autopilot, source)
         .await
-        .with_context(|| format!("fire autopilot `{}`", args.id))?;
-    println!("fired autopilot {} → run {run_id} task {task_id}", args.id);
+        .with_context(|| format!("fire autopilot `{}`", args.id))?
+    {
+        DispatchOutcome::Fired {
+            run_id, task_id, ..
+        } => println!("fired autopilot {} → run {run_id} task {task_id}", args.id),
+        DispatchOutcome::Skipped { run_id, reason, .. } => {
+            println!("skipped autopilot {} → run {run_id} ({reason})", args.id);
+        }
+    }
+    Ok(())
+}
+
+/// `hangar autopilot api-trigger <id> [--disable]`: arm (or disarm) the bare
+/// programmatic `api` trigger (migration 0057). Workspace-scoped.
+async fn run_autopilot_api_trigger(store: &Store, args: AutopilotIdArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+    let enabled = !args.disable;
+
+    let updated = AutopilotRepo::set_api_trigger_enabled(store.pool(), &ws, &id, enabled)
+        .await
+        .with_context(|| format!("set api trigger for autopilot `{}`", args.id))?;
+    anyhow::ensure!(updated, "no autopilot `{}` in this workspace", args.id);
+
+    if enabled {
+        println!("enabled api trigger for autopilot {}", args.id);
+        println!(
+            "  fire with: ainb hangar autopilot run {} --source api",
+            args.id
+        );
+    } else {
+        println!("disabled api trigger for autopilot {}", args.id);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot runs <id>`: the run-history read surface — every run with
+/// its status, the trigger that fired it, and (for a declined dispatch) the
+/// admission reason. Workspace-scoped: a foreign id yields an empty set.
+async fn run_autopilot_runs(
+    store: &Store,
+    args: AutopilotRunsArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let runs = AutopilotRepo::list_runs(store.pool(), &ws, &id, args.limit)
+        .await
+        .context("list autopilot runs")?;
+    render_autopilot_runs(&runs, format);
     Ok(())
 }
 
@@ -5812,6 +5948,80 @@ const fn autopilot_badge(enabled: bool) -> &'static str {
     if enabled { "enabled" } else { "disabled" }
 }
 
+/// Render an autopilot's run history (`hangar autopilot runs <id>`).
+///
+/// Carries the two columns migration 0057 added: `SOURCE` (which trigger fired
+/// the run) and `REASON` (why a `skipped` dispatch was declined).
+fn render_autopilot_runs(
+    rows: &[ainb_hangar_store::repo::autopilot::AutopilotRun],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows.iter().map(autopilot_run_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("id,status,source,started_at,completed_at,failure_reason");
+            for r in rows {
+                println!(
+                    "{},{},{},{},{},{}",
+                    csv_field(&r.id),
+                    csv_field(&r.status),
+                    csv_field(&r.source),
+                    r.started_at,
+                    r.completed_at.map_or_else(String::new, |v| v.to_string()),
+                    csv_field(r.failure_reason.as_deref().unwrap_or("")),
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| run id | status | source | started | reason |");
+            println!("| --- | --- | --- | --- | --- |");
+            for r in rows {
+                println!(
+                    "| {} | {} | {} | {} | {} |",
+                    md_cell(&r.id),
+                    md_cell(&r.status),
+                    md_cell(&r.source),
+                    r.started_at,
+                    md_cell(r.failure_reason.as_deref().unwrap_or("-")),
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no autopilot runs");
+            } else {
+                for r in rows {
+                    println!(
+                        "{}  {}  source={}  started={}  reason={}",
+                        r.id,
+                        r.status,
+                        r.source,
+                        r.started_at,
+                        r.failure_reason.as_deref().unwrap_or("-"),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One autopilot run as a JSON object (for the `--format json` surface).
+fn autopilot_run_to_json(r: &ainb_hangar_store::repo::autopilot::AutopilotRun) -> String {
+    serde_json::json!({
+        "id": r.id,
+        "autopilot_id": r.autopilot_id,
+        "status": r.status,
+        "source": r.source,
+        "started_at": r.started_at,
+        "completed_at": r.completed_at,
+        "failure_reason": r.failure_reason,
+    })
+    .to_string()
+}
+
 /// Render the webhook delivery audit log (`hangar autopilot deliveries <id>`).
 fn render_webhook_deliveries(
     rows: &[ainb_hangar_store::repo::autopilot_webhook::WebhookDelivery],
@@ -5897,7 +6107,7 @@ fn autopilot_line(a: &Autopilot, last_run: Option<&str>) -> String {
         a.next_tick_at.map_or_else(|| "-".to_string(), |v| v.to_string()),
         last_run.unwrap_or("-"),
         autopilot_badge(a.enabled),
-    )
+    ) + if a.api_trigger_enabled { " [api]" } else { "" }
 }
 
 const fn autopilot_csv_header() -> &'static str {
@@ -5939,7 +6149,7 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
         "{{\"id\":{},\"workspace_id\":{},\"agent_id\":{},\"name\":{},\"instructions\":{},\
           \"cron_expr\":{},\"max_concurrent_runs\":{},\"execution_mode\":{},\
           \"concurrency_policy\":{},\"next_tick_at\":{},\"enabled\":{},\
-          \"last_run\":{}}}",
+          \"api_trigger_enabled\":{},\"last_run\":{}}}",
         json_string(&a.id),
         json_string(&a.workspace_id),
         json_string(&a.agent_id),
@@ -5951,6 +6161,7 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
         json_string(a.concurrency_policy.as_str()),
         next_tick,
         a.enabled,
+        a.api_trigger_enabled,
         last,
     )
 }
@@ -8005,17 +8216,111 @@ mod tests {
 
     #[test]
     fn parses_autopilot_disable_enable_run_with_id() {
-        for (verb, is) in [("disable", "disable"), ("enable", "enable"), ("run", "run")] {
+        for (verb, is) in [("disable", "disable"), ("enable", "enable")] {
             let cmd = parse_hangar(&["ainb", "hangar", "autopilot", verb, "ap-1"]);
             match (is, cmd) {
                 ("disable", HangarCommand::Autopilot(AutopilotCommand::Disable(a)))
-                | ("enable", HangarCommand::Autopilot(AutopilotCommand::Enable(a)))
-                | ("run", HangarCommand::Autopilot(AutopilotCommand::Run(a))) => {
+                | ("enable", HangarCommand::Autopilot(AutopilotCommand::Enable(a))) => {
                     assert_eq!(a.id, "ap-1");
                 }
                 (_, other) => panic!("expected autopilot {verb}, got {other:?}"),
             }
         }
+        let cmd = parse_hangar(&["ainb", "hangar", "autopilot", "run", "ap-1"]);
+        let HangarCommand::Autopilot(AutopilotCommand::Run(a)) = cmd else {
+            panic!("expected autopilot run, got {cmd:?}");
+        };
+        assert_eq!(a.id, "ap-1");
+        assert_eq!(
+            a.source,
+            RunSourceArg::Manual,
+            "an unqualified `run` is the operator's MANUAL fire"
+        );
+    }
+
+    /// The `api`-trigger verbs parse (migration 0057 / parity item 15): the
+    /// arm/disarm toggle, the `--source api` fire, and the run-history read.
+    #[test]
+    fn parses_autopilot_api_trigger_verbs() {
+        let cmd = parse_hangar(&["ainb", "hangar", "autopilot", "api-trigger", "ap-1"]);
+        let HangarCommand::Autopilot(AutopilotCommand::ApiTrigger(a)) = cmd else {
+            panic!("expected autopilot api-trigger, got {cmd:?}");
+        };
+        assert_eq!(a.id, "ap-1");
+        assert!(!a.disable, "the bare verb ARMS the trigger");
+
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "api-trigger",
+            "ap-1",
+            "--disable",
+        ]);
+        let HangarCommand::Autopilot(AutopilotCommand::ApiTrigger(a)) = cmd else {
+            panic!("expected autopilot api-trigger, got {cmd:?}");
+        };
+        assert!(a.disable);
+
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "run",
+            "ap-1",
+            "--source",
+            "api",
+        ]);
+        let HangarCommand::Autopilot(AutopilotCommand::Run(a)) = cmd else {
+            panic!("expected autopilot run, got {cmd:?}");
+        };
+        assert_eq!(a.source, RunSourceArg::Api);
+
+        let cmd = parse_hangar(&["ainb", "hangar", "autopilot", "runs", "ap-1"]);
+        let HangarCommand::Autopilot(AutopilotCommand::Runs(a)) = cmd else {
+            panic!("expected autopilot runs, got {cmd:?}");
+        };
+        assert_eq!(a.id, "ap-1");
+        assert_eq!(a.limit, 20, "the history read defaults to a bounded window");
+    }
+
+    /// The list surface makes an armed api trigger visible, and the JSON
+    /// surface carries the flag.
+    #[test]
+    fn autopilot_renderers_surface_the_api_trigger() {
+        let mut ap = sample_autopilot(true);
+        assert!(
+            !autopilot_line(&ap, None).contains("[api]"),
+            "an unarmed trigger shows no badge"
+        );
+        assert!(autopilot_to_json(&ap, None).contains("\"api_trigger_enabled\":false"));
+
+        ap.api_trigger_enabled = true;
+        assert!(
+            autopilot_line(&ap, None).contains("[api]"),
+            "an armed api trigger must be visible: {}",
+            autopilot_line(&ap, None)
+        );
+        assert!(autopilot_to_json(&ap, None).contains("\"api_trigger_enabled\":true"));
+    }
+
+    /// The run-history renderers carry the trigger source and the admission
+    /// reason — without them a recorded skip is unreadable from the CLI.
+    #[test]
+    fn autopilot_run_renderers_carry_source_and_reason() {
+        let run = ainb_hangar_store::repo::autopilot::AutopilotRun {
+            id: "01RUN".into(),
+            autopilot_id: "01AP".into(),
+            started_at: 1_767_258_000_000,
+            completed_at: Some(1_767_258_000_000),
+            status: "skipped".into(),
+            source: "api".into(),
+            failure_reason: Some("concurrency limit: 1/1 in flight".into()),
+        };
+        let json = autopilot_run_to_json(&run);
+        assert!(json.contains("\"status\":\"skipped\""), "{json}");
+        assert!(json.contains("\"source\":\"api\""), "{json}");
+        assert!(json.contains("concurrency limit"), "{json}");
     }
 
     /// Build a stored autopilot fixture for the render tests.
@@ -8032,6 +8337,7 @@ mod tests {
             concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
             next_tick_at: Some(1_767_258_000_000),
             enabled,
+            api_trigger_enabled: false,
             created_at: 0,
         }
     }

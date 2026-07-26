@@ -751,7 +751,9 @@ async fn handle(
         methods::HANGAR_AUTOPILOTS_LIST
         | methods::HANGAR_AUTOPILOT_RUNS
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
-        | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req, events).await,
+        | methods::HANGAR_AUTOPILOT_SET_ENABLED
+        | methods::HANGAR_AUTOPILOT_TRIGGER_API
+        | methods::HANGAR_AUTOPILOT_SET_API_TRIGGER => handle_autopilot(pool, req, events).await,
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_TASK_RETRY => handle_task_retry(pool, req, events).await,
@@ -6490,7 +6492,8 @@ async fn agent_skills_list(
     serde_json::to_value(result).map_err(|e| internal(&format!("encode agent skills: {e}")))
 }
 
-/// Dispatch the four P7.5 autopilot-manager RPCs. Each resolves + scopes by
+/// Dispatch the autopilot-manager RPCs (the four P7.5 ones plus the two `api`
+/// trigger verbs of migration 0057). Each resolves + scopes by
 /// workspace (a foreign id yields an empty snapshot for the reads, fires/toggles
 /// nothing for the mutations) and drives the workspace-scoped autopilot snapshot
 /// mappers. The two mutations publish their matching [`HangarEvent`] onto
@@ -6566,6 +6569,89 @@ async fn handle_autopilot(
                 }
             }
             Ok(serde_json::json!({}))
+        }
+        methods::HANGAR_AUTOPILOT_TRIGGER_API => {
+            let params: ainb_hangar_proto::snapshots::AutopilotTriggerApiParams =
+                parse_params(req, "{ workspace_id, autopilot_id }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            let outcome = snapshots::autopilot_trigger_api(pool, &SystemClock, &ws, &id)
+                .await
+                .map_err(|e| internal(&format!("autopilot api trigger: {e}")))?;
+            // Announce exactly what the scheduler path announces, so the manager
+            // pane refreshes identically whichever trigger fired. `not_found` /
+            // `disabled` wrote nothing, so they announce nothing.
+            let result = match outcome {
+                snapshots::ApiTriggerOutcome::NotFound => {
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "not_found".to_string(),
+                        run_id: None,
+                        task_id: None,
+                        reason: None,
+                    }
+                }
+                snapshots::ApiTriggerOutcome::Disabled => {
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "disabled".to_string(),
+                        run_id: None,
+                        task_id: None,
+                        reason: None,
+                    }
+                }
+                snapshots::ApiTriggerOutcome::Fired { run_id, task_id } => {
+                    events.emit(
+                        ws.as_str(),
+                        ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                            autopilot_id: id.to_string(),
+                            status: "running".to_string(),
+                        },
+                    );
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "fired".to_string(),
+                        run_id: Some(run_id),
+                        task_id: Some(task_id),
+                        reason: None,
+                    }
+                }
+                snapshots::ApiTriggerOutcome::Skipped { run_id, reason } => {
+                    events.emit(
+                        ws.as_str(),
+                        ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                            autopilot_id: id.to_string(),
+                            status: "skipped".to_string(),
+                        },
+                    );
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "skipped".to_string(),
+                        run_id: Some(run_id),
+                        task_id: None,
+                        reason: Some(reason),
+                    }
+                }
+            };
+            to_value(&result)
+        }
+        methods::HANGAR_AUTOPILOT_SET_API_TRIGGER => {
+            let params: ainb_hangar_proto::snapshots::AutopilotSetApiTriggerParams =
+                parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            let updated = snapshots::autopilot_set_api_trigger(pool, &ws, &id, params.enabled)
+                .await
+                .map_err(|e| autopilot_repo_err(&e))?;
+            // Push the refreshed row so the manager table shows the armed badge
+            // in place — the same best-effort shape as `set_enabled`.
+            if updated {
+                if let Ok(rows) = snapshots::autopilots_list(pool, &ws).await {
+                    if let Some(row) = rows.into_iter().find(|r| r.id == id.as_str()) {
+                        events.emit(
+                            ws.as_str(),
+                            ainb_hangar_proto::events::HangarEvent::AutopilotUpdated(row),
+                        );
+                    }
+                }
+            }
+            to_value(&ainb_hangar_proto::snapshots::AutopilotSetApiTriggerResult { updated })
         }
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
@@ -8036,6 +8122,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -8112,6 +8199,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -8171,6 +8259,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -8217,6 +8306,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await

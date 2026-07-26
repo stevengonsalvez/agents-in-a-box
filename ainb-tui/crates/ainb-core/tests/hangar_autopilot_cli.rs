@@ -280,3 +280,179 @@ async fn cli_autopilot_create_rejects_invalid_cron_before_insert() {
         .expect("count autopilots");
     assert_eq!(count, 0, "a malformed cron must leave zero autopilot rows");
 }
+
+/// The `api` trigger + the `skipped` run status, end to end through the real
+/// binary (multica parity item 15).
+///
+/// The full operator transcript from the spec's acceptance proof:
+///
+/// 1. `run --source api` FAILS while the trigger is unarmed (non-zero exit,
+///    naming the fix) — a half-configured trigger is never firable;
+/// 2. `api-trigger <id>` arms it, and `list` shows the armed badge;
+/// 3. `run --source api` fires, stamping `source='api'` on the run;
+/// 4. `run --source api` again, at `max_concurrent_runs = 1` under the default
+///    `skip` policy, is DECLINED and RECORDED — it prints `skipped`, exits 0 (a
+///    successful, declined dispatch), enqueues no second task, and leaves a
+///    `status='skipped', source='api'` row readable via `runs --format json`.
+#[tokio::test]
+async fn cli_autopilot_api_trigger_fires_and_records_skipped() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open_in(tmp.path()).await.expect("open store");
+        seed_agent(store.pool()).await;
+    }
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "autopilot",
+            "create",
+            "--name",
+            "apitrig",
+            "--cron",
+            "0 9 * * *",
+            "--agent",
+            "ag-1",
+            "--max-concurrent-runs",
+            "1",
+        ],
+    );
+    assert!(ok, "autopilot create should exit 0; out={out}");
+    let id = out
+        .split_whitespace()
+        .nth(2)
+        .map(str::to_string)
+        .expect("create output carries an id");
+
+    // 1. Unarmed: the api fire is REFUSED, and the message names the fix.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "run", &id, "--source", "api"],
+    );
+    assert!(
+        !ok,
+        "an unarmed api trigger must not fire (exit non-zero); out={out}"
+    );
+    assert!(
+        out.contains("api trigger not enabled") && out.contains("api-trigger"),
+        "the refusal must name the fix:\n{out}"
+    );
+
+    // 2. Arm it.
+    let (ok, out) = run(tmp.path(), &["hangar", "autopilot", "api-trigger", &id]);
+    assert!(ok, "api-trigger should exit 0; out={out}");
+    assert!(
+        out.contains("enabled api trigger"),
+        "missing arm ack:\n{out}"
+    );
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "list", "--format", "json"],
+    );
+    assert!(ok, "autopilot list should exit 0; out={out}");
+    assert!(
+        out.contains("\"api_trigger_enabled\":true"),
+        "the armed trigger must be visible on the list surface:\n{out}"
+    );
+
+    // 3. Armed: the api fire works.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "run", &id, "--source", "api"],
+    );
+    assert!(ok, "an armed api fire should exit 0; out={out}");
+    assert!(out.contains("fired autopilot"), "missing fire ack:\n{out}");
+
+    // 4. At the limit: DECLINED, recorded, and still a successful command.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "run", &id, "--source", "api"],
+    );
+    assert!(
+        ok,
+        "a declined dispatch is a successful no-op, not an error; out={out}"
+    );
+    assert!(
+        out.contains("skipped autopilot") && out.contains("concurrency limit"),
+        "the decline must be reported with its reason:\n{out}"
+    );
+
+    // The read-back surface carries both runs, with their provenance.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "runs", &id, "--format", "json"],
+    );
+    assert!(ok, "autopilot runs should exit 0; out={out}");
+    let runs: Vec<serde_json::Value> = serde_json::from_str(out.trim()).expect("runs json");
+    assert_eq!(runs.len(), 2, "one fired run and one recorded skip:\n{out}");
+    assert_eq!(
+        runs.iter().filter(|r| r["status"] == "running" && r["source"] == "api").count(),
+        1,
+        "the fired run is stamped with its api provenance:\n{out}"
+    );
+    let skipped = runs
+        .iter()
+        .find(|r| r["status"] == "skipped")
+        .expect("the declined dispatch is readable from the CLI, not just logged");
+    assert_eq!(skipped["source"], "api");
+    assert!(
+        skipped["failure_reason"]
+            .as_str()
+            .is_some_and(|r| r.starts_with("concurrency limit")),
+        "the admission reason is persisted:\n{out}"
+    );
+    assert!(
+        skipped["completed_at"].is_i64(),
+        "a skipped run is TERMINAL:\n{out}"
+    );
+
+    // The skip enqueued no work.
+    let store = Store::open_in(tmp.path()).await.expect("reopen store");
+    let tasks: i64 = sqlx::query_scalar("SELECT count(*) FROM agent_task_queue")
+        .fetch_one(store.pool())
+        .await
+        .expect("count tasks");
+    assert_eq!(tasks, 1, "a declined dispatch must enqueue no second task");
+}
+
+/// `api-trigger --disable` disarms it again, and the refusal comes back.
+#[tokio::test]
+async fn cli_autopilot_api_trigger_can_be_disarmed() {
+    let tmp = tempfile::tempdir().unwrap();
+    {
+        let store = Store::open_in(tmp.path()).await.expect("open store");
+        seed_agent(store.pool()).await;
+    }
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "autopilot",
+            "create",
+            "--name",
+            "disarm",
+            "--cron",
+            "0 9 * * *",
+            "--agent",
+            "ag-1",
+        ],
+    );
+    assert!(ok, "create should exit 0; out={out}");
+    let id = out.split_whitespace().nth(2).map(str::to_string).unwrap();
+
+    let (ok, _) = run(tmp.path(), &["hangar", "autopilot", "api-trigger", &id]);
+    assert!(ok);
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "api-trigger", &id, "--disable"],
+    );
+    assert!(ok, "disarm should exit 0; out={out}");
+    assert!(out.contains("disabled api trigger"), "{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "autopilot", "run", &id, "--source", "api"],
+    );
+    assert!(!ok, "a disarmed trigger must refuse again; out={out}");
+}
