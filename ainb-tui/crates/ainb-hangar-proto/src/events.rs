@@ -1197,7 +1197,10 @@ mod tests {
         };
         let out = serde_json::to_string(&with_env).unwrap();
         assert!(out.contains("\"agent_env_key_count\":1"), "{out}");
-        assert!(out.contains("\"agent_env_keys\":[\"SECRET_TOKEN\"]"), "{out}");
+        assert!(
+            out.contains("\"agent_env_keys\":[\"SECRET_TOKEN\"]"),
+            "{out}"
+        );
         assert!(out.contains("\"agent_env_redacted\":true"), "{out}");
         assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), with_env);
     }

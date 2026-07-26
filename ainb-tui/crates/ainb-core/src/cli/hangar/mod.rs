@@ -1032,9 +1032,7 @@ fn parse_env_json(raw: &str, flag: &str) -> Result<Vec<(String, String)>, String
     let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| shape.clone())?;
     let obj = value.as_object().ok_or_else(|| shape.clone())?;
     obj.iter()
-        .map(|(k, v)| {
-            v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| shape.clone())
-        })
+        .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| shape.clone()))
         .collect()
 }
 
@@ -2807,8 +2805,8 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
     // `--env` / `--env-stdin` / `--env-file` are mutually exclusive at the clap
     // layer; whichever is present REPLACES the whole map (parity #30). Resolved
     // FIRST because it borrows `args` whole (the reads below move out of it).
-    let agent_env = resolve_agent_env_write(&args)?
-        .map(ainb_hangar_core::agent_env::AgentEnv::from_pairs);
+    let agent_env =
+        resolve_agent_env_write(&args)?.map(ainb_hangar_core::agent_env::AgentEnv::from_pairs);
     // Each nullable text field uses its clear-flag to distinguish "clear to none"
     // from "leave unchanged" (a clap conflict already bars setting both).
     let instructions = clear_or_set(args.clear_instructions, args.instructions);
@@ -7204,7 +7202,10 @@ mod tests {
     #[test]
     fn agent_json_masks_env_values() {
         let out = agent_to_json(&agent_with_secret_env());
-        assert!(!out.contains(ENV_SECRET), "agent JSON leaked the env value: {out}");
+        assert!(
+            !out.contains(ENV_SECRET),
+            "agent JSON leaked the env value: {out}"
+        );
         assert!(out.contains(r#""SECRET_TOKEN":"****""#), "{out}");
         assert!(out.contains(r#""env_key_count":1"#), "{out}");
         assert!(out.contains(r#""env_redacted":true"#), "{out}");
@@ -7224,10 +7225,15 @@ mod tests {
     #[test]
     fn parse_env_kv_error_never_echoes_the_value() {
         let no_eq = parse_env_kv(ENV_SECRET).expect_err("missing '=' must error");
-        assert!(!no_eq.contains(ENV_SECRET), "error echoed the value: {no_eq}");
-        let empty_key =
-            parse_env_kv(&format!("={ENV_SECRET}")).expect_err("empty key must error");
-        assert!(!empty_key.contains("sk-live-"), "error echoed the value: {empty_key}");
+        assert!(
+            !no_eq.contains(ENV_SECRET),
+            "error echoed the value: {no_eq}"
+        );
+        let empty_key = parse_env_kv(&format!("={ENV_SECRET}")).expect_err("empty key must error");
+        assert!(
+            !empty_key.contains("sk-live-"),
+            "error echoed the value: {empty_key}"
+        );
     }
 
     /// Clap must refuse any two of the three env write channels together, so a
@@ -7257,10 +7263,16 @@ mod tests {
     fn env_file_empty_is_an_error_but_brace_brace_clears() {
         let err = parse_env_json("   \n ", "--env-file").expect_err("blank input must error");
         assert!(err.contains("pass '{}' to clear"), "{err}");
-        assert_eq!(parse_env_json("{}", "--env-file").expect("{} clears"), Vec::new());
         assert_eq!(
-            parse_env_json(&format!(r#"{{"SECRET_TOKEN":"{ENV_SECRET}"}}"#), "--env-file")
-                .expect("valid object"),
+            parse_env_json("{}", "--env-file").expect("{} clears"),
+            Vec::new()
+        );
+        assert_eq!(
+            parse_env_json(
+                &format!(r#"{{"SECRET_TOKEN":"{ENV_SECRET}"}}"#),
+                "--env-file"
+            )
+            .expect("valid object"),
             vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())]
         );
     }

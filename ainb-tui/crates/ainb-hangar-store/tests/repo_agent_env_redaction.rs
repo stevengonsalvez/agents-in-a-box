@@ -67,7 +67,10 @@ async fn seeded_agent(store: &Store) -> Agent {
         ..Agent::default()
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
-    AgentRepo::get(store.pool(), "agent-secret").await.expect("get agent").expect("agent exists")
+    AgentRepo::get(store.pool(), "agent-secret")
+        .await
+        .expect("get agent")
+        .expect("agent exists")
 }
 
 #[tokio::test]
@@ -77,9 +80,18 @@ async fn stored_env_never_appears_in_the_row_debug() {
     let agent = seeded_agent(&store).await;
 
     let rendered = format!("{agent:?}");
-    assert!(!rendered.contains(SECRET), "row Debug leaked the env value: {rendered}");
-    assert!(rendered.contains("SECRET_TOKEN"), "row Debug should keep the key: {rendered}");
-    assert!(rendered.contains("****"), "row Debug should show the mask: {rendered}");
+    assert!(
+        !rendered.contains(SECRET),
+        "row Debug leaked the env value: {rendered}"
+    );
+    assert!(
+        rendered.contains("SECRET_TOKEN"),
+        "row Debug should keep the key: {rendered}"
+    );
+    assert!(
+        rendered.contains("****"),
+        "row Debug should show the mask: {rendered}"
+    );
 }
 
 #[tokio::test]
@@ -91,7 +103,10 @@ async fn serde_of_the_row_env_masks_values() {
     let json = serde_json::to_string(&agent.agent_env).expect("serialize env");
     assert!(!json.contains(SECRET), "serde leaked the env value: {json}");
     assert!(json.contains("****"), "serde should emit the mask: {json}");
-    assert!(json.contains("SECRET_TOKEN"), "serde should keep the key: {json}");
+    assert!(
+        json.contains("SECRET_TOKEN"),
+        "serde should keep the key: {json}"
+    );
 }
 
 #[tokio::test]

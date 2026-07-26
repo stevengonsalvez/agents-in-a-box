@@ -1530,7 +1530,10 @@ mod tests {
         let mut buf = WireBuffer::new(80, 24);
         render_agents(&mut buf, 80, 1, 23, &state);
         let text = buffer_text(&buf, 80, 24);
-        assert!(!text.contains("env "), "an env-less agent renders nothing: {text:?}");
+        assert!(
+            !text.contains("env "),
+            "an env-less agent renders nothing: {text:?}"
+        );
     }
 
     /// A PRE-#30 `agents_list` payload (no `agent_env_*` keys) still decodes, and

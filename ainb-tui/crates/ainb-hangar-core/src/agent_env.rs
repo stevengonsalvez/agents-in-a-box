@@ -123,7 +123,9 @@ impl AgentEnv {
         let pairs = obj
             .iter()
             .map(|(k, v)| {
-                v.as_str().map(|s| (k.clone(), s.to_string())).ok_or("env value is not a string")
+                v.as_str()
+                    .map(|s| (k.clone(), s.to_string()))
+                    .ok_or("env value is not a string")
             })
             .collect::<Result<Vec<_>, _>>()?;
         Ok(Self { pairs })
@@ -250,7 +252,10 @@ mod tests {
     #[test]
     fn debug_masks_values_and_keeps_keys() {
         let rendered = format!("{:?}", one());
-        assert!(!rendered.contains(SECRET), "Debug leaked the value: {rendered}");
+        assert!(
+            !rendered.contains(SECRET),
+            "Debug leaked the value: {rendered}"
+        );
         assert!(rendered.contains("SECRET_TOKEN"), "{rendered}");
         assert!(rendered.contains(REDACTED_VALUE), "{rendered}");
     }

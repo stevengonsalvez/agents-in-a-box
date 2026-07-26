@@ -374,10 +374,17 @@ async fn agent_env_value_never_reaches_the_wire() {
     assert!(resp["error"].is_null(), "update must ack: {resp}");
 
     let body = resp.to_string();
-    assert!(!body.contains("sk-live-"), "the update response leaked the env value: {body}");
+    assert!(
+        !body.contains("sk-live-"),
+        "the update response leaked the env value: {body}"
+    );
     let row = &resp["result"];
     assert_eq!(row["agent_env_key_count"], 1, "{resp}");
-    assert_eq!(row["agent_env_keys"], serde_json::json!(["SECRET_TOKEN"]), "{resp}");
+    assert_eq!(
+        row["agent_env_keys"],
+        serde_json::json!(["SECRET_TOKEN"]),
+        "{resp}"
+    );
     assert_eq!(row["agent_env_redacted"], true, "{resp}");
 
     // Same contract on the list snapshot — the surface every TUI actually reads.
@@ -388,7 +395,10 @@ async fn agent_env_value_never_reaches_the_wire() {
         )
         .await;
     let body = list.to_string();
-    assert!(!body.contains("sk-live-"), "agents_list leaked the env value: {body}");
+    assert!(
+        !body.contains("sk-live-"),
+        "agents_list leaked the env value: {body}"
+    );
     let agent = list["result"]["actors"]
         .as_array()
         .unwrap()
@@ -396,7 +406,11 @@ async fn agent_env_value_never_reaches_the_wire() {
         .find(|a| a["actor_ref"] == "agent:agent-1")
         .expect("agent-1 present");
     assert_eq!(agent["agent_env_key_count"], 1, "{list}");
-    assert_eq!(agent["agent_env_keys"], serde_json::json!(["SECRET_TOKEN"]), "{list}");
+    assert_eq!(
+        agent["agent_env_keys"],
+        serde_json::json!(["SECRET_TOKEN"]),
+        "{list}"
+    );
     assert_eq!(agent["agent_env_redacted"], true, "{list}");
 }
 
@@ -424,9 +438,21 @@ async fn malformed_agent_env_error_echoes_neither_key_nor_value() {
             }),
         )
         .await;
-    assert!(!resp["error"].is_null(), "a non-string env value must be rejected: {resp}");
+    assert!(
+        !resp["error"].is_null(),
+        "a non-string env value must be rejected: {resp}"
+    );
     let message = resp["error"]["message"].as_str().unwrap_or_default();
-    assert!(!message.contains("31337"), "the error echoed the value: {message}");
-    assert!(!message.contains("SECRET_TOKEN"), "the error echoed the key: {message}");
-    assert!(message.starts_with("expected "), "the message still names the shape: {message}");
+    assert!(
+        !message.contains("31337"),
+        "the error echoed the value: {message}"
+    );
+    assert!(
+        !message.contains("SECRET_TOKEN"),
+        "the error echoed the key: {message}"
+    );
+    assert!(
+        message.starts_with("expected "),
+        "the message still names the shape: {message}"
+    );
 }

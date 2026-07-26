@@ -124,7 +124,10 @@ async fn update_config_persists_and_is_partial() {
     assert_eq!(got.cli_args, vec!["--verbose".to_string()]);
     assert_eq!(got.mcp_config.as_deref(), Some(r#"{"servers":{}}"#));
     assert_eq!(got.thinking.as_deref(), Some("high"));
-    assert_eq!(got.agent_env.expose_for_child_env(), vec![("FOO".to_string(), "bar".to_string())]);
+    assert_eq!(
+        got.agent_env.expose_for_child_env(),
+        vec![("FOO".to_string(), "bar".to_string())]
+    );
     assert_eq!(
         got.token_budget,
         Some(750_000),

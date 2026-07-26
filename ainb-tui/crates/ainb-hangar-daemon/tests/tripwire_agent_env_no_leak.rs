@@ -169,16 +169,30 @@ async fn agent_env_value_leaks_into_no_persisted_or_rendered_artefact() {
     assert_clean_tree(&task_logs, "the task logs directory");
 
     // ── (d) `ainb hangar agent list --format json` stdout ───────────────────
-    let listed = run_ainb(&ainb, home.path(), &["hangar", "agent", "list", "--format", "json"]);
-    assert!(!listed.contains(SECRET), "agent list --format json leaked the value:\n{listed}");
+    let listed = run_ainb(
+        &ainb,
+        home.path(),
+        &["hangar", "agent", "list", "--format", "json"],
+    );
+    assert!(
+        !listed.contains(SECRET),
+        "agent list --format json leaked the value:\n{listed}"
+    );
     assert!(
         listed.contains(r#""SECRET_TOKEN":"****""#),
         "agent list --format json must keep the KEY and mask the value:\n{listed}"
     );
 
     // ── (e) `ainb hangar agent env <id>` stdout ─────────────────────────────
-    let env_out = run_ainb(&ainb, home.path(), &["hangar", "agent", "env", &codex_agent_id]);
-    assert!(!env_out.contains(SECRET), "agent env leaked the value:\n{env_out}");
+    let env_out = run_ainb(
+        &ainb,
+        home.path(),
+        &["hangar", "agent", "env", &codex_agent_id],
+    );
+    assert!(
+        !env_out.contains(SECRET),
+        "agent env leaked the value:\n{env_out}"
+    );
     assert!(
         env_out.contains("SECRET_TOKEN=****"),
         "agent env must print the masked pair:\n{env_out}"

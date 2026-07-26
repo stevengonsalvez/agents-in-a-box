@@ -402,7 +402,11 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let run = run_with_exit(dir.path(), Some("0"));
         let wrapper = dir.path().join(WRAPPER_FILE);
-        std::fs::write(&wrapper, "#!/bin/sh\nenv -i SECRET_TOKEN='sk-live-DEADBEEF01' x\n").unwrap();
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nenv -i SECRET_TOKEN='sk-live-DEADBEEF01' x\n",
+        )
+        .unwrap();
         assert!(wrapper.exists(), "precondition: the wrapper is on disk");
 
         let _ = run.outcome_from_exit_file();
