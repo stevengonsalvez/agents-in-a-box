@@ -776,6 +776,11 @@ pub const T4_SQUAD_INSTRUCTIONS: &str = "Route schema work to the DB owner.";
 pub const T4_DEP_BLOCKER_ISSUE: &str = "issue-dep-a";
 /// The dependency-chain DEPENDENT card's issue id (card B, depends-on A, auto-run on).
 pub const T4_DEP_DEPENDENT_ISSUE: &str = "issue-dep-b";
+/// The card RELATED to the blocker (multica parity #20): it is seeded into the
+/// SAME dep-chain pipeline (a second pipeline would double the fixture cost, and
+/// this suite already flakes under concurrency) with `auto_run` ON, so the only
+/// thing that can explain it never auto-running is its link KIND.
+pub const T4_REL_ISSUE: &str = "issue-dep-r";
 
 /// An agent actor-ref for the T4 squad seeding.
 fn t4_agent_ref(id: &str) -> ainb_hangar_core::actor::ActorRef {
@@ -988,6 +993,26 @@ pub fn prepare_pipeline_dep_chain() -> Pipeline {
                 CardDependencyRepo::set_auto_run(pool, &ws, T4_DEP_DEPENDENT_ISSUE, true)
                     .await
                     .expect("B auto-run on");
+
+                // multica parity #20: R is RELATED to A and also opts into
+                // auto-run. A related link never gates and is invisible to the
+                // finalize seam, so R must neither refuse a run nor gain a task
+                // when A finishes — with auto_run equal on B and R, the LINK KIND
+                // is the only difference between them.
+                seed_card_issue(pool, T4_REL_ISSUE, "DepRelatedR", &repo_path, now + 2).await;
+                CardDependencyRepo::add_link(
+                    pool,
+                    &ws,
+                    T4_REL_ISSUE,
+                    T4_DEP_BLOCKER_ISSUE,
+                    ainb_hangar_store::repo::card_dependency::LinkKind::Related,
+                    now,
+                )
+                .await
+                .expect("R related-to A");
+                CardDependencyRepo::set_auto_run(pool, &ws, T4_REL_ISSUE, true)
+                    .await
+                    .expect("R auto-run on");
                 free_fixture_running_task(pool).await;
             });
         },

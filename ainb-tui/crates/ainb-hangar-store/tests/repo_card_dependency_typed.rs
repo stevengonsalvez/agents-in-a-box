@@ -99,17 +99,11 @@ async fn related_link_never_gates_a_run() {
         .unwrap();
 
     assert!(
-        CardDependencyRepo::unfinished_blockers_of(pool, "a")
-            .await
-            .unwrap()
-            .is_empty(),
+        CardDependencyRepo::unfinished_blockers_of(pool, "a").await.unwrap().is_empty(),
         "a related link must not gate the authoring card"
     );
     assert!(
-        CardDependencyRepo::unfinished_blockers_of(pool, "b")
-            .await
-            .unwrap()
-            .is_empty(),
+        CardDependencyRepo::unfinished_blockers_of(pool, "b").await.unwrap().is_empty(),
         "a related link must not gate the other card either"
     );
     assert!(
@@ -137,12 +131,7 @@ async fn blocks_is_normalised_into_the_reverse_blocked_by_edge() {
         vec!["a"],
         "`a blocks b` gates b, not a"
     );
-    assert!(
-        CardDependencyRepo::unfinished_blockers_of(pool, "a")
-            .await
-            .unwrap()
-            .is_empty()
-    );
+    assert!(CardDependencyRepo::unfinished_blockers_of(pool, "a").await.unwrap().is_empty());
     assert_eq!(
         CardDependencyRepo::blocks_of(pool, "a").await.unwrap(),
         vec!["b"],
@@ -207,8 +196,14 @@ async fn related_is_symmetric_and_idempotent() {
         1,
         "the mirrored re-add did not create a second row"
     );
-    assert_eq!(CardDependencyRepo::related_of(pool, "a").await.unwrap(), vec!["b"]);
-    assert_eq!(CardDependencyRepo::related_of(pool, "b").await.unwrap(), vec!["a"]);
+    assert_eq!(
+        CardDependencyRepo::related_of(pool, "a").await.unwrap(),
+        vec!["b"]
+    );
+    assert_eq!(
+        CardDependencyRepo::related_of(pool, "b").await.unwrap(),
+        vec!["a"]
+    );
 
     // And it can be removed from either end.
     CardDependencyRepo::remove_link(pool, &ws("ws-a"), "b", "a", LinkKind::Related)
@@ -332,10 +327,7 @@ async fn re_adding_a_pair_with_a_new_kind_replaces_the_kind() {
     assert_eq!(links.len(), 1, "still one row for the pair");
     assert_eq!(links[0].kind, LinkKind::Related);
     assert!(
-        CardDependencyRepo::unfinished_blockers_of(pool, "a")
-            .await
-            .unwrap()
-            .is_empty(),
+        CardDependencyRepo::unfinished_blockers_of(pool, "a").await.unwrap().is_empty(),
         "retyped to related — no longer gating"
     );
 }

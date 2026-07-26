@@ -171,9 +171,13 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
         .execute(pool)
         .await
         .expect("card");
+    // One GATING and one RELATED link (multica parity #20 / migration 0055): the
+    // cascade is kind-blind, so a `related` row must go too — otherwise deleting an
+    // issue would leave a dangling association behind.
     sqlx::query(
-        "INSERT INTO card_dependency (workspace_id, dependent_issue_id, blocker_issue_id, created_at) \
-         VALUES ('ws-a', 'i-1', 'i-2', 0), ('ws-a', 'i-2', 'i-1', 0)",
+        "INSERT INTO card_dependency \
+         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
+         VALUES ('ws-a', 'i-1', 'i-2', 0, 'blocked_by'), ('ws-a', 'i-2', 'i-1', 0, 'related')",
     )
     .execute(pool)
     .await
