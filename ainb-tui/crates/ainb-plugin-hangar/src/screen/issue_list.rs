@@ -4576,16 +4576,18 @@ mod tests {
     }
 
     /// 63l.4 — the card-board spreads its columns HORIZONTALLY across the full
-    /// width (Backlog left, Done right), not vertically. With a populated fixture
-    /// the leftmost (`Backlog`) and rightmost (`Done`) column headers must sit on
-    /// the SAME header row but at opposite ends of the board — the board uses the
-    /// width, it doesn't stack the sections down the pane.
+    /// width (Backlog left, Cancelled right), not vertically. With a populated
+    /// fixture every column header must sit on the SAME header row, in canonical
+    /// left-to-right order — the board uses the width, it doesn't stack the
+    /// sections down the pane.
     ///
     /// Reverting to the old top-packed vertical band layout stacks the headers down
     /// one column and this side-by-side assertion fails.
     #[test]
     fn columns_spread_horizontally_across_the_board() {
-        const W: u16 = 120;
+        // 168 = 7 × 24, wide enough that every canonical header paints in full
+        // rather than being clipped to a stub the assertions can't find.
+        const W: u16 = 168;
         const H: u16 = 24;
         let top = 1u16;
         let bottom = H - 1; // footer pinned on the last row
@@ -4606,31 +4608,48 @@ mod tests {
         let mut buf = WireBuffer::new(W, H);
         render_issue_list(&mut buf, W, top, bottom, &s, 0);
 
-        // Find the x of the Backlog header glyph and the Done header glyph; they
-        // sit on the same header row at opposite ends of the board.
-        let backlog_x = header_glyph_x(&buf, "Backlog (").expect("Backlog header painted");
-        let done_x = header_glyph_x(&buf, "Done (").expect("Done header painted");
+        // Every canonical header sits on the same row, at strictly increasing x.
+        // Asserted as a SEQUENCE rather than frozen offsets so a width or column
+        // change cannot make the check vacuous.
+        let xs: Vec<u16> = [
+            "Backlog (",
+            "Todo (",
+            "In Progress (",
+            "In Review (",
+            "Done (",
+            "Blocked (",
+            "Cancelled (",
+        ]
+        .iter()
+        .map(|label| {
+            header_glyph_x(&buf, label).unwrap_or_else(|| panic!("{label} header painted"))
+        })
+        .collect();
         assert!(
-            done_x > backlog_x,
-            "Done must sit to the RIGHT of Backlog (horizontal columns): \
-             backlog_x={backlog_x}, done_x={done_x}",
+            xs.windows(2).all(|w| w[1] > w[0]),
+            "columns must spread left-to-right in canonical order, got {xs:?}",
         );
-        // Done sits in the rightmost fifth of a five-column board.
+        // The rightmost column really is at the right edge (not all seven packed
+        // into the left half with a vertical stack below).
+        let cancelled_x = *xs.last().expect("seven headers");
+        let columns = u16::try_from(IssueColumn::all().len()).expect("column count fits");
         assert!(
-            done_x >= W * 4 / 5 - 4,
-            "Done column must occupy the rightmost fifth (done_x={done_x}, w={W})",
+            cancelled_x >= W * (columns - 1) / columns - 4,
+            "Cancelled must occupy the rightmost column (cancelled_x={cancelled_x}, w={W})",
         );
     }
 
     /// The `(x, _)` start column of a header label painted anywhere in the buffer
     /// (the column the card-board painted that header at), scanning row-major.
     fn header_glyph_x(buf: &WireBuffer, label: &str) -> Option<u16> {
+        // Matched over CHARS, never bytes: the header row carries multi-byte
+        // status glyphs (`⊘`, `⨯`, …), so `str::find`'s byte offset is NOT a
+        // screen column and every x comparison built on it would be nonsense.
+        let needle: Vec<char> = label.chars().collect();
         for y in 0..buf.height {
-            let line = row_text(buf, y, buf.width);
-            if let Some(byte_idx) = line.find(label) {
-                // `find` returns a byte index; the header labels are ASCII here, so
-                // the byte index equals the char column.
-                return u16::try_from(byte_idx).ok();
+            let line: Vec<char> = row_text(buf, y, buf.width).chars().collect();
+            if let Some(idx) = line.windows(needle.len()).position(|w| w == needle.as_slice()) {
+                return u16::try_from(idx).ok();
             }
         }
         None
