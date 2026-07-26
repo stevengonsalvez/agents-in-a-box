@@ -409,7 +409,9 @@ pub fn render_card_board(
     // Blocked/Cancelled unreachable.
     let last_start = columns.len().saturating_sub(visible_cols);
     let first_col = selected
-        .map_or(0, |(sc, _)| sc.saturating_sub(visible_cols.saturating_sub(1)))
+        .map_or(0, |(sc, _)| {
+            sc.saturating_sub(visible_cols.saturating_sub(1))
+        })
         .min(last_start);
     let painted = visible_cols.min(columns.len().saturating_sub(first_col));
 

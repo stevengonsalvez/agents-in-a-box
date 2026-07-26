@@ -5140,9 +5140,9 @@ fn card_run_err(e: CardRunError) -> RpcError {
             "this card is blocked by unfinished cards ({}); finish them (or remove the dependency) first",
             refs.join(", ")
         )),
-        CardRunError::Cancelled => invalid_params(
-            "this card is cancelled; move it out of Cancelled before running it",
-        ),
+        CardRunError::Cancelled => {
+            invalid_params("this card is cancelled; move it out of Cancelled before running it")
+        }
         CardRunError::ActiveRun(status) => invalid_params(&format!(
             "a run is already active for this card ({status}); cancel it or wait for it to finish"
         )),

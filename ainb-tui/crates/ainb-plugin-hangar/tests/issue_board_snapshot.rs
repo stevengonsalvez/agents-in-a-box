@@ -134,7 +134,9 @@ fn render_full_issue_board_snapshot() {
     }
 
     // POSITIVE — each seeded card paints its `HGR-<n>` display id.
-    for id in ["HGR-1", "HGR-2", "HGR-3", "HGR-4", "HGR-5", "HGR-6", "HGR-7"] {
+    for id in [
+        "HGR-1", "HGR-2", "HGR-3", "HGR-4", "HGR-5", "HGR-6", "HGR-7",
+    ] {
         assert!(full.contains(id), "missing card display id {id:?}:\n{full}");
     }
 

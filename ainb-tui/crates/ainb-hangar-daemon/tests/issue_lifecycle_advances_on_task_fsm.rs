@@ -147,7 +147,11 @@ async fn blocked_issue_still_advances_to_in_progress() {
     let pool = store.pool();
 
     set_issue1_state(pool, "blocked").await;
-    assert_eq!(issue1_state(pool).await, "blocked", "blocked seeds and lists");
+    assert_eq!(
+        issue1_state(pool).await,
+        "blocked",
+        "blocked seeds and lists"
+    );
 
     let task = task1(pool).await;
     advance_issue_lifecycle_after_transition(pool, &task, "running").await;

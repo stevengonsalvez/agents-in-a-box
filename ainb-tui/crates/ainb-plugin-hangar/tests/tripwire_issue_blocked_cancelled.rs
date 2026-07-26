@@ -252,20 +252,17 @@ impl Pane {
     /// every x-range assertion below would silently compare nonsense.
     fn label_x(&self, label: &str) -> Option<usize> {
         let needle: Vec<char> = label.chars().collect();
-        self.rows.iter().find_map(|r| {
-            r.windows(needle.len()).position(|w| w == needle.as_slice())
-        })
+        self.rows
+            .iter()
+            .find_map(|r| r.windows(needle.len()).position(|w| w == needle.as_slice()))
     }
 
     /// Whether `needle` appears anywhere within the half-open x range
     /// `[from, to)` — i.e. INSIDE one board column.
     fn contains_in_x_range(&self, needle: &str, from: usize, to: usize) -> bool {
         self.rows.iter().any(|r| {
-            let slice: String = r
-                .iter()
-                .skip(from)
-                .take(to.saturating_sub(from))
-                .collect::<String>();
+            let slice: String =
+                r.iter().skip(from).take(to.saturating_sub(from)).collect::<String>();
             slice.contains(needle)
         })
     }
@@ -647,9 +644,7 @@ async fn context_menu_moves_a_card_into_blocked_over_the_wire() {
         let card_y = pane
             .rows
             .iter()
-            .position(|r| {
-                r.iter().skip(todo_x).take(20).collect::<String>().contains("HGR-1")
-            })
+            .position(|r| r.iter().skip(todo_x).take(20).collect::<String>().contains("HGR-1"))
             .expect("the Todo card paints its id") as u16;
 
         // Right-click the Todo card to raise the context menu.
@@ -709,7 +704,5 @@ async fn context_menu_moves_a_card_into_blocked_over_the_wire() {
         drop(hw);
         server.abort();
     };
-    tokio::time::timeout(BUDGET, body)
-        .await
-        .expect("exceeded blocked-move budget");
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded blocked-move budget");
 }

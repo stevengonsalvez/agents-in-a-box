@@ -42,10 +42,12 @@ async fn pool_at_head(dir: &std::path::Path) -> SqlitePool {
 
 /// Seed the workspace + creator every issue row needs.
 async fn seed_workspace(pool: &SqlitePool) {
-    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES ('ws-1','ws-1','ws-1',0)")
-        .execute(pool)
-        .await
-        .expect("insert workspace");
+    sqlx::query(
+        "INSERT INTO workspace (id, slug, name, created_at) VALUES ('ws-1','ws-1','ws-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("insert workspace");
     sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('user-1','a@x.com',0)")
         .execute(pool)
         .await
@@ -214,6 +216,8 @@ async fn legacy_open_and_closed_are_still_admitted() {
     try_insert(&pool, "i-open", "open").await.expect("legacy open still inserts");
     assert_eq!(state_of(&pool, "i-open").await, "open");
 
-    try_update(&pool, "i-open", "closed").await.expect("legacy closed still updates");
+    try_update(&pool, "i-open", "closed")
+        .await
+        .expect("legacy closed still updates");
     assert_eq!(state_of(&pool, "i-open").await, "closed");
 }
