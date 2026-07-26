@@ -67,6 +67,12 @@ pub struct AgentView {
     /// The agent's avatar token (e.g. `"emoji:🦊"`, migration 0050); empty when
     /// unset. Rendered as the leading glyph, never as the raw `emoji:` token.
     pub avatar: String,
+    /// How many per-agent env vars the agent carries (parity #30). Rendered as
+    /// `env <n> (hidden)`; `0` renders nothing.
+    ///
+    /// A COUNT, never a value — the wire has no field that can carry an env
+    /// value, so this screen has no way to render one even by mistake.
+    pub agent_env_key_count: u32,
 }
 
 impl Default for AgentView {
@@ -81,6 +87,7 @@ impl Default for AgentView {
             workload: Workload::Idle,
             description: String::new(),
             avatar: String::new(),
+            agent_env_key_count: 0,
         }
     }
 }
@@ -189,6 +196,7 @@ impl AgentsState {
                 workload: a.workload,
                 description: a.description.clone(),
                 avatar: a.avatar.clone(),
+                agent_env_key_count: a.agent_env_key_count,
             })
             .collect();
         Self::new(agents)
@@ -912,6 +920,19 @@ fn render_agent_row(
         x = put_str(buf, x, row, "  · ", MUTED_GRAY, area_w);
         x = put_str(buf, x, row, &agent.subtitle, MUTED_GRAY, area_w);
     }
+    // Parity #30: the per-agent env is surfaced as a COUNT only. There is no
+    // value on the wire to render, by construction.
+    if agent.agent_env_key_count > 0 {
+        x = put_str(buf, x, row, "  · ", MUTED_GRAY, area_w);
+        x = put_str(
+            buf,
+            x,
+            row,
+            &format!("env {} (hidden)", agent.agent_env_key_count),
+            MUTED_GRAY,
+            area_w,
+        );
+    }
     if !agent.description.is_empty() {
         x = put_str(buf, x, row, "  — ", MUTED_GRAY, area_w);
         put_str(buf, x, row, &agent.description, MUTED_GRAY, area_w);
@@ -1464,6 +1485,67 @@ mod tests {
             None,
             "an empty emoji token is nothing"
         );
+    }
+
+    /// Parity #30: an agent with per-agent env renders a COUNT (`env 1 (hidden)`)
+    /// and — necessarily — no value, because the wire carries none. The
+    /// `ActorRow` the screen is built from is what makes the leak impossible:
+    /// it has a key-name list and a count, and no value-bearing field at all.
+    #[test]
+    fn render_agent_row_shows_env_key_count_not_values() {
+        let row = ActorRow {
+            actor_ref: "agent:a-1".into(),
+            display_name: "builder".into(),
+            subtitle: "agent".into(),
+            presence: PresenceState::Online,
+            is_agent: true,
+            agent_env_key_count: 1,
+            agent_env_keys: vec!["SECRET_TOKEN".into()],
+            agent_env_redacted: true,
+            ..ActorRow::default()
+        };
+        let state = AgentsState::from_actors(&[row]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(
+            text.contains("env 1 (hidden)"),
+            "the roster must surface the env COUNT: {text:?}"
+        );
+        assert!(
+            !text.contains("sk-live-"),
+            "no value may reach the frame: {text:?}"
+        );
+    }
+
+    /// An env-less agent renders no env affordance at all (pure addition).
+    #[test]
+    fn render_agent_row_omits_env_when_the_agent_has_none() {
+        let state = AgentsState::new(vec![AgentView {
+            actor_ref: "agent:a-1".into(),
+            name: "builder".into(),
+            presence: PresenceState::Online,
+            ..AgentView::default()
+        }]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(!text.contains("env "), "an env-less agent renders nothing: {text:?}");
+    }
+
+    /// A PRE-#30 `agents_list` payload (no `agent_env_*` keys) still decodes, and
+    /// the screen simply shows no env affordance — the append-only proof from
+    /// the consumer's side.
+    #[test]
+    fn pre_parity_30_actor_row_payload_decodes_with_no_env_metadata() {
+        let legacy = r#"{"actor_ref":"agent:a-1","display_name":"builder",
+            "subtitle":"agent","presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-#30 payload decodes");
+        assert_eq!(row.agent_env_key_count, 0);
+        assert!(row.agent_env_keys.is_empty());
+        assert!(!row.agent_env_redacted);
+        let state = AgentsState::from_actors(&[row]);
+        assert_eq!(state.agents()[0].agent_env_key_count, 0);
     }
 
     /// Reassemble the buffer text for render assertions.
