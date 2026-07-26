@@ -122,6 +122,11 @@ pub enum SquadAssignError {
         /// has no `owner`-role member to fall back to).
         invoker: String,
     },
+    /// The squad is ARCHIVED, so it refuses new work (migration 0052, multica
+    /// `DeleteSquad` soft-delete parity). The guard runs in the pre-flight resolve
+    /// phase, so NO task row is written — restore the squad to assign to it again.
+    #[error("squad `{0}` is archived — restore it before assigning work")]
+    Archived(String),
     /// An underlying store failure (resolve, lookup, or enqueue).
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -175,6 +180,8 @@ impl SquadAssignService {
     ///
     /// # Errors
     ///
+    /// - [`SquadAssignError::Archived`] when the squad is archived — no task row
+    ///   is written.
     /// - [`SquadAssignError::NoAgentLeader`] when the squad is unknown in the
     ///   workspace or its leader is a human `member`.
     /// - [`SquadAssignError::LeaderAgentMissing`] when the leader agent row is
@@ -193,6 +200,12 @@ impl SquadAssignService {
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<SquadAssignment, SquadAssignError> {
+        // 0. An ARCHIVED squad refuses new work (migration 0052). Checked FIRST,
+        //    in the pre-flight phase, so no task row is written.
+        if SquadRepo::is_archived(pool, workspace, squad_id).await? {
+            return Err(SquadAssignError::Archived(squad_id.to_string()));
+        }
+
         // 1. Resolve the squad to its leader's agent id — the routing seam. A
         //    human-member leader (or unknown squad) resolves to `None`: there is
         //    no agent to dispatch to, so the assignment is rejected.
@@ -273,6 +286,8 @@ impl SquadAssignService {
     ///
     /// # Errors
     ///
+    /// - [`SquadAssignError::Archived`] when the squad is archived — the whole
+    ///   fan-out is refused with zero rows written.
     /// - [`SquadAssignError::NoAgentLeader`] / [`SquadAssignError::LeaderAgentMissing`]
     ///   from the leader brief (an unknown squad, a human leader, a dangling
     ///   leader ref).
@@ -295,6 +310,12 @@ impl SquadAssignService {
         // of leaving the leader (and earlier members) queued. Nothing is inserted
         // until all targets are known-good; then every insert lands in ONE
         // transaction (all-or-nothing).
+
+        // 0. An ARCHIVED squad refuses new work (migration 0052), before any
+        //    resolution and well before `pool.begin()`.
+        if SquadRepo::is_archived(pool, workspace, squad_id).await? {
+            return Err(SquadAssignError::Archived(squad_id.to_string()));
+        }
 
         // 1. Resolve the squad's leader agent — the routing seam. A human-member
         //    leader or unknown squad resolves to `None` and is rejected. The
