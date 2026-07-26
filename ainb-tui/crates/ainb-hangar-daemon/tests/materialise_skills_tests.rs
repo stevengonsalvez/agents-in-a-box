@@ -370,8 +370,24 @@ async fn skill_id_by_name(
 async fn disabled_skill_is_not_written_to_disk() {
     let (store, home, _db) = fresh().await;
     let (ws, agent) = seed(store.pool()).await;
-    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
-    attach_skill(store.pool(), &ws, &agent, "review", Some("# review"), vec![]).await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "commit",
+        Some("# commit"),
+        vec![],
+    )
+    .await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "review",
+        Some("# review"),
+        vec![],
+    )
+    .await;
 
     let review = skill_id_by_name(store.pool(), &ws, "review").await;
     SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
@@ -379,9 +395,7 @@ async fn disabled_skill_is_not_written_to_disk() {
         .expect("disable review");
 
     let (target, task_root) = target_in(home.path(), "claude");
-    let report = materialise_for_agent(store.pool(), &agent, &target)
-        .await
-        .expect("materialise");
+    let report = materialise_for_agent(store.pool(), &agent, &target).await.expect("materialise");
 
     assert!(
         task_root.join(".claude/skills/commit/SKILL.md").exists(),
@@ -402,8 +416,24 @@ async fn disabled_skill_is_not_written_to_disk() {
 async fn all_skills_disabled_materialises_nothing() {
     let (store, home, _db) = fresh().await;
     let (ws, agent) = seed(store.pool()).await;
-    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
-    attach_skill(store.pool(), &ws, &agent, "review", Some("# review"), vec![]).await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "commit",
+        Some("# commit"),
+        vec![],
+    )
+    .await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "review",
+        Some("# review"),
+        vec![],
+    )
+    .await;
 
     for name in ["commit", "review"] {
         let id = skill_id_by_name(store.pool(), &ws, name).await;
@@ -413,9 +443,7 @@ async fn all_skills_disabled_materialises_nothing() {
     }
 
     let (target, task_root) = target_in(home.path(), "claude");
-    let report = materialise_for_agent(store.pool(), &agent, &target)
-        .await
-        .expect("materialise");
+    let report = materialise_for_agent(store.pool(), &agent, &target).await.expect("materialise");
 
     assert_eq!(
         report,
@@ -432,14 +460,24 @@ async fn all_skills_disabled_materialises_nothing() {
 async fn re_enabling_restores_the_directory() {
     let (store, home_a, _db) = fresh().await;
     let (ws, agent) = seed(store.pool()).await;
-    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "commit",
+        Some("# commit"),
+        vec![],
+    )
+    .await;
     let commit = skill_id_by_name(store.pool(), &ws, "commit").await;
 
     SkillRepo::set_enabled(store.pool(), &ws, &agent, &commit, false)
         .await
         .expect("disable");
     let (target_a, root_a) = target_in(home_a.path(), "claude");
-    materialise_for_agent(store.pool(), &agent, &target_a).await.expect("materialise A");
+    materialise_for_agent(store.pool(), &agent, &target_a)
+        .await
+        .expect("materialise A");
     assert!(
         !root_a.join(".claude/skills/commit").exists(),
         "disabled: absent from tree A"
@@ -451,7 +489,9 @@ async fn re_enabling_restores_the_directory() {
     // A FRESH tree, so the assertion cannot pass on a leftover from tree A.
     let home_b = tempfile::tempdir().unwrap();
     let (target_b, root_b) = target_in(home_b.path(), "claude");
-    materialise_for_agent(store.pool(), &agent, &target_b).await.expect("materialise B");
+    materialise_for_agent(store.pool(), &agent, &target_b)
+        .await
+        .expect("materialise B");
     assert!(
         root_b.join(".claude/skills/commit/SKILL.md").exists(),
         "re-enabled: present in the fresh tree B"
@@ -464,8 +504,24 @@ async fn re_enabling_restores_the_directory() {
 async fn disabled_runtime_skills_suppresses_by_name() {
     let (store, home, _db) = fresh().await;
     let (ws, agent) = seed(store.pool()).await;
-    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
-    attach_skill(store.pool(), &ws, &agent, "review", Some("# review"), vec![]).await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "commit",
+        Some("# commit"),
+        vec![],
+    )
+    .await;
+    attach_skill(
+        store.pool(),
+        &ws,
+        &agent,
+        "review",
+        Some("# review"),
+        vec![],
+    )
+    .await;
 
     // The link stays ENABLED; only the runtime list names it.
     ainb_hangar_store::repo::agent::AgentRepo::set_disabled_runtime_skills(
@@ -477,9 +533,7 @@ async fn disabled_runtime_skills_suppresses_by_name() {
     .expect("set disabled_runtime_skills");
 
     let (target, task_root) = target_in(home.path(), "claude");
-    let report = materialise_for_agent(store.pool(), &agent, &target)
-        .await
-        .expect("materialise");
+    let report = materialise_for_agent(store.pool(), &agent, &target).await.expect("materialise");
 
     assert!(
         task_root.join(".claude/skills/commit/SKILL.md").exists(),

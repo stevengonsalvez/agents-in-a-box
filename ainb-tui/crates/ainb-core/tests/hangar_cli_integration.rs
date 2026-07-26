@@ -1636,13 +1636,7 @@ fn skill_toggle_round_trips_through_cli() {
     let (ok, out) = run(
         tmp.path(),
         &[
-            "hangar",
-            "skills",
-            "list",
-            "--agent",
-            "Tester",
-            "--format",
-            "json",
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
         ],
     );
     assert!(ok, "skills list --agent should exit 0; out={out}");
@@ -1663,7 +1657,14 @@ fn skill_toggle_round_trips_through_cli() {
     let (ok, out) = run(
         tmp.path(),
         &[
-            "hangar", "skills", "toggle", "review", "--agent", "Tester", "--enabled", "false",
+            "hangar",
+            "skills",
+            "toggle",
+            "review",
+            "--agent",
+            "Tester",
+            "--enabled",
+            "false",
         ],
     );
     assert!(ok, "skills toggle should exit 0; out={out}");
@@ -1675,13 +1676,7 @@ fn skill_toggle_round_trips_through_cli() {
     let (_, out) = run(
         tmp.path(),
         &[
-            "hangar",
-            "skills",
-            "list",
-            "--agent",
-            "Tester",
-            "--format",
-            "json",
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
         ],
     );
     let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
@@ -1701,13 +1696,7 @@ fn skill_toggle_round_trips_through_cli() {
     let (_, out) = run(
         tmp.path(),
         &[
-            "hangar",
-            "skills",
-            "list",
-            "--agent",
-            "Tester",
-            "--format",
-            "json",
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
         ],
     );
     let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");

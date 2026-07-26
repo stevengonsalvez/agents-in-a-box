@@ -483,12 +483,13 @@ impl SkillRepo {
         enabled: bool,
     ) -> Result<bool, SkillRepoError> {
         Self::ensure_same_workspace(pool, workspace, agent, skill).await?;
-        let result = sqlx::query("UPDATE agent_skill SET enabled = ? WHERE agent_id = ? AND skill_id = ?")
-            .bind(i64::from(enabled))
-            .bind(agent.as_str())
-            .bind(skill.as_str())
-            .execute(pool)
-            .await?;
+        let result =
+            sqlx::query("UPDATE agent_skill SET enabled = ? WHERE agent_id = ? AND skill_id = ?")
+                .bind(i64::from(enabled))
+                .bind(agent.as_str())
+                .bind(skill.as_str())
+                .execute(pool)
+                .await?;
         Ok(result.rows_affected() > 0)
     }
 

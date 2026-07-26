@@ -431,10 +431,7 @@ fn enter(state: &SkillManagerState) -> SkillManagerReduction {
 /// Wholesale replacement, not a merge: the reply is the full truth for that
 /// agent, so a link that has been detached since the last load must disappear
 /// from the map rather than linger as a stale ` (disabled)` marker.
-fn links_loaded(
-    state: &SkillManagerState,
-    links: Vec<AgentSkillLinkRow>,
-) -> SkillManagerReduction {
+fn links_loaded(state: &SkillManagerState, links: Vec<AgentSkillLinkRow>) -> SkillManagerReduction {
     let mut next = state.clone();
     next.link_enabled = links.into_iter().map(|l| (l.skill_id, l.enabled)).collect();
     no_intent(next)

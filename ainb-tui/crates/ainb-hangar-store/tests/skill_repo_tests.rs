@@ -500,7 +500,10 @@ async fn set_enabled_false_hides_link_from_skills_for_agent() {
         .await
         .expect("agent_skill_links");
     assert_eq!(
-        links.iter().map(|l| (l.name.as_str().to_string(), l.enabled)).collect::<Vec<_>>(),
+        links
+            .iter()
+            .map(|l| (l.name.as_str().to_string(), l.enabled))
+            .collect::<Vec<_>>(),
         vec![("commit".to_string(), true), ("review".to_string(), false)],
         "a disabled link is still ATTACHED, just not live"
     );

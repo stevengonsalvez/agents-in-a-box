@@ -108,7 +108,6 @@ impl Client {
             .await;
         assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
     }
-
 }
 
 /// Bind + serve the real listener over the seeded store (mirrors `boot()`).
@@ -136,7 +135,6 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     (socket_path, store)
 }
 
-
 /// Fetch `agent-1`'s skill links as a `(name, enabled)` list.
 async fn links(c: &mut Client) -> Vec<(String, bool)> {
     let resp = c
@@ -145,7 +143,10 @@ async fn links(c: &mut Client) -> Vec<(String, bool)> {
             serde_json::json!({ "workspace_id": WS_SLUG, "agent_id": "agent-1" }),
         )
         .await;
-    assert!(resp["error"].is_null(), "agent_skills_list must ack: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "agent_skills_list must ack: {resp}"
+    );
     resp["result"]["links"]
         .as_array()
         .expect("links array")
@@ -282,7 +283,10 @@ async fn skill_set_enabled_unattached_answers_toggled_false() {
 
     // `skill-review` exists but is NOT attached to `agent-1` in the fixture.
     let resp = set_enabled(&mut c, "skill-review", false).await;
-    assert!(resp["error"].is_null(), "an unattached pair is not an error: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "an unattached pair is not an error: {resp}"
+    );
     assert_eq!(
         resp["result"]["toggled"], false,
         "the body reports that nothing was toggled"

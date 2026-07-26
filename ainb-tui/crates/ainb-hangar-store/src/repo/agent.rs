@@ -331,7 +331,9 @@ impl AgentRepo {
         .bind(&agent.kind)
         .bind(&agent.system_key)
         .bind(&agent.service_tier)
-        .bind(disabled_runtime_skills_to_json(&agent.disabled_runtime_skills))
+        .bind(disabled_runtime_skills_to_json(
+            &agent.disabled_runtime_skills,
+        ))
         .execute(pool)
         .await?;
         Ok(())

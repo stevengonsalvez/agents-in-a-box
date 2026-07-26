@@ -51,10 +51,12 @@ async fn pool_at_prior_schema(dir: &std::path::Path) -> SqlitePool {
 /// Seed workspace → user → runtime → agent → skill and attach the skill through
 /// a RAW insert, i.e. exactly the row shape a pre-0051 install holds.
 async fn seed_attached(pool: &SqlitePool) {
-    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES ('ws-1','ws-1','ws-1',0)")
-        .execute(pool)
-        .await
-        .expect("insert workspace");
+    sqlx::query(
+        "INSERT INTO workspace (id, slug, name, created_at) VALUES ('ws-1','ws-1','ws-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("insert workspace");
     sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('user-1','a@x.com',0)")
         .execute(pool)
         .await
@@ -109,7 +111,10 @@ async fn applies_to_fresh_db_and_defaults_enabled_true() {
             .fetch_one(pool)
             .await
             .expect("read disabled_runtime_skills");
-    assert_eq!(suppressed, "[]", "no runtime skill is suppressed by default");
+    assert_eq!(
+        suppressed, "[]",
+        "no runtime skill is suppressed by default"
+    );
 }
 
 /// The load-bearing upgrade proof: a link written BEFORE the column existed
