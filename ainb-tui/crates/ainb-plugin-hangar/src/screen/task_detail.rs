@@ -560,20 +560,34 @@ fn advance_acceptance_cursor(state: &TaskDetailState) -> TaskDetailReduction {
 /// Toggle the criterion under the acceptance cursor, emitting
 /// [`TaskDetailIntent::SetCriterionChecked`] for its STABLE id. A no-op when
 /// nothing is selected or the cursor has fallen off a shortened list.
+///
+/// The glyph flips OPTIMISTICALLY on the card (the same
+/// move-then-arm-the-durable-RPC pattern the issue list's `d` uses) so the tick
+/// is immediate; the daemon's `IssueUpdated` push then reconciles the row —
+/// including undoing this flip if the mutation was rejected.
 fn toggle_selected_criterion(state: &TaskDetailState) -> TaskDetailReduction {
-    let criteria = acceptance_view(state.issue());
+    let mut criteria = acceptance_view(state.issue());
     let Some(idx) = state.acceptance_cursor else {
         return unchanged(state);
     };
     let Some(criterion) = criteria.get(idx) else {
         return unchanged(state);
     };
+    let (criterion_id, checked) = (criterion.id.clone(), !criterion.checked);
+    if checked {
+        criteria[idx].tick(0, None);
+    } else {
+        criteria[idx].untick();
+    }
+    let mut next = state.clone();
+    next.issue.acceptance_criteria = criteria.iter().map(|c| c.text.clone()).collect();
+    next.issue.acceptance = criteria;
     with_intent(
-        state.clone(),
+        next,
         TaskDetailIntent::SetCriterionChecked {
             issue_id: state.issue.id.clone(),
-            criterion_id: criterion.id.clone(),
-            checked: !criterion.checked,
+            criterion_id,
+            checked,
         },
     )
 }
