@@ -711,13 +711,21 @@ fn issue_label_attach_then_detach_persist_through_show() {
 #[test]
 fn issue_create_labels_route_through_the_label_join() {
     let tmp = tempfile::tempdir().unwrap();
-    let (ok, out) = run(
-        tmp.path(),
-        &[
-            "hangar", "issue", "create", "--title", "Labelled at birth", "--label", "bug",
-            "--label", "bug", "--label", "p0",
-        ],
-    );
+    // `bug` twice on purpose: the repeat must collapse to one attachment.
+    let args = [
+        "hangar",
+        "issue",
+        "create",
+        "--title",
+        "Labelled at birth",
+        "--label",
+        "bug",
+        "--label",
+        "bug",
+        "--label",
+        "p0",
+    ];
+    let (ok, out) = run(tmp.path(), &args);
     assert!(ok, "issue create --label should exit 0; out={out}");
     let id = out
         .lines()
