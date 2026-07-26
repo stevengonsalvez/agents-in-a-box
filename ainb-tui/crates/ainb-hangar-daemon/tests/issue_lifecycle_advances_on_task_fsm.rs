@@ -123,6 +123,75 @@ async fn failed_task_never_marks_its_issue_done() {
     );
 }
 
+/// Force `issue-1` into `state` directly (the human/agent move the board's
+/// `Move to ▸` submenu drives through the RPC).
+async fn set_issue1_state(pool: &SqlitePool, state: &str) {
+    sqlx::query("UPDATE issue SET state = ? WHERE id = 'issue-1'")
+        .bind(state)
+        .execute(pool)
+        .await
+        .expect("update issue state");
+}
+
+/// A BLOCKED issue is not "past done": unblocking it by starting a run still
+/// promotes it to In Progress.
+///
+/// RED without the `advance_rank` guard — `blocked` is appended at column 5, so
+/// the old `target.order() <= current.order()` comparison read `in_progress`
+/// (column 2) as "behind" and froze the issue in Blocked forever.
+#[tokio::test]
+async fn blocked_issue_still_advances_to_in_progress() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+    let pool = store.pool();
+
+    set_issue1_state(pool, "blocked").await;
+    assert_eq!(issue1_state(pool).await, "blocked", "blocked seeds and lists");
+
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_transition(pool, &task, "running").await;
+    assert_eq!(
+        issue1_state(pool).await,
+        "in_progress",
+        "a run on a blocked issue promotes it — blocked ranks with todo, not past done"
+    );
+
+    // …and the rest of the walk still works from there.
+    set_task1_status(pool, "done").await;
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_terminal(pool, &task).await;
+    assert_eq!(issue1_state(pool).await, "done");
+}
+
+/// A CANCELLED issue is terminal alongside `done`: no run transition revives it.
+#[tokio::test]
+async fn cancelled_issue_is_never_advanced() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = Store::open_in(dir.path()).await.unwrap();
+    seed_p4_fixture(store.pool()).await.unwrap();
+    let pool = store.pool();
+
+    set_issue1_state(pool, "cancelled").await;
+
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_transition(pool, &task, "running").await;
+    assert_eq!(
+        issue1_state(pool).await,
+        "cancelled",
+        "a running transition never revives a cancelled issue"
+    );
+
+    set_task1_status(pool, "done").await;
+    let task = task1(pool).await;
+    advance_issue_lifecycle_after_terminal(pool, &task).await;
+    assert_eq!(
+        issue1_state(pool).await,
+        "cancelled",
+        "even a successful terminal drain leaves a cancelled issue cancelled"
+    );
+}
+
 #[tokio::test]
 async fn null_issue_chat_task_advance_is_a_noop() {
     let dir = tempfile::tempdir().unwrap();
