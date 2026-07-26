@@ -3745,13 +3745,16 @@ async fn handle_comment_add(
     // this workspace. Firing AFTER the commit means a spawn-side fault can never
     // lose the comment; an unknown handle resolves to nothing and is ignored. A
     // store fault here is logged, not surfaced — the comment already landed and a
-    // failed trigger must not turn a successful comment into an RPC error.
+    // failed trigger must not turn a successful comment into an RPC error. The
+    // AUTHOR rides through as the gap #8 effective invoker: a mention of an agent
+    // the author may not invoke spawns nothing (the comment still lands).
     if let Err(e) = snapshots::spawn_mention_tasks(
         pool,
         &SystemIdGen,
         &SystemClock,
         ws.as_str(),
         row.issue_id.as_str(),
+        &author,
         &params.body,
     )
     .await

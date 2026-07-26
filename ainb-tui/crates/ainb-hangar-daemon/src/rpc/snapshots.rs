@@ -2044,6 +2044,15 @@ pub async fn comment_add(
 /// comment — matching the bead's "fires from inside `comment_add` after the
 /// comment commits" contract and side-stepping the reference's mid-write expansion race.
 ///
+/// Every resolved target is GATED (gap #8, multica
+/// `resolveMentionedAgentCommentTriggers`): the comment's `author` is mapped to an
+/// effective invoker ([`effective_mention_invoker`]) and an agent that invoker may
+/// not invoke is skipped exactly like an unresolvable handle — no task row, and no
+/// error. The gate runs BEFORE any other per-agent state is consulted, so a caller
+/// who cannot invoke an agent learns nothing about it from the trigger; and it is a
+/// per-target skip, so a denied `@handle` never suppresses the others in the same
+/// comment.
+///
 /// Resolution is by agent **name**, **workspace-scoped**: the candidate set is
 /// [`AgentRepo::list_by_workspace`] for the comment's workspace, so a foreign
 /// tenant's agent sharing the handle never gets a task. An unknown handle resolves
@@ -2072,15 +2081,20 @@ pub async fn spawn_mention_tasks(
     clock: &dyn HangarClock,
     workspace_id: &str,
     issue_id: &str,
+    author: &ainb_hangar_core::actor::ActorRef,
     body: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
     use crate::mentions::parse_mentions;
+    use ainb_hangar_store::repo::agent::AgentRepo;
     use ainb_hangar_store::repo::task::NewTask;
 
     let handles = parse_mentions(body);
     if handles.is_empty() {
         return Ok(Vec::new());
     }
+    // gap #8 — the EFFECTIVE invoker the invocation gate judges each mention target
+    // by (multica `resolveMentionedAgentCommentTriggers`, `comment.go:2323`/`:2365`).
+    let (invoker_kind, invoker_id) = effective_mention_invoker(pool, workspace_id, author).await?;
     // The workspace's agents are the only resolution candidates: a foreign
     // tenant's agent sharing a handle is never in this list, so it cannot be
     // mention-triggered here.
@@ -2097,6 +2111,20 @@ pub async fn spawn_mention_tasks(
         let Some(agent) = agents.iter().find(|a| &a.name == handle) else {
             continue;
         };
+        // gap #8 — the invocation gate, FIRST: multica checks invocability before
+        // any other per-agent state is read, so a caller who cannot invoke an agent
+        // never learns its archived / runtime state from the trigger's behaviour
+        // (`comment.go:2364`, enumeration-safety). A refusal is a per-target
+        // `continue`, never an early return: one denied `@handle` must not suppress
+        // the other mentions in the same comment. Denied ⇒ NO task row.
+        if !AgentRepo::can_invoke(pool, agent, invoker_kind, invoker_id.as_deref()).await? {
+            tracing::debug!(
+                agent = %agent.id,
+                handle = %handle,
+                "mention dispatch refused: invocation not allowed"
+            );
+            continue;
+        }
         let task = NewTask {
             id: idgen.new_ulid(),
             workspace_id: workspace_id.to_string(),
@@ -2121,6 +2149,52 @@ pub async fn spawn_mention_tasks(
         }
     }
     Ok(spawned)
+}
+
+/// The actor id the local TUI stamps on everything it authors (`member:me`).
+///
+/// It is a PLACEHOLDER, not a `user.id`: the plugin has no identity of its own and
+/// the daemon socket is the local operator's. `handle_issue_create` mints the same
+/// ref for wizard-created issues.
+pub(crate) const LOCAL_OPERATOR_MEMBER_ID: &str = "me";
+
+/// Resolve a comment author to the EFFECTIVE invoking identity the gap #8
+/// invocation gate judges its `@`-mention targets by.
+///
+/// - a `member` author naming a REAL user id → that user (the multi-user case the
+///   allow-list exists for);
+/// - the local-operator placeholder [`LOCAL_OPERATOR_MEMBER_ID`] → the workspace
+///   OWNER, exactly like `run_card`'s "no explicit invoker ⇒ owner" default. The
+///   local TUI stamps `member:me` on every comment it composes, so without this the
+///   gate would deny the single operator access to their own private agents — a
+///   regression with no security gain, since that socket IS the operator's. An
+///   owner-less workspace resolves to `""`, which matches no `owner_id` and fails
+///   closed, the same shape `run_card` has;
+/// - an `agent` author → `(Agent, None)`: hangar has no `originator_user_id`
+///   column (multica 184/185 is a separate gap), so an agent-authored mention is
+///   the UNATTRIBUTED A2A case — it fails closed for `private` and `member`-target
+///   agents and admits only a `public_to workspace` target (`workspaceBroad`).
+async fn effective_mention_invoker(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    author: &ainb_hangar_core::actor::ActorRef,
+) -> Result<(ainb_hangar_core::actor::ActorKind, Option<String>), sqlx::Error> {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_core::ids::WorkspaceId;
+
+    if author.kind() != ActorKind::Member {
+        return Ok((ActorKind::Agent, None));
+    }
+    if author.id() != LOCAL_OPERATOR_MEMBER_ID {
+        return Ok((ActorKind::Member, Some(author.id().to_string())));
+    }
+    let owner = match WorkspaceId::from_str(workspace_id.to_string()) {
+        Ok(ws) => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, &ws)
+            .await?
+            .unwrap_or_default(),
+        Err(_) => String::new(),
+    };
+    Ok((ActorKind::Member, Some(owner)))
 }
 
 /// Whether a `sqlx` error is a UNIQUE-constraint violation (the per-`(issue,
@@ -2220,9 +2294,16 @@ mod issue_states_contract_tests {
 #[cfg(test)]
 mod mention_spawn_tests {
     use super::spawn_mention_tasks;
+    use ainb_hangar_core::actor::{ActorKind, ActorRef};
     use ainb_hangar_core::clock::SystemClock;
     use ainb_hangar_core::idgen::SystemIdGen;
     use ainb_hangar_store::Store;
+
+    /// The seed fixture's OWNER member (`user-1` owns `agent-1`), the author every
+    /// pre-gap-#8 case uses — it must keep spawning exactly as before.
+    fn owner() -> ActorRef {
+        ActorRef::new(ActorKind::Member, "user-1").unwrap()
+    }
 
     /// How many tasks `agent-1` has queued/started on `issue-3` in the fixture
     /// workspace.
@@ -2250,6 +2331,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            &owner(),
             "@claude-agent please do X",
         )
         .await
@@ -2274,6 +2356,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            &owner(),
             "@claude-agent do X",
         )
         .await
@@ -2287,6 +2370,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            &owner(),
             "@claude-agent again",
         )
         .await
@@ -2317,6 +2401,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            &owner(),
             "@claude-agent and also @claude-agent",
         )
         .await
@@ -2340,6 +2425,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            &owner(),
             "@nobody hello and @ghost too",
         )
         .await
@@ -2347,6 +2433,237 @@ mod mention_spawn_tests {
 
         assert!(spawned.is_empty());
         assert_eq!(count_for_issue3(&store).await, 0);
+    }
+
+    /// Add `user_id` to the fixture workspace as a plain (non-owner) member.
+    async fn seed_plain_member(store: &Store, user_id: &str) {
+        sqlx::query("INSERT INTO user (id, email, created_at) VALUES (?, ?, 0)")
+            .bind(user_id)
+            .bind(format!("{user_id}@example.com"))
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, ?, 'member')")
+            .bind(crate::seed::WS_ID)
+            .bind(user_id)
+            .execute(store.pool())
+            .await
+            .unwrap();
+    }
+
+    /// Seed a second agent in the fixture workspace (on the fixture runtime),
+    /// private by default and owned by the workspace owner.
+    async fn seed_second_agent(store: &Store, id: &str, name: &str) {
+        sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES (?, ?, ?, 'runtime-1', 'workspace', 'user-1')",
+        )
+        .bind(id)
+        .bind(crate::seed::WS_ID)
+        .bind(name)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    /// Allow-list `user_id` on `agent_id` (`public_to` + a `member` target).
+    async fn allow_member(store: &Store, agent_id: &str, user_id: &str) {
+        use ainb_hangar_store::repo::agent::AgentRepo;
+        use ainb_hangar_store::repo::agent_invocation_target::AgentInvocationTargetRepo;
+
+        AgentRepo::set_permission_mode(store.pool(), agent_id, "public_to")
+            .await
+            .unwrap();
+        AgentInvocationTargetRepo::add(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            agent_id,
+            "member",
+            user_id,
+            None,
+        )
+        .await
+        .unwrap();
+    }
+
+    /// gap #8 — MENTION GATE: a plain workspace member mentioning a PRIVATE agent
+    /// they do not own spawns NOTHING, and no task row lands on the issue. The
+    /// comment itself is unaffected (this function only owns the trigger).
+    #[tokio::test]
+    async fn mention_by_a_non_owner_member_of_a_private_agent_spawns_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            &bob,
+            "@claude-agent please do X",
+        )
+        .await
+        .unwrap();
+
+        assert!(
+            spawned.is_empty(),
+            "a non-owner member may not mention-dispatch a private agent"
+        );
+        assert_eq!(count_for_issue3(&store).await, 0, "no task row is written");
+
+        // CONTROL: allow-list bob → the very same mention now spawns exactly one.
+        allow_member(&store, "agent-1", "bob").await;
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            &bob,
+            "@claude-agent please do X",
+        )
+        .await
+        .unwrap();
+        assert_eq!(spawned, vec!["agent-1".to_string()]);
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// gap #8 — the gate is PER-TARGET: one denied `@handle` in a comment must not
+    /// suppress an allowed one in the same comment (multica's loop-local `continue`).
+    #[tokio::test]
+    async fn a_denied_mention_does_not_suppress_an_allowed_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+        seed_second_agent(&store, "agent-priv", "private-bot").await;
+        // bob may invoke `claude-agent` but NOT `private-bot`.
+        allow_member(&store, "agent-1", "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            &bob,
+            "@private-bot and @claude-agent please do X",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(
+            spawned,
+            vec!["agent-1".to_string()],
+            "only the allowed target spawns; the denied one is skipped, not fatal"
+        );
+        let denied: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_task_queue WHERE agent_id = 'agent-priv'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(denied, 0, "the denied target got no task row");
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// gap #8 — an AGENT-authored mention carries no resolved human originator
+    /// (hangar has no `originator_user_id`), so it is the unattributed A2A case:
+    /// it fails closed against a private agent, and is admitted only once the
+    /// target is `public_to` with a WORKSPACE target (multica's `workspaceBroad`).
+    #[tokio::test]
+    async fn an_agent_authored_mention_of_a_private_agent_is_refused() {
+        use ainb_hangar_store::repo::agent::AgentRepo;
+        use ainb_hangar_store::repo::agent_invocation_target::AgentInvocationTargetRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_second_agent(&store, "agent-2", "peer-bot").await;
+
+        let peer = ActorRef::new(ActorKind::Agent, "agent-2").unwrap();
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            &peer,
+            "@claude-agent take this over",
+        )
+        .await
+        .unwrap();
+        assert!(
+            spawned.is_empty(),
+            "unattributed A2A must fail closed against a private agent"
+        );
+        assert_eq!(count_for_issue3(&store).await, 0);
+
+        // Flip the target to `public_to` + a WORKSPACE target → workspaceBroad admits.
+        AgentRepo::set_permission_mode(store.pool(), "agent-1", "public_to")
+            .await
+            .unwrap();
+        AgentInvocationTargetRepo::add(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            "agent-1",
+            "workspace",
+            crate::seed::WS_ID,
+            None,
+        )
+        .await
+        .unwrap();
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            &peer,
+            "@claude-agent take this over",
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            spawned,
+            vec!["agent-1".to_string()],
+            "a public_to WORKSPACE target admits unattributed automation"
+        );
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// gap #8 REGRESSION GUARD for the single-operator TUI: the plugin stamps the
+    /// `member:me` placeholder (not a real `user.id`) on every comment it composes.
+    /// That placeholder resolves to the WORKSPACE OWNER, so the operator keeps
+    /// mention-dispatching their own private agents.
+    #[tokio::test]
+    async fn the_local_operator_placeholder_still_spawns() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let me = ActorRef::new(ActorKind::Member, super::LOCAL_OPERATOR_MEMBER_ID).unwrap();
+        let spawned = spawn_mention_tasks(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            &me,
+            "@claude-agent please do X",
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(spawned, vec!["agent-1".to_string()]);
+        assert_eq!(count_for_issue3(&store).await, 1);
     }
 }
 
