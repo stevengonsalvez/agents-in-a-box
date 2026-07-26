@@ -162,6 +162,28 @@ pub const HANGAR_AUTOPILOT_FIRE_NOW: &str = "hangar/autopilot_fire_now";
 /// `d` key toggles the selected autopilot (P7.5). Workspace-scoped.
 pub const HANGAR_AUTOPILOT_SET_ENABLED: &str = "hangar/autopilot_set_enabled";
 
+/// `hangar/autopilot_trigger_api` — fire one autopilot through its bare
+/// programmatic `api` trigger (migration 0057).
+///
+/// Params: `{ workspace_id: String, autopilot_id: String }`. Result: a
+/// [`crate::snapshots::AutopilotTriggerApiResult`]. Unlike
+/// [`HANGAR_AUTOPILOT_FIRE_NOW`] (an operator's manual override), this is the
+/// `api` TRIGGER: it only fires when the autopilot has explicitly armed
+/// `api_trigger_enabled`, and it runs the SAME admission gate the scheduler
+/// does — so a dispatch at the concurrency limit under the `skip` policy is
+/// declined and recorded as a terminal `skipped` run rather than silently
+/// dropped. Workspace-scoped: a foreign id reports `not_found` and fires
+/// nothing.
+pub const HANGAR_AUTOPILOT_TRIGGER_API: &str = "hangar/autopilot_trigger_api";
+
+/// `hangar/autopilot_set_api_trigger` — arm or disarm the `api` trigger.
+///
+/// Params: `{ workspace_id: String, autopilot_id: String, enabled: bool }`.
+/// Result: `{ updated: bool }` (`false` when the id is foreign / absent).
+/// Mirrors [`HANGAR_AUTOPILOT_SET_ENABLED`]: a trigger surface is armed by an
+/// explicit operator action, never implicitly at create time. Workspace-scoped.
+pub const HANGAR_AUTOPILOT_SET_API_TRIGGER: &str = "hangar/autopilot_set_api_trigger";
+
 /// `hangar/tasks_list` — snapshot the task queue of a workspace for the Kanban
 /// board (P8.4).
 ///
@@ -1123,6 +1145,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_RUNS,
     HANGAR_AUTOPILOT_FIRE_NOW,
     HANGAR_AUTOPILOT_SET_ENABLED,
+    HANGAR_AUTOPILOT_TRIGGER_API,
+    HANGAR_AUTOPILOT_SET_API_TRIGGER,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_TASK_RETRY,
@@ -1303,6 +1327,8 @@ mod tests {
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
+            HANGAR_AUTOPILOT_TRIGGER_API,
+            HANGAR_AUTOPILOT_SET_API_TRIGGER,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
@@ -1377,6 +1403,8 @@ mod tests {
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
+            HANGAR_AUTOPILOT_TRIGGER_API,
+            HANGAR_AUTOPILOT_SET_API_TRIGGER,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
