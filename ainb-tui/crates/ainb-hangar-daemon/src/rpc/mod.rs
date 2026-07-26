@@ -774,6 +774,7 @@ async fn handle(
         methods::HANGAR_SQUAD_MEMBER_ADD => handle_squad_member(pool, req, true).await,
         methods::HANGAR_SQUAD_MEMBER_REMOVE => handle_squad_member(pool, req, false).await,
         methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
+        methods::HANGAR_SQUAD_ARCHIVE => handle_squad_archive(pool, req).await,
         methods::HANGAR_SQUAD_FANOUT => handle_squad_fanout(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
@@ -4056,13 +4057,14 @@ async fn handle_agent_archive(
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
     let params: ainb_hangar_proto::snapshots::AgentArchiveParams =
-        parse_params(req, "{ workspace_id, agent_id, archived }")?;
+        parse_params(req, "{ workspace_id, agent_id, archived, archived_by_user_id? }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let row = snapshots::agent_archive(
         pool,
         ws.as_str(),
         &params.agent_id,
         params.archived,
+        params.archived_by_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
         SystemClock.now_ms(),
     )
     .await
@@ -4271,6 +4273,38 @@ async fn handle_squad_member(
     squads_list_value(pool, &ws).await
 }
 
+/// Dispatch `hangar/squad_archive` (parity #26): archive or un-archive one squad,
+/// recording WHO and WHEN, and answer with the refreshed ACTIVE squad list.
+///
+/// Mirrors [`handle_squad_member`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the tenant-scoped flip. A `(squad_id, workspace)` pair
+/// that matches no row is a not-found error, never a cross-tenant flip.
+async fn handle_squad_archive(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::SquadArchiveParams =
+        parse_params(req, "{ workspace_id, squad_id, archived, archived_by_user_id? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let squads = snapshots::squad_archive(
+        pool,
+        ws.as_str(),
+        &params.squad_id,
+        params.archived,
+        params.archived_by_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    let Some(squads) = squads else {
+        return Err(invalid_params(&format!(
+            "no squad `{}` in this workspace",
+            params.squad_id
+        )));
+    };
+    to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
+}
+
 /// Re-read `ws`'s squads and serialize them as a
 /// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult) wire
 /// value. Shared by the three squad mutations so each answers with the same
@@ -4457,6 +4491,11 @@ fn squad_assign_err(e: &ainb_hangar_store::service::squad_assign::SquadAssignErr
         // squad path reaches this arm through `CardRunError::Squad`).
         SquadAssignError::NotInvocable { agent_id, invoker } => invalid_params(&format!(
             "agent {agent_id} is not invocable by {invoker} — it is private or you are not on its allow-list"
+        )),
+        // parity #26: an archived squad refuses new work. A client error — the
+        // operator restores the squad and re-issues.
+        SquadAssignError::Archived(id) => invalid_params(&format!(
+            "squad `{id}` is archived — restore it before assigning work"
         )),
         SquadAssignError::Db(db) => store_err(db),
     }
