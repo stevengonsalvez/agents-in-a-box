@@ -988,6 +988,11 @@ impl HangarPlugin {
                 self.apply_agents(resp);
                 if let Some(e) = &resp.error {
                     self.screens.squads.note_err(format!("agent create failed: {}", e.message));
+                    // The create can be raised from EITHER pane, so the refusal
+                    // (e.g. migration 0050's duplicate name) must also land on the
+                    // Agents screen — otherwise the wizard closes and nothing at
+                    // all is said about why no agent appeared.
+                    self.screens.agents.note_err(e.message.clone());
                 } else {
                     self.screens.squads.note_ok("agent created");
                 }
@@ -2773,21 +2778,23 @@ impl HangarPlugin {
         let (id, method, params) = match action {
             AgentsAction::Create {
                 name,
+                description,
                 provider,
                 model,
                 instructions,
             } => (
                 AGENT_CREATE_REQ_ID,
                 daemon_methods::HANGAR_AGENT_CREATE,
-                // `model` / `instructions` are `Option`s; the proto's
-                // `skip_serializing_if` drops them when absent so the wire stays
-                // clean and the daemon leaves those columns at their defaults.
+                // `model` / `instructions` / `description` are `Option`s; the
+                // proto's `skip_serializing_if` drops them when absent so the wire
+                // stays clean and the daemon leaves those columns at their defaults.
                 serde_json::json!({
                     "workspace_id": ws,
                     "name": name,
                     "provider": provider,
                     "model": model,
                     "instructions": instructions,
+                    "description": description,
                 }),
             ),
             AgentsAction::Delete { actor_ref } => {

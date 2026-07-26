@@ -61,6 +61,28 @@ pub struct AgentView {
     /// Live workload — the orthogonal second dimension (multica `Workload`),
     /// derived by the daemon from the agent's live task counts.
     pub workload: Workload,
+    /// The agent's short blurb (migration 0050); empty when unset. Rendered
+    /// muted after the subtitle and clipped to the remaining row width.
+    pub description: String,
+    /// The agent's avatar token (e.g. `"emoji:🦊"`, migration 0050); empty when
+    /// unset. Rendered as the leading glyph, never as the raw `emoji:` token.
+    pub avatar: String,
+}
+
+impl Default for AgentView {
+    /// The neutral row: unnamed, offline, idle, no metadata. Fixtures spread it
+    /// so the next wire field is one struct edit, not a test sweep.
+    fn default() -> Self {
+        Self {
+            actor_ref: String::new(),
+            name: String::new(),
+            subtitle: String::new(),
+            presence: PresenceState::Offline,
+            workload: Workload::Idle,
+            description: String::new(),
+            avatar: String::new(),
+        }
+    }
 }
 
 /// The fixed provider choices the create wizard cycles through — mirrors
@@ -78,6 +100,8 @@ const SUPPORTED_PROVIDERS: [&str; 3] = ["claude", "codex", "copilot"];
 pub struct CreateDraft {
     /// The new agent's name (required, non-blank to advance past the `Name` step).
     pub name: String,
+    /// The optional short blurb (≤255 characters); blank = none.
+    pub description: String,
     /// The chosen provider — one of [`SUPPORTED_PROVIDERS`]; defaults to `claude`.
     pub provider: String,
     /// The optional per-agent model override; blank = the provider default.
@@ -90,6 +114,7 @@ impl Default for CreateDraft {
     fn default() -> Self {
         Self {
             name: String::new(),
+            description: String::new(),
             provider: SUPPORTED_PROVIDERS[0].to_string(),
             model: String::new(),
             instructions: String::new(),
@@ -97,12 +122,14 @@ impl Default for CreateDraft {
     }
 }
 
-/// The step the guided create wizard is on. Enter advances `Name → Provider →
-/// Model → Instructions → Confirm`; Enter on `Confirm` fires the create.
+/// The step the guided create wizard is on. Enter advances `Name → Description →
+/// Provider → Model → Instructions → Confirm`; Enter on `Confirm` fires the create.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CreateStep {
     /// Type the agent name (required).
     Name,
+    /// Type an optional short blurb (blank = none, migration 0050).
+    Description,
     /// Pick the provider from the fixed list (a picker, never free text).
     Provider,
     /// Type an optional model override (blank = provider default).
@@ -160,6 +187,8 @@ impl AgentsState {
                 subtitle: a.subtitle.clone(),
                 presence: a.presence,
                 workload: a.workload,
+                description: a.description.clone(),
+                avatar: a.avatar.clone(),
             })
             .collect();
         Self::new(agents)
@@ -296,13 +325,17 @@ pub enum AgentsEvent {
 /// delete by id).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AgentsIntent {
-    /// Create an AGENT from the guided wizard (`n` → name → provider → model →
-    /// instructions → confirm) — `hangar/agent_create`; the glue fires it with no
-    /// ids (the daemon fills workspace / runtime / owner) and folds the refreshed
-    /// roster back. Carries the full structured draft, not just a name.
+    /// Create an AGENT from the guided wizard (`n` → name → description →
+    /// provider → model → instructions → confirm) — `hangar/agent_create`; the
+    /// glue fires it with no ids (the daemon fills workspace / runtime / owner)
+    /// and folds the refreshed roster back. Carries the full structured draft,
+    /// not just a name.
     CreateAgent {
         /// The new agent's name (non-blank).
         name: String,
+        /// The optional short blurb — `None` when the description step was left
+        /// blank (migration 0050).
+        description: Option<String>,
         /// The chosen provider (one of [`SUPPORTED_PROVIDERS`]).
         provider: String,
         /// The optional model override — `None` when the model step was left blank.
@@ -360,6 +393,11 @@ fn reduce_create_key(state: &AgentsState, c: char) -> AgentsReduction {
     };
     match step {
         CreateStep::Name => reduce_text_step(state, draft, c, CreateStep::Name, |d| &mut d.name),
+        CreateStep::Description => {
+            reduce_text_step(state, draft, c, CreateStep::Description, |d| {
+                &mut d.description
+            })
+        }
         CreateStep::Model => reduce_text_step(state, draft, c, CreateStep::Model, |d| &mut d.model),
         CreateStep::Instructions => {
             reduce_text_step(state, draft, c, CreateStep::Instructions, |d| {
@@ -375,7 +413,8 @@ fn reduce_create_key(state: &AgentsState, c: char) -> AgentsReduction {
 /// advancing, so it is handled by [`reduce_confirm_step`], never here).
 const fn next_step(step: CreateStep) -> CreateStep {
     match step {
-        CreateStep::Name => CreateStep::Provider,
+        CreateStep::Name => CreateStep::Description,
+        CreateStep::Description => CreateStep::Provider,
         CreateStep::Provider => CreateStep::Model,
         CreateStep::Model => CreateStep::Instructions,
         CreateStep::Instructions | CreateStep::Confirm => CreateStep::Confirm,
@@ -458,6 +497,7 @@ fn reduce_confirm_step(state: &AgentsState, draft: CreateDraft, c: char) -> Agen
         next,
         AgentsIntent::CreateAgent {
             name: draft.name.trim().to_string(),
+            description: non_blank(&draft.description),
             provider: draft.provider,
             model,
             instructions,
@@ -686,8 +726,24 @@ fn render_create_wizard(
             let line = format!("Name: {}▏", draft.name);
             put_str(buf, 0, y.saturating_add(1), &line, GOLD, area_w);
         }
+        CreateStep::Description => {
+            show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            put_str(
+                buf,
+                0,
+                y,
+                "Optional description, Enter to continue (blank = none)",
+                MUTED_GRAY,
+                area_w,
+            );
+            let line = format!("Description: {}▏", draft.description);
+            put_str(buf, 0, y.saturating_add(1), &line, GOLD, area_w);
+        }
         CreateStep::Provider => {
             show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            show_field(buf, y, "Description", blurb_or_none(&draft.description));
             y = y.saturating_add(1);
             put_str(
                 buf,
@@ -704,6 +760,8 @@ fn render_create_wizard(
         CreateStep::Model => {
             show_field(buf, y, "Name", &draft.name);
             y = y.saturating_add(1);
+            show_field(buf, y, "Description", blurb_or_none(&draft.description));
+            y = y.saturating_add(1);
             show_field(buf, y, "Provider", &draft.provider);
             y = y.saturating_add(1);
             put_str(
@@ -719,6 +777,8 @@ fn render_create_wizard(
         }
         CreateStep::Instructions => {
             show_field(buf, y, "Name", &draft.name);
+            y = y.saturating_add(1);
+            show_field(buf, y, "Description", blurb_or_none(&draft.description));
             y = y.saturating_add(1);
             show_field(buf, y, "Provider", &draft.provider);
             y = y.saturating_add(1);
@@ -745,6 +805,8 @@ fn render_create_wizard(
             y = y.saturating_add(1);
             show_field(buf, y, "Name", &draft.name);
             y = y.saturating_add(1);
+            show_field(buf, y, "Description", blurb_or_none(&draft.description));
+            y = y.saturating_add(1);
             show_field(buf, y, "Provider", &draft.provider);
             y = y.saturating_add(1);
             let model = if draft.model.trim().is_empty() {
@@ -763,6 +825,13 @@ fn render_create_wizard(
             show_field(buf, y, "Instructions", instr);
         }
     }
+}
+
+/// Render a draft blurb for the wizard's review rows: the trimmed text, or the
+/// explicit `(none)` placeholder so a skipped step reads as deliberate.
+fn blurb_or_none(description: &str) -> &str {
+    let t = description.trim();
+    if t.is_empty() { "(none)" } else { t }
 }
 
 /// The first-visible row index for a viewport of `visible_rows` rows that must keep
@@ -786,11 +855,16 @@ fn render_action_hints(buf: &mut WireBuffer, row: u16, area_w: u16) {
 }
 
 /// Render one agent row:
-/// `▶ <name>  <dot> <presence> · <wl-glyph> <workload>  · <subtitle>`.
+/// `▶ <avatar> <name>  <dot> <presence> · <wl-glyph> <workload>  · <subtitle>  — <blurb>`.
 ///
 /// The two dimensions are painted side by side (multica `presence × workload`):
 /// the availability dot+word, then ` · ` + the workload glyph+word colour-coded
 /// by its state, so an `online` agent visibly reads `working` vs `idle`.
+///
+/// The avatar glyph (migration 0050) leads the row when the agent carries one,
+/// and the blurb trails it muted. Both are pure additions: an agent with neither
+/// renders exactly as it did pre-0050. `put_str` clips at `area_w`, so a long
+/// blurb is truncated rather than wrapping onto the next agent's row.
 fn render_agent_row(
     buf: &mut WireBuffer,
     row: u16,
@@ -807,6 +881,10 @@ fn render_agent_row(
         SELECTION_GREEN,
         area_w,
     );
+    if let Some(glyph) = avatar_glyph(&agent.avatar) {
+        x = put_cell(buf, x, row, glyph, GOLD, area_w);
+        x = put_str(buf, x, row, " ", MUTED_GRAY, area_w);
+    }
     x = put_str(
         buf,
         x,
@@ -835,8 +913,23 @@ fn render_agent_row(
     x = put_str(buf, x, row, workload_word(agent.workload), wl_color, area_w);
     if !agent.subtitle.is_empty() {
         x = put_str(buf, x, row, "  · ", MUTED_GRAY, area_w);
-        put_str(buf, x, row, &agent.subtitle, MUTED_GRAY, area_w);
+        x = put_str(buf, x, row, &agent.subtitle, MUTED_GRAY, area_w);
     }
+    if !agent.description.is_empty() {
+        x = put_str(buf, x, row, "  — ", MUTED_GRAY, area_w);
+        put_str(buf, x, row, &agent.description, MUTED_GRAY, area_w);
+    }
+}
+
+/// Decode an avatar token into the glyph to paint, or `None` when there is
+/// nothing renderable.
+///
+/// Hangar mints `"emoji:<glyph>"` tokens (multica `newAgentAvatar`). Only that
+/// form renders, and only its FIRST character — an empty token, a bare string,
+/// or a URL-style token (a future avatar backend) paints nothing rather than
+/// leaking the raw `emoji:` prefix into the roster.
+fn avatar_glyph(avatar: &str) -> Option<char> {
+    avatar.strip_prefix("emoji:")?.chars().next()
 }
 
 /// The lowercase presence word rendered next to the dot.
@@ -966,8 +1059,9 @@ mod tests {
     }
 
     /// `n` opens the wizard at `Name`; the full step sequence collects
-    /// name → provider → model → instructions and Enter on `Confirm` emits the
-    /// widened `CreateAgent` intent with every field; a single Esc cancels.
+    /// name → description → provider → model → instructions and Enter on
+    /// `Confirm` emits the widened `CreateAgent` intent with every field; a
+    /// single Esc cancels.
     #[test]
     fn create_flow_raises_intent_and_esc_cancels() {
         let state = AgentsState::from_actors(&snapshot());
@@ -976,12 +1070,14 @@ mod tests {
         assert_eq!(opened.create_draft().map(|d| d.name.as_str()), Some(""));
         assert!(opened.is_capturing());
 
-        // Name "qa" + Enter -> Provider; '→'(l) cycles claude->codex; Enter -> Model;
-        // type model + Enter -> Instructions; type text + Enter -> Confirm.
+        // Name "qa" + Enter -> Description; type blurb + Enter -> Provider;
+        // '→'(l) cycles claude->codex; Enter -> Model; type model + Enter ->
+        // Instructions; type text + Enter -> Confirm.
         let at_confirm = drive(
             &opened,
             &[
-                'q', 'a', '\n', // Name -> Provider
+                'q', 'a', '\n', // Name -> Description
+                'r', 'u', 'n', 's', ' ', 'Q', 'A', '\n', // Description -> Provider
                 'l', '\n', // pick codex -> Model
                 'g', 'p', 't', '\n', // Model -> Instructions
                 'b', 'e', ' ', 't', 'e', 'r', 's', 'e', '\n', // -> Confirm
@@ -1001,6 +1097,7 @@ mod tests {
             out.intent,
             Some(AgentsIntent::CreateAgent {
                 name: "qa".into(),
+                description: Some("runs QA".into()),
                 provider: "codex".into(),
                 model: Some("gpt".into()),
                 instructions: Some("be terse".into()),
@@ -1036,16 +1133,17 @@ mod tests {
     fn wizard_blank_optionals_are_none() {
         let state = AgentsState::from_actors(&snapshot());
         let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
-        // Name "bot" + Enter; Provider Enter (leave claude); Model Enter (blank);
-        // Instructions Enter (blank); Confirm Enter.
+        // Name "bot" + Enter; Description Enter (blank); Provider Enter (leave
+        // claude); Model Enter (blank); Instructions Enter (blank); Confirm Enter.
         let out = drive(
             &opened,
-            &['b', 'o', 't', '\n', '\n', '\n', '\n', '\n'],
+            &['b', 'o', 't', '\n', '\n', '\n', '\n', '\n', '\n'],
         );
         assert_eq!(
             out.intent,
             Some(AgentsIntent::CreateAgent {
                 name: "bot".into(),
+                description: None,
                 provider: "claude".into(),
                 model: None,
                 instructions: None,
@@ -1059,7 +1157,8 @@ mod tests {
     fn wizard_esc_cancels_from_any_step() {
         let state = AgentsState::from_actors(&snapshot());
         let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
-        let at_provider = drive(&opened, &['a', '\n']).state;
+        // Name, then Enter through the blank Description step to reach Provider.
+        let at_provider = drive(&opened, &['a', '\n', '\n']).state;
         assert_eq!(at_provider.create_step(), Some(CreateStep::Provider));
         let cancelled = reduce_agents(&at_provider, AgentsEvent::Esc);
         assert!(!cancelled.state.is_creating(), "one Esc closes the wizard");
@@ -1071,7 +1170,7 @@ mod tests {
     fn wizard_provider_picker_cycles() {
         let state = AgentsState::from_actors(&snapshot());
         let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
-        let at_provider = drive(&opened, &['a', '\n']).state;
+        let at_provider = drive(&opened, &['a', '\n', '\n']).state;
         assert_eq!(
             at_provider.create_draft().map(|d| d.provider.as_str()),
             Some("claude")
@@ -1214,6 +1313,7 @@ mod tests {
                 subtitle: "claude".into(),
                 presence: PresenceState::Online,
                 workload: Workload::Working,
+            ..AgentView::default()
             },
             AgentView {
                 actor_ref: "agent:a-2".into(),
@@ -1221,6 +1321,7 @@ mod tests {
                 subtitle: "claude".into(),
                 presence: PresenceState::Online,
                 workload: Workload::Queued,
+            ..AgentView::default()
             },
         ]);
         let mut buf = WireBuffer::new(80, 24);
@@ -1246,6 +1347,7 @@ mod tests {
             subtitle: "claude".into(),
             presence: PresenceState::Online,
             workload: Workload::Idle,
+        ..AgentView::default()
         }]);
         let mut buf = WireBuffer::new(80, 24);
         render_agents(&mut buf, 80, 1, 23, &state);
@@ -1263,7 +1365,8 @@ mod tests {
         let at_confirm = drive(
             &opened,
             &[
-                'q', 'a', '\n', // Name -> Provider
+                'q', 'a', '\n', // Name -> Description
+                's', 'h', 'i', 'p', 's', '\n', // Description -> Provider
                 'l', '\n', // codex -> Model
                 'g', 'p', 't', '-', '5', '\n', // Model -> Instructions
                 'b', 'e', ' ', 't', 'e', 'r', 's', 'e', '\n', // -> Confirm
@@ -1275,6 +1378,10 @@ mod tests {
         render_agents(&mut buf, 80, 1, 23, &at_confirm);
         let text = buffer_text(&buf, 80, 24);
         assert!(text.contains("codex"), "confirm shows the chosen provider");
+        assert!(
+            text.contains("ships"),
+            "confirm lists the typed description"
+        );
         assert!(text.contains("gpt-5"), "confirm shows the chosen model");
         assert!(
             text.contains("be terse"),
@@ -1287,8 +1394,8 @@ mod tests {
     fn render_provider_step_shows_choice() {
         let state = AgentsState::from_actors(&snapshot());
         let opened = reduce_agents(&state, AgentsEvent::Key('n')).state;
-        // Name + Enter -> Provider, then cycle to codex.
-        let at_provider = drive(&opened, &['a', '\n', 'l']).state;
+        // Name + Enter -> Description, blank Enter -> Provider, then cycle to codex.
+        let at_provider = drive(&opened, &['a', '\n', '\n', 'l']).state;
         assert_eq!(at_provider.create_step(), Some(CreateStep::Provider));
         let mut buf = WireBuffer::new(80, 24);
         render_agents(&mut buf, 80, 1, 23, &at_provider);
@@ -1297,6 +1404,59 @@ mod tests {
             text.contains("codex"),
             "the provider picker shows the current choice"
         );
+    }
+
+    /// A roster row renders its blurb VERBATIM after the subtitle (migration
+    /// 0050) — the exact substring, not merely "the screen shows something".
+    #[test]
+    fn render_shows_the_agent_description() {
+        let state = AgentsState::new(vec![AgentView {
+            actor_ref: "agent:a-1".into(),
+            name: "builder".into(),
+            subtitle: "agent".into(),
+            presence: PresenceState::Online,
+            description: "ships the backend".into(),
+            ..AgentView::default()
+        }]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(
+            text.contains("ships the backend"),
+            "the blurb must render verbatim on the roster row: {text:?}"
+        );
+    }
+
+    /// An `emoji:` avatar renders the GLYPH and never leaks the raw token; an
+    /// agent with no avatar renders no leading glyph at all.
+    #[test]
+    fn render_shows_the_avatar_glyph_not_the_token() {
+        let state = AgentsState::new(vec![AgentView {
+            actor_ref: "agent:a-1".into(),
+            name: "builder".into(),
+            presence: PresenceState::Online,
+            avatar: "emoji:🦊".into(),
+            ..AgentView::default()
+        }]);
+        let mut buf = WireBuffer::new(80, 24);
+        render_agents(&mut buf, 80, 1, 23, &state);
+        let text = buffer_text(&buf, 80, 24);
+        assert!(text.contains('🦊'), "the avatar glyph must render: {text:?}");
+        assert!(
+            !text.contains("emoji:"),
+            "the raw avatar token must never leak to the roster: {text:?}"
+        );
+    }
+
+    /// The avatar decoder only accepts the `emoji:` form: an empty token, a bare
+    /// string, and a URL all paint nothing rather than a stray character.
+    #[test]
+    fn avatar_glyph_only_decodes_the_emoji_form() {
+        assert_eq!(avatar_glyph("emoji:🦊"), Some('🦊'));
+        assert_eq!(avatar_glyph(""), None);
+        assert_eq!(avatar_glyph("🦊"), None, "a bare glyph is not a token");
+        assert_eq!(avatar_glyph("https://x/y.png"), None);
+        assert_eq!(avatar_glyph("emoji:"), None, "an empty emoji token is nothing");
     }
 
     /// Reassemble the buffer text for render assertions.
