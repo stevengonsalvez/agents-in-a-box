@@ -219,6 +219,7 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ainb_hangar_core::clock::SystemClock;
     use ainb_hangar_store::Store;
 
     #[tokio::test]
@@ -231,7 +232,9 @@ mod tests {
         assert_eq!(issues.len(), 3, "three seeded issues");
         assert!(issues.iter().any(|i| i.title == "Refactor API"));
 
-        let actors = crate::rpc::snapshots::agents_list(store.pool(), WS_ID).await.unwrap();
+        let actors = crate::rpc::snapshots::agents_list(store.pool(), WS_ID, SystemClock.now_ms())
+            .await
+            .unwrap();
         assert!(actors.iter().any(|a| a.display_name == "claude-agent" && a.is_agent));
         assert!(actors.iter().any(|a| !a.is_agent), "member present");
 

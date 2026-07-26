@@ -284,6 +284,29 @@ impl AgentRepo {
         .await
     }
 
+    /// List the ids of every ACTIVE agent bound to one runtime, ordered by
+    /// `name`.
+    ///
+    /// The presence sweeper's event fan-out is the caller: when a runtime's
+    /// liveness flips, every agent backed by it changed availability, and only
+    /// the ids are needed to address the event. Archived agents are excluded —
+    /// they are absent from the picker, so no surface would render their dot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn list_ids_by_runtime(
+        pool: &SqlitePool,
+        runtime_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agent WHERE runtime_id = ? AND archived = 0 ORDER BY name",
+        )
+        .bind(runtime_id)
+        .fetch_all(pool)
+        .await
+    }
+
     /// Edit a subset of one agent's mutable config, scoped to a workspace
     /// (e38.15).
     ///

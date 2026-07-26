@@ -22,6 +22,7 @@
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
+//! | `HANGAR_PRESENCE_SWEEP_MS` | runtime-presence pass interval (heartbeat + availability decay) | `30000` |
 //! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | reference running TTL (2.5h) |
 //! | `HANGAR_SPAWN_SETUP_TIMEOUT_MS` | running→spawn setup-phase umbrella override (tests) | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
@@ -60,8 +61,8 @@ use crate::health_stats::HealthStats;
 use crate::progress_comment;
 use crate::runner::{Backend, Mode, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
-    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
-    sweep_stale_running,
+    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_runtime_presence,
+    sweep_stale_dispatched, sweep_stale_running,
 };
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
@@ -209,6 +210,12 @@ impl DaemonConfig {
         // tighten it to drive a reclaim within a bounded budget.
         if let Some(ms) = env_u64_opt("HANGAR_GC_INTERVAL_MS") {
             sweeper.gc_interval = Duration::from_millis(ms);
+        }
+        // The runtime-presence cadence is independently tunable so a tripwire can
+        // observe an availability decay inside a bounded budget rather than
+        // waiting out the 30s production tick.
+        if let Some(ms) = env_u64_opt("HANGAR_PRESENCE_SWEEP_MS") {
+            sweeper.presence_interval = Duration::from_millis(ms);
         }
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_DISPATCHED_TTL_MS") {
             sweeper.dispatched_ttl = Duration::from_millis(ms);
@@ -446,6 +453,18 @@ pub async fn run(
         hangar_home(),
         cfg.sweeper.gc_interval,
         Arc::new(SystemClock),
+    );
+
+    // Runtime presence (multica gap #6): heartbeat our own runtime and decay
+    // every stale one, pushing an `AgentPresence` event per moved agent.
+    // Deliberately spawned BEFORE the `disable_claim` early-return: that mode is
+    // "sweepers only" by its own log line, and presence is a sweeper.
+    let _presence = spawn_runtime_presence(
+        pool.clone(),
+        cfg.runtime_id.clone(),
+        cfg.sweeper.presence_interval,
+        Arc::new(SystemClock),
+        events.clone(),
     );
 
     let Some(runtime_id) = cfg.runtime_id.clone().filter(|_| !cfg.disable_claim) else {
@@ -696,6 +715,88 @@ pub fn spawn_gc_sweeper(
             }
         }
     })
+}
+
+/// Schedule the runtime-presence pass: beat for our own runtime, decay everyone
+/// else's by heartbeat age, and push an `AgentPresence` event per agent whose
+/// availability moved (multica gap #6, the availability half).
+///
+/// This is the WRITER half of the presence derivation. The snapshot read folds
+/// the heartbeat age itself, so the Agents screen is correct without a live
+/// daemon; this loop makes the persisted `agent_runtime.status` truthful for
+/// every other reader and — via the event — makes an attached TUI re-render
+/// without polling (the plugin arms `fetch_snapshots` on any non-`TaskMessage`
+/// event, so it needs no change). The reference publishes
+/// `EventDaemonRegister{stale_sweep}` on its own bus for exactly this reason.
+///
+/// `runtime_id` is this daemon's own runtime, beaten first each pass so the
+/// daemon can never sweep itself; `None` for a daemon that advertises none.
+/// A failed pass is logged and the loop continues — presence is observability,
+/// never a reason to down the daemon. Returns the [`JoinHandle`] so a caller can
+/// stop it; the production daemon drops it and relies on process exit, mirroring
+/// [`spawn_gc_sweeper`].
+///
+/// [`JoinHandle`]: tokio::task::JoinHandle
+#[must_use]
+pub fn spawn_runtime_presence(
+    pool: SqlitePool,
+    runtime_id: Option<String>,
+    interval: Duration,
+    clock: Arc<dyn HangarClock>,
+    events: EventSink,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            match sweep_runtime_presence(&pool, clock.as_ref(), runtime_id.as_deref()).await {
+                Ok(sweep) => emit_presence_events(&pool, &events, &sweep).await,
+                Err(e) => tracing::error!(error = %e, kind = "presence", "sweeper pass failed"),
+            }
+        }
+    })
+}
+
+/// Fan an `AgentPresence` event out for every agent backed by a runtime the
+/// presence sweep just moved.
+///
+/// One event per AGENT (not per runtime): the plugin renders agents, and a
+/// runtime typically backs several. A lookup fault is logged and skipped — a
+/// missing notification must never abort the remaining fan-out or the loop.
+async fn emit_presence_events(
+    pool: &SqlitePool,
+    events: &EventSink,
+    sweep: &ainb_hangar_store::repo::agent_runtime::PresenceSweep,
+) {
+    use ainb_hangar_proto::events::{HangarEvent, PresenceState};
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    for (runtimes, state) in [
+        (&sweep.to_unstable, PresenceState::Unstable),
+        (&sweep.to_offline, PresenceState::Offline),
+    ] {
+        for rt in runtimes {
+            match AgentRepo::list_ids_by_runtime(pool, &rt.id).await {
+                Ok(agent_ids) => {
+                    for agent_id in agent_ids {
+                        // A stored PK is non-empty by construction; a malformed
+                        // row is skipped rather than panicking the loop.
+                        let Ok(agent_id) = ainb_hangar_core::ids::AgentId::from_str(agent_id)
+                        else {
+                            continue;
+                        };
+                        events.emit(
+                            &rt.workspace_id,
+                            HangarEvent::AgentPresence { agent_id, state },
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, runtime_id = %rt.id, "presence fan-out failed");
+                }
+            }
+        }
+    }
 }
 
 /// Resolve the claude credential env for `backend`, bounded and off the async

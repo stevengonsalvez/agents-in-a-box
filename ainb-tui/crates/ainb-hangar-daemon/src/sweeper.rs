@@ -50,6 +50,8 @@
 use std::time::Duration;
 
 use ainb_hangar_core::clock::HangarClock;
+use ainb_hangar_proto::events::PresenceState;
+use ainb_hangar_store::repo::agent_runtime::{AgentRuntimeRepo, PresenceSweep};
 use sqlx::SqlitePool;
 
 /// How long a `queued` task may wait before it is failed. Reference:
@@ -89,6 +91,12 @@ pub const DEFAULT_SWEEP_INTERVAL: Duration = Duration::from_secs(60);
 /// `HANGAR_GC_INTERVAL_MS` for deterministic / tight-budget tests.
 pub const DEFAULT_GC_INTERVAL: Duration = Duration::from_secs(3_600);
 
+/// Default interval between runtime-presence passes (heartbeat + availability
+/// decay). Reference: `runtime_sweeper.go:21` (`sweepInterval` = 30s).
+/// Overridable via `HANGAR_PRESENCE_SWEEP_MS` so a tripwire can land several
+/// ticks inside its budget.
+pub const DEFAULT_PRESENCE_INTERVAL: Duration = Duration::from_secs(30);
+
 /// Tunable thresholds for the sweepers.
 ///
 /// Production constructs [`SweeperConfig::default`] (the reference defaults);
@@ -108,6 +116,8 @@ pub struct SweeperConfig {
     pub sweep_interval: Duration,
     /// Interval between workspace-GC passes (on-disk orphan/Full reclaim).
     pub gc_interval: Duration,
+    /// Interval between runtime-presence passes (heartbeat + availability decay).
+    pub presence_interval: Duration,
     /// Maximum rows mutated per pass.
     pub batch_size: i64,
 }
@@ -121,6 +131,7 @@ impl Default for SweeperConfig {
             running_ttl: RUNNING_TTL,
             sweep_interval: DEFAULT_SWEEP_INTERVAL,
             gc_interval: DEFAULT_GC_INTERVAL,
+            presence_interval: DEFAULT_PRESENCE_INTERVAL,
             batch_size: DEFAULT_BATCH_SIZE,
         }
     }
@@ -316,6 +327,51 @@ pub async fn sweep_stale_dispatched(
         );
     }
     Ok(DispatchSweepOutcome { reclaimed, failed })
+}
+
+/// One runtime-presence pass: beat for our own runtime, then age-sweep the rest.
+///
+/// Unlike the task sweepers this one has a WRITE side of its own: the daemon
+/// stamps `own_runtime_id`'s heartbeat FIRST, so its own row can never be
+/// decayed by its own sweep, then walks every other runtime through
+/// `online → unstable → offline` by heartbeat age. The thresholds come from
+/// [`PresenceState`], the single definition the read-side fold also uses.
+///
+/// `own_runtime_id` is `None` for a daemon that advertises no runtime of its own
+/// (the claim-disabled "sweepers only" mode), in which case the pass is purely
+/// the age sweep.
+///
+/// Returns the rows that moved so the caller can fan `AgentPresence` events out
+/// (the reference publishes `EventDaemonRegister{stale_sweep}` for the same
+/// reason: clients must re-read the runtime list).
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the heartbeat or either sweep statement fails.
+pub async fn sweep_runtime_presence(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    own_runtime_id: Option<&str>,
+) -> Result<PresenceSweep, sqlx::Error> {
+    let now = clock.now_ms();
+    if let Some(id) = own_runtime_id {
+        AgentRuntimeRepo::heartbeat(pool, id, now).await?;
+    }
+    let sweep = AgentRuntimeRepo::sweep_presence_by_age(
+        pool,
+        now,
+        PresenceState::UNSTABLE_AFTER_MS,
+        PresenceState::OFFLINE_AFTER_MS,
+    )
+    .await?;
+    if !sweep.is_empty() {
+        tracing::info!(
+            to_unstable = sweep.to_unstable.len(),
+            to_offline = sweep.to_offline.len(),
+            "runtime_presence_swept",
+        );
+    }
+    Ok(sweep)
 }
 
 /// Reclaim a crashed daemon's orphaned in-flight tasks back to `queued` at

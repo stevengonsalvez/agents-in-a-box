@@ -68,9 +68,14 @@ fn new_task(id: &str) -> NewTask {
     }
 }
 
+/// A fixed "now" for the snapshot reads. The seeded runtime carries a NULL
+/// `last_seen_at`, so the availability fold reads its status verbatim and this
+/// value never moves presence — workload stays the only dimension under test.
+const NOW: i64 = 1_700_000_000_000;
+
 /// The agent row's workload in the current `agents_list` snapshot.
 async fn agent_row(store: &Store) -> ainb_hangar_proto::events::ActorRow {
-    snapshots::agents_list(store.pool(), WS)
+    snapshots::agents_list(store.pool(), WS, NOW)
         .await
         .expect("agents_list")
         .into_iter()
@@ -123,6 +128,7 @@ async fn agents_list_workload_tracks_lifecycle_and_agent_update_agrees() {
             agent_env: None,
             token_budget: None,
         },
+        NOW,
     )
     .await
     .expect("agent_update")
