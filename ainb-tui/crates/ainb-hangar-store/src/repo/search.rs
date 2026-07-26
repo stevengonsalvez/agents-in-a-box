@@ -328,8 +328,11 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws-a").await;
         seed_runtime(pool, "ws-a", "rt").await;
+        // Distinct names: agent names are unique per workspace (migration 0050),
+        // and archiving does NOT release a name. Both still LIKE-match "scout",
+        // which is all this test needs — only the ACTIVE one may come back.
         seed_agent(pool, "ws-a", "a-active", "scout", false).await;
-        seed_agent(pool, "ws-a", "a-archived", "scout", true).await;
+        seed_agent(pool, "ws-a", "a-archived", "scout (retired)", true).await;
 
         let hits = cross_entity_search(pool, "ws-a", "scout").await.unwrap();
         let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
