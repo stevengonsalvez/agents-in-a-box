@@ -344,3 +344,150 @@ async fn materialised_skills_do_not_pollute_git_worktree() {
         "git worktree must stay clean after materialisation; got:\n{dirty}"
     );
 }
+
+// ---- Disabled links never materialise (migration 0051, parity #24) ----------
+//
+// The acceptance seam. Both suppression levers are proven against ON-DISK truth
+// (`Path::exists()`), not against a report field alone: the whole point is that
+// the agent never sees the skill.
+
+/// Resolve one skill's id by kebab-case name within the workspace.
+async fn skill_id_by_name(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    name: &str,
+) -> ainb_hangar_core::ids::SkillId {
+    SkillRepo::list(pool, ws)
+        .await
+        .expect("list skills")
+        .into_iter()
+        .find(|s| s.name.as_str() == name)
+        .unwrap_or_else(|| panic!("no skill named {name}"))
+        .id
+}
+
+#[tokio::test]
+async fn disabled_skill_is_not_written_to_disk() {
+    let (store, home, _db) = fresh().await;
+    let (ws, agent) = seed(store.pool()).await;
+    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
+    attach_skill(store.pool(), &ws, &agent, "review", Some("# review"), vec![]).await;
+
+    let review = skill_id_by_name(store.pool(), &ws, "review").await;
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
+        .await
+        .expect("disable review");
+
+    let (target, task_root) = target_in(home.path(), "claude");
+    let report = materialise_for_agent(store.pool(), &agent, &target)
+        .await
+        .expect("materialise");
+
+    assert!(
+        task_root.join(".claude/skills/commit/SKILL.md").exists(),
+        "the enabled skill still lands on disk"
+    );
+    assert!(
+        !task_root.join(".claude/skills/review").exists(),
+        "a disabled skill's directory must never be written"
+    );
+    assert_eq!(
+        report.skill_names,
+        vec!["commit".to_string()],
+        "the report names only what was actually written"
+    );
+}
+
+#[tokio::test]
+async fn all_skills_disabled_materialises_nothing() {
+    let (store, home, _db) = fresh().await;
+    let (ws, agent) = seed(store.pool()).await;
+    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
+    attach_skill(store.pool(), &ws, &agent, "review", Some("# review"), vec![]).await;
+
+    for name in ["commit", "review"] {
+        let id = skill_id_by_name(store.pool(), &ws, name).await;
+        SkillRepo::set_enabled(store.pool(), &ws, &agent, &id, false)
+            .await
+            .expect("disable");
+    }
+
+    let (target, task_root) = target_in(home.path(), "claude");
+    let report = materialise_for_agent(store.pool(), &agent, &target)
+        .await
+        .expect("materialise");
+
+    assert_eq!(
+        report,
+        ainb_hangar_daemon::materialise::MaterialiseReport::default(),
+        "an all-disabled agent produces the same empty report as an unattached one"
+    );
+    assert!(
+        !task_root.join(".claude").exists(),
+        "no empty provider-home tree is left behind"
+    );
+}
+
+#[tokio::test]
+async fn re_enabling_restores_the_directory() {
+    let (store, home_a, _db) = fresh().await;
+    let (ws, agent) = seed(store.pool()).await;
+    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
+    let commit = skill_id_by_name(store.pool(), &ws, "commit").await;
+
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &commit, false)
+        .await
+        .expect("disable");
+    let (target_a, root_a) = target_in(home_a.path(), "claude");
+    materialise_for_agent(store.pool(), &agent, &target_a).await.expect("materialise A");
+    assert!(
+        !root_a.join(".claude/skills/commit").exists(),
+        "disabled: absent from tree A"
+    );
+
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &commit, true)
+        .await
+        .expect("re-enable");
+    // A FRESH tree, so the assertion cannot pass on a leftover from tree A.
+    let home_b = tempfile::tempdir().unwrap();
+    let (target_b, root_b) = target_in(home_b.path(), "claude");
+    materialise_for_agent(store.pool(), &agent, &target_b).await.expect("materialise B");
+    assert!(
+        root_b.join(".claude/skills/commit/SKILL.md").exists(),
+        "re-enabled: present in the fresh tree B"
+    );
+}
+
+/// D1 — the by-NAME runtime suppression list (multica 206), independent of the
+/// junction's `enabled` flag.
+#[tokio::test]
+async fn disabled_runtime_skills_suppresses_by_name() {
+    let (store, home, _db) = fresh().await;
+    let (ws, agent) = seed(store.pool()).await;
+    attach_skill(store.pool(), &ws, &agent, "commit", Some("# commit"), vec![]).await;
+    attach_skill(store.pool(), &ws, &agent, "review", Some("# review"), vec![]).await;
+
+    // The link stays ENABLED; only the runtime list names it.
+    ainb_hangar_store::repo::agent::AgentRepo::set_disabled_runtime_skills(
+        store.pool(),
+        agent.as_str(),
+        &["review".to_string()],
+    )
+    .await
+    .expect("set disabled_runtime_skills");
+
+    let (target, task_root) = target_in(home.path(), "claude");
+    let report = materialise_for_agent(store.pool(), &agent, &target)
+        .await
+        .expect("materialise");
+
+    assert!(
+        task_root.join(".claude/skills/commit/SKILL.md").exists(),
+        "an unsuppressed skill still lands"
+    );
+    assert!(
+        !task_root.join(".claude/skills/review").exists(),
+        "a runtime-suppressed skill never reaches the agent, junction flag notwithstanding"
+    );
+    assert_eq!(report.skill_names, vec!["commit".to_string()]);
+}
