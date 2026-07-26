@@ -41,11 +41,42 @@ use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::SqlitePool;
 
+/// One squad membership: the member actor plus its free-text ROLE label
+/// (migration 0053, multica 084).
+///
+/// The role is what the LEADER's claim-time briefing renders next to the member
+/// so it can match a task to the member's stated specialty ("owns the
+/// migrations"). It is advisory: nothing dispatches on it (D3). `""` means "no
+/// stated role" and renders as no suffix at all.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SquadMember {
+    /// The member as a polymorphic actor-ref (`member:<id>` / `agent:<id>`).
+    pub actor: ActorRef,
+    /// The member's free-text role label; `""` when unset.
+    pub role: String,
+}
+
+impl SquadMember {
+    /// A membership with no stated role (the pre-0053 shape) — the convenience
+    /// constructor readers and tests use when only the actor matters.
+    #[must_use]
+    pub fn new(actor: ActorRef) -> Self {
+        Self { actor, role: String::new() }
+    }
+
+    /// A membership carrying `role` verbatim.
+    #[must_use]
+    pub fn with_role(actor: ActorRef, role: impl Into<String>) -> Self {
+        Self { actor, role: role.into() }
+    }
+}
+
 /// One squad with its leader and members (the list row).
 ///
 /// `id` + `name` identify the squad within its workspace; `leader` is the
 /// polymorphic leader actor-ref (`member:<id>` / `agent:<id>`); `members` are the
-/// squad's member actor-refs (ordered for a stable render). A pure read model.
+/// squad's memberships (actor + free-text role, ordered for a stable render). A
+/// pure read model.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Squad {
     /// The squad's id (`squad.id`).
@@ -54,8 +85,16 @@ pub struct Squad {
     pub name: String,
     /// The squad's leader as a polymorphic actor-ref.
     pub leader: ActorRef,
-    /// The squad's member actor-refs (may be empty), ordered by `(type, id)`.
-    pub members: Vec<ActorRef>,
+    /// The squad's memberships (may be empty), ordered by `(type, id)`. Each
+    /// carries the member's free-text [`SquadMember::role`] (migration 0053).
+    /// A single vec of structs — NOT a parallel `roles` vec — so the pairing
+    /// invariant holds at compile time.
+    pub members: Vec<SquadMember>,
+    /// The user-authored per-squad routing guidance (`squad.instructions`,
+    /// migration 0053), `""` when unset. Rendered VERBATIM as the leader
+    /// briefing's `## Squad Instructions` section, and omitted entirely when
+    /// blank (multica blank-omit parity).
+    pub instructions: String,
     /// `true` when the squad is archived (migration 0052). Archived squads leave
     /// [`SquadRepo::list`] and refuse new assignments. This flag — not
     /// [`archived_at`](Self::archived_at) — is the authoritative discriminant.
@@ -119,6 +158,12 @@ impl SquadRepo {
     /// `(squad_id, member_type, member_id)` composite PK dedupes via
     /// `ON CONFLICT DO NOTHING`).
     ///
+    /// **`DO NOTHING` is load-bearing (migration 0053):** a re-add must never
+    /// clear a [`role`](SquadMember::role) an operator set on an existing
+    /// membership. Only [`add_member_with_role`](Self::add_member_with_role) —
+    /// where the caller supplied an explicit role, i.e. explicit intent —
+    /// overwrites it.
+    ///
     /// # Errors
     ///
     /// Returns [`SquadRepoError::NotFound`] when the squad is not in `workspace`,
@@ -140,6 +185,117 @@ impl SquadRepo {
         .bind(member.id())
         .execute(&mut *tx)
         .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Add `member` to `squad` within `workspace` WITH an explicit free-text
+    /// `role` (migration 0053, multica 084).
+    ///
+    /// Same tenant guard as [`add_member`](Self::add_member), but the conflict
+    /// path is `DO UPDATE SET role = excluded.role`: supplying a role is explicit
+    /// intent, so re-adding an existing member with a role DOES overwrite the
+    /// stored one. `role` is stored verbatim apart from a [`str::trim`] of the
+    /// outer whitespace; `""` clears it (no `CHECK`, no vocabulary — D2).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SquadRepoError::NotFound`] when the squad is not in `workspace`,
+    /// or [`SquadRepoError::Db`] on a store failure.
+    pub async fn add_member_with_role(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+        member: &ActorRef,
+        role: &str,
+    ) -> Result<(), SquadRepoError> {
+        let mut tx = pool.begin().await?;
+        Self::ensure_squad_in_ws(&mut tx, workspace, squad_id).await?;
+        sqlx::query(
+            "INSERT INTO squad_member (squad_id, member_type, member_id, role) \
+             VALUES (?, ?, ?, ?) \
+             ON CONFLICT (squad_id, member_type, member_id) DO UPDATE SET role = excluded.role",
+        )
+        .bind(squad_id)
+        .bind(member.kind().as_str())
+        .bind(member.id())
+        .bind(role.trim())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Set (or clear) an EXISTING membership's free-text `role` (multica
+    /// `UpdateSquadMemberRole` parity, migration 0053).
+    ///
+    /// Returns `true` when a membership row was updated and `false` when `member`
+    /// is not in the squad — this **never inserts** a membership as a side
+    /// effect, so the caller can reject "that actor is not a member" rather than
+    /// answering a silent success. `role` is trimmed; `""` clears the label.
+    ///
+    /// Workspace-scoped through the shared [`ensure_squad_in_ws`](Self::ensure_squad_in_ws)
+    /// guard: a squad id from another tenant is a [`SquadRepoError::NotFound`],
+    /// never a cross-tenant write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SquadRepoError::NotFound`] when the squad is not in `workspace`,
+    /// or [`SquadRepoError::Db`] on a store failure.
+    pub async fn set_member_role(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+        member: &ActorRef,
+        role: &str,
+    ) -> Result<bool, SquadRepoError> {
+        let mut tx = pool.begin().await?;
+        Self::ensure_squad_in_ws(&mut tx, workspace, squad_id).await?;
+        let res = sqlx::query(
+            "UPDATE squad_member SET role = ? \
+             WHERE squad_id = ? AND member_type = ? AND member_id = ?",
+        )
+        .bind(role.trim())
+        .bind(squad_id)
+        .bind(member.kind().as_str())
+        .bind(member.id())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(res.rows_affected() > 0)
+    }
+
+    /// Set (or clear) one squad's user-authored `instructions` (migration 0053,
+    /// multica 088).
+    ///
+    /// The text is stored VERBATIM apart from a [`str::trim`] of the outer edges:
+    /// it reaches an agent's materialised `CLAUDE.md` through the leader
+    /// briefing, so it is never escaped, reflowed or normalised (the same
+    /// contract as `issue.description`). `""` clears it, which makes the briefing
+    /// omit the `## Squad Instructions` section entirely.
+    ///
+    /// Workspace-scoped through [`ensure_squad_in_ws`](Self::ensure_squad_in_ws):
+    /// a foreign-tenant squad id is a [`SquadRepoError::NotFound`] and writes
+    /// nothing.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SquadRepoError::NotFound`] when the squad is not in `workspace`,
+    /// or [`SquadRepoError::Db`] on a store failure.
+    pub async fn set_instructions(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+        instructions: &str,
+    ) -> Result<(), SquadRepoError> {
+        let mut tx = pool.begin().await?;
+        Self::ensure_squad_in_ws(&mut tx, workspace, squad_id).await?;
+        sqlx::query("UPDATE squad SET instructions = ? WHERE id = ? AND workspace_id = ?")
+            .bind(instructions.trim())
+            .bind(squad_id)
+            .bind(workspace.as_str())
+            .execute(&mut *tx)
+            .await?;
         tx.commit().await?;
         Ok(())
     }
@@ -218,10 +374,12 @@ impl SquadRepo {
     ) -> Result<Vec<Squad>, sqlx::Error> {
         use sqlx::Row;
         let sql = if active_only {
-            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by \
+            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by, \
+             instructions \
              FROM squad WHERE workspace_id = ? AND archived = 0 ORDER BY name, id"
         } else {
-            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by \
+            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by, \
+             instructions \
              FROM squad WHERE workspace_id = ? ORDER BY name, id"
         };
         let squad_rows = sqlx::query(sql).bind(workspace.as_str()).fetch_all(pool).await?;
@@ -233,25 +391,13 @@ impl SquadRepo {
                 &r.try_get::<String, _>("leader_type")?,
                 &r.try_get::<String, _>("leader_id")?,
             )?;
-            let member_rows = sqlx::query(
-                "SELECT member_type, member_id FROM squad_member \
-                 WHERE squad_id = ? ORDER BY member_type, member_id",
-            )
-            .bind(&id)
-            .fetch_all(pool)
-            .await?;
-            let mut members = Vec::with_capacity(member_rows.len());
-            for m in &member_rows {
-                members.push(decode_actor(
-                    &m.try_get::<String, _>("member_type")?,
-                    &m.try_get::<String, _>("member_id")?,
-                )?);
-            }
+            let members = read_members(pool, &id).await?;
             squads.push(Squad {
                 id,
                 name: r.try_get("name")?,
                 leader,
                 members,
+                instructions: r.try_get("instructions")?,
                 archived: r.try_get::<i64, _>("archived")? != 0,
                 archived_at: r.try_get("archived_at")?,
                 archived_by: decode_archiver(r.try_get::<Option<String>, _>("archived_by")?),
@@ -287,7 +433,8 @@ impl SquadRepo {
     ) -> Result<Option<Squad>, sqlx::Error> {
         use sqlx::Row;
         let Some(r) = sqlx::query(
-            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by \
+            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by, \
+             instructions \
              FROM squad WHERE id = ? AND workspace_id = ?",
         )
         .bind(squad_id)
@@ -303,25 +450,13 @@ impl SquadRepo {
             &r.try_get::<String, _>("leader_type")?,
             &r.try_get::<String, _>("leader_id")?,
         )?;
-        let member_rows = sqlx::query(
-            "SELECT member_type, member_id FROM squad_member \
-             WHERE squad_id = ? ORDER BY member_type, member_id",
-        )
-        .bind(&id)
-        .fetch_all(pool)
-        .await?;
-        let mut members = Vec::with_capacity(member_rows.len());
-        for m in &member_rows {
-            members.push(decode_actor(
-                &m.try_get::<String, _>("member_type")?,
-                &m.try_get::<String, _>("member_id")?,
-            )?);
-        }
+        let members = read_members(pool, &id).await?;
         Ok(Some(Squad {
             id,
             name: r.try_get("name")?,
             leader,
             members,
+            instructions: r.try_get("instructions")?,
             archived: r.try_get::<i64, _>("archived")? != 0,
             archived_at: r.try_get("archived_at")?,
             archived_by: decode_archiver(r.try_get::<Option<String>, _>("archived_by")?),
@@ -369,6 +504,12 @@ impl SquadRepo {
     /// tenant's members. The LEADER is *not* excluded here — a squad whose leader
     /// is also listed as a member yields that agent once in this list; the fan-out
     /// caller dedupes it against the already-dispatched leader.
+    ///
+    /// **Role-blind by design (D3, migration 0053).** `squad_member.role` is
+    /// advisory metadata the LEADER reads in its briefing; it never filters this
+    /// query, so every agent member is still dispatched to regardless of role —
+    /// matching multica, where nothing gates dispatch on role either. Selective
+    /// routing is parity item #16, a separate product question.
     ///
     /// # Errors
     ///
@@ -475,6 +616,34 @@ impl SquadRepo {
     }
 }
 
+/// Read one squad's memberships (actor + free-text role), ordered by
+/// `(member_type, member_id)` for a stable render — the one member-read shared by
+/// [`SquadRepo::list_where`] and [`SquadRepo::get`], so both see roles.
+async fn read_members(
+    pool: &SqlitePool,
+    squad_id: &str,
+) -> Result<Vec<SquadMember>, sqlx::Error> {
+    use sqlx::Row;
+    let rows = sqlx::query(
+        "SELECT member_type, member_id, role FROM squad_member \
+         WHERE squad_id = ? ORDER BY member_type, member_id",
+    )
+    .bind(squad_id)
+    .fetch_all(pool)
+    .await?;
+    let mut members = Vec::with_capacity(rows.len());
+    for m in &rows {
+        members.push(SquadMember {
+            actor: decode_actor(
+                &m.try_get::<String, _>("member_type")?,
+                &m.try_get::<String, _>("member_id")?,
+            )?,
+            role: m.try_get("role")?,
+        });
+    }
+    Ok(members)
+}
+
 /// Decode a `(type, id)` pair into a typed [`ActorRef`], mapping a malformed pair
 /// (a junk discriminant or empty id the CHECK should have prevented) onto a
 /// decode error so a corrupt row surfaces rather than panics.
@@ -571,8 +740,11 @@ mod tests {
         assert_eq!(s.leader, agent("a-lead"));
         assert_eq!(
             s.members,
-            vec![agent("a-1"), member("u-1")],
-            "ordered, deduped"
+            vec![
+                SquadMember::new(agent("a-1")),
+                SquadMember::new(member("u-1"))
+            ],
+            "ordered, deduped, roleless"
         );
     }
 
@@ -705,7 +877,11 @@ mod tests {
         assert_eq!(got.leader, agent("a-lead"));
         assert_eq!(
             got.members,
-            vec![agent("a-1"), agent("a-2"), member("u-1")],
+            vec![
+                SquadMember::new(agent("a-1")),
+                SquadMember::new(agent("a-2")),
+                SquadMember::new(member("u-1"))
+            ],
             "members ordered by (type, id)"
         );
 
