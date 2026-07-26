@@ -40,6 +40,7 @@
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AutopilotRunId, IdError, TaskId};
+use ainb_hangar_core::origin::IssueOrigin;
 use sqlx::{Row, SqlitePool};
 
 use super::autopilot::{Autopilot, ExecutionMode};
@@ -139,11 +140,16 @@ pub async fn fire_autopilot_tick(
                 .instructions
                 .clone()
                 .unwrap_or_else(|| format!("Autopilot run: {}", autopilot.name));
+            // ORIGIN PROVENANCE (migration 0056, multica parity #21): stamped
+            // INSIDE this INSERT — the exact analogue of multica's
+            // `CreateIssueWithOrigin` (`service/autopilot.go:129-146`), which
+            // binds `ap.ID` (the RULE, not the run) so the completion handler
+            // and analytics can resolve the issue by provenance.
             sqlx::query(
                 "INSERT INTO issue \
                  (id, workspace_id, title, description, state, \
-                  creator_type, creator_id, created_at) \
-                 VALUES (?, ?, ?, ?, 'open', 'agent', ?, ?)",
+                  creator_type, creator_id, created_at, origin_type, origin_id) \
+                 VALUES (?, ?, ?, ?, 'open', 'agent', ?, ?, 'autopilot', ?)",
             )
             .bind(&issue_id)
             .bind(&autopilot.workspace_id)
@@ -151,6 +157,7 @@ pub async fn fire_autopilot_tick(
             .bind(&autopilot.instructions)
             .bind(&autopilot.agent_id)
             .bind(now)
+            .bind(&autopilot.id)
             .execute(&mut *tx)
             .await?;
             Some(issue_id)
@@ -176,6 +183,22 @@ pub async fn fire_autopilot_tick(
             autopilot_run_id: Some(run_id.clone()),
             generation: 0,
         },
+    )
+    .await?;
+
+    // 5. Stamp the task's ORIGIN PROVENANCE inside the SAME transaction, so the
+    //    claim loop can never observe a fired task missing the provenance the
+    //    dispatcher hands its agent child. `origin_id` is the AUTOPILOT id, not
+    //    the run id (multica `service/autopilot.go:145`).
+    TaskRepo::set_origin_in_tx(
+        &mut tx,
+        &task_id,
+        &IssueOrigin::autopilot(&autopilot.id).map_err(|e| {
+            FireError::Db(sqlx::Error::Protocol(format!(
+                "autopilot {} has an unusable id for origin provenance: {e}",
+                autopilot.id
+            )))
+        })?,
     )
     .await?;
 
