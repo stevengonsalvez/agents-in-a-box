@@ -41,6 +41,20 @@
 //!   skill belong to the supplied workspace before touching `agent_skill`, and
 //!   return [`SkillRepoError::CrossWorkspace`] otherwise.
 //!
+//! # Attachment vs enablement (migration 0051, parity #24)
+//!
+//! The `agent_skill` junction carries an `enabled` flag, so there are **two
+//! orthogonal levers**: detaching removes the link entirely, disabling keeps the
+//! link and suppresses only its effect. A disabled link still shows up in
+//! [`SkillRepo::agent_skill_links`] and still counts the skill as "used"
+//! workspace-wide, but it contributes nothing to
+//! [`SkillRepo::skills_for_agent`] — the read the dispatch materialiser uses —
+//! so the skill's directory is never written for that agent.
+//!
+//! `enabled` defaults to `1`, so every attachment predating the migration keeps
+//! materialising exactly as it did. [`SkillRepo::attach_to_agent`] never
+//! re-enables a disabled link (see its docs).
+//!
 //! The `(workspace_id, name)` unique index (`idx_skill_workspace_name`,
 //! migration 0008) is the authoritative guard that a skill name resolves to
 //! exactly one row per tenant. The schema declares no `ON DELETE CASCADE` on
@@ -79,6 +93,25 @@ pub struct SkillFile {
     pub path: String,
     /// File contents; `None` for an empty placeholder.
     pub content: Option<String>,
+}
+
+/// One `agent_skill` junction row, resolved to the skill's name and its
+/// per-agent enablement (migration 0051, parity #24).
+///
+/// This is the listing shape for "what is attached to this agent, and is it
+/// live?" — deliberately distinct from [`SkillRepo::skills_for_agent`], which
+/// returns only the ENABLED links' full bundles (the materialisation shape).
+/// Attachment and enablement are two orthogonal levers: detaching removes the
+/// link, disabling keeps the link and suppresses its effect.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AgentSkillLink {
+    /// The attached skill (`skill.id`).
+    pub skill_id: SkillId,
+    /// The attached skill's normalised (kebab-case) name.
+    pub name: SkillName,
+    /// `false` when the link is attached but suppressed — it still counts as an
+    /// attachment everywhere, but it never materialises for the agent.
+    pub enabled: bool,
 }
 
 /// Stateless typed wrapper over the skill tables.
@@ -176,6 +209,10 @@ impl SkillRepo {
     }
 
     /// List the skill ids attached to an agent, ordered by `skill_id`.
+    ///
+    /// Raw-row helper: it IGNORES `agent_skill.enabled`, so a disabled link is
+    /// still listed here. Use [`SkillRepo::agent_skill_links`] when enablement
+    /// matters.
     ///
     /// # Errors
     ///
@@ -347,6 +384,12 @@ impl SkillRepo {
     /// When both checks pass it runs `INSERT ... ON CONFLICT (agent_id,
     /// skill_id) DO NOTHING`, so calling it twice leaves exactly one row.
     ///
+    /// **D2 — attach never resurrects a disabled link.** `DO NOTHING` (rather
+    /// than `DO UPDATE SET enabled = 1`) is load-bearing, not laziness: the
+    /// daemon's seed and `templates use` paths re-attach on every re-run, so a
+    /// re-enabling attach would silently undo an operator's deliberate disable.
+    /// Re-enabling is an explicit [`SkillRepo::set_enabled`] call.
+    ///
     /// # Errors
     ///
     /// Returns [`SkillRepoError::CrossWorkspace`] if either the agent or the
@@ -413,8 +456,89 @@ impl SkillRepo {
             .collect())
     }
 
-    /// List the skills attached to an agent as [`SkillWithFiles`], ordered by
-    /// skill name.
+    /// Set one `agent_skill` link's `enabled` flag (migration 0051, parity #24).
+    ///
+    /// Disabling keeps the junction row — the skill stays *attached* and still
+    /// counts as used workspace-wide — but suppresses its effect: a disabled
+    /// link contributes nothing to [`SkillRepo::skills_for_agent`], and so is
+    /// never written to disk by the dispatch materialiser.
+    ///
+    /// Both the `agent` and the `skill` must belong to `workspace`; otherwise
+    /// this returns [`SkillRepoError::CrossWorkspace`] and writes nothing.
+    ///
+    /// Returns `true` when a junction row was updated and `false` when the pair
+    /// is not attached, so a caller can distinguish "toggled" from "no such
+    /// link". Idempotent: setting the value a row already holds still returns
+    /// `true` (the row exists) and changes nothing observable.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillRepoError::CrossWorkspace`] if either the agent or the
+    /// skill is not in `workspace`, or [`SkillRepoError::Db`] on a SQL failure.
+    pub async fn set_enabled(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        agent: &AgentId,
+        skill: &SkillId,
+        enabled: bool,
+    ) -> Result<bool, SkillRepoError> {
+        Self::ensure_same_workspace(pool, workspace, agent, skill).await?;
+        let result = sqlx::query("UPDATE agent_skill SET enabled = ? WHERE agent_id = ? AND skill_id = ?")
+            .bind(i64::from(enabled))
+            .bind(agent.as_str())
+            .bind(skill.as_str())
+            .execute(pool)
+            .await?;
+        Ok(result.rows_affected() > 0)
+    }
+
+    /// List **every** skill link on an agent — enabled and disabled alike —
+    /// ordered by skill name (migration 0051, parity #24).
+    ///
+    /// This is the attachment-listing shape; [`SkillRepo::skills_for_agent`] is
+    /// the materialisation shape. Workspace-scoped exactly like it: a foreign
+    /// agent id yields an empty vec.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillRepoError::Db`] on a SQL failure or
+    /// [`SkillRepoError::Name`] on a corrupt stored name.
+    pub async fn agent_skill_links(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        agent: &AgentId,
+    ) -> Result<Vec<AgentSkillLink>, SkillRepoError> {
+        let rows: Vec<(String, String, i64)> = sqlx::query_as(
+            "SELECT s.id, s.name, a.enabled \
+             FROM skill s \
+             JOIN agent_skill a ON a.skill_id = s.id \
+             JOIN agent ag ON ag.id = a.agent_id \
+             WHERE a.agent_id = ? AND ag.workspace_id = ? \
+             ORDER BY s.name",
+        )
+        .bind(agent.as_str())
+        .bind(workspace.as_str())
+        .fetch_all(pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (id, name, enabled) in rows {
+            out.push(AgentSkillLink {
+                skill_id: SkillId::from_str(id).map_err(|_| SkillRepoError::EmptyId)?,
+                name: SkillName::new(&name)?,
+                enabled: enabled != 0,
+            });
+        }
+        Ok(out)
+    }
+
+    /// List the **enabled** skills attached to an agent as [`SkillWithFiles`],
+    /// ordered by skill name.
+    ///
+    /// **This returns the ENABLED attachments only — it is the materialisation
+    /// shape.** A link whose `agent_skill.enabled` is `0` (migration 0051,
+    /// parity #24) is still attached but is deliberately absent here, which is
+    /// what keeps a disabled skill off the agent's task tree. Callers that want
+    /// the full attachment set use [`SkillRepo::agent_skill_links`].
     ///
     /// Joins `agent_skill` → `skill` and additionally joins the `agent` row,
     /// filtering `WHERE ag.workspace_id = ?`: a foreign agent id (one that does
@@ -436,7 +560,7 @@ impl SkillRepo {
              FROM skill s \
              JOIN agent_skill a ON a.skill_id = s.id \
              JOIN agent ag ON ag.id = a.agent_id \
-             WHERE a.agent_id = ? AND ag.workspace_id = ? \
+             WHERE a.agent_id = ? AND ag.workspace_id = ? AND a.enabled = 1 \
              ORDER BY s.name",
         )
         .bind(agent.as_str())
