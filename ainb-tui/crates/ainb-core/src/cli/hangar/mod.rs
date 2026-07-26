@@ -757,6 +757,11 @@ pub enum SquadCommand {
     Archive(SquadArchiveArgs),
     /// Restore an archived squad (clears the archive audit stamp).
     Unarchive(SquadArchiveArgs),
+    /// Set or clear an existing member's free-text role on a squad.
+    #[command(name = "member-role")]
+    MemberRole(SquadMemberRoleArgs),
+    /// Show, set, or clear a squad's user-authored routing instructions.
+    Instructions(SquadInstructionsArgs),
 }
 
 /// Arguments for `hangar squad list`.
@@ -794,6 +799,11 @@ pub struct SquadCreateArgs {
     /// leader is the actor a squad-assigned task is routed to.
     #[arg(long)]
     pub leader: String,
+    /// Initial routing guidance for the squad, rendered VERBATIM as the leader
+    /// briefing's `## Squad Instructions` section. Omitted leaves it empty, and
+    /// a blank field omits that section entirely.
+    #[arg(long)]
+    pub instructions: Option<String>,
     /// Workspace slug the squad belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -808,6 +818,47 @@ pub struct SquadMemberArgs {
     /// The member actor-ref (`agent:<id>` / `member:<id>`).
     #[arg(long)]
     pub member: String,
+    /// Free-text role for the ADDED member ("owns the migrations"), which the
+    /// squad leader reads in its briefing. Honoured by `add-member` and IGNORED
+    /// by `remove-member`. Omitted leaves an existing member's role untouched.
+    #[arg(long)]
+    pub role: Option<String>,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad member-role`: set or clear an EXISTING
+/// membership's free-text role (migration 0053).
+#[derive(Args, Debug)]
+pub struct SquadMemberRoleArgs {
+    /// The squad id (`squad.id`) whose membership to edit.
+    pub squad_id: String,
+    /// The existing member actor-ref (`agent:<id>` / `member:<id>`).
+    #[arg(long)]
+    pub member: String,
+    /// The free-text role label. Pass an empty string to clear it.
+    #[arg(long, default_value = "")]
+    pub role: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar squad instructions`: show, set, or clear a squad's
+/// user-authored routing guidance (migration 0053).
+#[derive(Args, Debug)]
+pub struct SquadInstructionsArgs {
+    /// The squad id (`squad.id`) to read or edit.
+    pub squad_id: String,
+    /// Replace the squad's instructions with this text (stored verbatim).
+    #[arg(long, conflicts_with = "clear")]
+    pub set: Option<String>,
+    /// Clear the squad's instructions, so the leader briefing omits the section.
+    #[arg(long)]
+    pub clear: bool,
     /// Workspace slug the squad belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -2680,6 +2731,8 @@ async fn dispatch_squad(cmd: SquadCommand, format: OutputFormat) -> Result<()> {
         SquadCommand::Assign(args) => run_squad_assign(&store, args).await,
         SquadCommand::Archive(args) => run_squad_set_archived(&store, args, true).await,
         SquadCommand::Unarchive(args) => run_squad_set_archived(&store, args, false).await,
+        SquadCommand::MemberRole(args) => run_squad_member_role(&store, args).await,
+        SquadCommand::Instructions(args) => run_squad_instructions(&store, args).await,
     }
 }
 
@@ -2761,6 +2814,14 @@ async fn run_squad_create(store: &Store, args: SquadCreateArgs) -> Result<()> {
     SquadRepo::create(store.pool(), &ws, &id, &args.name, &leader, now)
         .await
         .map_err(squad_cli_err)?;
+    // Optional initial routing guidance (migration 0053). `create`'s signature
+    // stays unchanged — the two writes are one logical unit here.
+    if let Some(instructions) = args.instructions.as_deref().map(str::trim).filter(|t| !t.is_empty())
+    {
+        SquadRepo::set_instructions(store.pool(), &ws, &id, instructions)
+            .await
+            .map_err(squad_cli_err)?;
+    }
     println!("created squad {} ({}) led by {}", args.name, id, leader);
     Ok(())
 }
@@ -2781,15 +2842,108 @@ async fn run_squad_member(store: &Store, args: SquadMemberArgs, add: bool) -> Re
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
     if add {
-        SquadRepo::add_member(store.pool(), &ws, &args.squad_id, &member)
-            .await
-            .map_err(squad_cli_err)?;
-        println!("added {member} to squad {}", args.squad_id);
+        // An explicit `--role` is explicit intent, so it OVERWRITES on a re-add;
+        // omitting it keeps the idempotent `DO NOTHING` path, which never clears
+        // a role an operator already set.
+        match args.role.as_deref().map(str::trim).filter(|r| !r.is_empty()) {
+            Some(role) => {
+                SquadRepo::add_member_with_role(store.pool(), &ws, &args.squad_id, &member, role)
+                    .await
+                    .map_err(squad_cli_err)?;
+                println!(
+                    "added {member} to squad {} with role \"{role}\"",
+                    args.squad_id
+                );
+            }
+            None => {
+                SquadRepo::add_member(store.pool(), &ws, &args.squad_id, &member)
+                    .await
+                    .map_err(squad_cli_err)?;
+                println!("added {member} to squad {}", args.squad_id);
+            }
+        }
     } else {
         SquadRepo::remove_member(store.pool(), &ws, &args.squad_id, &member)
             .await
             .map_err(squad_cli_err)?;
         println!("removed {member} from squad {}", args.squad_id);
+    }
+    Ok(())
+}
+
+/// `hangar squad member-role`: set or clear an EXISTING membership's free-text
+/// role, workspace-scoped (migration 0053).
+///
+/// An actor that is not already a member is a hard error with a non-zero exit —
+/// never an "ok" on a no-op — mirroring the RPC handler's `INVALID_PARAMS`.
+async fn run_squad_member_role(store: &Store, args: SquadMemberRoleArgs) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let member: ActorRef = args.member.parse().with_context(|| {
+        format!(
+            "member must be `agent:<id>` or `member:<id>`: {}",
+            args.member
+        )
+    })?;
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let updated = SquadRepo::set_member_role(store.pool(), &ws, &args.squad_id, &member, &args.role)
+        .await
+        .map_err(squad_cli_err)?;
+    if !updated {
+        anyhow::bail!(
+            "{member} is not a member of squad {} — add it first",
+            args.squad_id
+        );
+    }
+    let role = args.role.trim();
+    if role.is_empty() {
+        println!("cleared the role of {member} on squad {}", args.squad_id);
+    } else {
+        println!(
+            "set the role of {member} on squad {} to \"{role}\"",
+            args.squad_id
+        );
+    }
+    Ok(())
+}
+
+/// `hangar squad instructions`: show (no flag), set (`--set`), or clear
+/// (`--clear`) a squad's user-authored routing guidance (migration 0053).
+///
+/// The text is stored VERBATIM — it reaches an agent's materialised `CLAUDE.md`
+/// through the leader briefing. Clearing makes that briefing omit the
+/// `## Squad Instructions` section entirely.
+async fn run_squad_instructions(store: &Store, args: SquadInstructionsArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    if args.set.is_some() || args.clear {
+        let text = if args.clear { "" } else { args.set.as_deref().unwrap_or_default() };
+        SquadRepo::set_instructions(store.pool(), &ws, &args.squad_id, text)
+            .await
+            .map_err(squad_cli_err)?;
+        if text.trim().is_empty() {
+            println!("cleared the instructions of squad {}", args.squad_id);
+        } else {
+            println!("set the instructions of squad {}", args.squad_id);
+        }
+        return Ok(());
+    }
+
+    let squad = SquadRepo::get(store.pool(), &ws, &args.squad_id)
+        .await
+        .context("read squad")?
+        .with_context(|| format!("no squad {} in this workspace", args.squad_id))?;
+    if squad.instructions.is_empty() {
+        println!("squad {} has no instructions", args.squad_id);
+    } else {
+        println!("{}", squad.instructions);
     }
     Ok(())
 }
@@ -5695,7 +5849,18 @@ fn squad_line(s: &ainb_hangar_store::repo::squad::Squad) -> String {
         squad_members_joined(s),
         if s.archived { "  [archived]" } else { "" },
         archive_audit_suffix(s.archived_at, s.archived_by.as_ref()),
-    )
+    ) + &squad_instructions_suffix(s)
+}
+
+/// The squad's routing guidance as an indented follow-on line for the TEXT
+/// surface, or `""` when blank (migration 0053) — a squad with no instructions
+/// prints exactly the one line it printed before the column existed.
+fn squad_instructions_suffix(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    if s.instructions.is_empty() {
+        String::new()
+    } else {
+        format!("\n  instructions: {}", s.instructions)
+    }
 }
 fn squad_csv_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
     format!(
@@ -5721,17 +5886,36 @@ fn squad_md_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
         md_cell(&s.archived_by.as_ref().map_or_else(|| "-".to_string(), ToString::to_string)),
     )
 }
-/// Minimal stable JSON object for one squad (id, name, leader, members array).
+/// Minimal stable JSON object for one squad (id, name, leader, members array,
+/// plus the parity-#25 `instructions` string and `member_roles` array).
+///
+/// APPEND-ONLY, mirroring the wire row: `members` stays a flat array of
+/// actor-refs so an existing consumer keeps parsing it, and roles ride a parallel
+/// `member_roles` array of `{member, role}` objects keyed by the actor-ref (join
+/// by `member`, never by index).
 fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
+    let member_roles = s
+        .members
+        .iter()
+        .filter(|m| !m.role.is_empty())
+        .map(|m| {
+            format!(
+                "{{\"member\":{},\"role\":{}}}",
+                json_string(&m.actor.to_string()),
+                json_string(&m.role)
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
     format!(
-        "{{\"id\":{},\"name\":{},\"leader\":{},\"members\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{}}}",
+        "{{\"id\":{},\"name\":{},\"leader\":{},\"members\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{},\"instructions\":{},\"member_roles\":[{member_roles}]}}",
         json_string(&s.id),
         json_string(&s.name),
         json_string(&s.leader.to_string()),
         json_string_array(
             s.members
                 .iter()
-                .map(|m| m.to_string())
+                .map(|m| m.actor.to_string())
                 .collect::<Vec<_>>()
                 .iter()
                 .map(String::as_str)
@@ -5742,11 +5926,24 @@ fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
             || "null".to_string(),
             |actor| json_string(&actor.to_string())
         ),
+        json_string(&s.instructions),
     )
 }
-/// Join a squad's member actor-refs with `, ` for the flat text surfaces.
+/// Join a squad's member actor-refs with `, ` for the flat text surfaces, each
+/// suffixed with ` (role: …)` when the membership carries one (migration 0053).
+/// A roleless member renders exactly as it did before the column existed.
 fn squad_members_joined(s: &ainb_hangar_store::repo::squad::Squad) -> String {
-    s.members.iter().map(ToString::to_string).collect::<Vec<_>>().join(", ")
+    s.members
+        .iter()
+        .map(|m| {
+            if m.role.is_empty() {
+                m.actor.to_string()
+            } else {
+                format!("{} (role: {})", m.actor, m.role)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 // ──────────────────────────────────────────────────────────────────────────
