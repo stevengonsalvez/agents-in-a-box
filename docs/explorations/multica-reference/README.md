@@ -133,7 +133,7 @@ the inbox** — remain open.
 | 16 | Squad selective routing vs spray fan-out | L | **product decision first**; depends on 2‑rest |
 | 9‑rest | The LLM turn behind the agent builder (needs `kind`/`system_key` from #23) | L | |
 | 14 | Autopilot rule versioning + human attribution | M | |
-| 7‑rest | Briefing `## Squad Instructions` + per-member role/skills | S | unlocked the moment #25 lands |
+| 7‑cwd (F1) | The briefing is written into the TASK tree while a card run's provider `cwd` is its worktree | S–M | issue #485 — delivery mechanism, not briefing content |
 
 **P2 — polish / cheap wins.**
 
