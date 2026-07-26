@@ -1164,8 +1164,9 @@ pub struct IssueCreateArgs {
     pub due: Option<i64>,
     /// A label to attach to the issue (repeatable: `--label bug --label p0`).
     ///
-    /// Persisted as the issue's label list. The full labels table + attach/detach
-    /// is a separate concern; create just records the labels it is handed.
+    /// Each name is resolve-or-created in the workspace and joined to the issue
+    /// through the `label` / `issue_label` tables (migration 0016), so a repeated
+    /// name yields exactly one attachment.
     #[arg(long = "label", action = clap::ArgAction::Append)]
     pub labels: Vec<String>,
     /// An acceptance criterion (repeatable: `--acceptance "x" --acceptance "y"`).
@@ -1210,13 +1211,9 @@ pub struct IssueCreateArgs {
 /// Returns a human-readable message if the input is not a valid `YYYY-MM-DD`
 /// date (surfaced by clap as the flag's value error).
 fn parse_due_date(raw: &str) -> Result<i64, String> {
-    let date = chrono::NaiveDate::parse_from_str(raw, "%Y-%m-%d")
-        .map_err(|_| format!("expected a YYYY-MM-DD date, got {raw:?}"))?;
-    let dt = date
-        .and_hms_opt(0, 0, 0)
-        .ok_or_else(|| format!("invalid time-of-day for date {raw:?}"))?
-        .and_utc();
-    Ok(dt.timestamp_millis())
+    // One parser, one error message, shared with the TUI create wizard so a
+    // calendar day typed in either place resolves to the same UTC-midnight ms.
+    ainb_hangar_proto::dates::parse_calendar_date_ms(raw)
 }
 
 /// Arguments for `hangar issue list`.
@@ -3375,7 +3372,11 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         created_at: now,
         priority: args.priority,
         due_date: args.due,
-        labels: args.labels.clone(),
+        // 0016: labels go through the `label` / `issue_label` join below (the
+        // source of truth), never straight into this JSON read-cache — writing
+        // the cache alone left `hangar issue create --label` invisible to every
+        // label query and diverged the CLI from the daemon's create.
+        labels: Vec::new(),
         // 0048: trim-drop blank elements — an empty criterion / ref is not data.
         acceptance_criteria: args
             .acceptance_criteria
@@ -3395,6 +3396,22 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         stage: None,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
+
+    // 0016: attach each `--label` through the join — `LabelRepo::attach` resolves
+    // or creates the label in the workspace, writes the `issue_label` row
+    // (ON CONFLICT DO NOTHING, so a repeated flag is one row) and re-derives the
+    // `issue.labels` cache from the join. Same path the daemon's create takes, so
+    // a CLI-created and a TUI-created issue read back identically.
+    if !args.labels.is_empty() {
+        use ainb_hangar_store::repo::label::LabelRepo;
+        let ws = ainb_hangar_core::ids::WorkspaceId::from_str(workspace_id.clone())
+            .context("workspace id")?;
+        for name in args.labels.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+            LabelRepo::attach(pool, &ws, &id, name, None)
+                .await
+                .with_context(|| format!("attach label `{name}`"))?;
+        }
+    }
 
     // Resolve + persist the repo / branches (0032/0042). A remote repo token is
     // cloned once into the shared clone cache (the board card-create parity),

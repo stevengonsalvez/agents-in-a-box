@@ -704,6 +704,57 @@ fn issue_label_attach_then_detach_persist_through_show() {
     );
 }
 
+/// Parity 28: `hangar issue create --label` routes through the 0016 label join,
+/// not just the `issue.labels` JSON cache — so a created label is visible to the
+/// SAME reads a later `label attach` would produce, and a repeated `--label` is
+/// idempotent (one chip, not two).
+#[test]
+fn issue_create_labels_route_through_the_label_join() {
+    let tmp = tempfile::tempdir().unwrap();
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "create", "--title", "Labelled at birth", "--label", "bug",
+            "--label", "bug", "--label", "p0",
+        ],
+    );
+    assert!(ok, "issue create --label should exit 0; out={out}");
+    let id = out
+        .lines()
+        .find_map(|l| l.strip_prefix("created issue "))
+        .map(|s| s.trim().to_string())
+        .expect("create output carries an id");
+
+    // The read-cache reflects the join (attach re-derives it), deduped.
+    let (ok, out) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "json show should exit 0; out={out}");
+    assert!(
+        out.contains("\"labels\":[\"bug\",\"p0\"]"),
+        "create labels missing / duplicated in json show:\n{out}"
+    );
+
+    // The join is the source of truth: detaching through the label verb (which
+    // only ever touches `issue_label`) must be able to REMOVE what create wrote.
+    // Before this change create wrote the cache only, so the detach was a no-op.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "label", "detach", &id, "bug"],
+    );
+    assert!(ok, "label detach should exit 0; out={out}");
+    let (ok, out) = run(
+        tmp.path(),
+        &["--format", "json", "hangar", "issue", "show", &id],
+    );
+    assert!(ok, "json show should exit 0; out={out}");
+    assert!(
+        out.contains("\"labels\":[\"p0\"]"),
+        "detach did not remove a create-authored label:\n{out}"
+    );
+}
+
 /// `ainb hangar issue label attach` against an unknown issue id is an error
 /// (exit non-zero), never a silent no-op.
 #[test]
