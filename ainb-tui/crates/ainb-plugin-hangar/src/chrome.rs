@@ -347,6 +347,66 @@ mod tests {
         assert!(!tab_is_active(&Screen::AgentPicker(issue), '1'));
     }
 
+    /// #450 HYGIENE: no per-screen footer hint may advertise a char the global
+    /// router (or the host) eats first — such a hint is a lie: pressing it
+    /// navigates away instead of doing what the footer says.
+    ///
+    /// The trailing GLOBAL hints (`^P`, `?`, `q`) are exempt: those ARE the
+    /// reserved keys, advertised by the layer that owns them.
+    ///
+    /// Fails on `main`: the Fleet footer advertised `→/A:attach`, but bare `A`
+    /// switches to the Agents tab.
+    #[test]
+    fn footer_hint_keys_never_collide_with_reserved_router_keys() {
+        use crate::screen::router::is_reserved_key;
+        let issue = ainb_hangar_core::ids::IssueId::from_str("i1").unwrap();
+        let task = ainb_hangar_core::ids::TaskId::from_str("01HANGARTASK000000000001").unwrap();
+        let screens = [
+            Screen::IssueList,
+            Screen::TaskDetail(task),
+            Screen::AgentPicker(issue),
+            Screen::SkillManager,
+            Screen::Autopilots,
+            Screen::Kanban,
+            Screen::Boards,
+            Screen::DaemonHealth,
+            Screen::Usage,
+            Screen::Logs,
+            Screen::Inbox,
+            Screen::ControlCenter,
+            Screen::Fleet,
+            Screen::Squads,
+            Screen::Profiles,
+            Screen::Agents,
+            Screen::Settings,
+            Screen::Help,
+            Screen::CommandPalette,
+        ];
+        // The globals the footer appends unconditionally — reserved BY DESIGN.
+        let global = [("^P", "search"), ("?", "help"), ("q", "quit")];
+        for active in screens {
+            for hint in footer_hints(&active) {
+                if global.contains(&hint) {
+                    continue;
+                }
+                // A hint key may be a compound label (`j/k`, `→/a`, `enter`);
+                // check every single ASCII char token inside it.
+                for token in hint.0.split('/') {
+                    let mut chars = token.chars();
+                    let (Some(ch), None) = (chars.next(), chars.next()) else {
+                        continue;
+                    };
+                    assert!(
+                        !is_reserved_key(ch),
+                        "{active:?} footer advertises `{}` but `{ch}` is a reserved \
+                         router/host key — the screen never sees it",
+                        hint.0
+                    );
+                }
+            }
+        }
+    }
+
     /// Footer always ends with the global `?:help q:quit` hints regardless of
     /// the active screen.
     #[test]

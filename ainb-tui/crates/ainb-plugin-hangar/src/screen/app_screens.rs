@@ -2519,3 +2519,142 @@ mod kanban_retry_route_tests {
         );
     }
 }
+
+/// #450: the general invariant that keeps a screen-local binding from silently
+/// rotting. The routing layer (tab switches / `q` quit / `?` help) and the HOST
+/// (`?`/`H` help toggle) both consume their chars BEFORE the active screen's
+/// reducer is consulted, so any screen that binds one of those chars binds a key
+/// the user can never press. Enumerating the reserved set against every pure nav
+/// mapper makes the whole class of bug non-recurring.
+#[cfg(test)]
+mod reserved_key_invariant_tests {
+    use super::*;
+    use crate::screen::fleet::{FleetKey, FleetPaneState, reduce_browse_key};
+    use crate::screen::router::{HOST_RESERVED_KEYS, ROUTER_KEYS, is_reserved_key};
+    use crate::screen::settings::{SettingsEvent, SettingsSection, SettingsState};
+    use ainb_hangar_proto::settings::HealthSnapshot;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    /// Every char no hangar screen may bind while it is not capturing text.
+    fn reserved_chars() -> Vec<char> {
+        let mut all: Vec<char> = ROUTER_KEYS.to_vec();
+        for ch in HOST_RESERVED_KEYS {
+            if !all.contains(&ch) {
+                all.push(ch);
+            }
+        }
+        all
+    }
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// A settings pane parked on `section`, navigated there through the REAL
+    /// `j` section-walk (the field is private, and `j` is not a reserved char).
+    fn settings_state(section: SettingsSection) -> SettingsState {
+        let mut state = SettingsState::new(
+            HealthSnapshot {
+                socket_path: "/tmp/x.sock".into(),
+                pid: 1,
+                uptime_secs: 0,
+                version: "test".into(),
+                connected: true,
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        for _ in 0..8 {
+            if state.section() == section {
+                return state;
+            }
+            state = crate::screen::settings::reduce_settings(&state, SettingsEvent::Key('j')).state;
+        }
+        assert_eq!(
+            state.section(),
+            section,
+            "could not reach {section:?} via `j`"
+        );
+        state
+    }
+
+    /// No pure screen-key mapper may claim a reserved char. Exhaustive over the
+    /// reserved set × the Boards / Kanban / Fleet / Settings nav mappers.
+    ///
+    /// Fails on `main`: Boards bound `q` (squad) and `D` (depends-on), Boards and
+    /// Kanban bound `H`/`L`, Fleet bound `A`/`B`, Settings bound `K`.
+    #[test]
+    fn no_screen_binds_a_reserved_key() {
+        for ch in reserved_chars() {
+            assert!(is_reserved_key(ch), "`{ch}` must report as reserved");
+
+            assert!(
+                board_nav_event(&press(ch)).is_none(),
+                "Boards binds reserved key `{ch}` — the router/host eats it first"
+            );
+            assert!(
+                kanban_nav_event(&press(ch)).is_none(),
+                "Kanban binds reserved key `{ch}` — the router/host eats it first"
+            );
+
+            let mut fleet = FleetPaneState::default();
+            let intent = reduce_browse_key(&mut fleet, FleetKey::Char(ch));
+            assert!(
+                intent.is_none() && !fleet.is_modal_open(),
+                "Fleet binds reserved key `{ch}` — the router eats it first"
+            );
+
+            for section in [
+                SettingsSection::Daemon,
+                SettingsSection::Providers,
+                SettingsSection::Keys,
+                SettingsSection::Workspaces,
+                SettingsSection::Members,
+                SettingsSection::Notifications,
+            ] {
+                let before = settings_state(section);
+                let after =
+                    crate::screen::settings::reduce_settings(&before, SettingsEvent::Key(ch));
+                assert!(
+                    after.state == before && after.intent.is_none(),
+                    "Settings/{section:?} binds reserved key `{ch}` — the router eats it first"
+                );
+            }
+        }
+    }
+
+    /// The rebound Boards verbs are live on their NEW chars — the other half of
+    /// the invariant, so the fix can't be "delete the binding".
+    #[test]
+    fn rebound_boards_verbs_are_bound() {
+        assert!(matches!(
+            board_nav_event(&press('s')),
+            Some(BoardsEvent::AssignSquad)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('w')),
+            Some(BoardsEvent::AddDependency)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('<')),
+            Some(BoardsEvent::ReorderColumnLeft)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('>')),
+            Some(BoardsEvent::ReorderColumnRight)
+        ));
+        assert!(matches!(
+            kanban_nav_event(&press('<')),
+            Some(KanbanEvent::MoveCardLeft)
+        ));
+        assert!(matches!(
+            kanban_nav_event(&press('>')),
+            Some(KanbanEvent::MoveCardRight)
+        ));
+    }
+}
