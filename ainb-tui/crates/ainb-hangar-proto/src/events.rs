@@ -238,6 +238,80 @@ pub enum PresenceState {
     Offline,
 }
 
+impl PresenceState {
+    /// Heartbeat staleness beyond which a runtime is *degraded* (amber).
+    ///
+    /// Multica `derive-health.ts` `FIVE_MINUTES_MS`. Multica gates its amber band
+    /// behind a server-side 150s liveness sweeper; hangar has no liveness
+    /// authority outside the DB heartbeat, so the band is shifted to "stale for
+    /// longer than 5 minutes" — 10 missed beats at the 30s sweep cadence, the
+    /// same order of margin multica buys with its 15s/150s ratio.
+    pub const UNSTABLE_AFTER_MS: i64 = 5 * 60 * 1000;
+
+    /// End of the unstable grace window — past this the runtime is gone.
+    pub const OFFLINE_AFTER_MS: i64 = 10 * 60 * 1000;
+
+    /// Map a stored `agent_runtime.status` string onto a presence
+    /// (`"online"` → [`Online`](Self::Online), `"unstable"` →
+    /// [`Unstable`](Self::Unstable), anything else → [`Offline`](Self::Offline)).
+    #[must_use]
+    pub fn from_status(status: &str) -> Self {
+        match status {
+            "online" => Self::Online,
+            "unstable" => Self::Unstable,
+            _ => Self::Offline,
+        }
+    }
+
+    /// Severity order for the "worse wins" fold: `Offline` < `Unstable` <
+    /// `Online`. Deliberately NOT a `PartialOrd` derive — the public variant
+    /// order is wire-visible through the serde renames and must not be reordered.
+    const fn rank(self) -> u8 {
+        match self {
+            Self::Offline => 0,
+            Self::Unstable => 1,
+            Self::Online => 2,
+        }
+    }
+
+    /// Fold the stored runtime status together with its heartbeat age (multica
+    /// `deriveRuntimeHealth` + `deriveAgentAvailability`).
+    ///
+    /// `last_seen_at == None` yields the status verbatim: a row that never
+    /// carried a heartbeat signal (legacy / CLI-seeded) must not decay just
+    /// because it has no beat to measure.
+    ///
+    /// Otherwise the **worse** of (stored status, heartbeat age) wins, so a
+    /// deregistered runtime with a fresh beat still reads `Offline`, and a
+    /// crashed daemon whose row is frozen at `"online"` still decays to
+    /// `Unstable` then `Offline`. The age fold is the primary mechanism, not
+    /// defence in depth: hangar's sweeper lives INSIDE the daemon, so nothing
+    /// can flip a dead daemon's own row.
+    ///
+    /// Age is `now_ms.saturating_sub(seen)`, so a future stamp (clock skew)
+    /// reads as fresh rather than panicking or flipping.
+    #[must_use]
+    pub fn derive(status: &str, last_seen_at: Option<i64>, now_ms: i64) -> Self {
+        let stored = Self::from_status(status);
+        let Some(seen) = last_seen_at else {
+            return stored;
+        };
+        let age = now_ms.saturating_sub(seen);
+        let by_age = if age > Self::OFFLINE_AFTER_MS {
+            Self::Offline
+        } else if age > Self::UNSTABLE_AFTER_MS {
+            Self::Unstable
+        } else {
+            Self::Online
+        };
+        if by_age.rank() < stored.rank() {
+            by_age
+        } else {
+            stored
+        }
+    }
+}
+
 /// Workload dimension (multica `Workload`), orthogonal to availability.
 ///
 /// Derived from LIVE task counts only — terminal tasks
@@ -684,6 +758,92 @@ mod tests {
         assert_eq!(Workload::derive(2, 0), Workload::Working);
         // running wins even when both are non-zero.
         assert_eq!(Workload::derive(1, 5), Workload::Working);
+    }
+
+    /// `PresenceState::derive` folds the stored status with the heartbeat age
+    /// across every band (multica `deriveRuntimeHealth` +
+    /// `deriveAgentAvailability`, with the hangar band shift).
+    #[test]
+    fn presence_derive_bands() {
+        const NOW: i64 = 1_700_000_000_000;
+        const UNSTABLE: i64 = PresenceState::UNSTABLE_AFTER_MS;
+        const OFFLINE: i64 = PresenceState::OFFLINE_AFTER_MS;
+        // (status, last_seen_at, expected, why)
+        let cases: &[(&str, Option<i64>, PresenceState, &str)] = &[
+            (
+                "online",
+                None,
+                PresenceState::Online,
+                "legacy row, verbatim",
+            ),
+            ("offline", None, PresenceState::Offline, "verbatim"),
+            ("online", Some(NOW - 10_000), PresenceState::Online, "fresh"),
+            (
+                "online",
+                Some(NOW - (UNSTABLE - 1)),
+                PresenceState::Online,
+                "band edge is inclusive of Online",
+            ),
+            (
+                "online",
+                Some(NOW - (UNSTABLE + 1)),
+                PresenceState::Unstable,
+                "the amber band opens",
+            ),
+            (
+                "online",
+                Some(NOW - OFFLINE),
+                PresenceState::Unstable,
+                "grace boundary is inclusive of Unstable",
+            ),
+            (
+                "online",
+                Some(NOW - (OFFLINE + 1)),
+                PresenceState::Offline,
+                "grace expired",
+            ),
+            (
+                "offline",
+                Some(NOW - 10_000),
+                PresenceState::Offline,
+                "worse wins: a deregistered runtime is not online",
+            ),
+            (
+                "unstable",
+                Some(NOW - 10_000),
+                PresenceState::Unstable,
+                "worse wins: a stored degraded status survives a fresh beat",
+            ),
+            (
+                "online",
+                Some(NOW + 3_600_000),
+                PresenceState::Online,
+                "clock skew must not panic or flip",
+            ),
+        ];
+        for (status, seen, expect, why) in cases {
+            assert_eq!(
+                PresenceState::derive(status, *seen, NOW),
+                *expect,
+                "status={status} last_seen={seen:?}: {why}"
+            );
+        }
+    }
+
+    /// The status mapper is the inverse of the render vocabulary and treats an
+    /// unknown string as `Offline` (never as available).
+    #[test]
+    fn presence_from_status_defaults_offline() {
+        assert_eq!(PresenceState::from_status("online"), PresenceState::Online);
+        assert_eq!(
+            PresenceState::from_status("unstable"),
+            PresenceState::Unstable
+        );
+        assert_eq!(
+            PresenceState::from_status("offline"),
+            PresenceState::Offline
+        );
+        assert_eq!(PresenceState::from_status("weird"), PresenceState::Offline);
     }
 
     /// An `ActorRow` JSON without a `workload` key decodes to `Idle` (a
