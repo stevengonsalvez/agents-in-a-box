@@ -651,3 +651,70 @@ async fn agent_skill_links_foreign_agent_is_empty() {
         "a foreign agent id must never leak another tenant's attachments"
     );
 }
+
+// ---- The roster shape (parity `7-rest`) -------------------------------------
+//
+// `enabled_skill_names_for_agent` is what the squad-leader briefing renders: the
+// same enabled+workspace filter as `skills_for_agent`, name-shaped, no file
+// hydration.
+
+#[tokio::test]
+async fn enabled_skill_names_for_agent_returns_name_ordered_enabled_names() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws, agent, _commit, _review) = seed_two_attached_skills(&store).await;
+    // A third skill sorting BEFORE both of the seeded ones pins ORDER BY name
+    // rather than insertion order.
+    let audit = SkillRepo::create(store.pool(), &ws, "audit", None, Some("# audit"), vec![])
+        .await
+        .expect("create audit");
+    SkillRepo::attach_to_agent(store.pool(), &ws, &agent, &audit)
+        .await
+        .expect("attach audit");
+
+    let names = SkillRepo::enabled_skill_names_for_agent(store.pool(), &ws, &agent)
+        .await
+        .expect("enabled_skill_names_for_agent");
+    assert_eq!(
+        names.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+        vec!["audit", "commit", "review"],
+        "every enabled attachment, ordered by name"
+    );
+}
+
+#[tokio::test]
+async fn enabled_skill_names_for_agent_excludes_a_disabled_link() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws, agent, _commit, review) = seed_two_attached_skills(&store).await;
+
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
+        .await
+        .expect("disable review");
+
+    let names = SkillRepo::enabled_skill_names_for_agent(store.pool(), &ws, &agent)
+        .await
+        .expect("enabled_skill_names_for_agent");
+    assert_eq!(
+        names.iter().map(|n| n.as_str()).collect::<Vec<_>>(),
+        vec!["commit"],
+        "a disabled link must never be advertised on the roster"
+    );
+}
+
+#[tokio::test]
+async fn enabled_skill_names_for_agent_foreign_agent_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (_ws_a, agent, _commit, _review) = seed_two_attached_skills(&store).await;
+    seed_workspace(&store, "ws-b", "beta").await;
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+
+    let names = SkillRepo::enabled_skill_names_for_agent(store.pool(), &ws_b, &agent)
+        .await
+        .expect("enabled_skill_names_for_agent");
+    assert!(
+        names.is_empty(),
+        "the cross-tenant guard holds for the roster read too"
+    );
+}
