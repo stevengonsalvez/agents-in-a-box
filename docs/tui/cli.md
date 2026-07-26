@@ -3652,6 +3652,9 @@ Options:
       --provider <PROVIDER>          Provider to record (`claude`/`codex`/`copilot`); defaults to `claude`
       --model <MODEL>                Optional per-agent model override (e.g. `sonnet`, `gpt-5-codex`)
       --instructions <INSTRUCTIONS>  Optional instructions / system prompt for the agent
+      --description <DESCRIPTION>    Optional short blurb rendered beside the agent (≤255 characters)
+      --avatar <AVATAR>              Optional avatar token (e.g. `emoji:🦊`); omitted mints a random emoji
+      --service-tier <SERVICE_TIER>  Optional Codex service tier (e.g. `priority`); omitted inherits the local Codex config. Stored + surfaced only — no dispatch-time override yet
       --workspace <WORKSPACE>        Workspace slug to create the agent in. Defaults to the bootstrapped `default` workspace (created if absent)
   -h, --help                         Print help
 ```
@@ -3701,6 +3704,11 @@ Options:
       --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is given the whole env map is REPLACED with the values
       --token-budget <TOKEN_BUDGET>  New token budget (rtk/headroom, migration 0042); omitted leaves it. Mutually exclusive with `--clear-token-budget`
       --clear-token-budget           Clear the token budget (back to unlimited); omitted leaves it
+      --description <DESCRIPTION>    New description (≤255 characters); omitted leaves it. Pass `--description ""` to blank it (the column is NOT NULL, so `""` IS its cleared state)
+      --avatar <AVATAR>              New avatar token; omitted leaves it. Mutually exclusive with `--clear-avatar`
+      --clear-avatar                 Clear the avatar; omitted leaves it
+      --service-tier <SERVICE_TIER>  New Codex service tier; omitted leaves it. Mutually exclusive with `--clear-service-tier`
+      --clear-service-tier           Clear the service tier (back to inheriting the local Codex config)
       --workspace <WORKSPACE>        Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                         Print help
 ```
