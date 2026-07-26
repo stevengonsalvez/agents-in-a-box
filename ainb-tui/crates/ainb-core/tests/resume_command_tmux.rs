@@ -63,7 +63,14 @@ fn isolation() -> &'static TmuxIsolation {
     static ISO: OnceLock<TmuxIsolation> = OnceLock::new();
     ISO.get_or_init(|| {
         let ambient = std::env::var("TMUX_TMPDIR").ok();
-        let dir = PathBuf::from("/tmp").join(format!("ainb-verify-tmux-{}", std::process::id()));
+        // pid + nanos: containers recycle low pids, and a leftover dir owned by
+        // another uid would make tmux refuse the socket.
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or_default();
+        let dir =
+            PathBuf::from("/tmp").join(format!("ainb-verify-tmux-{}-{nonce}", std::process::id()));
         std::fs::create_dir_all(&dir).expect("create private tmux socket dir");
         std::env::set_var("TMUX_TMPDIR", &dir);
         TmuxIsolation { dir, ambient }
