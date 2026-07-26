@@ -765,6 +765,13 @@ pub fn enqueue_task_with_repo(home: &Path, suffix: &str, repo_ref: &str) -> Stri
 pub const T4_SQUAD_ID: &str = "squad-t4";
 /// The squad card's issue id (assigned to [`T4_SQUAD_ID`], placed on the board).
 pub const T4_SQUAD_CARD_ISSUE: &str = "issue-squad-card";
+/// The free-text ROLE stamped on squad member `agent-m1` (parity #25).
+pub const T4_SQUAD_M1_ROLE: &str = "owns the migrations";
+/// The skill attached (enabled) to squad member `agent-m1` (parity `7-rest`).
+pub const T4_SQUAD_M1_SKILL: &str = "pathfinding";
+/// The squad's user-authored routing instructions (parity #25), rendered
+/// VERBATIM into the leader briefing.
+pub const T4_SQUAD_INSTRUCTIONS: &str = "Route schema work to the DB owner.";
 /// The dependency-chain BLOCKER card's issue id (card A).
 pub const T4_DEP_BLOCKER_ISSUE: &str = "issue-dep-a";
 /// The dependency-chain DEPENDENT card's issue id (card B, depends-on A, auto-run on).
@@ -883,12 +890,38 @@ pub fn prepare_pipeline_squad_card() -> Pipeline {
                 )
                 .await
                 .expect("create squad");
-                SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m1"))
-                    .await
-                    .expect("add m1");
+                // m1 carries a ROLE and a live SKILL, and the squad carries
+                // INSTRUCTIONS, so the leader-briefing tripwire can read all three
+                // fragments off the CLAUDE.md the real daemon materialises
+                // (parity #25 + `7-rest`). m2 stays bare, pinning the blank-omit.
+                SquadRepo::add_member_with_role(
+                    pool,
+                    &ws,
+                    T4_SQUAD_ID,
+                    &t4_agent_ref("agent-m1"),
+                    T4_SQUAD_M1_ROLE,
+                )
+                .await
+                .expect("add m1");
                 SquadRepo::add_member(pool, &ws, T4_SQUAD_ID, &t4_agent_ref("agent-m2"))
                     .await
                     .expect("add m2");
+                SquadRepo::set_instructions(pool, &ws, T4_SQUAD_ID, T4_SQUAD_INSTRUCTIONS)
+                    .await
+                    .expect("set squad instructions");
+                {
+                    use ainb_hangar_core::ids::AgentId;
+                    use ainb_hangar_store::repo::skill::SkillRepo;
+
+                    let m1 = AgentId::from_str("agent-m1".to_string()).expect("m1 id");
+                    let skill =
+                        SkillRepo::create(pool, &ws, T4_SQUAD_M1_SKILL, None, Some("# b"), vec![])
+                            .await
+                            .expect("create m1 skill");
+                    SkillRepo::attach_to_agent(pool, &ws, &m1, &skill)
+                        .await
+                        .expect("attach m1 skill");
+                }
 
                 seed_card_issue(
                     pool,
@@ -1028,6 +1061,26 @@ pub fn newest_active_task_for_issue(home: &Path, issue_id: &str) -> Option<Strin
         .ok()
         .flatten()
     })
+}
+
+/// The `CLAUDE.md` the daemon materialised into `task_id`'s task tree, or `None`
+/// when it has not been written (yet).
+///
+/// This is the file the squad-leader briefing is appended to pre-spawn, so a
+/// tripwire that reads it is asserting on the REAL injected prompt rather than a
+/// re-built string. It lives in the TASK tree (not the run worktree), and the
+/// tree is reclaimed after finalize — read it while the run is still held.
+#[must_use]
+pub fn materialised_context_prompt(home: &Path, task_id: &str) -> Option<String> {
+    let path = home
+        .join(".agents-in-a-box")
+        .join("hangar")
+        .join("workspaces")
+        .join(ainb_hangar_daemon::seed::WS_SLUG)
+        .join(task_id)
+        .join("workdir")
+        .join("CLAUDE.md");
+    std::fs::read_to_string(path).ok()
 }
 
 /// Read one task row's status by its exact `task_id` in the fixture store, or `None`
