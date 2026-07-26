@@ -78,6 +78,56 @@ async fn set_member_role_on_a_non_member_writes_nothing() {
     );
 }
 
+/// `set_member_role` actually WRITES: it sets a role on an existing membership,
+/// replaces it, and clears it with `""` — round-tripping through BOTH read paths.
+/// (The neuter-the-UPDATE mutation test lands here.)
+#[tokio::test]
+async fn set_member_role_persists_replaces_and_clears() {
+    let dir = tempfile::tempdir().unwrap();
+    let store = open(&dir).await;
+    let pool = store.pool();
+    seed_ws(pool, "ws-a").await;
+    SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent("a-lead"), 1).await.unwrap();
+    SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent("a-1")).await.unwrap();
+    SquadRepo::add_member(pool, &ws("ws-a"), "s1", &human("u-1")).await.unwrap();
+
+    // Set.
+    assert!(
+        SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "owns the migrations")
+            .await
+            .unwrap(),
+        "an existing membership reports an update"
+    );
+    for squad in [
+        SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap(),
+        SquadRepo::list(pool, &ws("ws-a")).await.unwrap().remove(0),
+    ] {
+        let roled = squad.members.iter().find(|m| m.actor == agent("a-1")).unwrap();
+        assert_eq!(roled.role, "owns the migrations", "the role is stored");
+        let other = squad.members.iter().find(|m| m.actor == human("u-1")).unwrap();
+        assert_eq!(other.role, "", "only the named membership is touched");
+    }
+
+    // Replace, with surrounding whitespace trimmed.
+    SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "  owns the CLI  ")
+        .await
+        .unwrap();
+    let s = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap();
+    assert_eq!(
+        s.members.iter().find(|m| m.actor == agent("a-1")).unwrap().role,
+        "owns the CLI"
+    );
+
+    // Clear.
+    SquadRepo::set_member_role(pool, &ws("ws-a"), "s1", &agent("a-1"), "").await.unwrap();
+    let s = SquadRepo::get(pool, &ws("ws-a"), "s1").await.unwrap().unwrap();
+    assert_eq!(
+        s.members.iter().find(|m| m.actor == agent("a-1")).unwrap().role,
+        "",
+        "an empty role clears the label"
+    );
+}
+
 /// Both levers are tenant-guarded: a squad id from another workspace is a
 /// `NotFound` and the real tenant's row is provably untouched.
 #[tokio::test]
