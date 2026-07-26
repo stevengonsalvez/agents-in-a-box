@@ -15,7 +15,12 @@
 //! [`ActorRef`] type keeps the `_id` half non-empty; referential integrity of
 //! the `_id` value is a service-layer concern.
 
+use ainb_hangar_core::acceptance::{
+    AcceptanceCriterion, criteria_from_json, criteria_to_json, normalise_ids,
+    resolve_criterion_index,
+};
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::idgen::IdGen;
 use sqlx::{Row, SqlitePool};
 
 /// Parameters for inserting a new `issue` row.
@@ -49,10 +54,11 @@ pub struct NewIssue {
     /// column — the minimal persistence the create flow needs (the full labels
     /// table + attach/detach is a separate concern).
     pub labels: Vec<String>,
-    /// Ordered acceptance-criteria strings (one criterion per element). Stored as
-    /// a single JSON-array column, identical persistence to `labels` (migration
-    /// 0048, multica parity `init.up.sql:66` `acceptance_criteria`).
-    pub acceptance_criteria: Vec<String>,
+    /// Ordered acceptance criteria, one [`AcceptanceCriterion`] per element:
+    /// stable id + text + checked bit. Stored as a single JSON-array column
+    /// (migration 0048 created it, 0054 promoted the element shape from bare
+    /// strings to objects — multica parity `init.up.sql:66`).
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
     /// Ordered context-reference strings (URL / `owner/repo#123` / free text, one
     /// per element). Stored as a single JSON-array column, identical persistence to
     /// `labels` (migration 0048, multica parity `init.up.sql:67` `context_refs`).
@@ -92,9 +98,10 @@ pub struct Issue {
     pub due_date: Option<i64>,
     /// Free-form labels, re-assembled from the JSON-array `labels` column.
     pub labels: Vec<String>,
-    /// Ordered acceptance-criteria strings, re-assembled from the JSON-array
-    /// `acceptance_criteria` column (migration 0048).
-    pub acceptance_criteria: Vec<String>,
+    /// Ordered acceptance criteria, re-assembled from the JSON-array
+    /// `acceptance_criteria` column (migrations 0048 + 0054). Legacy bare-string
+    /// elements decode as unchecked criteria with placeholder ids.
+    pub acceptance_criteria: Vec<AcceptanceCriterion>,
     /// Ordered context-reference strings, re-assembled from the JSON-array
     /// `context_refs` column (migration 0048).
     pub context_refs: Vec<String>,
@@ -265,7 +272,7 @@ impl IssueRepo {
         let (assignee_type, assignee_id) = split_actor(issue.assignee.as_ref());
         let (creator_type, creator_id) = split_actor(Some(&issue.creator));
         let labels_json = labels_to_json(&issue.labels);
-        let acceptance_json = labels_to_json(&issue.acceptance_criteria);
+        let acceptance_json = criteria_to_json(&issue.acceptance_criteria);
         let context_refs_json = labels_to_json(&issue.context_refs);
         sqlx::query(
             "INSERT INTO issue \
@@ -816,6 +823,126 @@ impl IssueRepo {
         tx.commit().await?;
         Ok(summary)
     }
+
+    /// Set one acceptance criterion's checked state on one issue,
+    /// workspace-scoped (multica parity #11-rest).
+    ///
+    /// Read-modify-write of the JSON column inside ONE transaction so two
+    /// concurrent ticks cannot lose each other's write. The UPDATE additionally
+    /// carries a compare-and-swap (`AND acceptance_criteria = <the exact text we
+    /// read>`) so a lost update surfaces as [`CriterionError::Conflict`] instead
+    /// of silently clobbering.
+    ///
+    /// Legacy bare-string elements are normalised to minted stable ids on the
+    /// way through — the write-time half of the 0054 backfill.
+    ///
+    /// **Idempotent**: ticking an already-ticked criterion succeeds without
+    /// bumping `checked_at`, so a retrying agent does not rewrite provenance.
+    ///
+    /// Returns the refreshed [`Issue`].
+    ///
+    /// # Errors
+    ///
+    /// - [`CriterionError::IssueNotFound`] — no issue with that id in that
+    ///   workspace (unknown id OR cross-tenant).
+    /// - [`CriterionError::CriterionNotFound`] — the issue carries no criterion
+    ///   matching `criterion` (neither by id nor by 1-based ordinal).
+    /// - [`CriterionError::Conflict`] — a concurrent write changed the column
+    ///   between our read and our write.
+    /// - [`CriterionError::Db`] — an underlying `sqlx` failure.
+    pub async fn set_criterion_checked(
+        pool: &SqlitePool,
+        id_gen: &dyn IdGen,
+        workspace_id: &str,
+        issue_id: &str,
+        criterion: &str,
+        checked: bool,
+        at: i64,
+        by: Option<&str>,
+    ) -> Result<Issue, CriterionError> {
+        let mut tx = pool.begin().await?;
+
+        let raw: Option<String> = sqlx::query_scalar(
+            "SELECT acceptance_criteria FROM issue WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(issue_id)
+        .bind(workspace_id)
+        .fetch_optional(&mut *tx)
+        .await?;
+        let raw = raw.ok_or(CriterionError::IssueNotFound)?;
+
+        let mut items = criteria_from_json(&raw)
+            .map_err(|e| CriterionError::Db(decode_err("acceptance_criteria", &e.to_string())))?;
+        let idx =
+            resolve_criterion_index(&items, criterion).ok_or(CriterionError::CriterionNotFound)?;
+
+        // Normalise placeholder ids (legacy 0048 rows) so the row converges to
+        // the structured shape on its first write.
+        normalise_ids(&mut items, id_gen);
+        if checked {
+            items[idx].tick(at, by);
+        } else {
+            items[idx].untick();
+        }
+        let next = criteria_to_json(&items);
+
+        let affected = sqlx::query(
+            "UPDATE issue SET acceptance_criteria = ? \
+             WHERE id = ? AND workspace_id = ? AND acceptance_criteria = ?",
+        )
+        .bind(&next)
+        .bind(issue_id)
+        .bind(workspace_id)
+        .bind(&raw)
+        .execute(&mut *tx)
+        .await?
+        .rows_affected();
+        if affected == 0 && next != raw {
+            return Err(CriterionError::Conflict);
+        }
+
+        tx.commit().await?;
+
+        Self::get_by_id(pool, issue_id)
+            .await?
+            .ok_or(CriterionError::IssueNotFound)
+    }
+}
+
+/// Resolve a caller-supplied criterion selector against an issue's list: either
+/// the exact `id`, or a 1-BASED ORDINAL (`"2"`).
+///
+/// Ordinals exist because an agent reading the detail card sees positions, not
+/// ids. Re-exported from [`ainb_hangar_core::acceptance`] so the CLI and the
+/// daemon reach the same addressing through the store seam they already use.
+#[must_use]
+pub fn resolve_criterion<'a>(
+    items: &'a [AcceptanceCriterion],
+    sel: &str,
+) -> Option<&'a AcceptanceCriterion> {
+    ainb_hangar_core::acceptance::resolve_criterion(items, sel)
+}
+
+/// Error surface for [`IssueRepo::set_criterion_checked`].
+///
+/// Splits tenant isolation, addressing, and lost-update detection from a raw
+/// database failure, mirroring
+/// [`LabelRepoError`](crate::repo::label::LabelRepoError).
+#[derive(Debug, thiserror::Error)]
+pub enum CriterionError {
+    /// No issue with that id IN THAT WORKSPACE (unknown id or cross-tenant).
+    /// Nothing is written.
+    #[error("issue not found in this workspace")]
+    IssueNotFound,
+    /// The issue exists but carries no criterion with that id or ordinal.
+    #[error("no acceptance criterion matches that id or ordinal")]
+    CriterionNotFound,
+    /// A concurrent write changed the column between our read and our write.
+    #[error("criterion changed concurrently; re-read and retry")]
+    Conflict,
+    /// An underlying `sqlx` failure.
+    #[error(transparent)]
+    Db(#[from] sqlx::Error),
 }
 
 /// Escape the SQL `LIKE` metacharacters (`\`, `%`, `_`) in `term` so the value
@@ -885,7 +1012,8 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
     )?
     .ok_or_else(|| decode_err("creator", "creator columns must be non-null"))?;
     let labels = labels_from_json(&row.try_get::<String, _>("labels")?)?;
-    let acceptance_criteria = labels_from_json(&row.try_get::<String, _>("acceptance_criteria")?)?;
+    let acceptance_criteria = criteria_from_json(&row.try_get::<String, _>("acceptance_criteria")?)
+        .map_err(|e| decode_err("acceptance_criteria", &e.to_string()))?;
     let context_refs = labels_from_json(&row.try_get::<String, _>("context_refs")?)?;
     Ok(Issue {
         id: row.try_get("id")?,
@@ -937,6 +1065,18 @@ mod tests {
 
     fn member() -> ActorRef {
         ActorRef::new(ActorKind::Member, "user-1").unwrap()
+    }
+
+    /// A fresh unchecked criterion with a caller-chosen (deterministic) id.
+    fn criterion(id: &str, text: &str) -> AcceptanceCriterion {
+        AcceptanceCriterion::with_id(id, text).unwrap()
+    }
+
+    /// A deterministic id generator for the normalise-on-write path.
+    fn idgen(ids: &[&str]) -> ainb_hangar_core::idgen::FixedIdGen {
+        ainb_hangar_core::idgen::FixedIdGen::new(
+            ids.iter().map(std::string::ToString::to_string).collect(),
+        )
     }
 
     async fn seed_ws(pool: &SqlitePool, ws: &str) {
@@ -1059,8 +1199,8 @@ mod tests {
                 due_date: None,
                 labels: Vec::new(),
                 acceptance_criteria: vec![
-                    "cargo build is green".into(),
-                    "detail card shows criteria".into(),
+                    criterion("ac-1", "cargo build is green"),
+                    criterion("ac-2", "detail card shows criteria"),
                 ],
                 context_refs: vec!["acme/api#42".into()],
                 parent_issue_id: None,
@@ -1072,12 +1212,16 @@ mod tests {
 
         let issue = IssueRepo::get_by_id(pool, "issue-ac").await.unwrap().unwrap();
         assert_eq!(
-            issue.acceptance_criteria,
+            issue
+                .acceptance_criteria
+                .iter()
+                .map(|c| (c.id.as_str(), c.text.as_str(), c.checked))
+                .collect::<Vec<_>>(),
             vec![
-                "cargo build is green".to_string(),
-                "detail card shows criteria".to_string()
+                ("ac-1", "cargo build is green", false),
+                ("ac-2", "detail card shows criteria", false),
             ],
-            "criteria survive verbatim and order-preserving"
+            "criteria survive verbatim, order-preserving, ids stable, unchecked"
         );
         assert_eq!(
             issue.context_refs,
@@ -1093,6 +1237,307 @@ mod tests {
             "default empty criteria"
         );
         assert!(plain.context_refs.is_empty(), "default empty context refs");
+    }
+
+    /// Seed one issue carrying `criteria` in `ws`.
+    async fn seed_issue_with_criteria(
+        pool: &SqlitePool,
+        ws: &str,
+        id: &str,
+        criteria: Vec<AcceptanceCriterion>,
+    ) {
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: id.into(),
+                workspace_id: ws.into(),
+                title: "T".into(),
+                description: None,
+                state: "open".into(),
+                assignee: None,
+                creator: member(),
+                created_at: 1,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                acceptance_criteria: criteria,
+                context_refs: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+            },
+        )
+        .await
+        .unwrap();
+    }
+
+    /// Read the raw `acceptance_criteria` column text (what actually hit disk).
+    async fn raw_acceptance(pool: &SqlitePool, id: &str) -> String {
+        sqlx::query_scalar::<_, String>("SELECT acceptance_criteria FROM issue WHERE id = ?")
+            .bind(id)
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// **T1** — the sqlite half of the #11-rest acceptance: a tick survives a
+    /// pool re-open, ids are stable, and the on-disk shape is an OBJECT array
+    /// carrying `"checked":true`.
+    #[tokio::test]
+    async fn criterion_tick_persists_to_sqlite() {
+        let dir = tempfile::tempdir().unwrap();
+        {
+            let store = Store::open_in(dir.path()).await.unwrap();
+            let pool = store.pool();
+            seed_ws(pool, "ws-a").await;
+            seed_issue_with_criteria(
+                pool,
+                "ws-a",
+                "issue-1",
+                vec![criterion("ac-a", "builds"), criterion("ac-b", "tests")],
+            )
+            .await;
+
+            let updated = IssueRepo::set_criterion_checked(
+                pool,
+                &idgen(&[]),
+                "ws-a",
+                "issue-1",
+                "ac-b",
+                true,
+                1_700,
+                Some("agent:builder"),
+            )
+            .await
+            .expect("tick succeeds");
+            assert!(!updated.acceptance_criteria[0].checked);
+            assert!(updated.acceptance_criteria[1].checked);
+        }
+
+        // Re-open the pool: the state came off disk, not out of memory.
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let issue = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
+        assert_eq!(
+            issue
+                .acceptance_criteria
+                .iter()
+                .map(|c| (c.id.as_str(), c.text.as_str(), c.checked))
+                .collect::<Vec<_>>(),
+            vec![("ac-a", "builds", false), ("ac-b", "tests", true)],
+            "ids stable, order preserved, only the ticked one is checked"
+        );
+        assert_eq!(issue.acceptance_criteria[1].checked_at, Some(1_700));
+        assert_eq!(
+            issue.acceptance_criteria[1].checked_by.as_deref(),
+            Some("agent:builder")
+        );
+
+        let raw = raw_acceptance(pool, "issue-1").await;
+        assert!(
+            raw.starts_with("[{"),
+            "column holds an OBJECT array, got {raw}"
+        );
+        assert!(
+            raw.contains(r#""id":"ac-b","text":"tests","checked":true"#),
+            "structured per-criterion state on disk, got {raw}"
+        );
+        assert!(
+            raw.contains(r#""id":"ac-a","text":"builds","checked":false"#),
+            "the sibling stayed unchecked on disk, got {raw}"
+        );
+    }
+
+    /// **T2** — ticking twice does not rewrite provenance; unticking clears BOTH
+    /// `checked_at` and `checked_by`.
+    #[tokio::test]
+    async fn criterion_tick_is_idempotent_and_untick_clears_provenance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue_with_criteria(pool, "ws-a", "issue-1", vec![criterion("ac-a", "builds")]).await;
+
+        let tick = |at: i64, by: &'static str| async move {
+            IssueRepo::set_criterion_checked(
+                pool,
+                &idgen(&[]),
+                "ws-a",
+                "issue-1",
+                "ac-a",
+                true,
+                at,
+                Some(by),
+            )
+            .await
+            .expect("tick succeeds")
+        };
+
+        let first = tick(100, "agent:builder").await;
+        assert_eq!(first.acceptance_criteria[0].checked_at, Some(100));
+
+        let second = tick(999, "agent:other").await;
+        assert_eq!(
+            second.acceptance_criteria[0].checked_at,
+            Some(100),
+            "a retry must not rewrite when it was ticked"
+        );
+        assert_eq!(
+            second.acceptance_criteria[0].checked_by.as_deref(),
+            Some("agent:builder"),
+            "a retry must not rewrite who ticked it"
+        );
+
+        let cleared = IssueRepo::set_criterion_checked(
+            pool,
+            &idgen(&[]),
+            "ws-a",
+            "issue-1",
+            "ac-a",
+            false,
+            1_234,
+            Some("agent:third"),
+        )
+        .await
+        .expect("untick succeeds");
+        assert!(!cleared.acceptance_criteria[0].checked);
+        assert_eq!(cleared.acceptance_criteria[0].checked_at, None);
+        assert_eq!(cleared.acceptance_criteria[0].checked_by, None);
+        let raw = raw_acceptance(pool, "issue-1").await;
+        assert!(
+            !raw.contains("checked_at") && !raw.contains("checked_by"),
+            "untick leaves no stale provenance on disk, got {raw}"
+        );
+    }
+
+    /// **T3** — a pre-0054 row written as bare strings decodes tolerantly, and
+    /// the first tick normalises the WHOLE list to minted stable ids while
+    /// preserving every text.
+    #[tokio::test]
+    async fn legacy_string_criteria_decode_and_normalise() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue_with_criteria(pool, "ws-a", "issue-1", Vec::new()).await;
+
+        // Force the column back to the legacy 0048 shape.
+        sqlx::query("UPDATE issue SET acceptance_criteria = ? WHERE id = ?")
+            .bind(r#"["builds","tests"]"#)
+            .bind("issue-1")
+            .execute(pool)
+            .await
+            .unwrap();
+
+        let read = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
+        assert_eq!(
+            read.acceptance_criteria
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<Vec<_>>(),
+            vec!["builds", "tests"],
+            "legacy strings decode tolerantly"
+        );
+        assert!(read.acceptance_criteria.iter().all(|c| !c.checked));
+
+        // Tick by ORDINAL — an agent reading the card sees positions, not ids.
+        let updated = IssueRepo::set_criterion_checked(
+            pool,
+            &idgen(&["MINT1", "MINT2"]),
+            "ws-a",
+            "issue-1",
+            "2",
+            true,
+            50,
+            None,
+        )
+        .await
+        .expect("tick by ordinal succeeds");
+
+        assert_eq!(
+            updated
+                .acceptance_criteria
+                .iter()
+                .map(|c| (c.id.as_str(), c.text.as_str(), c.checked))
+                .collect::<Vec<_>>(),
+            vec![("ac-mint1", "builds", false), ("ac-mint2", "tests", true)],
+            "ids minted for BOTH elements; the untouched sibling kept its text"
+        );
+        let raw = raw_acceptance(pool, "issue-1").await;
+        assert!(
+            raw.starts_with("[{") && !raw.contains("ac-legacy-"),
+            "normalised to objects with minted ids on disk, got {raw}"
+        );
+    }
+
+    /// **T4** — an issue id from workspace B addressed with workspace A is
+    /// rejected and writes NOTHING.
+    #[tokio::test]
+    async fn criterion_set_cross_tenant_is_rejected() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        seed_issue_with_criteria(pool, "ws-b", "issue-b", vec![criterion("ac-a", "builds")]).await;
+
+        let before = raw_acceptance(pool, "issue-b").await;
+        let err = IssueRepo::set_criterion_checked(
+            pool,
+            &idgen(&[]),
+            "ws-a",
+            "issue-b",
+            "ac-a",
+            true,
+            10,
+            None,
+        )
+        .await
+        .expect_err("cross-tenant tick must be rejected");
+        assert!(
+            matches!(err, CriterionError::IssueNotFound),
+            "got {err:?}, want IssueNotFound"
+        );
+        assert_eq!(
+            raw_acceptance(pool, "issue-b").await,
+            before,
+            "zero rows changed"
+        );
+
+        // An unknown criterion selector on a legitimately-owned issue is a
+        // distinct error, not a silent no-op.
+        let err = IssueRepo::set_criterion_checked(
+            pool,
+            &idgen(&[]),
+            "ws-b",
+            "issue-b",
+            "ac-nope",
+            true,
+            10,
+            None,
+        )
+        .await
+        .expect_err("unknown criterion must be rejected");
+        assert!(
+            matches!(err, CriterionError::CriterionNotFound),
+            "got {err:?}, want CriterionNotFound"
+        );
+        // An out-of-range ordinal likewise.
+        assert!(matches!(
+            IssueRepo::set_criterion_checked(
+                pool,
+                &idgen(&[]),
+                "ws-b",
+                "issue-b",
+                "7",
+                true,
+                10,
+                None
+            )
+            .await
+            .expect_err("out-of-range ordinal must be rejected"),
+            CriterionError::CriterionNotFound
+        ));
+        assert_eq!(raw_acceptance(pool, "issue-b").await, before);
     }
 
     /// A title hit outranks a description hit outranks a comment-only hit; a
