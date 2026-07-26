@@ -504,6 +504,22 @@ pub const HANGAR_SQUAD_MEMBER_REMOVE: &str = "hangar/squad_member_remove";
 /// or an unknown squad is rejected (`INVALID_PARAMS`).
 pub const HANGAR_SQUAD_ASSIGN: &str = "hangar/squad_assign";
 
+/// `hangar/squad_archive` — archive or un-archive one squad, recording WHO and
+/// WHEN (parity #26, migration 0052).
+///
+/// Params: [`crate::snapshots::SquadArchiveParams`]. Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`] (ACTIVE squads only), so a caller
+/// re-renders from the response without a `squads_list` round-trip — the same
+/// envelope `squad_create` / `squad_member_*` answer with.
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a squad id that does
+/// not belong to the resolved workspace is rejected with `INVALID_PARAMS`, never
+/// a cross-tenant write. Archiving removes the squad from the active list AND
+/// makes it refuse new assignments ([`HANGAR_SQUAD_ASSIGN`] /
+/// [`HANGAR_SQUAD_FANOUT`] answer `INVALID_PARAMS`); un-archiving restores it and
+/// CLEARS the audit pair.
+pub const HANGAR_SQUAD_ARCHIVE: &str = "hangar/squad_archive";
+
 /// `hangar/squad_fanout` — fan an issue out across the WHOLE squad: brief the
 /// LEADER *and* enqueue one task per distinct `agent` member, all on the same
 /// issue (P7).
@@ -1040,6 +1056,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SQUAD_MEMBER_ADD,
     HANGAR_SQUAD_MEMBER_REMOVE,
     HANGAR_SQUAD_ASSIGN,
+    HANGAR_SQUAD_ARCHIVE,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     HANGAR_USAGE_ROLLUP,
@@ -1211,6 +1228,7 @@ mod tests {
             HANGAR_SQUAD_MEMBER_ADD,
             HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_SQUAD_ASSIGN,
+            HANGAR_SQUAD_ARCHIVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
@@ -1281,6 +1299,7 @@ mod tests {
             HANGAR_SQUAD_MEMBER_ADD,
             HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_SQUAD_ASSIGN,
+            HANGAR_SQUAD_ARCHIVE,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
