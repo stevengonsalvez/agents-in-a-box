@@ -693,7 +693,9 @@ async fn handle(
         methods::HANGAR_SEARCH => handle_search(pool, req).await,
         methods::HANGAR_AGENTS_LIST => {
             let actors = match resolve(pool, req).await? {
-                Some(ws) => snapshots::agents_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+                Some(ws) => snapshots::agents_list(pool, &ws, SystemClock.now_ms())
+                    .await
+                    .map_err(|e| store_err(&e))?,
                 None => Vec::new(),
             };
             to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
@@ -3830,7 +3832,9 @@ async fn handle_agent_create(
     }
     // Answer with the refreshed roster (the same shape agents_list returns) so
     // the plugin folds the new agent into its cached list and the squad gate clears.
-    let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    let actors = snapshots::agents_list(pool, ws.as_str(), SystemClock.now_ms())
+        .await
+        .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
 }
 
@@ -3879,7 +3883,9 @@ async fn handle_agent_delete(
         })?;
     // Answer with the refreshed roster (the same shape agents_list / agent_create
     // return) so the plugin folds the shrunk list into its picker cache.
-    let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    let actors = snapshots::agents_list(pool, ws.as_str(), SystemClock.now_ms())
+        .await
+        .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
 }
 
@@ -3902,9 +3908,15 @@ async fn handle_agent_update(
              name/instructions/model/cli_args/mcp_config/thinking/agent_env",
         ));
     }
-    let row = snapshots::agent_update(pool, ws.as_str(), &params.agent_id, &update)
-        .await
-        .map_err(|e| store_err(&e))?;
+    let row = snapshots::agent_update(
+        pool,
+        ws.as_str(),
+        &params.agent_id,
+        &update,
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
     let Some(row) = row else {
         return Err(invalid_params(&format!(
             "no agent `{}` in this workspace",
@@ -3968,9 +3980,15 @@ async fn handle_agent_archive(
     let params: ainb_hangar_proto::snapshots::AgentArchiveParams =
         parse_params(req, "{ workspace_id, agent_id, archived }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
-    let row = snapshots::agent_archive(pool, ws.as_str(), &params.agent_id, params.archived)
-        .await
-        .map_err(|e| store_err(&e))?;
+    let row = snapshots::agent_archive(
+        pool,
+        ws.as_str(),
+        &params.agent_id,
+        params.archived,
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
     let Some(row) = row else {
         return Err(invalid_params(&format!(
             "no agent `{}` in this workspace",

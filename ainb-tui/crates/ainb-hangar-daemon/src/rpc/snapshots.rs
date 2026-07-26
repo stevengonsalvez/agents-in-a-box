@@ -7,12 +7,24 @@
 //!
 //! ## Presence derivation
 //!
-//! An agent's [`PresenceState`] is derived from its backing
-//! [`AgentRuntime::status`]: `"online"` → `Online`, `"unstable"` → `Unstable`,
-//! anything else (`"offline"`, unseen) → `Offline`. A human member has no
-//! runtime, so it is always reported `Online` (a member is "available" in the
-//! picker; the real online/away signal for humans lands with presence tracking
-//! in a later phase).
+//! An agent's [`PresenceState`] folds its backing runtime's stored `status`
+//! together with the AGE of its `last_seen_at` heartbeat, via the shared
+//! [`PresenceState::derive`] (multica `deriveRuntimeHealth` +
+//! `deriveAgentAvailability`): a runtime unseen for more than 5 minutes reads
+//! `Unstable`, more than 10 minutes `Offline`, and the worse of (stored status,
+//! heartbeat age) always wins.
+//!
+//! The age fold lives on the READ side deliberately. Hangar's presence sweeper
+//! runs inside the daemon, so a daemon that dies cannot flip its own row: a
+//! status-only passthrough would pin every agent of a crashed daemon at
+//! `● online` forever. The sweeper still writes the status (so every other
+//! reader sees the truth and the TUI gets an event), but this snapshot is
+//! correct with no live daemon and no tick latency. `now_ms` is injected rather
+//! than read here so the derivation is deterministic under test.
+//!
+//! A human member has no runtime, so it is always reported `Online` (a member is
+//! "available" in the picker; the real online/away signal for humans lands with
+//! presence tracking in a later phase).
 
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
@@ -430,9 +442,14 @@ async fn latest_branch_for_issue(
 /// in one polymorphic [`ActorRow`] list.
 ///
 /// Agents lead (they are the common assignee at v1), each carrying the presence
-/// derived from its runtime; members follow. Recent-use ranking is a later-phase
-/// concern, so every row is `recent_rank: None` (the picker falls back to its
-/// alphabetical body, which is deterministic).
+/// derived from its runtime's status + heartbeat age against `now_ms`; members
+/// follow. Recent-use ranking is a later-phase concern, so every row is
+/// `recent_rank: None` (the picker falls back to its alphabetical body, which is
+/// deterministic).
+///
+/// `now_ms` is injected (production passes
+/// [`SystemClock`](ainb_hangar_core::clock::SystemClock)) so the staleness fold
+/// is deterministic under test.
 ///
 /// # Errors
 ///
@@ -440,6 +457,7 @@ async fn latest_branch_for_issue(
 pub async fn agents_list(
     pool: &SqlitePool,
     workspace_id: &str,
+    now_ms: i64,
 ) -> Result<Vec<ActorRow>, sqlx::Error> {
     let mut out = Vec::new();
 
@@ -449,7 +467,7 @@ pub async fn agents_list(
 
     for agent in AgentRepo::list_by_workspace(pool, workspace_id).await? {
         let (running, queued) = workload_map.get(&agent.id).copied().unwrap_or((0, 0));
-        out.push(agent_actor_row_with_counts(pool, &agent, running, queued).await?);
+        out.push(agent_actor_row_with_counts(pool, &agent, running, queued, now_ms).await?);
     }
 
     for member in members_of(pool, workspace_id).await? {
@@ -760,18 +778,9 @@ pub async fn skills_list(
     Ok(out)
 }
 
-/// Map an `agent_runtime.status` string onto a wire [`PresenceState`].
-fn presence_from_status(status: &str) -> PresenceState {
-    match status {
-        "online" => PresenceState::Online,
-        "unstable" => PresenceState::Unstable,
-        _ => PresenceState::Offline,
-    }
-}
-
 /// Map one store [`Agent`](ainb_hangar_store::repo::agent::Agent) onto its picker
-/// [`ActorRow`], deriving presence from the backing runtime's status and the
-/// workload dimension from the agent's OWN live task counts.
+/// [`ActorRow`], deriving presence from the backing runtime's status + heartbeat
+/// age and the workload dimension from the agent's OWN live task counts.
 ///
 /// Shared by the e38.15 agent-CRUD wrappers ([`agent_update`] / [`agent_archive`])
 /// so the row a mutation answers with is byte-identical to the same agent's
@@ -785,17 +794,19 @@ fn presence_from_status(status: &str) -> PresenceState {
 async fn agent_actor_row(
     pool: &SqlitePool,
     agent: &ainb_hangar_store::repo::agent::Agent,
+    now_ms: i64,
 ) -> Result<ActorRow, sqlx::Error> {
     let (running, queued) = TaskRepo::live_workload_for_agent(pool, &agent.id).await?;
-    agent_actor_row_with_counts(pool, agent, running, queued).await
+    agent_actor_row_with_counts(pool, agent, running, queued, now_ms).await
 }
 
 /// Build one agent's picker [`ActorRow`] from its store row plus already-resolved
-/// live task counts (`running`, `queued`), deriving presence from the runtime and
-/// workload via [`Workload::derive`]. The counts-taking seam lets [`agents_list`]
-/// batch the workload query once for the whole workspace. A missing runtime maps
-/// to `Offline` (the runtime FK is required, but a deleted-out-of-band runtime
-/// must not panic the snapshot).
+/// live task counts (`running`, `queued`), deriving presence from the runtime via
+/// [`PresenceState::derive`] (status folded with heartbeat age, measured against
+/// the injected `now_ms`) and workload via [`Workload::derive`]. The counts-taking
+/// seam lets [`agents_list`] batch the workload query once for the whole
+/// workspace. A missing runtime maps to `Offline` (the runtime FK is required,
+/// but a deleted-out-of-band runtime must not panic the snapshot).
 ///
 /// # Errors
 ///
@@ -805,9 +816,10 @@ async fn agent_actor_row_with_counts(
     agent: &ainb_hangar_store::repo::agent::Agent,
     running: i64,
     queued: i64,
+    now_ms: i64,
 ) -> Result<ActorRow, sqlx::Error> {
     let presence = match AgentRuntimeRepo::get(pool, &agent.runtime_id).await? {
-        Some(rt) => presence_from_status(&rt.status),
+        Some(rt) => PresenceState::derive(&rt.status, rt.last_seen_at, now_ms),
         None => PresenceState::Offline,
     };
     Ok(ActorRow {
@@ -841,13 +853,14 @@ pub async fn agent_update(
     workspace_id: &str,
     agent_id: &str,
     update: &ainb_hangar_store::repo::agent::AgentConfigUpdate,
+    now_ms: i64,
 ) -> Result<Option<ActorRow>, sqlx::Error> {
     let touched = AgentRepo::update_config(pool, workspace_id, agent_id, update).await?;
     if !touched {
         return Ok(None);
     }
     match AgentRepo::get(pool, agent_id).await? {
-        Some(agent) => Ok(Some(agent_actor_row(pool, &agent).await?)),
+        Some(agent) => Ok(Some(agent_actor_row(pool, &agent, now_ms).await?)),
         None => Ok(None),
     }
 }
@@ -869,13 +882,14 @@ pub async fn agent_archive(
     workspace_id: &str,
     agent_id: &str,
     archived: bool,
+    now_ms: i64,
 ) -> Result<Option<ActorRow>, sqlx::Error> {
     let touched = AgentRepo::set_archived(pool, workspace_id, agent_id, archived).await?;
     if !touched {
         return Ok(None);
     }
     match AgentRepo::get(pool, agent_id).await? {
-        Some(agent) => Ok(Some(agent_actor_row(pool, &agent).await?)),
+        Some(agent) => Ok(Some(agent_actor_row(pool, &agent, now_ms).await?)),
         None => Ok(None),
     }
 }
