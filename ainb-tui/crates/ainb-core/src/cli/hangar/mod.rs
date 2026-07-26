@@ -7182,6 +7182,119 @@ mod tests {
         HangarCommand::from_arg_matches(sub).expect("extract HangarCommand")
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Parity #30 — the per-agent env redaction contract at the CLI boundary.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The canary. Any appearance of this literal in rendered output is a leak.
+    const ENV_SECRET: &str = "sk-live-DEADBEEF01";
+
+    /// An agent row carrying one secret env var.
+    fn agent_with_secret_env() -> ainb_hangar_store::repo::agent::Agent {
+        ainb_hangar_store::repo::agent::Agent {
+            id: "agent-1".to_string(),
+            name: "secretive".to_string(),
+            agent_env: vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())].into(),
+            ..ainb_hangar_store::repo::agent::Agent::default()
+        }
+    }
+
+    /// `hangar agent list --format json` used to print `"env":{"K":"<plaintext>"}`.
+    /// Multica's contract is keep-keys / mask-values plus a `redacted` flag.
+    #[test]
+    fn agent_json_masks_env_values() {
+        let out = agent_to_json(&agent_with_secret_env());
+        assert!(!out.contains(ENV_SECRET), "agent JSON leaked the env value: {out}");
+        assert!(out.contains(r#""SECRET_TOKEN":"****""#), "{out}");
+        assert!(out.contains(r#""env_key_count":1"#), "{out}");
+        assert!(out.contains(r#""env_redacted":true"#), "{out}");
+    }
+
+    /// An env-less agent reports the honest zero/false, not a redacted-looking
+    /// empty map with `env_redacted: true`.
+    #[test]
+    fn agent_json_env_less_agent_is_not_marked_redacted() {
+        let out = agent_to_json(&ainb_hangar_store::repo::agent::Agent::default());
+        assert!(out.contains(r#""env_key_count":0"#), "{out}");
+        assert!(out.contains(r#""env_redacted":false"#), "{out}");
+    }
+
+    /// A malformed `--env` used to echo the WHOLE raw argument (the secret) into
+    /// stderr via clap's `value_parser` error.
+    #[test]
+    fn parse_env_kv_error_never_echoes_the_value() {
+        let no_eq = parse_env_kv(ENV_SECRET).expect_err("missing '=' must error");
+        assert!(!no_eq.contains(ENV_SECRET), "error echoed the value: {no_eq}");
+        let empty_key =
+            parse_env_kv(&format!("={ENV_SECRET}")).expect_err("empty key must error");
+        assert!(!empty_key.contains("sk-live-"), "error echoed the value: {empty_key}");
+    }
+
+    /// Clap must refuse any two of the three env write channels together, so a
+    /// secret-bearing file can never be silently overridden by an argv value.
+    #[test]
+    fn env_file_and_env_stdin_and_env_are_mutually_exclusive() {
+        let registry = CommandRegistry::built_ins();
+        for extra in [
+            vec!["--env", "A=b", "--env-stdin"],
+            vec!["--env", "A=b", "--env-file", "/tmp/e.json"],
+            vec!["--env-stdin", "--env-file", "/tmp/e.json"],
+        ] {
+            let mut argv = vec!["ainb", "hangar", "agent", "edit", "agent-1"];
+            argv.extend(extra.iter().copied());
+            let app = registry.build_clap(crate::cli::root_clap_command());
+            assert!(
+                app.try_get_matches_from(&argv).is_err(),
+                "clap accepted mutually exclusive env channels: {argv:?}"
+            );
+        }
+    }
+
+    /// Multica's empty-input rule (`cmd_agent.go:750-762`): a blank payload is an
+    /// ERROR (it almost always means a broken upstream pipe, and treating it as a
+    /// clear silently wipes secrets); only the explicit `{}` clears.
+    #[test]
+    fn env_file_empty_is_an_error_but_brace_brace_clears() {
+        let err = parse_env_json("   \n ", "--env-file").expect_err("blank input must error");
+        assert!(err.contains("pass '{}' to clear"), "{err}");
+        assert_eq!(parse_env_json("{}", "--env-file").expect("{} clears"), Vec::new());
+        assert_eq!(
+            parse_env_json(&format!(r#"{{"SECRET_TOKEN":"{ENV_SECRET}"}}"#), "--env-file")
+                .expect("valid object"),
+            vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())]
+        );
+    }
+
+    /// A JSON parse failure must not reflect the payload back — `serde_json`
+    /// messages quote the offending scalar, which here IS the secret.
+    #[test]
+    fn env_json_parse_error_never_echoes_the_payload() {
+        let err = parse_env_json(&format!(r#"{{"K":"{ENV_SECRET}"#), "--env-stdin")
+            .expect_err("truncated JSON must error");
+        assert!(!err.contains("sk-live-"), "{err}");
+        let err = parse_env_json(r#"{"K":31337}"#, "--env-stdin")
+            .expect_err("non-string value must error");
+        assert!(!err.contains("31337"), "{err}");
+    }
+
+    /// The redacted read verb parses, and carries NO `--reveal` (deviation D-1).
+    #[test]
+    fn parses_agent_env_verb_and_has_no_reveal_flag() {
+        let cmd = parse_hangar(&["ainb", "hangar", "agent", "env", "agent-1"]);
+        let HangarCommand::Agent(AgentCommand::Env(args)) = cmd else {
+            panic!("expected agent env, got {cmd:?}");
+        };
+        assert_eq!(args.id, "agent-1");
+
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        assert!(
+            app.try_get_matches_from(["ainb", "hangar", "agent", "env", "agent-1", "--reveal"])
+                .is_err(),
+            "there must be no plaintext escape hatch on the CLI"
+        );
+    }
+
     #[test]
     fn parses_issue_create_with_title_and_description() {
         let cmd = parse_hangar(&[
