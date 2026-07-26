@@ -520,6 +520,36 @@ pub const HANGAR_SQUAD_ASSIGN: &str = "hangar/squad_assign";
 /// CLEARS the audit pair.
 pub const HANGAR_SQUAD_ARCHIVE: &str = "hangar/squad_archive";
 
+/// `hangar/squad_member_role_set` — set or clear one EXISTING squad membership's
+/// free-text ROLE (parity #25, migration 0053, multica `UpdateSquadMemberRole`).
+///
+/// Params: [`crate::snapshots::SquadMemberRoleParams`]. Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`], the same envelope `squad_create` /
+/// `squad_member_*` / `squad_archive` answer with, so a caller re-renders from
+/// the response without a `squads_list` round-trip.
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a squad id from
+/// another tenant is rejected with `INVALID_PARAMS`, never a cross-tenant write.
+/// **Never a silent no-op:** an actor that is not already a member is rejected
+/// with `INVALID_PARAMS` rather than answering success — this method edits an
+/// existing membership and never inserts one. An empty `role` CLEARS the label.
+/// The role is advisory metadata the squad LEADER reads in its claim-time
+/// briefing; nothing dispatches on it.
+pub const HANGAR_SQUAD_MEMBER_ROLE_SET: &str = "hangar/squad_member_role_set";
+
+/// `hangar/squad_instructions_set` — set or clear one squad's user-authored
+/// routing guidance (parity #25, migration 0053, multica 088).
+///
+/// Params: [`crate::snapshots::SquadInstructionsParams`]. Result: the refreshed
+/// [`crate::snapshots::SquadsListResult`].
+///
+/// Mutating + workspace-scoped like [`HANGAR_SQUAD_CREATE`]: a squad id from
+/// another tenant is rejected with `INVALID_PARAMS` and writes nothing. The text
+/// is stored VERBATIM — it is rendered as the leader briefing's
+/// `## Squad Instructions` section, which is omitted entirely when the field is
+/// blank (multica blank-omit parity).
+pub const HANGAR_SQUAD_INSTRUCTIONS_SET: &str = "hangar/squad_instructions_set";
+
 /// `hangar/squad_fanout` — fan an issue out across the WHOLE squad: brief the
 /// LEADER *and* enqueue one task per distinct `agent` member, all on the same
 /// issue (P7).
@@ -1057,6 +1087,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SQUAD_MEMBER_REMOVE,
     HANGAR_SQUAD_ASSIGN,
     HANGAR_SQUAD_ARCHIVE,
+    HANGAR_SQUAD_MEMBER_ROLE_SET,
+    HANGAR_SQUAD_INSTRUCTIONS_SET,
     HANGAR_HEALTH,
     HANGAR_DAEMON_HEALTH,
     HANGAR_USAGE_ROLLUP,
@@ -1229,6 +1261,8 @@ mod tests {
             HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_SQUAD_ASSIGN,
             HANGAR_SQUAD_ARCHIVE,
+    HANGAR_SQUAD_MEMBER_ROLE_SET,
+    HANGAR_SQUAD_INSTRUCTIONS_SET,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
@@ -1300,6 +1334,8 @@ mod tests {
             HANGAR_SQUAD_MEMBER_REMOVE,
             HANGAR_SQUAD_ASSIGN,
             HANGAR_SQUAD_ARCHIVE,
+    HANGAR_SQUAD_MEMBER_ROLE_SET,
+    HANGAR_SQUAD_INSTRUCTIONS_SET,
             HANGAR_HEALTH,
             HANGAR_DAEMON_HEALTH,
             HANGAR_USAGE_ROLLUP,
