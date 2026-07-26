@@ -29,7 +29,7 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ainb_hangar_core::actor::ActorRef;
+use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
@@ -561,6 +561,9 @@ pub async fn squads_list(
             name: s.name,
             leader: s.leader.to_string(),
             members: s.members.iter().map(ToString::to_string).collect(),
+            archived: s.archived,
+            archived_at: s.archived_at,
+            archived_by: s.archived_by.as_ref().map(ToString::to_string).unwrap_or_default(),
         })
         .collect())
 }
@@ -842,6 +845,11 @@ async fn agent_actor_row_with_counts(
         // a metadata-less agent serialises exactly as it did pre-0050.
         description: agent.description.clone(),
         avatar: agent.avatar_url.clone().unwrap_or_default(),
+        // Migration 0052 archive audit. Both are omitted from the wire when
+        // unset, so an active (or pre-0052-archived) agent serialises exactly as
+        // it did before.
+        archived_at: agent.archived_at,
+        archived_by: agent.archived_by.as_ref().map(ToString::to_string).unwrap_or_default(),
     })
 }
 
@@ -894,9 +902,13 @@ pub async fn agent_archive(
     workspace_id: &str,
     agent_id: &str,
     archived: bool,
+    archived_by: Option<&str>,
     now_ms: i64,
 ) -> Result<Option<ActorRow>, sqlx::Error> {
-    let touched = AgentRepo::set_archived(pool, workspace_id, agent_id, archived).await?;
+    let by = effective_archiver(pool, workspace_id, archived_by).await?;
+    let touched =
+        AgentRepo::set_archived(pool, workspace_id, agent_id, archived, by.as_ref(), now_ms)
+            .await?;
     if !touched {
         return Ok(None);
     }
@@ -904,6 +916,76 @@ pub async fn agent_archive(
         Some(agent) => Ok(Some(agent_actor_row(pool, &agent, now_ms).await?)),
         None => Ok(None),
     }
+}
+
+/// Resolve the actor recorded as `archived_by` (migration 0052, parity #26):
+///
+/// 1. an explicitly supplied user id (trimmed; blank counts as absent), else
+/// 2. the workspace OWNER — the single-operator default, mirroring the gap-#8
+///    invoker resolution — else
+/// 3. `None`, an honestly unattributed archive (an owner-less workspace).
+///
+/// One helper so the agent and squad handlers can never drift apart on who gets
+/// blamed for an archive.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the owner lookup fails.
+async fn effective_archiver(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    supplied: Option<&str>,
+) -> Result<Option<ActorRef>, sqlx::Error> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::workspace::WorkspaceRepo;
+
+    if let Some(id) = supplied.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(ActorRef::new(ActorKind::Member, id).ok());
+    }
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(None);
+    };
+    let owner = WorkspaceRepo::owner_id(pool, &ws).await?;
+    Ok(owner.and_then(|id| ActorRef::new(ActorKind::Member, id).ok()))
+}
+
+/// Archive or un-archive one squad, scoped to `workspace_id`, recording WHO and
+/// WHEN, then re-read the workspace's ACTIVE squads
+/// (`hangar/squad_archive`, parity #26).
+///
+/// Workspace-scoped through [`SquadRepo::set_archived`]'s tenant guard: a
+/// foreign-tenant squad id flips no row and resolves to `None` (the not-found
+/// case the caller surfaces as an error). The refreshed list is active-only, so
+/// a just-archived squad is absent from the response — which is the observable
+/// outcome the caller renders.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault or a malformed stored row.
+pub async fn squad_archive(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    squad_id: &str,
+    archived: bool,
+    archived_by: Option<&str>,
+    now_ms: i64,
+) -> Result<Option<Vec<ainb_hangar_proto::snapshots::SquadWireRow>>, sqlx::Error> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::{SquadRepo, SquadRepoError};
+
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(None);
+    };
+    let by = effective_archiver(pool, workspace_id, archived_by).await?;
+    match SquadRepo::set_archived(pool, &ws, squad_id, archived, by.as_ref(), now_ms).await {
+        Ok(()) => {}
+        // `DuplicateName` is structurally impossible here (an archive never
+        // renames), but folding it into the not-found rejection keeps a future
+        // store change from panicking a live daemon connection.
+        Err(SquadRepoError::NotFound | SquadRepoError::DuplicateName) => return Ok(None),
+        Err(SquadRepoError::Db(e)) => return Err(e),
+    }
+    squads_list(pool, workspace_id).await.map(Some)
 }
 
 /// A workspace member joined with its user record (for the picker row).

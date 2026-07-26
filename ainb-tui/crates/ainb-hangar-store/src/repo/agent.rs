@@ -24,6 +24,7 @@
 //! are nullable TEXT carried as `Option<String>`. **Persistence only** — the
 //! provider EXEC consumption of these knobs is a separate bead (e38.16).
 
+use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::skill::SkillName;
 use sqlx::SqlitePool;
 
@@ -64,8 +65,19 @@ pub struct Agent {
     /// Owning user (`user.id`).
     pub owner_id: String,
     /// `true` when the agent is archived (hidden from the active picker). The
-    /// schema stores this as a 0/1 INTEGER (migration 0015).
+    /// schema stores this as a 0/1 INTEGER (migration 0015). This flag — NOT
+    /// [`archived_at`](Self::archived_at) — is the authoritative discriminant.
     pub archived: bool,
+    /// When the agent was archived (epoch ms, migration 0052), or `None` when the
+    /// agent is active — or when it was archived BEFORE 0052 existed. That second
+    /// case is an honest unknown; a historical archive is never given a
+    /// fabricated timestamp.
+    pub archived_at: Option<i64>,
+    /// Who archived the agent, as a canonical actor-ref (migration 0052), or
+    /// `None` when the agent is active / the archive predates 0052 / the archive
+    /// was unattributed. A malformed stored value decodes to `None` rather than
+    /// failing the whole read.
+    pub archived_by: Option<ActorRef>,
     /// Optional provider model override (e.g. `claude-opus-4`); `None` = the
     /// runtime's provider default.
     pub model: Option<String>,
@@ -138,6 +150,8 @@ impl Default for Agent {
             permission_mode: "private".to_string(),
             owner_id: String::new(),
             archived: false,
+            archived_at: None,
+            archived_by: None,
             model: None,
             cli_args: Vec::new(),
             mcp_config: None,
@@ -557,8 +571,18 @@ impl AgentRepo {
         Ok(res.rows_affected() == 1)
     }
 
-    /// Set (or clear) one agent's `archived` flag, scoped to a workspace
-    /// (e38.15).
+    /// Set (or clear) one agent's `archived` flag **and its audit trail**, scoped
+    /// to a workspace (e38.15; audit trail = migration 0052, multica gap #26).
+    ///
+    /// There is deliberately no audit-less archive path: `by` (the archiving
+    /// actor, `None` = unattributed) and `now_ms` are required parameters, so a
+    /// caller cannot flip the flag without deciding what to record.
+    ///
+    /// - archiving (`archived = true`) STAMPS `archived_at = now_ms` and
+    ///   `archived_by = by`. Re-archiving RE-stamps: last archiver wins, which is
+    ///   still an honest record of the most recent archive action.
+    /// - un-archiving (`archived = false`) CLEARS both audit columns (multica
+    ///   `RestoreAgent` parity) — a restored agent carries no stale stamp.
     ///
     /// Workspace-scoped at the SQL boundary: an agent id from another tenant
     /// matches no row and flips nothing. Returns `true` when exactly one row was
@@ -575,13 +599,20 @@ impl AgentRepo {
         workspace_id: &str,
         id: &str,
         archived: bool,
+        by: Option<&ActorRef>,
+        now_ms: i64,
     ) -> Result<bool, sqlx::Error> {
-        let res = sqlx::query("UPDATE agent SET archived = ? WHERE id = ? AND workspace_id = ?")
-            .bind(i64::from(archived))
-            .bind(id)
-            .bind(workspace_id)
-            .execute(pool)
-            .await?;
+        let res = sqlx::query(
+            "UPDATE agent SET archived = ?, archived_at = ?, archived_by = ? \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(i64::from(archived))
+        .bind(archived.then_some(now_ms))
+        .bind(archived.then(|| by.map(ToString::to_string)).flatten())
+        .bind(id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -887,7 +918,7 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
      permission_mode, owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, \
      provider, token_budget, description, avatar_url, kind, system_key, service_tier, \
-     disabled_runtime_skills FROM agent";
+     disabled_runtime_skills, archived_at, archived_by FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -1101,6 +1132,10 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             disabled_runtime_skills: disabled_runtime_skills_from_json(
                 &row.try_get::<String, _>("disabled_runtime_skills")?,
             ),
+            archived_at: row.try_get("archived_at")?,
+            archived_by: row
+                .try_get::<Option<String>, _>("archived_by")?
+                .and_then(|s| s.parse::<ActorRef>().ok()),
         })
     }
 }

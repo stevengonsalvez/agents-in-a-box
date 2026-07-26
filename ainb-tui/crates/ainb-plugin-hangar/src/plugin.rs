@@ -6819,6 +6819,7 @@ mod tests {
                 name: "Platform".into(),
                 leader: "agent:a1".into(),
                 members: vec!["agent:a1".into()],
+                ..SquadWireRow::default()
             }],
         });
         let mut app = p.app_state().clone();

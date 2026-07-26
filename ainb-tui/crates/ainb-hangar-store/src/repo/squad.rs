@@ -56,6 +56,17 @@ pub struct Squad {
     pub leader: ActorRef,
     /// The squad's member actor-refs (may be empty), ordered by `(type, id)`.
     pub members: Vec<ActorRef>,
+    /// `true` when the squad is archived (migration 0052). Archived squads leave
+    /// [`SquadRepo::list`] and refuse new assignments. This flag — not
+    /// [`archived_at`](Self::archived_at) — is the authoritative discriminant.
+    pub archived: bool,
+    /// When the squad was archived (epoch ms), or `None` when active / archived
+    /// without attribution. Never fabricated for a historical archive.
+    pub archived_at: Option<i64>,
+    /// Who archived the squad, as a canonical actor-ref, or `None` when active /
+    /// unattributed. A malformed stored value decodes to `None` rather than
+    /// failing the read.
+    pub archived_by: Option<ActorRef>,
 }
 
 /// Stateless typed wrapper over the `squad` + `squad_member` tables.
@@ -163,7 +174,13 @@ impl SquadRepo {
         Ok(())
     }
 
-    /// List every squad of `workspace` with its members, ordered by name.
+    /// List the **active** (non-archived) squads of `workspace` with their
+    /// members, ordered by name (multica `ListSquads` parity, migration 0052).
+    ///
+    /// Archived squads are deliberately excluded — use
+    /// [`list_including_archived`](Self::list_including_archived) for the audit
+    /// view. Behavioural no-op on pre-0052 data: every existing row defaults to
+    /// `archived = 0`.
     ///
     /// Workspace-scoped: a foreign / unknown workspace yields an empty vec, never
     /// another tenant's squads. Each squad's `members` are ordered by
@@ -176,14 +193,38 @@ impl SquadRepo {
         pool: &SqlitePool,
         workspace: &WorkspaceId,
     ) -> Result<Vec<Squad>, sqlx::Error> {
+        Self::list_where(pool, workspace, true).await
+    }
+
+    /// List EVERY squad of `workspace` — active and archived — with its members,
+    /// ordered by name (the audit / `--all` read path). Mirrors
+    /// [`AgentRepo::list_by_workspace_including_archived`](crate::repo::agent::AgentRepo::list_by_workspace_including_archived).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if a query or actor-ref decode fails.
+    pub async fn list_including_archived(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+    ) -> Result<Vec<Squad>, sqlx::Error> {
+        Self::list_where(pool, workspace, false).await
+    }
+
+    /// Shared body of [`list`](Self::list) / [`list_including_archived`](Self::list_including_archived).
+    async fn list_where(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        active_only: bool,
+    ) -> Result<Vec<Squad>, sqlx::Error> {
         use sqlx::Row;
-        let squad_rows = sqlx::query(
-            "SELECT id, name, leader_type, leader_id FROM squad \
-             WHERE workspace_id = ? ORDER BY name, id",
-        )
-        .bind(workspace.as_str())
-        .fetch_all(pool)
-        .await?;
+        let sql = if active_only {
+            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by \
+             FROM squad WHERE workspace_id = ? AND archived = 0 ORDER BY name, id"
+        } else {
+            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by \
+             FROM squad WHERE workspace_id = ? ORDER BY name, id"
+        };
+        let squad_rows = sqlx::query(sql).bind(workspace.as_str()).fetch_all(pool).await?;
 
         let mut squads = Vec::with_capacity(squad_rows.len());
         for r in &squad_rows {
@@ -211,6 +252,9 @@ impl SquadRepo {
                 name: r.try_get("name")?,
                 leader,
                 members,
+                archived: r.try_get::<i64, _>("archived")? != 0,
+                archived_at: r.try_get("archived_at")?,
+                archived_by: decode_archiver(r.try_get::<Option<String>, _>("archived_by")?),
             });
         }
         Ok(squads)
@@ -224,6 +268,10 @@ impl SquadRepo {
     /// 0045), resolves to `None`. The daemon's claim-time briefing injection keys
     /// off this: a `None` return = skip injection silently (no stale briefing),
     /// mirroring multica's dangling-`squad_id` guard.
+    ///
+    /// Unlike [`list`](Self::list) this does NOT filter archived squads: an
+    /// archived squad must stay resolvable so an audit read can show its stamp and
+    /// the reject-assignment guard can name it (migration 0052).
     ///
     /// Reuses the same [`decode_actor`] + `(member_type, member_id)` ordering as
     /// [`list`](Self::list), just filtered to the one id (an id-keyed single-row
@@ -239,8 +287,8 @@ impl SquadRepo {
     ) -> Result<Option<Squad>, sqlx::Error> {
         use sqlx::Row;
         let Some(r) = sqlx::query(
-            "SELECT id, name, leader_type, leader_id FROM squad \
-             WHERE id = ? AND workspace_id = ?",
+            "SELECT id, name, leader_type, leader_id, archived, archived_at, archived_by \
+             FROM squad WHERE id = ? AND workspace_id = ?",
         )
         .bind(squad_id)
         .bind(workspace.as_str())
@@ -274,6 +322,9 @@ impl SquadRepo {
             name: r.try_get("name")?,
             leader,
             members,
+            archived: r.try_get::<i64, _>("archived")? != 0,
+            archived_at: r.try_get("archived_at")?,
+            archived_by: decode_archiver(r.try_get::<Option<String>, _>("archived_by")?),
         }))
     }
 
@@ -340,6 +391,69 @@ impl SquadRepo {
         Ok(rows.into_iter().map(|(id,)| id).collect())
     }
 
+    /// Set (or clear) one squad's `archived` flag **and its audit trail**
+    /// (migration 0052, multica gap #26 / `DeleteSquad` soft-delete parity).
+    ///
+    /// Same stamp/clear semantics as
+    /// [`AgentRepo::set_archived`](crate::repo::agent::AgentRepo::set_archived):
+    /// archiving stamps `(archived_at = now_ms, archived_by = by)` and re-archiving
+    /// re-stamps (last archiver wins); un-archiving CLEARS both so a restored squad
+    /// carries no stale attribution.
+    ///
+    /// Workspace-scoped through the shared [`ensure_squad_in_ws`](Self::ensure_squad_in_ws)
+    /// guard: a squad id from another tenant is a [`SquadRepoError::NotFound`],
+    /// never a cross-tenant write.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SquadRepoError::NotFound`] when the squad is not in `workspace`,
+    /// or [`SquadRepoError::Db`] on a store failure.
+    pub async fn set_archived(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+        archived: bool,
+        by: Option<&ActorRef>,
+        now_ms: i64,
+    ) -> Result<(), SquadRepoError> {
+        let mut tx = pool.begin().await?;
+        Self::ensure_squad_in_ws(&mut tx, workspace, squad_id).await?;
+        sqlx::query(
+            "UPDATE squad SET archived = ?, archived_at = ?, archived_by = ? \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(i64::from(archived))
+        .bind(archived.then_some(now_ms))
+        .bind(archived.then(|| by.map(ToString::to_string)).flatten())
+        .bind(squad_id)
+        .bind(workspace.as_str())
+        .execute(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(())
+    }
+
+    /// Whether `squad_id` is archived within `workspace` — the single-scalar read
+    /// the assignment guard uses. An unknown / foreign-tenant id reads `false`
+    /// (the caller's own not-found path then fires, so this never masks it).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn is_archived(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        squad_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let archived: Option<i64> =
+            sqlx::query_scalar("SELECT archived FROM squad WHERE id = ? AND workspace_id = ?")
+                .bind(squad_id)
+                .bind(workspace.as_str())
+                .fetch_optional(pool)
+                .await?;
+        Ok(archived.is_some_and(|a| a != 0))
+    }
+
     /// Confirm `squad_id` belongs to `workspace` inside `tx`, erroring with
     /// [`SquadRepoError::NotFound`] otherwise (the tenant guard the member
     /// mutations share).
@@ -368,6 +482,14 @@ fn decode_actor(kind: &str, id: &str) -> Result<ActorRef, sqlx::Error> {
     format!("{kind}:{id}")
         .parse::<ActorRef>()
         .map_err(|e| sqlx::Error::Decode(Box::new(e)))
+}
+
+/// Decode the stored `archived_by` cell into a typed [`ActorRef`], TOLERANTLY: a
+/// malformed value degrades to `None` (an unattributed archive) rather than
+/// failing the whole squad read. The audit sidecar must never make a squad
+/// unreadable.
+fn decode_archiver(raw: Option<String>) -> Option<ActorRef> {
+    raw.and_then(|s| s.parse::<ActorRef>().ok())
 }
 
 /// Whether a `sqlx` error is a `SQLite` UNIQUE-constraint violation (the

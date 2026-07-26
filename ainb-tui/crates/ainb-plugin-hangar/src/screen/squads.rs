@@ -796,6 +796,7 @@ mod tests {
             name: name.into(),
             leader: leader.into(),
             members: members.iter().map(|m| (*m).to_string()).collect(),
+            ..SquadWireRow::default()
         }
     }
 

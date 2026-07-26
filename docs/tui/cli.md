@@ -3794,6 +3794,7 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+      --by <BY>                The `user.id` recorded as the archiving actor (migration 0052). Omitted defaults to the workspace owner — the ordinary single-operator archive
   -h, --help                   Print help
 ```
 
@@ -3813,6 +3814,7 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+      --by <BY>                The `user.id` recorded as the archiving actor (migration 0052). Omitted defaults to the workspace owner — the ordinary single-operator archive
   -h, --help                   Print help
 ```
 
@@ -4035,6 +4037,8 @@ Commands:
   add-member     Add a member actor to a squad (`agent:<id>` / `member:<id>`)
   remove-member  Remove a member actor from a squad (`agent:<id>` / `member:<id>`)
   assign         Route a task to the squad's LEADER (leader routing taking effect)
+  archive        Archive a squad: it leaves the active list and refuses new assignments
+  unarchive      Restore an archived squad (clears the archive audit stamp)
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -4055,6 +4059,7 @@ Usage: ainb hangar squad list [OPTIONS]
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+      --all                    Include ARCHIVED squads (migration 0052). The default list is active-only
   -h, --help                   Print help
 ```
 
@@ -4139,6 +4144,46 @@ Options:
       --fanout                 Fan the work out across the WHOLE squad (leader brief + one task per distinct `agent` member) instead of briefing the leader alone
       --invoker <INVOKER>      The user the invocation-permission gate judges this assignment by (a user id or an email). Omitted defaults to the workspace owner — the ordinary single-operator assign, which the gate always admits
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad archive`
+
+Archive a squad: it leaves the active list and refuses new assignments
+
+```console
+$ ainb hangar squad archive --help
+Archive a squad: it leaves the active list and refuses new assignments
+
+Usage: ainb hangar squad archive [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Squad id to (un)archive
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+      --by <BY>                The `user.id` recorded as the archiving actor (migration 0052). Omitted defaults to the workspace owner
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad unarchive`
+
+Restore an archived squad (clears the archive audit stamp)
+
+```console
+$ ainb hangar squad unarchive --help
+Restore an archived squad (clears the archive audit stamp)
+
+Usage: ainb hangar squad unarchive [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Squad id to (un)archive
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+      --by <BY>                The `user.id` recorded as the archiving actor (migration 0052). Omitted defaults to the workspace owner
   -h, --help                   Print help
 ```
 

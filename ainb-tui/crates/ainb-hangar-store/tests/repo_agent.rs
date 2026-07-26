@@ -222,7 +222,7 @@ async fn archive_flips_flag_and_hides_from_active_list() {
     assert_eq!(active.len(), 1, "active list shows the un-archived agent");
 
     // Archive it (workspace-scoped).
-    let touched = AgentRepo::set_archived(store.pool(), &workspace_id, "agent-1", true)
+    let touched = AgentRepo::set_archived(store.pool(), &workspace_id, "agent-1", true, None, 0)
         .await
         .expect("archive");
     assert!(touched, "archive touches one row");
@@ -241,7 +241,7 @@ async fn archive_flips_flag_and_hides_from_active_list() {
     assert_eq!(all.len(), 1, "include-archived list still returns it");
 
     // Un-archive restores it to the active list.
-    AgentRepo::set_archived(store.pool(), &workspace_id, "agent-1", false)
+    AgentRepo::set_archived(store.pool(), &workspace_id, "agent-1", false, None, 0)
         .await
         .expect("unarchive");
     let active = AgentRepo::list_by_workspace(store.pool(), &workspace_id).await.unwrap();
@@ -252,7 +252,7 @@ async fn archive_flips_flag_and_hides_from_active_list() {
     );
 
     // A foreign workspace archives nothing (workspace-scoped).
-    let touched = AgentRepo::set_archived(store.pool(), "other-ws", "agent-1", true)
+    let touched = AgentRepo::set_archived(store.pool(), "other-ws", "agent-1", true, None, 0)
         .await
         .expect("cross-tenant archive");
     assert!(!touched, "a foreign workspace must archive no row");

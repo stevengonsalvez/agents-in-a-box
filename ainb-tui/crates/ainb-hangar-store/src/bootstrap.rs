@@ -406,6 +406,9 @@ pub async fn create_agent_from(
         permission_mode: "private".to_string(),
         owner_id,
         archived: false,
+        // Never archived, so there is nothing to attribute (migration 0052).
+        archived_at: None,
+        archived_by: None,
         model: draft.model,
         cli_args: Vec::new(),
         mcp_config: None,

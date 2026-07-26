@@ -35,6 +35,7 @@ fn wire_squad(id: &str, name: &str, leader: &str, members: &[&str]) -> SquadWire
         name: name.into(),
         leader: leader.into(),
         members: members.iter().map(|m| (*m).to_string()).collect(),
+        ..SquadWireRow::default()
     }
 }
 

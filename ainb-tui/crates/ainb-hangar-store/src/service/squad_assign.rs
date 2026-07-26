@@ -122,6 +122,11 @@ pub enum SquadAssignError {
         /// has no `owner`-role member to fall back to).
         invoker: String,
     },
+    /// The squad is ARCHIVED, so it refuses new work (migration 0052, multica
+    /// `DeleteSquad` soft-delete parity). The guard runs in the pre-flight resolve
+    /// phase, so NO task row is written — restore the squad to assign to it again.
+    #[error("squad `{0}` is archived — restore it before assigning work")]
+    Archived(String),
     /// An underlying store failure (resolve, lookup, or enqueue).
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -175,6 +180,8 @@ impl SquadAssignService {
     ///
     /// # Errors
     ///
+    /// - [`SquadAssignError::Archived`] when the squad is archived — no task row
+    ///   is written.
     /// - [`SquadAssignError::NoAgentLeader`] when the squad is unknown in the
     ///   workspace or its leader is a human `member`.
     /// - [`SquadAssignError::LeaderAgentMissing`] when the leader agent row is
@@ -193,6 +200,12 @@ impl SquadAssignService {
         idgen: &dyn IdGen,
         clock: &dyn HangarClock,
     ) -> Result<SquadAssignment, SquadAssignError> {
+        // 0. An ARCHIVED squad refuses new work (migration 0052). Checked FIRST,
+        //    in the pre-flight phase, so no task row is written.
+        if SquadRepo::is_archived(pool, workspace, squad_id).await? {
+            return Err(SquadAssignError::Archived(squad_id.to_string()));
+        }
+
         // 1. Resolve the squad to its leader's agent id — the routing seam. A
         //    human-member leader (or unknown squad) resolves to `None`: there is
         //    no agent to dispatch to, so the assignment is rejected.
@@ -273,6 +286,8 @@ impl SquadAssignService {
     ///
     /// # Errors
     ///
+    /// - [`SquadAssignError::Archived`] when the squad is archived — the whole
+    ///   fan-out is refused with zero rows written.
     /// - [`SquadAssignError::NoAgentLeader`] / [`SquadAssignError::LeaderAgentMissing`]
     ///   from the leader brief (an unknown squad, a human leader, a dangling
     ///   leader ref).
@@ -295,6 +310,12 @@ impl SquadAssignService {
         // of leaving the leader (and earlier members) queued. Nothing is inserted
         // until all targets are known-good; then every insert lands in ONE
         // transaction (all-or-nothing).
+
+        // 0. An ARCHIVED squad refuses new work (migration 0052), before any
+        //    resolution and well before `pool.begin()`.
+        if SquadRepo::is_archived(pool, workspace, squad_id).await? {
+            return Err(SquadAssignError::Archived(squad_id.to_string()));
+        }
 
         // 1. Resolve the squad's leader agent — the routing seam. A human-member
         //    leader or unknown squad resolves to `None` and is rejected. The
@@ -1310,5 +1331,123 @@ mod tests {
             "got {err:?}"
         );
         assert_eq!(queue_len(pool).await, 0, "no task row for a refused assign");
+    }
+
+    /// An ARCHIVED squad refuses a leader assignment and writes NO task row
+    /// (migration 0052, multica `DeleteSquad` parity). The no-write half is the
+    /// point: the guard runs pre-flight, so the flag is not merely cosmetic.
+    #[tokio::test]
+    async fn assign_to_leader_refuses_an_archived_squad_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_agent(pool, "ws-a", "a-lead", "rt-lead").await;
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent_ref("a-lead"), 1)
+            .await
+            .unwrap();
+        SquadRepo::set_archived(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            true,
+            Some(&member_ref("user-1")),
+            5_000,
+        )
+        .await
+        .unwrap();
+
+        let err = SquadAssignService::assign_to_leader(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &SquadAssignRequest::default(),
+            &FixedIdGen::new(vec!["task-1".to_string()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::Archived(ref id) if id == "s1"),
+            "got {err:?}"
+        );
+        assert_eq!(
+            queue_len(pool).await,
+            0,
+            "an archived squad enqueues nothing"
+        );
+
+        // Restoring it makes the same assignment succeed — the guard is the only
+        // thing that refused, not a broken fixture.
+        SquadRepo::set_archived(pool, &ws("ws-a"), "s1", false, None, 6_000)
+            .await
+            .unwrap();
+        SquadAssignService::assign_to_leader(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &SquadAssignRequest::default(),
+            &FixedIdGen::new(vec!["task-1".to_string()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .expect("a restored squad accepts work again");
+        assert_eq!(queue_len(pool).await, 1);
+    }
+
+    /// The same guard on the FAN-OUT path: an archived squad enqueues neither the
+    /// leader brief nor any member task.
+    #[tokio::test]
+    async fn assign_fanout_refuses_an_archived_squad_without_writing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_agent(pool, "ws-a", "a-lead", "rt-lead").await;
+        seed_agent(pool, "ws-a", "a-m1", "rt-m1").await;
+        seed_agent(pool, "ws-a", "a-m2", "rt-m2").await;
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent_ref("a-lead"), 1)
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1"))
+            .await
+            .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m2"))
+            .await
+            .unwrap();
+        SquadRepo::set_archived(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            true,
+            Some(&member_ref("user-1")),
+            5_000,
+        )
+        .await
+        .unwrap();
+
+        let err = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &SquadAssignRequest::default(),
+            &FixedIdGen::new(vec![
+                "task-1".to_string(),
+                "task-2".to_string(),
+                "task-3".to_string(),
+            ]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::Archived(ref id) if id == "s1"),
+            "got {err:?}"
+        );
+        assert_eq!(
+            queue_len(pool).await,
+            0,
+            "neither the leader brief nor any member task was written"
+        );
     }
 }

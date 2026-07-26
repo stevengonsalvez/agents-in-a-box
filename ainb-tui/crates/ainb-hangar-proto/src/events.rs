@@ -536,6 +536,15 @@ pub struct ActorRow {
     /// unset and for members. Omitted from the wire when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub avatar: String,
+    /// When the agent was archived (epoch ms, migration 0052 / parity #26);
+    /// absent for an active agent, for a member, for an archive predating 0052,
+    /// and for a pre-0052 producer. Omitted from the wire when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// Who archived the agent, as a canonical actor-ref (migration 0052); empty
+    /// when active / unknown / unattributed. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub archived_by: String,
 }
 
 impl Default for ActorRow {
@@ -555,6 +564,8 @@ impl Default for ActorRow {
             recent_rank: None,
             description: String::new(),
             avatar: String::new(),
+            archived_at: None,
+            archived_by: String::new(),
         }
     }
 }
@@ -973,5 +984,31 @@ mod tests {
             "{out}"
         );
         assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
+    }
+
+    /// The parity-#26 archive audit is APPEND-ONLY on `ActorRow`: a pre-0052
+    /// payload decodes with both fields absent, an unstamped row emits neither
+    /// key, and a stamped row round-trips verbatim.
+    #[test]
+    fn actor_row_archive_audit_is_append_only() {
+        let legacy = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent",
+            "presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-0052 payload decodes");
+        assert_eq!(row.archived_at, None);
+        assert_eq!(row.archived_by, "");
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("archived_at") && !out.contains("archived_by"),
+            "an unstamped row must not emit the audit keys: {out}"
+        );
+
+        let stamped = ActorRow {
+            archived_at: Some(1_700_000_000_000),
+            archived_by: "member:user-1".into(),
+            ..row
+        };
+        let out = serde_json::to_string(&stamped).unwrap();
+        assert!(out.contains("\"archived_by\":\"member:user-1\""), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), stamped);
     }
 }

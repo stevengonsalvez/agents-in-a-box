@@ -1235,6 +1235,13 @@ pub struct AgentArchiveParams {
     pub agent_id: String,
     /// `true` archives (hides from the active picker); `false` restores.
     pub archived: bool,
+    /// The user id recorded as `archived_by` (migration 0052, parity #26).
+    /// APPEND-ONLY: omitted (`None`) defaults to the workspace OWNER — the
+    /// ordinary single-operator archive — mirroring
+    /// [`SquadAssignParams::invoker_user_id`]. An old client omits it; an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_by_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_DELETE`]: delete one named agent
@@ -1342,7 +1349,7 @@ pub struct MemberRemoveParams {
 /// canonical actor-ref (`member:<id>` / `agent:<id>`) — the actor a squad-assigned
 /// task routes to; `members` are the squad's member actor-refs in the same form.
 /// A pure wire row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct SquadWireRow {
     /// The squad's id (`squad.id`) — what `squad_member_add`/`remove` key off.
     pub id: String,
@@ -1353,6 +1360,40 @@ pub struct SquadWireRow {
     pub leader: String,
     /// The squad's member actor-refs (`member:<id>` / `agent:<id>`), ordered.
     pub members: Vec<String>,
+    /// `true` when the squad is archived (migration 0052, parity #26).
+    /// APPEND-ONLY: absent on the wire when `false`, so a pre-0052 producer's
+    /// payload still parses and a consumer sees the active default.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub archived: bool,
+    /// When the squad was archived (epoch ms), absent when active / unstamped.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_at: Option<i64>,
+    /// Who archived the squad, as a canonical actor-ref; empty when unknown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub archived_by: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_ARCHIVE`] (parity #26): archive or
+/// un-archive one squad, recording who + when.
+///
+/// `workspace_id` is the tenant-isolation guard — the daemon resolves it and
+/// scopes the flip by `(squad_id, workspace_id)` so a foreign-tenant squad id
+/// archives nothing. `archived: true` removes the squad from the active list and
+/// makes it refuse new assignments; `false` restores it and CLEARS the audit
+/// pair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadArchiveParams {
+    /// The subscribed workspace the squad must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to (un)archive (`squad.id`).
+    pub squad_id: String,
+    /// `true` archives; `false` restores.
+    pub archived: bool,
+    /// The user id recorded as `archived_by`. APPEND-ONLY: omitted (`None`)
+    /// defaults to the workspace OWNER, same resolution as
+    /// [`AgentArchiveParams::archived_by_user_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub archived_by_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_SQUADS_LIST`] and the refreshed view the
@@ -2776,11 +2817,79 @@ mod tests {
             workspace_id: "ws-1".into(),
             agent_id: "agent-1".into(),
             archived: true,
+            archived_by_user_id: Some("user-2".into()),
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
             serde_json::from_str::<AgentArchiveParams>(&s).unwrap(),
             params
+        );
+    }
+
+    /// The parity-#26 archive-audit fields are APPEND-ONLY on the wire: a LEGACY
+    /// payload without them still parses (defaulting to "unattributed"), and a
+    /// value-less row does not emit the keys — so an old peer's shape is
+    /// unchanged in both directions.
+    #[test]
+    fn archive_audit_fields_are_append_only_on_the_wire() {
+        // A pre-0052 client payload (no `archived_by_user_id`) still parses.
+        let legacy = r#"{"workspace_id":"ws-1","agent_id":"agent-1","archived":true}"#;
+        let p: AgentArchiveParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(
+            p.archived_by_user_id, None,
+            "an omitted archiver defaults to None (the daemon then falls back to the owner)"
+        );
+        assert!(
+            !serde_json::to_string(&p).unwrap().contains("archived_by_user_id"),
+            "an unset archiver is not emitted"
+        );
+
+        // The squad params carry the same append-only field.
+        let legacy = r#"{"workspace_id":"ws-1","squad_id":"s1","archived":true}"#;
+        let p: SquadArchiveParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(p.archived_by_user_id, None);
+        assert!(p.archived);
+
+        // A round-trip with the field present preserves it.
+        let full = SquadArchiveParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            archived: true,
+            archived_by_user_id: Some("user-2".into()),
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadArchiveParams>(&s).unwrap(),
+            full
+        );
+
+        // An ACTIVE squad row emits none of the three audit keys, so a pre-0052
+        // consumer sees byte-identical JSON to what it saw before.
+        let active = SquadWireRow {
+            id: "s1".into(),
+            name: "alpha".into(),
+            leader: "agent:a-lead".into(),
+            ..SquadWireRow::default()
+        };
+        let s = serde_json::to_string(&active).unwrap();
+        for key in ["archived", "archived_at", "archived_by"] {
+            assert!(!s.contains(key), "active row must not emit `{key}`: {s}");
+        }
+
+        // An ARCHIVED row carries all three, and a legacy payload without them
+        // parses back to the active default.
+        let archived = SquadWireRow {
+            archived: true,
+            archived_at: Some(1_700_000_000_000),
+            archived_by: "member:user-1".into(),
+            ..active.clone()
+        };
+        let s = serde_json::to_string(&archived).unwrap();
+        assert_eq!(serde_json::from_str::<SquadWireRow>(&s).unwrap(), archived);
+        let legacy_row = r#"{"id":"s1","name":"alpha","leader":"agent:a-lead","members":[]}"#;
+        assert_eq!(
+            serde_json::from_str::<SquadWireRow>(legacy_row).unwrap(),
+            active
         );
     }
 
@@ -2873,6 +2982,7 @@ mod tests {
                 name: "alpha".into(),
                 leader: "agent:a-lead".into(),
                 members: vec!["agent:a-1".into(), "member:u-1".into()],
+                ..SquadWireRow::default()
             }],
         };
         let s = serde_json::to_string(&list).unwrap();
