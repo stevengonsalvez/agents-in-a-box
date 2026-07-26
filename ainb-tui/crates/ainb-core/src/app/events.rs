@@ -2983,7 +2983,7 @@ impl EventHandler {
             KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FleetPanelMoveDown),
             KeyCode::Tab => Some(AppEvent::FleetPanelOptionNext),
             KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
-            KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
+            KeyCode::Enter => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
             KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
             // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
@@ -3011,7 +3011,7 @@ impl EventHandler {
             KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
             KeyCode::Char('!') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill)),
             KeyCode::Char('#') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Archive)),
-            KeyCode::Char('t' | 'p') | KeyCode::Right | KeyCode::Char('A') => {
+            KeyCode::Char('t' | 'p' | 'a') | KeyCode::Right | KeyCode::Char('A') => {
                 let key = match key_event.code {
                     KeyCode::Right => FleetKey::Right,
                     // The pane reducer binds takeover-attach to lowercase `a`
@@ -8775,7 +8775,7 @@ mod panel_back_tests {
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('a')),
-            Some(AppEvent::FleetPanelAnswer)
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('a')))
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('B')),

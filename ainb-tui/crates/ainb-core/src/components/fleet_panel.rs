@@ -961,7 +961,7 @@ pub fn render(frame: &mut Frame, area: Rect, state: &mut FleetPanelState) {
         .canonical
         .selected_session()
         .map(|session| match session.attachment_label() {
-            "TMUX" => "→ open  A full screen",
+            "TMUX" => "→ open  a full screen",
             "REMOTE" => "remote control",
             _ => "no attachment",
         })

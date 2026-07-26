@@ -2145,7 +2145,7 @@ fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
         actions.extend(["y Approve", "n Deny"]);
     }
     if session.capabilities.contains("tmux_attach") && session.tmux_target.is_some() {
-        actions.extend(["→ Open", "A Full screen"]);
+        actions.extend(["→ Open", "a Full screen"]);
     }
     if session.capabilities.contains("send_prompt") {
         actions.push("p Send prompt");
