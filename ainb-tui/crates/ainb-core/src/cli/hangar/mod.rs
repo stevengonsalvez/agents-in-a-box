@@ -621,6 +621,10 @@ pub struct AgentArchiveArgs {
     /// `default` workspace.
     #[arg(long)]
     pub workspace: Option<String>,
+    /// The `user.id` recorded as the archiving actor (migration 0052). Omitted
+    /// defaults to the workspace owner — the ordinary single-operator archive.
+    #[arg(long)]
+    pub by: Option<String>,
 }
 
 /// `hangar member <verb>`.
@@ -749,6 +753,10 @@ pub enum SquadCommand {
     RemoveMember(SquadMemberArgs),
     /// Route a task to the squad's LEADER (leader routing taking effect).
     Assign(SquadAssignArgs),
+    /// Archive a squad: it leaves the active list and refuses new assignments.
+    Archive(SquadArchiveArgs),
+    /// Restore an archived squad (clears the archive audit stamp).
+    Unarchive(SquadArchiveArgs),
 }
 
 /// Arguments for `hangar squad list`.
@@ -757,6 +765,24 @@ pub struct SquadListArgs {
     /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
     #[arg(long)]
     pub workspace: Option<String>,
+    /// Include ARCHIVED squads (migration 0052). The default list is active-only.
+    #[arg(long)]
+    pub all: bool,
+}
+
+/// Arguments for `hangar squad archive` / `hangar squad unarchive`.
+#[derive(Args, Debug)]
+pub struct SquadArchiveArgs {
+    /// Squad id to (un)archive.
+    pub id: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// The `user.id` recorded as the archiving actor (migration 0052). Omitted
+    /// defaults to the workspace owner.
+    #[arg(long)]
+    pub by: Option<String>,
 }
 
 /// Arguments for `hangar squad create`.
@@ -2330,16 +2356,54 @@ async fn run_agent_set_archived(
     use ainb_hangar_store::repo::agent::AgentRepo;
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
-    let touched = AgentRepo::set_archived(store.pool(), &workspace_id, &args.id, archived)
-        .await
-        .with_context(|| format!("archive agent {}", args.id))?;
+    let by = effective_archiver(store, &workspace_id, args.by.as_deref()).await?;
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    let touched =
+        AgentRepo::set_archived(store.pool(), &workspace_id, &args.id, archived, by.as_ref(), now)
+            .await
+            .with_context(|| format!("archive agent {}", args.id))?;
     if touched {
-        let verb = if archived { "archived" } else { "un-archived" };
-        println!("{verb} agent {}", args.id);
+        if archived {
+            // Report the audit that was actually written, so the operator can see
+            // WHO the archive was attributed to without re-reading the row.
+            match &by {
+                Some(actor) => println!("archived agent {} by {actor} at {now}", args.id),
+                None => println!("archived agent {} at {now} (unattributed)", args.id),
+            }
+        } else {
+            println!("un-archived agent {}", args.id);
+        }
     } else {
         anyhow::bail!("no agent with id {} in this workspace", args.id);
     }
     Ok(())
+}
+
+/// Resolve the actor recorded as `archived_by` for a CLI archive (migration 0052),
+/// with the SAME precedence the daemon uses
+/// (`rpc::snapshots::effective_archiver`): an explicit `--by` user id, else the
+/// workspace owner, else `None` (an honestly unattributed archive). Keeping the
+/// two in lockstep means an archive reads identically whether it came from the CLI
+/// or the RPC surface.
+async fn effective_archiver(
+    store: &Store,
+    workspace_id: &str,
+    supplied: Option<&str>,
+) -> Result<Option<ainb_hangar_core::actor::ActorRef>> {
+    use ainb_hangar_core::actor::{ActorKind, ActorRef};
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::workspace::WorkspaceRepo;
+
+    if let Some(id) = supplied.map(str::trim).filter(|s| !s.is_empty()) {
+        return Ok(ActorRef::new(ActorKind::Member, id).ok());
+    }
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(None);
+    };
+    let owner = WorkspaceRepo::owner_id(store.pool(), &ws)
+        .await
+        .context("resolve the workspace owner as the default archiving actor")?;
+    Ok(owner.and_then(|id| ActorRef::new(ActorKind::Member, id).ok()))
 }
 
 /// Collapse a `(clear_flag, optional_value)` pair into the store's nested-`Option`
@@ -2608,7 +2672,37 @@ async fn dispatch_squad(cmd: SquadCommand, format: OutputFormat) -> Result<()> {
         SquadCommand::AddMember(args) => run_squad_member(&store, args, true).await,
         SquadCommand::RemoveMember(args) => run_squad_member(&store, args, false).await,
         SquadCommand::Assign(args) => run_squad_assign(&store, args).await,
+        SquadCommand::Archive(args) => run_squad_set_archived(&store, args, true).await,
+        SquadCommand::Unarchive(args) => run_squad_set_archived(&store, args, false).await,
     }
+}
+
+/// `hangar squad archive|unarchive`: flip the archived flag with its audit stamp,
+/// workspace-scoped (parity #26).
+async fn run_squad_set_archived(
+    store: &Store,
+    args: SquadArchiveArgs,
+    archived: bool,
+) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let by = effective_archiver(store, &workspace_id, args.by.as_deref()).await?;
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    SquadRepo::set_archived(store.pool(), &ws, &args.id, archived, by.as_ref(), now)
+        .await
+        .map_err(squad_cli_err)?;
+    if archived {
+        match &by {
+            Some(actor) => println!("archived squad {} by {actor} at {now}", args.id),
+            None => println!("archived squad {} at {now} (unattributed)", args.id),
+        }
+    } else {
+        println!("un-archived squad {}", args.id);
+    }
+    Ok(())
 }
 
 /// `hangar squad list`: render the workspace's squads (name, leader, members).
@@ -2630,7 +2724,12 @@ async fn run_squad_list(store: &Store, args: SquadListArgs, format: OutputFormat
         return Ok(());
     };
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
-    let squads = SquadRepo::list(store.pool(), &ws).await.context("list squads")?;
+    let squads = if args.all {
+        SquadRepo::list_including_archived(store.pool(), &ws).await
+    } else {
+        SquadRepo::list(store.pool(), &ws).await
+    }
+    .context("list squads")?;
     render_squad_list(&squads, format);
     Ok(())
 }
@@ -2779,6 +2878,9 @@ fn squad_assign_cli_err(
         // gap #8: the invocation gate refused a dispatch target — no task row was
         // written. Surfaced verbatim so the CLI exits non-zero with the reason.
         e @ SquadAssignError::NotInvocable { .. } => anyhow::anyhow!("{e}"),
+        // parity #26: an archived squad refuses new work — no task row was
+        // written. Surfaced verbatim so the CLI exits non-zero with the reason.
+        e @ SquadAssignError::Archived(_) => anyhow::anyhow!("{e}"),
         db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),
     }
 }
@@ -5368,8 +5470,12 @@ fn agent_line(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     } else {
         format!("  — {}", a.description)
     };
+    // The archive audit (migration 0052) is appended only when the agent actually
+    // carries a stamp, so an ACTIVE agent — and one archived before 0052 existed —
+    // renders byte-identically to the pre-0052 line.
+    let audit = archive_audit_suffix(a.archived_at, a.archived_by.as_ref());
     format!(
-        "{}  {}{}  model={}  args={}  env={}{}",
+        "{}  {}{}  model={}  args={}  env={}{}{}",
         a.id,
         a.name,
         if a.archived { "  [archived]" } else { "" },
@@ -5377,17 +5483,36 @@ fn agent_line(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         a.cli_args.len(),
         a.agent_env.len(),
         blurb,
+        audit,
     )
 }
+
+/// Render the archive audit as a `  archived_by=<ref>@<ms>` suffix, or the EMPTY
+/// string when the row carries no timestamp (active, or archived before migration
+/// 0052). Shared by the agent and squad text lines so the two read the same.
+fn archive_audit_suffix(
+    archived_at: Option<i64>,
+    archived_by: Option<&ainb_hangar_core::actor::ActorRef>,
+) -> String {
+    match archived_at {
+        None => String::new(),
+        Some(ms) => match archived_by {
+            Some(actor) => format!("  archived_by={actor}@{ms}"),
+            None => format!("  archived_at={ms}"),
+        },
+    }
+}
 const fn agent_csv_header() -> &'static str {
-    "id,name,archived,model,thinking,args,env,description"
+    "id,name,archived,archived_at,archived_by,model,thinking,args,env,description"
 }
 fn agent_csv_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     format!(
-        "{},{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{},{},{}",
         csv_field(a.id.as_str()),
         csv_field(a.name.as_str()),
         a.archived,
+        a.archived_at.map(|ms| ms.to_string()).unwrap_or_default(),
+        csv_field(&a.archived_by.as_ref().map(ToString::to_string).unwrap_or_default()),
         csv_field(a.model.as_deref().unwrap_or("")),
         csv_field(a.thinking.as_deref().unwrap_or("")),
         a.cli_args.len(),
@@ -5396,15 +5521,17 @@ fn agent_csv_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     )
 }
 const fn agent_md_header() -> &'static str {
-    "| id | name | archived | model | thinking | args | env | description |\n\
-     | --- | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| id | name | archived | archived_at | archived_by | model | thinking | args | env | description |\n\
+     | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |\n"
 }
 fn agent_md_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     format!(
-        "| {} | {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} | {} | {} | {} |",
         md_cell(a.id.as_str()),
         md_cell(a.name.as_str()),
         a.archived,
+        md_cell(&a.archived_at.map(|ms| ms.to_string()).unwrap_or_else(|| "-".to_string())),
+        md_cell(&a.archived_by.as_ref().map_or_else(|| "-".to_string(), ToString::to_string)),
         md_cell(a.model.as_deref().unwrap_or("-")),
         md_cell(a.thinking.as_deref().unwrap_or("-")),
         a.cli_args.len(),
@@ -5416,6 +5543,13 @@ fn agent_md_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
 fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     let model = a.model.as_deref().map_or_else(|| "null".to_string(), json_string);
     let thinking = a.thinking.as_deref().map_or_else(|| "null".to_string(), json_string);
+    // The audit pair is `null` (not `0` / `""`) when unstamped — an honest
+    // "unknown", distinguishable from an epoch-0 archive by an unattributed actor.
+    let archived_at = a.archived_at.map_or_else(|| "null".to_string(), |ms| ms.to_string());
+    let archived_by = a
+        .archived_by
+        .as_ref()
+        .map_or_else(|| "null".to_string(), |actor| json_string(&actor.to_string()));
     let args = json_string_array(a.cli_args.iter().map(String::as_str));
     let env = a
         .agent_env
@@ -5424,10 +5558,12 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"id\":{},\"name\":{},\"archived\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"description\":{}}}",
+        "{{\"id\":{},\"name\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"description\":{}}}",
         json_string(a.id.as_str()),
         json_string(a.name.as_str()),
         a.archived,
+        archived_at,
+        archived_by,
         model,
         thinking,
         args,
@@ -5517,13 +5653,16 @@ fn render_squad_list(squads: &[ainb_hangar_store::repo::squad::Squad], format: O
             println!("[{body}]");
         }
         OutputFormat::Csv => {
-            println!("id,name,leader,members");
+            println!("id,name,leader,members,archived,archived_at,archived_by");
             for s in squads {
                 println!("{}", squad_csv_row(s));
             }
         }
         OutputFormat::Markdown => {
-            print!("| id | name | leader | members |\n| --- | --- | --- | --- |\n");
+            print!(
+                "| id | name | leader | members | archived | archived_at | archived_by |\n\
+                 | --- | --- | --- | --- | --- | --- | --- |\n"
+            );
             for s in squads {
                 println!("{}", squad_md_row(s));
             }
@@ -5543,35 +5682,43 @@ fn render_squad_list(squads: &[ainb_hangar_store::repo::squad::Squad], format: O
 /// One-line text summary of a squad (id, name, leader, member actor-refs).
 fn squad_line(s: &ainb_hangar_store::repo::squad::Squad) -> String {
     format!(
-        "{}  {}  leader={}  members=[{}]",
+        "{}  {}  leader={}  members=[{}]{}{}",
         s.id,
         s.name,
         s.leader,
-        squad_members_joined(s)
+        squad_members_joined(s),
+        if s.archived { "  [archived]" } else { "" },
+        archive_audit_suffix(s.archived_at, s.archived_by.as_ref()),
     )
 }
 fn squad_csv_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
     format!(
-        "{},{},{},{}",
+        "{},{},{},{},{},{},{}",
         csv_field(&s.id),
         csv_field(&s.name),
         csv_field(&s.leader.to_string()),
         csv_field(&squad_members_joined(s)),
+        s.archived,
+        s.archived_at.map(|ms| ms.to_string()).unwrap_or_default(),
+        csv_field(&s.archived_by.as_ref().map(ToString::to_string).unwrap_or_default()),
     )
 }
 fn squad_md_row(s: &ainb_hangar_store::repo::squad::Squad) -> String {
     format!(
-        "| {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} |",
         md_cell(&s.id),
         md_cell(&s.name),
         md_cell(&s.leader.to_string()),
         md_cell(&squad_members_joined(s)),
+        s.archived,
+        md_cell(&s.archived_at.map(|ms| ms.to_string()).unwrap_or_else(|| "-".to_string())),
+        md_cell(&s.archived_by.as_ref().map_or_else(|| "-".to_string(), ToString::to_string)),
     )
 }
 /// Minimal stable JSON object for one squad (id, name, leader, members array).
 fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
     format!(
-        "{{\"id\":{},\"name\":{},\"leader\":{},\"members\":{}}}",
+        "{{\"id\":{},\"name\":{},\"leader\":{},\"members\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{}}}",
         json_string(&s.id),
         json_string(&s.name),
         json_string(&s.leader.to_string()),
@@ -5583,6 +5730,11 @@ fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
                 .iter()
                 .map(String::as_str)
         ),
+        s.archived,
+        s.archived_at.map_or_else(|| "null".to_string(), |ms| ms.to_string()),
+        s.archived_by
+            .as_ref()
+            .map_or_else(|| "null".to_string(), |actor| json_string(&actor.to_string())),
     )
 }
 /// Join a squad's member actor-refs with `, ` for the flat text surfaces.
