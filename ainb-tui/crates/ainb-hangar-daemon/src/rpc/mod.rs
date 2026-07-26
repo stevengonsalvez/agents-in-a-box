@@ -4253,15 +4253,20 @@ async fn handle_squad_assign(
 
     let params: ainb_hangar_proto::snapshots::SquadAssignParams = parse_params(
         req,
-        "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
+        "{ workspace_id, squad_id, issue_id?, work_dir?, priority?, invoker_user_id? }",
     )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let generation = squad_assign_generation(pool, params.issue_id.as_deref()).await?;
+    // gap #8: an optional invoker identity. Omitted (`None`) defaults to the
+    // workspace owner inside the service — the ordinary single-operator assign,
+    // which the gate always admits.
+    let invoker = params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let request = SquadAssignRequest {
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
         generation,
+        invoker,
         ..SquadAssignRequest::default()
     };
     let SquadAssignment {
@@ -4309,15 +4314,20 @@ async fn handle_squad_fanout(
 
     let params: ainb_hangar_proto::snapshots::SquadAssignParams = parse_params(
         req,
-        "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
+        "{ workspace_id, squad_id, issue_id?, work_dir?, priority?, invoker_user_id? }",
     )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let generation = squad_assign_generation(pool, params.issue_id.as_deref()).await?;
+    // gap #8: an optional invoker identity. Omitted (`None`) defaults to the
+    // workspace owner inside the service — the ordinary single-operator assign,
+    // which the gate always admits.
+    let invoker = params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let request = SquadAssignRequest {
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
         generation,
+        invoker,
         ..SquadAssignRequest::default()
     };
     let SquadFanout { leader, members } = SquadAssignService::assign_fanout(
@@ -4364,6 +4374,12 @@ fn squad_assign_err(e: &ainb_hangar_store::service::squad_assign::SquadAssignErr
         SquadAssignError::MemberAgentMissing(id) => {
             invalid_params(&format!("squad member agent `{id}` not found"))
         }
+        // gap #8: worded identically to `CardRunError::NotInvocable`, so a board
+        // rejection and a squad rejection read the same to the operator (the board
+        // squad path reaches this arm through `CardRunError::Squad`).
+        SquadAssignError::NotInvocable { agent_id, invoker } => invalid_params(&format!(
+            "agent {agent_id} is not invocable by {invoker} — it is private or you are not on its allow-list"
+        )),
         SquadAssignError::Db(db) => store_err(db),
     }
 }
@@ -4883,7 +4899,10 @@ async fn handle_board_card_run(
         agent_override,
         params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()),
         None, // a board card runs under the card's own assignee (no wizard override)
-        None, // owner-invoked (the local TUI operator); the gate admits the owner
+        // gap #8: an optional invoker identity, parsed exactly as `handle_issue_run`
+        // does. Omitted (`None`) defaults to the workspace owner inside `run_card` —
+        // the ordinary single-operator TUI Run, which the gate always admits.
+        params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
     )
     .await
     .map_err(card_run_err)?;
@@ -5170,7 +5189,12 @@ impl Drop for CardLaunchSlot {
 ///      from being double-fanned;
 ///   3. F2 repo-required — the run-time override, else the card's persisted repo,
 ///      else a refusal (never a "random" run);
-///   4. F4 agent cascade + F8 dispatchable check.
+///   4. F4 agent cascade + F8 dispatchable check;
+///   5. gap #8 invocation gate — the EFFECTIVE invoker (`invoker_user_id`, else the
+///      workspace owner) is resolved ONCE, above the fork, and every dispatch
+///      target is judged by it: the single assignee agent here, and the leader plus
+///      every member inside [`SquadAssignService::assign_fanout`]. A refusal writes
+///      no `agent_task_queue` row on either fork.
 ///
 /// Then it forks: a card with an assigned SQUAD (`issue.squad_id`, migration 0035)
 /// FANS OUT via [`SquadAssignService::assign_fanout`] — the leader brief plus one
@@ -5265,6 +5289,21 @@ pub(crate) async fn run_card(
         tracing::warn!(error = %e, "card_run: last-used agent write failed");
     }
 
+    // gap #8 invocation gate — the EFFECTIVE invoker, resolved ONCE for BOTH forks.
+    // Defaults to the workspace owner (the ordinary single-operator TUI Run) when
+    // no explicit invoker is supplied; the owner branch of `can_invoke` always
+    // admits, so the existing Run path is unchanged and the gate only bites a
+    // non-owner member (the case the allow-list exists for). Resolved ABOVE the
+    // squad fork so the fan-out is gated by the same identity as the single-agent
+    // enqueue — the squad branch used to `return` before this ever ran.
+    let invoker_id = match invoker_user_id {
+        Some(u) => u.to_string(),
+        None => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, ws)
+            .await
+            .map_err(CardRunError::Db)?
+            .unwrap_or_default(),
+    };
+
     // Fork: a squad card FANS OUT; a single-agent card enqueues one task.
     let squad_id = CardParityRepo::get_issue_squad(pool, issue_id)
         .await
@@ -5284,6 +5323,9 @@ pub(crate) async fn run_card(
             repo_ref: Some(&repo_ref),
             agent_kind: Some(agent_kind),
             generation,
+            // gap #8: the leader AND every member are gated by this invoker inside
+            // the service's pre-flight resolve, so a denial enqueues nothing.
+            invoker: Some(&invoker_id),
             ..SquadAssignRequest::default()
         };
         let fanout = SquadAssignService::assign_fanout(
@@ -5316,18 +5358,8 @@ pub(crate) async fn run_card(
         .ok_or(CardRunError::NoAgent)?;
 
     // gap #8 invocation gate: a run may only be enqueued for an agent the invoker
-    // is permitted to invoke (multica canInvokeAgent parity). The EFFECTIVE invoker
-    // defaults to the workspace owner (the ordinary single-operator TUI Run) when no
-    // explicit invoker is supplied — the owner branch always admits, so the existing
-    // Run path is unchanged; the gate only bites a non-owner member (the case the
-    // allow-list exists for). Denied here means NO task row is written.
-    let invoker_id = match invoker_user_id {
-        Some(u) => u.to_string(),
-        None => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, ws)
-            .await
-            .map_err(CardRunError::Db)?
-            .unwrap_or_default(),
-    };
+    // is permitted to invoke (multica canInvokeAgent parity), judged by the
+    // `invoker_id` resolved above the squad fork. Denied means NO task row is written.
     let invocable = ainb_hangar_store::repo::agent::AgentRepo::can_invoke(
         pool,
         &agent,
@@ -9470,6 +9502,142 @@ mod tests {
             count, 2,
             "the allow-listed member's run enqueued the second task"
         );
+    }
+
+    /// gap #8 SQUAD FAN-OUT guard: the invocation gate reaches the squad branch of
+    /// `run_card` too — it used to `return` above the gate, so a card assigned to a
+    /// squad dispatched the leader + every member with NO permission check at all.
+    /// A non-owner member running a squad card whose leader is private yields
+    /// `Squad(NotInvocable)` and writes NO row; the owner's identical run fans out.
+    ///
+    /// Mutation-provable: delete the `gate(...)` call from `assign_fanout` and the
+    /// DENY leg below goes red.
+    #[tokio::test]
+    async fn run_card_gates_a_squad_fanout_against_a_non_owner_member() {
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+        use ainb_hangar_store::repo::member::{MemberRepo, MemberRole};
+        use ainb_hangar_store::repo::squad::SquadRepo;
+        use ainb_hangar_store::service::squad_assign::SquadAssignError;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        // Both agents are PRIVATE (migration 0047 default) and owned by the
+        // workspace owner.
+        let leader = bootstrap::create_agent(pool, &ws, "lead-bot", "claude", None).await.unwrap();
+        let member = bootstrap::create_agent(pool, &ws, "work-bot", "claude", None).await.unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        let bob = MemberRepo::add(pool, &ws_id, "bob@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+
+        let agent_ref = |id: &str| {
+            ainb_hangar_core::actor::ActorRef::new(ainb_hangar_core::actor::ActorKind::Agent, id)
+                .unwrap()
+        };
+        SquadRepo::create(
+            pool,
+            &ws_id,
+            "squad-1",
+            "shippers",
+            &agent_ref(&leader.id),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(pool, &ws_id, "squad-1", &agent_ref(&member.id))
+            .await
+            .unwrap();
+
+        // A runnable squad card (repo = scratch, squad assigned).
+        let issue_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: issue_id.clone(),
+                workspace_id: ws.clone(),
+                title: "squad card".into(),
+                description: Some("fan this out".into()),
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        CardParityRepo::set_issue_repo_agent(pool, &ws, &issue_id, Some("scratch"), None)
+            .await
+            .unwrap();
+        CardParityRepo::set_issue_squad(pool, &ws_id, &issue_id, Some("squad-1"))
+            .await
+            .unwrap();
+        let load = || async { IssueRepo::get_by_id(pool, &issue_id).await.unwrap().unwrap() };
+        let queue_len = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_task_queue")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        };
+
+        // (a) DENY: bob is not the leader's owner and is on no allow-list.
+        let denied = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load().await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            Some(&bob.user_id),
+        )
+        .await;
+        assert!(
+            matches!(
+                denied,
+                Err(CardRunError::Squad(SquadAssignError::NotInvocable { .. }))
+            ),
+            "a non-owner member must not fan a card out through a private squad",
+        );
+        assert_eq!(queue_len().await, 0, "a blocked fan-out writes NO task row");
+
+        // (b) OWNER (default `None` invoker) fans out — leader brief + one member.
+        let owner_run = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load().await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            None,
+        )
+        .await;
+        assert!(owner_run.is_ok(), "the owner's squad run must fan out");
+        assert_eq!(queue_len().await, 2, "leader brief + one member task");
     }
 
     /// Pattern-B handover regression: the create-wizard fires ONE `issue_update`
