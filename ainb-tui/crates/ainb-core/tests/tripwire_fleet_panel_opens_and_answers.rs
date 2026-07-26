@@ -1,6 +1,7 @@
 //! Tripwire: the Fleet panel opens from Home, renders Hangar's authoritative
-//! Fleet snapshot, completes a tabbed multi-question ASK, submits one versioned
-//! structured answer batch, and returns to Home via `Esc`.
+//! Fleet snapshot, switches across operator lenses, completes a tabbed
+//! multi-question ASK, submits one versioned structured answer batch, and
+//! returns to Home via `Esc`.
 //!
 //! This is the live-terminal sibling of the Fleet panel unit tests. It drives
 //! the real `ainb` binary in tmux with an isolated HOME seeded with:
@@ -198,6 +199,38 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         }),
         4_000_000_000_200,
     );
+    hangar.apply_hook(
+        "fleet-panel-running-start",
+        "fleet-panel-running-1",
+        &home_tmp.path().join("running-project"),
+        "SessionStart",
+        serde_json::json!({ "source": "hook" }),
+        4_000_000_000_100,
+    );
+    hangar.apply_hook(
+        "fleet-panel-running-prompt",
+        "fleet-panel-running-1",
+        &home_tmp.path().join("running-project"),
+        "UserPromptSubmit",
+        serde_json::json!({ "prompt": "Run workflow validation" }),
+        4_000_000_000_101,
+    );
+    hangar.apply_hook(
+        "fleet-panel-completed-start",
+        "fleet-panel-completed-1",
+        &home_tmp.path().join("completed-project"),
+        "SessionStart",
+        serde_json::json!({ "source": "hook" }),
+        4_000_000_000_000,
+    );
+    hangar.apply_hook(
+        "fleet-panel-completed-stop",
+        "fleet-panel-completed-1",
+        &home_tmp.path().join("completed-project"),
+        "Stop",
+        serde_json::json!({ "reason": "complete" }),
+        4_000_000_000_001,
+    );
     let seeded = hangar
         .session("claude:fleet-panel-ask-1")
         .expect("seeded ASK appears in authoritative snapshot");
@@ -310,13 +343,15 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
         c.contains("Fleet")
             && c.contains("Hangar")
-            && c.contains("ASK")
+            && c.contains("1 Needs input 2")
+            && c.contains("2 Idle 0")
+            && c.contains("3 Completed 1")
+            && c.contains("4 Running 1")
+            && c.contains("5 All 4")
+            && c.contains("NEEDS INPUT")
             && c.contains("What release scope should Fleet use?")
-            && c.contains("Which proof should gate launch?")
-            && c.contains("When should the release launch?")
-            && c.contains("Tripwire")
-            && c.contains("WAIT")
-            && c.contains("hangar-authoritative")
+            && c.contains("CONNECTION")
+            && c.contains("REMOTE")
     });
     let Some(open_cap) = opened else {
         let last = capture_pane(&session);
@@ -325,12 +360,62 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         );
     };
     assert!(
-        open_cap.contains("Enter/a") && open_cap.contains("q/Esc"),
+        open_cap.contains("1-5 views") && open_cap.contains("q/Esc back"),
         "Fleet help bar missing answer/back controls:\n{open_cap}"
     );
     assert!(
         !open_cap.contains("current_state"),
         "Fleet must not expose or read legacy notifyd current_state:\n{open_cap}"
+    );
+    demo_pause();
+
+    send_key(&session, "4");
+    let running = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("running-project") && c.contains("RUNNING") && c.contains("1/1")
+    });
+    assert!(
+        running.is_some(),
+        "Running lens did not isolate active workflow:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "3");
+    let completed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("completed-project") && c.contains("COMPLETED") && c.contains("1/1")
+    });
+    assert!(
+        completed.is_some(),
+        "Completed lens did not isolate finished session:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "5");
+    let all = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("running-project")
+            && c.contains("completed-project")
+            && c.contains("fleet-tripwire-project")
+            && c.contains("waiting-project")
+            && c.contains("5 All 4")
+    });
+    assert!(
+        all.is_some(),
+        "All lens did not render complete roster:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "1");
+    let needs_input = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("What release scope should Fleet use?")
+            && c.contains("NEEDS INPUT")
+            && c.contains("1/2")
+    });
+    assert!(
+        needs_input.is_some(),
+        "Needs input lens did not restore actionable queue:\n{}",
+        capture_pane(&session)
     );
     demo_pause();
 

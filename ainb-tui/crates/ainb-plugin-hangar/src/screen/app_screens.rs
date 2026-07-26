@@ -1429,13 +1429,11 @@ fn route_fleet(states: &mut ScreenStates, key: &KeyEvent) {
         fleet_key(key).map(FleetEvent::Key)
     } else {
         match &key.code {
-            KeyCode::Char { ch: 'f' } => Some(FleetEvent::SetFilter(FleetFilter::Focus)),
-            KeyCode::Char { ch: 'o' } => Some(FleetEvent::SetFilter(FleetFilter::Actionable)),
-            KeyCode::Char { ch: 'm' } => Some(FleetEvent::SetFilter(FleetFilter::Managed)),
-            KeyCode::Char { ch: 'd' } => Some(FleetEvent::SetFilter(FleetFilter::Degraded)),
-            KeyCode::Char { ch: 'c' } => Some(FleetEvent::SetFilter(FleetFilter::Claude)),
-            KeyCode::Char { ch: 'x' } => Some(FleetEvent::SetFilter(FleetFilter::Codex)),
-            KeyCode::Char { ch: 'v' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
+            KeyCode::Char { ch: '1' } => Some(FleetEvent::SetFilter(FleetFilter::NeedsInput)),
+            KeyCode::Char { ch: '2' } => Some(FleetEvent::SetFilter(FleetFilter::Idle)),
+            KeyCode::Char { ch: '3' } => Some(FleetEvent::SetFilter(FleetFilter::Completed)),
+            KeyCode::Char { ch: '4' } => Some(FleetEvent::SetFilter(FleetFilter::Running)),
+            KeyCode::Char { ch: '5' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
             KeyCode::Char { ch: 's' } => Some(FleetEvent::RequestAction(FleetAction::Stop)),
             KeyCode::Char { ch: 'r' } => Some(FleetEvent::RequestAction(FleetAction::Restart)),
             KeyCode::Char { ch: 'i' } => Some(FleetEvent::RequestAction(FleetAction::Interrupt)),
@@ -2150,6 +2148,8 @@ mod fleet_routing_tests {
             cwd: "/work/one".into(),
             tmux_target: Some("one:0.0".into()),
             display_name: Some("one".into()),
+            repository_name: Some("one".into()),
+            branch_name: Some("main".into()),
             discovered_at: 1,
             last_observed_at: 2,
             metadata_updated_at: 2,
@@ -2229,5 +2229,43 @@ mod fleet_routing_tests {
                 ..
             })
         ));
+    }
+
+    #[test]
+    fn fleet_routes_numeric_lenses_and_preserves_modal_digit_entry() {
+        let mut states = ScreenStates::default();
+        states.fleet.set_sessions(vec![row("ASK")]);
+
+        for (digit, filter) in [
+            ('1', FleetFilter::NeedsInput),
+            ('2', FleetFilter::Idle),
+            ('3', FleetFilter::Completed),
+            ('4', FleetFilter::Running),
+            ('5', FleetFilter::All),
+        ] {
+            route_fleet(&mut states, &key(KeyCode::Char { ch: digit }));
+            assert_eq!(states.fleet.filter(), filter, "Fleet lens key {digit}");
+        }
+
+        for legacy in ['f', 'o', 'm', 'd', 'c', 'x', 'v'] {
+            route_fleet(&mut states, &key(KeyCode::Char { ch: legacy }));
+            assert_eq!(
+                states.fleet.filter(),
+                FleetFilter::All,
+                "legacy Fleet filter key {legacy:?} must not change lens"
+            );
+        }
+
+        route_fleet(&mut states, &key(KeyCode::Char { ch: 'p' }));
+        route_fleet(&mut states, &key(KeyCode::Char { ch: '1' }));
+        route_fleet(&mut states, &key(KeyCode::Enter));
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                action: FleetAction::SendText { text },
+                ..
+            }) if text == "1"
+        ));
+        assert_eq!(states.fleet.filter(), FleetFilter::All);
     }
 }

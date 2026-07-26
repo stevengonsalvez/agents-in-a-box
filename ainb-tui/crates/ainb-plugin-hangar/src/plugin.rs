@@ -6732,7 +6732,7 @@ mod tests {
     #[test]
     fn fleet_broadcast_rpc_error_restores_confirmation_for_retry() {
         use crate::screen::fleet::{
-            FleetEvent, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
+            FleetEvent, FleetFilter, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
         };
 
         let mut plugin = HangarPlugin::new();
@@ -6750,6 +6750,11 @@ mod tests {
         .expect("Fleet row");
         plugin.screens.fleet =
             reduce_fleet(&plugin.screens.fleet, FleetEvent::Snapshot(vec![row])).state;
+        plugin.screens.fleet = reduce_fleet(
+            &plugin.screens.fleet,
+            FleetEvent::SetFilter(FleetFilter::All),
+        )
+        .state;
         for event in [
             FleetEvent::Key(FleetKey::Char('b')),
             FleetEvent::Key(FleetKey::Char('x')),

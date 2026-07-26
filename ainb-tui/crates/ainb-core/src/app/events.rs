@@ -2939,9 +2939,10 @@ impl EventHandler {
     ///
     ///   - ↑/↓ · k/j        move the row selection
     ///   - Tab / BackTab    move the ASK option cursor (when the row is an ASK)
-    ///   - Enter / a        answer the selected ASK with the highlighted option
-    ///   - B                broadcast a ping prompt to the selected session
-    ///   - r                force-refresh from current_state
+    ///   - Enter            answer the selected structured question
+    ///   - B                open broadcast composer for the current lens
+    ///   - 1 / 2 / 3 / 4 / 5 switch Needs input / Idle / Completed / Running / All
+    ///   - r                restart the selected session after confirmation
     ///   - q / Esc          back to the screen it was opened from (PanelBack)
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that
@@ -3018,13 +3019,11 @@ impl EventHandler {
                 };
                 Some(AppEvent::FleetPanelCanonicalKey(key))
             }
-            KeyCode::Char('f') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Focus)),
-            KeyCode::Char('o') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Actionable)),
-            KeyCode::Char('m') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Managed)),
-            KeyCode::Char('d') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Degraded)),
-            KeyCode::Char('l') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Claude)),
-            KeyCode::Char('x') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Codex)),
-            KeyCode::Char('v') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
+            KeyCode::Char('1') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput)),
+            KeyCode::Char('2') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle)),
+            KeyCode::Char('3') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed)),
+            KeyCode::Char('4') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running)),
+            KeyCode::Char('5') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
             _ => None,
         }
     }
@@ -8811,20 +8810,38 @@ mod panel_back_tests {
         EventHandler::process_event(start.unwrap(), &mut state);
         assert!(state.fleet_panel_state.canonical_modal_open());
         assert!(matches!(
-            route(&mut state, KeyCode::Char('/')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('/')))
+            route(&mut state, KeyCode::Char('1')),
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('1')))
         ));
         EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
         assert!(!state.fleet_panel_state.canonical_modal_open());
 
         assert!(matches!(
-            route(&mut state, KeyCode::Char('f')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Focus))
+            route(&mut state, KeyCode::Char('1')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput))
         ));
         assert!(matches!(
-            route(&mut state, KeyCode::Char('x')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Codex))
+            route(&mut state, KeyCode::Char('2')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle))
         ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('3')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('4')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('5')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
+        ));
+        for legacy in ['f', 'o', 'm', 'd', 'l', 'x', 'v'] {
+            assert!(
+                route(&mut state, KeyCode::Char(legacy)).is_none(),
+                "legacy Fleet filter key {legacy:?} must be unbound"
+            );
+        }
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
