@@ -3748,6 +3748,7 @@ Commands:
   permission  Set an agent's invocation permission mode (gap #8: `private`/`public_to`)
   allow       Manage an agent's invocation allow-list (add/revoke/list a target)
   can-invoke  Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`)
+  env         Show an agent's per-agent env: variable NAMES only, values masked
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3820,7 +3821,9 @@ Options:
       --clear-mcp                    Clear the MCP config; omitted leaves it
       --thinking <THINKING>          New thinking level (e.g. `low`/`medium`/`high`); omitted leaves it. Mutually exclusive with `--clear-thinking`
       --clear-thinking               Clear the thinking level; omitted leaves it
-      --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is given the whole env map is REPLACED with the values
+      --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable; ANY `--env` REPLACES the whole map). Visible in `ps` / shell history — prefer `--env-stdin` / `--env-file` for secrets
+      --env-stdin                    Read the whole env map from STDIN as a JSON object of string→string, keeping secrets off argv; `{}` clears it and empty input is an ERROR, not a clear
+      --env-file <ENV_FILE>          Read the whole env map from a FILE as a JSON object of string→string (same contract as `--env-stdin`)
       --token-budget <TOKEN_BUDGET>  New token budget (rtk/headroom, migration 0042); omitted leaves it. Mutually exclusive with `--clear-token-budget`
       --clear-token-budget           Clear the token budget (back to unlimited); omitted leaves it
       --description <DESCRIPTION>    New description (≤255 characters); omitted leaves it. Pass `--description ""` to blank it (the column is NOT NULL, so `""` IS its cleared state)
@@ -3941,6 +3944,25 @@ Options:
       --as <AS_USER>           The invoking user id or email to judge the run by
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --actor <ACTOR>          Treat the invoker as an `agent` actor (no resolved originator) rather than a `member`. Exercises the A2A / workspaceBroad path
+      --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar agent env`
+
+Show an agent's per-agent env: variable NAMES only, values masked
+
+```console
+$ ainb hangar agent env --help
+Show an agent's per-agent env: variable NAMES only, values masked
+
+Usage: ainb hangar agent env [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to inspect
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```

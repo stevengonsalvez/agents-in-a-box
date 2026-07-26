@@ -647,21 +647,17 @@ pub struct AgentEditArgs {
     /// Clear the thinking level; omitted leaves it.
     #[arg(long = "clear-thinking")]
     pub clear_thinking: bool,
-    /// A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is
-    /// given the whole env map is REPLACED with the values.
-    ///
-    /// **Secrets on argv are visible in `ps` / `/proc/<pid>/cmdline` / shell
-    /// history** — prefer `--env-stdin` or `--env-file` for secret material.
+    // NOTE: each of the three env flags keeps a SINGLE-paragraph doc comment on
+    // purpose — a second paragraph flips clap's whole `agent edit` help into the
+    // long-help layout, which churns the generated `docs/tui/cli.md` reference.
+    /// A `KEY=VALUE` env var for the agent (repeatable; ANY `--env` REPLACES the whole map). Visible in `ps` / shell history — prefer `--env-stdin` / `--env-file` for secrets.
     #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append,
           conflicts_with_all = ["env_stdin", "env_file"])]
     pub env: Vec<(String, String)>,
-    /// Read the whole env map as a JSON object of string→string from STDIN
-    /// (`{"SECRET_TOKEN":"sk-live-…"}`). Exists to keep secret material off
-    /// argv; `{}` clears the map, and empty input is an ERROR, not a clear.
+    /// Read the whole env map from STDIN as a JSON object of string→string, keeping secrets off argv; `{}` clears it and empty input is an ERROR, not a clear
     #[arg(long = "env-stdin", conflicts_with_all = ["env", "env_file"])]
     pub env_stdin: bool,
-    /// Read the whole env map as a JSON object of string→string from a FILE.
-    /// Same contract as `--env-stdin`.
+    /// Read the whole env map from a FILE as a JSON object of string→string (same contract as `--env-stdin`)
     #[arg(long = "env-file", conflicts_with_all = ["env", "env_stdin"])]
     pub env_file: Option<std::path::PathBuf>,
     /// New token budget (rtk/headroom, migration 0042); omitted leaves it.
