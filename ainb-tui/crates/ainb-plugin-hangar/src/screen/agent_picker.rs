@@ -406,6 +406,7 @@ mod render_tests {
             workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent,
             recent_rank,
+            ..ActorRow::default()
         }
     }
 

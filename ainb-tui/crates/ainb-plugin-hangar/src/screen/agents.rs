@@ -912,6 +912,7 @@ mod tests {
             workload: Workload::Idle,
             is_agent,
             recent_rank: None,
+        ..ActorRow::default()
         }
     }
 

@@ -64,14 +64,7 @@ async fn insert_and_get_agent_roundtrip() {
         visibility: "workspace".to_string(),
         permission_mode: "private".to_string(),
         owner_id,
-        archived: false,
-        model: None,
-        cli_args: Vec::new(),
-        mcp_config: None,
-        thinking: None,
-        agent_env: Vec::new(),
-        provider: None,
-        token_budget: None,
+        ..Agent::default()
     };
 
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
@@ -103,14 +96,7 @@ async fn update_config_persists_and_is_partial() {
         visibility: "workspace".to_string(),
         permission_mode: "private".to_string(),
         owner_id,
-        archived: false,
-        model: None,
-        cli_args: Vec::new(),
-        mcp_config: None,
-        thinking: None,
-        agent_env: Vec::new(),
-        provider: None,
-        token_budget: None,
+        ..Agent::default()
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
@@ -182,14 +168,7 @@ async fn update_config_is_workspace_scoped_and_empty_is_noop() {
         visibility: "workspace".to_string(),
         permission_mode: "private".to_string(),
         owner_id,
-        archived: false,
-        model: None,
-        cli_args: Vec::new(),
-        mcp_config: None,
-        thinking: None,
-        agent_env: Vec::new(),
-        provider: None,
-        token_budget: None,
+        ..Agent::default()
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 
@@ -233,14 +212,7 @@ async fn archive_flips_flag_and_hides_from_active_list() {
         visibility: "workspace".to_string(),
         permission_mode: "private".to_string(),
         owner_id,
-        archived: false,
-        model: None,
-        cli_args: Vec::new(),
-        mcp_config: None,
-        thinking: None,
-        agent_env: Vec::new(),
-        provider: None,
-        token_budget: None,
+        ..Agent::default()
     };
     AgentRepo::insert(store.pool(), &agent).await.expect("insert agent");
 

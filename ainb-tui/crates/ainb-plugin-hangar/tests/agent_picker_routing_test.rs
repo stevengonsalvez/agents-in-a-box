@@ -27,6 +27,7 @@ fn actor() -> ActorRow {
         workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent: true,
         recent_rank: Some(0),
+    ..ActorRow::default()
     }
 }
 

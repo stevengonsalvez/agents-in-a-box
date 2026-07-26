@@ -4143,14 +4143,7 @@ mod tests {
             visibility: "workspace".into(),
             permission_mode: "private".into(),
             owner_id: owner,
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
         let disp = resolve_dispatch(pool, "bare-agent", None, Mode::Headless).await.unwrap();

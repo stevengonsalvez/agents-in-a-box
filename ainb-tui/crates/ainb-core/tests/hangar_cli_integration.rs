@@ -430,14 +430,7 @@ fn seed_agent(home: &std::path::Path) {
                 visibility: "workspace".into(),
                 permission_mode: "private".into(),
                 owner_id,
-                archived: false,
-                model: None,
-                cli_args: Vec::new(),
-                mcp_config: None,
-                thinking: None,
-                agent_env: Vec::new(),
-                provider: None,
-                token_budget: None,
+                ..Agent::default()
             },
         )
         .await
@@ -1122,14 +1115,7 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 visibility: "workspace".into(),
                 permission_mode: "private".into(),
                 owner_id: owner_id.clone(),
-                archived: false,
-                model: None,
-                cli_args: Vec::new(),
-                mcp_config: None,
-                thinking: None,
-                agent_env: Vec::new(),
-                provider: None,
-                token_budget: None,
+                ..Agent::default()
             },
         )
         .await

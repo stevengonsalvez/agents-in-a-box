@@ -156,6 +156,7 @@ mod tests {
             workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent,
             recent_rank: None,
+        ..ActorRow::default()
         }
     }
 

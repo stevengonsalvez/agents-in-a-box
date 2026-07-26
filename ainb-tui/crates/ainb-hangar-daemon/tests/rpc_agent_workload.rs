@@ -120,13 +120,7 @@ async fn agents_list_workload_tracks_lifecycle_and_agent_update_agrees() {
         AGENT,
         &AgentConfigUpdate {
             name: Some(AGENT.to_string()),
-            instructions: None,
-            model: None,
-            cli_args: None,
-            mcp_config: None,
-            thinking: None,
-            agent_env: None,
-            token_budget: None,
+            ..AgentConfigUpdate::default()
         },
         NOW,
     )
