@@ -37,20 +37,14 @@ async fn pool_at_prior_schema(dir: &std::path::Path) -> SqlitePool {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal);
-    let pool = SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool");
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.expect("open pool");
 
     let mut migrator = sqlx::migrate::Migrator::new(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
     )
     .await
     .expect("load migrations directory");
-    migrator
-        .migrations
-        .to_mut()
-        .retain(|m| m.version < NEW_MIGRATION_VERSION);
+    migrator.migrations.to_mut().retain(|m| m.version < NEW_MIGRATION_VERSION);
     assert!(
         !migrator.migrations.is_empty(),
         "prior-migration set must not be empty"
@@ -219,5 +213,8 @@ async fn preexisting_autopilots_read_api_trigger_disabled() {
     let bad = sqlx::query("UPDATE autopilot SET api_trigger_enabled = 7 WHERE id = 'ap-1'")
         .execute(&pool)
         .await;
-    assert!(bad.is_err(), "api_trigger_enabled CHECK must reject non-0/1");
+    assert!(
+        bad.is_err(),
+        "api_trigger_enabled CHECK must reject non-0/1"
+    );
 }
