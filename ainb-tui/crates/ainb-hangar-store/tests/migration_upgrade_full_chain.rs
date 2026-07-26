@@ -644,7 +644,18 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         .fetch_one(&pool)
         .await
         .expect("read head migration version");
-    assert_eq!(head_version, 48, "head is migration 0048");
+    // Derived from the EMBEDDED chain, never frozen: a hard-coded number here
+    // red-gates every later migration PR for no behavioral reason. What the
+    // upgrade must guarantee is that it reached the head this binary ships.
+    let embedded_head = sqlx::migrate!("./migrations")
+        .iter()
+        .map(|m| m.version)
+        .max()
+        .expect("the embedded chain is non-empty");
+    assert_eq!(
+        head_version, embedded_head,
+        "the upgrade must apply the WHOLE embedded chain, up to its head"
+    );
 
     // (b) Every seeded row survived: the population is row-for-row identical.
     let after = population_snapshot(&pool).await;
