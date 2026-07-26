@@ -45,7 +45,9 @@ use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
-use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
+use ainb_hangar_store::repo::autopilot_run::{
+    DispatchOutcome, FireError, RunSource, dispatch_with_admission, fire_autopilot_tick_with_source,
+};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::{CriterionError, IssueRepo};
@@ -1265,6 +1267,7 @@ pub async fn autopilots_list(
             enabled: ap.enabled,
             last_run_status: last.as_ref().map(|r| r.status.clone()),
             last_run_at: last.as_ref().map(|r| r.started_at),
+            api_trigger_enabled: ap.api_trigger_enabled,
         });
     }
     Ok(out)
@@ -1294,6 +1297,8 @@ pub async fn autopilot_runs(
             started_at: r.started_at,
             completed_at: r.completed_at,
             status: r.status,
+            source: r.source,
+            failure_reason: r.failure_reason,
         })
         .collect())
 }
@@ -1320,8 +1325,107 @@ pub async fn autopilot_fire_now(
     let Some(autopilot) = AutopilotRepo::get(pool, workspace, autopilot_id).await? else {
         return Ok(false);
     };
-    fire_autopilot_tick(pool, clock, &autopilot).await?;
+    // A MANUAL fire: the operator's explicit override, stamped as such on the
+    // run so the history can tell it from a scheduled or api-triggered tick.
+    fire_autopilot_tick_with_source(pool, clock, &autopilot, RunSource::Manual).await?;
     Ok(true)
+}
+
+/// What [`autopilot_trigger_api`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiTriggerOutcome {
+    /// No such autopilot in this workspace. A foreign id leaks nothing.
+    NotFound,
+    /// The autopilot exists but has not armed `api_trigger_enabled`. NOTHING is
+    /// written: the trigger does not exist, so there is nothing to skip (a
+    /// `skipped` run records an ADMISSION decision, not a missing trigger).
+    Disabled,
+    /// The admission gate declined the dispatch; a terminal `skipped` run
+    /// records it.
+    Skipped {
+        /// The recorded `skipped` run.
+        run_id: String,
+        /// The admission reason.
+        reason: String,
+    },
+    /// The dispatch was admitted.
+    Fired {
+        /// The new run.
+        run_id: String,
+        /// The task enqueued against it.
+        task_id: String,
+    },
+}
+
+/// Fire one autopilot through its bare programmatic `api` trigger
+/// (`hangar/autopilot_trigger_api`, migration 0057 / multica parity item 15),
+/// scoped to `workspace`.
+///
+/// The `api` trigger is the third trigger surface after cron and webhook: no
+/// cron expression, no HMAC — a caller with normal API access fires the
+/// autopilot directly (multica `handler/autopilot.go:441`, where
+/// `kind IN ('schedule','webhook','api')` and only `schedule` requires a cron
+/// expression).
+///
+/// Two guards, in order:
+///
+/// 1. the autopilot must exist IN THIS WORKSPACE ([`ApiTriggerOutcome::NotFound`]),
+/// 2. it must have armed `api_trigger_enabled` ([`ApiTriggerOutcome::Disabled`],
+///    writing nothing).
+///
+/// Then it goes through the SAME [`dispatch_with_admission`] gate the scheduler
+/// uses, so an api fire at the concurrency limit under the `skip` policy is
+/// declined and recorded as a terminal `skipped` run stamped `source = 'api'`.
+///
+/// # Errors
+///
+/// Returns [`AutopilotFireError::Repo`] on a store failure resolving the row, or
+/// [`AutopilotFireError::Fire`] when the dispatch fails (e.g. the autopilot's
+/// agent was deleted).
+pub async fn autopilot_trigger_api(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+) -> Result<ApiTriggerOutcome, AutopilotFireError> {
+    let Some(autopilot) = AutopilotRepo::get(pool, workspace, autopilot_id).await? else {
+        return Ok(ApiTriggerOutcome::NotFound);
+    };
+    if !autopilot.api_trigger_enabled {
+        return Ok(ApiTriggerOutcome::Disabled);
+    }
+    Ok(
+        match dispatch_with_admission(pool, clock, &autopilot, RunSource::Api).await? {
+            DispatchOutcome::Fired {
+                run_id, task_id, ..
+            } => ApiTriggerOutcome::Fired {
+                run_id: run_id.to_string(),
+                task_id: task_id.to_string(),
+            },
+            DispatchOutcome::Skipped { run_id, reason, .. } => ApiTriggerOutcome::Skipped {
+                run_id: run_id.to_string(),
+                reason,
+            },
+        },
+    )
+}
+
+/// Arm or disarm one autopilot's `api` trigger
+/// (`hangar/autopilot_set_api_trigger`), scoped to `workspace`.
+///
+/// Returns `false` when the id resolved to no autopilot in this tenant (nothing
+/// written).
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure.
+pub async fn autopilot_set_api_trigger(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    enabled: bool,
+) -> Result<bool, AutopilotRepoError> {
+    AutopilotRepo::set_api_trigger_enabled(pool, workspace, autopilot_id, enabled).await
 }
 
 /// Enable or disable one autopilot (`hangar/autopilot_set_enabled`, P7.5),
