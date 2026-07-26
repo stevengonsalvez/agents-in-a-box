@@ -2822,6 +2822,32 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_SQUAD_MEMBER_REMOVE,
                 serde_json::json!({ "workspace_id": ws, "squad_id": squad_id, "member": member_ref }),
             ),
+            SquadAction::SetMemberRole {
+                squad_id,
+                member_ref,
+                role,
+            } => (
+                SQUADS_LIST_REQ_ID,
+                daemon_methods::HANGAR_SQUAD_MEMBER_ROLE_SET,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "squad_id": squad_id,
+                    "member": member_ref,
+                    "role": role,
+                }),
+            ),
+            SquadAction::SetInstructions {
+                squad_id,
+                instructions,
+            } => (
+                SQUADS_LIST_REQ_ID,
+                daemon_methods::HANGAR_SQUAD_INSTRUCTIONS_SET,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "squad_id": squad_id,
+                    "instructions": instructions,
+                }),
+            ),
             SquadAction::Assign { squad_id } => {
                 let Some(issue_id) = self.first_assignable_issue() else {
                     self.screens.squads.note_err("no issue available to assign");
@@ -3756,7 +3782,7 @@ impl HangarPlugin {
         // typed text, not a nav key. Route straight to the screen reducer (which
         // owns Esc-to-cancel), mirroring the issue-list capture guard so typing a
         // squad name like `qa` inserts instead of quitting / switching tabs.
-        if matches!(app.screen, Screen::Squads) && self.screens.squads.is_creating() {
+        if matches!(app.screen, Screen::Squads) && self.screens.squads.is_capturing() {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
             }
@@ -4940,7 +4966,7 @@ impl Plugin for HangarPlugin {
                     || s.config_input_buffer().is_some()
                     || s.workspace_name_input().is_some()
             }),
-            Screen::Squads => self.screens.squads.is_creating(),
+            Screen::Squads => self.screens.squads.is_capturing(),
             // Every open Boards overlay (create-title / profile-pick / column
             // rename / `Run ▾`) consumes all keys as input, per its routing guard.
             Screen::Boards => self.screens.boards.overlay().is_some(),

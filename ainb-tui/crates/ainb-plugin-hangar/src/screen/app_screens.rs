@@ -474,6 +474,24 @@ pub enum SquadAction {
         /// The member actor-ref to remove.
         member_ref: String,
     },
+    /// Set (or clear) `member_ref`'s free-text role on `squad_id` (`r` on a
+    /// member row) — `hangar/squad_member_role_set` (parity #25).
+    SetMemberRole {
+        /// The squad whose membership is edited.
+        squad_id: String,
+        /// The member actor-ref whose role changes.
+        member_ref: String,
+        /// The new role; empty clears it.
+        role: String,
+    },
+    /// Set (or clear) `squad_id`'s user-authored instructions (`i`) —
+    /// `hangar/squad_instructions_set` (parity #25).
+    SetInstructions {
+        /// The squad whose instructions change.
+        squad_id: String,
+        /// The new instructions; empty clears them.
+        instructions: String,
+    },
     /// Assign the current issue to `squad_id` (`x`) — `hangar/squad_fanout`; the
     /// glue picks the issue and fans the brief to the leader + agent members.
     Assign {
@@ -2244,6 +2262,22 @@ fn route_squads(states: &mut ScreenStates, key: &KeyEvent) {
         }) => Some(SquadAction::RemoveMember {
             squad_id,
             member_ref,
+        }),
+        Some(SquadsIntent::SetMemberRole {
+            squad_id,
+            member_ref,
+            role,
+        }) => Some(SquadAction::SetMemberRole {
+            squad_id,
+            member_ref,
+            role,
+        }),
+        Some(SquadsIntent::SetInstructions {
+            squad_id,
+            instructions,
+        }) => Some(SquadAction::SetInstructions {
+            squad_id,
+            instructions,
         }),
         Some(SquadsIntent::AssignIssue { squad_id }) => Some(SquadAction::Assign { squad_id }),
         None => None,

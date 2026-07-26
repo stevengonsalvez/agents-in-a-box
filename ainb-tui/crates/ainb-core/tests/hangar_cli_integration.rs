@@ -1840,3 +1840,130 @@ fn skill_toggle_round_trips_through_cli() {
         "attach must never re-enable a deliberately disabled link: {links}"
     );
 }
+
+/// The user-visible proof for parity #25 through the REAL binary: create a squad
+/// with `--instructions`, add a member with `--role`, read both back out of
+/// `squad list --format json`, change the role with `squad member-role`, clear
+/// the instructions with `squad instructions --clear`, and see each step land.
+#[test]
+fn squad_role_and_instructions_round_trip_through_the_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "shippers",
+            "--leader",
+            "agent:lead-1",
+            "--instructions",
+            "Route schema work to the DB owner.",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "add-member",
+            &squad_id,
+            "--member",
+            "agent:worker-1",
+            "--role",
+            "owns the migrations",
+        ],
+    );
+    assert!(ok, "add-member --role should exit 0; out={out}");
+    assert!(
+        out.contains("with role \"owns the migrations\""),
+        "the ack must name the role:\n{out}"
+    );
+
+    // Both land in the JSON view.
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("\"instructions\":\"Route schema work to the DB owner.\""),
+        "instructions in the JSON view:\n{json}"
+    );
+    assert!(
+        json.contains("\"member\":\"agent:worker-1\"")
+            && json.contains("\"role\":\"owns the migrations\""),
+        "the member role in the JSON view:\n{json}"
+    );
+
+    // The TEXT view carries the role inline and the instructions on their own line.
+    let (_, text) = run(tmp.path(), &["hangar", "squad", "list"]);
+    assert!(
+        text.contains("agent:worker-1 (role: owns the migrations)"),
+        "the text view must carry the role:\n{text}"
+    );
+    assert!(
+        text.contains("instructions: Route schema work to the DB owner."),
+        "the text view must carry the instructions:\n{text}"
+    );
+
+    // `member-role` changes it in place.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "member-role",
+            &squad_id,
+            "--member",
+            "agent:worker-1",
+            "--role",
+            "owns the CLI",
+        ],
+    );
+    assert!(ok, "member-role should exit 0; out={out}");
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("\"role\":\"owns the CLI\"") && !json.contains("owns the migrations"),
+        "the role must be replaced:\n{json}"
+    );
+
+    // A NON-member role-set fails loudly rather than reporting "ok" on a no-op.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "member-role",
+            &squad_id,
+            "--member",
+            "agent:ghost",
+            "--role",
+            "nobody",
+        ],
+    );
+    assert!(!ok, "a non-member role-set must exit non-zero; out={out}");
+
+    // `instructions --clear` empties the field; a bare read then says so.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "squad", "instructions", &squad_id, "--clear"],
+    );
+    assert!(ok, "instructions --clear should exit 0; out={out}");
+    let (ok, out) = run(tmp.path(), &["hangar", "squad", "instructions", &squad_id]);
+    assert!(ok, "instructions read should exit 0; out={out}");
+    assert!(
+        out.contains("has no instructions"),
+        "the cleared field must read as empty:\n{out}"
+    );
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
+    assert!(
+        json.contains("\"instructions\":\"\""),
+        "the JSON view must show the cleared field:\n{json}"
+    );
+}

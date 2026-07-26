@@ -1371,6 +1371,34 @@ pub struct SquadWireRow {
     /// Who archived the squad, as a canonical actor-ref; empty when unknown.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub archived_by: String,
+    /// The user-authored per-squad routing guidance (`squad.instructions`,
+    /// migration 0053, parity #25). APPEND-ONLY: absent on the wire when empty,
+    /// so a pre-0053 producer's payload still parses and a consumer sees `""`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
+    /// Per-member ROLE labels. One entry per membership that HAS a role — a
+    /// roleless squad omits the field entirely, keeping the payload
+    /// byte-identical to a pre-0053 producer's. APPEND-ONLY:
+    /// [`members`](Self::members) is NOT retyped, so an old consumer keeps
+    /// parsing it unchanged; `members` stays the ordering authority and a
+    /// consumer joins these rows by the [`member`](SquadMemberWireRow::member)
+    /// ref, NEVER by index.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub member_roles: Vec<SquadMemberWireRow>,
+}
+
+/// One squad membership on the wire: the member actor-ref plus its free-text
+/// ROLE (migration 0053, parity #25).
+///
+/// Carried in [`SquadWireRow::member_roles`] only for members that actually have
+/// a role — a roleless membership contributes no row at all.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadMemberWireRow {
+    /// The member in canonical `member:<id>` / `agent:<id>` form.
+    pub member: String,
+    /// The member's free-text role label; empty when unset.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_ARCHIVE`] (parity #26): archive or
@@ -1426,6 +1454,11 @@ pub struct SquadCreateParams {
     pub name: String,
     /// The squad leader in canonical `member:<id>` / `agent:<id>` form.
     pub leader: String,
+    /// Optional initial `squad.instructions` (migration 0053, parity #25).
+    /// APPEND-ONLY: omitted ⇒ `""`, i.e. a squad created with no routing
+    /// guidance, exactly as a pre-0053 client's create behaves.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ADD`] and
@@ -1444,6 +1477,52 @@ pub struct SquadMemberParams {
     pub squad_id: String,
     /// The member actor in canonical `member:<id>` / `agent:<id>` form.
     pub member: String,
+    /// Optional role for the ADDED member (migration 0053, parity #25).
+    /// Honoured by [`crate::methods::HANGAR_SQUAD_MEMBER_ADD`] and **ignored by**
+    /// [`crate::methods::HANGAR_SQUAD_MEMBER_REMOVE`] (a removal has no role to
+    /// carry). APPEND-ONLY: omitted ⇒ `""`, which leaves an EXISTING member's
+    /// role untouched — a plain re-add never clears a role an operator set.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_MEMBER_ROLE_SET`] (parity #25): set
+/// or clear one EXISTING membership's free-text role.
+///
+/// `workspace_id` is the tenant-isolation guard, scoping the update by
+/// `(workspace_id, squad_id)` so a cross-tenant squad touches no row. `member` is
+/// a canonical actor-ref (`"agent:<id>"` / `"member:<id>"`) that must ALREADY be
+/// a member — the daemon answers `INVALID_PARAMS` rather than inserting a
+/// membership as a side effect. An empty `role` clears the label.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadMemberRoleParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to mutate (`squad.id`).
+    pub squad_id: String,
+    /// The existing member in canonical `member:<id>` / `agent:<id>` form.
+    pub member: String,
+    /// The free-text role label; empty clears it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SQUAD_INSTRUCTIONS_SET`] (parity #25): set
+/// or clear one squad's user-authored routing guidance.
+///
+/// `workspace_id` is the tenant-isolation guard. The text is stored VERBATIM (it
+/// reaches an agent's materialised `CLAUDE.md` through the leader briefing);
+/// empty clears it, which makes the briefing omit the `## Squad Instructions`
+/// section entirely.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct SquadInstructionsParams {
+    /// The subscribed workspace the squad belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The squad to mutate (`squad.id`).
+    pub squad_id: String,
+    /// The routing guidance; empty clears it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub instructions: String,
 }
 
 /// Params for [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): route a task to a
@@ -2893,6 +2972,73 @@ mod tests {
         );
     }
 
+    /// Parity #25 (migration 0053) is APPEND-ONLY on the squad wire: a pre-0053
+    /// payload parses to the empty defaults, a roleless / instruction-less row
+    /// serialises without the two new keys (byte-identical to a pre-0053
+    /// producer's), and a populated row round-trips.
+    #[test]
+    fn squad_role_and_instructions_are_append_only() {
+        // A pre-0053 row (no `instructions`, no `member_roles`) parses.
+        let legacy: SquadWireRow = serde_json::from_str(
+            r#"{"id":"s1","name":"alpha","leader":"agent:a-lead","members":["agent:a-1"]}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.instructions, "");
+        assert!(legacy.member_roles.is_empty());
+
+        // A roleless row emits NEITHER new key.
+        let s = serde_json::to_string(&legacy).unwrap();
+        for key in ["instructions", "member_roles"] {
+            assert!(!s.contains(key), "roleless row must not emit `{key}`: {s}");
+        }
+
+        // A populated row round-trips with both.
+        let full = SquadWireRow {
+            instructions: "Escalate schema questions to the DB owner.".into(),
+            member_roles: vec![SquadMemberWireRow {
+                member: "agent:a-1".into(),
+                role: "owns the migrations".into(),
+            }],
+            ..legacy.clone()
+        };
+        let s = serde_json::to_string(&full).unwrap();
+        assert_eq!(serde_json::from_str::<SquadWireRow>(&s).unwrap(), full);
+
+        // Legacy params (no `instructions` / no `role`) parse to the defaults.
+        let create: SquadCreateParams = serde_json::from_str(
+            r#"{"workspace_id":"ws-1","name":"alpha","leader":"agent:a-lead"}"#,
+        )
+        .unwrap();
+        assert_eq!(create.instructions, "");
+        let add: SquadMemberParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","squad_id":"s1","member":"agent:a-1"}"#)
+                .unwrap();
+        assert_eq!(add.role, "");
+
+        // Both new param types round-trip.
+        let role = SquadMemberRoleParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            member: "agent:a-1".into(),
+            role: "owns the migrations".into(),
+        };
+        let s = serde_json::to_string(&role).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadMemberRoleParams>(&s).unwrap(),
+            role
+        );
+        let instr = SquadInstructionsParams {
+            workspace_id: "ws-1".into(),
+            squad_id: "s1".into(),
+            instructions: "Line one.\nLine two.".into(),
+        };
+        let s = serde_json::to_string(&instr).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SquadInstructionsParams>(&s).unwrap(),
+            instr
+        );
+    }
+
     /// `AgentCreateParams` round-trips, and the optional fields are omitted when
     /// absent so a minimal `{ "name": ... }` payload deserializes (the fresh-home
     /// create needs neither an id nor a provider).
@@ -2992,6 +3138,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             name: "alpha".into(),
             leader: "agent:a-lead".into(),
+            instructions: "Route schema work to the DB owner.".into(),
         };
         let s = serde_json::to_string(&create).unwrap();
         assert_eq!(
@@ -3003,6 +3150,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             squad_id: "s1".into(),
             member: "agent:a-1".into(),
+            role: "owns the migrations".into(),
         };
         let s = serde_json::to_string(&member).unwrap();
         assert_eq!(

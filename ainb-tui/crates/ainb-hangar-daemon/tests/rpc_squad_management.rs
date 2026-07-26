@@ -641,3 +641,240 @@ async fn squad_assign_rpc_rejects_a_human_leader() {
         "assigning to a human-led squad must be rejected: {assigned}"
     );
 }
+
+/// Parity #25: `squad_member_add` honours an inline `role`, the two new RPCs
+/// (`squad_member_role_set` / `squad_instructions_set`) PERSIST, and the
+/// refreshed `SquadsListResult` carries `member_roles` + `instructions`.
+///
+/// Persistence is proved by reading the daemon's OWN sqlite file, not by
+/// trusting the response envelope.
+#[tokio::test]
+async fn squad_role_and_instructions_persist_through_the_rpcs() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // Create WITH instructions.
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "name": "alpha",
+                "leader": "agent:agent-2",
+                "instructions": "Route schema work to the DB owner.",
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "squad_create must ack: {resp}");
+    let squad_id = only_squad_id(&resp);
+    assert_eq!(
+        find_squad(&resp, &squad_id)["instructions"],
+        "Route schema work to the DB owner.",
+        "the create reply already carries the instructions: {resp}"
+    );
+
+    // Add a member WITH a role, in one call.
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_MEMBER_ADD,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "squad_id": squad_id,
+                "member": "agent:agent-1",
+                "role": "owns the migrations",
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "member_add must ack: {resp}");
+    let roles = find_squad(&resp, &squad_id)["member_roles"].as_array().unwrap();
+    assert_eq!(roles.len(), 1, "one roled membership: {resp}");
+    assert_eq!(roles[0]["member"], "agent:agent-1");
+    assert_eq!(roles[0]["role"], "owns the migrations");
+
+    // Proved at the DAEMON'S OWN sqlite file, not the envelope.
+    let stored: (String, String) = sqlx::query_as(
+        "SELECT sm.role, s.instructions FROM squad_member sm \
+         JOIN squad s ON s.id = sm.squad_id WHERE sm.squad_id = ? AND sm.member_id = 'agent-1'",
+    )
+    .bind(&squad_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(stored.0, "owns the migrations");
+    assert_eq!(stored.1, "Route schema work to the DB owner.");
+
+    // A plain re-add (no `role`) leaves the role intact — never a silent clear.
+    c.call(
+        methods::HANGAR_SQUAD_MEMBER_ADD,
+        serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "member": "agent:agent-1" }),
+    )
+    .await;
+    let role: String = sqlx::query_scalar(
+        "SELECT role FROM squad_member WHERE squad_id = ? AND member_id = 'agent-1'",
+    )
+    .bind(&squad_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(
+        role, "owns the migrations",
+        "a plain re-add must not clear it"
+    );
+
+    // `squad_member_role_set` updates it.
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_MEMBER_ROLE_SET,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "squad_id": squad_id,
+                "member": "agent:agent-1",
+                "role": "owns the CLI",
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "role_set must ack: {resp}");
+    let role: String = sqlx::query_scalar(
+        "SELECT role FROM squad_member WHERE squad_id = ? AND member_id = 'agent-1'",
+    )
+    .bind(&squad_id)
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(role, "owns the CLI");
+
+    // `squad_instructions_set` clears them.
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_INSTRUCTIONS_SET,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id, "instructions": "" }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "instructions_set must ack: {resp}");
+    assert!(
+        find_squad(&resp, &squad_id)["instructions"].as_str().unwrap_or("").is_empty(),
+        "cleared in the refreshed view: {resp}"
+    );
+    let instructions: String = sqlx::query_scalar("SELECT instructions FROM squad WHERE id = ?")
+        .bind(&squad_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(instructions, "", "cleared at sqlite");
+}
+
+/// Parity #25: a role-set for an actor that is NOT a member is rejected and
+/// writes NO membership row — never a silent success.
+#[tokio::test]
+async fn squad_member_role_set_rejects_a_non_member() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "alpha", "leader": "agent:agent-2" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_MEMBER_ROLE_SET,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "squad_id": squad_id,
+                "member": "agent:agent-1",
+                "role": "ghost",
+            }),
+        )
+        .await;
+    assert!(
+        !resp["error"].is_null(),
+        "a non-member role-set must be rejected: {resp}"
+    );
+    let rows: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM squad_member WHERE squad_id = ?")
+        .bind(&squad_id)
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+    assert_eq!(rows, 0, "no membership may be minted as a side effect");
+}
+
+/// Parity #25 acceptance leg B — "archive works (sqlite)", RE-PROVEN in this PR
+/// (no new code): archiving removes the squad from `list`, keeps it in the
+/// `--all` view with its audit stamp, and makes an assign refuse it.
+#[tokio::test]
+async fn squad_archive_still_hides_and_refuses_assignment() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    seed_second_agent(&store).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = c
+        .call(
+            methods::HANGAR_SQUAD_CREATE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "name": "alpha", "leader": "agent:agent-2" }),
+        )
+        .await;
+    let squad_id = only_squad_id(&created);
+
+    let resp = c
+        .call(
+            methods::HANGAR_SQUAD_ARCHIVE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "squad_id": squad_id,
+                "archived": true,
+                "archived_by_user_id": "user-1",
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "archive must ack: {resp}");
+    assert!(
+        resp["result"]["squads"].as_array().unwrap().is_empty(),
+        "the archived squad leaves the ACTIVE list: {resp}"
+    );
+
+    // The audit pair is stamped at sqlite.
+    let (archived, at, by): (i64, Option<i64>, Option<String>) =
+        sqlx::query_as("SELECT archived, archived_at, archived_by FROM squad WHERE id = ?")
+            .bind(&squad_id)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    assert_eq!(archived, 1);
+    assert!(at.is_some(), "archived_at stamped");
+    assert_eq!(by.as_deref(), Some("member:user-1"));
+
+    // The audit read still resolves it.
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+    let ws = WorkspaceId::from_str(WS_ID.to_string()).unwrap();
+    assert!(SquadRepo::list(store.pool(), &ws).await.unwrap().is_empty());
+    let all = SquadRepo::list_including_archived(store.pool(), &ws).await.unwrap();
+    assert_eq!(all.len(), 1);
+    assert!(all[0].archived);
+
+    // And an assignment to it is refused.
+    let assign = c
+        .call(
+            methods::HANGAR_SQUAD_ASSIGN,
+            serde_json::json!({ "workspace_id": WS_SLUG, "squad_id": squad_id }),
+        )
+        .await;
+    assert!(
+        !assign["error"].is_null(),
+        "an archived squad must refuse a new assignment: {assign}"
+    );
+}

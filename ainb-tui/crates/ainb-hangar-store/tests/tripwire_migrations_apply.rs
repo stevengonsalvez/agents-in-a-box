@@ -282,6 +282,20 @@ async fn migration_0002_creates_skill_tables_with_composite_keys() {
         "squad.archived_by (0052): {squad}"
     );
 
+    // Migration 0053 (parity #25, multica 084/088): per-member ROLE + per-squad
+    // INSTRUCTIONS. Both are NOT NULL DEFAULT '' — "unset" is the empty string,
+    // which is also the "omit this fragment" sentinel the leader briefing
+    // renders against. Free text, no CHECK (role is a label, not a vocabulary).
+    assert!(
+        squad.contains("instructions TEXT NOT NULL DEFAULT ''"),
+        "squad.instructions (0053): {squad}"
+    );
+    let squad_member = table_sql(&pool, "squad_member").await;
+    assert!(
+        squad_member.contains("role TEXT NOT NULL DEFAULT ''"),
+        "squad_member.role (0053): {squad_member}"
+    );
+
     pool.close().await;
 }
 

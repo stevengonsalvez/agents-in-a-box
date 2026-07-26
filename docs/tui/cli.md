@@ -4039,6 +4039,8 @@ Commands:
   assign         Route a task to the squad's LEADER (leader routing taking effect)
   archive        Archive a squad: it leaves the active list and refuses new assignments
   unarchive      Restore an archived squad (clears the archive audit stamp)
+  member-role    Set or clear an existing member's free-text role on a squad
+  instructions   Show, set, or clear a squad's user-authored routing instructions
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -4077,10 +4079,11 @@ Arguments:
   <NAME>  The squad name (unique within the workspace)
 
 Options:
-      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
-      --leader <LEADER>        The squad leader as an actor-ref (`agent:<id>` / `member:<id>`). An `agent` leader is the actor a squad-assigned task is routed to
-      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
-  -h, --help                   Print help
+      --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
+      --leader <LEADER>              The squad leader as an actor-ref (`agent:<id>` / `member:<id>`). An `agent` leader is the actor a squad-assigned task is routed to
+      --instructions <INSTRUCTIONS>  Initial routing guidance for the squad, rendered VERBATIM as the leader briefing's `## Squad Instructions` section. Omitted leaves it empty, and a blank field omits that section entirely
+      --workspace <WORKSPACE>        Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                         Print help
 ```
 
 #### `ainb hangar squad add-member`
@@ -4099,6 +4102,7 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --member <MEMBER>        The member actor-ref (`agent:<id>` / `member:<id>`)
+      --role <ROLE>            Free-text role for the ADDED member ("owns the migrations"), which the squad leader reads in its briefing. Honoured by `add-member` and IGNORED by `remove-member`. Omitted leaves an existing member's role untouched
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
@@ -4119,6 +4123,7 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --member <MEMBER>        The member actor-ref (`agent:<id>` / `member:<id>`)
+      --role <ROLE>            Free-text role for the ADDED member ("owns the migrations"), which the squad leader reads in its briefing. Honoured by `add-member` and IGNORED by `remove-member`. Omitted leaves an existing member's role untouched
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
@@ -4184,6 +4189,48 @@ Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
       --by <BY>                The `user.id` recorded as the archiving actor (migration 0052). Omitted defaults to the workspace owner
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad member-role`
+
+Set or clear an existing member's free-text role on a squad
+
+```console
+$ ainb hangar squad member-role --help
+Set or clear an existing member's free-text role on a squad
+
+Usage: ainb hangar squad member-role [OPTIONS] --member <MEMBER> <SQUAD_ID>
+
+Arguments:
+  <SQUAD_ID>  The squad id (`squad.id`) whose membership to edit
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --member <MEMBER>        The existing member actor-ref (`agent:<id>` / `member:<id>`)
+      --role <ROLE>            The free-text role label. Pass an empty string to clear it [default: ""]
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad instructions`
+
+Show, set, or clear a squad's user-authored routing instructions
+
+```console
+$ ainb hangar squad instructions --help
+Show, set, or clear a squad's user-authored routing instructions
+
+Usage: ainb hangar squad instructions [OPTIONS] <SQUAD_ID>
+
+Arguments:
+  <SQUAD_ID>  The squad id (`squad.id`) to read or edit
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --set <SET>              Replace the squad's instructions with this text (stored verbatim)
+      --clear                  Clear the squad's instructions, so the leader briefing omits the section
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 

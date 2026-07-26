@@ -16,10 +16,16 @@
 //!   mention-parse pipeline. Hangar has no such trigger, so the protocol
 //!   describes coordination without promising a mention link it cannot honour,
 //!   and roster rows carry `name — <agent|human> — <id>` (no mention markdown).
-//! - **No skills / role / `squad.instructions`.** Those columns are downstream
-//!   gaps (not landed), so roster rows omit skills/role and the
-//!   `## Squad Instructions` section is omitted entirely — exactly as multica
-//!   omits it when `squad.instructions` is blank.
+//! - **No agent SKILLS in roster rows.** Multica's `agentSkillsRosterSegment`
+//!   appends each member's enabled skills to its roster row; hangar's roster
+//!   carries the member's free-text ROLE (migration 0053) but not yet its
+//!   skills — that remainder is tracked as parity `7-rest`, not this item.
+//!
+//! Per-member `role` and `squad.instructions` (migration 0053, parity #25) ARE
+//! rendered: a roled member's row carries a `— role: <label>` suffix, and a
+//! non-blank `squad.instructions` becomes the third section
+//! `## Squad Instructions`, appended VERBATIM. A blank one omits the heading
+//! entirely — exactly as multica omits it when `squad.instructions` is blank.
 
 use ainb_hangar_core::actor::ActorKind;
 use ainb_hangar_core::ids::WorkspaceId;
@@ -72,10 +78,10 @@ member for it.
 /// Build the leader briefing for `squad_id` IF `claiming_agent_id` is the
 /// squad's leader AGENT; otherwise `None`.
 ///
-/// Sections: the Operating Protocol constant, then the Squad Roster (a leader
-/// self-row plus one row per non-archived member). `## Squad Instructions` is
-/// omitted (no `squad.instructions` column yet — parity with multica's
-/// blank-omit).
+/// Sections, in multica's order: the Operating Protocol constant, then the Squad
+/// Roster (a leader self-row plus one row per non-archived member, each carrying
+/// its free-text role when set), then `## Squad Instructions` — which is omitted
+/// ENTIRELY when `squad.instructions` is blank (multica blank-omit parity).
 ///
 /// Returns `None` on:
 /// - squad not found for `(workspace, squad_id)` — the dangling-`squad_id` guard
@@ -102,6 +108,14 @@ pub async fn build_squad_leader_briefing(
     let mut out = String::from(SQUAD_OPERATING_PROTOCOL);
     out.push('\n');
     out.push_str(&render_roster(pool, &squad).await);
+    // Section 3: the user-authored routing guidance, VERBATIM. Blank ⇒ the
+    // heading is not emitted at all (multica blank-omit parity, migration 0053).
+    let instructions = squad.instructions.trim();
+    if !instructions.is_empty() {
+        out.push_str("\n## Squad Instructions\n\n");
+        out.push_str(instructions);
+        out.push('\n');
+    }
     Some(out)
 }
 
@@ -133,23 +147,33 @@ async fn render_roster(pool: &SqlitePool, squad: &Squad) -> String {
 
     let mut rows: Vec<String> = Vec::with_capacity(squad.members.len());
     for m in &squad.members {
-        match m.kind() {
+        let actor = &m.actor;
+        match actor.kind() {
             ActorKind::Agent => {
                 // Skip the leader-as-member dupe (already shown above).
-                if m.id() == leader_id {
+                if actor.id() == leader_id {
                     continue;
                 }
-                match AgentRepo::get(pool, m.id()).await {
+                match AgentRepo::get(pool, actor.id()).await {
                     Ok(Some(agent)) if !agent.archived => {
-                        rows.push(format!("- {} — agent — {}\n", agent.name, m.id()));
+                        rows.push(format!(
+                            "- {} — agent — {}{}\n",
+                            agent.name,
+                            actor.id(),
+                            role_suffix(&m.role)
+                        ));
                     }
                     // Unresolvable or archived agent → skip silently.
                     _ => {}
                 }
             }
             ActorKind::Member => {
-                let label = human_label(pool, m.id()).await;
-                rows.push(format!("- {label} — human — {}\n", m.id()));
+                let label = human_label(pool, actor.id()).await;
+                rows.push(format!(
+                    "- {label} — human — {}{}\n",
+                    actor.id(),
+                    role_suffix(&m.role)
+                ));
             }
         }
     }
@@ -163,6 +187,20 @@ async fn render_roster(pool: &SqlitePool, squad: &Squad) -> String {
         out.push_str(r);
     }
     out
+}
+
+/// The roster row's trailing `— role: <label>` fragment, or `""` when the member
+/// has no stated role (migration 0053).
+///
+/// A blank role renders NOTHING — not an empty `role:` — so a pre-0053 squad's
+/// roster is byte-identical to what it was before the column existed.
+fn role_suffix(role: &str) -> String {
+    let role = role.trim();
+    if role.is_empty() {
+        String::new()
+    } else {
+        format!(" — role: {role}")
+    }
 }
 
 /// Resolve a human member's display label (its `user.email`), falling back to the
@@ -314,6 +352,149 @@ mod tests {
             build_squad_leader_briefing(pool, &w, "sq-h", &human.user_id).await,
             None,
             "a human leader cannot brief an agent runtime"
+        );
+    }
+
+    /// Parity #25: a squad with `instructions` and roled members renders the
+    /// `## Squad Instructions` section VERBATIM and stamps each roled member's
+    /// row with its `— role: <label>` suffix. Asserted against the FULL line, not
+    /// a bare substring, so a half-rendered row cannot pass.
+    #[tokio::test]
+    async fn briefing_carries_instructions_and_member_roles() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws_id = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let w = ws(&ws_id);
+
+        let leader =
+            bootstrap::create_agent(pool, &ws_id, "captain", "claude", None).await.unwrap();
+        let a = bootstrap::create_agent(pool, &ws_id, "scout", "claude", None).await.unwrap();
+        let b = bootstrap::create_agent(pool, &ws_id, "medic", "claude", None).await.unwrap();
+        SquadRepo::create(
+            pool,
+            &w,
+            "sq-r",
+            "roled",
+            &ActorRef::new(ActorKind::Agent, leader.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member_with_role(
+            pool,
+            &w,
+            "sq-r",
+            &ActorRef::new(ActorKind::Agent, a.id.clone()).unwrap(),
+            "owns the migrations",
+        )
+        .await
+        .unwrap();
+        // A roleless member on the same squad must render WITHOUT any suffix.
+        SquadRepo::add_member(
+            pool,
+            &w,
+            "sq-r",
+            &ActorRef::new(ActorKind::Agent, b.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+        let instructions =
+            "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
+        SquadRepo::set_instructions(pool, &w, "sq-r", instructions).await.unwrap();
+
+        let briefing = build_squad_leader_briefing(pool, &w, "sq-r", &leader.id).await.unwrap();
+
+        // The roled member's WHOLE line, and the roleless member's whole line.
+        assert!(
+            briefing.contains(&format!(
+                "- scout — agent — {} — role: owns the migrations\n",
+                a.id
+            )),
+            "roled member row must carry the role suffix:\n{briefing}"
+        );
+        assert!(
+            briefing.contains(&format!("- medic — agent — {}\n", b.id)),
+            "roleless member row must render unchanged:\n{briefing}"
+        );
+        // The instructions section, VERBATIM (embedded newline preserved).
+        assert!(
+            briefing.contains("## Squad Instructions"),
+            "instructions section present:\n{briefing}"
+        );
+        assert!(
+            briefing.contains(instructions),
+            "instructions rendered verbatim:\n{briefing}"
+        );
+
+        // Section ORDER matches multica: Protocol → Roster → Instructions.
+        let protocol = briefing.find("## Squad Operating Protocol").unwrap();
+        let roster = briefing.find("## Squad Roster").unwrap();
+        let instr = briefing.find("## Squad Instructions").unwrap();
+        assert!(
+            protocol < roster && roster < instr,
+            "section order:\n{briefing}"
+        );
+    }
+
+    /// Parity #25 blank-omit: a squad with blank `instructions` emits NO
+    /// `## Squad Instructions` heading at all, and a roleless member's row
+    /// carries no `— role:` fragment (byte-identical to the pre-0053 render).
+    #[tokio::test]
+    async fn blank_instructions_and_roles_render_nothing_extra() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws_id = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        let w = ws(&ws_id);
+
+        let leader =
+            bootstrap::create_agent(pool, &ws_id, "captain", "claude", None).await.unwrap();
+        let a = bootstrap::create_agent(pool, &ws_id, "scout", "claude", None).await.unwrap();
+        SquadRepo::create(
+            pool,
+            &w,
+            "sq-b",
+            "blank",
+            &ActorRef::new(ActorKind::Agent, leader.id.clone()).unwrap(),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(
+            pool,
+            &w,
+            "sq-b",
+            &ActorRef::new(ActorKind::Agent, a.id.clone()).unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let briefing = build_squad_leader_briefing(pool, &w, "sq-b", &leader.id).await.unwrap();
+        assert!(
+            !briefing.contains("## Squad Instructions"),
+            "a blank instructions field must not emit the heading:\n{briefing}"
+        );
+        assert!(
+            !briefing.contains("— role:"),
+            "a roleless member must not emit a role fragment:\n{briefing}"
+        );
+
+        // Clearing a previously-set value re-omits the section.
+        SquadRepo::set_instructions(pool, &w, "sq-b", "temporary").await.unwrap();
+        assert!(
+            build_squad_leader_briefing(pool, &w, "sq-b", &leader.id)
+                .await
+                .unwrap()
+                .contains("## Squad Instructions")
+        );
+        SquadRepo::set_instructions(pool, &w, "sq-b", "").await.unwrap();
+        assert!(
+            !build_squad_leader_briefing(pool, &w, "sq-b", &leader.id)
+                .await
+                .unwrap()
+                .contains("## Squad Instructions"),
+            "cleared instructions re-omit the section"
         );
     }
 
