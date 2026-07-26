@@ -286,7 +286,8 @@ mod tests {
 
     #[test]
     fn structured_array_round_trips_and_object_never_hits_string_arm() {
-        let json = r#"[{"id":"ac-1","text":"a","checked":true,"checked_at":7,"checked_by":"agent:x"}]"#;
+        let json =
+            r#"[{"id":"ac-1","text":"a","checked":true,"checked_at":7,"checked_by":"agent:x"}]"#;
         let items = criteria_from_json(json).expect("structured array decodes");
         assert_eq!(items[0].id, "ac-1");
         assert!(items[0].checked);
@@ -305,11 +306,7 @@ mod tests {
     fn empty_and_blank_handling() {
         assert!(criteria_from_json("[]").expect("empty").is_empty());
         assert_eq!(criteria_to_json(&[]), "[]");
-        assert!(
-            criteria_from_json(r#"["", "  "]"#)
-                .expect("blank strings")
-                .is_empty()
-        );
+        assert!(criteria_from_json(r#"["", "  "]"#).expect("blank strings").is_empty());
     }
 
     #[test]

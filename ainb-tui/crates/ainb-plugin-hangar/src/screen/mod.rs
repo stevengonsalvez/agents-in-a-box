@@ -40,8 +40,7 @@ pub mod usage_dashboard;
 pub use app_screens::{
     AgentsAction, AttentionAnswerAction, AutopilotAction, BoardsAction, IssueAssignAction,
     IssueCommentAction, IssueCreateAction, IssueCriterionAction, KanbanAction, NavIntent,
-    PaletteAction, ScreenStates,
-    SkillAction, SquadAction, WorkspaceAction, render_body, route_key,
+    PaletteAction, ScreenStates, SkillAction, SquadAction, WorkspaceAction, render_body, route_key,
 };
 pub use router::reduce;
 

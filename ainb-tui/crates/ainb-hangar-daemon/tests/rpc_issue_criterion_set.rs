@@ -158,7 +158,6 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     (socket_path, store)
 }
 
-
 /// Open a SECOND, independent pool onto the daemon's own database file, so the
 /// persistence assertion reads what actually hit disk rather than the daemon's
 /// in-process cache.
@@ -234,10 +233,7 @@ async fn rpc_issue_criterion_set_persists_and_pushes_event() {
         .find(|i| i["id"] == issue_id.as_str())
         .expect("the created issue is listed")
         .clone();
-    let second_id = row["acceptance"][1]["id"]
-        .as_str()
-        .expect("second criterion id")
-        .to_string();
+    let second_id = row["acceptance"][1]["id"].as_str().expect("second criterion id").to_string();
 
     let resp = c
         .call(
@@ -274,12 +270,11 @@ async fn rpc_issue_criterion_set_persists_and_pushes_event() {
 
     // It really hit disk: read the daemon's OWN db file through a fresh pool.
     let pool = direct_pool(dir.path()).await;
-    let raw: String =
-        sqlx::query_scalar("SELECT acceptance_criteria FROM issue WHERE id = ?")
-            .bind(&issue_id)
-            .fetch_one(&pool)
-            .await
-            .expect("read the column");
+    let raw: String = sqlx::query_scalar("SELECT acceptance_criteria FROM issue WHERE id = ?")
+        .bind(&issue_id)
+        .fetch_one(&pool)
+        .await
+        .expect("read the column");
     assert!(
         raw.starts_with("[{"),
         "the column holds structured objects, got {raw}"
@@ -351,7 +346,10 @@ async fn rpc_issue_criterion_set_persists_and_pushes_event() {
             }),
         )
         .await;
-    assert!(resp["error"].is_null(), "untick by ordinal must ack: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "untick by ordinal must ack: {resp}"
+    );
     assert_eq!(resp["result"]["acceptance"][1]["checked"], false);
     assert!(
         resp["result"]["acceptance"][1]["checked_by"].is_null(),

@@ -29,8 +29,8 @@
 use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
-use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::acceptance::AcceptanceCriterion;
+use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};

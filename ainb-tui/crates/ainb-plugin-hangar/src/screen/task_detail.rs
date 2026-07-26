@@ -1681,8 +1681,14 @@ mod card_tests {
         render_task_detail(&mut buf, 80, 0, 29, &s);
         let text = painted_text(&buf);
         assert!(text.contains("Acceptance: 0/2"), "header: {text}");
-        assert!(text.contains("builds") && text.contains("tests green"), "{text}");
-        assert!(!text.contains('☑'), "an old daemon's rows are unchecked: {text}");
+        assert!(
+            text.contains("builds") && text.contains("tests green"),
+            "{text}"
+        );
+        assert!(
+            !text.contains('☑'),
+            "an old daemon's rows are unchecked: {text}"
+        );
     }
 
     /// **T8** — `a` selects the first criterion, `t` emits the toggle intent for
@@ -1752,15 +1758,9 @@ mod card_tests {
         let mut buf = WireBuffer::new(80, 30);
         render_task_detail(&mut buf, 80, 0, 29, &selected);
         let rows = painted_rows(&buf);
-        let line = rows
-            .iter()
-            .find(|l| l.contains("builds"))
-            .expect("criterion line");
+        let line = rows.iter().find(|l| l.contains("builds")).expect("criterion line");
         assert!(line.contains('▶'), "marker on the selected line: {line}");
-        let other = rows
-            .iter()
-            .find(|l| l.contains("tests green"))
-            .expect("criterion line");
+        let other = rows.iter().find(|l| l.contains("tests green")).expect("criterion line");
         assert!(!other.contains('▶'), "marker only on one line: {other}");
     }
 

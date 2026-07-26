@@ -761,9 +761,7 @@ async fn handle(
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
-        methods::HANGAR_ISSUE_CRITERION_SET => {
-            handle_issue_criterion_set(pool, req, events).await
-        }
+        methods::HANGAR_ISSUE_CRITERION_SET => handle_issue_criterion_set(pool, req, events).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
         methods::HANGAR_AGENT_DELETE => handle_agent_delete(pool, req).await,
@@ -3717,8 +3715,10 @@ async fn handle_issue_criterion_set(
     use ainb_hangar_core::idgen::SystemIdGen;
     use ainb_hangar_proto::events::HangarEvent;
 
-    let params: ainb_hangar_proto::snapshots::IssueCriterionSetParams =
-        parse_params(req, "{ workspace_id, issue_id, criterion, checked, actor? }")?;
+    let params: ainb_hangar_proto::snapshots::IssueCriterionSetParams = parse_params(
+        req,
+        "{ workspace_id, issue_id, criterion, checked, actor? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     if params.criterion.trim().is_empty() {
         return Err(invalid_params("criterion must not be empty"));

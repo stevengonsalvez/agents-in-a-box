@@ -36,9 +36,9 @@
 use anyhow::{Context, Result};
 use clap::{Args, Subcommand};
 
+use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::SystemClock;
-use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::autopilot::Autopilot;

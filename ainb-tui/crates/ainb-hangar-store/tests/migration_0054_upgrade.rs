@@ -31,20 +31,14 @@ async fn pool_at_prior_schema(dir: &std::path::Path) -> SqlitePool {
         .filename(&db_path)
         .create_if_missing(true)
         .journal_mode(SqliteJournalMode::Wal);
-    let pool = SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool");
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.expect("open pool");
 
     let mut migrator = sqlx::migrate::Migrator::new(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
     )
     .await
     .expect("load migrations directory");
-    migrator
-        .migrations
-        .to_mut()
-        .retain(|m| m.version < NEW_MIGRATION_VERSION);
+    migrator.migrations.to_mut().retain(|m| m.version < NEW_MIGRATION_VERSION);
     assert!(
         !migrator.migrations.is_empty(),
         "prior-migration set must not be empty"
@@ -155,9 +149,7 @@ async fn upgrades_populated_db_flat_strings_to_structured_objects() {
 /// whole upgrade path.
 #[tokio::test]
 async fn json1_functions_are_available() {
-    let pool = SqlitePool::connect("sqlite::memory:")
-        .await
-        .expect("open memory pool");
+    let pool = SqlitePool::connect("sqlite::memory:").await.expect("open memory pool");
     let valid: i64 = sqlx::query_scalar("SELECT json_valid('[\"a\"]')")
         .fetch_one(&pool)
         .await

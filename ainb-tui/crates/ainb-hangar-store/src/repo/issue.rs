@@ -903,9 +903,7 @@ impl IssueRepo {
 
         tx.commit().await?;
 
-        Self::get_by_id(pool, issue_id)
-            .await?
-            .ok_or(CriterionError::IssueNotFound)
+        Self::get_by_id(pool, issue_id).await?.ok_or(CriterionError::IssueNotFound)
     }
 }
 
@@ -1430,10 +1428,7 @@ mod tests {
 
         let read = IssueRepo::get_by_id(pool, "issue-1").await.unwrap().unwrap();
         assert_eq!(
-            read.acceptance_criteria
-                .iter()
-                .map(|c| c.text.as_str())
-                .collect::<Vec<_>>(),
+            read.acceptance_criteria.iter().map(|c| c.text.as_str()).collect::<Vec<_>>(),
             vec!["builds", "tests"],
             "legacy strings decode tolerantly"
         );

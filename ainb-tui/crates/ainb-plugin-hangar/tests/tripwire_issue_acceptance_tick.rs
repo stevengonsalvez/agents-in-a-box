@@ -436,14 +436,10 @@ where
     pane
 }
 
-
 /// The painted buffer as one string PER ROW, so a glyph assertion is pinned to
 /// the same line as its criterion rather than anywhere on the screen.
 fn render_rows(render_resp: &serde_json::Value) -> Vec<String> {
-    let cells = render_resp["result"]["buffer"]["cells"]
-        .as_array()
-        .cloned()
-        .unwrap_or_default();
+    let cells = render_resp["result"]["buffer"]["cells"].as_array().cloned().unwrap_or_default();
     let mut by_row: std::collections::BTreeMap<i64, Vec<(i64, String)>> =
         std::collections::BTreeMap::new();
     for c in &cells {

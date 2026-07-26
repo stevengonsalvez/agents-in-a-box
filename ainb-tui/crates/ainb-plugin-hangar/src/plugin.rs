@@ -3164,9 +3164,7 @@ impl HangarPlugin {
             return;
         };
         if let Err(e) = host.unix_socket_send(stream_id, body).await {
-            let _ = host
-                .log_info(format!("hangar: criterion set send failed: {e}"))
-                .await;
+            let _ = host.log_info(format!("hangar: criterion set send failed: {e}")).await;
         }
     }
 

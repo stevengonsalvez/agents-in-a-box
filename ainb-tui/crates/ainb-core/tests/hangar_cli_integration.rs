@@ -2206,7 +2206,10 @@ fn issue_criteria_list_check_uncheck_round_trip() {
         .to_string();
 
     // Both criteria list, unchecked, with distinct minted ids.
-    let (ok, out) = run(tmp.path(), &["hangar", "issue", "criteria", "list", &issue_id]);
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "list", &issue_id],
+    );
     assert!(ok, "criteria list should exit 0; out={out}");
     let lines: Vec<&str> = out
         .lines()
@@ -2215,13 +2218,17 @@ fn issue_criteria_list_check_uncheck_round_trip() {
     assert_eq!(lines.len(), 2, "both criteria listed:\n{out}");
     assert!(lines[0].starts_with("1  ac-"), "ordinal + id: {}", lines[0]);
     assert!(lines[1].starts_with("2  ac-"), "ordinal + id: {}", lines[1]);
-    assert!(lines[0].contains('☐') && !lines[0].contains('☑'), "{}", lines[0]);
-    assert!(lines[1].contains('☐') && !lines[1].contains('☑'), "{}", lines[1]);
-    let second_id = lines[1]
-        .split_whitespace()
-        .nth(1)
-        .expect("criterion id column")
-        .to_string();
+    assert!(
+        lines[0].contains('☐') && !lines[0].contains('☑'),
+        "{}",
+        lines[0]
+    );
+    assert!(
+        lines[1].contains('☐') && !lines[1].contains('☑'),
+        "{}",
+        lines[1]
+    );
+    let second_id = lines[1].split_whitespace().nth(1).expect("criterion id column").to_string();
     let first_id = lines[0].split_whitespace().nth(1).expect("id").to_string();
     assert_ne!(first_id, second_id, "ids are per-criterion, not shared");
 
@@ -2242,7 +2249,10 @@ fn issue_criteria_list_check_uncheck_round_trip() {
     assert!(ok, "criteria check should exit 0; out={out}");
 
     // It persisted, and ONLY the second one moved.
-    let (ok, out) = run(tmp.path(), &["hangar", "issue", "criteria", "list", &issue_id]);
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "criteria", "list", &issue_id],
+    );
     assert!(ok, "criteria list should exit 0; out={out}");
     let first = out
         .lines()
@@ -2267,7 +2277,9 @@ fn issue_criteria_list_check_uncheck_round_trip() {
     // Checking the SAME criterion by ID is idempotent (still 1/2).
     let (ok, _) = run(
         tmp.path(),
-        &["hangar", "issue", "criteria", "check", &issue_id, &second_id],
+        &[
+            "hangar", "issue", "criteria", "check", &issue_id, &second_id,
+        ],
     );
     assert!(ok, "a repeat check should exit 0");
     let (_, out) = run(tmp.path(), &["hangar", "issue", "show", &issue_id]);
@@ -2276,7 +2288,9 @@ fn issue_criteria_list_check_uncheck_round_trip() {
     // Uncheck by ID clears it and the attribution.
     let (ok, out) = run(
         tmp.path(),
-        &["hangar", "issue", "criteria", "uncheck", &issue_id, &second_id],
+        &[
+            "hangar", "issue", "criteria", "uncheck", &issue_id, &second_id,
+        ],
     );
     assert!(ok, "criteria uncheck should exit 0; out={out}");
     assert!(
