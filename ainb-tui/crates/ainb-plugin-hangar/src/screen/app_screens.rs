@@ -1656,6 +1656,33 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             _ => return None,
         };
         IssueListEvent::Wizard(k)
+    } else if states.issue_list.mode() == IssueListMode::FilterPanel {
+        // multica-gap #10: the `f` facet panel needs the STRUCTURED key
+        // vocabulary — arrows to navigate, Space/Enter to toggle — which the
+        // plain-char path can't carry. Every key is captured (the panel is modal);
+        // Esc is intercepted upstream by the capture guard (`abort_filter_panel`).
+        let k = match &key.code {
+            KeyCode::Up => super::issue_list::PanelKey::Up,
+            KeyCode::Down => super::issue_list::PanelKey::Down,
+            KeyCode::Left | KeyCode::BackTab => super::issue_list::PanelKey::Left,
+            KeyCode::Right | KeyCode::Tab => super::issue_list::PanelKey::Right,
+            KeyCode::Enter => super::issue_list::PanelKey::Toggle,
+            KeyCode::Esc => super::issue_list::PanelKey::Close,
+            KeyCode::Char { ch } => match ch {
+                ' ' => super::issue_list::PanelKey::Toggle,
+                'k' => super::issue_list::PanelKey::Up,
+                'j' => super::issue_list::PanelKey::Down,
+                'h' => super::issue_list::PanelKey::Left,
+                'l' => super::issue_list::PanelKey::Right,
+                'C' => super::issue_list::PanelKey::Clear,
+                'f' => super::issue_list::PanelKey::Close,
+                // Any other char is swallowed — the panel never leaks a key to the
+                // board underneath.
+                _ => return None,
+            },
+            _ => return None,
+        };
+        IssueListEvent::Panel(k)
     } else {
         // Normal-mode Tab / Shift+Tab cycle the filter-chip bar
         // (All → Members → Agents → Mine → All). Guarded on Normal mode so the

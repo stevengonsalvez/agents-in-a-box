@@ -24,6 +24,7 @@ pub mod actor_row;
 pub mod card_board;
 pub mod danger_access_modal;
 pub mod editor_pane;
+pub mod facet_panel;
 pub mod file_tree;
 pub mod filter_chip;
 pub mod frosted_banner;

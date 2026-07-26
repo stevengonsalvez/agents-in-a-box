@@ -3590,10 +3590,12 @@ impl HangarPlugin {
         if matches!(app.screen, Screen::IssueList) && self.screens.issue_list.is_capturing_text() {
             if matches!(key.code, KeyCode::Esc) {
                 // Esc drops whichever capture surface is open in one press — the
-                // create wizard OR the `x` delete-confirm overlay (both no-op when
-                // not in their mode), never trapping the user (63d).
+                // create wizard, the `x` delete-confirm overlay, OR the `f` facet
+                // panel (multica-gap #10; all no-op when not in their mode), never
+                // trapping the user (63d).
                 self.screens.issue_list.abort_create();
                 self.screens.issue_list.abort_confirm_delete();
+                self.screens.issue_list.abort_filter_panel();
                 return;
             }
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
