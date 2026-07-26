@@ -57,6 +57,7 @@ fn row(id: &str, display: &str, state: &str, priority: i64, assignee: Option<&st
         acceptance_criteria: Vec::new(),
         acceptance: Vec::new(),
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 

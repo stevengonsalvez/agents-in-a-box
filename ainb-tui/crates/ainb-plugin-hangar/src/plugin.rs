@@ -2702,10 +2702,11 @@ impl HangarPlugin {
                 board_id,
                 dependent_issue_id,
                 blocker_issue_id,
+                link_type,
             } => (
                 BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_CARD_DEP_ADD,
-                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id }),
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id, "link_type": link_type }),
             ),
             BoardsAction::CardSetAutoRun {
                 board_id,
@@ -4354,6 +4355,7 @@ impl HangarPlugin {
             acceptance_criteria: Vec::new(),
             acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -5779,6 +5781,7 @@ mod tests {
             acceptance_criteria: Vec::new(),
             acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }]);
         p
     }
@@ -5934,6 +5937,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -5964,6 +5968,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
         ]);
 
@@ -6155,6 +6160,7 @@ mod tests {
             acceptance_criteria: Vec::new(),
             acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -6245,6 +6251,7 @@ mod tests {
             acceptance_criteria: Vec::new(),
             acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -6327,6 +6334,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             })
             .collect();
         p.screens.set_issues(rows);
@@ -6413,6 +6421,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
             IssueRow {
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -6443,6 +6452,7 @@ mod tests {
                 acceptance_criteria: Vec::new(),
                 acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -6868,6 +6878,8 @@ mod tests {
                                 member_states: Vec::new(),
                                 blocked_by: Vec::new(),
                                 auto_run: false,
+                                blocks: Vec::new(),
+                                related: Vec::new(),
                             },
                             BoardCardWireRow {
                                 issue_id: "issue-2".into(),
@@ -6881,6 +6893,8 @@ mod tests {
                                 member_states: Vec::new(),
                                 blocked_by: Vec::new(),
                                 auto_run: false,
+                                blocks: Vec::new(),
+                                related: Vec::new(),
                             },
                         ],
                     },
@@ -7182,6 +7196,7 @@ mod tests {
             acceptance_criteria: Vec::new(),
             acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);

@@ -806,6 +806,9 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD => handle_board_card_assign_squad(pool, req).await,
         methods::HANGAR_BOARD_CARD_DEP_ADD => handle_board_card_dep(pool, req, true).await,
         methods::HANGAR_BOARD_CARD_DEP_REMOVE => handle_board_card_dep(pool, req, false).await,
+        methods::HANGAR_ISSUE_LINK_ADD => handle_issue_link(pool, req, true).await,
+        methods::HANGAR_ISSUE_LINK_REMOVE => handle_issue_link(pool, req, false).await,
+        methods::HANGAR_ISSUE_LINKS => handle_issue_links(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
@@ -5793,8 +5796,9 @@ async fn handle_board_card_dep(
 
     let params: ainb_hangar_proto::snapshots::BoardCardDepParams = parse_params(
         req,
-        "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id }",
+        "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id, link_type? }",
     )?;
+    let kind = link_kind_of(params.link_type);
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
 
     // Both endpoints must be cards on this board — a dependency is a board
@@ -5806,26 +5810,113 @@ async fn handle_board_card_dep(
     }
 
     if add {
-        CardDependencyRepo::add_edge(
+        CardDependencyRepo::add_link(
             pool,
             &ws,
             &params.dependent_issue_id,
             &params.blocker_issue_id,
+            kind,
             SystemClock.now_ms(),
         )
         .await
         .map_err(|e| card_dep_err(&e))?;
     } else {
-        CardDependencyRepo::remove_edge(
+        CardDependencyRepo::remove_link(
             pool,
             &ws,
             &params.dependent_issue_id,
             &params.blocker_issue_id,
+            kind,
         )
         .await
         .map_err(|e| store_err(&e))?;
     }
     boards_list_value(pool, &ws).await
+}
+
+/// Translate the wire kind onto the store's [`LinkKind`] (multica parity #20).
+/// The wire default (`blocked_by`) is the historical gating edge, so an old client
+/// that omits the field lands here unchanged.
+///
+/// [`LinkKind`]: ainb_hangar_store::repo::card_dependency::LinkKind
+fn link_kind_of(
+    wire: ainb_hangar_proto::snapshots::LinkKindWire,
+) -> ainb_hangar_store::repo::card_dependency::LinkKind {
+    use ainb_hangar_proto::snapshots::LinkKindWire;
+    use ainb_hangar_store::repo::card_dependency::LinkKind;
+    match wire {
+        LinkKindWire::Blocks => LinkKind::Blocks,
+        LinkKindWire::BlockedBy => LinkKind::BlockedBy,
+        LinkKindWire::Related => LinkKind::Related,
+    }
+}
+
+/// `hangar/issue_link_add` (`add = true`) / `hangar/issue_link_remove`
+/// (`add = false`) (multica parity #20): author a TYPED link between two issues,
+/// independent of any board.
+///
+/// Board-free counterpart of [`handle_board_card_dep`] — the link lives on the
+/// issues, so it is authorable from the issue list / detail card / CLI with no
+/// board in the picture. Same workspace scoping and the same
+/// [`card_dep_err`] mapping. Answers with the refreshed link list.
+async fn handle_issue_link(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let params: ainb_hangar_proto::snapshots::IssueLinkParams = parse_params(
+        req,
+        "{ workspace_id, issue_id, other_issue_id, link_type? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let kind = link_kind_of(params.link_type);
+
+    if add {
+        CardDependencyRepo::add_link(
+            pool,
+            &ws,
+            &params.issue_id,
+            &params.other_issue_id,
+            kind,
+            SystemClock.now_ms(),
+        )
+        .await
+        .map_err(|e| card_dep_err(&e))?;
+    } else {
+        CardDependencyRepo::remove_link(pool, &ws, &params.issue_id, &params.other_issue_id, kind)
+            .await
+            .map_err(|e| store_err(&e))?;
+    }
+    issue_links_value(pool, &ws, &params.issue_id).await
+}
+
+/// `hangar/issue_links` (multica parity #20): read one issue's whole typed link
+/// graph, in render order (`blocked_by`, then `blocks`, then `related`).
+async fn handle_issue_links(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::IssueLinksParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    issue_links_value(pool, &ws, &params.issue_id).await
+}
+
+/// Build the `IssueLinksResult` payload for one issue.
+async fn issue_links_value(
+    pool: &SqlitePool,
+    ws: &ainb_hangar_core::ids::WorkspaceId,
+    issue_id: &str,
+) -> Result<serde_json::Value, RpcError> {
+    let links = crate::rpc::snapshots::issue_link_rows(pool, ws.as_str(), issue_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(
+        serde_json::to_value(ainb_hangar_proto::snapshots::IssueLinksResult { links })
+            .unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// `hangar/board_card_set_auto_run` (tcp T4 / F7): flip a card's auto-run flag.
@@ -5864,7 +5955,7 @@ async fn handle_board_card_set_auto_run(
 fn card_dep_err(e: &ainb_hangar_store::repo::card_dependency::CardDependencyError) -> RpcError {
     use ainb_hangar_store::repo::card_dependency::CardDependencyError;
     match e {
-        CardDependencyError::SelfDependency => invalid_params("a card cannot depend on itself"),
+        CardDependencyError::SelfDependency => invalid_params("a card cannot link to itself"),
         CardDependencyError::Cycle => invalid_params("that dependency would create a cycle"),
         CardDependencyError::NotFound => invalid_params("both cards must be on this board"),
         CardDependencyError::Db(db) => store_err(db),

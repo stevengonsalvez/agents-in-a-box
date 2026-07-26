@@ -2319,3 +2319,147 @@ fn issue_criteria_list_check_uncheck_round_trip() {
     );
     assert!(!ok, "an unknown criterion id must exit non-zero; out={out}");
 }
+
+/// multica parity #20, the sqlite half of the acceptance, with NO daemon: a link
+/// authored as `blocked-by` persists as `blocked_by`, renders with 🔒 while the
+/// blocker is unfinished, and shows up on `issue show`; the reverse `blocks`
+/// direction renders from the other end; a `related` link persists as `related`
+/// and renders with `~`; and NO `'blocks'` row is ever written.
+#[test]
+fn issue_link_add_list_persists_typed_links() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let create = |title: &str| -> String {
+        let (ok, out) = run(tmp.path(), &["hangar", "issue", "create", "--title", title]);
+        assert!(ok, "issue create should exit 0; out={out}");
+        out.lines()
+            .find_map(|l| l.strip_prefix("created issue "))
+            .expect("create prints the new issue id")
+            .trim()
+            .to_string()
+    };
+    let schema = create("schema");
+    let parser = create("parser");
+    let docs = create("docs");
+
+    // parser is blocked-by schema; parser is related to docs.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "issue",
+            "link",
+            "add",
+            &parser,
+            &schema,
+            "--kind",
+            "blocked-by",
+        ],
+    );
+    assert!(ok, "link add should exit 0; out={out}");
+    assert!(
+        out.contains("🔒") && out.contains("blocked-by") && out.contains("schema"),
+        "the add prints the refreshed link list with a lock:\n{out}"
+    );
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "link", "add", &parser, &docs, "--kind", "related",
+        ],
+    );
+    assert!(ok, "related link add should exit 0; out={out}");
+
+    // parser's links: a locked blocker AND a related card.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "list", &parser]);
+    assert!(ok, "link list should exit 0; out={out}");
+    let blocked_line = out
+        .lines()
+        .find(|l| l.contains("blocked-by"))
+        .unwrap_or_else(|| panic!("a blocked-by row in:\n{out}"));
+    assert!(
+        blocked_line.contains('🔒') && blocked_line.contains("schema"),
+        "an unfinished blocker renders locked: {blocked_line}"
+    );
+    let related_line = out
+        .lines()
+        .find(|l| l.contains("related"))
+        .unwrap_or_else(|| panic!("a related row in:\n{out}"));
+    assert!(
+        related_line.contains('~') && related_line.contains("docs"),
+        "a related link renders with ~: {related_line}"
+    );
+
+    // The REVERSE direction renders from schema's end.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "list", &schema]);
+    assert!(ok, "link list should exit 0; out={out}");
+    let blocks_line = out
+        .lines()
+        .find(|l| l.contains("blocks"))
+        .unwrap_or_else(|| panic!("a blocks row in:\n{out}"));
+    assert!(
+        blocks_line.contains('→') && blocks_line.contains("parser"),
+        "the blocker renders what it blocks: {blocks_line}"
+    );
+
+    // `issue show` carries the same section.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &parser]);
+    assert!(ok, "issue show should exit 0; out={out}");
+    assert!(out.contains("Links:"), "the show block:\n{out}");
+    assert!(out.contains("blocked-by"), "the gating link:\n{out}");
+
+    // An issue with NO links shows no section and says so on `link list`.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "list", &docs]);
+    assert!(ok, "link list should exit 0; out={out}");
+    assert!(
+        out.contains("related"),
+        "docs reads the symmetric relation back:\n{out}"
+    );
+
+    // Removing the related link from the OTHER end works (it is symmetric).
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "link", "remove", &docs, &parser, "--kind", "related",
+        ],
+    );
+    assert!(ok, "link remove should exit 0; out={out}");
+    assert!(out.contains("no links"), "docs has no links left:\n{out}");
+}
+
+/// A self-link and a cycle are refused with a NON-ZERO exit, never a silent
+/// no-op.
+#[test]
+fn issue_link_refuses_a_self_link_and_a_cycle() {
+    let tmp = tempfile::tempdir().unwrap();
+    let create = |title: &str| -> String {
+        let (ok, out) = run(tmp.path(), &["hangar", "issue", "create", "--title", title]);
+        assert!(ok, "issue create should exit 0; out={out}");
+        out.lines()
+            .find_map(|l| l.strip_prefix("created issue "))
+            .expect("create prints the new issue id")
+            .trim()
+            .to_string()
+    };
+    let a = create("a");
+    let b = create("b");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "add", &a, &a]);
+    assert!(!ok, "a self-link must exit non-zero; out={out}");
+    assert!(out.contains("itself"), "kind-agnostic refusal:\n{out}");
+
+    let (ok, _) = run(tmp.path(), &["hangar", "issue", "link", "add", &a, &b]);
+    assert!(ok, "the first gating link lands");
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "link", "add", &b, &a]);
+    assert!(!ok, "the closing edge must exit non-zero; out={out}");
+    assert!(out.contains("cycle"), "cycle refusal:\n{out}");
+
+    // A `related` pair in BOTH orientations is fine — it gates nothing.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "issue", "link", "add", &b, &a, "--kind", "related",
+        ],
+    );
+    assert!(ok, "a related link is cycle-exempt; out={out}");
+}

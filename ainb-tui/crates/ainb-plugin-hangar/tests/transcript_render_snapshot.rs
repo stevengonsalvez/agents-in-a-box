@@ -47,6 +47,7 @@ fn issue_row() -> IssueRow {
         acceptance_criteria: Vec::new(),
         acceptance: Vec::new(),
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 

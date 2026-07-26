@@ -315,10 +315,13 @@ pub enum BoardsAction {
     CardDepAdd {
         /// The board both cards sit on.
         board_id: String,
-        /// The DEPENDENT card's issue.
+        /// The FROM card's issue (the DEPENDENT under the default kind).
         dependent_issue_id: String,
-        /// The BLOCKER card's issue.
+        /// The TO card's issue (the BLOCKER under the default kind).
         blocker_issue_id: String,
+        /// The link KIND to author (multica parity #20); `BlockedBy` reproduces
+        /// the pre-#20 gating edge.
+        link_type: ainb_hangar_proto::snapshots::LinkKindWire,
     },
     /// Flip a card's auto-run flag (`R`) — `hangar/board_card_set_auto_run`
     /// (tcp T4 / F7).
@@ -2037,6 +2040,9 @@ fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
         KeyCode::Up => BoardsKey::Up,
         KeyCode::Down => BoardsKey::Down,
         KeyCode::Char { ch } => BoardsKey::Char(*ch),
+        // Overlay-local only: the dep picker cycles its link kind (multica parity
+        // #20). No global binding is added, so no host-reserved key is touched.
+        KeyCode::Tab => BoardsKey::Tab,
         _ => return None,
     };
     Some(BoardsEvent::Key(k))
@@ -2160,10 +2166,12 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             board_id,
             dependent_issue_id,
             blocker_issue_id,
+            link_type,
         } => Some(BoardsAction::CardDepAdd {
             board_id,
             dependent_issue_id,
             blocker_issue_id,
+            link_type: link_type.to_wire(),
         }),
         BoardsIntent::ToggleAutoRun {
             board_id,

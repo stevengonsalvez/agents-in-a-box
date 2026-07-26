@@ -160,6 +160,7 @@ fn seeded_issues() -> serde_json::Value {
             acceptance_criteria: Vec::new(),
             acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }],
     })
     .unwrap()
