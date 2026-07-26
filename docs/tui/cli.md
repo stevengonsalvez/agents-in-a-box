@@ -4063,6 +4063,8 @@ Options:
       --issue <ISSUE>          The issue the routed task carries (`issue.id`), or omit for an ad-hoc task
       --work-dir <WORK_DIR>    The run's working directory, or omit
       --priority <PRIORITY>    Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine) [default: 0]
+      --fanout                 Fan the work out across the WHOLE squad (leader brief + one task per distinct `agent` member) instead of briefing the leader alone
+      --invoker <INVOKER>      The user the invocation-permission gate judges this assignment by (a user id or an email). Omitted defaults to the workspace owner — the ordinary single-operator assign, which the gate always admits
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```

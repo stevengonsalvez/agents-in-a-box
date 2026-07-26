@@ -774,6 +774,15 @@ pub struct SquadAssignArgs {
     /// Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine).
     #[arg(long, default_value_t = 0)]
     pub priority: i64,
+    /// Fan the work out across the WHOLE squad (leader brief + one task per
+    /// distinct `agent` member) instead of briefing the leader alone.
+    #[arg(long)]
+    pub fanout: bool,
+    /// The user the invocation-permission gate judges this assignment by (a user
+    /// id or an email). Omitted defaults to the workspace owner — the ordinary
+    /// single-operator assign, which the gate always admits.
+    #[arg(long)]
+    pub invoker: Option<String>,
     /// Workspace slug the squad belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -2558,20 +2567,53 @@ async fn run_squad_member(store: &Store, args: SquadMemberArgs, add: bool) -> Re
 /// squad's leader agent, derive the leader's runtime, and enqueue the task keyed
 /// to the leader so the claim path dispatches it to the leader. A human-member or
 /// unknown-squad leader (no agent to dispatch to) is rejected.
+///
+/// `--fanout` fans across the WHOLE squad (leader brief + one task per distinct
+/// `agent` member) — the daemon-free proof of the same service the RPC drives.
+/// `--invoker` names the user the gap #8 invocation gate judges every dispatch
+/// target by; omitted, the service resolves the workspace owner.
 async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
     use ainb_hangar_core::ids::WorkspaceId;
     use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let invoker = match args.invoker.as_deref() {
+        Some(token) => Some(resolve_user_id(store, token).await?),
+        None => None,
+    };
     let request = SquadAssignRequest {
         issue_id: args.issue.as_deref(),
         work_dir: args.work_dir.as_deref(),
         priority: args.priority,
+        invoker: invoker.as_deref(),
         // The CLI assign carries no card repo/agent (tcp T4): the task runs in-tree,
         // exactly the pre-T4 behaviour.
         ..SquadAssignRequest::default()
     };
+    if args.fanout {
+        let fanout = SquadAssignService::assign_fanout(
+            store.pool(),
+            &ws,
+            &args.squad_id,
+            &request,
+            &SystemIdGen,
+            &SystemClock,
+        )
+        .await
+        .map_err(squad_assign_cli_err)?;
+        println!(
+            "briefed leader {} with task {} (runtime {})",
+            fanout.leader.leader_agent_id, fanout.leader.task_id, fanout.leader.runtime_id
+        );
+        for m in &fanout.members {
+            println!(
+                "fanned task {} to member {} (runtime {})",
+                m.task_id, m.agent_id, m.runtime_id
+            );
+        }
+        return Ok(());
+    }
     let assignment = SquadAssignService::assign_to_leader(
         store.pool(),
         &ws,
@@ -2607,6 +2649,9 @@ fn squad_assign_cli_err(
         SquadAssignError::MemberAgentMissing(id) => {
             anyhow::anyhow!("squad member agent `{id}` not found")
         }
+        // gap #8: the invocation gate refused a dispatch target — no task row was
+        // written. Surfaced verbatim so the CLI exits non-zero with the reason.
+        e @ SquadAssignError::NotInvocable { .. } => anyhow::anyhow!("{e}"),
         db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),
     }
 }

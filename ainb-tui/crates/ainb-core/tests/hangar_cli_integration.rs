@@ -1085,14 +1085,18 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 .fetch_one(pool)
                 .await
                 .expect("default workspace exists after bootstrap");
-        // `agent.owner_id` FKs to `user(id)`; seed the owner.
-        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES (?, ?, ?)")
-            .bind("assign-owner")
-            .bind("owner@example.com")
-            .bind(0_i64)
-            .execute(pool)
-            .await
-            .unwrap();
+        // `agent.owner_id` FKs to `user(id)`. Own the agent with the workspace's
+        // OWNER (what `bootstrap::create_agent` does), not a synthetic user: the
+        // gap #8 invocation gate resolves the workspace owner as the default
+        // invoker, so a foreign-owned private agent would be uninvocable — a
+        // fixture artefact, not the routing behaviour under test.
+        let owner_id: String = sqlx::query_scalar(
+            "SELECT user_id FROM member WHERE workspace_id = ? AND role = 'owner' LIMIT 1",
+        )
+        .bind(&ws_id)
+        .fetch_one(pool)
+        .await
+        .expect("the bootstrapped workspace has an owner member");
         AgentRuntimeRepo::insert(
             pool,
             &AgentRuntime {
@@ -1111,13 +1115,13 @@ fn seed_assignable_agent(home: &std::path::Path) {
             pool,
             &Agent {
                 id: "assign-agent".into(),
-                workspace_id: ws_id,
+                workspace_id: ws_id.clone(),
                 name: "lead".into(),
                 runtime_id: "assign-runtime".into(),
                 instructions: None,
                 visibility: "workspace".into(),
                 permission_mode: "private".into(),
-                owner_id: "assign-owner".into(),
+                owner_id: owner_id.clone(),
                 archived: false,
                 model: None,
                 cli_args: Vec::new(),
@@ -1295,4 +1299,160 @@ fn workspace_config_clear_flags_unset_knobs() {
         out.contains("no prefix here") && !out.contains("[OPS] no prefix here"),
         "a cleared prefix must leave the title verbatim:\n{out}"
     );
+}
+
+/// gap #8 ACCEPTANCE (multica `validateAssigneePair` / squad-private-leader 403),
+/// daemon-free through the real binary: `ainb hangar squad assign --fanout
+/// --invoker <non-owner>` against a squad whose LEADER is private exits non-zero
+/// with the invocation-refusal message, and sqlite holds NO `agent_task_queue`
+/// row. Allow-listing that member on the leader then makes the identical command
+/// land the leader brief — proving a decision, not blanket denial.
+#[test]
+fn squad_fanout_gates_a_private_leader_against_a_non_owner_member() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+    seed_assignable_agent(tmp.path());
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "member",
+            "add",
+            "--email",
+            "bob@example.com",
+            "--role",
+            "member",
+        ],
+    );
+    assert!(ok, "member add should exit 0; out={out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "privsquad",
+            "--leader",
+            "agent:assign-agent",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    // DENY: bob is a plain member, the leader is private and owned by the owner.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "assign",
+            &squad_id,
+            "--fanout",
+            "--invoker",
+            "bob@example.com",
+        ],
+    );
+    assert!(
+        !ok,
+        "a non-owner fan-out through a private leader must fail; out={out}"
+    );
+    assert!(
+        out.contains("not invocable"),
+        "the gap #8 refusal must surface:\n{out}"
+    );
+    assert_eq!(
+        queued_task_count(tmp.path()),
+        0,
+        "a refused fan-out writes NO task row"
+    );
+
+    // `agent can-invoke` agrees with the path that just refused.
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "can-invoke",
+            "assign-agent",
+            "--as",
+            "bob@example.com",
+        ],
+    );
+    assert!(
+        out.contains("DENY"),
+        "can-invoke must agree it is denied:\n{out}"
+    );
+
+    // CONTROL: share the leader with bob (`agent allow` implies public_to).
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "allow",
+            "assign-agent",
+            "--member",
+            "bob@example.com",
+        ],
+    );
+    assert!(ok, "agent allow should exit 0; out={out}");
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "agent",
+            "can-invoke",
+            "assign-agent",
+            "--as",
+            "bob@example.com",
+        ],
+    );
+    assert!(out.contains("ALLOW"), "can-invoke must now allow:\n{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "assign",
+            &squad_id,
+            "--fanout",
+            "--invoker",
+            "bob@example.com",
+        ],
+    );
+    assert!(
+        ok,
+        "the allow-listed member's fan-out should exit 0; out={out}"
+    );
+    assert!(
+        out.contains("briefed leader assign-agent"),
+        "the fan-out must brief the leader:\n{out}"
+    );
+    assert_eq!(
+        queued_task_count(tmp.path()),
+        1,
+        "the leader brief landed (the squad has no agent members)"
+    );
+}
+
+/// Rows in `agent_task_queue` for the isolated hangar home — the acceptance
+/// assertion that a refused dispatch wrote NOTHING.
+fn queued_task_count(home: &std::path::Path) -> i64 {
+    use ainb_hangar_store::Store;
+
+    let rt = tokio::runtime::Runtime::new().unwrap();
+    rt.block_on(async {
+        let store = Store::open_in(home).await.unwrap();
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(store.pool())
+            .await
+            .unwrap()
+    })
 }
