@@ -499,6 +499,16 @@ pub struct AgentCreateArgs {
     /// Optional instructions / system prompt for the agent.
     #[arg(long)]
     pub instructions: Option<String>,
+    /// Optional short blurb rendered beside the agent (≤255 characters).
+    #[arg(long)]
+    pub description: Option<String>,
+    /// Optional avatar token (e.g. `emoji:🦊`); omitted mints a random emoji.
+    #[arg(long)]
+    pub avatar: Option<String>,
+    /// Optional Codex service tier (e.g. `priority`); omitted inherits the local
+    /// Codex config. Stored + surfaced only — no dispatch-time override yet.
+    #[arg(long = "service-tier")]
+    pub service_tier: Option<String>,
     /// Workspace slug to create the agent in. Defaults to the bootstrapped
     /// `default` workspace (created if absent).
     #[arg(long)]
@@ -578,6 +588,24 @@ pub struct AgentEditArgs {
     /// Clear the token budget (back to unlimited); omitted leaves it.
     #[arg(long = "clear-token-budget")]
     pub clear_token_budget: bool,
+    /// New description (≤255 characters); omitted leaves it. Pass `--description ""`
+    /// to blank it (the column is NOT NULL, so `""` IS its cleared state).
+    #[arg(long)]
+    pub description: Option<String>,
+    /// New avatar token; omitted leaves it. Mutually exclusive with
+    /// `--clear-avatar`.
+    #[arg(long, conflicts_with = "clear_avatar")]
+    pub avatar: Option<String>,
+    /// Clear the avatar; omitted leaves it.
+    #[arg(long = "clear-avatar")]
+    pub clear_avatar: bool,
+    /// New Codex service tier; omitted leaves it. Mutually exclusive with
+    /// `--clear-service-tier`.
+    #[arg(long = "service-tier", conflicts_with = "clear_service_tier")]
+    pub service_tier: Option<String>,
+    /// Clear the service tier (back to inheriting the local Codex config).
+    #[arg(long = "clear-service-tier")]
+    pub clear_service_tier: bool,
     /// Workspace slug the agent belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -2062,6 +2090,21 @@ async fn run_agent_can_invoke(store: &Store, args: AgentCanInvokeArgs) -> Result
     Ok(())
 }
 
+/// Validate an optional `--description` against the 255-CODE-POINT cap
+/// (migration 0050 / multica 060), returning the trimmed value.
+///
+/// Counted in `chars()`, not bytes, so an emoji-heavy blurb measures the way the
+/// schema's `length()` CHECK measures it. Rejecting here gives the operator the
+/// actionable message instead of an opaque store fault.
+fn validated_description(desc: Option<&str>) -> Result<Option<String>> {
+    let Some(desc) = desc else { return Ok(None) };
+    let trimmed = desc.trim();
+    if trimmed.chars().count() > ainb_hangar_store::repo::agent::MAX_DESCRIPTION_CHARS {
+        anyhow::bail!("description must be 255 characters or fewer");
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
 /// `hangar agent create`: create one agent from scratch, filling the workspace /
 /// runtime / owner FKs behind the scenes. Prints the created agent's name (never
 /// the id). An unsupported provider or empty name is a CLI error.
@@ -2072,6 +2115,7 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
     }
     let provider = ainb_hangar_store::bootstrap::normalize_provider(args.provider.as_deref())
         .map_err(|e| anyhow::anyhow!(e))?;
+    let description = validated_description(args.description.as_deref())?.unwrap_or_default();
     // An explicit --workspace must exist; the default is ensured (created if absent).
     let workspace_id = match args.workspace.as_deref() {
         Some(slug) => {
@@ -2084,15 +2128,31 @@ async fn run_agent_create(store: &Store, args: AgentCreateArgs) -> Result<()> {
         }
         None => ensure_default_workspace(store).await?,
     };
-    let agent = ainb_hangar_store::bootstrap::create_agent(
+    let agent = ainb_hangar_store::bootstrap::create_agent_from(
         store.pool(),
         &workspace_id,
-        name,
-        &provider,
-        args.instructions,
+        ainb_hangar_store::bootstrap::AgentDraft {
+            name: name.to_string(),
+            provider,
+            instructions: args.instructions,
+            description,
+            avatar_url: args.avatar,
+            service_tier: args.service_tier,
+            // `--model` rides the follow-up write below (unchanged); `kind` /
+            // `system_key` are internal-only (a system agent is never CLI-minted).
+            ..ainb_hangar_store::bootstrap::AgentDraft::default()
+        },
     )
     .await
-    .context("create agent")?;
+    .map_err(|e| {
+        if ainb_hangar_store::repo::agent::is_duplicate_name(&e) {
+            // Multica 046's 409 equivalent: a clear refusal + non-zero exit, never
+            // a silent second identically-named actor the picker cannot tell apart.
+            anyhow::anyhow!("an agent named `{name}` already exists in this workspace")
+        } else {
+            anyhow::Error::new(e).context("create agent")
+        }
+    })?;
     // Optional model override: mirror the daemon's create-time follow-up so the
     // CLI create path persists the model too. A blank value is treated as absent
     // (leaves `model` NULL rather than writing an empty string).
@@ -2164,9 +2224,14 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
     let agent_env = (!args.env.is_empty()).then_some(args.env);
 
     let token_budget = clear_or_set(args.clear_token_budget, args.token_budget);
+    // Migration 0050: `description` is NOT NULL so it has no clear-flag (`""` IS
+    // its cleared state); avatar / service tier follow the clear-flag pattern.
+    let description = validated_description(args.description.as_deref())?;
+    let avatar_url = clear_or_set(args.clear_avatar, args.avatar);
+    let service_tier = clear_or_set(args.clear_service_tier, args.service_tier);
 
     let update = AgentConfigUpdate {
-        name: args.name,
+        name: args.name.clone(),
         instructions,
         model,
         cli_args,
@@ -2174,19 +2239,33 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
         thinking,
         agent_env,
         token_budget,
+        description,
+        avatar_url,
+        service_tier,
     };
 
     if update.is_empty() {
         anyhow::bail!(
             "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
              / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
-             / --env / --token-budget / --clear-token-budget"
+             / --env / --token-budget / --clear-token-budget / --description / --avatar / \
+             --clear-avatar / --service-tier / --clear-service-tier"
         );
     }
 
     let touched = AgentRepo::update_config(store.pool(), &workspace_id, &args.id, &update)
         .await
-        .with_context(|| format!("update agent {}", args.id))?;
+        .map_err(|e| {
+            // A RENAME onto a taken name is the same refusal create gives.
+            if ainb_hangar_store::repo::agent::is_duplicate_name(&e) {
+                anyhow::anyhow!(
+                    "an agent named `{}` already exists in this workspace",
+                    args.name.as_deref().unwrap_or_default()
+                )
+            } else {
+                anyhow::Error::new(e).context(format!("update agent {}", args.id))
+            }
+        })?;
     if touched {
         println!("updated agent {}", args.id);
     } else {
@@ -5042,24 +5121,32 @@ fn render_agent_list(agents: &[ainb_hangar_store::repo::agent::Agent], format: O
     }
 }
 
-/// One-line text summary of an agent (id, name, archived badge, model).
+/// One-line text summary of an agent (id, name, archived badge, model, blurb).
 fn agent_line(a: &ainb_hangar_store::repo::agent::Agent) -> String {
+    // The blurb (migration 0050) is appended only when set, so a metadata-less
+    // agent's line is byte-identical to the pre-0050 rendering.
+    let blurb = if a.description.is_empty() {
+        String::new()
+    } else {
+        format!("  — {}", a.description)
+    };
     format!(
-        "{}  {}{}  model={}  args={}  env={}",
+        "{}  {}{}  model={}  args={}  env={}{}",
         a.id,
         a.name,
         if a.archived { "  [archived]" } else { "" },
         a.model.as_deref().unwrap_or("-"),
         a.cli_args.len(),
         a.agent_env.len(),
+        blurb,
     )
 }
 const fn agent_csv_header() -> &'static str {
-    "id,name,archived,model,thinking,args,env"
+    "id,name,archived,model,thinking,args,env,description"
 }
 fn agent_csv_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     format!(
-        "{},{},{},{},{},{},{}",
+        "{},{},{},{},{},{},{},{}",
         csv_field(a.id.as_str()),
         csv_field(a.name.as_str()),
         a.archived,
@@ -5067,15 +5154,16 @@ fn agent_csv_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         csv_field(a.thinking.as_deref().unwrap_or("")),
         a.cli_args.len(),
         a.agent_env.len(),
+        csv_field(a.description.as_str()),
     )
 }
 const fn agent_md_header() -> &'static str {
-    "| id | name | archived | model | thinking | args | env |\n\
-     | --- | --- | --- | --- | --- | --- | --- |\n"
+    "| id | name | archived | model | thinking | args | env | description |\n\
+     | --- | --- | --- | --- | --- | --- | --- | --- |\n"
 }
 fn agent_md_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     format!(
-        "| {} | {} | {} | {} | {} | {} | {} |",
+        "| {} | {} | {} | {} | {} | {} | {} | {} |",
         md_cell(a.id.as_str()),
         md_cell(a.name.as_str()),
         a.archived,
@@ -5083,6 +5171,7 @@ fn agent_md_row(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         md_cell(a.thinking.as_deref().unwrap_or("-")),
         a.cli_args.len(),
         a.agent_env.len(),
+        md_cell(a.description.as_str()),
     )
 }
 /// Minimal stable JSON object for one agent (id, name, archived + config knobs).
@@ -5097,7 +5186,7 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"id\":{},\"name\":{},\"archived\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}}}}",
+        "{{\"id\":{},\"name\":{},\"archived\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"description\":{}}}",
         json_string(a.id.as_str()),
         json_string(a.name.as_str()),
         a.archived,
@@ -5105,6 +5194,7 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         thinking,
         args,
         env,
+        json_string(a.description.as_str()),
     )
 }
 
