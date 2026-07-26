@@ -1967,3 +1967,205 @@ fn squad_role_and_instructions_round_trip_through_the_cli() {
         "the JSON view must show the cleared field:\n{json}"
     );
 }
+
+/// The user-visible PROMPT-INSPECTION proof for parity #7 / `7-rest`:
+/// `ainb hangar squad briefing <id>` prints the exact text the daemon would
+/// inject into a leader run — the operating protocol, the roster with each
+/// member's role AND materialisable skills, and the squad instructions.
+///
+/// Driven entirely through the real binary: agents are created, skills imported
+/// and attached (one of them disabled, which must NOT be advertised), the squad
+/// is built with a roled member and instructions, and the briefing is read back.
+#[test]
+fn squad_briefing_prints_protocol_roster_roles_skills_and_instructions() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    // Two skills on disk for `skills sync` to import.
+    let skills_src = tempfile::tempdir().unwrap();
+    for name in ["pathfinding", "demolition"] {
+        let dir = skills_src.path().join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\n---\n\n# {name}\n"),
+        )
+        .unwrap();
+    }
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "sync",
+            "--source",
+            skills_src.path().to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "skills sync should exit 0; out={out}");
+
+    for name in ["captain", "scout"] {
+        let (ok, out) = run(tmp.path(), &["hangar", "agent", "create", "--name", name]);
+        assert!(ok, "agent create should exit 0; out={out}");
+    }
+    // Resolve the two agent ids from the JSON listing.
+    let (ok, agents_json) = run(tmp.path(), &["--format", "json", "hangar", "agent", "list"]);
+    assert!(ok, "agent list should exit 0; out={agents_json}");
+    let agent_id = |name: &str| -> String {
+        // Each agent object carries both "id" and "name"; split on the name to
+        // find its object, then walk back to that object's id.
+        let marker = format!("\"name\":\"{name}\"");
+        let upto = &agents_json[..agents_json.find(&marker).expect("agent in listing")];
+        let id_at = upto.rfind("\"id\":\"").expect("id before the name");
+        let rest = &upto[id_at + 6..];
+        rest[..rest.find('"').unwrap()].to_string()
+    };
+    let captain = agent_id("captain");
+    let scout = agent_id("scout");
+
+    // scout gets both skills, then `demolition` is DISABLED — the roster must
+    // advertise only what scout will actually materialise.
+    for skill in ["pathfinding", "demolition"] {
+        let (ok, out) = run(
+            tmp.path(),
+            &["hangar", "skills", "attach", skill, "--agent", &scout],
+        );
+        assert!(ok, "skills attach should exit 0; out={out}");
+    }
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "toggle",
+            "demolition",
+            "--agent",
+            &scout,
+            "--enabled",
+            "false",
+        ],
+    );
+    assert!(ok, "skills toggle should exit 0; out={out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "briefed",
+            "--leader",
+            &format!("agent:{captain}"),
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "add-member",
+            &squad_id,
+            "--member",
+            &format!("agent:{scout}"),
+        ],
+    );
+    assert!(ok, "squad add-member should exit 0; out={out}");
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "member-role",
+            &squad_id,
+            "--member",
+            &format!("agent:{scout}"),
+            "--role",
+            "owns the migrations",
+        ],
+    );
+    assert!(ok, "squad member-role should exit 0; out={out}");
+    let instructions = "Route schema work to the DB owner.";
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "instructions",
+            &squad_id,
+            "--set",
+            instructions,
+        ],
+    );
+    assert!(ok, "squad instructions should exit 0; out={out}");
+
+    let (ok, briefing) = run(tmp.path(), &["hangar", "squad", "briefing", &squad_id]);
+    assert!(ok, "squad briefing should exit 0; out={briefing}");
+    assert!(
+        briefing.contains("## Squad Operating Protocol"),
+        "protocol section:\n{briefing}"
+    );
+    assert!(
+        briefing.contains("## Squad Roster"),
+        "roster section:\n{briefing}"
+    );
+    // The member's WHOLE row — role AND the live skill, never a bare substring.
+    assert!(
+        briefing.contains(&format!(
+            "- scout — agent — {scout} — role: owns the migrations — skills: pathfinding\n"
+        )),
+        "member row must carry role + materialisable skills:\n{briefing}"
+    );
+    assert!(
+        !briefing.contains("demolition"),
+        "a disabled skill link must never be advertised:\n{briefing}"
+    );
+    assert!(
+        briefing.contains("## Squad Instructions"),
+        "instructions section:\n{briefing}"
+    );
+    assert!(
+        briefing.contains(instructions),
+        "instructions rendered verbatim:\n{briefing}"
+    );
+}
+
+/// A squad whose leader is a human `member` has no agent runtime to brief:
+/// `hangar squad briefing` refuses with an explanation rather than printing a
+/// half-built prompt.
+#[test]
+fn squad_briefing_on_a_human_leader_squad_exits_non_zero() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Bootstrap the workspace");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            "humans",
+            "--leader",
+            "member:user-9",
+        ],
+    );
+    assert!(ok, "squad create should exit 0; out={out}");
+    let squad_id = out
+        .lines()
+        .find_map(|l| l.split('(').nth(1).and_then(|s| s.split(')').next()))
+        .expect("create output carries the squad id")
+        .to_string();
+
+    let (ok, out) = run(tmp.path(), &["hangar", "squad", "briefing", &squad_id]);
+    assert!(!ok, "a human-leader squad must exit non-zero; out={out}");
+    assert!(
+        out.contains("has a human leader; no agent briefing is built"),
+        "the refusal must explain itself:\n{out}"
+    );
+}
