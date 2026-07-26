@@ -496,9 +496,33 @@ fn agent_edit_and_archive_round_trip() {
         shown.contains("\"thinking\":\"high\""),
         "thinking not persisted:\n{shown}"
     );
+    // Parity #30: the env is persisted but RENDERED REDACTED — the key survives,
+    // the value is masked, and the count/flag say so. The value's round-trip is
+    // proven at the store boundary (`repo_agent_env_redaction`), which is the
+    // only layer allowed to see it.
     assert!(
-        shown.contains("\"FOO\":\"bar\""),
-        "env not persisted:\n{shown}"
+        shown.contains("\"FOO\":\"****\""),
+        "env key not persisted (or the value leaked):\n{shown}"
+    );
+    assert!(
+        !shown.contains("\"bar\""),
+        "the env value must never be rendered:\n{shown}"
+    );
+    assert!(
+        shown.contains("\"env_key_count\":1") && shown.contains("\"env_redacted\":true"),
+        "the redaction metadata must accompany the masked map:\n{shown}"
+    );
+
+    // The dedicated redacted read verb agrees.
+    let (ok, env_out) = run(tmp.path(), &["hangar", "agent", "env", "agent-1"]);
+    assert!(ok, "agent env should exit 0; out={env_out}");
+    assert!(
+        env_out.contains("FOO=****"),
+        "agent env must mask the value:\n{env_out}"
+    );
+    assert!(
+        env_out.contains("1 keys (values hidden)"),
+        "agent env must report the count:\n{env_out}"
     );
 
     // Archive it: the active list no longer shows it.

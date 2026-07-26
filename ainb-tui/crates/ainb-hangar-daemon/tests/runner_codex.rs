@@ -270,17 +270,26 @@ async fn codex_dispatch_tracing_never_contains_the_agent_env_value() {
 
     let tmp = TempDir::new().expect("tmp");
     let env = exec_env_in(tmp.path());
+    // The fake PROVES it received the value by touching a marker file rather
+    // than printing it: a child that echoes its own secret is the child's leak,
+    // and it would land in `codex.jsonl` and (via the contract-drift warning)
+    // in the log — drowning out the thing actually under test.
+    let marker = tmp.path().join("child-saw-secret");
     let script = write_script(
         tmp.path(),
         "fake-codex.sh",
-        r#"echo '{"type":"system","session_id":"s"}'
-echo "SECRET_TOKEN=${SECRET_TOKEN:-<absent>}"
-exit 0"#,
+        &format!(
+            "if [ \"${{SECRET_TOKEN}}\" = '{SECRET}' ]; then : > '{}'; fi\n\
+             echo '{{\"type\":\"system\",\"session_id\":\"s\"}}'\n\
+             echo '{{\"type\":\"result\",\"content\":\"ok\"}}'\n\
+             exit 0",
+            marker.display()
+        ),
     );
     let runner = Runner::new(cfg_with_codex(script));
     let extra_env = [("SECRET_TOKEN".to_string(), SECRET.to_string())];
 
-    let outcome = runner
+    runner
         .run_codex_with_env(
             &env,
             std::iter::empty(),
@@ -291,7 +300,7 @@ exit 0"#,
         .expect("run");
 
     assert!(
-        outcome.result().stdout_tail.contains(&format!("SECRET_TOKEN={SECRET}")),
+        marker.exists(),
         "precondition: the child really does receive the value"
     );
 
