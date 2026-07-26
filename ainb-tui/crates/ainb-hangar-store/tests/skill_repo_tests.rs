@@ -438,3 +438,213 @@ async fn attach_rejects_cross_workspace() {
             .expect("count junction");
     assert_eq!(junction, 0, "rejected attach writes no junction row");
 }
+
+// ---- Per-agent skill enablement (migration 0051, parity #24) ----------------
+//
+// Attachment and enablement are two orthogonal levers: detach removes the link,
+// disable keeps the link and suppresses only its effect. These tests pin that
+// split — in particular that `skills_for_agent` (the materialisation read) hides
+// a disabled link while `agent_skill_links` (the attachment read) still shows it.
+
+/// Seed a workspace + agent + two named skills, attach both, and return the
+/// typed ids the enablement tests drive.
+async fn seed_two_attached_skills(
+    store: &Store,
+) -> (
+    WorkspaceId,
+    ainb_hangar_core::ids::AgentId,
+    ainb_hangar_core::ids::SkillId,
+    ainb_hangar_core::ids::SkillId,
+) {
+    seed_workspace(store, "ws-1", "alpha").await;
+    let agent_id = seed_agent(store, "ws-1", "1").await;
+    let ws = WorkspaceId::from_str("ws-1").unwrap();
+    let agent = ainb_hangar_core::ids::AgentId::from_str(&agent_id).unwrap();
+    let commit = SkillRepo::create(store.pool(), &ws, "commit", None, Some("# commit"), vec![])
+        .await
+        .expect("create commit");
+    let review = SkillRepo::create(store.pool(), &ws, "review", None, Some("# review"), vec![])
+        .await
+        .expect("create review");
+    for skill in [&commit, &review] {
+        SkillRepo::attach_to_agent(store.pool(), &ws, &agent, skill)
+            .await
+            .expect("attach");
+    }
+    (ws, agent, commit, review)
+}
+
+#[tokio::test]
+async fn set_enabled_false_hides_link_from_skills_for_agent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws, agent, _commit, review) = seed_two_attached_skills(&store).await;
+
+    let toggled = SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
+        .await
+        .expect("disable review");
+    assert!(toggled, "disabling an attached link reports a row change");
+
+    // The materialisation read sees only the enabled link…
+    let live = SkillRepo::skills_for_agent(store.pool(), &ws, &agent)
+        .await
+        .expect("skills_for_agent");
+    assert_eq!(
+        live.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["commit"],
+        "a disabled link must not reach the materialiser"
+    );
+
+    // …while the attachment read still lists BOTH, flagged.
+    let links = SkillRepo::agent_skill_links(store.pool(), &ws, &agent)
+        .await
+        .expect("agent_skill_links");
+    assert_eq!(
+        links.iter().map(|l| (l.name.as_str().to_string(), l.enabled)).collect::<Vec<_>>(),
+        vec![("commit".to_string(), true), ("review".to_string(), false)],
+        "a disabled link is still ATTACHED, just not live"
+    );
+}
+
+#[tokio::test]
+async fn set_enabled_true_restores_it() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws, agent, _commit, review) = seed_two_attached_skills(&store).await;
+
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
+        .await
+        .expect("disable");
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, true)
+        .await
+        .expect("re-enable");
+
+    let live = SkillRepo::skills_for_agent(store.pool(), &ws, &agent)
+        .await
+        .expect("skills_for_agent");
+    assert_eq!(
+        live.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["commit", "review"],
+        "re-enabling restores the link to the materialisation set"
+    );
+}
+
+/// D2 — the regression guard. Seed/`templates use` re-attach on every re-run; if
+/// attach reset `enabled` those idempotent paths would silently undo a disable.
+#[tokio::test]
+async fn attach_does_not_re_enable_a_disabled_link() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws, agent, _commit, review) = seed_two_attached_skills(&store).await;
+
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
+        .await
+        .expect("disable");
+    SkillRepo::attach_to_agent(store.pool(), &ws, &agent, &review)
+        .await
+        .expect("re-attach (idempotent)");
+
+    let links = SkillRepo::agent_skill_links(store.pool(), &ws, &agent)
+        .await
+        .expect("agent_skill_links");
+    let review_link = links.iter().find(|l| l.name.as_str() == "review").expect("review link");
+    assert!(
+        !review_link.enabled,
+        "re-attaching must NOT resurrect a deliberately disabled link"
+    );
+}
+
+/// Detach removes the row outright, so a later attach mints a NEW row — which
+/// starts at the column default, enabled.
+#[tokio::test]
+async fn detach_then_attach_starts_enabled() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws, agent, _commit, review) = seed_two_attached_skills(&store).await;
+
+    SkillRepo::set_enabled(store.pool(), &ws, &agent, &review, false)
+        .await
+        .expect("disable");
+    SkillRepo::detach_from_agent(store.pool(), &ws, &agent, &review)
+        .await
+        .expect("detach");
+    SkillRepo::attach_to_agent(store.pool(), &ws, &agent, &review)
+        .await
+        .expect("re-attach");
+
+    let links = SkillRepo::agent_skill_links(store.pool(), &ws, &agent)
+        .await
+        .expect("agent_skill_links");
+    let review_link = links.iter().find(|l| l.name.as_str() == "review").expect("review link");
+    assert!(
+        review_link.enabled,
+        "a freshly-created link starts enabled (the column default)"
+    );
+}
+
+#[tokio::test]
+async fn set_enabled_cross_workspace_rejected() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (ws_a, agent, commit, _review) = seed_two_attached_skills(&store).await;
+    seed_workspace(&store, "ws-b", "beta").await;
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+
+    // Scoping the agent's own link to a FOREIGN workspace must be refused.
+    let res = SkillRepo::set_enabled(store.pool(), &ws_b, &agent, &commit, false).await;
+    assert!(
+        matches!(
+            res,
+            Err(ainb_hangar_store::repo::skill::SkillRepoError::CrossWorkspace)
+        ),
+        "cross-workspace toggle must be rejected (IDOR), got {res:?}"
+    );
+
+    // …and the real link is untouched.
+    let live = SkillRepo::skills_for_agent(store.pool(), &ws_a, &agent)
+        .await
+        .expect("skills_for_agent");
+    assert_eq!(
+        live.iter().map(|s| s.name.as_str()).collect::<Vec<_>>(),
+        vec!["commit", "review"],
+        "a rejected toggle must not change any flag"
+    );
+}
+
+#[tokio::test]
+async fn set_enabled_on_unattached_pair_returns_false() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_workspace(&store, "ws-1", "alpha").await;
+    let agent_id = seed_agent(&store, "ws-1", "1").await;
+    let ws = WorkspaceId::from_str("ws-1").unwrap();
+    let agent = ainb_hangar_core::ids::AgentId::from_str(&agent_id).unwrap();
+    let orphan = SkillRepo::create(store.pool(), &ws, "orphan", None, None, vec![])
+        .await
+        .expect("create skill");
+
+    let toggled = SkillRepo::set_enabled(store.pool(), &ws, &agent, &orphan, false)
+        .await
+        .expect("no error for an unattached pair");
+    assert!(
+        !toggled,
+        "toggling an unattached pair reports no row change (not an error)"
+    );
+}
+
+#[tokio::test]
+async fn agent_skill_links_foreign_agent_is_empty() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    let (_ws_a, agent, _commit, _review) = seed_two_attached_skills(&store).await;
+    seed_workspace(&store, "ws-b", "beta").await;
+    let ws_b = WorkspaceId::from_str("ws-b").unwrap();
+
+    let links = SkillRepo::agent_skill_links(store.pool(), &ws_b, &agent)
+        .await
+        .expect("agent_skill_links");
+    assert!(
+        links.is_empty(),
+        "a foreign agent id must never leak another tenant's attachments"
+    );
+}
