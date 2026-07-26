@@ -486,6 +486,8 @@ pub async fn agents_list(
             workload: Workload::Idle,
             is_agent: false,
             recent_rank: None,
+            // A human member carries no agent metadata.
+            ..ActorRow::default()
         });
     }
 
@@ -836,6 +838,10 @@ async fn agent_actor_row_with_counts(
         workload: Workload::derive(running, queued),
         is_agent: true,
         recent_rank: None,
+        // Migration 0050 metadata. Both are omitted from the wire when empty, so
+        // a metadata-less agent serialises exactly as it did pre-0050.
+        description: agent.description.clone(),
+        avatar: agent.avatar_url.clone().unwrap_or_default(),
     })
 }
 

@@ -115,6 +115,7 @@ fn seeded_agents() -> serde_json::Value {
         workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
+        ..ActorRow::default()
     };
     serde_json::to_value(AgentsListResult {
         actors: vec![

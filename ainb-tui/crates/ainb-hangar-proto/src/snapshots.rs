@@ -1119,6 +1119,19 @@ pub struct AgentUpdateParams {
     /// (back to unlimited), a value sets it (migration 0042).
     #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
     pub token_budget: FieldUpdate<i64>,
+    /// New description, ≤255 CHARACTERS; `None` leaves it unchanged (the column
+    /// is NOT NULL — its cleared state is `""`, so no [`FieldUpdate`]).
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// New avatar token; omitted leaves it, `null` clears it, a value sets it
+    /// (migration 0050).
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub avatar_url: FieldUpdate<String>,
+    /// New Codex service tier; omitted leaves it, `null` clears it (back to
+    /// inheriting the local config), a value sets it (migration 0050).
+    #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
+    pub service_tier: FieldUpdate<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_CREATE`]: create one agent from
@@ -1152,6 +1165,24 @@ pub struct AgentCreateParams {
     /// Optional token budget (rtk/headroom); absent = unlimited (migration 0042).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub token_budget: Option<i64>,
+    /// Optional short blurb, ≤255 CHARACTERS (migration 0050); absent = `""`.
+    /// The daemon rejects an over-long value with `INVALID_PARAMS`.
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    /// Optional avatar token (e.g. `"emoji:🦊"`); absent/blank makes the daemon
+    /// mint a random emoji so an agent is never avatar-less (migration 0050).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub avatar_url: Option<String>,
+    /// Optional Codex service tier (runtime-native catalog id, e.g. `"priority"`);
+    /// absent = inherit the local Codex config (migration 0050). Stored +
+    /// surfaced only — no dispatch-time override reads it yet.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_tier: Option<String>,
+    // NOTE: `kind` / `system_key` are DELIBERATELY absent from the create wire.
+    // A `system` agent is a hidden internal carrier minted by the agent-builder
+    // (gap #9-rest), never by a client, so exposing it here would let any peer
+    // manufacture an agent no roster can see.
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_ARCHIVE`] (e38.15): archive or
@@ -2206,6 +2237,7 @@ mod tests {
                 workload: Workload::Working,
                 is_agent: true,
                 recent_rank: Some(0),
+                ..Default::default()
             }],
         };
         let s = serde_json::to_string(&actors).unwrap();
@@ -2613,6 +2645,9 @@ mod tests {
             thinking: FieldUpdate::Set("high".into()),
             agent_env: Some(vec![("FOO".into(), "bar".into())]),
             token_budget: FieldUpdate::Set(500_000),
+            description: Some("ships the backend".into()),
+            avatar_url: FieldUpdate::Set("emoji:\u{1F98A}".into()),
+            service_tier: FieldUpdate::Set("priority".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentUpdateParams>(&s).unwrap(), full);
@@ -2628,6 +2663,11 @@ mod tests {
         assert!(p.mcp_config.is_keep(), "absent mcp_config leaves it");
         assert!(p.thinking.is_keep(), "absent thinking leaves it");
         assert_eq!(p.agent_env, None, "absent agent_env leaves it");
+        // Migration-0050 metadata: a PRE-0050 producer sends none of these keys,
+        // and each must decode to leave-unchanged (the append-only proof).
+        assert_eq!(p.description, None, "absent description leaves it");
+        assert!(p.avatar_url.is_keep(), "absent avatar_url leaves it");
+        assert!(p.service_tier.is_keep(), "absent service_tier leaves it");
         assert_eq!(serde_json::to_string(&p).unwrap(), minimal);
 
         // An explicit `null` is the CLEAR instruction, distinct from omission.
@@ -2664,6 +2704,9 @@ mod tests {
             instructions: Some("be terse".into()),
             model: Some("gpt-5-codex".into()),
             token_budget: Some(250_000),
+            description: Some("reviews every PR".into()),
+            avatar_url: Some("emoji:\u{1F98A}".into()),
+            service_tier: Some("priority".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
         assert_eq!(serde_json::from_str::<AgentCreateParams>(&s).unwrap(), full);
@@ -2675,6 +2718,11 @@ mod tests {
         assert!(minimal.provider.is_none());
         assert!(minimal.instructions.is_none());
         assert!(minimal.model.is_none());
+        // Migration-0050 metadata: a PRE-0050 payload carries none of these keys
+        // and still deserializes, each defaulting to "unset" (append-only proof).
+        assert!(minimal.description.is_none());
+        assert!(minimal.avatar_url.is_none());
+        assert!(minimal.service_tier.is_none());
         // The optional fields are omitted from the serialized form when absent.
         assert_eq!(
             serde_json::to_string(&minimal).unwrap(),

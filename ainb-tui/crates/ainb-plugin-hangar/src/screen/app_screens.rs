@@ -496,6 +496,8 @@ pub enum AgentsAction {
     Create {
         /// The new agent's name.
         name: String,
+        /// The optional short blurb (`None` = left blank, migration 0050).
+        description: Option<String>,
         /// The chosen provider (`claude`/`codex`/`copilot`).
         provider: String,
         /// The optional per-agent model override (`None` = provider default).
@@ -2271,11 +2273,13 @@ fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
     states.pending_agents_action = match out.intent {
         Some(AgentsIntent::CreateAgent {
             name,
+            description,
             provider,
             model,
             instructions,
         }) => Some(AgentsAction::Create {
             name,
+            description,
             provider,
             model,
             instructions,

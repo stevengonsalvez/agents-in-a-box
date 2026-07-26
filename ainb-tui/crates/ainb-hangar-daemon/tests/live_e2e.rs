@@ -482,7 +482,15 @@ async fn live_dispatch_remote_repo_source_branch() {
     run_ainb(
         &ainb,
         home.path(),
-        &["hangar", "agent", "create", "--name", &agent_name, "--provider", "claude"],
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            &agent_name,
+            "--provider",
+            "claude",
+        ],
     );
     let pool = open_pool(&db_path).await;
     let (agent_id, runtime_id) = agent_ids_by_name(&pool, &agent_name).await;
@@ -492,7 +500,12 @@ async fn live_dispatch_remote_repo_source_branch() {
         &["hangar", "agent", "edit", &agent_id, "--model", "haiku"],
     );
 
-    let daemon = LiveDaemon::spawn(&home.path().join("daemon.log"), home.path(), &runtime_id, &claude);
+    let daemon = LiveDaemon::spawn(
+        &home.path().join("daemon.log"),
+        home.path(),
+        &runtime_id,
+        &claude,
+    );
 
     // Enqueue with the REMOTE repo + the feature source branch. The CLI clones
     // the remote into the shared cache and persists the LOCAL path + the branch
@@ -510,7 +523,14 @@ async fn live_dispatch_remote_repo_source_branch() {
         );
     }
     let mut args: Vec<&str> = vec![
-        "hangar", "issue", "create", "--title", &brief, "--assign", &agent_id, "--repo",
+        "hangar",
+        "issue",
+        "create",
+        "--title",
+        &brief,
+        "--assign",
+        &agent_id,
+        "--repo",
         &remote_url,
     ];
     if !break_source {
@@ -556,7 +576,10 @@ async fn live_dispatch_remote_repo_source_branch() {
     assert_eq!(got.trim(), nonce, "artifact exists but nonce mismatch");
 
     // 4. Only now is `done` trustworthy.
-    assert_eq!(status, "done", "sentinel + nonce present but status={status:?}, not done");
+    assert_eq!(
+        status, "done",
+        "sentinel + nonce present but status={status:?}, not done"
+    );
 
     eprintln!(
         "LIVE E2E BRANCH OK: task {task_id} done; worktree on feature/x verified at {wd:?}; \
@@ -572,7 +595,11 @@ fn make_branchy_bare_remote(dir: &Path) -> String {
     std::fs::create_dir_all(&work).expect("mk work");
     let git = |args: &[&str]| {
         let out = Command::new("git").arg("-C").arg(&work).args(args).output().expect("git");
-        assert!(out.status.success(), "git {args:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(
+            out.status.success(),
+            "git {args:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
     };
     git(&["init", "--quiet"]);
     git(&["config", "user.email", "t@e.com"]);
@@ -602,7 +629,11 @@ fn make_branchy_bare_remote(dir: &Path) -> String {
         ])
         .output()
         .expect("bare clone");
-    assert!(out.status.success(), "bare clone: {}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.status.success(),
+        "bare clone: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
     format!("file://{}", bare.display())
 }
 

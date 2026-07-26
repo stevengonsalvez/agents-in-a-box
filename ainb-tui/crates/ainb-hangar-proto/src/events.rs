@@ -527,6 +527,36 @@ pub struct ActorRow {
     /// Recent-use rank: `Some(n)` pins the actor in the `RECENT` section (lower
     /// `n` = more recent); `None` falls into the alphabetical body.
     pub recent_rank: Option<u32>,
+    /// The agent's short blurb (migration 0050); empty for members and for a
+    /// pre-0050 producer. Omitted from the wire when empty so the shape only
+    /// grows for a producer that supplies it.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// The agent's avatar token (e.g. `"emoji:🦊"`, migration 0050); empty when
+    /// unset and for members. Omitted from the wire when empty.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub avatar: String,
+}
+
+impl Default for ActorRow {
+    /// The neutral row: an unnamed, offline, idle member with no metadata.
+    ///
+    /// Exists so fixtures can spread it (`ActorRow { display_name: …,
+    /// ..Default::default() }`) and a later append-only field is one struct edit
+    /// rather than a sweep across every test that builds a row.
+    fn default() -> Self {
+        Self {
+            actor_ref: String::new(),
+            display_name: String::new(),
+            subtitle: String::new(),
+            presence: PresenceState::Offline,
+            workload: Workload::default(),
+            is_agent: false,
+            recent_rank: None,
+            description: String::new(),
+            avatar: String::new(),
+        }
+    }
 }
 
 /// A wire-side skill row for the skill-manager list (`hangar/skills_list`).
@@ -872,10 +902,49 @@ mod tests {
             presence: PresenceState::Online,
             workload: Workload::Working,
             is_agent: true,
-            recent_rank: None,
+            ..Default::default()
         };
         let out = serde_json::to_string(&row).unwrap();
         assert!(out.contains("\"workload\":\"working\""), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
+    }
+
+    /// A PRE-0050 producer's payload — no `description`, no `avatar` — still
+    /// deserializes, both fields defaulting to empty. This is the append-only
+    /// proof (a full round-trip alone would not catch a missing `serde(default)`).
+    #[test]
+    fn actor_row_decodes_a_pre_0050_payload() {
+        let legacy = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent",
+            "presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-0050 payload decodes");
+        assert_eq!(row.description, "", "absent description defaults to empty");
+        assert_eq!(row.avatar, "", "absent avatar defaults to empty");
+        // And a row with no metadata re-serialises WITHOUT the new keys, so the
+        // wire only grows for a producer that actually supplies them.
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("description") && !out.contains("avatar"),
+            "empty metadata must be omitted from the wire: {out}"
+        );
+    }
+
+    /// Populated metadata round-trips verbatim (the other half of append-only).
+    #[test]
+    fn actor_row_metadata_round_trips() {
+        let row = ActorRow {
+            actor_ref: "agent:a1".into(),
+            display_name: "builder".into(),
+            presence: PresenceState::Online,
+            is_agent: true,
+            description: "ships the backend".into(),
+            avatar: "emoji:\u{1F98A}".into(),
+            ..Default::default()
+        };
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            out.contains("\"description\":\"ships the backend\""),
+            "{out}"
+        );
         assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
     }
 }

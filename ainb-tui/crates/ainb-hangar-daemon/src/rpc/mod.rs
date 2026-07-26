@@ -3810,25 +3810,35 @@ async fn handle_agent_create(
 ) -> Result<serde_json::Value, RpcError> {
     let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params(
         req,
-        "{ workspace_id?, name, provider?, model?, instructions? }",
+        "{ workspace_id?, name, provider?, model?, instructions?, description?, avatar_url?, \
+         service_tier? }",
     )?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("agent name must not be empty"));
     }
+    let description = validate_description(params.description.as_deref())?.unwrap_or_default();
     let provider = ainb_hangar_store::bootstrap::normalize_provider(params.provider.as_deref())
         .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
-    let created = ainb_hangar_store::bootstrap::create_agent(
+    let created = ainb_hangar_store::bootstrap::create_agent_from(
         pool,
         ws.as_str(),
-        name,
-        &provider,
-        params.instructions,
+        ainb_hangar_store::bootstrap::AgentDraft {
+            name: name.to_string(),
+            provider,
+            instructions: params.instructions,
+            description,
+            avatar_url: params.avatar_url,
+            service_tier: params.service_tier,
+            // `model` rides the create-time follow-up write below (unchanged), and
+            // `kind`/`system_key` are never client-settable — see AgentCreateParams.
+            ..ainb_hangar_store::bootstrap::AgentDraft::default()
+        },
     )
     .await
-    .map_err(|e| store_err(&e))?;
+    .map_err(|e| duplicate_name_or_store_err(&e, name))?;
     // Optional create-time model override (gap #9) + token budget (0042): applied
     // as a single follow-up config write rather than widening create_agent's
     // signature across every caller. A blank model is treated as absent (no
@@ -3915,16 +3925,20 @@ async fn handle_agent_update(
     let params: ainb_hangar_proto::snapshots::AgentUpdateParams = parse_params(
         req,
         "{ workspace_id, agent_id, name?, instructions?, model?, cli_args?, mcp_config?, \
-         thinking?, agent_env? }",
+         thinking?, agent_env?, description?, avatar_url?, service_tier? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    // Same 255-code-point cap as create — an over-long blurb is refused with the
+    // actionable message before it can reach the schema CHECK.
+    validate_description(params.description.as_deref())?;
     let update = agent_config_update_from_params(&params);
     // An edit with no field set is a client error: there is nothing to write.
     if update.is_empty() {
         return Err(invalid_params(
             "nothing to update: set at least one of \
-             name/instructions/model/cli_args/mcp_config/thinking/agent_env",
+             name/instructions/model/cli_args/mcp_config/thinking/agent_env/\
+             description/avatar_url/service_tier",
         ));
     }
     let row = snapshots::agent_update(
@@ -3935,7 +3949,9 @@ async fn handle_agent_update(
         SystemClock.now_ms(),
     )
     .await
-    .map_err(|e| store_err(&e))?;
+    // A RENAME onto a name already taken in this workspace is the same refusal
+    // create gives (migration 0050), not an opaque store fault.
+    .map_err(|e| duplicate_name_or_store_err(&e, params.name.as_deref().unwrap_or_default()))?;
     let Some(row) = row else {
         return Err(invalid_params(&format!(
             "no agent `{}` in this workspace",
@@ -3943,6 +3959,42 @@ async fn handle_agent_update(
         )));
     };
     to_value(&row)
+}
+
+/// Validate an optional wire `description` against multica's 255-CODE-POINT cap
+/// (migration 0050 / multica 060), returning the trimmed value.
+///
+/// Counted in `chars()`, not bytes, so an emoji-heavy blurb is measured the way
+/// multica's `utf8.RuneCountInString` measures it and the way the schema's
+/// `length()` CHECK does. Rejecting here (rather than letting the CHECK fire)
+/// gives the user the actionable message instead of an opaque store fault.
+fn validate_description(desc: Option<&str>) -> Result<Option<String>, RpcError> {
+    let Some(desc) = desc else { return Ok(None) };
+    let trimmed = desc.trim();
+    if trimmed.chars().count() > ainb_hangar_store::repo::agent::MAX_DESCRIPTION_CHARS {
+        return Err(invalid_params(
+            "description must be 255 characters or fewer",
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Turn a failed agent create/rename into either the duplicate-name refusal
+/// (multica's 409-equivalent, migration 0050) or the generic store error.
+///
+/// The `data.reason` marker follows the precedent [`handle_agent_delete`] set with
+/// `active_tasks` / `has_history`, so the TUI branches on a token rather than
+/// string-matching the message.
+fn duplicate_name_or_store_err(e: &sqlx::Error, name: &str) -> RpcError {
+    if ainb_hangar_store::repo::agent::is_duplicate_name(e) {
+        RpcError {
+            code: INVALID_PARAMS,
+            message: format!("an agent named `{name}` already exists in this workspace"),
+            data: Some(serde_json::json!({ "reason": "duplicate_name" })),
+        }
+    } else {
+        store_err(e)
+    }
 }
 
 /// Map the wire [`AgentUpdateParams`] onto the store's [`AgentConfigUpdate`].
@@ -3966,6 +4018,11 @@ fn agent_config_update_from_params(
         thinking: field_to_nested(&params.thinking),
         token_budget: field_to_nested(&params.token_budget),
         agent_env: params.agent_env.clone(),
+        // Migration 0050. `description` is NOT NULL, so it maps straight through
+        // like `name`; the other two are nullable and use the FieldUpdate bridge.
+        description: params.description.as_deref().map(|d| d.trim().to_string()),
+        avatar_url: field_to_nested(&params.avatar_url),
+        service_tier: field_to_nested(&params.service_tier),
     }
 }
 

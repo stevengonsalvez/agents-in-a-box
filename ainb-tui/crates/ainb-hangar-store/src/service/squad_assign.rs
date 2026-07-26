@@ -639,14 +639,7 @@ mod tests {
                 visibility: "workspace".into(),
                 permission_mode: "private".into(),
                 owner_id: owner_id.into(),
-                archived: false,
-                model: None,
-                cli_args: Vec::new(),
-                mcp_config: None,
-                thinking: None,
-                agent_env: Vec::new(),
-                provider: None,
-                token_budget: None,
+                ..Agent::default()
             },
         )
         .await

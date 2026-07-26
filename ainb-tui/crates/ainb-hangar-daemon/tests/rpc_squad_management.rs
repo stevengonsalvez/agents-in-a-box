@@ -178,14 +178,7 @@ async fn seed_second_agent(store: &Store) {
             visibility: "workspace".into(),
             permission_mode: "private".into(),
             owner_id: "user-1".into(),
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         },
     )
     .await
@@ -225,14 +218,7 @@ async fn seed_agent_on(store: &Store, agent_id: &str, runtime_id: &str) {
             visibility: "workspace".into(),
             permission_mode: "private".into(),
             owner_id: "user-1".into(),
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         },
     )
     .await

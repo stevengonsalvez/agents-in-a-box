@@ -90,6 +90,80 @@ pub struct Agent {
     /// unlimited (migration 0042). Stored + surfaced only in this milestone —
     /// dispatch-time enforcement is a later feature.
     pub token_budget: Option<i64>,
+    /// Short blurb rendered next to the agent in rosters/pickers; `""` when unset.
+    /// Capped at 255 characters by the schema (migration 0050, multica 060).
+    pub description: String,
+    /// Optional avatar token; hangar mints `"emoji:🦊"`-style values at create so an
+    /// agent is never avatar-less (multica `newAgentAvatar`). `None` only for rows
+    /// created before migration 0050.
+    pub avatar_url: Option<String>,
+    /// `"user"` (an ordinary agent) or `"system"` (a hidden carrier agent, e.g. the
+    /// agent-builder). Roster/picker reads filter to `"user"` (migration 0050).
+    pub kind: String,
+    /// Identity key for a system agent (e.g. `"agent_builder:<flow>"`); `None` for user
+    /// agents. Unique per `(workspace, owner, runtime)` where not null (migration 0050).
+    pub system_key: Option<String>,
+    /// Optional per-agent Codex service-tier override (runtime-native catalog id such as
+    /// `"priority"`); `None` = inherit the local Codex config. Stored + surfaced only in
+    /// this milestone — dispatch-time consumption is a later feature (as `token_budget` was).
+    pub service_tier: Option<String>,
+}
+
+impl Default for Agent {
+    /// The neutral, never-inserted-as-is shape: an ordinary `"user"`-kind,
+    /// `"private"` agent with no metadata. Fixture sites spread this
+    /// (`Agent { name: …, ..Default::default() }`) so a later schema add is one
+    /// struct edit, not another brittle-fixture sweep.
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            workspace_id: String::new(),
+            name: String::new(),
+            runtime_id: String::new(),
+            instructions: None,
+            visibility: "private".to_string(),
+            permission_mode: "private".to_string(),
+            owner_id: String::new(),
+            archived: false,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: Vec::new(),
+            provider: None,
+            token_budget: None,
+            description: String::new(),
+            avatar_url: None,
+            kind: AGENT_KIND_USER.to_string(),
+            system_key: None,
+            service_tier: None,
+        }
+    }
+}
+
+/// The ordinary agent kind — the only one rosters, pickers and search surface.
+pub const AGENT_KIND_USER: &str = "user";
+/// The hidden carrier kind (e.g. the agent-builder). Never in a roster; reached
+/// only by [`AgentRepo::find_system`].
+pub const AGENT_KIND_SYSTEM: &str = "system";
+
+/// Maximum `description` length in CHARACTERS (code points), matching multica's
+/// `utf8.RuneCountInString` cap and the schema `CHECK (length(description) <= 255)`.
+/// Callers validate against this so the user sees a clear message; the schema
+/// CHECK is the last line of defence.
+pub const MAX_DESCRIPTION_CHARS: usize = 255;
+
+/// Whether a `sqlx` error is the `(workspace_id, name)` uniqueness violation from
+/// migration 0050 — i.e. "an agent by that name already exists here" rather than
+/// any other store fault. Callers map it to multica's 409-equivalent refusal.
+///
+/// SQLite's message is `UNIQUE constraint failed: agent.workspace_id, agent.name`;
+/// the `agent.name` substring separates it from the `system_key` index and from an
+/// id PK collision.
+#[must_use]
+pub fn is_duplicate_name(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .is_some_and(|db| db.is_unique_violation() && db.message().contains("agent.name"))
 }
 
 /// A partial-edit instruction for one agent's mutable config (e38.15).
@@ -128,6 +202,15 @@ pub struct AgentConfigUpdate {
     /// New token budget: `None` leaves it, `Some(None)` clears it (back to
     /// unlimited), `Some(Some(_))` sets it.
     pub token_budget: Option<Option<i64>>,
+    /// New description, or `None` to leave it unchanged. The column is NOT NULL
+    /// (its "cleared" state is `""`), so this is a single `Option` like `name`.
+    pub description: Option<String>,
+    /// New avatar token: `None` leaves it, `Some(None)` clears it,
+    /// `Some(Some(_))` sets it (migration 0050).
+    pub avatar_url: Option<Option<String>>,
+    /// New Codex service tier: `None` leaves it, `Some(None)` clears it (back to
+    /// inheriting the local Codex config), `Some(Some(_))` sets it (migration 0050).
+    pub service_tier: Option<Option<String>>,
 }
 
 impl AgentConfigUpdate {
@@ -143,6 +226,9 @@ impl AgentConfigUpdate {
             && self.thinking.is_none()
             && self.agent_env.is_none()
             && self.token_budget.is_none()
+            && self.description.is_none()
+            && self.avatar_url.is_none()
+            && self.service_tier.is_none()
     }
 }
 
@@ -206,8 +292,8 @@ impl AgentRepo {
             "INSERT INTO agent \
              (id, workspace_id, name, runtime_id, instructions, visibility, permission_mode, \
               owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
-              token_budget) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              token_budget, description, avatar_url, kind, system_key, service_tier) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -225,12 +311,22 @@ impl AgentRepo {
         .bind(env_to_json(&agent.agent_env))
         .bind(&agent.provider)
         .bind(agent.token_budget)
+        .bind(&agent.description)
+        .bind(&agent.avatar_url)
+        .bind(&agent.kind)
+        .bind(&agent.system_key)
+        .bind(&agent.service_tier)
         .execute(pool)
         .await?;
         Ok(())
     }
 
     /// Fetch one [`Agent`] by primary key, or `None` if absent.
+    ///
+    /// Deliberately **kind-blind** (migration 0050): this is the internal by-id
+    /// lookup every dispatch/edit path uses, so a `"system"` agent resolved by an
+    /// id it already holds must still read back. Multica's `GetAgent` is likewise
+    /// unfiltered — only the roster/picker LISTS filter to `kind = 'user'`.
     ///
     /// # Errors
     ///
@@ -259,7 +355,7 @@ impl AgentRepo {
         workspace_id: &str,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as::<_, Agent>(&format!(
-            "{SELECT_COLS} WHERE workspace_id = ? AND archived = 0 ORDER BY name"
+            "{SELECT_COLS} WHERE workspace_id = ? AND archived = 0 AND kind = 'user' ORDER BY name"
         ))
         .bind(workspace_id)
         .fetch_all(pool)
@@ -277,7 +373,7 @@ impl AgentRepo {
         workspace_id: &str,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as::<_, Agent>(&format!(
-            "{SELECT_COLS} WHERE workspace_id = ? ORDER BY name"
+            "{SELECT_COLS} WHERE workspace_id = ? AND kind = 'user' ORDER BY name"
         ))
         .bind(workspace_id)
         .fetch_all(pool)
@@ -300,10 +396,35 @@ impl AgentRepo {
         runtime_id: &str,
     ) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar::<_, String>(
-            "SELECT id FROM agent WHERE runtime_id = ? AND archived = 0 ORDER BY name",
+            "SELECT id FROM agent WHERE runtime_id = ? AND archived = 0 AND kind = 'user' \
+             ORDER BY name",
         )
         .bind(runtime_id)
         .fetch_all(pool)
+        .await
+    }
+
+    /// Look up a hidden `"system"` agent by its identity key within a workspace
+    /// (migration 0050, multica `chat.sql:433` — the agent-builder carrier lookup).
+    ///
+    /// This is the ONLY read that returns a system agent by search: every roster,
+    /// picker and search query filters to `kind = 'user'`, so a carrier agent is
+    /// invisible everywhere else.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails (a missing row is `Ok(None)`).
+    pub async fn find_system(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        system_key: &str,
+    ) -> Result<Option<Agent>, sqlx::Error> {
+        sqlx::query_as::<_, Agent>(&format!(
+            "{SELECT_COLS} WHERE workspace_id = ? AND system_key = ? AND kind = 'system'"
+        ))
+        .bind(workspace_id)
+        .bind(system_key)
+        .fetch_optional(pool)
         .await
     }
 
@@ -322,7 +443,9 @@ impl AgentRepo {
     ///
     /// # Errors
     ///
-    /// Returns a [`sqlx::Error`] if the update fails.
+    /// Returns a [`sqlx::Error`] if the update fails — including a RENAME onto a
+    /// name another agent in the same workspace already holds, for which
+    /// [`is_duplicate_name`] is `true` (migration 0050).
     pub async fn update_config(
         pool: &SqlitePool,
         workspace_id: &str,
@@ -362,6 +485,15 @@ impl AgentRepo {
         if update.token_budget.is_some() {
             sets.push("token_budget = ?");
         }
+        if update.description.is_some() {
+            sets.push("description = ?");
+        }
+        if update.avatar_url.is_some() {
+            sets.push("avatar_url = ?");
+        }
+        if update.service_tier.is_some() {
+            sets.push("service_tier = ?");
+        }
         let sql = format!(
             "UPDATE agent SET {} WHERE id = ? AND workspace_id = ?",
             sets.join(", ")
@@ -393,6 +525,15 @@ impl AgentRepo {
         }
         if let Some(token_budget) = &update.token_budget {
             query = query.bind(token_budget);
+        }
+        if let Some(description) = &update.description {
+            query = query.bind(description);
+        }
+        if let Some(avatar_url) = &update.avatar_url {
+            query = query.bind(avatar_url);
+        }
+        if let Some(service_tier) = &update.service_tier {
+            query = query.bind(service_tier);
         }
         let res = query.bind(id).bind(workspace_id).execute(pool).await?;
         Ok(res.rows_affected() == 1)
@@ -696,7 +837,7 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
      permission_mode, owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, \
-     provider, token_budget FROM agent";
+     provider, token_budget, description, avatar_url, kind, system_key, service_tier FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -876,6 +1017,11 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             agent_env: env_from_json(&row.try_get::<String, _>("agent_env")?)?,
             provider: row.try_get("provider")?,
             token_budget: row.try_get("token_budget")?,
+            description: row.try_get("description")?,
+            avatar_url: row.try_get("avatar_url")?,
+            kind: row.try_get("kind")?,
+            system_key: row.try_get("system_key")?,
+            service_tier: row.try_get("service_tier")?,
         })
     }
 }
