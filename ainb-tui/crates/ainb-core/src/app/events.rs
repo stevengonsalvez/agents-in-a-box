@@ -403,7 +403,7 @@ pub enum AppEvent {
     FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
     FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
     FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
+    FleetPanelRefresh, // Fleet panel: force-refresh request
     /// Route one canonical reducer key through main ainb Fleet panel.
     FleetPanelCanonicalKey(FleetKey),
     /// Apply canonical Fleet roster filter.
@@ -3003,8 +3003,9 @@ impl EventHandler {
                     Some(AppEvent::FleetPanelNewAtcOpen)
                 }
             }
-            KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
-            KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
+            KeyCode::Char('r' | 'R') => {
+                Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
+            }
             KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
             KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
             KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Continue)),
@@ -8783,7 +8784,7 @@ mod panel_back_tests {
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::FleetPanelRefresh)
+            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
         ));
 
         // Esc/q pop back to the saved origin, not hardcoded home.
