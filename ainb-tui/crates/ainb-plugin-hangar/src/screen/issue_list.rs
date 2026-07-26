@@ -755,6 +755,20 @@ pub enum WizardRow {
     /// reference (URL / `owner/repo#123` / note), stored as `issue.context_refs`
     /// (migration 0048). Enter here inserts a NEWLINE (like `Brief`).
     Context,
+    /// The priority PICKER row (←/→ cycle `0..3`, wrapping; migration 0014).
+    /// The wire scale is HIGHER = MORE URGENT, so `0` is P3 (routine, the
+    /// default) and `3` is P0. Typing / Backspace are ignored here, exactly like
+    /// `Agent`.
+    Priority,
+    /// The due-date text row (OPTIONAL, single-line): a `YYYY-MM-DD` calendar day
+    /// parsed at UTC midnight into `issue.due_date` (migration 0014). Blank = no
+    /// deadline; an unparseable buffer paints red and BLOCKS create (focus jumps
+    /// back here) rather than silently dropping the date.
+    Due,
+    /// The labels text row (OPTIONAL, single-line): comma-separated label NAMES,
+    /// each resolve-or-created in the workspace and joined to the new issue
+    /// (migration 0016). Blanks and repeats are dropped.
+    Labels,
     /// The repo picker row (REQUIRED — `@` fuzzy dropdown or ←/→ cycle; a
     /// repo-less create is impossible).
     Repo,
@@ -767,14 +781,18 @@ pub enum WizardRow {
 }
 
 impl WizardRow {
-    /// The rows in render / focus-cycle order (Title → Brief → Link → Acceptance →
-    /// Context → Repo → Source → Target → Agent).
-    pub const ALL: [Self; 9] = [
+    /// The rows in render / focus-cycle order: the issue's own attributes first
+    /// (Title → Brief → Link → Acceptance → Context → Priority → Due → Labels),
+    /// then the dispatch tail (Repo → Source → Target → Agent).
+    pub const ALL: [Self; 12] = [
         Self::Title,
         Self::Brief,
         Self::Link,
         Self::Acceptance,
         Self::Context,
+        Self::Priority,
+        Self::Due,
+        Self::Labels,
         Self::Repo,
         Self::Source,
         Self::Target,
@@ -835,6 +853,17 @@ pub struct CreateWizard {
     /// newlines; each non-blank line becomes one `issue.context_refs` element
     /// (migration 0048). Blank is allowed.
     context: String,
+    /// The picked urgency on the wire scale `0..3` (P3..P0, HIGHER = MORE
+    /// URGENT; migration 0014). Defaults to `0` (P3), the schema default, so an
+    /// untouched wizard creates exactly what it did before this row existed.
+    priority: i64,
+    /// The single-line due-date buffer (OPTIONAL): a `YYYY-MM-DD` calendar day
+    /// converted to epoch ms at UTC midnight for `issue.due_date`. Blank = no
+    /// deadline; an unparseable value BLOCKS create rather than being dropped.
+    due: String,
+    /// The single-line labels buffer (OPTIONAL): comma-separated label names
+    /// attached through the 0016 join at create. Blank is allowed.
+    labels: String,
     /// The picked repo's wire ref, or `None` until one is chosen (REQUIRED).
     repo_ref: Option<String>,
     /// The post-`@` fuzzy query filtering the repo dropdown.
@@ -870,6 +899,9 @@ impl Default for CreateWizard {
             link: String::new(),
             acceptance: String::new(),
             context: String::new(),
+            priority: 0,
+            due: String::new(),
+            labels: String::new(),
             repo_ref: None,
             repo_query: String::new(),
             repo_dropdown: None,
@@ -920,6 +952,26 @@ impl CreateWizard {
     #[must_use]
     pub fn context(&self) -> &str {
         &self.context
+    }
+
+    /// The picked urgency on the wire scale `0..3` (P3..P0, HIGHER = MORE
+    /// URGENT). `0` on an untouched wizard.
+    #[must_use]
+    pub const fn priority(&self) -> i64 {
+        self.priority
+    }
+
+    /// The raw due-date buffer typed so far (a `YYYY-MM-DD` calendar day; may be
+    /// empty, and may be mid-typing and therefore unparseable).
+    #[must_use]
+    pub fn due(&self) -> &str {
+        &self.due
+    }
+
+    /// The raw comma-separated labels buffer typed so far (may be empty).
+    #[must_use]
+    pub fn labels(&self) -> &str {
+        &self.labels
     }
 
     /// The parent issue's wire id when this wizard is an "add sub-issue" (`s` /
@@ -1727,6 +1779,19 @@ pub enum IssueListIntent {
         /// the Context row, carried through to `issue.context_refs`. Empty when the
         /// row was left blank.
         context_refs: Vec<String>,
+        /// The urgency picked on the Priority row (migration 0014), on the wire
+        /// scale `0..3` (P3..P0, HIGHER = MORE URGENT). `0` when the row was left
+        /// alone — the schema default.
+        priority: i64,
+        /// The deadline typed on the Due row (migration 0014) as epoch ms at UTC
+        /// midnight. `None` when the row was left blank. A non-blank but
+        /// unparseable buffer never reaches here: the create guard keeps the
+        /// wizard open on the Due row instead.
+        due_date: Option<i64>,
+        /// The label NAMES typed on the Labels row (migration 0016), comma-split,
+        /// trimmed, blank-and-duplicate-dropped. Each is resolve-or-created in the
+        /// workspace and joined to the new issue. Empty when the row was blank.
+        labels: Vec<String>,
         /// The repo picked in stage 2 (REQUIRED — an absolute path, `scratch`, or
         /// a remote indicator the daemon clones).
         repo_ref: String,
@@ -2160,11 +2225,20 @@ fn wizard_cycle_value(
             };
             wizard.agent_cursor = ring_step(wizard.agent_cursor, n, forward);
         }
+        WizardRow::Priority => {
+            // 0014: cycle the four-value urgency ring (P3..P0), wrapping — the
+            // same idiom as the Agent row. `usize` for `ring_step`, back to the
+            // wire scalar after.
+            let cur = usize::try_from(wizard.priority).unwrap_or(0).min(3);
+            wizard.priority = i64::try_from(ring_step(cur, 4, forward)).unwrap_or(0);
+        }
         WizardRow::Title
         | WizardRow::Brief
         | WizardRow::Link
         | WizardRow::Acceptance
         | WizardRow::Context
+        | WizardRow::Due
+        | WizardRow::Labels
         | WizardRow::Source
         | WizardRow::Target => {}
     }
@@ -2186,6 +2260,8 @@ fn wizard_type_char(
         WizardRow::Link => wizard.link.push(c),
         WizardRow::Acceptance => wizard.acceptance.push(c),
         WizardRow::Context => wizard.context.push(c),
+        WizardRow::Due => wizard.due.push(c),
+        WizardRow::Labels => wizard.labels.push(c),
         WizardRow::Source => wizard.source_branch.push(c),
         WizardRow::Target => wizard.target_branch.push(c),
         WizardRow::Repo => {
@@ -2197,7 +2273,8 @@ fn wizard_type_char(
             // Any non-`@` char on the closed repo row is ignored — the picker is
             // driven by `@` / ←→, not free text.
         }
-        WizardRow::Agent => {}
+        // Picker rows: ←→ only, never free text.
+        WizardRow::Priority | WizardRow::Agent => {}
     }
     set_wizard(state, wizard)
 }
@@ -2221,13 +2298,19 @@ fn wizard_backspace(state: &IssueListState, mut wizard: CreateWizard) -> IssueLi
         WizardRow::Context => {
             wizard.context.pop();
         }
+        WizardRow::Due => {
+            wizard.due.pop();
+        }
+        WizardRow::Labels => {
+            wizard.labels.pop();
+        }
         WizardRow::Source => {
             wizard.source_branch.pop();
         }
         WizardRow::Target => {
             wizard.target_branch.pop();
         }
-        WizardRow::Repo | WizardRow::Agent => {}
+        WizardRow::Repo | WizardRow::Priority | WizardRow::Agent => {}
     }
     set_wizard(state, wizard)
 }
@@ -2299,11 +2382,44 @@ fn split_lines(raw: &str) -> Vec<String> {
         .collect()
 }
 
+/// Split the single-line Labels buffer into label NAMES: comma-separated, each
+/// trimmed, blanks dropped, repeats dropped preserving first-seen order (0016).
+/// `LabelRepo::attach` is idempotent so a repeat could not corrupt the join, but
+/// the create payload should not imply the repetition meant anything.
+fn split_labels(raw: &str) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    for name in raw.split(',').map(str::trim).filter(|s| !s.is_empty()) {
+        if !out.iter().any(|seen| seen == name) {
+            out.push(name.to_string());
+        }
+    }
+    out
+}
+
+/// The Due row's buffer as epoch ms at UTC midnight: `Ok(None)` when blank (no
+/// deadline), `Ok(Some(ms))` for a valid `YYYY-MM-DD`, `Err(())` when the buffer
+/// is non-blank and unparseable — which the create guard turns into "stay open,
+/// focus the row" and the renderer paints red.
+fn wizard_due_ms(raw: &str) -> Result<Option<i64>, ()> {
+    let t = raw.trim();
+    if t.is_empty() {
+        return Ok(None);
+    }
+    ainb_hangar_proto::dates::parse_calendar_date_ms(t).map(Some).map_err(|_| ())
+}
+
 fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueListReduction {
     if wizard.title.trim().is_empty() {
         wizard.focus = WizardRow::Title;
         return set_wizard(state, wizard);
     }
+    // 0014: a typed-but-invalid deadline must never be silently dropped — the
+    // same "guide, never silently block" contract the Title / Repo guards use.
+    // The row itself paints the error, so no note plumbing is needed.
+    let Ok(due_date) = wizard_due_ms(&wizard.due) else {
+        wizard.focus = WizardRow::Due;
+        return set_wizard(state, wizard);
+    };
     let Some(repo_ref) = wizard.repo_ref.clone() else {
         // Repo REQUIRED: guide the user to it with the dropdown open at scratch.
         wizard.focus = WizardRow::Repo;
@@ -2358,6 +2474,11 @@ fn wizard_try_create(state: &IssueListState, mut wizard: CreateWizard) -> IssueL
             // lines — each surviving line is one list element (order-preserving).
             acceptance_criteria: split_lines(&wizard.acceptance),
             context_refs: split_lines(&wizard.context),
+            // 0014/0016: the authored urgency, the parsed deadline (already
+            // validated above), and the comma-split label names.
+            priority: wizard.priority,
+            due_date,
+            labels: split_labels(&wizard.labels),
             repo_ref,
             source_branch: opt(&wizard.source_branch),
             target_branch: opt(&wizard.target_branch),
@@ -2757,13 +2878,13 @@ const CARD_BACKDROP: Color = Color::rgb(20, 20, 28);
 const WIZARD_TITLE: &str = "✦ New task";
 /// The in-card footer hint naming the nav keys.
 const WIZARD_HINT: &str = "↑↓ row   ←→ value   Enter create   Esc cancel";
-/// The card's FIXED-row height: top border + the 6 single-line field rows
-/// (Title / Link / Repo / Source / Target / Agent) + spacer + hint + bottom
-/// border. The multi-line Brief row adds `brief_rows` on top of this, and the `@`
-/// repo picker adds its visible dropdown rows while open (see [`render_wizard`]);
-/// the card is exactly this tall only in the degenerate all-empty
-/// single-line-brief case.
-const WIZARD_CARD_H: u16 = 10;
+/// The card's FIXED-row height: top border + the 9 single-line field rows
+/// (Title / Link / Priority / Due / Labels / Repo / Source / Target / Agent) +
+/// spacer + hint + bottom border. The multi-line Brief / Acceptance / Context
+/// rows add their wrapped-line counts on top of this, and the `@` repo picker
+/// adds its visible dropdown rows while open (see [`render_wizard`]); the card is
+/// exactly this tall only in the degenerate all-empty single-line-brief case.
+const WIZARD_CARD_H: u16 = 13;
 /// The most wrapped Brief lines the card shows at once; a longer brief
 /// scroll-follows the newest text within this window. Bounds card growth so the
 /// Brief never blows the viewport.
@@ -3032,6 +3153,14 @@ const BRIEF_PLACEHOLDER: &str = "(optional — describe the task)";
 const ACCEPTANCE_PLACEHOLDER: &str = "(optional — one criterion per line)";
 /// The placeholder for the empty, unfocused Context row (one reference / line).
 const CONTEXT_PLACEHOLDER: &str = "(optional — one reference per line)";
+/// The placeholder for the empty, unfocused Due row — it also DOCUMENTS the only
+/// accepted format, so the red invalid state is reachable only by ignoring it.
+const DUE_PLACEHOLDER: &str = "YYYY-MM-DD";
+/// The placeholder for the empty, unfocused Labels row (comma-separated names).
+const LABELS_PLACEHOLDER: &str = "bug, p0";
+/// The colour a non-blank, unparseable Due buffer paints in: the always-visible
+/// "Enter will not create with this" signal.
+const DUE_INVALID: Color = Color::rgb(220, 90, 90);
 
 /// Render the multi-line Brief value at `(x, y)` over `rows` lines (see
 /// [`render_multiline`]).
@@ -3109,6 +3238,9 @@ const fn wizard_row_label(row: WizardRow) -> &'static str {
         WizardRow::Link => "Linked",
         WizardRow::Acceptance => "Accept",
         WizardRow::Context => "Context",
+        WizardRow::Priority => "Priority",
+        WizardRow::Due => "Due",
+        WizardRow::Labels => "Labels",
         WizardRow::Repo => "Repo",
         WizardRow::Source => "Source",
         WizardRow::Target => "Target",
@@ -3160,6 +3292,48 @@ fn render_wizard_field(
                 raw.to_string()
             };
             let colour = if !focused && raw.is_empty() {
+                MUTED_GRAY
+            } else {
+                value_colour
+            };
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
+        WizardRow::Priority => {
+            // 0014: `P0..P3` plus the urgency word, painted in the SAME chip
+            // colour the board cards use so the two surfaces read alike. A
+            // focused row takes the gold focus colour instead.
+            let chip = crate::widgets::card_board::PriorityChip::from_priority(wizard.priority());
+            let colour = if focused { GOLD } else { chip.color() };
+            let shown = format!("{}  {}", priority_label(wizard.priority()), chip.label());
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
+        WizardRow::Due => {
+            // A non-blank, unparseable buffer paints RED: the always-visible
+            // signal that Enter will refuse to create (never a silent drop).
+            let raw = wizard.due();
+            let invalid = wizard_due_ms(raw).is_err();
+            let shown = if raw.is_empty() && !focused {
+                DUE_PLACEHOLDER.to_string()
+            } else {
+                text(raw)
+            };
+            let colour = if invalid {
+                DUE_INVALID
+            } else if raw.is_empty() && !focused {
+                MUTED_GRAY
+            } else {
+                value_colour
+            };
+            put_card_str(buf, cx, y, &shown, colour, right, true);
+        }
+        WizardRow::Labels => {
+            let raw = wizard.labels();
+            let shown = if raw.is_empty() && !focused {
+                LABELS_PLACEHOLDER.to_string()
+            } else {
+                text(raw)
+            };
+            let colour = if raw.is_empty() && !focused {
                 MUTED_GRAY
             } else {
                 value_colour
@@ -3913,11 +4087,7 @@ mod tests {
         s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
         // Move focus past Brief to the Repo row, then open the dropdown.
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
@@ -3961,11 +4131,7 @@ mod tests {
         s.set_repos(repo_roster());
         let s = type_into(&s, "Fix");
         // Focus Repo (past Brief), cycle ←→ to pick `rosetta` (scratch=0, rosetta=1).
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // scratch
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state; // rosetta
         assert_eq!(
@@ -4003,11 +4169,7 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
         let mut buf = WireBuffer::new(120, 24);
         render_issue_list(&mut buf, 120, 1, 23, &s, 0);
@@ -4053,11 +4215,7 @@ mod tests {
             reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         base.set_repos(repo_roster());
         let base = type_into(&base, "Fix");
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
-        let base = reduce_issue_list(&base, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
+        let base = focus_wizard_row(base, WizardRow::Repo);
 
         let painted_row_span = |s: &IssueListState| -> u16 {
             let mut buf = WireBuffer::new(120, 24);
@@ -4090,6 +4248,65 @@ mod tests {
         );
     }
 
+    /// Parity 28: the card paints the three new rows, the Priority row shows the
+    /// picked `P0` + its urgency word after →×3, and a non-blank unparseable Due
+    /// buffer paints in the error colour (the always-visible "Enter will refuse"
+    /// signal) while a valid one does not.
+    #[test]
+    fn wizard_card_paints_priority_due_and_labels_rows() {
+        let s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
+        let s = type_into(&s, "Fix");
+
+        let paint = |s: &IssueListState| -> String {
+            let mut buf = WireBuffer::new(120, 30);
+            render_issue_list(&mut buf, 120, 1, 29, s, 0);
+            painted_text(&buf)
+        };
+
+        // The three labels are on the card at rest.
+        let text = paint(&s);
+        for needle in [
+            "Priority",
+            "Due",
+            "Labels",
+            DUE_PLACEHOLDER,
+            LABELS_PLACEHOLDER,
+        ] {
+            assert!(text.contains(needle), "missing {needle:?}:\n{text}");
+        }
+        assert!(text.contains("P3"), "the default urgency reads P3:\n{text}");
+
+        // →×3 on the Priority row paints P0 + the Urgent chip word.
+        let s = focus_wizard_row(s, WizardRow::Priority);
+        let s = (0..3).fold(s, |s, _| {
+            reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Right)).state
+        });
+        let text = paint(&s);
+        assert!(text.contains("P0"), "→×3 must paint P0:\n{text}");
+        assert!(
+            text.contains("Urgent"),
+            "the urgency word is shown:\n{text}"
+        );
+
+        // A garbage Due buffer paints red; a valid one does not.
+        let painted_in_error = |s: &IssueListState| -> bool {
+            let mut buf = WireBuffer::new(120, 30);
+            render_issue_list(&mut buf, 120, 1, 29, s, 0);
+            buf.cells.iter().any(|(_, c)| c.fg == Some(DUE_INVALID))
+        };
+        let s = focus_wizard_row(s, WizardRow::Due);
+        let bad = type_into(&s, "31-12-2026");
+        assert!(
+            painted_in_error(&bad),
+            "an unparseable due date must paint in the error colour"
+        );
+        let good = type_into(&s, "2026-08-01");
+        assert!(
+            !painted_in_error(&good),
+            "a valid due date must not paint in the error colour"
+        );
+    }
+
     /// A roster longer than the visible window scrolls: paging the cursor Down past
     /// the window reveals a later candidate that was off-screen at open.
     #[test]
@@ -4105,11 +4322,7 @@ mod tests {
         let mut s = reduce_issue_list(&IssueListState::default(), IssueListEvent::Key('c')).state;
         s.set_repos(roster);
         let s = type_into(&s, "Fix");
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Brief
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Link
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Acceptance
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Context
-        let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Down)).state; // Repo
+        let s = focus_wizard_row(s, WizardRow::Repo);
         let s = reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char('@'))).state;
 
         // At open the last repo is off-window (13 candidates incl. scratch, window 6).
@@ -4147,6 +4360,19 @@ mod tests {
     }
 
     /// Type a string into the focused wizard row, char by char.
+    /// Move the open wizard's focus to `row` by pressing Down until it lands
+    /// there. Position-INDEPENDENT so adding a wizard row does not re-number
+    /// every render fixture below.
+    fn focus_wizard_row(mut state: IssueListState, row: WizardRow) -> IssueListState {
+        for _ in 0..=WizardRow::ALL.len() {
+            if state.wizard().expect("wizard is open").focus() == row {
+                return state;
+            }
+            state = reduce_issue_list(&state, IssueListEvent::Wizard(WizardKey::Down)).state;
+        }
+        panic!("focus never reached {row:?}");
+    }
+
     fn type_into(state: &IssueListState, text: &str) -> IssueListState {
         text.chars().fold(state.clone(), |s, ch| {
             reduce_issue_list(&s, IssueListEvent::Wizard(WizardKey::Char(ch))).state

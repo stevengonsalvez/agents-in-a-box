@@ -137,6 +137,19 @@ fn type_str(mut s: IssueListState, text: &str) -> IssueListState {
     s
 }
 
+/// Move focus to `row` by pressing Down until it lands there (bounded by the row
+/// count). Position-INDEPENDENT on purpose: adding a wizard row must not
+/// re-number every fixture in this file.
+fn focus_row(mut s: IssueListState, row: WizardRow) -> IssueListState {
+    for _ in 0..=WizardRow::ALL.len() {
+        if s.wizard().expect("wizard is open").focus() == row {
+            return s;
+        }
+        s = wiz(&s, WizardKey::Down).state;
+    }
+    panic!("focus never reached {row:?}");
+}
+
 /// Open a fresh wizard focused on the Title row (the `c` entry point).
 fn open_wizard() -> IssueListState {
     reduce_issue_list(&seeded_state(), IssueListEvent::Key('c')).state
@@ -148,16 +161,11 @@ fn ready_to_create() -> IssueListState {
     let s = open_wizard();
     let s = type_str(s, "Fix login");
     // Move past Brief to Repo, open the dropdown (cursor at scratch), pick it.
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Char('@')).state;
     let s = wiz(&s, WizardKey::Enter).state; // pick scratch, dropdown closes
     // Land focus on the Agent row.
-    let s = wiz(&s, WizardKey::Down).state; // Repo → Source
-    let s = wiz(&s, WizardKey::Down).state; // Source → Target
+    let s = focus_row(s, WizardRow::Target);
     wiz(&s, WizardKey::Down).state // Target → Agent
 }
 
@@ -182,37 +190,56 @@ fn c_opens_wizard_focused_on_title() {
 }
 
 /// ↓ / Tab advance the focused row, ↑ / Shift+Tab retreat, both wrapping around
-/// the nine rows (Title → Brief → Link → Acceptance → Context → Repo → Source →
-/// Target → Agent; mirrors the host new-session Configure form).
+/// EVERY row in [`WizardRow::ALL`] order (mirrors the host new-session Configure
+/// form). Driven off `ALL` rather than a frozen literal list, so adding a row
+/// extends the coverage instead of breaking the fixture.
 #[test]
 fn wizard_focus_moves_and_wraps() {
     let s = open_wizard();
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Title);
+    assert_eq!(
+        WizardRow::ALL.first(),
+        Some(&WizardRow::Title),
+        "a fresh wizard opens on the first row"
+    );
 
+    // Down / Tab walk the whole ring forward and land back on the first row.
+    let mut s = s;
+    for (i, expected) in WizardRow::ALL.iter().enumerate().skip(1) {
+        // Alternate the two forward keys — they must be interchangeable.
+        let key = if i % 2 == 0 {
+            WizardKey::Tab
+        } else {
+            WizardKey::Down
+        };
+        s = wiz(&s, key).state;
+        assert_eq!(
+            s.wizard().unwrap().focus(),
+            *expected,
+            "row {i} of the forward walk"
+        );
+    }
     let s = wiz(&s, WizardKey::Down).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
-    let s = wiz(&s, WizardKey::Tab).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Link);
-    let s = wiz(&s, WizardKey::Tab).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Acceptance);
-    let s = wiz(&s, WizardKey::Tab).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Context);
-    let s = wiz(&s, WizardKey::Tab).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Repo);
-    let s = wiz(&s, WizardKey::Tab).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Source);
+    assert_eq!(
+        s.wizard().unwrap().focus(),
+        WizardRow::Title,
+        "forward wraps off the last row"
+    );
 
-    // Wrap forward: Agent → Title.
-    let s = wiz(&s, WizardKey::Down).state; // Target
-    let s = wiz(&s, WizardKey::Down).state; // Agent
-    let s = wiz(&s, WizardKey::Down).state; // wraps → Title
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Title);
+    // Up walks the ring backward from Title, wrapping onto the last row first.
+    let mut s = s;
+    for expected in WizardRow::ALL.iter().rev() {
+        s = wiz(&s, WizardKey::Up).state;
+        assert_eq!(s.wizard().unwrap().focus(), *expected, "backward walk");
+    }
 
-    // Wrap backward: Title → Agent.
-    let s = wiz(&s, WizardKey::Up).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Agent);
+    // Shift+Tab is the same retreat as ↑ (checked once, from the first row).
     let s = wiz(&s, WizardKey::BackTab).state;
-    assert_eq!(s.wizard().unwrap().focus(), WizardRow::Target);
+    assert_eq!(
+        s.wizard().unwrap().focus(),
+        *WizardRow::ALL.last().unwrap(),
+        "Shift+Tab retreats and wraps like ↑"
+    );
 }
 
 /// ←/→ cycle the Agent picker through `AgentChip::ALL`, wrapping; the branch text
@@ -242,8 +269,7 @@ fn wizard_left_right_cycles_agent_only() {
     );
 
     // ←/→ on a text row is a no-op (Source keeps its prefill).
-    let s = wiz(&s, WizardKey::Up).state; // Agent → Target
-    let s = wiz(&s, WizardKey::Up).state; // Target → Source
+    let s = focus_row(s, WizardRow::Source);
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Source);
     let out = wiz(&s, WizardKey::Right);
     assert_eq!(out.state.wizard().unwrap().source_branch(), "main");
@@ -255,11 +281,7 @@ fn wizard_left_right_cycles_agent_only() {
 fn wizard_left_right_cycles_repo() {
     let s = open_wizard();
     let s = type_str(s, "Fix");
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     assert_eq!(s.wizard().unwrap().repo_ref(), None);
 
     // → picks the first candidate (scratch is always index 0).
@@ -275,12 +297,7 @@ fn wizard_typing_edits_focused_text_row() {
     assert_eq!(s.wizard().unwrap().title(), "Title text");
 
     // Focus Source, clear the "main" prefill, type a custom ref.
-    let s = wiz(&s, WizardKey::Down).state; // Brief
-    let s = wiz(&s, WizardKey::Down).state; // Link
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Context
-    let s = wiz(&s, WizardKey::Down).state; // Repo
-    let s = wiz(&s, WizardKey::Down).state; // Source
+    let s = focus_row(s, WizardRow::Source);
     let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
     let s = type_str(s, "feature/x");
     let w = s.wizard().unwrap();
@@ -299,11 +316,7 @@ fn wizard_typing_edits_focused_text_row() {
 fn wizard_at_opens_repo_dropdown() {
     let s = open_wizard();
     let s = type_str(s, "Fix");
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     assert_eq!(s.wizard().unwrap().repo_dropdown(), None);
 
     let s = wiz(&s, WizardKey::Char('@')).state;
@@ -322,11 +335,7 @@ fn wizard_at_opens_repo_dropdown() {
 fn wizard_tab_from_dropdown_commits_highlight() {
     let s = open_wizard();
     let s = type_str(s, "Fix");
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Char('@')).state; // open dropdown, cursor on scratch
 
     let out = wiz(&s, WizardKey::Tab);
@@ -395,6 +404,11 @@ fn wizard_complete_form_commits_create_and_run() {
             external_ref: None,
             acceptance_criteria: Vec::new(),
             context_refs: Vec::new(),
+            // An untouched Priority / Due / Labels row creates exactly what it
+            // did before those rows existed (parity 28).
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
             repo_ref: "scratch".to_string(),
             source_branch: Some("main".to_string()),
             target_branch: Some("main".to_string()),
@@ -436,13 +450,7 @@ fn wizard_brief_enter_inserts_newline_not_create() {
     // Even a create-ready form (title + repo picked) must not commit from Brief.
     let s = ready_to_create();
     // Walk focus back to the Brief row (Agent → … → Brief).
-    let s = wiz(&s, WizardKey::Up).state; // Target
-    let s = wiz(&s, WizardKey::Up).state; // Source
-    let s = wiz(&s, WizardKey::Up).state; // Repo
-    let s = wiz(&s, WizardKey::Up).state; // Context
-    let s = wiz(&s, WizardKey::Up).state; // Acceptance
-    let s = wiz(&s, WizardKey::Up).state; // Link
-    let s = wiz(&s, WizardKey::Up).state; // Brief
+    let s = focus_row(s, WizardRow::Brief);
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Brief);
 
     let s = type_str(s, "line one");
@@ -468,17 +476,14 @@ fn wizard_link_carries_to_create_intent() {
     let s = open_wizard();
     let s = type_str(s, "Fix login");
     // Title → Brief → Link, then type the upstream ref.
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
+    let s = focus_row(s, WizardRow::Link);
     assert_eq!(s.wizard().unwrap().focus(), WizardRow::Link);
     let s = type_str(s, "  acme/api#42  "); // surrounding whitespace is trimmed
     assert_eq!(s.wizard().unwrap().link(), "  acme/api#42  ");
     // Backspace edits the single line.
     let s = wiz(&s, WizardKey::Backspace).state; // drop a trailing space
     // Move to Repo, pick scratch, commit.
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Right).state; // pick scratch
     let out = wiz(&s, WizardKey::Enter);
     match out.intent {
@@ -520,10 +525,7 @@ fn wizard_brief_carries_to_create_intent() {
     let s = wiz(&s, WizardKey::Down).state; // Title → Brief
     let s = type_str(s, "Reproduce then patch");
     // Move to Repo, pick scratch, then commit from the Repo row.
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Right).state; // pick scratch
 
     let out = wiz(&s, WizardKey::Enter);
@@ -552,10 +554,7 @@ fn wizard_brief_preserved_verbatim_on_intent() {
     let s = type_str(s, "then summarise findings");
     let s = wiz(&s, WizardKey::Enter).state; // trailing newline
     // Commit from the Repo row.
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Right).state; // pick scratch
 
     let out = wiz(&s, WizardKey::Enter);
@@ -591,8 +590,7 @@ fn wizard_blank_brief_is_none_on_intent() {
 fn wizard_branch_edits_and_blanks_round_trip() {
     let s = ready_to_create();
     // Focus Source (Agent → up twice), retype it, then blank Target.
-    let s = wiz(&s, WizardKey::Up).state; // Target
-    let s = wiz(&s, WizardKey::Up).state; // Source
+    let s = focus_row(s, WizardRow::Source);
     let s = (0..4).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
     let s = type_str(s, "feature/x");
     let s = wiz(&s, WizardKey::Down).state; // Target
@@ -609,6 +607,11 @@ fn wizard_branch_edits_and_blanks_round_trip() {
             external_ref: None,
             acceptance_criteria: Vec::new(),
             context_refs: Vec::new(),
+            // An untouched Priority / Due / Labels row creates exactly what it
+            // did before those rows existed (parity 28).
+            priority: 0,
+            due_date: None,
+            labels: Vec::new(),
             repo_ref: "scratch".to_string(),
             source_branch: Some("feature/x".to_string()),
             target_branch: None,
@@ -632,11 +635,7 @@ fn wizard_required_guard_blocks_incomplete_creates() {
 
     // Repo only, no title → Enter never creates.
     let s = open_wizard();
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Right).state; // pick scratch
     assert_eq!(s.wizard().unwrap().repo_ref(), Some("scratch"));
     assert!(wiz(&s, WizardKey::Enter).intent.is_none());
@@ -888,16 +887,10 @@ fn subissue_wizard_commit_carries_parent_issue_id() {
     // Open via `s`, then fill exactly like `ready_to_create` (title + repo + agent).
     let s = reduce_issue_list(&s, IssueListEvent::Key('s')).state;
     let s = type_str(s, "Fix login");
-    let s = wiz(&s, WizardKey::Down).state; // Title → Brief
-    let s = wiz(&s, WizardKey::Down).state; // Brief → Link
-    let s = wiz(&s, WizardKey::Down).state; // Link → Acceptance
-    let s = wiz(&s, WizardKey::Down).state; // Acceptance → Context
-    let s = wiz(&s, WizardKey::Down).state; // Context → Repo
+    let s = focus_row(s, WizardRow::Repo);
     let s = wiz(&s, WizardKey::Char('@')).state;
     let s = wiz(&s, WizardKey::Enter).state; // pick scratch
-    let s = wiz(&s, WizardKey::Down).state; // Repo → Source
-    let s = wiz(&s, WizardKey::Down).state; // Source → Target
-    let s = wiz(&s, WizardKey::Down).state; // Target → Agent
+    let s = focus_row(s, WizardRow::Agent);
 
     let out = wiz(&s, WizardKey::Enter);
 
@@ -1199,4 +1192,131 @@ fn assignee_facet_filters_by_actor_kind() {
     )
     .state;
     assert_eq!(visible_ids(&s), vec!["d_nolbl".to_string()]);
+}
+
+// ---------------------------------------------------------------------------
+// Parity 28: the wizard authors priority / due date / labels
+// ---------------------------------------------------------------------------
+
+/// `2026-08-01` at UTC midnight in epoch milliseconds.
+const DUE_2026_08_01: i64 = 1_785_542_400_000;
+
+/// Driving REAL keys through the wizard — ←/→ on Priority, typing on Due and
+/// Labels — carries all three onto the raised `CreateAndRun`, with the labels
+/// comma-split, trimmed, blank-dropped and deduped (first-seen order kept).
+#[test]
+fn wizard_priority_due_labels_carry_to_create_intent() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix login");
+
+    // Priority is a PICKER: → three times walks 0 → 3 (P3 → P0).
+    let s = focus_row(s, WizardRow::Priority);
+    let s = wiz(&s, WizardKey::Right).state;
+    let s = wiz(&s, WizardKey::Right).state;
+    let s = wiz(&s, WizardKey::Right).state;
+    assert_eq!(s.wizard().unwrap().priority(), 3, "→×3 reaches P0");
+
+    // Due + Labels are single-line TEXT rows.
+    let s = focus_row(s, WizardRow::Due);
+    let s = type_str(s, "2026-08-01");
+    let s = focus_row(s, WizardRow::Labels);
+    let s = type_str(s, "bug, p0, ,bug");
+
+    let s = focus_row(s, WizardRow::Repo);
+    let s = wiz(&s, WizardKey::Right).state; // pick scratch
+
+    let out = wiz(&s, WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            priority,
+            due_date,
+            labels,
+            ..
+        }) => {
+            assert_eq!(priority, 3, "the picked urgency reaches the intent");
+            assert_eq!(
+                due_date,
+                Some(DUE_2026_08_01),
+                "the typed calendar day is parsed at UTC midnight"
+            );
+            assert_eq!(
+                labels,
+                vec!["bug".to_string(), "p0".to_string()],
+                "blank dropped, duplicate dropped, first-seen order kept"
+            );
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
+}
+
+/// Priority wraps like every other picker ring: ← from the default 0 lands on 3.
+#[test]
+fn wizard_priority_ring_wraps_and_ignores_typing() {
+    let s = focus_row(open_wizard(), WizardRow::Priority);
+    assert_eq!(s.wizard().unwrap().priority(), 0, "default is P3");
+
+    let s = wiz(&s, WizardKey::Left).state;
+    assert_eq!(s.wizard().unwrap().priority(), 3, "← wraps 0 → 3");
+
+    // A picker row ignores text: typing and Backspace leave it alone.
+    let s = type_str(s, "9");
+    let s = wiz(&s, WizardKey::Backspace).state;
+    assert_eq!(
+        s.wizard().unwrap().priority(),
+        3,
+        "typing never edits a picker row"
+    );
+}
+
+/// An unparseable due date NEVER silently drops the deadline: Enter refuses to
+/// create, the wizard stays open, and focus lands on the offending row.
+#[test]
+fn wizard_invalid_due_blocks_create_and_focuses_the_row() {
+    let s = open_wizard();
+    let s = type_str(s, "Fix login");
+    let s = focus_row(s, WizardRow::Due);
+    let s = type_str(s, "31-12-2026"); // valid-looking, wrong order
+    let s = focus_row(s, WizardRow::Repo);
+    let s = wiz(&s, WizardKey::Right).state; // pick scratch — form is otherwise complete
+
+    let out = wiz(&s, WizardKey::Enter);
+
+    assert!(out.intent.is_none(), "a bad due date must not create");
+    assert_eq!(out.state.mode(), IssueListMode::CreateInput);
+    assert_eq!(
+        out.state.wizard().expect("wizard still open").focus(),
+        WizardRow::Due,
+        "focus guides the user to the offending row"
+    );
+
+    // Correcting it unblocks the create (the guard is not a dead end).
+    let s = out.state;
+    let s = (0.."31-12-2026".len()).fold(s, |s, _| wiz(&s, WizardKey::Backspace).state);
+    let s = type_str(s, "2026-08-01");
+    let out = wiz(&s, WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun { due_date, .. }) => {
+            assert_eq!(due_date, Some(DUE_2026_08_01));
+        }
+        other => panic!("expected CreateAndRun after the fix, got {other:?}"),
+    }
+}
+
+/// A blank Due row is NOT an error — it simply means "no deadline".
+#[test]
+fn wizard_blank_due_creates_without_a_deadline() {
+    let out = wiz(&ready_to_create(), WizardKey::Enter);
+    match out.intent {
+        Some(IssueListIntent::CreateAndRun {
+            priority,
+            due_date,
+            labels,
+            ..
+        }) => {
+            assert_eq!(priority, 0, "untouched Priority stays P3");
+            assert_eq!(due_date, None, "blank Due means no deadline");
+            assert!(labels.is_empty(), "blank Labels means no labels");
+        }
+        other => panic!("expected CreateAndRun, got {other:?}"),
+    }
 }
