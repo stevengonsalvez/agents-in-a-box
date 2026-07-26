@@ -762,6 +762,19 @@ pub enum SquadCommand {
     MemberRole(SquadMemberRoleArgs),
     /// Show, set, or clear a squad's user-authored routing instructions.
     Instructions(SquadInstructionsArgs),
+    /// Print the leader briefing this squad would inject into a leader run.
+    Briefing(SquadBriefingArgs),
+}
+
+/// Arguments for `hangar squad briefing`.
+#[derive(Args, Debug)]
+pub struct SquadBriefingArgs {
+    /// Squad id whose leader briefing to render.
+    pub id: String,
+    /// Workspace slug the squad belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar squad list`.
@@ -2733,7 +2746,47 @@ async fn dispatch_squad(cmd: SquadCommand, format: OutputFormat) -> Result<()> {
         SquadCommand::Unarchive(args) => run_squad_set_archived(&store, args, false).await,
         SquadCommand::MemberRole(args) => run_squad_member_role(&store, args).await,
         SquadCommand::Instructions(args) => run_squad_instructions(&store, args).await,
+        SquadCommand::Briefing(args) => run_squad_briefing(&store, args).await,
     }
+}
+
+/// `hangar squad briefing`: print — verbatim, to stdout, with nothing else — the
+/// squad-leader briefing the daemon would append to a leader run's `CLAUDE.md`.
+///
+/// This is the read-only PROMPT-INSPECTION surface for parity #7 / `7-rest`:
+/// before this, the only way to see a leader's injected protocol + roster (with
+/// each member's role and materialisable skills) + instructions was to run a
+/// task and read the file off the task tree. It calls the very same
+/// `build_squad_leader_briefing` the claim path calls, so what it prints is what
+/// the leader gets — not a re-implementation that can drift.
+///
+/// A squad whose leader is a human `member` has no agent runtime to brief, so
+/// there is no briefing to print: that exits non-zero with an explanation,
+/// mirroring the builder's `None`.
+async fn run_squad_briefing(store: &Store, args: SquadBriefingArgs) -> Result<()> {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_daemon::squad_briefing::build_squad_leader_briefing;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let squad = SquadRepo::get(store.pool(), &ws, &args.id)
+        .await
+        .context("read squad")?
+        .with_context(|| format!("no squad {} in this workspace", args.id))?;
+    if squad.leader.kind() != ActorKind::Agent {
+        anyhow::bail!(
+            "squad {} has a human leader; no agent briefing is built",
+            args.id
+        );
+    }
+    let briefing =
+        build_squad_leader_briefing(store.pool(), &ws, &args.id, squad.leader.id())
+            .await
+            .with_context(|| format!("squad {} builds no leader briefing", args.id))?;
+    print!("{briefing}");
+    Ok(())
 }
 
 /// `hangar squad archive|unarchive`: flip the archived flag with its audit stamp,
