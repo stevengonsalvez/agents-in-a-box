@@ -16,20 +16,31 @@
 //!   mention-parse pipeline. Hangar has no such trigger, so the protocol
 //!   describes coordination without promising a mention link it cannot honour,
 //!   and roster rows carry `name — <agent|human> — <id>` (no mention markdown).
-//! - **No agent SKILLS in roster rows.** Multica's `agentSkillsRosterSegment`
-//!   appends each member's enabled skills to its roster row; hangar's roster
-//!   carries the member's free-text ROLE (migration 0053) but not yet its
-//!   skills — that remainder is tracked as parity `7-rest`, not this item.
+//! - **Roster SKILLS mean what hangar will actually MATERIALISE for that
+//!   member, not every attached link.** Multica's `agentSkillsRosterSegment`
+//!   reads one live tool registry; hangar has dispatch-time materialisation
+//!   governed by TWO levers, and the roster applies BOTH — `agent_skill.enabled`
+//!   (migration 0051) and the by-name `agent.disabled_runtime_skills` list — so
+//!   the leader never routes work to a capability the member will not have on
+//!   disk. Faithful to multica's intent (advertise real capability) even though
+//!   multica has only one lever.
 //!
-//! Per-member `role` and `squad.instructions` (migration 0053, parity #25) ARE
-//! rendered: a roled member's row carries a `— role: <label>` suffix, and a
-//! non-blank `squad.instructions` becomes the third section
-//! `## Squad Instructions`, appended VERBATIM. A blank one omits the heading
-//! entirely — exactly as multica omits it when `squad.instructions` is blank.
+//! Per-member `role`, per-member `skills` and `squad.instructions` ARE rendered:
+//! a roled member's row carries a `— role: <label>` suffix, a skilled AGENT
+//! member's row carries a trailing `— skills: <a>, <b>`, and a non-blank
+//! `squad.instructions` becomes the third section `## Squad Instructions`,
+//! appended VERBATIM. Each fragment is independently blank-omitted — exactly as
+//! multica omits its own when the underlying value is empty:
+//!
+//! ```text
+//! - <name> — agent — <id>[ — role: <role>][ — skills: <a>, <b>]
+//! - <email|id> — human — <id>[ — role: <role>]
+//! ```
 
 use ainb_hangar_core::actor::ActorKind;
-use ainb_hangar_core::ids::WorkspaceId;
-use ainb_hangar_store::repo::agent::AgentRepo;
+use ainb_hangar_core::ids::{AgentId, WorkspaceId};
+use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
+use ainb_hangar_store::repo::skill::SkillRepo;
 use ainb_hangar_store::repo::squad::{Squad, SquadRepo};
 use sqlx::SqlitePool;
 
@@ -53,8 +64,9 @@ squad.
 Your responsibilities, in order:
 
 1. **Read the issue** (title, description, latest comments, acceptance criteria) \
-and decide which squad member is best suited to do the work. Match the task to \
-the members listed in the Squad Roster below.
+and decide which squad member is best suited to do the work. Pick from the \
+members listed in the Squad Roster below, matching the task to each member's \
+stated role and skills.
 2. **Delegate and sequence the work** across the members in the Squad Roster. \
 Split the work so each member owns the part that fits them.
 3. **Coordinate, don't re-do.** Track what each member is doing and how the \
@@ -107,7 +119,7 @@ pub async fn build_squad_leader_briefing(
     }
     let mut out = String::from(SQUAD_OPERATING_PROTOCOL);
     out.push('\n');
-    out.push_str(&render_roster(pool, &squad).await);
+    out.push_str(&render_roster(pool, workspace, &squad).await);
     // Section 3: the user-authored routing guidance, VERBATIM. Blank ⇒ the
     // heading is not emitted at all (multica blank-omit parity, migration 0053).
     let instructions = squad.instructions.trim();
@@ -129,10 +141,18 @@ pub async fn build_squad_leader_briefing(
 /// - An `agent` member that cannot be loaded, or that is archived, is skipped
 ///   silently (multica `renderMemberRow` parity).
 /// - A human `member` is listed (inert in fan-out, but the leader should see it)
-///   with its email as the label, falling back to the id.
+///   with its email as the label, falling back to the id — and NEVER carries a
+///   skills segment (multica appends skills "for agents"; a human has no skill
+///   set to materialise).
+/// - The leader SELF-row is deliberately skill-less: the leader is reading its
+///   own briefing, so listing its own capabilities is noise, and multica's
+///   self-row is the identity line only.
 /// - When no member rows survive: `"Members: (none — you are the only member of
 ///   this squad)"`.
-async fn render_roster(pool: &SqlitePool, squad: &Squad) -> String {
+///
+/// `workspace` scopes the per-member skill read (the roster must never leak
+/// another tenant's skill names).
+async fn render_roster(pool: &SqlitePool, workspace: &WorkspaceId, squad: &Squad) -> String {
     use std::fmt::Write as _;
     let mut out = String::from("## Squad Roster\n\n");
 
@@ -156,11 +176,13 @@ async fn render_roster(pool: &SqlitePool, squad: &Squad) -> String {
                 }
                 match AgentRepo::get(pool, actor.id()).await {
                     Ok(Some(agent)) if !agent.archived => {
+                        let skills = skills_segment(pool, workspace, &agent).await;
                         rows.push(format!(
-                            "- {} — agent — {}{}\n",
+                            "- {} — agent — {}{}{}\n",
                             agent.name,
                             actor.id(),
-                            role_suffix(&m.role)
+                            role_suffix(&m.role),
+                            skills
                         ));
                     }
                     // Unresolvable or archived agent → skip silently.
@@ -200,6 +222,42 @@ fn role_suffix(role: &str) -> String {
         String::new()
     } else {
         format!(" — role: {role}")
+    }
+}
+
+/// The roster row's trailing `— skills: a, b, c` fragment, or `""` when the
+/// member will materialise no skills (multica `agentSkillsRosterSegment`
+/// parity).
+///
+/// Applies BOTH suppression levers so the roster advertises only what the member
+/// will actually have on disk at dispatch: `agent_skill.enabled = 0` (filtered
+/// in the query, migration 0051) and `agent.disabled_runtime_skills` (filtered
+/// here, exactly as `materialise::materialise_for_agent` does). Advertising a
+/// capability the member will not have is worse than advertising none — the
+/// leader would route work that the member then cannot do.
+///
+/// A read fault degrades to `""`: a briefing must never fail to build over a
+/// skill read.
+///
+/// The names are ADVISORY — they inform the leader's routing, they are never a
+/// dispatch filter (`SquadRepo::member_agent_ids` / `assign_fanout` stay
+/// skill-blind; selective routing is parity #16).
+async fn skills_segment(pool: &SqlitePool, workspace: &WorkspaceId, agent: &Agent) -> String {
+    let Ok(agent_id) = AgentId::from_str(agent.id.clone()) else {
+        return String::new();
+    };
+    let names = SkillRepo::enabled_skill_names_for_agent(pool, workspace, &agent_id)
+        .await
+        .unwrap_or_default();
+    let live: Vec<&str> = names
+        .iter()
+        .map(ainb_hangar_core::skill::SkillName::as_str)
+        .filter(|n| !agent.disabled_runtime_skills.iter().any(|d| d == n))
+        .collect();
+    if live.is_empty() {
+        String::new()
+    } else {
+        format!(" — skills: {}", live.join(", "))
     }
 }
 
