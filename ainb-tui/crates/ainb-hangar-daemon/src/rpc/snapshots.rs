@@ -1759,16 +1759,52 @@ pub async fn refresh_pr_status(
     Ok((status, row))
 }
 
+/// Everything the caller supplies for one `hangar/issue_create` — the daemon
+/// mints the id, stamps `created_at`, and picks the `open` state itself.
+///
+/// Exists so [`issue_create`] stays under the argument-count lint as the create
+/// surface grows: every new authored attribute lands here instead of on the
+/// signature. Borrowed throughout — the struct is built and consumed within one
+/// handler call.
+#[derive(Debug, Clone, Copy)]
+pub struct IssueCreateInput<'a> {
+    /// The tenant-isolation guard: the resolved workspace the issue belongs to.
+    pub workspace_id: &'a str,
+    /// The issue title (already validated non-blank at the handler boundary).
+    pub title: &'a str,
+    /// Optional free-form body text.
+    pub description: Option<&'a str>,
+    /// The creating actor (already parsed from its `kind:id` wire form).
+    pub creator: &'a ActorRef,
+    /// Optional upstream-issue link (migration 0043).
+    pub external_ref: Option<&'a str>,
+    /// Optional parent issue, making this a sub-issue (migration 0046).
+    pub parent_issue_id: Option<&'a str>,
+    /// Ordered acceptance criteria (migration 0048).
+    pub acceptance_criteria: &'a [String],
+    /// Ordered context references (migration 0048).
+    pub context_refs: &'a [String],
+    /// Urgency `0..3` (P3..P0, HIGHER = MORE URGENT, migration 0014); `0` is the
+    /// schema default. Range-validated at the handler boundary.
+    pub priority: i64,
+    /// Optional deadline as epoch ms at UTC midnight (migration 0014).
+    pub due_date: Option<i64>,
+    /// Label NAMES to attach (migration 0016): each resolve-or-created in the
+    /// workspace and joined to the new issue.
+    pub labels: &'a [String],
+}
+
 /// Create one new issue in `workspace_id`, then return it as a wire [`IssueRow`]
 /// (`hangar/issue_create`, e38.29).
 ///
 /// Mints a fresh ULID via `idgen`, stamps `created_at` from `clock`, and inserts
 /// through [`IssueRepo::insert`] in the `open` lifecycle state. The new issue is
-/// unassigned (the create flow only captures title + description); `creator` is
-/// the already-parsed actor-ref. The re-wrapped [`IssueRow`] mirrors the
-/// `issues_list` shape (a freshly-created issue has no completed task, so
-/// `pr_url` is always `None`), so the response row and the pushed `IssueCreated`
-/// event are byte-identical to a list snapshot of the row.
+/// unassigned (the create flow captures attributes, never an assignee);
+/// `creator` is the already-parsed actor-ref. Authored labels are attached
+/// through the 0016 join and read back from it, so the re-wrapped [`IssueRow`]
+/// mirrors the `issues_list` shape (a freshly-created issue has no completed
+/// task, so `pr_url` is always `None`) — the response row and the pushed
+/// `IssueCreated` event stay byte-identical to a list snapshot of the row.
 ///
 /// # Errors
 ///
@@ -1778,18 +1814,24 @@ pub async fn issue_create(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
     clock: &dyn HangarClock,
-    workspace_id: &str,
-    title: &str,
-    description: Option<&str>,
-    creator: &ActorRef,
-    external_ref: Option<&str>,
-    parent_issue_id: Option<&str>,
-    acceptance_criteria: &[String],
-    context_refs: &[String],
+    input: &IssueCreateInput<'_>,
 ) -> Result<IssueRow, sqlx::Error> {
     use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::issue::NewIssue;
 
+    let &IssueCreateInput {
+        workspace_id,
+        title,
+        description,
+        creator,
+        external_ref,
+        parent_issue_id,
+        acceptance_criteria,
+        context_refs,
+        priority,
+        due_date,
+        labels,
+    } = input;
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
     // e38.21: apply the workspace's issue_prefix to the new title so the prefix
@@ -1809,8 +1851,11 @@ pub async fn issue_create(
             assignee: None,
             creator: creator.clone(),
             created_at,
-            priority: 0,
-            due_date: None,
+            priority,
+            due_date,
+            // 0016: labels are written through the `label` / `issue_label` join
+            // below, never straight into the JSON cache — the join is the source
+            // of truth and `LabelRepo::attach` re-derives the cache from it.
             labels: Vec::new(),
             acceptance_criteria: acceptance_criteria.to_vec(),
             context_refs: context_refs.to_vec(),
@@ -1823,6 +1868,29 @@ pub async fn issue_create(
     // post-insert card-parity pattern as source/target branches). A `None` /
     // blank ref is a no-op, so a link-less create leaves `external_ref` NULL.
     CardParityRepo::set_issue_external_ref(pool, workspace_id, &id, external_ref).await?;
+    // 0016: attach the authored labels through the join (resolve-or-create per
+    // name, `ON CONFLICT DO NOTHING` on the join row, `issue.labels` re-derived
+    // inside the same transaction). Attach is idempotent, so a repeated name is
+    // one join row. The re-read below is what the response + pushed event carry,
+    // so they match a later `issues_list` snapshot byte-for-byte.
+    let stored_labels = if labels.is_empty() {
+        Vec::new()
+    } else {
+        let ws = WorkspaceId::from_str(workspace_id.to_string()).map_err(|e| {
+            sqlx::Error::ColumnDecode {
+                index: "workspace_id".to_string(),
+                source: format!("malformed workspace id {workspace_id:?}: {e}").into(),
+            }
+        })?;
+        for name in labels {
+            LabelRepo::attach(pool, &ws, &id, name, None).await.map_err(|e| match e {
+                LabelRepoError::Db(db) => db,
+                // Unreachable: the issue was just inserted into THIS workspace.
+                LabelRepoError::IssueNotFound => sqlx::Error::RowNotFound,
+            })?;
+        }
+        LabelRepo::labels_for_issue(pool, &ws, &id).await?
+    };
     let issue_id = IssueId::from_str(id.clone()).map_err(|e| sqlx::Error::ColumnDecode {
         index: "id".to_string(),
         source: format!("malformed issue id {id:?}: {e}").into(),
@@ -1842,9 +1910,13 @@ pub async fn issue_create(
         assignee: None,
         creator: format!("{}:{}", creator.kind().as_str(), creator.id()),
         created_at,
-        priority: 0,
-        due_date: None,
-        labels: Vec::new(),
+        // The urgency + deadline the create captured (0014), echoed so the
+        // response row and the pushed IssueCreated event match a list snapshot.
+        priority,
+        due_date,
+        // Read back from the 0016 join (ORDER BY name), exactly what a later
+        // `issues_list` shows — never the caller's unsorted input.
+        labels: stored_labels,
         pr_url: None,
         // A freshly-created issue has no tasks yet, so no committed branch, and no
         // repo / agent / branches pinned until the follow-up issue_update (63d).
