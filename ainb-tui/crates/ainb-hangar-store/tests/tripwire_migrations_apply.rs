@@ -255,6 +255,33 @@ async fn migration_0002_creates_skill_tables_with_composite_keys() {
         "agent.disabled_runtime_skills (0051): {agent}"
     );
 
+    // Migration 0052 (parity #26, multica 031/085): the archive AUDIT sidecar.
+    // Both columns are NULLABLE with no default — a pre-0052 archived row keeps
+    // NULL (an honest unknown), and there is deliberately no CHECK tying
+    // `archived = 1` to a non-null stamp.
+    assert!(
+        agent.contains("archived_at INTEGER"),
+        "agent.archived_at (0052): {agent}"
+    );
+    assert!(
+        agent.contains("archived_by TEXT"),
+        "agent.archived_by (0052): {agent}"
+    );
+
+    let squad = table_sql(&pool, "squad").await;
+    assert!(
+        squad.contains("archived INTEGER NOT NULL DEFAULT 0"),
+        "squad.archived default-false (0052): {squad}"
+    );
+    assert!(
+        squad.contains("archived_at INTEGER"),
+        "squad.archived_at (0052): {squad}"
+    );
+    assert!(
+        squad.contains("archived_by TEXT"),
+        "squad.archived_by (0052): {squad}"
+    );
+
     pool.close().await;
 }
 
