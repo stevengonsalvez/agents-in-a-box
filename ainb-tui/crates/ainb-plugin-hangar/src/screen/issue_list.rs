@@ -4410,14 +4410,15 @@ mod tests {
         out
     }
 
-    /// The Issues screen renders through the five-column card-board (63l.4): every
-    /// canonical lifecycle column appears with its live count header, and a
+    /// The Issues screen renders through the seven-column card-board (63l.4):
+    /// every canonical lifecycle column appears with its live count header, and a
     /// representative row is bucketed into each as a CARD (its id painted inside a
-    /// bordered tile). A `backlog` and an `in_review` row prove the two outer
-    /// columns are not dropped, and the legacy `open` / `closed` tokens still land
-    /// under Todo / Done via the canonical helper.
+    /// bordered tile). A `backlog` and an `in_review` row prove the outer columns
+    /// are not dropped, `blocked` / `cancelled` prove the two appended ones
+    /// render, and the legacy `open` / `closed` tokens still land under Todo /
+    /// Done via the canonical helper.
     #[test]
-    fn renders_all_five_canonical_columns_with_counts() {
+    fn renders_all_seven_canonical_columns_with_counts() {
         let s = IssueListState::with_rows(vec![
             row("i-backlog", "backlog", None),
             row("i-todo", "todo", None),
@@ -4426,11 +4427,13 @@ mod tests {
             row("i-review", "in_review", None),
             row("i-done", "done", None),
             row("i-closed", "closed", None), // legacy -> Done
+            row("i-blocked", "blocked", None),
+            row("i-cancelled", "cancelled", None),
         ]);
 
-        // A wide board so every 16-cell column fits its header + card.
-        let mut buf = WireBuffer::new(120, 24);
-        render_issue_list(&mut buf, 120, 1, 23, &s, 0);
+        // A wide board so every one of the seven columns fits its header + card.
+        let mut buf = WireBuffer::new(168, 24);
+        render_issue_list(&mut buf, 168, 1, 23, &s, 0);
         let painted = painted_text(&buf);
 
         // Every canonical column header with its live count.
@@ -4440,6 +4443,8 @@ mod tests {
             "In Progress (1)",
             "In Review (1)",
             "Done (2)", // done + legacy closed
+            "Blocked (1)",
+            "Cancelled (1)",
         ] {
             assert!(
                 painted.contains(header),
@@ -4456,6 +4461,8 @@ mod tests {
             "i-review",
             "i-done",
             "i-closed",
+            "i-blocked",
+            "i-cancelled",
         ] {
             assert!(
                 painted.contains(id),
