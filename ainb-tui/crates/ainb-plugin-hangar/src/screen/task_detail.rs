@@ -1018,17 +1018,25 @@ fn render_detail_card(
     );
     row = row.saturating_add(1);
 
-    // --- Labels ---
+    // --- Labels / Due (0014: the deadline shares the Labels row, so the card
+    //     height is unchanged and an issue's whole triage state reads in one
+    //     glance: Priority above, Labels + Due here) ---
     let labels = if issue.labels.is_empty() {
         CARD_UNSET.to_string()
     } else {
         issue.labels.iter().map(|l| format!("[{l}]")).collect::<Vec<_>>().join(" ")
     };
+    let due = issue.due_date.map_or_else(|| CARD_UNSET.to_string(), fmt_card_date);
     card_field_row(
         buf,
         card_w,
         row,
-        &[("Labels: ", CARD_LABEL), (&labels, CARD_VALUE)],
+        &[
+            ("Labels: ", CARD_LABEL),
+            (&labels, CARD_VALUE),
+            ("   Due: ", CARD_LABEL),
+            (&due, CARD_VALUE),
+        ],
     );
     row = row.saturating_add(1);
 
@@ -1380,6 +1388,33 @@ mod card_tests {
             "em-dash placeholder for unset repo/agent"
         );
         assert!(text.contains("no description"), "unset description");
+    }
+
+    /// Parity 28: the deadline renders on the card next to the labels — a real
+    /// `YYYY-MM-DD` when set, the unset placeholder when not. Without this the
+    /// wizard could author a due date the user could never see.
+    #[test]
+    fn detail_card_renders_the_due_date() {
+        // Set: the calendar day appears under a `Due:` label.
+        let mut issue = full_issue();
+        issue.due_date = Some(1_785_542_400_000); // 2026-08-01 UTC midnight
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Due: "), "due label: {text}");
+        assert!(text.contains("2026-08-01"), "due value: {text}");
+
+        // Unset: the label still renders, with the em-dash placeholder.
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 30);
+        render_task_detail(&mut buf, 80, 0, 29, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Due: "), "due label when unset: {text}");
+        assert!(
+            !text.contains("2026-08-01"),
+            "no stale date on a deadline-less issue: {text}"
+        );
     }
 
     /// A linked upstream issue (0043) renders a subtle `Linked: ⧉ <ref>` line on

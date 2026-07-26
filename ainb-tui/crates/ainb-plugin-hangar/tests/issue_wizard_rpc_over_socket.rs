@@ -368,7 +368,12 @@ async fn wizard_commit_issues_create_update_and_run() {
         send_key(&mut host_write, KeyCode::Down).await; // Brief → Link
         send_key(&mut host_write, KeyCode::Down).await; // Link → Acceptance
         send_key(&mut host_write, KeyCode::Down).await; // Acceptance → Context
-        send_key(&mut host_write, KeyCode::Down).await; // Context → Repo
+        // Parity 28 rows, all left at their defaults on this walk: the create's
+        // wire shape must stay byte-identical to pre-28 (asserted below).
+        send_key(&mut host_write, KeyCode::Down).await; // Context → Priority
+        send_key(&mut host_write, KeyCode::Down).await; // Priority → Due
+        send_key(&mut host_write, KeyCode::Down).await; // Due → Labels
+        send_key(&mut host_write, KeyCode::Down).await; // Labels → Repo
         send_key(&mut host_write, KeyCode::Char { ch: '@' }).await;
         send_key(&mut host_write, KeyCode::Enter).await;
         send_key(&mut host_write, KeyCode::Enter).await;
@@ -449,10 +454,149 @@ async fn wizard_commit_issues_create_update_and_run() {
             "issue_update must precede issue_run (update @ {update_ix}, run @ {run_ix})"
         );
 
+        // Parity 28 append-only guarantee: a walk that leaves Priority / Due /
+        // Labels alone emits a create payload with NONE of the three keys, so the
+        // wire shape an old daemon sees is unchanged.
+        let create_params = calls
+            .iter()
+            .find(|(m, _)| m == daemon_methods::HANGAR_ISSUE_CREATE)
+            .map(|(_, p)| p.clone())
+            .expect("issue_create was sent");
+        for key in ["priority", "due_date", "labels"] {
+            assert!(
+                create_params.get(key).is_none(),
+                "an untouched {key} row must not reach the wire: {create_params}"
+            );
+        }
+
         drop(host_write);
         server.abort();
     };
     tokio::time::timeout(BUDGET, body)
         .await
         .expect("exceeded wizard-dispatch budget");
+}
+
+/// Parity 28, the positive half: a wizard walk that PICKS a priority, types a
+/// due date and types labels emits a `hangar/issue_create` payload carrying all
+/// three, in wire form (`priority` scalar, `due_date` epoch ms, `labels` array of
+/// names). Drives real key events end-to-end over the plugin's host protocol —
+/// the shape the daemon actually receives, not a reducer-level intent.
+#[tokio::test]
+async fn wizard_priority_due_labels_reach_the_create_payload() {
+    let body = async {
+        let home = tempfile::tempdir().expect("home");
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+        let stream_id = format!("sock-wizard-attrs-{}", std::process::id());
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+
+        let state = home.path().join("hangar").join("state.toml");
+        std::fs::create_dir_all(state.parent().unwrap()).expect("state dir");
+        std::fs::write(&state, "warnings_ack = [\"first_run\"]\n").expect("seed ack");
+
+        let socket_path = home.path().join("hangar.sock");
+        let listener = UnixListener::bind(&socket_path).expect("bind daemon");
+        spawn_daemon(listener, seen.clone());
+
+        let (host_side, plugin_side) = tokio::io::duplex(256 * 1024);
+        let (plugin_read, plugin_write) = tokio::io::split(plugin_side);
+        let server = tokio::spawn(Server::new(HangarPlugin::new()).run(plugin_read, plugin_write));
+
+        let (host_read_half, mut host_write) = tokio::io::split(host_side);
+        let mut host_read = BufReader::new(host_read_half);
+
+        let daemon = init_and_dial(&mut host_write, &mut host_read, &socket_path, &stream_id).await;
+        let (daemon_read, mut daemon_write) = daemon.into_split();
+        let mut daemon_reader = BufReader::new(daemon_read);
+
+        let ack = read_one_raw_frame(&mut daemon_reader).await.expect("subscribe ack");
+        push_data(&mut host_write, &stream_id, &ack).await;
+        pump_snapshots(
+            &mut host_write,
+            &mut host_read,
+            &mut daemon_reader,
+            &mut daemon_write,
+            &stream_id,
+        )
+        .await;
+
+        // `c` → title → tab down to Priority, →×3 (P3 → P0) → Due, type the
+        // calendar day → Labels, type a comma list (with a blank and a repeat) →
+        // Repo, pick scratch → Enter commits.
+        send_key(&mut host_write, KeyCode::Char { ch: 'c' }).await;
+        for ch in "Urgent task".chars() {
+            send_key(&mut host_write, KeyCode::Char { ch }).await;
+        }
+        for _ in 0..5 {
+            send_key(&mut host_write, KeyCode::Down).await; // Title → … → Priority
+        }
+        for _ in 0..3 {
+            send_key(&mut host_write, KeyCode::Right).await; // P3 → P0
+        }
+        send_key(&mut host_write, KeyCode::Down).await; // Priority → Due
+        for ch in "2026-08-01".chars() {
+            send_key(&mut host_write, KeyCode::Char { ch }).await;
+        }
+        send_key(&mut host_write, KeyCode::Down).await; // Due → Labels
+        for ch in "bug, p0, ,bug".chars() {
+            send_key(&mut host_write, KeyCode::Char { ch }).await;
+        }
+        send_key(&mut host_write, KeyCode::Down).await; // Labels → Repo
+        send_key(&mut host_write, KeyCode::Char { ch: '@' }).await;
+        send_key(&mut host_write, KeyCode::Enter).await; // pick scratch
+        send_key(&mut host_write, KeyCode::Enter).await; // commit
+
+        let mut created: Option<serde_json::Value> = None;
+        for _ in 0..60 {
+            relay_one_send_or_render(
+                &mut host_write,
+                &mut host_read,
+                &mut daemon_reader,
+                &mut daemon_write,
+                &stream_id,
+            )
+            .await;
+            let calls: Vec<(String, serde_json::Value)> = seen.lock().unwrap().clone();
+            created = calls
+                .iter()
+                .find(|(m, p)| {
+                    m == daemon_methods::HANGAR_ISSUE_CREATE
+                        && p.get("title").and_then(serde_json::Value::as_str) == Some("Urgent task")
+                })
+                .map(|(_, p)| p.clone());
+            if created.is_some() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let params = created.unwrap_or_else(|| {
+            panic!(
+                "wizard commit must send issue_create; saw: {:?}",
+                seen.lock().unwrap()
+            )
+        });
+
+        assert_eq!(
+            params.get("priority"),
+            Some(&serde_json::json!(3)),
+            "the picked P0 must reach the wire: {params}"
+        );
+        assert_eq!(
+            params.get("due_date"),
+            // 2026-08-01 at UTC midnight.
+            Some(&serde_json::json!(1_785_542_400_000_i64)),
+            "the typed calendar day must reach the wire as epoch ms: {params}"
+        );
+        assert_eq!(
+            params.get("labels"),
+            Some(&serde_json::json!(["bug", "p0"])),
+            "labels must reach the wire comma-split, deduped: {params}"
+        );
+
+        drop(host_write);
+        server.abort();
+    };
+    tokio::time::timeout(BUDGET, body)
+        .await
+        .expect("exceeded wizard-attribute budget");
 }

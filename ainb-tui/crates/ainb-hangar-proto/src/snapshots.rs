@@ -1049,6 +1049,25 @@ pub struct IssueCreateParams {
     /// field: an old client omits it, an old daemon ignores it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub context_refs: Vec<String>,
+    /// New issue urgency `0..3` (P3..P0, HIGHER = MORE URGENT, migration 0014).
+    /// `None` = the schema default 0 (P3). An out-of-range value is REJECTED by
+    /// the daemon (multica's `validateIssueEnum` contract), never clamped.
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub priority: Option<i64>,
+    /// Optional deadline as epoch milliseconds at UTC midnight (migration 0014).
+    /// Clients author a `YYYY-MM-DD` calendar day and convert with
+    /// [`crate::dates::parse_calendar_date_ms`]; `None` = no due date.
+    /// Append-only field: an old client omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub due_date: Option<i64>,
+    /// Label NAMES to attach at create (migration 0016): each is resolve-or-created
+    /// in the workspace and joined to the new issue through the `label` /
+    /// `issue_label` tables (the join is the source of truth; `issue.labels` stays
+    /// the derived read-cache). Append-only field: an old client omits it, an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub labels: Vec<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's

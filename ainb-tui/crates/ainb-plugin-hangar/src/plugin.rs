@@ -3068,6 +3068,9 @@ impl HangarPlugin {
             external_ref,
             acceptance_criteria,
             context_refs,
+            priority,
+            due_date,
+            labels,
             repo_ref,
             source_branch,
             target_branch,
@@ -3110,6 +3113,18 @@ impl HangarPlugin {
         }
         if !context_refs.is_empty() {
             params["context_refs"] = serde_json::json!(context_refs);
+        }
+        // 0014/0016: the wizard's Priority / Due / Labels rows. Each key is added
+        // ONLY when the author moved it off its default, so an unadorned create's
+        // wire shape stays byte-identical to pre-parity-28 (append-only).
+        if priority != 0 {
+            params["priority"] = serde_json::json!(priority);
+        }
+        if let Some(due) = due_date {
+            params["due_date"] = serde_json::json!(due);
+        }
+        if !labels.is_empty() {
+            params["labels"] = serde_json::json!(labels);
         }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,

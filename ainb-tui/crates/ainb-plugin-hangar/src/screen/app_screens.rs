@@ -402,6 +402,16 @@ pub enum IssueCreateAction {
         /// `issue.context_refs` and rendered on the detail card. Empty when the
         /// wizard's Context row was left blank.
         context_refs: Vec<String>,
+        /// The urgency picked on the wizard's Priority row (migration 0014), on
+        /// the wire scale `0..3` (P3..P0, HIGHER = MORE URGENT). `0` (P3) when the
+        /// row was left alone.
+        priority: i64,
+        /// The deadline typed on the wizard's Due row (migration 0014) as epoch ms
+        /// at UTC midnight; `None` when the row was blank.
+        due_date: Option<i64>,
+        /// The label NAMES typed on the wizard's Labels row (migration 0016),
+        /// resolve-or-created and joined to the new issue. Empty when blank.
+        labels: Vec<String>,
         /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
         /// indicator the daemon clones.
         repo_ref: String,
@@ -1716,6 +1726,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             external_ref,
             acceptance_criteria,
             context_refs,
+            priority,
+            due_date,
+            labels,
             repo_ref,
             source_branch,
             target_branch,
@@ -1729,6 +1742,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
                 external_ref,
                 acceptance_criteria,
                 context_refs,
+                priority,
+                due_date,
+                labels,
                 repo_ref,
                 source_branch,
                 target_branch,

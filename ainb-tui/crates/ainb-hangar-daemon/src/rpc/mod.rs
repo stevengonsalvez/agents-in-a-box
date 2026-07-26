@@ -3079,7 +3079,7 @@ async fn handle_issue_create(
 
     let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
         req,
-        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs? }",
+        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -3115,6 +3115,26 @@ async fn handle_issue_create(
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .collect();
+    // 0014 priority: `0..3` (P3..P0). An out-of-vocabulary value is a client
+    // error, mirroring multica's `validateIssueEnum` — NEVER silently clamped,
+    // which would persist an urgency the author did not ask for.
+    let priority = params.priority.unwrap_or(0);
+    if !(0..=3).contains(&priority) {
+        return Err(invalid_params("issue priority must be 0..3 (P3..P0)"));
+    }
+    // 0014 due date: the wire carries epoch ms at UTC midnight (the client parses
+    // the `YYYY-MM-DD` calendar day with `proto::dates::parse_calendar_date_ms`),
+    // so any i64 is accepted here — a pre-1970 deadline is legal, if odd.
+    let due_date = params.due_date;
+    // 0016 labels: trim-drop blanks like the other lists, and dedupe preserving
+    // first-seen order. `LabelRepo::attach` is idempotent so a duplicate would not
+    // corrupt the join, but the response row must not imply the repeat mattered.
+    let mut labels: Vec<String> = Vec::new();
+    for name in params.labels.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !labels.iter().any(|seen| seen == name) {
+            labels.push(name.to_string());
+        }
+    }
     if let Some(parent) = parent_issue_id {
         let ok = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, parent)
             .await
@@ -3130,14 +3150,19 @@ async fn handle_issue_create(
         pool,
         &SystemIdGen,
         &SystemClock,
-        ws.as_str(),
-        &params.title,
-        params.description.as_deref(),
-        &creator,
-        external_ref,
-        parent_issue_id,
-        &acceptance_criteria,
-        &context_refs,
+        &snapshots::IssueCreateInput {
+            workspace_id: ws.as_str(),
+            title: &params.title,
+            description: params.description.as_deref(),
+            creator: &creator,
+            external_ref,
+            parent_issue_id,
+            acceptance_criteria: &acceptance_criteria,
+            context_refs: &context_refs,
+            priority,
+            due_date,
+            labels: &labels,
+        },
     )
     .await
     .map_err(|e| store_err(&e))?;
