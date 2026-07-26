@@ -1362,3 +1362,42 @@ async fn migration_0047_adds_permission_mode_and_invocation_target() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn migration_0055_types_card_dependency_links() {
+    // multica parity #20: `issue_dependency.type IN ('blocks','blocked_by','related')`.
+    // hangar's row IS the blocked_by relation, so 0055 adds the KIND column with a
+    // constant DEFAULT 'blocked_by' — every pre-0055 row backfills to today's
+    // semantics with no table rewrite — plus the (workspace_id, link_type) index the
+    // typed graph read uses. 0036 is UNTOUCHED (an applied migration is immutable).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let cols = sqlx::query("PRAGMA table_info(card_dependency)")
+        .fetch_all(&pool)
+        .await
+        .expect("table_info");
+    let link_type = cols
+        .iter()
+        .find(|r| {
+            let name: String = r.get("name");
+            name == "link_type"
+        })
+        .expect("card_dependency.link_type exists");
+    let notnull: i64 = link_type.get("notnull");
+    let dflt: Option<String> = link_type.get("dflt_value");
+    assert_eq!(notnull, 1, "link_type is NOT NULL");
+    assert_eq!(
+        dflt.as_deref().map(|d| d.trim_matches('\'')),
+        Some("blocked_by"),
+        "the constant default backfills every pre-0055 row as a gating edge"
+    );
+
+    let idx = index_sql(&pool, "idx_card_dependency_ws_type").await;
+    assert!(
+        idx.contains("card_dependency") && idx.contains("link_type"),
+        "idx_card_dependency_ws_type serves the typed graph read: {idx}"
+    );
+
+    pool.close().await;
+}
