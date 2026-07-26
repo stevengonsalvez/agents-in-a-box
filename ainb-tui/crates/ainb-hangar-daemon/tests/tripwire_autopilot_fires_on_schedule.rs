@@ -117,6 +117,7 @@ async fn autopilot_fires_on_schedule_after_clock_advance() {
         max_concurrent_runs: 1,
         execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
         concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
+        api_trigger_enabled: false,
     };
     let create_clock = ainb_hangar_core::clock::FixedClock(T0);
     let autopilot_id = AutopilotRepo::create(&pool, &create_clock, &req)

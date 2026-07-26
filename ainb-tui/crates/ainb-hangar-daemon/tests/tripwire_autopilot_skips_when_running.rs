@@ -94,6 +94,7 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::RunOnly,
         // The default policy: a tick at the in-flight limit is dropped.
         concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
+        api_trigger_enabled: false,
     };
     let create_clock = FixedClock(T0);
     let autopilot_id = AutopilotRepo::create(&pool, &create_clock, &req)
@@ -130,7 +131,7 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         .unwrap()
         .get(0);
 
-    // ── advance #2: at the limit → skipped, no new rows ─────────────────────
+    // ── advance #2: at the limit → skipped: no new task, decline recorded ───
     clock.advance(FIVE_MIN_MS);
     let ev = next_event(&mut rx, Duration::from_secs(2)).await;
     match ev {
@@ -142,16 +143,35 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         }
         other => panic!("expected TickSkipped(concurrency), got {other:?}"),
     }
-    // The skip is REAL — the queue and run table are genuinely untouched.
+    // The skip enqueues NO work (the invariant that matters) …
     assert_eq!(
-        count(&pool, "SELECT count(*) FROM autopilot_run").await,
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run WHERE status <> 'skipped'"
+        )
+        .await,
         1,
-        "skip must not create a second run"
+        "skip must not create a second LIVE run"
     );
     assert_eq!(
         count(&pool, "SELECT count(*) FROM agent_task_queue").await,
         1,
         "skip must not enqueue a second task"
+    );
+    // … but since migration 0057 it IS recorded: a terminal `skipped` run with
+    // its trigger source and the admission reason, so a declined dispatch is
+    // visible to every read path instead of existing only as a log line.
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run \
+             WHERE status = 'skipped' AND source = 'schedule' \
+               AND completed_at IS NOT NULL \
+               AND failure_reason LIKE 'concurrency limit%'"
+        )
+        .await,
+        1,
+        "the declined dispatch must be persisted as a skipped run"
     );
 
     // ── complete #1, freeing the concurrency slot ───────────────────────────
@@ -191,9 +211,13 @@ async fn autopilot_skips_tick_when_prior_run_in_flight() {
         "with the slot freed, the next tick fires; got {ev:?}"
     );
     assert_eq!(
-        count(&pool, "SELECT count(*) FROM autopilot_run").await,
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run WHERE status <> 'skipped'"
+        )
+        .await,
         2,
-        "a second run now exists"
+        "a second LIVE run now exists (the recorded skip is not one)"
     );
     assert_eq!(
         count(&pool, "SELECT count(*) FROM agent_task_queue").await,
