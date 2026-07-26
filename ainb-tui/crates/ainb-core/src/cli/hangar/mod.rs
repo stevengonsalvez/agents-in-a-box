@@ -1206,6 +1206,77 @@ pub enum IssueCommand {
     /// Inspect or tick off an issue's acceptance criteria.
     #[command(subcommand)]
     Criteria(IssueCriteriaCommand),
+    /// Add, remove, or list an issue's typed links to other issues.
+    #[command(subcommand)]
+    Link(IssueLinkCommand),
+}
+
+/// `hangar issue link <verb>` (multica parity #20).
+///
+/// An issue relates to another with a KIND: `blocked-by` (the gating relation —
+/// the issue refuses to run until the other finishes), `blocks` (the same
+/// relation authored from the other end), or `related` (a plain association that
+/// NEVER gates and never auto-runs). Talks to the store repo directly, exactly
+/// like `issue criteria`, so it works with no daemon running.
+#[derive(Subcommand, Debug)]
+pub enum IssueLinkCommand {
+    /// Link two issues. Re-adding a pair with a new kind replaces the kind.
+    Add(IssueLinkArgs),
+    /// Remove a link between two issues. Idempotent.
+    Remove(IssueLinkArgs),
+    /// List an issue's links (`🔒`/`✓` blocked-by, `→` blocks, `~` related).
+    List(IssueLinkListArgs),
+}
+
+/// The `--kind` selector for `hangar issue link add|remove`.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LinkKindArg {
+    /// This issue is blocked by the other — the gating default.
+    #[default]
+    BlockedBy,
+    /// This issue blocks the other (stored as the reverse gating link).
+    Blocks,
+    /// The two issues are merely associated: never gating, never auto-running.
+    Related,
+}
+
+impl LinkKindArg {
+    /// The store-side kind this selector authors.
+    fn to_kind(self) -> ainb_hangar_store::repo::card_dependency::LinkKind {
+        use ainb_hangar_store::repo::card_dependency::LinkKind;
+        match self {
+            Self::BlockedBy => LinkKind::BlockedBy,
+            Self::Blocks => LinkKind::Blocks,
+            Self::Related => LinkKind::Related,
+        }
+    }
+}
+
+/// Arguments for `hangar issue link add|remove`.
+#[derive(Args, Debug)]
+pub struct IssueLinkArgs {
+    /// Issue id (ULID) the link is authored ON.
+    pub id: String,
+    /// The OTHER issue id (ULID) at the far end of the link.
+    pub other: String,
+    /// The link kind. Defaults to `blocked-by`, the gating relation.
+    #[arg(long, value_enum, default_value_t = LinkKindArg::BlockedBy)]
+    pub kind: LinkKindArg,
+    /// Workspace slug both issues belong to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue link list`.
+#[derive(Args, Debug)]
+pub struct IssueLinkListArgs {
+    /// Issue id (ULID) whose links to list.
+    pub id: String,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar issue criteria <verb>` (multica parity #11-rest).
@@ -3629,6 +3700,7 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Delete(args) => run_issue_delete(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
         IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
+        IssueCommand::Link(cmd) => run_issue_link(&store, cmd).await,
     }
 }
 
@@ -3856,6 +3928,136 @@ async fn run_issue_criteria(store: &Store, cmd: IssueCriteriaCommand) -> Result<
         println!("{}", criterion_line(idx + 1, criterion));
     }
     Ok(())
+}
+
+/// `hangar issue link add|remove|list`: author and read an issue's TYPED links
+/// (multica parity #20).
+///
+/// Routes through the SAME [`CardDependencyRepo`] seam the daemon RPCs use, so
+/// there is exactly one mutator: a `blocks` link normalises into the reverse
+/// `blocked_by` row, a `related` link is symmetric and never gates, and a
+/// self-link / cycle / cross-tenant endpoint is a NON-ZERO exit rather than a
+/// silent no-op.
+///
+/// [`CardDependencyRepo`]: ainb_hangar_store::repo::card_dependency::CardDependencyRepo
+async fn run_issue_link(store: &Store, cmd: IssueLinkCommand) -> Result<()> {
+    use ainb_hangar_store::repo::card_dependency::{CardDependencyError, CardDependencyRepo};
+
+    let (id, workspace) = match &cmd {
+        IssueLinkCommand::Add(a) | IssueLinkCommand::Remove(a) => {
+            (a.id.clone(), a.workspace.clone())
+        }
+        IssueLinkCommand::List(a) => (a.id.clone(), a.workspace.clone()),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+
+    match &cmd {
+        IssueLinkCommand::Add(args) => {
+            let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+            let ws = ainb_hangar_core::ids::WorkspaceId::from_str(workspace_id.clone())
+                .map_err(|e| anyhow::anyhow!("bad workspace id: {e}"))?;
+            CardDependencyRepo::add_link(
+                store.pool(),
+                &ws,
+                &args.id,
+                &args.other,
+                args.kind.to_kind(),
+                now,
+            )
+            .await
+            .map_err(|e| match e {
+                CardDependencyError::SelfDependency => {
+                    anyhow::anyhow!("a card cannot link to itself")
+                }
+                CardDependencyError::Cycle => {
+                    anyhow::anyhow!("that link would create a dependency cycle")
+                }
+                CardDependencyError::NotFound => anyhow::anyhow!(
+                    "both issues must exist in this workspace ({} / {})",
+                    args.id,
+                    args.other
+                ),
+                CardDependencyError::Db(db) => anyhow::Error::new(db).context("add issue link"),
+            })?;
+        }
+        IssueLinkCommand::Remove(args) => {
+            let ws = ainb_hangar_core::ids::WorkspaceId::from_str(workspace_id.clone())
+                .map_err(|e| anyhow::anyhow!("bad workspace id: {e}"))?;
+            CardDependencyRepo::remove_link(
+                store.pool(),
+                &ws,
+                &args.id,
+                &args.other,
+                args.kind.to_kind(),
+            )
+            .await
+            .context("remove issue link")?;
+        }
+        IssueLinkCommand::List(_) => {}
+    }
+
+    print_issue_links(store, &workspace_id, &id).await
+}
+
+/// Print one issue's typed links, one row per link:
+/// `<glyph>  <kind>  <display-id>  <title>`. `🔒` marks a blocker that is still
+/// UNFINISHED (so it gates), `✓` one that has finished, `→` what this issue
+/// blocks, and `~` a related issue. No links ⇒ `no links`.
+async fn print_issue_links(store: &Store, workspace_id: &str, issue_id: &str) -> Result<()> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let blockers = CardDependencyRepo::blockers_of(store.pool(), issue_id)
+        .await
+        .context("read blockers")?;
+    let unfinished = CardDependencyRepo::unfinished_blockers_of(store.pool(), issue_id)
+        .await
+        .context("read unfinished blockers")?;
+    let blocks = CardDependencyRepo::blocks_of(store.pool(), issue_id)
+        .await
+        .context("read blocked cards")?;
+    let related = CardDependencyRepo::related_of(store.pool(), issue_id)
+        .await
+        .context("read related cards")?;
+
+    if blockers.is_empty() && blocks.is_empty() && related.is_empty() {
+        println!("no links");
+        return Ok(());
+    }
+
+    for (kind, ids) in [
+        ("blocked-by", &blockers),
+        ("blocks", &blocks),
+        ("related", &related),
+    ] {
+        for other in ids {
+            let glyph = match kind {
+                "blocked-by" if unfinished.iter().any(|u| u == other) => "🔒",
+                "blocked-by" => "✓",
+                "blocks" => "→",
+                _ => "~",
+            };
+            let row =
+                IssueRepo::get_by_id(store.pool(), other).await.context("read linked issue")?;
+            let title = row.as_ref().map_or_else(String::new, |r| r.title.clone());
+            let reference = match &row {
+                Some(_) => issue_display_ref(store, workspace_id, other).await?,
+                None => other.clone(),
+            };
+            println!("{glyph}  {kind:<10}  {reference:<10}  {title}");
+        }
+    }
+    Ok(())
+}
+
+/// The human display id (`HGR-<n>`) of an issue, falling back to its raw id.
+async fn issue_display_ref(store: &Store, workspace_id: &str, issue_id: &str) -> Result<String> {
+    let seq = IssueRepo::workspace_seq(store.pool(), workspace_id, issue_id)
+        .await
+        .context("read issue ordinal")?;
+    Ok(seq.map_or_else(
+        || issue_id.to_string(),
+        |n| ainb_hangar_store::repo::workspace::issue_display_id(None, n),
+    ))
 }
 
 /// `hangar issue update`: edit a subset of an issue's mutable fields,
@@ -4415,9 +4617,36 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
                     println!("  {}", criterion_line(idx + 1, criterion));
                 }
             }
+            // multica parity #20: the issue's typed links, so the CLI proof of a
+            // blocked_by / blocks / related relation needs no daemon and no TUI.
+            // Silent when the issue has none (`print_issue_links` prints
+            // `no links`, which we suppress here by checking first).
+            if issue_has_links(store, &issue.id).await? {
+                println!("Links:");
+                print_issue_links(store, &issue.workspace_id, &issue.id).await?;
+            }
         }
     }
     Ok(())
+}
+
+/// Whether an issue carries ANY typed link (multica parity #20) — so
+/// `issue show` can omit the `Links:` section entirely rather than printing an
+/// empty header.
+async fn issue_has_links(store: &Store, issue_id: &str) -> Result<bool> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+    Ok(!CardDependencyRepo::blockers_of(store.pool(), issue_id)
+        .await
+        .context("read blockers")?
+        .is_empty()
+        || !CardDependencyRepo::blocks_of(store.pool(), issue_id)
+            .await
+            .context("read blocked cards")?
+            .is_empty()
+        || !CardDependencyRepo::related_of(store.pool(), issue_id)
+            .await
+            .context("read related cards")?
+            .is_empty())
 }
 
 /// Dispatch the `hangar task` verbs.
