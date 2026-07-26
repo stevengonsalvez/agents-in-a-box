@@ -987,16 +987,16 @@ pub enum BoardsEvent {
     /// agent), prefilled from the card, and commits at the agent stage as an
     /// `issue_update` rather than a create. A no-op with no card focused.
     EditFocusedCard,
-    /// Move the focused column one place left (`⇧←`).
+    /// Move the focused column one place left (`⇧←` / `<`).
     ReorderColumnLeft,
-    /// Move the focused column one place right (`⇧→`).
+    /// Move the focused column one place right (`⇧→` / `>`).
     ReorderColumnRight,
     /// Toggle the focused board's auto-move master toggle (`m`).
     ToggleAutoMove,
-    /// Assign a SQUAD to the focused card (`q`, tcp T4 / F7) — opens a picker over
+    /// Assign a SQUAD to the focused card (`s`, tcp T4 / F7) — opens a picker over
     /// the injected squad roster (plus a "clear" row). A no-op with no card focused.
     AssignSquad,
-    /// Add a `depends-on` blocker to the focused card (`D`, tcp T4 / F7) — opens a
+    /// Add a `depends-on` blocker to the focused card (`w`, tcp T4 / F7) — opens a
     /// picker over the board's OTHER cards. A no-op with no card focused.
     AddDependency,
     /// Toggle the focused card's auto-run flag (`R`, tcp T4 / F7) — the card
@@ -2545,33 +2545,41 @@ fn render_no_board(buf: &mut WireBuffer, area_w: u16, top: u16, status: &BoardsS
     }
 }
 
+/// The Boards key-hint band, as `(key, description)` pairs.
+///
+/// Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a runnable
+/// card AND reruns a finished/failed/cancelled one (same launch path), `X`
+/// cancels a running one. `feedback_keybinding_hints_near_control`. The
+/// lifecycle verbs lead so they render even when a narrow pane clips the
+/// trailing column verbs. `⇧↑↓` reorders a card within its column, `d` removes
+/// it.
+///
+/// Crate-visible so the tests can prove every advertised single-char key is
+/// actually reachable — i.e. none of them is a reserved router/host key that
+/// would be eaten before the boards reducer sees it (#450).
+pub(crate) const BOARDS_HINTS: [(&str, &str); 16] = [
+    ("↵", "run/rerun"),
+    ("a", "attach"),
+    ("X", "cancel"),
+    ("t", "timeline"),
+    ("e", "edit"),
+    ("d", "remove"),
+    ("s", "squad"),
+    ("w", "depends-on"),
+    ("R", "auto-run"),
+    ("⇧↑↓", "move card"),
+    ("n", "add col"),
+    ("r", "rename"),
+    ("x", "del col"),
+    ("c", "add card"),
+    ("⇧←→", "reorder col"),
+    ("m", "auto-move"),
+];
+
 /// The key-hint band rendered under the board title — the column/card bindings
 /// next to the widget they drive.
 fn render_hint_band(buf: &mut WireBuffer, area_w: u16, row: u16) {
-    // Card-lifecycle verbs sit next to the card controls (F6): `↵` runs a
-    // runnable card AND reruns a finished/failed/cancelled one (same launch
-    // path), `X` cancels a running one. `feedback_keybinding_hints_near_control`.
-    // Card-lifecycle verbs (F6) lead so they render even when a narrow pane clips
-    // the trailing column verbs. `⇧↑↓` reorders a card within its column, `d`
-    // removes it. `feedback_keybinding_hints_near_control`.
-    let hints: [(&str, &str); 16] = [
-        ("↵", "run/rerun"),
-        ("a", "attach"),
-        ("X", "cancel"),
-        ("t", "timeline"),
-        ("e", "edit"),
-        ("d", "remove"),
-        ("q", "squad"),
-        ("D", "depends-on"),
-        ("R", "auto-run"),
-        ("⇧↑↓", "move card"),
-        ("n", "add col"),
-        ("r", "rename"),
-        ("x", "del col"),
-        ("c", "add card"),
-        ("⇧←→", "reorder col"),
-        ("m", "auto-move"),
-    ];
+    let hints = BOARDS_HINTS;
     let mut x = 0u16;
     for (key, desc) in hints {
         x = put_str(buf, x, row, key, GOLD, area_w);

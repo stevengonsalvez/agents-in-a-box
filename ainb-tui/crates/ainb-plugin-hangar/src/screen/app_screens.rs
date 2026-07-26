@@ -297,7 +297,7 @@ pub enum BoardsAction {
         /// The new column name.
         name: String,
     },
-    /// Assign (or clear) a squad as a card's assignee (`q`) —
+    /// Assign (or clear) a squad as a card's assignee (`s`) —
     /// `hangar/board_card_assign_squad` (tcp T4 / F7).
     CardAssignSquad {
         /// The board the card sits on.
@@ -1900,9 +1900,14 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
 /// EVERY key routes to it as a [`BoardsEvent::Key`] so typed text and picker
 /// motion land in the input rather than moving the board. With no overlay open
 /// the navigation/verb map applies: `←/→/↑/↓` (and `h/j/k/l`) move focus; `[`/`]`
-/// switch boards; `⇧←/→` reorder; `x` deletes a column; `n` appends one; `m`
-/// toggles auto-move; `c` opens card-create; `r` opens column-rename; `Enter`
-/// opens the card's `Run ▾`; `a` attaches to the card's run.
+/// switch boards; `⇧←/→` (and `<`/`>`) reorder; `x` deletes a column; `n` appends
+/// one; `m` toggles auto-move; `c` opens card-create; `r` opens column-rename;
+/// `Enter` opens the card's `Run ▾`; `a` attaches to the card's run; `s` opens the
+/// squad picker; `w` opens the depends-on picker.
+///
+/// Every char bound here must be free of
+/// [`is_reserved_key`](crate::screen::router::is_reserved_key) — a reserved char
+/// never reaches this mapper (#450).
 fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
     // The timeline overlay (`t`) captures keys locally — a read-only scroll view
     // that never routes to the reducer (its content is an IO-derived side-cache).
@@ -1990,8 +1995,11 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'l' => Some(BoardsEvent::FocusRight),
             'k' => Some(BoardsEvent::FocusUp),
             'j' => Some(BoardsEvent::FocusDown),
-            'H' => Some(BoardsEvent::ReorderColumnLeft),
-            'L' => Some(BoardsEvent::ReorderColumnRight),
+            // `<`/`>` reorder the focused column (the `⇧←→` chords still work).
+            // The old `H`/`L` pair was dead: `H` is swallowed by the HOST help
+            // toggle and `L` by the plugin router's Logs tab (#450).
+            '<' => Some(BoardsEvent::ReorderColumnLeft),
+            '>' => Some(BoardsEvent::ReorderColumnRight),
             '[' => Some(BoardsEvent::PrevBoard),
             ']' => Some(BoardsEvent::NextBoard),
             'b' => Some(BoardsEvent::CreateBoard),
@@ -2013,10 +2021,14 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'x' => Some(BoardsEvent::DeleteColumn),
             'c' => Some(BoardsEvent::AddCard),
             'm' => Some(BoardsEvent::ToggleAutoMove),
-            // `q` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a picker.
-            'q' => Some(BoardsEvent::AssignSquad),
-            // `d` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
-            'D' => Some(BoardsEvent::AddDependency),
+            // `s` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a
+            // picker. It was `q` until #450: bare `q` is the global quit key, so
+            // the binding was dead and the advertised `q:squad` hint popped the
+            // whole panel instead of opening the picker.
+            's' => Some(BoardsEvent::AssignSquad),
+            // `w` ("waits-on") adds a depends-on blocker. Was `D` until #450, which
+            // the router claims as the daemon-health tab.
+            'w' => Some(BoardsEvent::AddDependency),
             // `R` (uppercase, distinct from `r` = rename) toggles the auto-run flag.
             'R' => Some(BoardsEvent::ToggleAutoRun),
             _ => None,
