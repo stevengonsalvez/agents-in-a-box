@@ -2707,6 +2707,8 @@ mod tests {
             member_states: Vec::new(),
             blocked_by: Vec::new(),
             auto_run: false,
+            blocks: Vec::new(),
+            related: Vec::new(),
         }
     }
 

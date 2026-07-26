@@ -151,6 +151,7 @@ pub async fn issues_list(
                 acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
                 acceptance: issue.acceptance_criteria,
                 context_refs: issue.context_refs,
+                dependencies: Vec::new(),
             });
         }
     }
@@ -322,6 +323,7 @@ pub async fn issues_search(
             acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
             acceptance: issue.acceptance_criteria,
             context_refs: issue.context_refs,
+            dependencies: Vec::new(),
         });
     }
     Ok(out)
@@ -731,6 +733,8 @@ async fn enrich_board_card(
         member_states,
         blocked_by,
         auto_run,
+        blocks: Vec::new(),
+        related: Vec::new(),
     })
 }
 
@@ -1776,6 +1780,7 @@ pub async fn issue_row(
         acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
         acceptance: issue.acceptance_criteria,
         context_refs: issue.context_refs,
+        dependencies: Vec::new(),
     }))
 }
 
@@ -1920,6 +1925,7 @@ async fn read_issue_row(
         acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
         acceptance: issue.acceptance_criteria,
         context_refs: issue.context_refs,
+        dependencies: Vec::new(),
     }))
 }
 
@@ -2171,6 +2177,7 @@ pub async fn issue_create(
         acceptance_criteria: criteria_texts(&minted_criteria),
         acceptance: minted_criteria,
         context_refs: context_refs.to_vec(),
+        dependencies: Vec::new(),
     })
 }
 

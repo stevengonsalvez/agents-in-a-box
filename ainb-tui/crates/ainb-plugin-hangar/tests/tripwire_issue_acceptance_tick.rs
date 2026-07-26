@@ -122,6 +122,7 @@ fn row(id: &str, title: &str, criteria: Vec<AcceptanceCriterion>) -> IssueRow {
         acceptance_criteria: criteria.iter().map(|c| c.text.clone()).collect(),
         acceptance: criteria,
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 

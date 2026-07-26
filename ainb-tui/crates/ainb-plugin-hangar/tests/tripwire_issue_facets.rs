@@ -126,6 +126,7 @@ fn row(id: &str, title: &str, state: &str, priority: i64, labels: &[&str]) -> Is
         acceptance_criteria: Vec::new(),
         acceptance: Vec::new(),
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 
