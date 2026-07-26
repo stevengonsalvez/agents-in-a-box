@@ -226,6 +226,82 @@ exit 0"#,
     );
 }
 
+/// Parity #30 — the other half of the contract above: the value that reaches the
+/// CHILD must never reach the LOG.
+///
+/// The positive half (`codex_exec_passes_agent_env_but_strips_ambient_secret`)
+/// proves dispatch still works; this proves the tracing emitted across the whole
+/// run never contains the value. It is the reason `ResolvedDispatch` /
+/// `AgentEnv` carry a hand-written redacting `Debug`: a single
+/// `tracing::debug!(?dispatch)` added later cannot silently re-open the leak.
+#[tokio::test]
+async fn codex_dispatch_tracing_never_contains_the_agent_env_value() {
+    use std::io::Write as _;
+    use std::sync::{Arc, Mutex};
+
+    const SECRET: &str = "sk-live-DEADBEEF01";
+
+    /// A `MakeWriter` that appends every emitted log line to a shared buffer.
+    #[derive(Clone)]
+    struct Capture(Arc<Mutex<Vec<u8>>>);
+    impl std::io::Write for Capture {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.0.lock().expect("log lock").write(buf)
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Capture {
+        type Writer = Self;
+        fn make_writer(&'a self) -> Self::Writer {
+            self.clone()
+        }
+    }
+
+    let log = Arc::new(Mutex::new(Vec::new()));
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(Capture(Arc::clone(&log)))
+        .with_max_level(tracing::Level::TRACE)
+        .finish();
+    // `#[tokio::test]` is a current-thread runtime, so a thread-local default
+    // subscriber captures the whole dispatch.
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let tmp = TempDir::new().expect("tmp");
+    let env = exec_env_in(tmp.path());
+    let script = write_script(
+        tmp.path(),
+        "fake-codex.sh",
+        r#"echo '{"type":"system","session_id":"s"}'
+echo "SECRET_TOKEN=${SECRET_TOKEN:-<absent>}"
+exit 0"#,
+    );
+    let runner = Runner::new(cfg_with_codex(script));
+    let extra_env = [("SECRET_TOKEN".to_string(), SECRET.to_string())];
+
+    let outcome = runner
+        .run_codex_with_env(
+            &env,
+            std::iter::empty(),
+            extra_env.iter().cloned(),
+            &brief_invocation(),
+        )
+        .await
+        .expect("run");
+
+    assert!(
+        outcome.result().stdout_tail.contains(&format!("SECRET_TOKEN={SECRET}")),
+        "precondition: the child really does receive the value"
+    );
+
+    let captured = String::from_utf8_lossy(&log.lock().expect("log lock")).to_string();
+    assert!(
+        !captured.contains("sk-live-"),
+        "the dispatch tracing leaked the agent_env value:\n{captured}"
+    );
+}
+
 #[tokio::test]
 async fn codex_exec_nonzero_exit_marks_agent_error() {
     let tmp = TempDir::new().expect("tmp");
