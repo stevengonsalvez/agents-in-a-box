@@ -62,10 +62,11 @@ use sqlx::{Row, SqlitePool};
 ///
 /// multica's `issue_dependency.type` is `IN ('blocks','blocked_by','related')`.
 /// hangar's row is already directional (`dependent -> blocker` == "dependent is
-/// *blocked_by* blocker"), so [`LinkKind::Blocks`] is a write/read DIRECTION, never
+/// `blocked_by` blocker"), so [`LinkKind::Blocks`] is a write/read DIRECTION, never
 /// a stored value: authoring `A blocks B` normalises into the row
 /// `(dependent = B, blocker = A, link_type = 'blocked_by')`. The at-rest domain is
 /// therefore `{'blocked_by', 'related'}` — see [`LinkKind::as_stored`].
+///
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum LinkKind {
     /// FROM blocks TO — normalised at write into the reverse `BlockedBy` row.
@@ -79,10 +80,12 @@ pub enum LinkKind {
 }
 
 impl LinkKind {
-    /// The value persisted in `card_dependency.link_type`. `Blocks` shares
-    /// `BlockedBy`'s storage because the endpoints are swapped at write.
+    /// The value persisted in `card_dependency.link_type`.
+    ///
+    /// `Blocks` shares `BlockedBy`'s storage because the endpoints are swapped at
+    /// write.
     #[must_use]
-    pub fn as_stored(self) -> &'static str {
+    pub const fn as_stored(self) -> &'static str {
         match self {
             Self::Blocks | Self::BlockedBy => LINK_TYPE_BLOCKED_BY,
             Self::Related => LINK_TYPE_RELATED,
@@ -101,16 +104,17 @@ impl LinkKind {
         }
     }
 
-    /// Whether links of this kind gate dispatch (and drive the auto-run seam).
-    /// `Related` never does.
+    /// Whether links of this kind gate dispatch.
+    ///
+    /// Gating kinds also drive the auto-run seam; `Related` never does either.
     #[must_use]
-    pub fn is_gating(self) -> bool {
+    pub const fn is_gating(self) -> bool {
         !matches!(self, Self::Related)
     }
 
     /// The rendered token (`"blocks"` / `"blocked_by"` / `"related"`).
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
             Self::Blocks => "blocks",
             Self::BlockedBy => LINK_TYPE_BLOCKED_BY,
@@ -435,10 +439,7 @@ impl CardDependencyRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] on a store fault.
-    pub async fn related_of(
-        pool: &SqlitePool,
-        issue_id: &str,
-    ) -> Result<Vec<String>, sqlx::Error> {
+    pub async fn related_of(pool: &SqlitePool, issue_id: &str) -> Result<Vec<String>, sqlx::Error> {
         sqlx::query_scalar(
             "SELECT CASE WHEN dependent_issue_id = ?1 THEN blocker_issue_id \
                          ELSE dependent_issue_id END AS other \

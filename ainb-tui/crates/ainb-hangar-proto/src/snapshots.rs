@@ -2166,13 +2166,13 @@ impl LinkKindWire {
     /// pre-#20 meaning, so an old client sees an unchanged payload.
     #[must_use]
     #[allow(clippy::trivially_copy_pass_by_ref)]
-    pub fn is_default(&self) -> bool {
+    pub const fn is_default(&self) -> bool {
         matches!(self, Self::BlockedBy)
     }
 
     /// The rendered token (`"blocks"` / `"blocked_by"` / `"related"`).
     #[must_use]
-    pub fn as_token(self) -> &'static str {
+    pub const fn as_token(self) -> &'static str {
         match self {
             Self::Blocks => "blocks",
             Self::BlockedBy => "blocked_by",
@@ -3584,7 +3584,7 @@ mod tests {
         );
     }
 
-    /// Every wire kind round-trips through its snake_case token.
+    /// Every wire kind round-trips through its `snake_case` token.
     #[test]
     fn link_kind_wire_round_trips_snake_case() {
         for (kind, token) in [
@@ -3592,7 +3592,10 @@ mod tests {
             (LinkKindWire::BlockedBy, "blocked_by"),
             (LinkKindWire::Related, "related"),
         ] {
-            assert_eq!(serde_json::to_string(&kind).unwrap(), format!("\"{token}\""));
+            assert_eq!(
+                serde_json::to_string(&kind).unwrap(),
+                format!("\"{token}\"")
+            );
             assert_eq!(kind.as_token(), token);
             assert_eq!(
                 serde_json::from_str::<LinkKindWire>(&format!("\"{token}\"")).unwrap(),
@@ -3611,9 +3614,16 @@ mod tests {
         )
         .expect("a pre-#20 card row still decodes");
         assert!(row.blocks.is_empty() && row.related.is_empty());
-        assert_eq!(row.blocked_by, vec!["HGR-2"], "blocked_by keeps its meaning");
+        assert_eq!(
+            row.blocked_by,
+            vec!["HGR-2"],
+            "blocked_by keeps its meaning"
+        );
 
         let s = serde_json::to_string(&row).unwrap();
-        assert!(!s.contains("\"blocks\"") && !s.contains("\"related\""), "{s}");
+        assert!(
+            !s.contains("\"blocks\"") && !s.contains("\"related\""),
+            "{s}"
+        );
     }
 }
