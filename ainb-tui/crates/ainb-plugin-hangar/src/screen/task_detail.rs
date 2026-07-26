@@ -45,7 +45,7 @@
 
 use ainb_hangar_core::acceptance::{AcceptanceCriterion, checked_count, legacy_placeholder_id};
 use ainb_hangar_core::ids::TaskId;
-use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
+use ainb_hangar_proto::events::{HangarEvent, IssueLinkRow, IssueRow, MessageKind, TaskResult};
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -1192,6 +1192,28 @@ fn render_detail_card(
         }
     }
 
+    // --- Typed links (multica parity #20): one line per link, glyphed by kind so
+    //     the gating ones read differently from the associations —
+    //     🔒 an UNFINISHED blocker, ✓ a satisfied one, → what this card blocks,
+    //     ~ a related card. Rendered ONLY when non-empty, so an old daemon (which
+    //     sends no `dependencies`) leaves the card byte-identical. ---
+    if !issue.dependencies.is_empty() {
+        card_field_row(buf, card_w, row, &[("Links:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for link in &issue.dependencies {
+            let (glyph, kind_label) = link_glyph_and_label(link);
+            let reference = link.display_id.clone().unwrap_or_else(|| link.issue_id.clone());
+            let head = format!("  {glyph} {kind_label:<10} {reference}  ");
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[(&head, CARD_LABEL), (&link.title, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
     // --- divider ---
     draw_card_divider(buf, row, card_w);
     row = row.saturating_add(1);
@@ -1271,6 +1293,23 @@ fn acceptance_view(issue: &IssueRow) -> Vec<AcceptanceCriterion> {
 /// Draw one card content row: the `│` left+right edges in the border colour, then
 /// the label/value `segments` laid out left-to-right from the inner column,
 /// clipped by **chars** at the right edge (63d, utf8-safe).
+/// The glyph + rendered kind label for one typed link (multica parity #20).
+///
+/// `blocked_by` is the only kind that can gate, so it is the only one whose glyph
+/// varies: 🔒 while the blocker is unfinished, ✓ once it is satisfied. An
+/// unrecognised kind token (a newer daemon) falls back to the neutral association
+/// glyph rather than being dropped.
+fn link_glyph_and_label(
+    link: &ainb_hangar_proto::events::IssueLinkRow,
+) -> (&'static str, &'static str) {
+    match link.kind.as_str() {
+        "blocked_by" if link.satisfied => ("✓", "blocked-by"),
+        "blocked_by" => ("🔒", "blocked-by"),
+        "blocks" => ("→", "blocks"),
+        _ => ("~", "related"),
+    }
+}
+
 fn card_field_row(buf: &mut WireBuffer, card_w: u16, row: u16, segments: &[(&str, Color)]) {
     let inner_right = card_w.saturating_sub(2);
     // Edges first; the content overlays the interior between them.
@@ -1579,6 +1618,66 @@ mod card_tests {
         assert!(
             !painted_text(&buf).contains("Linked: "),
             "an unlinked issue shows no Linked line"
+        );
+    }
+
+    /// One typed link row for the render tests.
+    fn link_row(kind: &str, display: &str, title: &str, satisfied: bool) -> IssueLinkRow {
+        IssueLinkRow {
+            kind: kind.into(),
+            issue_id: format!("issue-{display}"),
+            display_id: Some(display.into()),
+            title: title.into(),
+            state: "open".into(),
+            satisfied,
+        }
+    }
+
+    /// multica parity #20: all three kinds render in a `Links:` block, each with
+    /// its own glyph — 🔒 for an unfinished blocker, ✓ once it is satisfied,
+    /// → for what this card blocks, ~ for a related card.
+    #[test]
+    fn detail_card_renders_a_links_block_per_kind() {
+        let mut issue = full_issue();
+        issue.dependencies = vec![
+            link_row("blocked_by", "HGR-4", "Build the parser", false),
+            link_row("blocked_by", "HGR-3", "Land the schema", true),
+            link_row("blocks", "HGR-9", "Ship the CLI", false),
+            link_row("related", "HGR-7", "Docs sweep", false),
+        ];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let text = painted_text(&buf);
+
+        assert!(text.contains("Links:"), "the block header: {text}");
+        for want in [
+            "🔒 blocked-by HGR-4",
+            "✓ blocked-by HGR-3",
+            "→ blocks",
+            "~ related",
+        ] {
+            let squashed = text.split_whitespace().collect::<Vec<_>>().join(" ");
+            let want_squashed = want.split_whitespace().collect::<Vec<_>>().join(" ");
+            assert!(
+                squashed.contains(&want_squashed),
+                "missing {want:?} in {text}"
+            );
+        }
+        assert!(text.contains("Build the parser"), "the link title: {text}");
+        assert!(text.contains("Docs sweep"), "the related title: {text}");
+    }
+
+    /// An issue with NO links renders no `Links:` line at all — an old daemon
+    /// sends no `dependencies`, so the card degrades to exactly today's render.
+    #[test]
+    fn detail_card_omits_the_links_block_when_empty() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        assert!(
+            !painted_text(&buf).contains("Links:"),
+            "no links ⇒ no block (an old daemon leaves the card unchanged)"
         );
     }
 

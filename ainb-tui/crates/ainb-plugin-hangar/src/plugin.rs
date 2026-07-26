@@ -2702,10 +2702,11 @@ impl HangarPlugin {
                 board_id,
                 dependent_issue_id,
                 blocker_issue_id,
+                link_type,
             } => (
                 BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_CARD_DEP_ADD,
-                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id }),
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id, "link_type": link_type }),
             ),
             BoardsAction::CardSetAutoRun {
                 board_id,
