@@ -4041,6 +4041,7 @@ Commands:
   unarchive      Restore an archived squad (clears the archive audit stamp)
   member-role    Set or clear an existing member's free-text role on a squad
   instructions   Show, set, or clear a squad's user-authored routing instructions
+  briefing       Print the leader briefing this squad would inject into a leader run
   help           Print this message or the help of the given subcommand(s)
 
 Options:
@@ -4230,6 +4231,25 @@ Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --set <SET>              Replace the squad's instructions with this text (stored verbatim)
       --clear                  Clear the squad's instructions, so the leader briefing omits the section
+      --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar squad briefing`
+
+Print the leader briefing this squad would inject into a leader run
+
+```console
+$ ainb hangar squad briefing --help
+Print the leader briefing this squad would inject into a leader run
+
+Usage: ainb hangar squad briefing [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Squad id whose leader briefing to render
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
