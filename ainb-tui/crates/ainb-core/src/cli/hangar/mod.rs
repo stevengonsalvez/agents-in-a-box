@@ -12,7 +12,7 @@
 //!
 //! | path                          | backing impl                                            |
 //! |-------------------------------|---------------------------------------------------------|
-//! | `hangar issue create`         | [`ainb_hangar_store::repo::issue::IssueRepo::insert`]    |
+//! | `hangar issue create`         | [`ainb_hangar_store::repo::issue::IssueRepo::insert`] + [`ainb_hangar_store::repo::issue::IssueRepo::set_origin`] |
 //! | `hangar issue list`           | `IssueRepo::list_by_workspace_state`                     |
 //! | `hangar issue show`           | `IssueRepo::get_by_id`                                   |
 //! | `hangar task list`            | `ainb_hangar_store::repo::task::TaskRepo`                |
@@ -40,6 +40,7 @@ use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::SystemClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::autopilot::Autopilot;
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
@@ -1500,6 +1501,49 @@ pub struct IssueCreateArgs {
     /// the lowest unfinished stage cascades a roll-up comment onto the parent.
     #[arg(long)]
     pub parent: Option<String>,
+    /// Provenance of this issue: `autopilot` | `comment_mention` | `manual`
+    /// (migration 0056, multica parity #21).
+    ///
+    /// Defaults to `$HANGAR_ORIGIN_TYPE` — the daemon injects it into a
+    /// dispatched agent's environment, so an issue an agent creates mid-run is
+    /// attributable back to the comment / autopilot that asked for it. With
+    /// neither flag nor env, a create is stamped `manual`.
+    #[arg(long = "origin-type")]
+    pub origin_type: Option<String>,
+    /// The provenance id: the autopilot id for `autopilot`, the comment id for
+    /// `comment_mention`. REQUIRED for every kind except `manual`.
+    ///
+    /// Defaults to `$HANGAR_ORIGIN_ID`. Supplying an id with no
+    /// `--origin-type` is an error, never a silent drop.
+    #[arg(long = "origin-id")]
+    pub origin_id: Option<String>,
+}
+
+/// Resolve an issue create's ORIGIN PROVENANCE from flags, then env, then the
+/// `manual` default (migration 0056, multica parity #21).
+///
+/// Precedence rule: an explicit `--origin-type` suppresses the env pair
+/// ENTIRELY, so a flag kind is never mixed with an inherited env id. Only when
+/// NEITHER flag is given does the daemon-injected `HANGAR_ORIGIN_TYPE` /
+/// `HANGAR_ORIGIN_ID` pair apply.
+///
+/// # Errors
+///
+/// Returns an error for an id without a kind, a kind outside the allow-list, or
+/// a kind that requires an id and got none — the same messages the RPC handler
+/// produces, so both surfaces say the same thing.
+fn resolve_cli_origin(
+    flag_type: Option<&str>,
+    flag_id: Option<&str>,
+    env_type: Option<&str>,
+    env_id: Option<&str>,
+) -> Result<IssueOrigin> {
+    let (kind, id) = if flag_type.is_some() || flag_id.is_some() {
+        (flag_type, flag_id)
+    } else {
+        (env_type, env_id)
+    };
+    Ok(IssueOrigin::from_wire(kind, id)?.unwrap_or_else(IssueOrigin::manual))
 }
 
 /// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
@@ -4348,6 +4392,16 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         anyhow::ensure!(ok, "parent issue `{parent}` not found in this workspace");
     }
 
+    // 0056: resolve the ORIGIN PROVENANCE BEFORE any write (like the assignee and
+    // parent resolves above) — a bad origin must fail the command before the
+    // insert, never leave a half-provenanced issue behind.
+    let origin = resolve_cli_origin(
+        args.origin_type.as_deref(),
+        args.origin_id.as_deref(),
+        std::env::var("HANGAR_ORIGIN_TYPE").ok().as_deref(),
+        std::env::var("HANGAR_ORIGIN_ID").ok().as_deref(),
+    )?;
+
     // e38.21: apply the workspace's issue_prefix to the new title so the prefix
     // actually takes effect on a created issue. An unconfigured workspace leaves
     // the title verbatim (the v1 behaviour). Read after the assignee resolve so a
@@ -4396,6 +4450,12 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         stage: None,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
+    // 0056: stamp the resolved provenance post-insert, the same pattern the
+    // daemon's create uses, so a CLI-created and a TUI-created issue read back
+    // identically.
+    IssueRepo::set_origin(pool, &workspace_id, &id, &origin)
+        .await
+        .context("stamp issue origin")?;
 
     // 0016: attach each `--label` through the join — `LabelRepo::attach` resolves
     // or creates the label in the workspace, writes the `issue_label` row
@@ -4605,6 +4665,16 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
         }
         OutputFormat::Text => {
             println!("{}", issue_line(&issue));
+            // 0056 / multica parity #21: the provenance, so the "an issue created
+            // by autopilot or by a comment mention records its origin" proof needs
+            // no daemon and no TUI. Omitted entirely for a pre-0056 row, whose
+            // provenance is genuinely unknown.
+            if let Some(origin) = issue.origin.as_ref() {
+                match origin.id() {
+                    Some(id) => println!("Origin: {} ({id})", origin.kind_db_str()),
+                    None => println!("Origin: {}", origin.kind_db_str()),
+                }
+            }
             // #11-rest: the definition-of-done, with its per-criterion ☑/☐ state,
             // so the CLI proof does not depend on the TUI.
             if !issue.acceptance_criteria.is_empty() {
@@ -8045,5 +8115,144 @@ mod tests {
         )
         .await
         .expect("a padded key must resolve on get too");
+    }
+
+    // ---- ORIGIN PROVENANCE (0056, multica parity #21) ----------------------
+
+    /// The precedence rule: flags win, else the daemon-injected env pair, else
+    /// `manual`. An explicit `--origin-type` suppresses the env pair ENTIRELY, so
+    /// a flag kind is never married to an inherited env id.
+    #[test]
+    fn cli_origin_precedence_is_flags_then_env_then_manual() {
+        // Neither: manual.
+        let o = resolve_cli_origin(None, None, None, None).unwrap();
+        assert_eq!(o.kind_db_str(), "manual");
+        assert_eq!(o.id(), None);
+
+        // Env only: the daemon's injection is the default (the mention chain).
+        let o = resolve_cli_origin(None, None, Some("comment_mention"), Some("c-1")).unwrap();
+        assert_eq!(o.kind_db_str(), "comment_mention");
+        assert_eq!(o.id(), Some("c-1"));
+
+        // Flags beat env, and the env ID does NOT leak into a flag kind.
+        let o =
+            resolve_cli_origin(Some("manual"), None, Some("comment_mention"), Some("c-1")).unwrap();
+        assert_eq!(o.kind_db_str(), "manual");
+        assert_eq!(
+            o.id(),
+            None,
+            "an explicit flag kind never inherits the env id"
+        );
+    }
+
+    /// A bad origin is a hard error at resolve time, with the same wording the
+    /// RPC handler produces.
+    #[test]
+    fn cli_origin_rejects_a_bad_pair() {
+        let err = resolve_cli_origin(Some("quick_create"), Some("x"), None, None).unwrap_err();
+        assert!(err.to_string().contains("unsupported origin_type"));
+
+        let err = resolve_cli_origin(None, Some("c-1"), None, None).unwrap_err();
+        assert!(err.to_string().contains("must be provided together"));
+
+        let err = resolve_cli_origin(Some("autopilot"), None, None, None).unwrap_err();
+        assert!(err.to_string().contains("requires an origin_id"));
+    }
+
+    /// End-to-end: `hangar issue create --origin-type … --origin-id …` stamps the
+    /// pair onto the created row, and `issue show`'s read surface reads it back.
+    #[tokio::test]
+    async fn issue_create_stamps_the_authored_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Split this out",
+            "--origin-type",
+            "comment_mention",
+            "--origin-id",
+            "c-42",
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let (kind, id): (String, Option<String>) =
+            sqlx::query_as("SELECT origin_type, origin_id FROM issue LIMIT 1")
+                .fetch_one(store.pool())
+                .await
+                .expect("read origin");
+        assert_eq!(kind, "comment_mention");
+        assert_eq!(id.as_deref(), Some("c-42"));
+    }
+
+    /// A create with no origin flags (and no daemon env) is stamped `manual` —
+    /// never left NULL, so `origin_type IS NULL` keeps meaning exactly one thing:
+    /// "created before provenance existed".
+    #[tokio::test]
+    async fn issue_create_without_flags_stamps_manual() {
+        // The env pair is a DAEMON injection into a dispatched agent child; a test
+        // process never has it, and mutating process env from a test is unsound
+        // (and lint-denied here), so this asserts the plain no-flag-no-env path.
+        // `cli_origin_precedence_is_flags_then_env_then_manual` covers the env
+        // legs directly, with no process-global state.
+        assert!(
+            std::env::var("HANGAR_ORIGIN_TYPE").is_err(),
+            "a test process must not inherit the daemon's origin injection"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let HangarCommand::Issue(IssueCommand::Create(args)) =
+            parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "By hand"])
+        else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let (kind, id): (String, Option<String>) =
+            sqlx::query_as("SELECT origin_type, origin_id FROM issue LIMIT 1")
+                .fetch_one(store.pool())
+                .await
+                .expect("read origin");
+        assert_eq!(kind, "manual");
+        assert_eq!(id, None);
+    }
+
+    /// A bogus `--origin-type` fails BEFORE any write: the issue table is still
+    /// empty afterwards (the resolve is deliberately ahead of the insert, like
+    /// the assignee / parent resolves).
+    #[tokio::test]
+    async fn issue_create_with_a_bad_origin_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Nope",
+            "--origin-type",
+            "bogus",
+            "--origin-id",
+            "x",
+        ]) else {
+            panic!("expected issue create");
+        };
+        let err = run_issue_create(&store, args).await.unwrap_err();
+        assert!(err.to_string().contains("unsupported origin_type"));
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+            .fetch_one(store.pool())
+            .await
+            .expect("count issues");
+        assert_eq!(count, 0, "a bad origin must fail ahead of the insert");
     }
 }
