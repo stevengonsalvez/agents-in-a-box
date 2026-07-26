@@ -62,6 +62,21 @@ pub struct SquadAssignRequest<'a> {
     /// it — a fan-out is one run. `0` (the default) is the first run / the pre-8ln
     /// squads-screen path.
     pub generation: i64,
+    /// The EFFECTIVE invoking user id the invocation-permission gate judges every
+    /// dispatch target by (gap #8, multica `canInvokeAgent` parity).
+    ///
+    /// `None` (the [`Default`]) means **"resolve the workspace owner"**, NOT "skip
+    /// the gate" — the owner branch of
+    /// [`AgentRepo::can_invoke`](crate::repo::agent::AgentRepo::can_invoke) always
+    /// admits, so the ordinary single-operator assign is unchanged while any future
+    /// caller inherits the gate for free. A multi-user caller names a non-owner
+    /// member here to be gated against each target agent's allow-list.
+    ///
+    /// A workspace with no `owner`-role member resolves to `""`, which matches no
+    /// `agent.owner_id` and therefore denies every `private` agent — the same
+    /// pre-existing behaviour the single-agent run path has (`run_card`'s
+    /// `unwrap_or_default()`), kept identical here so the two paths cannot drift.
+    pub invoker: Option<&'a str>,
 }
 
 /// The outcome of a successful squad assignment: the enqueued task plus the
@@ -93,6 +108,20 @@ pub enum SquadAssignError {
     /// unknown runtime — the caller re-issues once the member ref is fixed.
     #[error("squad member agent `{0}` not found")]
     MemberAgentMissing(String),
+    /// A dispatch target (the leader or a member) is not invocable by the effective
+    /// invoker (gap #8, multica `canInvokeAgent` parity). NO task row is written —
+    /// the gate runs in the pre-flight resolve phase, before the fan-out transaction
+    /// opens, so a denial leaves the queue untouched rather than rolled back.
+    #[error(
+        "agent `{agent_id}` is not invocable by `{invoker}` — it is private or you are not on its allow-list"
+    )]
+    NotInvocable {
+        /// The dispatch target that refused the invoker (`agent.id`).
+        agent_id: String,
+        /// The effective invoking user id the gate judged (`""` when the workspace
+        /// has no `owner`-role member to fall back to).
+        invoker: String,
+    },
     /// An underlying store failure (resolve, lookup, or enqueue).
     #[error(transparent)]
     Db(#[from] sqlx::Error),
@@ -150,6 +179,9 @@ impl SquadAssignService {
     ///   workspace or its leader is a human `member`.
     /// - [`SquadAssignError::LeaderAgentMissing`] when the leader agent row is
     ///   absent (a dangling leader ref).
+    /// - [`SquadAssignError::NotInvocable`] when the effective invoker
+    ///   ([`SquadAssignRequest::invoker`], else the workspace owner) may not invoke
+    ///   the leader agent (gap #8) — no task row is written.
     /// - [`SquadAssignError::Db`] on a store fault (resolve, lookup, enqueue —
     ///   notably a UNIQUE violation when a pending task already exists for the
     ///   leader on the same issue).
@@ -174,6 +206,11 @@ impl SquadAssignService {
             .await?
             .ok_or_else(|| SquadAssignError::LeaderAgentMissing(leader_agent_id.clone()))?;
         let runtime_id = agent.runtime_id.clone();
+
+        // 2b. gap #8 invocation gate: the effective invoker must be permitted to
+        //     invoke the leader. Denied means NO task row is written at all.
+        let invoker = Self::effective_invoker(pool, workspace, request).await?;
+        Self::gate(pool, &agent, &invoker).await?;
 
         // 3. Enqueue a task keyed to the leader's `(agent_id, runtime_id)` — the
         //    existing claim/dispatch path routes it to the leader and nobody else.
@@ -241,6 +278,9 @@ impl SquadAssignService {
     ///   leader ref).
     /// - [`SquadAssignError::MemberAgentMissing`] when a member's agent row is
     ///   absent (a dangling member ref).
+    /// - [`SquadAssignError::NotInvocable`] when the effective invoker may not
+    ///   invoke the LEADER or ANY member (gap #8). The gate runs in the pre-flight
+    ///   resolve phase, so a denial writes zero rows.
     /// - [`SquadAssignError::Db`] on a store fault (resolve, lookup, enqueue).
     pub async fn assign_fanout(
         pool: &SqlitePool,
@@ -263,9 +303,17 @@ impl SquadAssignService {
         let leader_agent_id = SquadRepo::leader_agent_id(pool, workspace, squad_id)
             .await?
             .ok_or(SquadAssignError::NoAgentLeader)?;
-        let leader_runtime_id = Self::agent_runtime_in_ws(pool, workspace, &leader_agent_id)
+        let leader = Self::agent_in_ws(pool, workspace, &leader_agent_id)
             .await?
             .ok_or_else(|| SquadAssignError::LeaderAgentMissing(leader_agent_id.clone()))?;
+        let leader_runtime_id = leader.runtime_id.clone();
+
+        // 1b. gap #8 invocation gate: resolve the EFFECTIVE invoker ONCE, then judge
+        //     every dispatch target (the leader here, each member below) by it —
+        //     inside this pre-flight resolve phase, BEFORE `pool.begin()`. A denial
+        //     therefore writes zero rows rather than rolling written ones back.
+        let invoker = Self::effective_invoker(pool, workspace, request).await?;
+        Self::gate(pool, &leader, &invoker).await?;
 
         // 2. Resolve the distinct `agent` members. Seed the dedupe set with the
         //    leader's agent so its brief is never double-dispatched as a member;
@@ -283,10 +331,14 @@ impl SquadAssignService {
             if !seen.insert(agent_id.clone()) {
                 continue;
             }
-            let runtime_id = Self::agent_runtime_in_ws(pool, workspace, &agent_id)
+            let member = Self::agent_in_ws(pool, workspace, &agent_id)
                 .await?
                 .ok_or_else(|| SquadAssignError::MemberAgentMissing(agent_id.clone()))?;
-            member_targets.push((agent_id, runtime_id));
+            // gap #8: every fanned-out member is gated by the same effective
+            // invoker as the leader — a foreign private agent dragged into a squad
+            // is refused here, before any row is written.
+            Self::gate(pool, &member, &invoker).await?;
+            member_targets.push((agent_id, member.runtime_id));
         }
 
         // 3. Every target is known-good — enqueue the leader brief and all member
@@ -381,24 +433,77 @@ impl SquadAssignService {
         .await
     }
 
-    /// Resolve `agent_id` to its runtime **within `workspace`**, returning `None`
-    /// when no agent row with that id exists in the workspace — a dangling ref, or
-    /// a ref that names another tenant's agent. This is the guard that stops a
-    /// squad member/leader ref from borrowing a foreign workspace's agent +
+    /// Resolve `agent_id` to its full agent row **within `workspace`**, returning
+    /// `None` when no agent row with that id exists in the workspace — a dangling
+    /// ref, or a ref that names another tenant's agent. This is the guard that stops
+    /// a squad member/leader ref from borrowing a foreign workspace's agent +
     /// runtime and dispatching a task across the tenant boundary (`AgentRepo::get`
     /// alone keys only on the primary id, which is not workspace-scoped).
-    async fn agent_runtime_in_ws(
+    ///
+    /// Returns the WHOLE agent (not just its runtime) because the gap #8 invocation
+    /// gate judges `permission_mode` / `owner_id` / `workspace_id`, not the runtime.
+    async fn agent_in_ws(
         pool: &SqlitePool,
         workspace: &WorkspaceId,
         agent_id: &str,
-    ) -> Result<Option<String>, sqlx::Error> {
+    ) -> Result<Option<crate::repo::agent::Agent>, sqlx::Error> {
         let Some(agent) = AgentRepo::get(pool, agent_id).await? else {
             return Ok(None);
         };
         if agent.workspace_id != workspace.as_str() {
             return Ok(None);
         }
-        Ok(Some(agent.runtime_id))
+        Ok(Some(agent))
+    }
+
+    /// Resolve the EFFECTIVE invoking user id for an assignment (gap #8): the
+    /// caller-supplied [`SquadAssignRequest::invoker`], else the workspace owner.
+    ///
+    /// Deliberately identical in shape to the single-agent run path's resolution
+    /// (`run_card`), including the `unwrap_or_default()` on an owner-less workspace,
+    /// so the squad seam and the single-agent seam can never drift apart.
+    async fn effective_invoker(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        request: &SquadAssignRequest<'_>,
+    ) -> Result<String, sqlx::Error> {
+        match request.invoker {
+            Some(u) => Ok(u.to_string()),
+            None => Ok(
+                crate::repo::workspace::WorkspaceRepo::owner_id(pool, workspace)
+                    .await?
+                    .unwrap_or_default(),
+            ),
+        }
+    }
+
+    /// Refuse a dispatch target the effective invoker may not invoke (gap #8).
+    ///
+    /// Both the leader and every fanned-out member are judged as the SAME
+    /// [`ActorKind::Member`] invoker — the human who pressed Run — because hangar's
+    /// fan-out enqueues member work directly on that human's behalf (multica's
+    /// leader instead spawns member work over A2A). Gating members as an agent actor
+    /// would pass a `None` originator and deny every `private` agent, which is every
+    /// hangar agent by default.
+    async fn gate(
+        pool: &SqlitePool,
+        agent: &crate::repo::agent::Agent,
+        invoker: &str,
+    ) -> Result<(), SquadAssignError> {
+        let allowed = AgentRepo::can_invoke(
+            pool,
+            agent,
+            ainb_hangar_core::actor::ActorKind::Member,
+            Some(invoker),
+        )
+        .await?;
+        if allowed {
+            return Ok(());
+        }
+        Err(SquadAssignError::NotInvocable {
+            agent_id: agent.id.clone(),
+            invoker: invoker.to_string(),
+        })
     }
 }
 
@@ -423,12 +528,49 @@ mod tests {
         ActorRef::new(ActorKind::Member, id).unwrap()
     }
 
+    /// Seed a workspace WITH its `owner`-role member (`user-1`), matching what
+    /// `bootstrap::ensure_default_workspace` lays down. The gap #8 gate resolves the
+    /// default invoker through `WorkspaceRepo::owner_id`, so an owner-less fixture
+    /// would resolve `""` and deny every (private-by-default) agent — a fixture
+    /// artefact, not the behaviour under test.
     async fn seed_ws(pool: &SqlitePool, id: &str) {
         sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
             .bind(id)
             .bind(id)
             .bind(id)
             .bind(0_i64)
+            .execute(pool)
+            .await
+            .unwrap();
+        seed_user(pool, "user-1").await;
+        sqlx::query(
+            "INSERT INTO member (workspace_id, user_id, role) VALUES (?, 'user-1', 'owner')",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .unwrap();
+    }
+
+    /// Insert a `user` row (idempotent) — `agent.owner_id` and `member.user_id`
+    /// both FK to it.
+    async fn seed_user(pool: &SqlitePool, id: &str) {
+        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES (?, ?, ?)")
+            .bind(id)
+            .bind(format!("{id}@example.com"))
+            .bind(0_i64)
+            .execute(pool)
+            .await
+            .unwrap();
+    }
+
+    /// Add `user_id` to `ws_id` as a plain (non-owner) member — the multi-user case
+    /// the gap #8 allow-list exists for.
+    async fn seed_plain_member(pool: &SqlitePool, ws_id: &str, user_id: &str) {
+        seed_user(pool, user_id).await;
+        sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES (?, ?, 'member')")
+            .bind(ws_id)
+            .bind(user_id)
             .execute(pool)
             .await
             .unwrap();
@@ -448,8 +590,22 @@ mod tests {
         .unwrap();
     }
 
-    /// Seed an `agent_runtime` + `agent` pair bound to `runtime_id`.
+    /// Seed an `agent_runtime` + `agent` pair bound to `runtime_id`, owned by the
+    /// workspace owner (`user-1`) — the ordinary single-operator shape.
     async fn seed_agent(pool: &SqlitePool, ws_id: &str, agent_id: &str, runtime_id: &str) {
+        seed_agent_owned(pool, ws_id, agent_id, runtime_id, "user-1").await;
+    }
+
+    /// Seed an `agent_runtime` + `agent` pair bound to `runtime_id`, owned by
+    /// `owner_id`. Every agent is `private` (migration 0047's default), so the gap
+    /// #8 gate admits only the owner until a target is added.
+    async fn seed_agent_owned(
+        pool: &SqlitePool,
+        ws_id: &str,
+        agent_id: &str,
+        runtime_id: &str,
+        owner_id: &str,
+    ) {
         use crate::repo::agent::{Agent, AgentRepo};
         use crate::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
 
@@ -470,14 +626,8 @@ mod tests {
         .await
         .unwrap();
         // `agent.owner_id` FKs to `user(id)`; seed the owner once (idempotent
-        // across the two agents these tests insert).
-        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES (?, ?, ?)")
-            .bind("user-1")
-            .bind("owner@example.com")
-            .bind(0_i64)
-            .execute(pool)
-            .await
-            .unwrap();
+        // across the agents these tests insert).
+        seed_user(pool, owner_id).await;
         AgentRepo::insert(
             pool,
             &Agent {
@@ -488,7 +638,7 @@ mod tests {
                 instructions: None,
                 visibility: "workspace".into(),
                 permission_mode: "private".into(),
-                owner_id: "user-1".into(),
+                owner_id: owner_id.into(),
                 archived: false,
                 model: None,
                 cli_args: Vec::new(),
@@ -948,5 +1098,224 @@ mod tests {
             matches!(err, SquadAssignError::NoAgentLeader),
             "got {err:?}"
         );
+    }
+
+    /// How many rows the queue holds at all (the gap #8 acceptance assertion is
+    /// "zero rows WRITTEN", not "rows rolled back").
+    async fn queue_len(pool: &SqlitePool) -> i64 {
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+            .fetch_one(pool)
+            .await
+            .unwrap()
+    }
+
+    /// gap #8 — FAN-OUT MEMBER GATE: a squad member agent owned by SOMEONE ELSE and
+    /// left `private` is not invocable by the assignment's effective invoker (here
+    /// the workspace owner), so the whole fan-out is refused and NO task row is
+    /// written — not the leader's, not the allowed member's. Allow-listing the
+    /// invoker on that agent (public_to + a `member` target) then lets the very same
+    /// call through, proving the gate is a real decision and not blanket denial.
+    #[tokio::test]
+    async fn fanout_refuses_a_private_member_agent_and_writes_no_row() {
+        use crate::repo::agent::AgentRepo;
+        use crate::repo::agent_invocation_target::AgentInvocationTargetRepo;
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_core::idgen::SystemIdGen;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_agent(pool, "ws-a", "agent-L", "rt-lead").await;
+        seed_agent(pool, "ws-a", "agent-m1", "rt-m1").await;
+        // `agent-m2` belongs to a DIFFERENT user and stays private → the workspace
+        // owner is not its owner and is on no allow-list.
+        seed_plain_member(pool, "ws-a", "carol").await;
+        seed_agent_owned(pool, "ws-a", "agent-m2", "rt-m2", "carol").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        // Fixture sanity: an empty `owner_id` would make an agent uninvocable by
+        // EVERYONE, which would make this test pass for the wrong reason.
+        for id in ["agent-L", "agent-m1", "agent-m2"] {
+            let agent = AgentRepo::get(pool, id).await.unwrap().unwrap();
+            assert!(!agent.owner_id.is_empty(), "{id} must carry an owner");
+        }
+
+        SquadRepo::create(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            "shippers",
+            &agent_ref("agent-L"),
+            1,
+        )
+        .await
+        .unwrap();
+        for m in ["agent-m1", "agent-m2"] {
+            SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref(m)).await.unwrap();
+        }
+
+        let request = SquadAssignRequest {
+            issue_id: Some("issue-1"),
+            ..SquadAssignRequest::default()
+        };
+        let ids = || FixedIdGen::new(vec!["task-lead".into(), "task-m1".into(), "task-m2".into()]);
+        let err = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &ids(),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::NotInvocable { ref agent_id, .. } if agent_id == "agent-m2"),
+            "the foreign private member must refuse the fan-out, got {err:?}"
+        );
+        assert_eq!(
+            queue_len(pool).await,
+            0,
+            "a refused fan-out writes NO task row at all"
+        );
+
+        // CONTROL: share `agent-m2` with the workspace owner → the same call lands
+        // the leader brief + both member tasks.
+        AgentRepo::set_permission_mode(pool, "agent-m2", "public_to").await.unwrap();
+        AgentInvocationTargetRepo::add(
+            pool,
+            &SystemIdGen,
+            &SystemClock,
+            "agent-m2",
+            "member",
+            "user-1",
+            None,
+        )
+        .await
+        .unwrap();
+        let fanout = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &ids(),
+            &FixedClock(9_000),
+        )
+        .await
+        .expect("an allow-listed member unblocks the fan-out");
+        assert_eq!(fanout.members.len(), 2, "both members fanned out");
+        assert_eq!(queue_len(pool).await, 3, "leader brief + two member tasks");
+    }
+
+    /// gap #8 — FAN-OUT LEADER GATE (the direct port of multica's
+    /// `squad_private_leader_test.go` 403 case): a plain workspace member fanning an
+    /// issue out to a squad whose LEADER is private and owned by someone else is
+    /// refused, and nothing is enqueued.
+    #[tokio::test]
+    async fn fanout_refuses_a_non_owner_member_against_a_private_leader() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        // Leader + member both owned by the workspace owner and private by default.
+        seed_agent(pool, "ws-a", "agent-L", "rt-lead").await;
+        seed_agent(pool, "ws-a", "agent-m1", "rt-m1").await;
+        seed_plain_member(pool, "ws-a", "bob").await;
+        seed_issue(pool, "ws-a", "issue-1").await;
+
+        SquadRepo::create(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            "shippers",
+            &agent_ref("agent-L"),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("agent-m1"))
+            .await
+            .unwrap();
+
+        let request = SquadAssignRequest {
+            issue_id: Some("issue-1"),
+            invoker: Some("bob"),
+            ..SquadAssignRequest::default()
+        };
+        let err = SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &FixedIdGen::new(vec!["task-lead".into(), "task-m1".into()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::NotInvocable { ref agent_id, ref invoker }
+                if agent_id == "agent-L" && invoker == "bob"),
+            "a plain member must not fan out through a private leader, got {err:?}"
+        );
+        assert_eq!(
+            queue_len(pool).await,
+            0,
+            "the private-leader refusal writes no row"
+        );
+
+        // The OWNER's fan-out over the identical squad still works — the gate bites
+        // the non-owner only.
+        let owner_request = SquadAssignRequest {
+            issue_id: Some("issue-1"),
+            ..SquadAssignRequest::default()
+        };
+        SquadAssignService::assign_fanout(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &owner_request,
+            &FixedIdGen::new(vec!["task-lead".into(), "task-m1".into()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .expect("the owner always fans out");
+        assert_eq!(queue_len(pool).await, 2, "leader brief + one member task");
+    }
+
+    /// gap #8 — the LEADER-ONLY assign shares the same gate: a plain member cannot
+    /// brief a private leader, and no task row is written.
+    #[tokio::test]
+    async fn assign_to_leader_refuses_a_non_owner_member() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_agent(pool, "ws-a", "agent-L", "rt-lead").await;
+        seed_plain_member(pool, "ws-a", "bob").await;
+
+        SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent_ref("agent-L"), 1)
+            .await
+            .unwrap();
+
+        let request = SquadAssignRequest {
+            invoker: Some("bob"),
+            ..SquadAssignRequest::default()
+        };
+        let err = SquadAssignService::assign_to_leader(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            &request,
+            &FixedIdGen::new(vec!["task-1".to_string()]),
+            &FixedClock(9_000),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            matches!(err, SquadAssignError::NotInvocable { ref agent_id, .. } if agent_id == "agent-L"),
+            "got {err:?}"
+        );
+        assert_eq!(queue_len(pool).await, 0, "no task row for a refused assign");
     }
 }

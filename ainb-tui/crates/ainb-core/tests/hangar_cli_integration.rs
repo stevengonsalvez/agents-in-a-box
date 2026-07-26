@@ -1085,14 +1085,18 @@ fn seed_assignable_agent(home: &std::path::Path) {
                 .fetch_one(pool)
                 .await
                 .expect("default workspace exists after bootstrap");
-        // `agent.owner_id` FKs to `user(id)`; seed the owner.
-        sqlx::query("INSERT OR IGNORE INTO user (id, email, created_at) VALUES (?, ?, ?)")
-            .bind("assign-owner")
-            .bind("owner@example.com")
-            .bind(0_i64)
-            .execute(pool)
-            .await
-            .unwrap();
+        // `agent.owner_id` FKs to `user(id)`. Own the agent with the workspace's
+        // OWNER (what `bootstrap::create_agent` does), not a synthetic user: the
+        // gap #8 invocation gate resolves the workspace owner as the default
+        // invoker, so a foreign-owned private agent would be uninvocable — a
+        // fixture artefact, not the routing behaviour under test.
+        let owner_id: String = sqlx::query_scalar(
+            "SELECT user_id FROM member WHERE workspace_id = ? AND role = 'owner' LIMIT 1",
+        )
+        .bind(&ws_id)
+        .fetch_one(pool)
+        .await
+        .expect("the bootstrapped workspace has an owner member");
         AgentRuntimeRepo::insert(
             pool,
             &AgentRuntime {
@@ -1111,13 +1115,13 @@ fn seed_assignable_agent(home: &std::path::Path) {
             pool,
             &Agent {
                 id: "assign-agent".into(),
-                workspace_id: ws_id,
+                workspace_id: ws_id.clone(),
                 name: "lead".into(),
                 runtime_id: "assign-runtime".into(),
                 instructions: None,
                 visibility: "workspace".into(),
                 permission_mode: "private".into(),
-                owner_id: "assign-owner".into(),
+                owner_id: owner_id.clone(),
                 archived: false,
                 model: None,
                 cli_args: Vec::new(),
