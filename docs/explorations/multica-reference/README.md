@@ -142,7 +142,7 @@ the inbox** — remain open.
 | 28 | Surface priority / due / labels in the issue create wizard | S | schema has had these since mig 0014 — UI-only |
 | 19 | `blocked` + `cancelled` issue states | S | |
 | 23 | Agent metadata (`description`/`avatar_url`/`kind`/`service_tier`/UNIQUE name) | S–M | `kind`/`system_key` unblocks 9‑rest |
-| 25 | Squad per-member `role` + `instructions` + archive | S–M | feeds 7‑rest |
+| 25 | Squad per-member `role` + `instructions` + archive | S–M | role + instructions landed; the briefing now renders both plus roster skills |
 | 26 | Archive audit trail (`archived_at`/`archived_by`, agent + squad) | S | |
 | 20 | Typed issue dependency graph (`blocked_by`/`related`) | S–M | core auto-run mechanic already parity |
 | 21 | Issue origin provenance | S–M | |
