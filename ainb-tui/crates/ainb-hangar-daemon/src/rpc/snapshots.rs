@@ -720,6 +720,19 @@ async fn enrich_board_card(
         .map(|b| short_display_id(b))
         .collect();
     let auto_run = CardDependencyRepo::get_auto_run(pool, issue_id).await?;
+    // multica parity #20: the REVERSE direction (`blocks`) and the non-gating
+    // `related` set. Render-only — neither touches `blocked_by` (still UNFINISHED
+    // blockers only) nor the card's runnable state.
+    let blocks = CardDependencyRepo::blocks_of(pool, issue_id)
+        .await?
+        .iter()
+        .map(|b| short_display_id(b))
+        .collect();
+    let related = CardDependencyRepo::related_of(pool, issue_id)
+        .await?
+        .iter()
+        .map(|b| short_display_id(b))
+        .collect();
 
     Ok(ainb_hangar_proto::snapshots::BoardCardWireRow {
         issue_id: issue_id.to_string(),
@@ -733,8 +746,8 @@ async fn enrich_board_card(
         member_states,
         blocked_by,
         auto_run,
-        blocks: Vec::new(),
-        related: Vec::new(),
+        blocks,
+        related,
     })
 }
 
@@ -1751,6 +1764,10 @@ pub async fn issue_row(
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
     let extras = issue_card_fields(pool, &issue.id).await?;
+    // multica parity #20: the DETAIL path (and only it) carries the typed link
+    // graph — a list snapshot leaves `dependencies` empty on purpose, because
+    // filling it there would be an N-query fan-out per row.
+    let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1780,8 +1797,58 @@ pub async fn issue_row(
         acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
         acceptance: issue.acceptance_criteria,
         context_refs: issue.context_refs,
-        dependencies: Vec::new(),
+        dependencies,
     }))
+}
+
+/// One issue's TYPED links (multica parity #20), in render order: `blocked_by`
+/// first (each flagged `satisfied` once that blocker has finished, so the detail
+/// card can show ✓ vs 🔒), then the reverse `blocks` direction, then the
+/// non-gating `related` set.
+///
+/// Every row is stated from the SUBJECT issue's point of view and carries the
+/// OTHER issue's display id / title / state, resolved through the same
+/// [`issue_display_row`] helper the list snapshot uses, so a link renders
+/// identically to the issue it points at.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_link_rows(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Vec<ainb_hangar_proto::events::IssueLinkRow>, sqlx::Error> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let prefix = workspace_issue_prefix(pool, workspace_id).await?;
+    let blockers = CardDependencyRepo::blockers_of(pool, issue_id).await?;
+    let unfinished = CardDependencyRepo::unfinished_blockers_of(pool, issue_id).await?;
+    let blocks = CardDependencyRepo::blocks_of(pool, issue_id).await?;
+    let related = CardDependencyRepo::related_of(pool, issue_id).await?;
+
+    let mut out = Vec::with_capacity(blockers.len() + blocks.len() + related.len());
+    for (kind, ids) in [
+        ("blocked_by", &blockers),
+        ("blocks", &blocks),
+        ("related", &related),
+    ] {
+        for other in ids {
+            let display_id =
+                issue_display_row(pool, workspace_id, other, prefix.as_deref()).await?;
+            let row = IssueRepo::get_by_id(pool, other).await?;
+            out.push(ainb_hangar_proto::events::IssueLinkRow {
+                kind: kind.to_string(),
+                issue_id: other.clone(),
+                display_id,
+                title: row.as_ref().map(|r| r.title.clone()).unwrap_or_default(),
+                state: row.as_ref().map(|r| r.state.clone()).unwrap_or_default(),
+                // Only a blocker can be satisfied; `blocks` / `related` never gate.
+                satisfied: kind == "blocked_by" && !unfinished.contains(other),
+            });
+        }
+    }
+    Ok(out)
 }
 
 /// Attach a label to an issue, scoped to `workspace_id`, then re-read the issue
@@ -1896,6 +1963,10 @@ async fn read_issue_row(
     let pr_url = latest_pr_url_for_issue(pool, workspace_id, &issue.id).await?;
     let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
     let extras = issue_card_fields(pool, &issue.id).await?;
+    // multica parity #20: the DETAIL path (and only it) carries the typed link
+    // graph — a list snapshot leaves `dependencies` empty on purpose, because
+    // filling it there would be an N-query fan-out per row.
+    let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
         id,
         display_id,
@@ -1925,7 +1996,7 @@ async fn read_issue_row(
         acceptance_criteria: criteria_texts(&issue.acceptance_criteria),
         acceptance: issue.acceptance_criteria,
         context_refs: issue.context_refs,
-        dependencies: Vec::new(),
+        dependencies,
     }))
 }
 
