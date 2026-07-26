@@ -155,7 +155,6 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     (socket_path, store)
 }
 
-
 /// The `agents_list` row for `actor_ref`, or `None` when absent.
 async fn actor_row(c: &mut Client, actor_ref: &str) -> Option<serde_json::Value> {
     let list = c
@@ -230,7 +229,10 @@ async fn agent_create_persists_description_and_mints_an_avatar() {
     let actor_ref = row["actor_ref"].as_str().unwrap().to_string();
     let fresh = actor_row(&mut c, &actor_ref).await.expect("agent in agents_list");
     assert_eq!(fresh["description"], "ships the backend");
-    assert_eq!(fresh["avatar"], serde_json::Value::String(avatar.to_string()));
+    assert_eq!(
+        fresh["avatar"],
+        serde_json::Value::String(avatar.to_string())
+    );
 }
 
 /// (b) A SECOND create with the same name is refused with the machine-readable
@@ -242,9 +244,7 @@ async fn duplicate_agent_create_is_refused_with_a_reason_marker() {
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
 
-    let create = |name: &str| {
-        serde_json::json!({ "workspace_id": WS_SLUG, "name": name })
-    };
+    let create = |name: &str| serde_json::json!({ "workspace_id": WS_SLUG, "name": name });
     let first = c.call(methods::HANGAR_AGENT_CREATE, create("builder")).await;
     assert!(first["error"].is_null(), "the first create acks: {first}");
 
@@ -289,16 +289,13 @@ async fn over_long_description_is_rejected_at_the_boundary() {
         )
         .await;
     let err = &resp["error"];
-    assert!(!err.is_null(), "a 256-char description must be refused: {resp}");
-    assert_eq!(
-        err["code"], -32602,
-        "the refusal is INVALID_PARAMS: {err}"
-    );
     assert!(
-        err["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("255 characters or fewer"),
+        !err.is_null(),
+        "a 256-char description must be refused: {resp}"
+    );
+    assert_eq!(err["code"], -32602, "the refusal is INVALID_PARAMS: {err}");
+    assert!(
+        err["message"].as_str().unwrap_or_default().contains("255 characters or fewer"),
         "the message states the cap: {err}"
     );
     assert_eq!(
@@ -319,7 +316,10 @@ async fn over_long_description_is_rejected_at_the_boundary() {
             }),
         )
         .await;
-    assert!(resp["error"].is_null(), "255 characters is accepted: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "255 characters is accepted: {resp}"
+    );
 }
 
 /// (d) Renaming agent B onto agent A's name is refused the same way, and B
@@ -390,7 +390,10 @@ async fn agent_update_edits_the_description() {
             }),
         )
         .await;
-    assert!(resp["error"].is_null(), "a description-only edit acks: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "a description-only edit acks: {resp}"
+    );
     assert_eq!(resp["result"]["description"], "reviews every PR");
 
     let row = actor_row(&mut c, "agent:agent-1").await.expect("agent-1 present");

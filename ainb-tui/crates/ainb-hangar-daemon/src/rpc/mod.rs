@@ -3972,7 +3972,9 @@ fn validate_description(desc: Option<&str>) -> Result<Option<String>, RpcError> 
     let Some(desc) = desc else { return Ok(None) };
     let trimmed = desc.trim();
     if trimmed.chars().count() > ainb_hangar_store::repo::agent::MAX_DESCRIPTION_CHARS {
-        return Err(invalid_params("description must be 255 characters or fewer"));
+        return Err(invalid_params(
+            "description must be 255 characters or fewer",
+        ));
     }
     Ok(Some(trimmed.to_string()))
 }

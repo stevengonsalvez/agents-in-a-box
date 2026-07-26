@@ -80,7 +80,11 @@ async fn seed_populated(pool: &SqlitePool) {
     .expect("insert runtime");
 
     // Two agents sharing a name in ws-1, plus one in ws-2 under the same name.
-    for (id, ws) in [("a-first", "ws-1"), ("a-second", "ws-1"), ("a-other", "ws-2")] {
+    for (id, ws) in [
+        ("a-first", "ws-1"),
+        ("a-second", "ws-1"),
+        ("a-other", "ws-2"),
+    ] {
         insert_agent(pool, id, ws, "dup").await.expect("seed agent");
     }
     // FK-pin BOTH ws-1 agents with a terminal task: a migration that DELETEd the
@@ -184,7 +188,13 @@ async fn migration_0050_renames_duplicates_and_backfills_on_a_populated_database
     );
 
     // (d) The new columns backfill to their documented defaults on old rows.
-    let row: (String, Option<String>, String, Option<String>, Option<String>) = sqlx::query_as(
+    let row: (
+        String,
+        Option<String>,
+        String,
+        Option<String>,
+        Option<String>,
+    ) = sqlx::query_as(
         "SELECT description, avatar_url, kind, system_key, service_tier \
          FROM agent WHERE id = 'a-first'",
     )
@@ -226,7 +236,8 @@ async fn migration_0050_constraints_are_enforced_after_upgrade() {
         .await
         .expect_err("a duplicate name must now be refused");
     assert!(
-        err.as_database_error().is_some_and(sqlx::error::DatabaseError::is_unique_violation),
+        err.as_database_error()
+            .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
         "the refusal is a UNIQUE violation, got: {err}"
     );
     assert!(
@@ -297,12 +308,15 @@ async fn migration_0050_system_identity_index_is_partial() {
         }
     };
 
-    insert_system("sys-1", "carrier-1", "agent_builder").await.expect("first system agent");
+    insert_system("sys-1", "carrier-1", "agent_builder")
+        .await
+        .expect("first system agent");
     let err = insert_system("sys-2", "carrier-2", "agent_builder")
         .await
         .expect_err("a second system agent with the same key must collide");
     assert!(
-        err.as_database_error().is_some_and(sqlx::error::DatabaseError::is_unique_violation),
+        err.as_database_error()
+            .is_some_and(sqlx::error::DatabaseError::is_unique_violation),
         "the refusal is a UNIQUE violation, got: {err}"
     );
     assert!(
@@ -311,11 +325,10 @@ async fn migration_0050_system_identity_index_is_partial() {
     );
 
     // NULL system_key rows are unconstrained — three of them already coexist.
-    let null_keyed: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM agent WHERE system_key IS NULL")
-            .fetch_one(&pool)
-            .await
-            .expect("count null-keyed agents");
+    let null_keyed: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent WHERE system_key IS NULL")
+        .fetch_one(&pool)
+        .await
+        .expect("count null-keyed agents");
     assert!(
         null_keyed >= 3,
         "the partial index leaves NULL-keyed agents unconstrained (got {null_keyed})"

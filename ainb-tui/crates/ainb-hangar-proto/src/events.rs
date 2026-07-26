@@ -941,7 +941,10 @@ mod tests {
             ..Default::default()
         };
         let out = serde_json::to_string(&row).unwrap();
-        assert!(out.contains("\"description\":\"ships the backend\""), "{out}");
+        assert!(
+            out.contains("\"description\":\"ships the backend\""),
+            "{out}"
+        );
         assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), row);
     }
 }

@@ -297,7 +297,10 @@ async fn create_agent_from_round_trips_description_and_mints_an_avatar() {
     assert_eq!(created.kind, "user", "a plain create is user-kind");
 
     // Both read paths carry the metadata, not just the create return value.
-    let got = AgentRepo::get(store.pool(), &created.id).await.unwrap().expect("agent persisted");
+    let got = AgentRepo::get(store.pool(), &created.id)
+        .await
+        .unwrap()
+        .expect("agent persisted");
     assert_eq!(got.description, "ships the backend");
     assert_eq!(got.avatar_url, created.avatar_url);
     let listed = AgentRepo::list_by_workspace(store.pool(), &ws).await.unwrap();
@@ -323,7 +326,9 @@ async fn duplicate_agent_name_is_refused_per_workspace() {
         provider: "claude".into(),
         ..AgentDraft::default()
     };
-    create_agent_from(store.pool(), &ws, draft("builder")).await.expect("first create");
+    create_agent_from(store.pool(), &ws, draft("builder"))
+        .await
+        .expect("first create");
     let err = create_agent_from(store.pool(), &ws, draft("builder"))
         .await
         .expect_err("a duplicate name must be refused");
@@ -438,7 +443,10 @@ async fn system_agents_are_hidden_from_rosters_but_found_by_key() {
         "the internal by-id get stays kind-blind"
     );
     assert!(
-        AgentRepo::find_system(store.pool(), &ws, "no-such-key").await.unwrap().is_none()
+        AgentRepo::find_system(store.pool(), &ws, "no-such-key")
+            .await
+            .unwrap()
+            .is_none()
     );
 }
 
@@ -471,9 +479,7 @@ async fn update_config_sets_and_clears_agent_metadata() {
         service_tier: Some(Some("priority".into())),
         ..AgentConfigUpdate::default()
     };
-    assert!(
-        AgentRepo::update_config(store.pool(), &ws, &agent.id, &set).await.unwrap()
-    );
+    assert!(AgentRepo::update_config(store.pool(), &ws, &agent.id, &set).await.unwrap());
     let got = AgentRepo::get(store.pool(), &agent.id).await.unwrap().unwrap();
     assert_eq!(got.description, "second");
     assert_eq!(got.avatar_url.as_deref(), Some("emoji:🦊"));
@@ -485,9 +491,7 @@ async fn update_config_sets_and_clears_agent_metadata() {
         service_tier: Some(None),
         ..AgentConfigUpdate::default()
     };
-    assert!(
-        AgentRepo::update_config(store.pool(), &ws, &agent.id, &clear).await.unwrap()
-    );
+    assert!(AgentRepo::update_config(store.pool(), &ws, &agent.id, &clear).await.unwrap());
     let got = AgentRepo::get(store.pool(), &agent.id).await.unwrap().unwrap();
     assert_eq!(got.avatar_url, None, "the avatar cleared to NULL");
     assert_eq!(got.service_tier, None, "the service tier cleared to NULL");
@@ -512,7 +516,9 @@ async fn renaming_onto_a_taken_name_is_refused() {
         provider: "claude".into(),
         ..AgentDraft::default()
     };
-    create_agent_from(store.pool(), &ws, draft("alpha")).await.expect("create alpha");
+    create_agent_from(store.pool(), &ws, draft("alpha"))
+        .await
+        .expect("create alpha");
     let beta = create_agent_from(store.pool(), &ws, draft("beta")).await.expect("create beta");
 
     let rename = AgentConfigUpdate {
@@ -522,7 +528,10 @@ async fn renaming_onto_a_taken_name_is_refused() {
     let err = AgentRepo::update_config(store.pool(), &ws, &beta.id, &rename)
         .await
         .expect_err("renaming onto a taken name must be refused");
-    assert!(is_duplicate_name(&err), "classified as a duplicate name: {err}");
+    assert!(
+        is_duplicate_name(&err),
+        "classified as a duplicate name: {err}"
+    );
     assert_eq!(
         AgentRepo::get(store.pool(), &beta.id).await.unwrap().unwrap().name,
         "beta",

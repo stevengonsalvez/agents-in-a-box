@@ -671,7 +671,15 @@ fn agent_create_persists_description_and_refuses_a_duplicate_name() {
     // A SECOND create with the same name fails loudly.
     let (ok, out) = run(
         tmp.path(),
-        &["hangar", "agent", "create", "--name", "a", "--description", "second"],
+        &[
+            "hangar",
+            "agent",
+            "create",
+            "--name",
+            "a",
+            "--description",
+            "second",
+        ],
     );
     assert!(!ok, "a duplicate agent name must exit non-zero; out={out}");
     assert!(
@@ -707,7 +715,10 @@ fn agent_create_rejects_an_over_long_description() {
             &too_long,
         ],
     );
-    assert!(!ok, "a 256-character description must exit non-zero; out={out}");
+    assert!(
+        !ok,
+        "a 256-character description must exit non-zero; out={out}"
+    );
     assert!(
         out.contains("255 characters or fewer"),
         "the message must state the cap:\n{out}"

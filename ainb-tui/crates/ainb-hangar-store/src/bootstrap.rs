@@ -415,9 +415,7 @@ pub async fn create_agent_from(
         token_budget: None,
         description: draft.description.trim().to_string(),
         avatar_url: Some(avatar_url),
-        kind: draft
-            .kind
-            .unwrap_or_else(|| crate::repo::agent::AGENT_KIND_USER.to_string()),
+        kind: draft.kind.unwrap_or_else(|| crate::repo::agent::AGENT_KIND_USER.to_string()),
         system_key: draft.system_key,
         service_tier: draft.service_tier,
     };

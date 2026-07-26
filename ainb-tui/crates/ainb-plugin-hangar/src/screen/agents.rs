@@ -461,10 +461,7 @@ fn reduce_text_step(
 /// `h`/`k` (or `←`/`↑`) cycle backward through [`SUPPORTED_PROVIDERS`], Enter
 /// advances. The picker can only ever land on a supported provider.
 fn reduce_provider_step(state: &AgentsState, mut draft: CreateDraft, c: char) -> AgentsReduction {
-    let cur = SUPPORTED_PROVIDERS
-        .iter()
-        .position(|p| *p == draft.provider)
-        .unwrap_or(0);
+    let cur = SUPPORTED_PROVIDERS.iter().position(|p| *p == draft.provider).unwrap_or(0);
     let len = SUPPORTED_PROVIDERS.len();
     let next_idx = match c {
         '\n' => {
@@ -1005,7 +1002,7 @@ mod tests {
             workload: Workload::Idle,
             is_agent,
             recent_rank: None,
-        ..ActorRow::default()
+            ..ActorRow::default()
         }
     }
 
@@ -1177,7 +1174,10 @@ mod tests {
         );
         // Forward: claude -> codex -> copilot -> claude (wrap).
         let fwd = drive(&at_provider, &['l', 'l', 'l']).state;
-        assert_eq!(fwd.create_draft().map(|d| d.provider.as_str()), Some("claude"));
+        assert_eq!(
+            fwd.create_draft().map(|d| d.provider.as_str()),
+            Some("claude")
+        );
         // Backward from claude wraps to copilot.
         let back = drive(&at_provider, &['h']).state;
         assert_eq!(
@@ -1313,7 +1313,7 @@ mod tests {
                 subtitle: "claude".into(),
                 presence: PresenceState::Online,
                 workload: Workload::Working,
-            ..AgentView::default()
+                ..AgentView::default()
             },
             AgentView {
                 actor_ref: "agent:a-2".into(),
@@ -1321,7 +1321,7 @@ mod tests {
                 subtitle: "claude".into(),
                 presence: PresenceState::Online,
                 workload: Workload::Queued,
-            ..AgentView::default()
+                ..AgentView::default()
             },
         ]);
         let mut buf = WireBuffer::new(80, 24);
@@ -1347,7 +1347,7 @@ mod tests {
             subtitle: "claude".into(),
             presence: PresenceState::Online,
             workload: Workload::Idle,
-        ..AgentView::default()
+            ..AgentView::default()
         }]);
         let mut buf = WireBuffer::new(80, 24);
         render_agents(&mut buf, 80, 1, 23, &state);
@@ -1441,7 +1441,10 @@ mod tests {
         let mut buf = WireBuffer::new(80, 24);
         render_agents(&mut buf, 80, 1, 23, &state);
         let text = buffer_text(&buf, 80, 24);
-        assert!(text.contains('🦊'), "the avatar glyph must render: {text:?}");
+        assert!(
+            text.contains('🦊'),
+            "the avatar glyph must render: {text:?}"
+        );
         assert!(
             !text.contains("emoji:"),
             "the raw avatar token must never leak to the roster: {text:?}"
@@ -1456,7 +1459,11 @@ mod tests {
         assert_eq!(avatar_glyph(""), None);
         assert_eq!(avatar_glyph("🦊"), None, "a bare glyph is not a token");
         assert_eq!(avatar_glyph("https://x/y.png"), None);
-        assert_eq!(avatar_glyph("emoji:"), None, "an empty emoji token is nothing");
+        assert_eq!(
+            avatar_glyph("emoji:"),
+            None,
+            "an empty emoji token is nothing"
+        );
     }
 
     /// Reassemble the buffer text for render assertions.

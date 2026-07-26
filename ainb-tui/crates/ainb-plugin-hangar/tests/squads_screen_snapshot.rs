@@ -25,7 +25,7 @@ fn actor(actor_ref: &str, name: &str, presence: PresenceState, is_agent: bool) -
         workload: ainb_hangar_proto::events::Workload::Idle,
         is_agent,
         recent_rank: None,
-    ..ActorRow::default()
+        ..ActorRow::default()
     }
 }
 
