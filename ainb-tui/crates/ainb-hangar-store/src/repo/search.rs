@@ -124,7 +124,14 @@ pub async fn cross_entity_search(
     // One substring query per entity table; the kind tags the rows.
     let tables: [(SearchHitKind, &str, &str, &str); 4] = [
         (SearchHitKind::Issue, "issue", "title", ""),
-        (SearchHitKind::Agent, "agent", "name", " AND archived = 0"),
+        // Hidden `system` agents (migration 0050) never surface in the palette —
+        // the same filter every roster/picker read carries (multica agent.sql:1258).
+        (
+            SearchHitKind::Agent,
+            "agent",
+            "name",
+            " AND archived = 0 AND kind = 'user'",
+        ),
         (SearchHitKind::Skill, "skill", "name", ""),
         (SearchHitKind::Autopilot, "autopilot", "name", ""),
     ];
