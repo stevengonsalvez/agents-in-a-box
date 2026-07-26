@@ -3013,6 +3013,10 @@ impl EventHandler {
             KeyCode::Char('t' | 'p') | KeyCode::Right | KeyCode::Char('A') => {
                 let key = match key_event.code {
                     KeyCode::Right => FleetKey::Right,
+                    // The pane reducer binds takeover-attach to lowercase `a`
+                    // (uppercase `A` is a reserved hangar router key, #450); the
+                    // host panel keeps its `A` shortcut and forwards onto it.
+                    KeyCode::Char('A') => FleetKey::Char('a'),
                     KeyCode::Char(character) => FleetKey::Char(character),
                     _ => unreachable!(),
                 };
@@ -6184,7 +6188,10 @@ impl EventHandler {
                 Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
             }
             AppEvent::FleetPanelBroadcast => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('B')));
+                // The pane reducer binds broadcast to lowercase `b` (uppercase `B`
+                // is a reserved hangar router key, #450); the host panel's `B`
+                // shortcut forwards onto it.
+                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('b')));
             }
             AppEvent::FleetPanelApprove => {
                 match selected_approval_action(&state.fleet_panel_state.canonical, true) {

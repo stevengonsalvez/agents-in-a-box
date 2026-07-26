@@ -4676,16 +4676,17 @@ const fn is_ctrl_p(key: &ainb_plugin_sdk::KeyEvent) -> bool {
 /// On a modal screen Esc closes the modal (handled by the screen router); on a
 /// non-modal screen the per-screen reducer may want Esc, so it falls through.
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
+    // A CTRL/ALT chord is never a tab switch: `Ctrl+K` / `Alt+D` belong to the
+    // active screen (or to the host), so the routing layer must not steal them.
+    // SHIFT is untouched — the claimed chars are already uppercase.
+    let chorded = key.mods & (ainb_plugin_sdk::KEY_MOD_CTRL | ainb_plugin_sdk::KEY_MOD_ALT) != 0;
     match &key.code {
-        KeyCode::Char { ch }
-            // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
-            // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
-            // numbered tabs are now contiguous `1`→`4`.
-            if matches!(
-                *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'F' | 'S' | 'P' | 'A' | ',' | '?' | 'q'
-            ) =>
-        {
+        // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
+        // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
+        // numbered tabs are now contiguous `1`→`4`. The claimed set lives once,
+        // in `screen::router::ROUTER_KEYS`, so screens can assert against it
+        // (`no_screen_binds_a_reserved_key`, #450).
+        KeyCode::Char { ch } if !chorded && crate::screen::router::is_router_key(*ch) => {
             Some(AppEvent::Key(*ch))
         }
         // Esc routes through the router to close most modals (agent picker, help).
@@ -6649,6 +6650,315 @@ mod tests {
             matches!(p.app_state().screen, Screen::Boards),
             "typing `H`/`?` must not toggle help or leave the Boards screen, got {:?}",
             p.app_state().screen
+        );
+    }
+
+    // ----- #450: advertised screen keys must survive the global router -----
+
+    /// Seed a connected plugin parked on Boards with one board, one `Todo`
+    /// column, and one focused card, plus a one-squad roster. Drives the REAL
+    /// production key seam (`on_key`) in the tests below.
+    fn plugin_on_seeded_board() -> HangarPlugin {
+        use ainb_hangar_proto::snapshots::{
+            BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult, SquadWireRow,
+            SquadsListResult,
+        };
+        let mut p = connected_plugin_with_issue();
+        p.screens.set_boards(&BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Delivery".into(),
+                auto_move: true,
+                columns: vec![
+                    BoardColumnWireRow {
+                        id: "c-todo".into(),
+                        name: "Todo".into(),
+                        ord: 0,
+                        fsm_state: None,
+                        auto_move: false,
+                        cards: vec![
+                            BoardCardWireRow {
+                                issue_id: "issue-1".into(),
+                                title: "Refactor API".into(),
+                                display_id: "1".into(),
+                                state: None,
+                                session_name: None,
+                                repo_ref: None,
+                                agent: None,
+                                squad_id: None,
+                                member_states: Vec::new(),
+                                blocked_by: Vec::new(),
+                                auto_run: false,
+                            },
+                            BoardCardWireRow {
+                                issue_id: "issue-2".into(),
+                                title: "Ship docs".into(),
+                                display_id: "2".into(),
+                                state: None,
+                                session_name: None,
+                                repo_ref: None,
+                                agent: None,
+                                squad_id: None,
+                                member_states: Vec::new(),
+                                blocked_by: Vec::new(),
+                                auto_run: false,
+                            },
+                        ],
+                    },
+                    BoardColumnWireRow {
+                        id: "c-done".into(),
+                        name: "Done".into(),
+                        ord: 1,
+                        fsm_state: None,
+                        auto_move: false,
+                        cards: Vec::new(),
+                    },
+                ],
+                unmapped: Vec::new(),
+            }],
+        });
+        p.screens.set_squads(&SquadsListResult {
+            squads: vec![SquadWireRow {
+                id: "squad-1".into(),
+                name: "Platform".into(),
+                leader: "agent:a1".into(),
+                members: vec!["agent:a1".into()],
+            }],
+        });
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Boards;
+        p.app = Some(app);
+        p
+    }
+
+    /// THE #450 ACCEPTANCE PROOF: the advertised squad key opens the assign-squad
+    /// picker on the focused card and commits an assignment — driven through the
+    /// production `on_key` seam, not the pure reducer.
+    ///
+    /// Fails on `main`: the key was `q`, which the global router claims as quit,
+    /// so the press armed `close_request_pending` and popped the whole panel
+    /// instead. `BoardsEvent::AssignSquad` was unreachable from a real keypress.
+    #[test]
+    fn boards_squad_key_opens_the_picker_instead_of_quitting() {
+        use crate::screen::boards::BoardsOverlay;
+        let mut p = plugin_on_seeded_board();
+
+        p.on_key(&char_press('s'));
+
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::SquadPick { issue_id, .. }) if issue_id == "issue-1"
+            ),
+            "the squad key must open the SquadPick picker on the focused card, got {:?}",
+            p.screens.boards.overlay()
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Boards),
+            "the squad key must not leave the Boards screen, got {:?}",
+            p.app_state().screen
+        );
+        assert!(
+            !p.close_request_pending,
+            "the squad key must NOT arm a ui.close_request (that is the #450 bug)"
+        );
+
+        // Down onto the roster's first squad (row 0 is the "clear" row), Enter commits.
+        p.on_key(&key_press(KeyCode::Down));
+        p.on_key(&key_press(KeyCode::Enter));
+        assert_eq!(
+            p.screens.take_pending_boards_action(),
+            Some(crate::screen::app_screens::BoardsAction::CardAssignSquad {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+                squad_id: Some("squad-1".into()),
+            }),
+            "Enter on a roster row must commit the squad assignment RPC"
+        );
+    }
+
+    /// The escape hatch survives the rebind: bare `q` on Boards (no overlay) is
+    /// still the global quit, arming a `ui.close_request` so the user is never
+    /// trapped on a screen whose Esc is a no-op.
+    #[test]
+    fn boards_q_still_quits() {
+        let mut p = plugin_on_seeded_board();
+        p.on_key(&char_press('q'));
+        assert!(
+            p.close_request_pending,
+            "`q` on Boards must still arm the ui.close_request escape hatch"
+        );
+        assert!(
+            p.screens.boards.overlay().is_none(),
+            "`q` must not open a boards overlay, got {:?}",
+            p.screens.boards.overlay()
+        );
+    }
+
+    /// The other two rebound Boards verbs are live through the real key seam:
+    /// `w` opens the depends-on picker, `>` / `<` reorder the focused column.
+    ///
+    /// Fails on `main`: `D` switched to the daemon-health tab and `L`/`H` to the
+    /// logs tab / host help toggle.
+    #[test]
+    fn boards_depends_on_and_reorder_keys_are_live() {
+        use crate::screen::boards::BoardsOverlay;
+        let mut p = plugin_on_seeded_board();
+
+        p.on_key(&char_press('w'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::DepPick { dependent_issue_id, .. })
+                    if dependent_issue_id == "issue-1"
+            ),
+            "`w` must open the depends-on picker, got {:?}",
+            p.screens.boards.overlay()
+        );
+        assert!(matches!(p.app_state().screen, Screen::Boards));
+        p.on_key(&key_press(KeyCode::Esc));
+        let _ = p.screens.take_pending_boards_action();
+
+        p.on_key(&char_press('>'));
+        assert_eq!(
+            p.screens.take_pending_boards_action(),
+            Some(crate::screen::app_screens::BoardsAction::ColumnReorder {
+                board_id: "b1".into(),
+                column_ids: vec!["c-done".into(), "c-todo".into()],
+            }),
+            "`>` must lift a column-reorder RPC"
+        );
+        p.on_key(&char_press('<'));
+        // Focus followed the dragged column to index 1, so `<` drags it back.
+        // Assert the SHAPE (a reorder for this board over both columns), not a
+        // frozen id order — the local board is not re-sorted until the daemon
+        // answers, so the emitted order is the same swap either way.
+        assert!(
+            matches!(
+                p.screens.take_pending_boards_action(),
+                Some(crate::screen::app_screens::BoardsAction::ColumnReorder {
+                    board_id,
+                    column_ids,
+                }) if board_id == "b1" && column_ids.len() == 2
+            ),
+            "`<` must lift a column-reorder RPC"
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Boards) && !p.close_request_pending,
+            "the reorder keys must not navigate away or close the panel"
+        );
+    }
+
+    /// THE GENERAL GUARD: every single-char key the Boards hint band ADVERTISES
+    /// must actually reach the boards screen — pressing it may never switch tabs
+    /// or close the panel.
+    ///
+    /// Fails on `main` for `q` (quit) and `D` (daemon health): the band was
+    /// advertising keys the router ate first.
+    #[test]
+    fn every_boards_hint_band_key_is_reachable() {
+        for (key, desc) in crate::screen::boards::BOARDS_HINTS {
+            let mut chars = key.chars();
+            let (Some(ch), None) = (chars.next(), chars.next()) else {
+                continue; // compound / glyph hint (`↵`, `⇧←→`) — not a bare char
+            };
+            if !ch.is_ascii() {
+                continue;
+            }
+            let mut p = plugin_on_seeded_board();
+            p.on_key(&char_press(ch));
+            assert!(
+                matches!(p.app_state().screen, Screen::Boards),
+                "Boards advertises `{ch}:{desc}` but pressing it left the screen \
+                 (went to {:?}) — the router stole it",
+                p.app_state().screen
+            );
+            assert!(
+                !p.close_request_pending,
+                "Boards advertises `{ch}:{desc}` but pressing it closed the panel — \
+                 the router stole it as quit"
+            );
+        }
+    }
+
+    /// #450 (Fleet row): `a` on the Fleet pane raises the takeover-attach intent
+    /// and stays on Fleet. It was `A` — which the router claims as the Agents tab,
+    /// so the advertised `→/A:attach` navigated away instead of attaching.
+    #[test]
+    fn fleet_lowercase_a_attaches() {
+        use crate::screen::fleet::{FleetCapabilities, FleetIntent, FleetSessionRow};
+        let mut p = connected_plugin_with_issue();
+        p.screens.fleet.set_sessions(vec![FleetSessionRow {
+            session_key: "claude:ask".into(),
+            provider: "claude".into(),
+            provider_session_id: Some("provider-claude:ask".into()),
+            current_request_fingerprint: None,
+            current_request: None,
+            lifecycle_state: "IDLE".into(),
+            attention_state: "ASK".into(),
+            management_state: "managed".into(),
+            provenance: "hangar-authoritative".into(),
+            confidence: "authoritative".into(),
+            transport_health: "healthy".into(),
+            capabilities: FleetCapabilities::List(vec!["tmux_attach".to_string()]),
+            version: 7,
+            cwd: "/work/claude".into(),
+            tmux_target: Some("claude:ask:0.0".into()),
+            display_name: Some("claude:ask".into()),
+            discovered_at: 1_000,
+            last_observed_at: 9_000,
+            metadata_updated_at: 9_000,
+            lifecycle_updated_at: 9_000,
+            attention_updated_at: 9_000,
+            transport_updated_at: 9_000,
+        }]);
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Fleet;
+        p.app = Some(app);
+
+        p.on_key(&char_press('a'));
+
+        assert!(
+            matches!(p.app_state().screen, Screen::Fleet),
+            "`a` must stay on Fleet, got {:?}",
+            p.app_state().screen
+        );
+        assert_eq!(
+            p.screens.take_pending_fleet_intent(),
+            Some(FleetIntent::AttachFullscreen {
+                session_key: "claude:ask".into(),
+                tmux_target: "claude:ask:0.0".into(),
+            }),
+            "`a` on Fleet must raise the takeover-attach intent"
+        );
+    }
+
+    /// #450 (Settings row): `]` / `[` move the in-section list selection. They
+    /// were `J` / `K`, and bare `K` is the router's Kanban tab key — so the
+    /// advertised in-section navigation half-worked at best.
+    #[test]
+    fn settings_bracket_keys_move_the_in_section_list() {
+        let mut p = plugin_on_workspaces_settings();
+        let start = p.screens.settings.as_ref().expect("settings seeded").list_selected();
+
+        p.on_key(&char_press(']'));
+        let moved = p.screens.settings.as_ref().expect("settings seeded").list_selected();
+        assert_ne!(moved, start, "`]` must move the workspace-row selection");
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings),
+            "`]` must not leave the Settings screen, got {:?}",
+            p.app_state().screen
+        );
+
+        p.on_key(&char_press('['));
+        assert_eq!(
+            p.screens.settings.as_ref().expect("settings seeded").list_selected(),
+            start,
+            "`[` must move the workspace-row selection back"
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings) && !p.close_request_pending,
+            "`[` must not navigate away or close the panel"
         );
     }
 

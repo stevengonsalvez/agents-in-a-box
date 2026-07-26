@@ -297,7 +297,7 @@ pub enum BoardsAction {
         /// The new column name.
         name: String,
     },
-    /// Assign (or clear) a squad as a card's assignee (`q`) —
+    /// Assign (or clear) a squad as a card's assignee (`s`) —
     /// `hangar/board_card_assign_squad` (tcp T4 / F7).
     CardAssignSquad {
         /// The board the card sits on.
@@ -1856,8 +1856,24 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
         }
         return;
     }
+    let Some(ev) = kanban_nav_event(key) else {
+        return;
+    };
+    let out = reduce_kanban(&states.kanban, ev);
+    states.kanban = out.state;
+    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
+        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
+    }
+}
+
+/// Map a raw key to a Kanban navigation / drag event.
+///
+/// Every char bound here must be free of
+/// [`is_reserved_key`](crate::screen::router::is_reserved_key) — a reserved char
+/// never reaches this mapper (#450).
+fn kanban_nav_event(key: &KeyEvent) -> Option<KanbanEvent> {
     let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
-    let ev = match &key.code {
+    match &key.code {
         KeyCode::Left => Some(if shift {
             KanbanEvent::MoveCardLeft
         } else {
@@ -1870,25 +1886,19 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
         }),
         KeyCode::Up => Some(KanbanEvent::FocusUp),
         KeyCode::Down => Some(KanbanEvent::FocusDown),
-        // vi-style fallbacks: capital H/L drag a card, lowercase navigate.
+        // vi-style fallbacks: `<`/`>` drag a card, `h`/`j`/`k`/`l` navigate. The
+        // old `H`/`L` drag pair was dead — `H` is swallowed by the HOST help
+        // toggle and `L` by the plugin router's Logs tab (#450).
         KeyCode::Char { ch } => match ch {
             'h' => Some(KanbanEvent::FocusLeft),
             'l' => Some(KanbanEvent::FocusRight),
             'k' => Some(KanbanEvent::FocusUp),
             'j' => Some(KanbanEvent::FocusDown),
-            'H' => Some(KanbanEvent::MoveCardLeft),
-            'L' => Some(KanbanEvent::MoveCardRight),
+            '<' => Some(KanbanEvent::MoveCardLeft),
+            '>' => Some(KanbanEvent::MoveCardRight),
             _ => None,
         },
         _ => None,
-    };
-    let Some(ev) = ev else {
-        return;
-    };
-    let out = reduce_kanban(&states.kanban, ev);
-    states.kanban = out.state;
-    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
-        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
     }
 }
 
@@ -1900,9 +1910,14 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
 /// EVERY key routes to it as a [`BoardsEvent::Key`] so typed text and picker
 /// motion land in the input rather than moving the board. With no overlay open
 /// the navigation/verb map applies: `←/→/↑/↓` (and `h/j/k/l`) move focus; `[`/`]`
-/// switch boards; `⇧←/→` reorder; `x` deletes a column; `n` appends one; `m`
-/// toggles auto-move; `c` opens card-create; `r` opens column-rename; `Enter`
-/// opens the card's `Run ▾`; `a` attaches to the card's run.
+/// switch boards; `⇧←/→` (and `<`/`>`) reorder; `x` deletes a column; `n` appends
+/// one; `m` toggles auto-move; `c` opens card-create; `r` opens column-rename;
+/// `Enter` opens the card's `Run ▾`; `a` attaches to the card's run; `s` opens the
+/// squad picker; `w` opens the depends-on picker.
+///
+/// Every char bound here must be free of
+/// [`is_reserved_key`](crate::screen::router::is_reserved_key) — a reserved char
+/// never reaches this mapper (#450).
 fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
     // The timeline overlay (`t`) captures keys locally — a read-only scroll view
     // that never routes to the reducer (its content is an IO-derived side-cache).
@@ -1990,8 +2005,11 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'l' => Some(BoardsEvent::FocusRight),
             'k' => Some(BoardsEvent::FocusUp),
             'j' => Some(BoardsEvent::FocusDown),
-            'H' => Some(BoardsEvent::ReorderColumnLeft),
-            'L' => Some(BoardsEvent::ReorderColumnRight),
+            // `<`/`>` reorder the focused column (the `⇧←→` chords still work).
+            // The old `H`/`L` pair was dead: `H` is swallowed by the HOST help
+            // toggle and `L` by the plugin router's Logs tab (#450).
+            '<' => Some(BoardsEvent::ReorderColumnLeft),
+            '>' => Some(BoardsEvent::ReorderColumnRight),
             '[' => Some(BoardsEvent::PrevBoard),
             ']' => Some(BoardsEvent::NextBoard),
             'b' => Some(BoardsEvent::CreateBoard),
@@ -2013,10 +2031,14 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'x' => Some(BoardsEvent::DeleteColumn),
             'c' => Some(BoardsEvent::AddCard),
             'm' => Some(BoardsEvent::ToggleAutoMove),
-            // `q` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a picker.
-            'q' => Some(BoardsEvent::AssignSquad),
-            // `d` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
-            'D' => Some(BoardsEvent::AddDependency),
+            // `s` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a
+            // picker. It was `q` until #450: bare `q` is the global quit key, so
+            // the binding was dead and the advertised `q:squad` hint popped the
+            // whole panel instead of opening the picker.
+            's' => Some(BoardsEvent::AssignSquad),
+            // `w` ("waits-on") adds a depends-on blocker. Was `D` until #450, which
+            // the router claims as the daemon-health tab.
+            'w' => Some(BoardsEvent::AddDependency),
             // `R` (uppercase, distinct from `r` = rename) toggles the auto-run flag.
             'R' => Some(BoardsEvent::ToggleAutoRun),
             _ => None,
@@ -2495,5 +2517,144 @@ mod kanban_retry_route_tests {
             states.take_pending_task_retry_action().is_none(),
             "R on a non-terminal card must not lift a retry"
         );
+    }
+}
+
+/// #450: the general invariant that keeps a screen-local binding from silently
+/// rotting. The routing layer (tab switches / `q` quit / `?` help) and the HOST
+/// (`?`/`H` help toggle) both consume their chars BEFORE the active screen's
+/// reducer is consulted, so any screen that binds one of those chars binds a key
+/// the user can never press. Enumerating the reserved set against every pure nav
+/// mapper makes the whole class of bug non-recurring.
+#[cfg(test)]
+mod reserved_key_invariant_tests {
+    use super::*;
+    use crate::screen::fleet::{FleetKey, FleetPaneState, reduce_browse_key};
+    use crate::screen::router::{HOST_RESERVED_KEYS, ROUTER_KEYS, is_reserved_key};
+    use crate::screen::settings::{SettingsEvent, SettingsSection, SettingsState};
+    use ainb_hangar_proto::settings::HealthSnapshot;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    /// Every char no hangar screen may bind while it is not capturing text.
+    fn reserved_chars() -> Vec<char> {
+        let mut all: Vec<char> = ROUTER_KEYS.to_vec();
+        for ch in HOST_RESERVED_KEYS {
+            if !all.contains(&ch) {
+                all.push(ch);
+            }
+        }
+        all
+    }
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// A settings pane parked on `section`, navigated there through the REAL
+    /// `j` section-walk (the field is private, and `j` is not a reserved char).
+    fn settings_state(section: SettingsSection) -> SettingsState {
+        let mut state = SettingsState::new(
+            HealthSnapshot {
+                socket_path: "/tmp/x.sock".into(),
+                pid: 1,
+                uptime_secs: 0,
+                version: "test".into(),
+                connected: true,
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        for _ in 0..8 {
+            if state.section() == section {
+                return state;
+            }
+            state = crate::screen::settings::reduce_settings(&state, SettingsEvent::Key('j')).state;
+        }
+        assert_eq!(
+            state.section(),
+            section,
+            "could not reach {section:?} via `j`"
+        );
+        state
+    }
+
+    /// No pure screen-key mapper may claim a reserved char. Exhaustive over the
+    /// reserved set × the Boards / Kanban / Fleet / Settings nav mappers.
+    ///
+    /// Fails on `main`: Boards bound `q` (squad) and `D` (depends-on), Boards and
+    /// Kanban bound `H`/`L`, Fleet bound `A`/`B`, Settings bound `K`.
+    #[test]
+    fn no_screen_binds_a_reserved_key() {
+        for ch in reserved_chars() {
+            assert!(is_reserved_key(ch), "`{ch}` must report as reserved");
+
+            assert!(
+                board_nav_event(&press(ch)).is_none(),
+                "Boards binds reserved key `{ch}` — the router/host eats it first"
+            );
+            assert!(
+                kanban_nav_event(&press(ch)).is_none(),
+                "Kanban binds reserved key `{ch}` — the router/host eats it first"
+            );
+
+            let mut fleet = FleetPaneState::default();
+            let intent = reduce_browse_key(&mut fleet, FleetKey::Char(ch));
+            assert!(
+                intent.is_none() && !fleet.is_modal_open(),
+                "Fleet binds reserved key `{ch}` — the router eats it first"
+            );
+
+            for section in [
+                SettingsSection::Daemon,
+                SettingsSection::Providers,
+                SettingsSection::Keys,
+                SettingsSection::Workspaces,
+                SettingsSection::Members,
+                SettingsSection::Notifications,
+            ] {
+                let before = settings_state(section);
+                let after =
+                    crate::screen::settings::reduce_settings(&before, SettingsEvent::Key(ch));
+                assert!(
+                    after.state == before && after.intent.is_none(),
+                    "Settings/{section:?} binds reserved key `{ch}` — the router eats it first"
+                );
+            }
+        }
+    }
+
+    /// The rebound Boards verbs are live on their NEW chars — the other half of
+    /// the invariant, so the fix can't be "delete the binding".
+    #[test]
+    fn rebound_boards_verbs_are_bound() {
+        assert!(matches!(
+            board_nav_event(&press('s')),
+            Some(BoardsEvent::AssignSquad)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('w')),
+            Some(BoardsEvent::AddDependency)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('<')),
+            Some(BoardsEvent::ReorderColumnLeft)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('>')),
+            Some(BoardsEvent::ReorderColumnRight)
+        ));
+        assert!(matches!(
+            kanban_nav_event(&press('<')),
+            Some(KanbanEvent::MoveCardLeft)
+        ));
+        assert!(matches!(
+            kanban_nav_event(&press('>')),
+            Some(KanbanEvent::MoveCardRight)
+        ));
     }
 }

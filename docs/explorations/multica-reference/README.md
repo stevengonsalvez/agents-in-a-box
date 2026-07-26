@@ -167,7 +167,7 @@ Nothing in the roadmap above should be called done until that gate is green.
 |---|---|---|
 | **No historical comment surface in the TUI** | `TaskDetailState::new` (`plugin-hangar/src/screen/task_detail.rs:259`) starts with an empty transcript, and there is **no `hangar/comment_list` RPC** — `methods.rs` has only `HANGAR_COMMENT_ADD`. Live `CommentAdded` events *do* interleave into the transcript (`fold_event`, slate lane, `is_comment: true`), so the render path exists — but only for comments that arrive **while the screen is already open**. | Comment and cascade activity (including gap #3's parent-wake comment and gap #2's mention trigger) is invisible on reopen. A `comment_list` RPC + hydration on open is the fix; small, and it makes two shipped features observable. |
 | **Host router reserves keys from plugin screens** | The host intercepts `?` and `H` (help) and `W` (statusline wire) globally for any non-text context before plugin delivery (`ainb-core/src/app/events.rs:1483–1555`); the generic `captures_text` gate only exempts plugin **text-input** modes. Plus Ctrl+C per the host contract. | Plugin screens cannot bind these keys, which is why hangar features have had to take lowercase bindings. *Unverified:* the specific claim that uppercase `S`/`D` are also stolen — no such global handler appears in the pre-plugin block, so that one needs a live tmux check before being treated as fact. |
-| **#450 `q:squad` closed but unproven** | Issue #450 is CLOSED (2026‑07‑23T19:47:08Z — the same second PR #459 merged, i.e. auto-closed by a reference, with no comment). `'q' => BoardsEvent::AssignSquad` is still the binding (`screen/app_screens.rs:1974`), and the global `q`→Quit handler sits in `handle_home_screen_keys` (`events.rs:3072`), which a Boards screen should not reach. | Likely genuinely reachable, but the close was bookkeeping, not a verified fix. Needs one tmux press to confirm before #29 is struck from the matrix. |
+| **#450 `q:squad` — FIXED** | Issue #450 was auto-closed by a cross-reference from PR #459 (2026‑07‑23T19:47:08Z, no comment, no closing commit) while still broken. Now genuinely fixed: the global router keeps bare `q` (the only keyboard escape hatch off Boards), and the squad picker moved to `s` (`board_nav_event`), depends-on to `w`, column reorder to `<`/`>`. The reserved sets live once in `screen/router.rs` (`ROUTER_KEYS` / `HOST_RESERVED_KEYS` / `is_reserved_key`) and `no_screen_binds_a_reserved_key` (`screen/app_screens.rs`) enforces disjointness in both directions. | Resolved. Same sweep also un-stole Kanban `H`/`L`, Fleet `A`/`B`, Settings `K` — see `every_boards_hint_band_key_is_reachable` and `footer_hint_keys_never_collide_with_reserved_router_keys`. |
 
 ## Master gap matrix
 
@@ -208,7 +208,7 @@ user-visible impact, then effort. Effort: **S** ≈ days, **M** ≈ 1–2 weeks,
 | 26 | Agent / Squad | **Archive audit trail** | `archived_at` + `archived_by` (who/when) | `archived` boolean only (agent); no archive at all (squad) | Accountability for who retired an agent/squad and when | S |
 | 27 | Autopilot | **Subscriber / collaborator model** | `autopilot_subscriber` (auto-subscribe to spawned issues) + `autopilot_collaborator` write-grants | Single-owner only | Team-shared autopilots. Depends on #1. Fine to defer while solo | S–M |
 | 28 | Issue | **Surface existing priority/due/labels in create wizard** | `CreateIssueRequest` accepts priority/status/labels/dates directly | Schema has priority/due/labels since mig 0014 — **wizard never surfaces them** | Cheapest real win: three more wizard rows, columns already exist | S |
-| 29 | Squad | **#450: Boards `q:squad` hotkey unreachable** | (n/a) | Global router steals bare `q` as quit before Boards' `q → AssignSquad`; card fan-out unreachable by keyboard | Unblocks the *existing* fan-out feature. Add a Boards-no-overlay guard, same pattern as existing screen guards | S |
+| 29 | Squad | ~~**#450: Boards `q:squad` hotkey unreachable**~~ **DONE** | (n/a) | ~~Global router steals bare `q` as quit before Boards' `q → AssignSquad`~~ — fixed: the squad picker is `s`, depends-on `w`, reorder `<`/`>`; `q` stays the global escape hatch | Rejected the Boards-no-overlay guard (it traps the user: Boards has no Esc and `?`/`H` are host-eaten). Instead: one reserved key set in `screen/router.rs`, screens rebound off it, disjointness enforced by `no_screen_binds_a_reserved_key` | S |
 | 30 | Agent | **`custom_env` redaction contract** | Never serialized; `has_custom_env`/key-count only; audited GET/PUT endpoint | Stored/returned plain JSON | Secrets hygiene if Hangar ever grows multi-user/remote | S |
 
 ## Deliberately NOT chasing
@@ -276,7 +276,7 @@ leader briefing (#7) possible and is nearly free.
 | # | Item | Effort | Note |
 |---|---|---|---|
 | 28 | Surface priority/due/labels in issue create wizard | S | **schema already has these (mig 0014)** — UI-only |
-| 29 | Fix #450 Boards `q:squad` hotkey | S | unblocks existing fan-out feature |
+| 29 | ~~Fix #450 Boards `q:squad` hotkey~~ **DONE** | S | squad picker rebound to `s`; reserved-key invariant now enforced by test |
 | 19 | `blocked` + `cancelled` issue states | S | |
 | 23 | Agent metadata columns (description/avatar/kind/service_tier/unique-name) | S–M | `kind`/`system_key` also unblocks #9 |
 | 24 | Per-agent skill enable/disable toggle | S | |

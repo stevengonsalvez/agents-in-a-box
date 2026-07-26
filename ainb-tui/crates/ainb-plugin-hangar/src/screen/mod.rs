@@ -30,7 +30,7 @@ pub mod kanban;
 pub mod list_context_menu;
 pub mod logs;
 pub mod profiles;
-mod router;
+pub mod router;
 pub mod settings;
 pub mod skill_manager;
 pub mod squads;

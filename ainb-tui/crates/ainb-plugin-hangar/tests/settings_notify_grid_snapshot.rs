@@ -102,7 +102,7 @@ fn tui_renders_notify_routing_grid() {
 #[test]
 fn tui_cursor_accent_follows_the_2d_cursor() {
     let mut s = on_notifications();
-    s = reduce_settings(&s, SettingsEvent::Key('J')).state; // -> error row
+    s = reduce_settings(&s, SettingsEvent::Key(']')).state; // -> error row
     s = reduce_settings(&s, SettingsEvent::Key('l')).state; // -> web column
     assert_eq!(s.notify_cursor(), (1, 1));
 

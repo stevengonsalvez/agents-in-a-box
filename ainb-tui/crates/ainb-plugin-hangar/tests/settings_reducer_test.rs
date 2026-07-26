@@ -503,8 +503,9 @@ fn s_sets_selected_workspace_active() {
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state;
     s = reduce_settings(&s, SettingsEvent::Key('j')).state; // Workspaces
-    // Select the non-current workspace (ws2) then press `s`.
-    s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    // Select the non-current workspace (ws2) then press `s`. `]` moves the
+    // in-section list (it was `J` before #450 rebound the pair off `J`/`K`).
+    s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     let out = reduce_settings(&s, SettingsEvent::Key('s'));
     match out.intent {
         Some(SettingsIntent::SwitchWorkspace(id)) => {
@@ -600,7 +601,7 @@ fn x_deletes_selected_non_active_workspace() {
     );
 
     // Move to ws2 (non-active) → `x` emits DeleteWorkspace(ws2).
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     let out = reduce_settings(&s, SettingsEvent::Key('x'));
     match out.intent {
         Some(SettingsIntent::DeleteWorkspace(id)) => assert_eq!(id, "ws2"),
@@ -630,19 +631,20 @@ fn event_daemon_disconnected_flips_connection_section_status_to_red() {
     );
 }
 
-/// tcp T5: `J`/`K` move the kind row and `h`/`l` move the channel column on the
-/// Notifications grid, both clamped to their bounds.
+/// tcp T5: `]`/`[` move the kind row and `h`/`l` move the channel column on the
+/// Notifications grid, both clamped to their bounds. The kind pair was `J`/`K`
+/// until #450 — bare `K` is the router's Kanban tab key, so it never landed here.
 #[test]
 fn notify_grid_cursor_navigates_kinds_and_channels() {
     let s = notify_state();
     assert_eq!(s.notify_cursor(), (0, 0));
 
-    // J moves down the kinds; K back up; clamps at the ends.
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    // `]` moves down the kinds; `[` back up; clamps at the ends.
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     assert_eq!(s.notify_cursor(), (1, 0));
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     assert_eq!(s.notify_cursor(), (2, 0));
-    let s = reduce_settings(&s, SettingsEvent::Key('J')).state;
+    let s = reduce_settings(&s, SettingsEvent::Key(']')).state;
     assert_eq!(
         s.notify_cursor(),
         (2, 0),

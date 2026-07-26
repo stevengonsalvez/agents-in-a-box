@@ -4,7 +4,7 @@
 //!
 //! 1. open Settings (`,`),
 //! 2. navigate to the Workspace pane (`j` to the 4th section),
-//! 3. select the second workspace row (`J`),
+//! 3. select the second workspace row (`]`),
 //! 4. press `s` to set it active,
 //! 5. assert the pane re-renders with the second workspace marked active
 //!    (its `▶` slug indicator) and the daemon-side switch state followed.
@@ -66,7 +66,7 @@ fn seed_second_workspace(home: &std::path::Path) {
     rt.block_on(async {
         let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open seed store");
         // Stamped strictly AFTER the P4 fixture's workspace, so `acme` is always
-        // the SECOND row in the created_at-ordered workspace pane and the `J`
+        // the SECOND row in the created_at-ordered workspace pane and the `]`
         // (down) + `s` (activate) drive below lands on it deterministically. The
         // old frozen 2023 constant tied with the (then also frozen) fixture and
         // only worked because of insert order.
@@ -198,8 +198,32 @@ fn workspace_switch_e2e() {
         "second workspace missing:\n{listed}"
     );
 
-    // 3. Select the second workspace row.
-    sess.send_key("J");
+    // 3. Select the second workspace row. `]` moves the in-section list cursor —
+    //    it was `J` until #450 rebound the pair off `J`/`K` (the hangar router
+    //    claims bare `K` for the Kanban tab, so `K` never reached the reducer and
+    //    `J` moved with it). A single send can be dropped by tmux on a busy pane,
+    //    so re-send until the `›` row cursor sits on the `acme` row. `move_list`
+    //    clamps at the last row and the seed has exactly two workspaces with
+    //    `acme` stamped last, so extra `]` presses are idempotent.
+    let sel_deadline = Instant::now() + Duration::from_secs(20);
+    let selected_row = format!("›  {SECOND_SLUG}");
+    let on_row = loop {
+        sess.send_key("]");
+        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(800), |c| {
+            c.contains(&selected_row)
+        }) {
+            break Some(c);
+        }
+        if Instant::now() >= sel_deadline {
+            break None;
+        }
+    };
+    on_row.unwrap_or_else(|| {
+        panic!(
+            "row cursor never landed on `{SECOND_SLUG}`:\n{}",
+            sess.capture()
+        )
+    });
 
     // 4. Press `s` to set the selected workspace active.
     sess.send_key("s");
