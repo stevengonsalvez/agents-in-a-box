@@ -1364,6 +1364,13 @@ pub struct SquadAssignParams {
     /// Claim urgency (0..3, higher = more urgent); omitted defaults to `0`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub priority: Option<i64>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the assignment by. APPEND-ONLY: omitted (`None`) defaults to the
+    /// workspace owner (the ordinary single-operator assign, which the gate always
+    /// admits). A multi-user caller names a non-owner member here to be gated
+    /// against the leader's / each member's allow-list.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_SQUAD_ASSIGN`] (e38.17): the enqueued task
@@ -1803,6 +1810,14 @@ pub struct BoardCardRunParams {
     /// (`None`) uses the issue's persisted `source_branch`, else `main`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub source_branch: Option<String>,
+    /// A run-time INVOKER override (gap #8): the user id the invocation-permission
+    /// gate judges the run by — for the single-agent enqueue AND for every target of
+    /// a SQUAD fan-out. APPEND-ONLY: omitted (`None`) defaults to the workspace owner
+    /// (the ordinary single-operator TUI Run, which the gate always admits — so this
+    /// is invisible to existing callers). Mirrors
+    /// [`IssueRunParams::invoker_user_id`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invoker_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_BOARD_CARD_RUN`] (ccc / D6): the enqueued
@@ -2751,6 +2766,7 @@ mod tests {
             issue_id: Some("issue-1".into()),
             work_dir: Some("/tmp/run".into()),
             priority: Some(2),
+            invoker_user_id: Some("user-1".into()),
         };
         let s = serde_json::to_string(&assign).unwrap();
         assert_eq!(
@@ -2805,6 +2821,9 @@ mod tests {
         assert_eq!(minimal.issue_id, None);
         assert_eq!(minimal.work_dir, None);
         assert_eq!(minimal.priority, None);
+        // gap #8: the invoker override is append-only — a pre-gap-#8 caller omits
+        // it and the service falls back to the workspace owner.
+        assert_eq!(minimal.invoker_user_id, None);
         // The serialized form drops the absent optionals entirely.
         let s = serde_json::to_string(&minimal).unwrap();
         assert_eq!(s, r#"{"workspace_id":"ws-1","squad_id":"s1"}"#);
@@ -2995,12 +3014,16 @@ mod tests {
         .unwrap();
         assert_eq!(legacy.repo_ref, None);
         assert_eq!(legacy.agent, None);
+        // gap #8: the invoker override is append-only too — a legacy frame omits it
+        // and `run_card` falls back to the workspace owner.
+        assert_eq!(legacy.invoker_user_id, None);
 
         let over: BoardCardRunParams = serde_json::from_str(
-            r#"{"workspace_id":"ws-1","board_id":"b1","issue_id":"i1","mode":"interactive","repo_ref":"/repos/app","agent":"claude"}"#,
+            r#"{"workspace_id":"ws-1","board_id":"b1","issue_id":"i1","mode":"interactive","repo_ref":"/repos/app","agent":"claude","invoker_user_id":"bob"}"#,
         )
         .unwrap();
         assert_eq!(over.repo_ref.as_deref(), Some("/repos/app"));
         assert_eq!(over.agent.as_deref(), Some("claude"));
+        assert_eq!(over.invoker_user_id.as_deref(), Some("bob"));
     }
 }
