@@ -589,9 +589,7 @@ mod tests {
         // link-disabled (0051), delta is suppressed by name on the agent row.
         let mut ids: Vec<(String, SkillId)> = Vec::new();
         for name in ["alpha", "beta", "gamma", "delta"] {
-            let id = SkillRepo::create(pool, &w, name, None, Some("# body"), vec![])
-                .await
-                .unwrap();
+            let id = SkillRepo::create(pool, &w, name, None, Some("# body"), vec![]).await.unwrap();
             ids.push((name.to_string(), id));
         }
         let scout_id = AgentId::from_str(scout.id.clone()).unwrap();

@@ -3377,7 +3377,9 @@ mod tests {
         .unwrap();
         let instructions =
             "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
-        SquadRepo::set_instructions(pool, &ws_id, "squad-alpha", instructions).await.unwrap();
+        SquadRepo::set_instructions(pool, &ws_id, "squad-alpha", instructions)
+            .await
+            .unwrap();
         // scout's skills, exercising BOTH suppression levers through the real
         // claim seam: `alpha` + `gamma` materialise, `beta` is link-disabled and
         // `delta` is suppressed by name on the agent row — neither may be
@@ -3585,9 +3587,7 @@ mod tests {
         );
         assert!(
             !member_md.exists()
-                || !std::fs::read_to_string(&member_md)
-                    .unwrap()
-                    .contains("## Squad Instructions"),
+                || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Instructions"),
             "a member task must NOT receive the squad instructions"
         );
 

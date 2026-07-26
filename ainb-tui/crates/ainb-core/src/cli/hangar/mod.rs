@@ -2781,10 +2781,9 @@ async fn run_squad_briefing(store: &Store, args: SquadBriefingArgs) -> Result<()
             args.id
         );
     }
-    let briefing =
-        build_squad_leader_briefing(store.pool(), &ws, &args.id, squad.leader.id())
-            .await
-            .with_context(|| format!("squad {} builds no leader briefing", args.id))?;
+    let briefing = build_squad_leader_briefing(store.pool(), &ws, &args.id, squad.leader.id())
+        .await
+        .with_context(|| format!("squad {} builds no leader briefing", args.id))?;
     print!("{briefing}");
     Ok(())
 }
