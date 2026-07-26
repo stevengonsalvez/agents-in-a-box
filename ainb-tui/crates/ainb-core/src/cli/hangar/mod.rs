@@ -1203,6 +1203,58 @@ pub enum IssueCommand {
     /// Attach or detach a label on an issue.
     #[command(subcommand)]
     Label(IssueLabelCommand),
+    /// Inspect or tick off an issue's acceptance criteria.
+    #[command(subcommand)]
+    Criteria(IssueCriteriaCommand),
+}
+
+/// `hangar issue criteria <verb>` (multica parity #11-rest).
+///
+/// An issue's definition-of-done is a list of individually addressable criteria.
+/// `list` prints them with their ordinal, stable id, and `☑`/`☐` state; `check`
+/// and `uncheck` set one criterion's state by id OR 1-based ordinal, through the
+/// same store mutator the `hangar/issue_criterion_set` daemon RPC uses.
+#[derive(Subcommand, Debug)]
+pub enum IssueCriteriaCommand {
+    /// List an issue's acceptance criteria with ordinal, id, and ☑/☐ state.
+    List(IssueCriteriaListArgs),
+    /// Tick a criterion off (by id or 1-based ordinal). Idempotent.
+    Check(IssueCriteriaSetArgs),
+    /// Un-tick a criterion (by id or 1-based ordinal). Idempotent.
+    Uncheck(IssueCriteriaSetArgs),
+}
+
+/// Arguments for `hangar issue criteria list`.
+#[derive(Args, Debug)]
+pub struct IssueCriteriaListArgs {
+    /// Issue id (ULID) whose criteria to list.
+    pub id: String,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue criteria check|uncheck`.
+///
+/// `criterion` addresses ONE element either by its stable id (`ac-…`) or by its
+/// 1-based ordinal as printed by `criteria list` — an agent reading the detail
+/// card sees positions, not ids. The mutation is workspace-scoped: an issue id
+/// outside the tenant touches no row.
+#[derive(Args, Debug)]
+pub struct IssueCriteriaSetArgs {
+    /// Issue id (ULID) whose criterion to (un)tick.
+    pub id: String,
+    /// Criterion id (`ac-…`) or 1-based ordinal (`2`).
+    pub criterion: String,
+    /// Who ticked it (`agent:<id>` / `member:<id>`); recorded on a check and
+    /// cleared on an uncheck.
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue delete`.
@@ -3576,6 +3628,7 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
         IssueCommand::Delete(args) => run_issue_delete(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
+        IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
     }
 }
 
@@ -3696,6 +3749,112 @@ async fn run_issue_label(store: &Store, cmd: IssueLabelCommand) -> Result<()> {
             labels.join(", ")
         }
     );
+    Ok(())
+}
+
+/// Render one criterion as the stable `<ordinal>  <id>  <glyph>  <text>` line
+/// `hangar issue criteria list` and `hangar issue show` both print.
+fn criterion_line(ordinal: usize, criterion: &AcceptanceCriterion) -> String {
+    let mut line = format!(
+        "{ordinal}  {}  {}  {}",
+        criterion.id,
+        criterion.glyph(),
+        criterion.text
+    );
+    if criterion.checked {
+        let when = criterion
+            .checked_at
+            .map(fmt_epoch_ms_utc)
+            .unwrap_or_else(|| "unknown".to_string());
+        let who = criterion.checked_by.as_deref().unwrap_or("unknown");
+        line.push_str(&format!("      (checked {when} by {who})"));
+    }
+    line
+}
+
+/// Format an epoch-millis instant as an RFC3339 UTC timestamp for the criteria
+/// provenance suffix.
+fn fmt_epoch_ms_utc(ms: i64) -> String {
+    chrono::DateTime::from_timestamp_millis(ms).map_or_else(
+        || ms.to_string(),
+        |dt| dt.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+    )
+}
+
+/// `hangar issue criteria <verb>`: list / check / uncheck one issue's acceptance
+/// criteria (multica parity #11-rest).
+///
+/// `check` / `uncheck` route through the SAME
+/// [`IssueRepo::set_criterion_checked`] store seam the daemon RPC uses, so there
+/// is exactly one mutator rather than two divergent ones. A foreign / unknown
+/// issue id, or a selector matching no criterion, exits NON-ZERO — never a
+/// silent no-op.
+async fn run_issue_criteria(store: &Store, cmd: IssueCriteriaCommand) -> Result<()> {
+    use ainb_hangar_store::repo::issue::CriterionError;
+
+    let (id, workspace, set) = match &cmd {
+        IssueCriteriaCommand::List(args) => (args.id.clone(), args.workspace.clone(), None),
+        IssueCriteriaCommand::Check(args) => (
+            args.id.clone(),
+            args.workspace.clone(),
+            Some((args.criterion.clone(), true, args.actor.clone())),
+        ),
+        IssueCriteriaCommand::Uncheck(args) => (
+            args.id.clone(),
+            args.workspace.clone(),
+            Some((args.criterion.clone(), false, args.actor.clone())),
+        ),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+
+    let issue = if let Some((criterion, checked, actor)) = set {
+        if criterion.trim().is_empty() {
+            anyhow::bail!("criterion must not be empty");
+        }
+        let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+        IssueRepo::set_criterion_checked(
+            store.pool(),
+            &SystemIdGen,
+            &workspace_id,
+            &id,
+            criterion.trim(),
+            checked,
+            now,
+            actor.as_deref(),
+        )
+        .await
+        .map_err(|e| match e {
+            CriterionError::IssueNotFound => {
+                anyhow::anyhow!("no issue with id {id} in this workspace")
+            }
+            CriterionError::CriterionNotFound => anyhow::anyhow!(
+                "no acceptance criterion `{}` on issue {id} (use `hangar issue criteria list {id}`)",
+                criterion.trim()
+            ),
+            CriterionError::Conflict => {
+                anyhow::anyhow!("criterion changed concurrently; re-read and retry")
+            }
+            CriterionError::Db(db) => anyhow::Error::new(db).context("set acceptance criterion"),
+        })?
+    } else {
+        let issue = IssueRepo::get_by_id(store.pool(), &id)
+            .await
+            .context("fetch issue")?
+            .with_context(|| format!("no issue with id {id}"))?;
+        anyhow::ensure!(
+            issue.workspace_id == workspace_id,
+            "no issue with id {id} in this workspace"
+        );
+        issue
+    };
+
+    if issue.acceptance_criteria.is_empty() {
+        println!("issue {id} has no acceptance criteria");
+        return Ok(());
+    }
+    for (idx, criterion) in issue.acceptance_criteria.iter().enumerate() {
+        println!("{}", criterion_line(idx + 1, criterion));
+    }
     Ok(())
 }
 
@@ -4242,7 +4401,21 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
             print!("{}", issue_md_header());
             println!("{}", issue_md_row(&issue));
         }
-        OutputFormat::Text => println!("{}", issue_line(&issue)),
+        OutputFormat::Text => {
+            println!("{}", issue_line(&issue));
+            // #11-rest: the definition-of-done, with its per-criterion ☑/☐ state,
+            // so the CLI proof does not depend on the TUI.
+            if !issue.acceptance_criteria.is_empty() {
+                println!(
+                    "Acceptance: {}/{}",
+                    ainb_hangar_core::acceptance::checked_count(&issue.acceptance_criteria),
+                    issue.acceptance_criteria.len()
+                );
+                for (idx, criterion) in issue.acceptance_criteria.iter().enumerate() {
+                    println!("  {}", criterion_line(idx + 1, criterion));
+                }
+            }
+        }
     }
     Ok(())
 }
