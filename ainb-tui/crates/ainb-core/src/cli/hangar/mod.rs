@@ -879,6 +879,12 @@ pub enum SkillsCommand {
     Sync(SkillsSyncArgs),
     /// List the skills imported into a workspace.
     List(SkillsListArgs),
+    /// Attach a skill to an agent (idempotent; never re-enables a disabled link).
+    Attach(SkillsLinkArgs),
+    /// Detach a skill from an agent (idempotent).
+    Detach(SkillsLinkArgs),
+    /// Enable or disable an already-attached skill for one agent (parity #24).
+    Toggle(SkillsToggleArgs),
 }
 
 /// Arguments for `hangar skills sync`.
@@ -901,6 +907,47 @@ pub struct SkillsSyncArgs {
 #[derive(Args, Debug)]
 pub struct SkillsListArgs {
     /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+    /// List one agent's ATTACHMENTS (with their enabled/disabled state) instead
+    /// of the workspace's skills. Accepts an agent id or its name.
+    #[arg(long)]
+    pub agent: Option<String>,
+}
+
+/// Arguments for `hangar skills attach` / `hangar skills detach`.
+///
+/// Both the skill and the agent accept an id OR a name, because
+/// `hangar agent create` prints only the name — requiring ids would force every
+/// caller through an `agent list --format json | jq` scrape.
+#[derive(Args, Debug)]
+pub struct SkillsLinkArgs {
+    /// Skill to link: its id, or its kebab-case name within the workspace.
+    pub skill: String,
+    /// Agent to link it to: its id, or its name within the workspace.
+    #[arg(long)]
+    pub agent: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar skills toggle` (parity #24).
+///
+/// `--enabled` takes an explicit `true`/`false` rather than being a flip, so the
+/// command is idempotent and two operators converge on the same state.
+#[derive(Args, Debug)]
+pub struct SkillsToggleArgs {
+    /// Skill to toggle: its id, or its kebab-case name within the workspace.
+    pub skill: String,
+    /// Agent whose link is toggled: its id, or its name within the workspace.
+    #[arg(long)]
+    pub agent: String,
+    /// `true` = the link materialises; `false` = it stays attached but is
+    /// suppressed at dispatch.
+    #[arg(long, action = clap::ArgAction::Set)]
+    pub enabled: bool,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
     #[arg(long)]
     pub workspace: Option<String>,
 }
@@ -2759,7 +2806,128 @@ async fn dispatch_skills(cmd: SkillsCommand, format: OutputFormat) -> Result<()>
     match cmd {
         SkillsCommand::Sync(args) => run_skills_sync(&store, args).await,
         SkillsCommand::List(args) => run_skills_list(&store, args, format).await,
+        SkillsCommand::Attach(args) => run_skills_link(&store, args, true).await,
+        SkillsCommand::Detach(args) => run_skills_link(&store, args, false).await,
+        SkillsCommand::Toggle(args) => run_skills_toggle(&store, args).await,
     }
+}
+
+/// Resolve a skill reference (an id, else a kebab-case name) within `ws`.
+///
+/// Id-first so an explicit ULID always wins; the name fallback exists because
+/// nothing in the CLI surface prints skill ids.
+async fn resolve_skill_ref(
+    store: &Store,
+    ws: &ainb_hangar_core::ids::WorkspaceId,
+    reference: &str,
+) -> Result<ainb_hangar_core::ids::SkillId> {
+    use ainb_hangar_store::repo::skill::SkillRepo;
+
+    let skills = SkillRepo::list(store.pool(), ws).await.context("list skills")?;
+    if let Some(hit) = skills.iter().find(|s| s.id.as_str() == reference) {
+        return Ok(hit.id.clone());
+    }
+    let normalised = ainb_hangar_core::skill::SkillName::new(reference)
+        .with_context(|| format!("`{reference}` is not a usable skill name"))?;
+    if let Some(hit) = skills.iter().find(|s| s.name == normalised) {
+        return Ok(hit.id.clone());
+    }
+    let available: Vec<&str> = skills.iter().map(|s| s.name.as_str()).collect();
+    anyhow::bail!(
+        "no skill `{reference}` in this workspace (available: {})",
+        if available.is_empty() {
+            "none — run `ainb hangar skills sync` first".to_string()
+        } else {
+            available.join(", ")
+        }
+    )
+}
+
+/// Resolve an agent reference (an id, else a name) within `ws`.
+///
+/// Name resolution is unambiguous: migration 0050's `agent_workspace_name_unique`
+/// index means one agent per name per workspace.
+async fn resolve_agent_ref(
+    store: &Store,
+    ws: &ainb_hangar_core::ids::WorkspaceId,
+    reference: &str,
+) -> Result<ainb_hangar_core::ids::AgentId> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let agents = AgentRepo::list_by_workspace_including_archived(store.pool(), ws.as_str())
+        .await
+        .context("list agents")?;
+    let hit = agents
+        .iter()
+        .find(|a| a.id == reference)
+        .or_else(|| agents.iter().find(|a| a.name == reference));
+    let Some(agent) = hit else {
+        let available: Vec<&str> = agents.iter().map(|a| a.name.as_str()).collect();
+        anyhow::bail!(
+            "no agent `{reference}` in this workspace (available: {})",
+            if available.is_empty() {
+                "none — run `ainb hangar agent create --name <name>` first".to_string()
+            } else {
+                available.join(", ")
+            }
+        );
+    };
+    ainb_hangar_core::ids::AgentId::from_str(agent.id.clone()).context("agent id was empty")
+}
+
+/// `hangar skills attach|detach <skill> --agent <agent>`: mutate one junction row.
+///
+/// Attach is idempotent and — per parity #24 deviation D2 — never re-enables a
+/// link an operator has deliberately disabled; use `skills toggle` for that.
+async fn run_skills_link(store: &Store, args: SkillsLinkArgs, attach: bool) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::skill::SkillRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let skill = resolve_skill_ref(store, &ws, &args.skill).await?;
+    let agent = resolve_agent_ref(store, &ws, &args.agent).await?;
+
+    if attach {
+        SkillRepo::attach_to_agent(store.pool(), &ws, &agent, &skill)
+            .await
+            .context("attach skill to agent")?;
+        println!("attached {} to {}", args.skill, args.agent);
+    } else {
+        SkillRepo::detach_from_agent(store.pool(), &ws, &agent, &skill)
+            .await
+            .context("detach skill from agent")?;
+        println!("detached {} from {}", args.skill, args.agent);
+    }
+    Ok(())
+}
+
+/// `hangar skills toggle <skill> --agent <agent> --enabled <bool>` (parity #24).
+///
+/// Keeps the attachment and flips only whether it materialises. A pair that is
+/// not attached is reported as such rather than silently succeeding.
+async fn run_skills_toggle(store: &Store, args: SkillsToggleArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::skill::SkillRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let skill = resolve_skill_ref(store, &ws, &args.skill).await?;
+    let agent = resolve_agent_ref(store, &ws, &args.agent).await?;
+
+    let toggled = SkillRepo::set_enabled(store.pool(), &ws, &agent, &skill, args.enabled)
+        .await
+        .context("toggle skill enablement")?;
+    if toggled {
+        let state = if args.enabled { "enabled" } else { "disabled" };
+        println!("{state} {} for {}", args.skill, args.agent);
+    } else {
+        println!(
+            "{} is not attached to {} — nothing to toggle",
+            args.skill, args.agent
+        );
+    }
+    Ok(())
 }
 
 /// Resolve the target workspace id for a skills verb: the named workspace slug
@@ -2848,6 +3016,19 @@ async fn run_skills_list(store: &Store, args: SkillsListArgs, format: OutputForm
         return Ok(());
     };
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    // `--agent` switches to the ATTACHMENT listing (parity #24): every link on
+    // that agent with its enabled/disabled state. Rendered by its own function
+    // so the workspace listing's CSV header / markdown header stay untouched.
+    if let Some(agent_ref) = args.agent.as_deref() {
+        let agent = resolve_agent_ref(store, &ws, agent_ref).await?;
+        let links = SkillRepo::agent_skill_links(store.pool(), &ws, &agent)
+            .await
+            .context("list agent skill links")?;
+        render_agent_skill_links(&links, format);
+        return Ok(());
+    }
+
     let skills = SkillRepo::list(store.pool(), &ws).await.context("list skills")?;
     render_skill_list(&skills, format);
     Ok(())
@@ -5037,6 +5218,63 @@ fn render_skill_list(skills: &[ainb_hangar_core::skill::SkillWithFiles], format:
             } else {
                 for s in skills {
                     println!("{}", skill_line(s));
+                }
+            }
+        }
+    }
+}
+
+/// Render `hangar skills list --agent <agent>`: one agent's attachments with
+/// their per-agent enablement (parity #24).
+///
+/// A SEPARATE renderer from [`render_skill_list`] on purpose — this listing has
+/// different columns, and folding it into the workspace listing's shared CSV /
+/// markdown headers would break every fixture pinned to those headers.
+fn render_agent_skill_links(
+    links: &[ainb_hangar_store::repo::skill::AgentSkillLink],
+    format: OutputFormat,
+) {
+    let state = |enabled: bool| if enabled { "enabled" } else { "disabled" };
+    match format {
+        OutputFormat::Json => {
+            let body = links
+                .iter()
+                .map(|l| {
+                    format!(
+                        r#"{{"skill_id":{},"name":{},"enabled":{}}}"#,
+                        json_string(l.skill_id.as_str()),
+                        json_string(l.name.as_str()),
+                        l.enabled
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("skill_id,name,enabled");
+            for l in links {
+                println!(
+                    "{},{},{}",
+                    csv_field(l.skill_id.as_str()),
+                    csv_field(l.name.as_str()),
+                    l.enabled
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| name | enabled |");
+            println!("| --- | --- |");
+            for l in links {
+                println!("| {} | {} |", l.name, l.enabled);
+            }
+        }
+        OutputFormat::Text => {
+            if links.is_empty() {
+                println!("no skills attached");
+            } else {
+                for l in links {
+                    println!("{}  {}", l.name, state(l.enabled));
                 }
             }
         }

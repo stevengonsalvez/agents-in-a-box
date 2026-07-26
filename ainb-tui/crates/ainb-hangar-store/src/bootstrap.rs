@@ -418,6 +418,9 @@ pub async fn create_agent_from(
         kind: draft.kind.unwrap_or_else(|| crate::repo::agent::AGENT_KIND_USER.to_string()),
         system_key: draft.system_key,
         service_tier: draft.service_tier,
+        // Nothing suppressed at create: an operator opts individual skills out
+        // afterwards (migration 0051).
+        disabled_runtime_skills: Vec::new(),
     };
     AgentRepo::insert(pool, &agent).await?;
     Ok(agent)

@@ -746,6 +746,8 @@ async fn handle(
         }
         methods::HANGAR_SKILL_ATTACH => attach_or_detach(pool, req, true).await,
         methods::HANGAR_SKILL_DETACH => attach_or_detach(pool, req, false).await,
+        methods::HANGAR_SKILL_SET_ENABLED => skill_set_enabled(pool, req).await,
+        methods::HANGAR_AGENT_SKILLS_LIST => agent_skills_list(pool, req).await,
         methods::HANGAR_AUTOPILOTS_LIST
         | methods::HANGAR_AUTOPILOT_RUNS
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
@@ -6130,6 +6132,52 @@ async fn attach_or_detach(
             .map_err(|e| skill_repo_err(&e))?;
     }
     Ok(serde_json::json!({}))
+}
+
+/// `hangar/skill_set_enabled` (parity #24): flip one attached skill's per-agent
+/// enablement without detaching it.
+///
+/// Answers `{ "toggled": false }` — not an error — when the pair is not
+/// attached, so an idempotent caller can distinguish the two outcomes.
+async fn skill_set_enabled(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::SkillSetEnabledParams =
+        parse_params(req, "{ workspace_id, agent_id, skill_id, enabled }")?;
+    let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+        return Err(invalid_params(&format!(
+            "unknown workspace `{}`",
+            params.workspace_id
+        )));
+    };
+    let agent = agent_id(&params.agent_id)?;
+    let skill = skill_id(&params.skill_id)?;
+    let toggled = snapshots::skill_set_enabled(pool, &ws, &agent, &skill, params.enabled)
+        .await
+        .map_err(|e| skill_repo_err(&e))?;
+    Ok(serde_json::json!({ "toggled": toggled }))
+}
+
+/// `hangar/agent_skills_list` (parity #24): one agent's attachments WITH their
+/// enablement — disabled links included, flagged.
+async fn agent_skills_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AgentSkillsListParams =
+        parse_params(req, "{ workspace_id, agent_id }")?;
+    let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+        return Err(invalid_params(&format!(
+            "unknown workspace `{}`",
+            params.workspace_id
+        )));
+    };
+    let agent = agent_id(&params.agent_id)?;
+    let result = snapshots::agent_skills_list(pool, &ws, &agent)
+        .await
+        .map_err(|e| skill_repo_err(&e))?;
+    serde_json::to_value(result).map_err(|e| internal(&format!("encode agent skills: {e}")))
 }
 
 /// Dispatch the four P7.5 autopilot-manager RPCs. Each resolves + scopes by

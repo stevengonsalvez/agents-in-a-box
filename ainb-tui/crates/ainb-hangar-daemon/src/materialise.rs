@@ -27,6 +27,23 @@
 //! database-owned tree (or be dangling on cleanup) and break the provider
 //! sandbox's path checks.
 //!
+//! # Disabled links never materialise (migration 0051, parity #24)
+//!
+//! There are two independent suppression levers, and this module is where BOTH
+//! are honoured — hangar has no live tool registry to gate, so "the skill never
+//! lands on disk for that agent" is the faithful equivalent (deviation D1):
+//!
+//! - **`agent_skill.enabled = 0`** — the link stays attached but stops being
+//!   live. [`SkillRepo::skills_for_agent`] already filters it out, so it never
+//!   reaches this loop.
+//! - **`agent.disabled_runtime_skills`** — a per-agent by-NAME suppression list,
+//!   applied here after the read. It can name a skill the agent is not attached
+//!   to at all, which is why it cannot live in the junction query.
+//!
+//! An agent whose every skill is suppressed hits the same empty-skills
+//! early-return as an agent with no attachments: **zero directories written**, an
+//! empty report, and no stale `.claude/` tree left in a fresh task root.
+//!
 //! # Provider extensibility
 //!
 //! A new provider is one new [`ProviderSkillLayout`] arm (root + env var) and
@@ -38,6 +55,7 @@ use std::path::{Path, PathBuf};
 
 use ainb_hangar_core::ids::{AgentId, WorkspaceId};
 use ainb_hangar_core::skill::SkillWithFiles;
+use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use sqlx::SqlitePool;
 
@@ -164,14 +182,17 @@ pub enum MaterialiseError {
 /// Materialise every skill attached to `agent` into the provider's layout under
 /// `target`.
 ///
-/// Reads [`SkillRepo::skills_for_agent`], picks the [`ProviderSkillLayout`] for
-/// `target.provider`, then for each skill writes its body to `SKILL.md` and its
-/// supporting files at their relative paths under
-/// `{skills_root}/{skill_name}/`. Files under `scripts/` get the unix
-/// executable bit. Files are **copied** (written), never symlinked.
+/// Reads [`SkillRepo::skills_for_agent`] — which returns the **enabled** links
+/// only — then drops anything named in the agent's `disabled_runtime_skills`,
+/// picks the [`ProviderSkillLayout`] for `target.provider`, and for each
+/// surviving skill writes its body to `SKILL.md` and its supporting files at
+/// their relative paths under `{skills_root}/{skill_name}/`. Files under
+/// `scripts/` get the unix executable bit. Files are **copied** (written), never
+/// symlinked.
 ///
-/// An agent with no attached skills writes nothing (no directories created) and
-/// returns an empty [`MaterialiseReport`] — dispatch must still succeed.
+/// An agent with no attached skills — or whose every skill is suppressed by
+/// either lever — writes nothing (no directories created) and returns an empty
+/// [`MaterialiseReport`]; dispatch must still succeed.
 ///
 /// # Errors
 ///
@@ -183,6 +204,21 @@ pub async fn materialise_for_agent(
     target: &MaterialiseTarget,
 ) -> Result<MaterialiseReport, MaterialiseError> {
     let skills = SkillRepo::skills_for_agent(pool, &target.workspace, agent).await?;
+
+    // D1: the by-name runtime suppression list. Applied after the junction read
+    // because it can name a skill this agent was never attached to. A missing
+    // agent row suppresses nothing (the read below already scoped the skills, so
+    // there is no leak in degrading open here).
+    let suppressed = AgentRepo::get(pool, agent.as_str())
+        .await
+        .map_err(SkillRepoError::from)?
+        .map(|a| a.disabled_runtime_skills)
+        .unwrap_or_default();
+    let skills: Vec<_> = skills
+        .into_iter()
+        .filter(|s| !suppressed.iter().any(|n| n == s.name.as_str()))
+        .collect();
+
     let layout = ProviderSkillLayout::from_provider(&target.provider);
 
     // No skills → no dirs, no env pointer. Dispatch proceeds with an empty

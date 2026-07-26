@@ -3493,9 +3493,12 @@ Import + list workspace-scoped skills
 Usage: ainb hangar skills [OPTIONS] <COMMAND>
 
 Commands:
-  sync  Import skills from a toolkit directory into a workspace (idempotent)
-  list  List the skills imported into a workspace
-  help  Print this message or the help of the given subcommand(s)
+  sync    Import skills from a toolkit directory into a workspace (idempotent)
+  list    List the skills imported into a workspace
+  attach  Attach a skill to an agent (idempotent; never re-enables a disabled link)
+  detach  Detach a skill from an agent (idempotent)
+  toggle  Enable or disable an already-attached skill for one agent (parity #24)
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3533,6 +3536,68 @@ Usage: ainb hangar skills list [OPTIONS]
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+      --agent <AGENT>          List one agent's ATTACHMENTS (with their enabled/disabled state) instead of the workspace's skills. Accepts an agent id or its name
+  -h, --help                   Print help
+```
+
+#### `ainb hangar skills attach`
+
+Attach a skill to an agent (idempotent; never re-enables a disabled link)
+
+```console
+$ ainb hangar skills attach --help
+Attach a skill to an agent (idempotent; never re-enables a disabled link)
+
+Usage: ainb hangar skills attach [OPTIONS] --agent <AGENT> <SKILL>
+
+Arguments:
+  <SKILL>  Skill to link: its id, or its kebab-case name within the workspace
+
+Options:
+      --agent <AGENT>          Agent to link it to: its id, or its name within the workspace
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar skills detach`
+
+Detach a skill from an agent (idempotent)
+
+```console
+$ ainb hangar skills detach --help
+Detach a skill from an agent (idempotent)
+
+Usage: ainb hangar skills detach [OPTIONS] --agent <AGENT> <SKILL>
+
+Arguments:
+  <SKILL>  Skill to link: its id, or its kebab-case name within the workspace
+
+Options:
+      --agent <AGENT>          Agent to link it to: its id, or its name within the workspace
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar skills toggle`
+
+Enable or disable an already-attached skill for one agent (parity #24)
+
+```console
+$ ainb hangar skills toggle --help
+Enable or disable an already-attached skill for one agent (parity #24)
+
+Usage: ainb hangar skills toggle [OPTIONS] --agent <AGENT> --enabled <ENABLED> <SKILL>
+
+Arguments:
+  <SKILL>  Skill to toggle: its id, or its kebab-case name within the workspace
+
+Options:
+      --agent <AGENT>          Agent whose link is toggled: its id, or its name within the workspace
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --enabled <ENABLED>      `true` = the link materialises; `false` = it stays attached but is suppressed at dispatch [possible values: true, false]
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 

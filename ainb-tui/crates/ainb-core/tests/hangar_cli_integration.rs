@@ -1588,3 +1588,120 @@ fn queued_task_count(home: &std::path::Path) -> i64 {
             .unwrap()
     })
 }
+
+/// Parity #24 end-to-end through the REAL binary: sync two skills, attach both
+/// to an agent, disable one, and prove the listing reflects it — then re-attach
+/// the disabled one and prove the attach did NOT resurrect it (deviation D2).
+#[test]
+fn skill_toggle_round_trips_through_cli() {
+    let tmp = tempfile::tempdir().unwrap();
+    let source = tmp.path().join("src");
+    for name in ["commit", "review"] {
+        let dir = source.join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("SKILL.md"),
+            format!("---\nname: {name}\ndescription: the {name} skill\n---\n\n# {name}\n"),
+        )
+        .unwrap();
+    }
+
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "sync",
+            "--source",
+            source.to_str().unwrap(),
+        ],
+    );
+    assert!(ok, "skills sync should exit 0; out={out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "agent", "create", "--name", "Tester"],
+    );
+    assert!(ok, "agent create should exit 0; out={out}");
+
+    for skill in ["commit", "review"] {
+        let (ok, out) = run(
+            tmp.path(),
+            &["hangar", "skills", "attach", skill, "--agent", "Tester"],
+        );
+        assert!(ok, "attach {skill} should exit 0; out={out}");
+    }
+
+    // Both attachments start live.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
+        ],
+    );
+    assert!(ok, "skills list --agent should exit 0; out={out}");
+    let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
+    let state = |v: &serde_json::Value, name: &str| -> bool {
+        v.as_array()
+            .expect("array")
+            .iter()
+            .find(|l| l["name"] == name)
+            .unwrap_or_else(|| panic!("no link named {name} in {v}"))["enabled"]
+            .as_bool()
+            .expect("enabled bool")
+    };
+    assert!(state(&links, "commit"), "commit starts enabled: {links}");
+    assert!(state(&links, "review"), "review starts enabled: {links}");
+
+    // Disable one.
+    let (ok, out) = run(
+        tmp.path(),
+        &[
+            "hangar",
+            "skills",
+            "toggle",
+            "review",
+            "--agent",
+            "Tester",
+            "--enabled",
+            "false",
+        ],
+    );
+    assert!(ok, "skills toggle should exit 0; out={out}");
+    assert!(
+        out.contains("disabled review"),
+        "missing toggle ack:\n{out}"
+    );
+
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
+        ],
+    );
+    let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
+    assert!(state(&links, "commit"), "commit stays enabled: {links}");
+    assert!(
+        !state(&links, "review"),
+        "review reads back disabled — and is still LISTED, i.e. still attached: {links}"
+    );
+
+    // D2: re-attaching must NOT resurrect it (seed/templates re-attach on every
+    // re-run; a re-enabling attach would silently undo the operator's disable).
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "skills", "attach", "review", "--agent", "Tester"],
+    );
+    assert!(ok, "re-attach should exit 0; out={out}");
+    let (_, out) = run(
+        tmp.path(),
+        &[
+            "hangar", "skills", "list", "--agent", "Tester", "--format", "json",
+        ],
+    );
+    let links: serde_json::Value = serde_json::from_str(out.trim()).expect("json links");
+    assert!(
+        !state(&links, "review"),
+        "attach must never re-enable a deliberately disabled link: {links}"
+    );
+}

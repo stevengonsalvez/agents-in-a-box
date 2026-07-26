@@ -35,10 +35,10 @@ use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
-    ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow, InboxEntryRow, IssueRow,
-    PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow,
+    InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
-use ainb_hangar_proto::snapshots::{SkillDetail, SkillsSyncResult};
+use ainb_hangar_proto::snapshots::{AgentSkillsListResult, SkillDetail, SkillsSyncResult};
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::attention::AttentionRepo;
@@ -1034,6 +1034,57 @@ pub async fn skill_detach(
     skill: &SkillId,
 ) -> Result<(), SkillRepoError> {
     SkillRepo::detach_from_agent(pool, workspace, agent, skill).await
+}
+
+/// Flip one agent↔skill link's enablement (`hangar/skill_set_enabled`, parity
+/// #24).
+///
+/// Orthogonal to attach/detach: the junction row survives, it just stops being
+/// live. Answers `false` when the pair is not attached (a no-op, not an error)
+/// so the caller can tell "toggled" from "no such link". Workspace-scoped by the
+/// same guard [`skill_attach`] uses.
+///
+/// # Errors
+///
+/// Returns [`SkillRepoError::CrossWorkspace`] when either id is foreign, or
+/// [`SkillRepoError::Db`] on a store failure.
+pub async fn skill_set_enabled(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    agent: &AgentId,
+    skill: &SkillId,
+    enabled: bool,
+) -> Result<bool, SkillRepoError> {
+    SkillRepo::set_enabled(pool, workspace, agent, skill, enabled).await
+}
+
+/// List one agent's skill links with their enablement
+/// (`hangar/agent_skills_list`, parity #24).
+///
+/// Returns EVERY link — a disabled one is still attached and still listed, just
+/// flagged — so the skill-manager can render the `(disabled)` marker. A foreign
+/// agent id yields an empty list.
+///
+/// # Errors
+///
+/// Returns [`SkillRepoError::Db`] on a store failure or
+/// [`SkillRepoError::Name`] on a corrupt stored name.
+pub async fn agent_skills_list(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    agent: &AgentId,
+) -> Result<AgentSkillsListResult, SkillRepoError> {
+    let links = SkillRepo::agent_skill_links(pool, workspace, agent).await?;
+    Ok(AgentSkillsListResult {
+        links: links
+            .into_iter()
+            .map(|l| AgentSkillLinkRow {
+                skill_id: l.skill_id.as_str().to_string(),
+                name: l.name.as_str().to_string(),
+                enabled: l.enabled,
+            })
+            .collect(),
+    })
 }
 
 // ──────────────────────────────────────────────────────────────────────────

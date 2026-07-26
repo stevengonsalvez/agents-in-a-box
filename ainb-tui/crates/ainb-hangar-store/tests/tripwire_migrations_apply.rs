@@ -239,6 +239,21 @@ async fn migration_0002_creates_skill_tables_with_composite_keys() {
         agent_skill.contains("PRIMARY KEY (agent_id, skill_id)"),
         "agent_skill composite PK: {agent_skill}"
     );
+    // Migration 0051 (parity #24): per-agent enable/disable toggle. `ALTER TABLE
+    // ... ADD COLUMN` rewrites `sqlite_master.sql`, so the added column is
+    // visible in the stored DDL text.
+    assert!(
+        agent_skill.contains("enabled INTEGER NOT NULL DEFAULT 1"),
+        "agent_skill.enabled default-true (0051): {agent_skill}"
+    );
+
+    // Migration 0051 (parity #24, multica 206): per-agent runtime-level skill
+    // suppression list, JSON array text defaulting to the empty array.
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains("disabled_runtime_skills TEXT NOT NULL DEFAULT '[]'"),
+        "agent.disabled_runtime_skills (0051): {agent}"
+    );
 
     pool.close().await;
 }

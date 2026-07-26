@@ -16,8 +16,8 @@ use ainb_hangar_core::channel::ChannelSet;
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
-    ActorRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow, IssueRow, SkillFile,
-    SkillRow, TaskCardRow,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow,
+    IssueRow, SkillFile, SkillRow, TaskCardRow,
 };
 
 /// `serde(default)` helper — an absent `is_answer` defaults to `true`.
@@ -280,6 +280,41 @@ pub struct SkillAttachParams {
     pub agent_id: String,
     /// The skill being (de)attached.
     pub skill_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_SKILL_SET_ENABLED`] (parity #24).
+///
+/// The same `(workspace, agent, skill)` triple `SkillAttachParams` carries, plus
+/// the target state. Explicit rather than a flip so the call is idempotent and
+/// two racing clients converge instead of ping-ponging.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SkillSetEnabledParams {
+    /// The subscribed workspace both ids must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent whose link is being toggled.
+    pub agent_id: String,
+    /// The skill whose link is being toggled.
+    pub skill_id: String,
+    /// The target state: `true` = the link materialises, `false` = it stays
+    /// attached but is suppressed.
+    pub enabled: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_AGENT_SKILLS_LIST`] (parity #24).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSkillsListParams {
+    /// The subscribed workspace the agent must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The agent whose attachments are listed.
+    pub agent_id: String,
+}
+
+/// Result of [`crate::methods::HANGAR_AGENT_SKILLS_LIST`]: one agent's skill
+/// links, enabled and disabled alike, ordered by skill name (parity #24).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSkillsListResult {
+    /// Every link on the agent — a disabled one is still listed, flagged.
+    pub links: Vec<AgentSkillLinkRow>,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOTS_LIST`]: the workspace's
@@ -2370,6 +2405,63 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<SkillAttachParams>(&s).unwrap(),
             attach
+        );
+    }
+
+    /// The parity-#24 per-agent skill-toggle envelopes round-trip through JSON,
+    /// and an old peer's row (no `enabled` key) reads back as ENABLED.
+    #[test]
+    fn skill_toggle_envelopes_roundtrip() {
+        let toggle = SkillSetEnabledParams {
+            workspace_id: "ws-1".into(),
+            agent_id: "agent-1".into(),
+            skill_id: "skill-review".into(),
+            enabled: false,
+        };
+        let s = serde_json::to_string(&toggle).unwrap();
+        assert_eq!(
+            serde_json::from_str::<SkillSetEnabledParams>(&s).unwrap(),
+            toggle
+        );
+
+        let params = AgentSkillsListParams {
+            workspace_id: "ws-1".into(),
+            agent_id: "agent-1".into(),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSkillsListParams>(&s).unwrap(),
+            params
+        );
+
+        let result = AgentSkillsListResult {
+            links: vec![
+                AgentSkillLinkRow {
+                    skill_id: "s-1".into(),
+                    name: "commit".into(),
+                    enabled: true,
+                },
+                AgentSkillLinkRow {
+                    skill_id: "s-2".into(),
+                    name: "review".into(),
+                    enabled: false,
+                },
+            ],
+        };
+        let s = serde_json::to_string(&result).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AgentSkillsListResult>(&s).unwrap(),
+            result
+        );
+
+        // Append-only tolerance: a peer that predates the toggle concept omits
+        // the field entirely. It MUST read back as enabled — defaulting to
+        // `false` would render every skill on an old peer as disabled.
+        let legacy: AgentSkillLinkRow =
+            serde_json::from_str(r#"{"skill_id":"s","name":"n"}"#).unwrap();
+        assert!(
+            legacy.enabled,
+            "an omitted `enabled` means the peer has no toggle concept = ENABLED"
         );
     }
 

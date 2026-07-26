@@ -254,6 +254,11 @@ const FLEET_SUBSCRIBE_REQ_ID: i64 = 58;
 const FLEET_ACTION_REQ_ID: i64 = 59;
 /// Explicit-recipient Fleet broadcast.
 const FLEET_BROADCAST_REQ_ID: i64 = 60;
+/// JSON-RPC id for a `hangar/skill_set_enabled` request (parity #24).
+const SKILL_SET_ENABLED_REQ_ID: i64 = 61;
+/// JSON-RPC id for a `hangar/agent_skills_list` request (parity #24). Fired
+/// after every attach / detach / toggle so the ` (disabled)` marker is fresh.
+const AGENT_SKILLS_LIST_REQ_ID: i64 = 62;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -299,6 +304,10 @@ pub struct HangarPlugin {
     /// detail reply can be folded onto the right skill. `None` when no detail
     /// request is pending.
     pending_detail_slug: Option<String>,
+    /// Armed after any attach / detach / toggle reply: the next `render` pass
+    /// fires `hangar/agent_skills_list` so the skill rows' ` (disabled)` markers
+    /// never go stale (parity #24).
+    refresh_agent_skill_links: bool,
     /// The id of the autopilot a `hangar/autopilot_runs` is in flight for (P7.5),
     /// so the reply folds onto the right row. `None` when none pending.
     pending_runs_autopilot: Option<String>,
@@ -544,6 +553,7 @@ impl Default for HangarPlugin {
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
+            refresh_agent_skill_links: false,
             pending_runs_autopilot: None,
             opener: crate::shell::default_opener(),
             daemon_starter: crate::shell::default_daemon_starter(),
@@ -1099,6 +1109,11 @@ impl HangarPlugin {
             // the changed row or `{}`; we re-fetch the relevant lists to refresh
             // derived columns (`used`, next-tick, enabled, last-run, task status
             // buckets, issue assignee, inbox unread count).
+            // Parity #24: the link listing feeds the ` (disabled)` marker.
+            RpcId::Number(AGENT_SKILLS_LIST_REQ_ID) => self.apply_agent_skill_links(resp),
+            // Parity #24: a toggle changes only the per-agent link, so refresh
+            // the link map rather than the whole snapshot batch.
+            RpcId::Number(SKILL_SET_ENABLED_REQ_ID) => self.refresh_agent_skill_links = true,
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
@@ -1115,6 +1130,9 @@ impl HangarPlugin {
                 | PROFILE_UPSERT_REQ_ID,
             ) => {
                 self.fetch_pending = true;
+                // Attach / detach change the link SET for the selected agent, so
+                // the enablement map must be re-read too (parity #24).
+                self.refresh_agent_skill_links = true;
                 self.conn.on_event();
             }
             // Any other response/event keeps the link alive.
@@ -1876,6 +1894,53 @@ impl HangarPlugin {
         }
     }
 
+    /// Fold a `hangar/agent_skills_list` result onto the skill-manager screen
+    /// (parity #24): the selected agent's links plus their per-agent enablement.
+    fn apply_agent_skill_links(&mut self, resp: &RpcResponse) {
+        let Some(result) = &resp.result else {
+            return;
+        };
+        let Ok(listing) = serde_json::from_value::<
+            ainb_hangar_proto::snapshots::AgentSkillsListResult,
+        >(result.clone()) else {
+            return;
+        };
+        let out = crate::screen::skill_manager::reduce_skill_manager(
+            &self.screens.skill_manager,
+            crate::screen::skill_manager::SkillManagerEvent::LinksLoaded(listing.links),
+        );
+        self.screens.skill_manager = out.state;
+    }
+
+    /// Fire `hangar/agent_skills_list` for the currently-targeted agent when a
+    /// preceding attach / detach / toggle armed the refresh (parity #24).
+    ///
+    /// A no-op when nothing armed it, when the socket is down, or when the
+    /// workspace has no agent — exactly the guards the mutations themselves use.
+    async fn drain_agent_skill_links_refresh(&mut self, host: &HostClient) {
+        if !self.refresh_agent_skill_links {
+            return;
+        }
+        self.refresh_agent_skill_links = false;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Some(agent) = self.first_agent_ref() else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let Ok(body) = encode_request(
+            AGENT_SKILLS_LIST_REQ_ID,
+            daemon_methods::HANGAR_AGENT_SKILLS_LIST,
+            serde_json::json!({ "workspace_id": ws, "agent_id": agent }),
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: agent_skills_list send failed: {e}")).await;
+        }
+    }
+
     /// Build the settings cache from an `hangar/health` result.
     fn apply_health(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
@@ -2375,6 +2440,26 @@ impl HangarPlugin {
                     SKILL_DETACH_REQ_ID,
                     daemon_methods::HANGAR_SKILL_DETACH,
                     serde_json::json!({ "workspace_id": ws, "agent_id": agent, "skill_id": slug }),
+                )
+            }
+            SkillAction::ToggleEnabled(slug) => {
+                let Some(agent) = self.first_agent_ref() else {
+                    let _ = host.log_info("hangar: no agent to toggle skill for").await;
+                    return;
+                };
+                // A link the daemon has not reported on is treated as ENABLED
+                // (the column default), so the first `t` on it disables it —
+                // matching what the row renders.
+                let enabled = !self.screens.skill_manager.link_disabled(&slug);
+                (
+                    SKILL_SET_ENABLED_REQ_ID,
+                    daemon_methods::HANGAR_SKILL_SET_ENABLED,
+                    serde_json::json!({
+                        "workspace_id": ws,
+                        "agent_id": agent,
+                        "skill_id": slug,
+                        "enabled": !enabled,
+                    }),
                 )
             }
         };
@@ -4916,6 +5001,9 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_skill_action() {
             self.apply_skill_action(host, action).await;
         }
+        // Parity #24: after any attach / detach / toggle reply, re-read the
+        // selected agent's links so the ` (disabled)` markers stay honest.
+        self.drain_agent_skill_links_refresh(host).await;
         // P7.5: drain any deferred autopilot RPC (load-runs / fire-now /
         // set-enabled) raised by the autopilot-manager screen.
         if let Some(action) = self.screens.take_pending_autopilot_action() {
