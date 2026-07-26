@@ -269,6 +269,10 @@ impl SquadRepo {
     /// off this: a `None` return = skip injection silently (no stale briefing),
     /// mirroring multica's dangling-`squad_id` guard.
     ///
+    /// Unlike [`list`](Self::list) this does NOT filter archived squads: an
+    /// archived squad must stay resolvable so an audit read can show its stamp and
+    /// the reject-assignment guard can name it (migration 0052).
+    ///
     /// Reuses the same [`decode_actor`] + `(member_type, member_id)` ordering as
     /// [`list`](Self::list), just filtered to the one id (an id-keyed single-row
     /// read + one member sub-select, not an O(squads) scan).

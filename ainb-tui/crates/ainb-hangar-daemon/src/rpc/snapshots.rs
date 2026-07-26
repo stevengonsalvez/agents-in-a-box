@@ -979,9 +979,11 @@ pub async fn squad_archive(
     let by = effective_archiver(pool, workspace_id, archived_by).await?;
     match SquadRepo::set_archived(pool, &ws, squad_id, archived, by.as_ref(), now_ms).await {
         Ok(()) => {}
-        Err(SquadRepoError::NotFound) => return Ok(None),
+        // `DuplicateName` is structurally impossible here (an archive never
+        // renames), but folding it into the not-found rejection keeps a future
+        // store change from panicking a live daemon connection.
+        Err(SquadRepoError::NotFound | SquadRepoError::DuplicateName) => return Ok(None),
         Err(SquadRepoError::Db(e)) => return Err(e),
-        Err(SquadRepoError::DuplicateName) => unreachable!("archive never renames a squad"),
     }
     squads_list(pool, workspace_id).await.map(Some)
 }
