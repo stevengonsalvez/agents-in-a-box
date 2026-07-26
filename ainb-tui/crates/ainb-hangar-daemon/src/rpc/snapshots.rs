@@ -34,6 +34,7 @@ use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
+use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
     ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow,
@@ -123,8 +124,10 @@ pub async fn issues_list(
             // task-detail card.
             let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
-                origin_type: None,
-                origin_id: None,
+                // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+                // row a snapshot carries and the row an event pushes agree.
+                origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+                origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
                 id,
                 display_id,
                 workspace_id: issue.workspace_id,
@@ -297,8 +300,10 @@ pub async fn issues_search(
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
-            origin_type: None,
-            origin_id: None,
+            // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+            // row a snapshot carries and the row an event pushes agree.
+            origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+            origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
             id,
             display_id,
             workspace_id: issue.workspace_id,
@@ -1773,8 +1778,10 @@ pub async fn issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
-        origin_type: None,
-        origin_id: None,
+        // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+        // row a snapshot carries and the row an event pushes agree.
+        origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+        origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
         id,
         display_id,
         workspace_id: issue.workspace_id,
@@ -1974,8 +1981,10 @@ async fn read_issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
-        origin_type: None,
-        origin_id: None,
+        // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+        // row a snapshot carries and the row an event pushes agree.
+        origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+        origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
         id,
         display_id,
         workspace_id: issue.workspace_id,
@@ -2099,6 +2108,10 @@ pub struct IssueCreateInput<'a> {
     /// Label NAMES to attach (migration 0016): each resolve-or-created in the
     /// workspace and joined to the new issue.
     pub labels: &'a [String],
+    /// ORIGIN PROVENANCE for the created issue (migration 0056, multica parity
+    /// #21), already validated against the closed allow-list at the handler
+    /// boundary. `None` => the create stamps `manual` - a human authored it.
+    pub origin: Option<&'a IssueOrigin>,
 }
 
 /// Create one new issue in `workspace_id`, then return it as a wire [`IssueRow`]
@@ -2138,6 +2151,7 @@ pub async fn issue_create(
         priority,
         due_date,
         labels,
+        origin,
     } = input;
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
@@ -2182,6 +2196,13 @@ pub async fn issue_create(
     // post-insert card-parity pattern as source/target branches). A `None` /
     // blank ref is a no-op, so a link-less create leaves `external_ref` NULL.
     CardParityRepo::set_issue_external_ref(pool, workspace_id, &id, external_ref).await?;
+    // 0056: stamp the ORIGIN PROVENANCE with the same post-insert pattern. An
+    // absent origin is stamped `manual` (never left NULL) so from here on
+    // `origin_type IS NULL` means exactly one thing: "created before provenance
+    // existed". multica leaves human creates NULL; recording them explicitly
+    // makes the column a complete record without needing a backfill.
+    let stamped_origin = origin.cloned().unwrap_or_else(IssueOrigin::manual);
+    IssueRepo::set_origin(pool, workspace_id, &id, &stamped_origin).await?;
     // 0016: attach the authored labels through the join (resolve-or-create per
     // name, `ON CONFLICT DO NOTHING` on the join row, `issue.labels` re-derived
     // inside the same transaction). Attach is idempotent, so a repeated name is
@@ -2215,8 +2236,11 @@ pub async fn issue_create(
     // shows.
     let display_id = issue_display_row(pool, workspace_id, &id, prefix.as_deref()).await?;
     Ok(IssueRow {
-        origin_type: None,
-        origin_id: None,
+        // ORIGIN PROVENANCE (0056): echo exactly what was just stamped, so the
+        // response row and the pushed IssueCreated event stay byte-identical to
+        // a later list snapshot of the same issue.
+        origin_type: Some(stamped_origin.kind_db_str().to_string()),
+        origin_id: stamped_origin.id().map(ToString::to_string),
         id: issue_id,
         display_id,
         workspace_id: workspace_id.to_string(),
@@ -2385,6 +2409,7 @@ pub async fn spawn_mention_tasks(
     clock: &dyn HangarClock,
     workspace_id: &str,
     issue_id: &str,
+    comment_id: &str,
     author: &ainb_hangar_core::actor::ActorRef,
     body: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
@@ -2409,6 +2434,16 @@ pub async fn spawn_mention_tasks(
     // this run so a prior run's terminal rows on the issue do not poison it. Minted
     // once, before the fan-out loop, exactly like the squad fan-out.
     let generation = TaskRepo::next_generation_for_issue(pool, issue_id).await?;
+    // 0056 ORIGIN PROVENANCE: every task this comment spawns is stamped
+    // `('comment_mention', <comment.id>)` — hangar's structural analogue of
+    // multica's `quick_create` provenance. The dispatcher hands it to the agent
+    // child, so an issue the agent creates mid-run is attributable back to the
+    // comment that asked for it.
+    let mention_origin = IssueOrigin::comment_mention(comment_id).map_err(|e| {
+        sqlx::Error::Protocol(format!(
+            "comment {comment_id} is unusable as an origin id: {e}"
+        ))
+    })?;
     let mut spawned = Vec::new();
     for handle in &handles {
         // Resolve by name; an unknown handle simply matches no agent (ignored).
@@ -2444,7 +2479,13 @@ pub async fn spawn_mention_tasks(
             generation,
         };
         match TaskRepo::insert(pool, &task).await {
-            Ok(_) => spawned.push(agent.id.clone()),
+            Ok(_) => {
+                // Stamped per spawned task, INSIDE the per-handle loop and AFTER
+                // the invocation gate: a refused mention writes no row and
+                // therefore no provenance.
+                TaskRepo::set_origin(pool, &task.id, &mention_origin).await?;
+                spawned.push(agent.id.clone());
+            }
             // The agent already has a pending task on this issue (the per-(issue,
             // agent) unique index): coalesce, don't error. The trigger is
             // idempotent — re-mentioning an already-queued agent is a no-op.
@@ -2635,6 +2676,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent please do X",
         )
@@ -2660,6 +2702,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent do X",
         )
@@ -2674,6 +2717,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent again",
         )
@@ -2705,6 +2749,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent and also @claude-agent",
         )
@@ -2729,6 +2774,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@nobody hello and @ghost too",
         )
@@ -2808,6 +2854,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &bob,
             "@claude-agent please do X",
         )
@@ -2828,6 +2875,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &bob,
             "@claude-agent please do X",
         )
@@ -2856,6 +2904,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &bob,
             "@private-bot and @claude-agent please do X",
         )
@@ -2898,6 +2947,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &peer,
             "@claude-agent take this over",
         )
@@ -2930,6 +2980,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &peer,
             "@claude-agent take this over",
         )
@@ -2960,6 +3011,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &me,
             "@claude-agent please do X",
         )
