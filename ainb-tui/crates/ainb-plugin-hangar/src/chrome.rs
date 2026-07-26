@@ -180,7 +180,13 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
                 ("tab", "chip"),
             ]
         }
-        Screen::TaskDetail(_) => vec![("R", "retry"), ("X", "cancel"), ("x", "delete")],
+        Screen::TaskDetail(_) => vec![
+            ("R", "retry"),
+            ("X", "cancel"),
+            ("x", "delete"),
+            ("a", "criterion"),
+            ("t", "tick"),
+        ],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],

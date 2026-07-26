@@ -259,6 +259,10 @@ const SKILL_SET_ENABLED_REQ_ID: i64 = 61;
 /// JSON-RPC id for a `hangar/agent_skills_list` request (parity #24). Fired
 /// after every attach / detach / toggle so the ` (disabled)` marker is fresh.
 const AGENT_SKILLS_LIST_REQ_ID: i64 = 62;
+/// JSON-RPC id for a `hangar/issue_criterion_set` request (multica parity
+/// #11-rest). Fired by the task-detail `t` key; the reply is an `IssueRow` and
+/// the daemon's `IssueUpdated` push re-renders the card.
+const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -3125,6 +3129,47 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire a deferred acceptance-criterion tick raised by the task-detail `t`
+    /// key (multica parity #11-rest).
+    ///
+    /// Maps the [`IssueCriterionAction`] to `hangar/issue_criterion_set`,
+    /// addressing the criterion by its STABLE id and attributing the tick to the
+    /// current member. The daemon's `IssueUpdated` push re-renders the card
+    /// (mirroring [`Self::apply_comment_action`] — this fires the RPC only, no
+    /// separate re-pull). A send failure is logged but non-fatal — the criterion
+    /// simply stays as it was.
+    ///
+    /// [`IssueCriterionAction`]: crate::screen::IssueCriterionAction
+    async fn apply_criterion_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::IssueCriterionAction,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws,
+            "issue_id": action.issue_id,
+            "criterion": action.criterion_id,
+            "checked": action.checked,
+            "actor": SELF_AUTHOR_REF,
+        });
+        let Ok(body) = encode_request(
+            ISSUE_CRITERION_SET_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_CRITERION_SET,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host
+                .log_info(format!("hangar: criterion set send failed: {e}"))
+                .await;
+        }
+    }
+
     /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
     /// task-detail's issue (e38.34).
     ///
@@ -5077,6 +5122,11 @@ impl Plugin for HangarPlugin {
         // compose modal) and fire `hangar/comment_add` over the daemon socket.
         if let Some(action) = self.screens.take_pending_comment_action() {
             self.apply_comment_action(host, action).await;
+        }
+        // #11-rest: drain a deferred acceptance-criterion tick (`t` on the
+        // task-detail card) and fire `hangar/issue_criterion_set`.
+        if let Some(action) = self.screens.take_pending_criterion_action() {
+            self.apply_criterion_action(host, action).await;
         }
         // Phase 5: drain a deferred wizard create (Enter on the Agent stage) and
         // fire `hangar/issue_create` over the daemon socket; the reply arms the
