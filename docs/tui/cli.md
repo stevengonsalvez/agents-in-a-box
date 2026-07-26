@@ -2925,7 +2925,7 @@ Options:
       --label <LABELS>
           A label to attach to the issue (repeatable: `--label bug --label p0`).
           
-          Persisted as the issue's label list. The full labels table + attach/detach is a separate concern; create just records the labels it is handed.
+          Each name is resolve-or-created in the workspace and joined to the issue through the `label` / `issue_label` tables (migration 0016), so a repeated name yields exactly one attachment.
 
       --acceptance <ACCEPTANCE_CRITERIA>
           An acceptance criterion (repeatable: `--acceptance "x" --acceptance "y"`).
