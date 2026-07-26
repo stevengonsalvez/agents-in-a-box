@@ -100,6 +100,7 @@ fn seeded_squads() -> serde_json::Value {
             name: "shippers".into(),
             leader: "agent:agent-lead".into(),
             members: vec!["agent:agent-1".into(), "member:user-1".into()],
+            ..SquadWireRow::default()
         }],
     })
     .unwrap()
