@@ -21,6 +21,7 @@ use ainb_hangar_core::acceptance::{
 };
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::idgen::IdGen;
+use ainb_hangar_core::origin::{IssueOrigin, OriginKind};
 use sqlx::{Row, SqlitePool};
 
 /// Parameters for inserting a new `issue` row.
@@ -114,6 +115,11 @@ pub struct Issue {
     /// Optional 1-based **barrier stage** among siblings; `None` = unstaged
     /// (migration 0046).
     pub stage: Option<i64>,
+    /// Who/what created this issue (migration 0056, multica parity #21):
+    /// `('autopilot', <autopilot.id>)`, `('comment_mention', <comment.id>)` or
+    /// `('manual', NULL)`. `None` for every pre-0056 row — "provenance
+    /// unknown", deliberately distinct from an explicit `manual`.
+    pub origin: Option<IssueOrigin>,
 }
 
 /// A partial-edit instruction for one issue's mutable fields (e38.8).
@@ -315,13 +321,110 @@ impl IssueRepo {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
              FROM issue WHERE id = ?",
         )
         .bind(id)
         .fetch_optional(pool)
         .await?;
         row.map(|r| issue_from_row(&r)).transpose()
+    }
+
+    /// Stamp an issue's ORIGIN PROVENANCE post-insert (migration 0056), exactly
+    /// like [`CardParityRepo::set_issue_external_ref`] stamps `external_ref`.
+    ///
+    /// A post-insert setter is deliberate: it keeps [`NewIssue`] — and its ~30
+    /// construction sites — untouched, and mirrors the pattern the crate already
+    /// uses for every "the create flow learned one more fact" column.
+    ///
+    /// Workspace-scoped: an issue id from another tenant matches zero rows and
+    /// changes nothing. Returns `true` when exactly one row was stamped.
+    ///
+    /// [`CardParityRepo::set_issue_external_ref`]: crate::repo::card_parity::CardParityRepo::set_issue_external_ref
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_origin(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+        origin: &IssueOrigin,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query(
+            "UPDATE issue SET origin_type = ?, origin_id = ? WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(origin.kind_db_str())
+        .bind(origin.id())
+        .bind(issue_id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// The DETERMINISTIC by-origin lookup — multica's `GetIssueByOrigin`
+    /// (`service/task.go:1836`), the whole reason the pair exists: resolve "the
+    /// issue this run produced" by its stamped provenance instead of "the
+    /// agent's most recent issue", which races against concurrent creates by the
+    /// same agent.
+    ///
+    /// Served by `idx_issue_origin`. A `manual` origin carries no id and is
+    /// therefore never a useful lookup key — it matches the (potentially many)
+    /// manual rows, so callers should only pass an id-bearing origin. Returns
+    /// the OLDEST match when several exist, so the answer is stable.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails or a row is malformed.
+    pub async fn by_origin(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        origin: &IssueOrigin,
+    ) -> Result<Option<Issue>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT id, workspace_id, title, description, state, \
+             assignee_type, assignee_id, creator_type, creator_id, created_at, \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             FROM issue \
+             WHERE workspace_id = ? AND origin_type = ? AND origin_id IS ? \
+             ORDER BY created_at, id LIMIT 1",
+        )
+        .bind(workspace_id)
+        .bind(origin.kind_db_str())
+        .bind(origin.id())
+        .fetch_optional(pool)
+        .await?;
+        row.map(|r| issue_from_row(&r)).transpose()
+    }
+
+    /// Every issue in a workspace stamped with `kind` — the "which issues did
+    /// the platform create" list filter multica's `origin_type` was added for
+    /// (`042_autopilot.up.sql:73`, "so they can be filtered in lists").
+    ///
+    /// Oldest first. Served by `idx_issue_origin`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails or a row is malformed.
+    pub async fn list_by_origin_kind(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        kind: OriginKind,
+    ) -> Result<Vec<Issue>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT id, workspace_id, title, description, state, \
+             assignee_type, assignee_id, creator_type, creator_id, created_at, \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             FROM issue \
+             WHERE workspace_id = ? AND origin_type = ? \
+             ORDER BY created_at, id",
+        )
+        .bind(workspace_id)
+        .bind(kind.as_db_str())
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(issue_from_row).collect()
     }
 
     /// Overwrite an issue's lifecycle `state` (e.g. `"open"` → `"done"`).
@@ -436,7 +539,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
              FROM issue WHERE workspace_id = ? AND state = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -464,7 +567,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
              FROM issue WHERE parent_issue_id = ? \
              ORDER BY stage IS NULL, stage, created_at, id",
         )
@@ -594,7 +697,7 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT i.id, i.workspace_id, i.title, i.description, i.state, \
              i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.created_at, \
-             i.priority, i.due_date, i.labels, i.acceptance_criteria, i.context_refs, i.external_ref, i.parent_issue_id, i.stage, \
+             i.priority, i.due_date, i.labels, i.acceptance_criteria, i.context_refs, i.external_ref, i.parent_issue_id, i.stage, i.origin_type, i.origin_id, \
              MAX(CASE \
                  WHEN LOWER(i.title) LIKE ?2 ESCAPE '\\' THEN 3 \
                  WHEN LOWER(i.description) LIKE ?2 ESCAPE '\\' THEN 2 \
@@ -1030,6 +1133,10 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         external_ref: row.try_get("external_ref")?,
         parent_issue_id: row.try_get("parent_issue_id")?,
         stage: row.try_get("stage")?,
+        // LENIENT by design (migration 0056): a stored kind outside the
+        // allow-list degrades to `manual` instead of failing the whole row, so
+        // a newer daemon's future kind cannot brick an older reader.
+        origin: IssueOrigin::from_db(row.try_get("origin_type")?, row.try_get("origin_id")?),
     })
 }
 
@@ -1719,5 +1826,199 @@ mod tests {
         let hits = IssueRepo::search_ranked(pool, "ws-a", "keyword").await.unwrap();
         let ids: Vec<&str> = hits.iter().map(|i| i.id.as_str()).collect();
         assert_eq!(ids, ["i-a"], "only the owning tenant's issue is returned");
+    }
+
+    // ---- ORIGIN PROVENANCE (migration 0056, multica parity #21) -------------
+
+    /// Every column an unstamped (pre-0056-shaped) create leaves behind reads
+    /// back as "provenance unknown" — NOT as an implicit `manual`.
+    #[tokio::test]
+    async fn an_unstamped_issue_reads_back_with_no_origin() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-1", "t", None, 1).await;
+
+        let issue = IssueRepo::get_by_id(pool, "i-1").await.unwrap().unwrap();
+        assert_eq!(issue.origin, None);
+    }
+
+    /// The post-insert setter writes both columns, and the read side
+    /// re-assembles the typed pair — through `get_by_id`, `list_by_workspace`
+    /// AND `search_ranked`, so no SELECT list is left behind.
+    #[tokio::test]
+    async fn set_origin_round_trips_through_every_read_surface() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-1", "keyword title", None, 1).await;
+
+        let origin = IssueOrigin::autopilot("ap-9").unwrap();
+        assert!(IssueRepo::set_origin(pool, "ws-a", "i-1", &origin).await.unwrap());
+
+        // Raw SQL — the acceptance shape (`SELECT origin_type, origin_id`).
+        let (kind, id): (String, Option<String>) =
+            sqlx::query_as("SELECT origin_type, origin_id FROM issue WHERE id = 'i-1'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!((kind.as_str(), id.as_deref()), ("autopilot", Some("ap-9")));
+
+        assert_eq!(
+            IssueRepo::get_by_id(pool, "i-1").await.unwrap().unwrap().origin,
+            Some(origin.clone())
+        );
+        let listed = IssueRepo::list_by_workspace_state(pool, "ws-a", "open").await.unwrap();
+        assert_eq!(listed[0].origin, Some(origin.clone()));
+        let found = IssueRepo::search_ranked(pool, "ws-a", "keyword").await.unwrap();
+        assert_eq!(found[0].origin, Some(origin));
+    }
+
+    /// A `manual` stamp writes the kind and leaves `origin_id` NULL — the
+    /// column becomes a complete record ("a human authored it"), distinct from
+    /// the NULL kind a pre-0056 row keeps.
+    #[tokio::test]
+    async fn manual_stamps_the_kind_and_a_null_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-1", "t", None, 1).await;
+
+        IssueRepo::set_origin(pool, "ws-a", "i-1", &IssueOrigin::manual())
+            .await
+            .unwrap();
+
+        let (kind, id): (String, Option<String>) =
+            sqlx::query_as("SELECT origin_type, origin_id FROM issue WHERE id = 'i-1'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(kind, "manual");
+        assert_eq!(id, None);
+    }
+
+    /// The setter is workspace-scoped: a foreign tenant's id stamps nothing.
+    #[tokio::test]
+    async fn set_origin_never_crosses_a_tenant_boundary() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_ws(pool, "ws-b").await;
+        seed_issue(pool, "ws-a", "i-1", "t", None, 1).await;
+
+        let stamped = IssueRepo::set_origin(
+            pool,
+            "ws-b",
+            "i-1",
+            &IssueOrigin::comment_mention("c-1").unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(!stamped, "a foreign-tenant stamp matches zero rows");
+        assert_eq!(
+            IssueRepo::get_by_id(pool, "i-1").await.unwrap().unwrap().origin,
+            None
+        );
+    }
+
+    /// The DETERMINISTIC lookup multica added the pair for
+    /// (`GetIssueByOrigin`): the right issue for the right provenance id, and
+    /// `None` for a different id — never "the agent's most recent issue".
+    #[tokio::test]
+    async fn by_origin_resolves_the_stamped_issue_and_only_that_one() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-1", "first", None, 1).await;
+        seed_issue(pool, "ws-a", "i-2", "second", None, 2).await;
+
+        let mine = IssueOrigin::comment_mention("c-42").unwrap();
+        IssueRepo::set_origin(pool, "ws-a", "i-1", &mine).await.unwrap();
+        // i-2 is the agent's MORE RECENT issue but a different provenance.
+        IssueRepo::set_origin(
+            pool,
+            "ws-a",
+            "i-2",
+            &IssueOrigin::comment_mention("c-99").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let hit = IssueRepo::by_origin(pool, "ws-a", &mine).await.unwrap().unwrap();
+        assert_eq!(hit.id, "i-1", "resolved by provenance, not by recency");
+
+        let miss = IssueOrigin::comment_mention("c-nope").unwrap();
+        assert!(IssueRepo::by_origin(pool, "ws-a", &miss).await.unwrap().is_none());
+        assert!(
+            IssueRepo::by_origin(pool, "ws-b", &mine).await.unwrap().is_none(),
+            "workspace-scoped"
+        );
+    }
+
+    /// The "which issues did the platform create" list filter.
+    #[tokio::test]
+    async fn list_by_origin_kind_filters_to_that_kind_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-1", "a", None, 1).await;
+        seed_issue(pool, "ws-a", "i-2", "b", None, 2).await;
+        seed_issue(pool, "ws-a", "i-3", "c", None, 3).await;
+
+        IssueRepo::set_origin(
+            pool,
+            "ws-a",
+            "i-1",
+            &IssueOrigin::autopilot("ap-1").unwrap(),
+        )
+        .await
+        .unwrap();
+        IssueRepo::set_origin(pool, "ws-a", "i-2", &IssueOrigin::manual())
+            .await
+            .unwrap();
+        IssueRepo::set_origin(
+            pool,
+            "ws-a",
+            "i-3",
+            &IssueOrigin::autopilot("ap-2").unwrap(),
+        )
+        .await
+        .unwrap();
+
+        let fired = IssueRepo::list_by_origin_kind(pool, "ws-a", OriginKind::Autopilot)
+            .await
+            .unwrap();
+        let ids: Vec<&str> = fired.iter().map(|i| i.id.as_str()).collect();
+        assert_eq!(ids, ["i-1", "i-3"]);
+        // The unstamped row is in neither bucket.
+        let manual =
+            IssueRepo::list_by_origin_kind(pool, "ws-a", OriginKind::Manual).await.unwrap();
+        assert_eq!(manual.len(), 1);
+    }
+
+    /// A kind written outside the allow-list (only reachable through raw SQL /
+    /// a newer daemon) must not fail the read — it degrades to `manual`.
+    #[tokio::test]
+    async fn an_unknown_stored_kind_degrades_instead_of_failing_the_row() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws-a").await;
+        seed_issue(pool, "ws-a", "i-1", "t", None, 1).await;
+        sqlx::query(
+            "UPDATE issue SET origin_type = 'from_the_future', origin_id = 'x' WHERE id = 'i-1'",
+        )
+        .execute(pool)
+        .await
+        .unwrap();
+
+        let issue = IssueRepo::get_by_id(pool, "i-1").await.unwrap().unwrap();
+        assert_eq!(issue.origin.unwrap().kind(), OriginKind::Manual);
     }
 }
