@@ -77,7 +77,10 @@ async fn seed_graph(
     )
     .bind(agent_id)
     .bind("ws-1")
-    .bind("Agent")
+    // Names are unique per workspace (migration 0050), and several tests seed
+    // TWO agents into `ws-1`, so the name is derived from the caller's agent id
+    // rather than a shared literal.
+    .bind(format!("Agent {agent_id}"))
     .bind(runtime_id)
     .bind("workspace")
     .bind("user-1")
