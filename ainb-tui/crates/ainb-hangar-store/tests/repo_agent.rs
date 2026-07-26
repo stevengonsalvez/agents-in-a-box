@@ -108,7 +108,7 @@ async fn update_config_persists_and_is_partial() {
         cli_args: Some(vec!["--verbose".to_string()]),
         mcp_config: Some(Some(r#"{"servers":{}}"#.to_string())),
         thinking: Some(Some("high".to_string())),
-        agent_env: Some(vec![("FOO".to_string(), "bar".to_string())]),
+        agent_env: Some(vec![("FOO".to_string(), "bar".to_string())].into()),
         token_budget: Some(Some(750_000)),
         ..AgentConfigUpdate::default()
     };
@@ -124,7 +124,7 @@ async fn update_config_persists_and_is_partial() {
     assert_eq!(got.cli_args, vec!["--verbose".to_string()]);
     assert_eq!(got.mcp_config.as_deref(), Some(r#"{"servers":{}}"#));
     assert_eq!(got.thinking.as_deref(), Some("high"));
-    assert_eq!(got.agent_env, vec![("FOO".to_string(), "bar".to_string())]);
+    assert_eq!(got.agent_env.expose_for_child_env(), vec![("FOO".to_string(), "bar".to_string())]);
     assert_eq!(
         got.token_budget,
         Some(750_000),
