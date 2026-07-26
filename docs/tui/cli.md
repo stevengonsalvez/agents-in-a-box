@@ -3030,7 +3030,7 @@ Options:
           [possible values: text, json, csv, markdown]
 
       --state <STATE>
-          New lifecycle state (e.g. `in_progress`, `done`); omitted leaves it
+          New lifecycle state — one of `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`; omitted leaves it
 
       --assign <ASSIGN>
           Reassign the issue to an agent (`agent.id`); omitted leaves the assignee.
