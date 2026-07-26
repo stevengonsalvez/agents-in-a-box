@@ -33,12 +33,13 @@ use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
 use super::boards::{AgentChip, RepoOption, repo_candidates};
 
-/// The number of status columns the board renders — the five canonical
-/// lifecycle statuses (63l.3). Kept as a single constant so the column enum, the
-/// card-board render, and the per-column scroll offsets stay in lockstep.
+/// The number of status columns the board renders — the seven canonical
+/// lifecycle statuses (63l.3, extended with `blocked` / `cancelled`). Kept as a
+/// single constant so the column enum, the card-board render, and the
+/// per-column scroll offsets stay in lockstep.
 pub(crate) const COLUMN_COUNT: usize = IssueLifecycle::ALL.len();
 
-/// The five status columns issues are bucketed into for display, one per
+/// The seven status columns issues are bucketed into for display, one per
 /// canonical [`IssueLifecycle`] status (63l.3).
 ///
 /// The mapping from the wire `state` string to a column is owned by
@@ -59,6 +60,11 @@ pub enum IssueColumn {
     InReview,
     /// Terminal / closed (`"done"`, legacy `"closed"`).
     Done,
+    /// Work cannot proceed (`"blocked"`) — appended right of Done so every
+    /// pre-existing 0..4 column index stays stable.
+    Blocked,
+    /// Abandoned without completing (`"cancelled"`) — terminal alongside Done.
+    Cancelled,
 }
 
 impl IssueColumn {
@@ -84,6 +90,8 @@ impl IssueColumn {
             IssueLifecycle::InProgress => Self::InProgress,
             IssueLifecycle::InReview => Self::InReview,
             IssueLifecycle::Done => Self::Done,
+            IssueLifecycle::Blocked => Self::Blocked,
+            IssueLifecycle::Cancelled => Self::Cancelled,
         }
     }
 
@@ -103,10 +111,13 @@ impl IssueColumn {
             Self::InProgress => IssueLifecycle::InProgress,
             Self::InReview => IssueLifecycle::InReview,
             Self::Done => IssueLifecycle::Done,
+            Self::Blocked => IssueLifecycle::Blocked,
+            Self::Cancelled => IssueLifecycle::Cancelled,
         }
     }
 
-    /// The five columns in left-to-right display order (`backlog` … `done`).
+    /// The seven columns in left-to-right display order (`backlog` …
+    /// `cancelled`).
     #[must_use]
     pub const fn all() -> [Self; COLUMN_COUNT] {
         [
@@ -115,6 +126,8 @@ impl IssueColumn {
             Self::InProgress,
             Self::InReview,
             Self::Done,
+            Self::Blocked,
+            Self::Cancelled,
         ]
     }
 }
@@ -137,6 +150,10 @@ const fn column_glyph(column: IssueColumn) -> char {
         IssueColumn::InProgress => '◔',
         IssueColumn::InReview => '◑',
         IssueColumn::Done => '●',
+        // BMP, single-cell only — a wide/emoji glyph desyncs the column geometry
+        // the mouse hit-test shares with the paint.
+        IssueColumn::Blocked => '⊘',
+        IssueColumn::Cancelled => '⨯',
     }
 }
 
