@@ -218,10 +218,7 @@ fn by_title<'a>(rows: &'a [IssueRow], title: &str) -> &'a IssueRow {
 
 /// The count for one facet value out of a `facet_counts` list.
 fn count_of(counts: &[(FacetValue, usize)], want: &FacetValue) -> usize {
-    counts
-        .iter()
-        .find(|(v, _)| v == want)
-        .map_or(0, |(_, n)| *n)
+    counts.iter().find(|(v, _)| v == want).map_or(0, |(_, n)| *n)
 }
 
 /// The status + priority + label facet intersection narrows the real daemon's
