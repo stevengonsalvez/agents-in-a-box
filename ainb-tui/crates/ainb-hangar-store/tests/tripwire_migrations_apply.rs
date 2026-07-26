@@ -1401,3 +1401,51 @@ async fn migration_0055_types_card_dependency_links() {
 
     pool.close().await;
 }
+
+#[tokio::test]
+async fn migration_0056_adds_issue_and_task_origin_provenance() {
+    // multica parity #21: the (origin_type, origin_id) pair on the issue
+    // (`042_autopilot.up.sql:74-77`, widened by `060_issue_origin_quick_create`),
+    // mirrored onto the task so the daemon can hand a dispatched child its
+    // provenance. NULLABLE and NOT backfilled: a pre-0056 row reads NULL, which
+    // means "provenance unknown" — deliberately distinct from the explicit
+    // 'manual' a human create stamps from now on. NO CHECK constraint (SQLite
+    // cannot add one via ALTER); `OriginKind::parse` is the write-side gate.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    for (table, index) in [
+        ("issue", "idx_issue_origin"),
+        ("agent_task_queue", "idx_task_origin"),
+    ] {
+        let cols = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&pool)
+            .await
+            .expect("table_info");
+        for col in ["origin_type", "origin_id"] {
+            let found = cols
+                .iter()
+                .find(|r| {
+                    let name: String = r.get("name");
+                    name == col
+                })
+                .unwrap_or_else(|| panic!("{table}.{col} exists"));
+            let notnull: i64 = found.get("notnull");
+            let dflt: Option<String> = found.get("dflt_value");
+            assert_eq!(notnull, 0, "{table}.{col} is NULLABLE (no backfill)");
+            assert_eq!(dflt, None, "{table}.{col} has no default");
+        }
+
+        let idx = index_sql(&pool, index).await;
+        assert!(
+            idx.contains(table) && idx.contains("origin_type") && idx.contains("origin_id"),
+            "{index} serves the by-origin lookup: {idx}"
+        );
+        assert!(
+            idx.contains("WHERE origin_type IS NOT NULL"),
+            "{index} is PARTIAL so provenance-less rows stay out of it: {idx}"
+        );
+    }
+
+    pool.close().await;
+}
