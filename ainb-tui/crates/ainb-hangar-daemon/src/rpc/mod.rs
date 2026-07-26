@@ -3091,7 +3091,7 @@ async fn handle_issue_create(
 
     let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
         req,
-        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels? }",
+        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels?, origin_type?, origin_id? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -3147,6 +3147,18 @@ async fn handle_issue_create(
             labels.push(name.to_string());
         }
     }
+    // 0056 ORIGIN PROVENANCE (multica parity #21): validated BEFORE any write,
+    // like the parent resolve below — a bad origin must fail the call, never
+    // land a half-provenanced issue. multica's contract verbatim
+    // (`internal/handler/issue.go:1213-1231`): the two halves must arrive
+    // together and the kind must be on the allow-list, so a rogue caller cannot
+    // mint an arbitrary provenance label. An absent pair is legal and stamps
+    // `manual` downstream.
+    let origin = ainb_hangar_core::origin::IssueOrigin::from_wire(
+        params.origin_type.as_deref(),
+        params.origin_id.as_deref(),
+    )
+    .map_err(|e| invalid_params(&e.to_string()))?;
     if let Some(parent) = parent_issue_id {
         let ok = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, parent)
             .await
@@ -3174,6 +3186,7 @@ async fn handle_issue_create(
             priority,
             due_date,
             labels: &labels,
+            origin: origin.as_ref(),
         },
     )
     .await
@@ -3849,6 +3862,9 @@ async fn handle_comment_add(
         &SystemClock,
         ws.as_str(),
         row.issue_id.as_str(),
+        // 0056: the COMMITTED comment's id is this run's provenance
+        // (`('comment_mention', <comment.id>)`).
+        row.id.as_str(),
         &author,
         &params.body,
     )
@@ -5019,6 +5035,16 @@ async fn handle_board_card_create(
             parent_issue_id: None,
             stage: None,
         },
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    // 0056: a board card is authored by the TUI user, so its provenance is
+    // `manual` (stamped explicitly, never left NULL — see migration 0056).
+    IssueRepo::set_origin(
+        pool,
+        ws.as_str(),
+        &issue_id,
+        &ainb_hangar_core::origin::IssueOrigin::manual(),
     )
     .await
     .map_err(|e| store_err(&e))?;

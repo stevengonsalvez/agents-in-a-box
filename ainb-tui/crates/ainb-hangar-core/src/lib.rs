@@ -41,6 +41,10 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// Issue / task ORIGIN PROVENANCE: the validated `(origin_type, origin_id)`
+/// pair over the closed `{autopilot, comment_mention, manual}` allow-list
+/// (multica parity #21, migration 0056).
+pub mod origin;
 /// The single source of truth for the Hangar home directory
 /// ([`paths::hangar_home`], re-exported at the crate root). Every Hangar
 /// resolver delegates here so the `$AINB_HANGAR_HOME`-else-`~/.agents-in-a-box`

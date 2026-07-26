@@ -173,6 +173,32 @@ async fn autopilot_fires_on_schedule_after_clock_advance() {
     // The task row exists, linked to the run.
     let (task_id, run_id) = await_autopilot_task(&pool, Duration::from_secs(2)).await;
 
+    // 0056 / multica parity #21 — the REAL-DAEMON provenance leg: the task the
+    // live scheduler fired carries ('autopilot', <autopilot.id>) in sqlite. The
+    // id is the RULE, not the run (multica `service/autopilot.go:145` binds
+    // `ap.ID`), which is what makes "which issues did THIS autopilot create" a
+    // stable query across runs.
+    let origin = sqlx::query("SELECT origin_type, origin_id FROM agent_task_queue WHERE id = ?")
+        .bind(&task_id)
+        .fetch_one(&pool)
+        .await
+        .expect("task origin");
+    assert_eq!(
+        origin.get::<Option<String>, _>("origin_type").as_deref(),
+        Some("autopilot"),
+        "a scheduler-fired task records its provenance kind"
+    );
+    assert_eq!(
+        origin.get::<Option<String>, _>("origin_id").as_deref(),
+        Some(autopilot_id.as_str()),
+        "origin_id is the autopilot id"
+    );
+    assert_ne!(
+        origin.get::<Option<String>, _>("origin_id").as_deref(),
+        Some(run_id.as_str()),
+        "never the run id"
+    );
+
     shutdown.cancel();
     handle.await.expect("scheduler loop joins");
 

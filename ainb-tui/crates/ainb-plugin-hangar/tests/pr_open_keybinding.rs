@@ -22,6 +22,8 @@ const fn key(ch: char) -> KeyEvent {
 
 fn issue(pr_url: Option<&str>) -> IssueRow {
     IssueRow {
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("issue-1").unwrap(),
         display_id: None,
         workspace_id: "default".into(),

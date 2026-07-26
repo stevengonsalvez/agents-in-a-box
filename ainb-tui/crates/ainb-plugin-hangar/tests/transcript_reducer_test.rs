@@ -22,6 +22,8 @@ fn task() -> TaskId {
 
 fn issue_row() -> IssueRow {
     IssueRow {
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("i1").unwrap(),
         display_id: None,
         workspace_id: "ws".into(),

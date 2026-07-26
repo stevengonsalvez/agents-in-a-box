@@ -109,6 +109,8 @@ async fn read_one_raw_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Op
 /// One wire row. `state` is what buckets the card into a board column.
 fn row(id: &str, title: &str, state: &str) -> IssueRow {
     IssueRow {
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str(id).unwrap(),
         display_id: Some(id.to_uppercase()),
         workspace_id: "default".into(),

@@ -132,6 +132,8 @@ fn seeded_agents() -> serde_json::Value {
 fn seeded_issues() -> serde_json::Value {
     serde_json::to_value(IssuesListResult {
         issues: vec![IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),

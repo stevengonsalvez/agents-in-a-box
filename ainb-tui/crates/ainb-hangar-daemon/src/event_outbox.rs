@@ -166,6 +166,8 @@ mod tests {
 
     fn issue_row(id: &str) -> IssueRow {
         IssueRow {
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str(id).unwrap(),
             display_id: None,
             workspace_id: "ws-a".into(),

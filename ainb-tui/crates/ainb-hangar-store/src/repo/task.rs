@@ -26,6 +26,7 @@
 //! `sweep_expired_queued`). Those belong to the P1 daemon FSM, which builds on
 //! these read/enqueue primitives.
 
+use ainb_hangar_core::origin::IssueOrigin;
 use sqlx::{Row, SqlitePool};
 
 /// Parameters for enqueueing a new task (always inserted as `queued`).
@@ -160,12 +161,64 @@ pub struct Task {
     /// read back so the daemon claim path can key a leader-briefing injection off
     /// it. An infra-retry child copies it verbatim.
     pub squad_id: Option<String>,
+    /// Who/what enqueued this task (migration 0056, multica parity #21). The
+    /// daemon hands it to the agent child as `HANGAR_ORIGIN_TYPE` /
+    /// `HANGAR_ORIGIN_ID` at dispatch, so an issue the agent creates mid-run
+    /// carries the same provenance. `None` for every pre-0056 row.
+    pub origin: Option<IssueOrigin>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
 pub struct TaskRepo;
 
 impl TaskRepo {
+    /// Stamp a task's ORIGIN PROVENANCE (migration 0056) WITHIN an enqueue
+    /// transaction — same atomicity contract as
+    /// [`CardParityRepo::set_task_source_branch_in_tx`]: the claim loop can
+    /// never observe a task missing its dispatch inputs, so a task can never
+    /// exist without the provenance the dispatcher hands its child.
+    ///
+    /// [`CardParityRepo::set_task_source_branch_in_tx`]: crate::repo::card_parity::CardParityRepo::set_task_source_branch_in_tx
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_origin_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task_id: &str,
+        origin: &IssueOrigin,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE agent_task_queue SET origin_type = ?, origin_id = ? WHERE id = ?")
+            .bind(origin.kind_db_str())
+            .bind(origin.id())
+            .bind(task_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    /// Post-insert [`Self::set_origin_in_tx`] for callers outside a transaction.
+    ///
+    /// Returns `true` when exactly one row was stamped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_origin(
+        pool: &SqlitePool,
+        task_id: &str,
+        origin: &IssueOrigin,
+    ) -> Result<bool, sqlx::Error> {
+        let res =
+            sqlx::query("UPDATE agent_task_queue SET origin_type = ?, origin_id = ? WHERE id = ?")
+                .bind(origin.kind_db_str())
+                .bind(origin.id())
+                .bind(task_id)
+                .execute(pool)
+                .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Enqueue one task as `queued`, leaving every lifecycle/retry column at its
     /// schema default. Returns the new row's `id` on success.
     ///
@@ -662,7 +715,8 @@ impl TaskRepo {
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
      priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
-     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch, squad_id";
+     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch, squad_id, \
+     origin_type, origin_id";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -694,6 +748,9 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         generation: row.try_get("generation")?,
         source_branch: row.try_get("source_branch")?,
         squad_id: row.try_get("squad_id")?,
+        // LENIENT (migration 0056): an unknown stored kind degrades to `manual`
+        // rather than failing the row — see `IssueOrigin::from_db`.
+        origin: IssueOrigin::from_db(row.try_get("origin_type")?, row.try_get("origin_id")?),
     })
 }
 

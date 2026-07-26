@@ -42,6 +42,7 @@ fn seed_repo_cache() -> TempDir {
 
 fn task_fixture(id: &str, issue_id: Option<&str>) -> Task {
     Task {
+        origin: None,
         id: id.to_string(),
         workspace_id: "ws-1".to_string(),
         runtime_id: "rt-1".to_string(),

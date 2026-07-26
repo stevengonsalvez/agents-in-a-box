@@ -117,7 +117,26 @@ pub const ENV_ALLOWLIST: &[&str] = &[
     // deny-by-default filter, or the lifecycle hook's fleet-membership gate never
     // resolves and the run's AskUserQuestion never reaches the attention pipeline.
     ainb_fleet_core::session_registry::PARENT_ENV,
+    // 0056 (multica parity #21): the ORIGIN PROVENANCE the daemon hands the
+    // child so an issue the agent creates mid-run is attributable back to the
+    // comment / autopilot that asked for it (`ainb hangar issue create` reads
+    // these as its `--origin-*` defaults). Same justification as `PARENT_ENV`:
+    // daemon-stamped config, not an inherited ambient secret, so allowlisting
+    // leaks nothing — and WITHOUT it the deny-by-default filter drops both keys
+    // and the whole provenance chain silently no-ops.
+    ORIGIN_TYPE_ENV,
+    ORIGIN_ID_ENV,
 ];
+
+/// Env key carrying the dispatched task's ORIGIN PROVENANCE KIND to the agent
+/// child (migration 0056). Read by `ainb hangar issue create` as the default
+/// `--origin-type`.
+pub const ORIGIN_TYPE_ENV: &str = "HANGAR_ORIGIN_TYPE";
+
+/// Env key carrying the dispatched task's ORIGIN PROVENANCE ID to the agent
+/// child (migration 0056). Read by `ainb hangar issue create` as the default
+/// `--origin-id`.
+pub const ORIGIN_ID_ENV: &str = "HANGAR_ORIGIN_ID";
 
 /// The POSIX `sysexits.h` `EX_TEMPFAIL` (75): "temporary failure, indicating
 /// something that is not really an error … the request can be retried later".
@@ -2110,6 +2129,28 @@ mod tests {
             tok,
             Some("RESOLVED"),
             "claude child must carry the RESOLVED token, not the ambient leak"
+        );
+    }
+
+    /// 0056 / multica parity #21 silent-no-op guard: both ORIGIN PROVENANCE keys
+    /// must survive the deny-by-default allowlist filter. Drop either from
+    /// `ENV_ALLOWLIST` and the daemon still SETS them in `task_env` while the
+    /// child never SEES them — the whole provenance chain would no-op silently.
+    #[test]
+    fn compose_child_env_passes_the_origin_provenance_keys_through() {
+        let child = compose_child_env(
+            vec![
+                pair(ORIGIN_TYPE_ENV, "comment_mention"),
+                pair(ORIGIN_ID_ENV, "c-7"),
+                pair("SOME_AMBIENT_SECRET", "nope"),
+            ],
+            Vec::new(),
+        );
+        assert!(child.contains(&pair(ORIGIN_TYPE_ENV, "comment_mention")));
+        assert!(child.contains(&pair(ORIGIN_ID_ENV, "c-7")));
+        assert!(
+            !child.iter().any(|(k, _)| k == "SOME_AMBIENT_SECRET"),
+            "the filter is still deny-by-default"
         );
     }
 
