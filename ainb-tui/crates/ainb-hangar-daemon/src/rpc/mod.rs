@@ -4056,8 +4056,10 @@ async fn handle_agent_archive(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentArchiveParams =
-        parse_params(req, "{ workspace_id, agent_id, archived, archived_by_user_id? }")?;
+    let params: ainb_hangar_proto::snapshots::AgentArchiveParams = parse_params(
+        req,
+        "{ workspace_id, agent_id, archived, archived_by_user_id? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let row = snapshots::agent_archive(
         pool,
@@ -4283,8 +4285,10 @@ async fn handle_squad_archive(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::SquadArchiveParams =
-        parse_params(req, "{ workspace_id, squad_id, archived, archived_by_user_id? }")?;
+    let params: ainb_hangar_proto::snapshots::SquadArchiveParams = parse_params(
+        req,
+        "{ workspace_id, squad_id, archived, archived_by_user_id? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let squads = snapshots::squad_archive(
         pool,

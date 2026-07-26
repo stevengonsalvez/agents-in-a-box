@@ -1346,9 +1346,16 @@ mod tests {
         SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent_ref("a-lead"), 1)
             .await
             .unwrap();
-        SquadRepo::set_archived(pool, &ws("ws-a"), "s1", true, Some(&member_ref("user-1")), 5_000)
-            .await
-            .unwrap();
+        SquadRepo::set_archived(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            true,
+            Some(&member_ref("user-1")),
+            5_000,
+        )
+        .await
+        .unwrap();
 
         let err = SquadAssignService::assign_to_leader(
             pool,
@@ -1364,11 +1371,17 @@ mod tests {
             matches!(err, SquadAssignError::Archived(ref id) if id == "s1"),
             "got {err:?}"
         );
-        assert_eq!(queue_len(pool).await, 0, "an archived squad enqueues nothing");
+        assert_eq!(
+            queue_len(pool).await,
+            0,
+            "an archived squad enqueues nothing"
+        );
 
         // Restoring it makes the same assignment succeed — the guard is the only
         // thing that refused, not a broken fixture.
-        SquadRepo::set_archived(pool, &ws("ws-a"), "s1", false, None, 6_000).await.unwrap();
+        SquadRepo::set_archived(pool, &ws("ws-a"), "s1", false, None, 6_000)
+            .await
+            .unwrap();
         SquadAssignService::assign_to_leader(
             pool,
             &ws("ws-a"),
@@ -1396,11 +1409,22 @@ mod tests {
         SquadRepo::create(pool, &ws("ws-a"), "s1", "alpha", &agent_ref("a-lead"), 1)
             .await
             .unwrap();
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1")).await.unwrap();
-        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m2")).await.unwrap();
-        SquadRepo::set_archived(pool, &ws("ws-a"), "s1", true, Some(&member_ref("user-1")), 5_000)
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m1"))
             .await
             .unwrap();
+        SquadRepo::add_member(pool, &ws("ws-a"), "s1", &agent_ref("a-m2"))
+            .await
+            .unwrap();
+        SquadRepo::set_archived(
+            pool,
+            &ws("ws-a"),
+            "s1",
+            true,
+            Some(&member_ref("user-1")),
+            5_000,
+        )
+        .await
+        .unwrap();
 
         let err = SquadAssignService::assign_fanout(
             pool,

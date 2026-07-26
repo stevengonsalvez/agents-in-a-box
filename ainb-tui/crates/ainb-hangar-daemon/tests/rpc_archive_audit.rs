@@ -213,8 +213,7 @@ async fn agent_archive_defaults_the_archiver_to_the_workspace_owner() {
         .await;
     assert!(resp["error"].is_null(), "unarchive must ack: {resp}");
     assert!(
-        resp["result"].get("archived_at").is_none()
-            && resp["result"].get("archived_by").is_none(),
+        resp["result"].get("archived_at").is_none() && resp["result"].get("archived_by").is_none(),
         "a restored agent's row must omit the audit keys: {}",
         resp["result"]
     );
@@ -398,10 +397,7 @@ async fn squad_archive_rejects_an_unknown_squad() {
         "an unknown squad must be rejected: {resp}"
     );
     assert!(
-        resp["error"]["message"]
-            .as_str()
-            .unwrap_or_default()
-            .contains("no-such-squad"),
+        resp["error"]["message"].as_str().unwrap_or_default().contains("no-such-squad"),
         "the error must name the squad: {resp}"
     );
 }

@@ -148,7 +148,9 @@ async fn agent_archive_without_an_actor_still_records_when() {
     let pool = store.pool();
     seed_agent(pool, "ws-1", "ag-1").await;
 
-    AgentRepo::set_archived(pool, "ws-1", "ag-1", true, None, T1).await.expect("archive");
+    AgentRepo::set_archived(pool, "ws-1", "ag-1", true, None, T1)
+        .await
+        .expect("archive");
     let got = AgentRepo::get(pool, "ag-1").await.unwrap().unwrap();
     assert_eq!(got.archived_at, Some(T1));
     assert_eq!(got.archived_by, None, "unattributed, not fabricated");
@@ -184,11 +186,13 @@ async fn a_malformed_archiver_decodes_to_none_rather_than_failing_the_read() {
     let pool = store.pool();
     seed_agent(pool, "ws-1", "ag-1").await;
 
-    sqlx::query("UPDATE agent SET archived = 1, archived_at = ?, archived_by = 'garbage' WHERE id = 'ag-1'")
-        .bind(T1)
-        .execute(pool)
-        .await
-        .expect("write a corrupt cell");
+    sqlx::query(
+        "UPDATE agent SET archived = 1, archived_at = ?, archived_by = 'garbage' WHERE id = 'ag-1'",
+    )
+    .bind(T1)
+    .execute(pool)
+    .await
+    .expect("write a corrupt cell");
 
     let got = AgentRepo::get(pool, "ag-1").await.expect("read still succeeds").unwrap();
     assert!(got.archived);
@@ -226,7 +230,10 @@ async fn squad_archive_records_audit_and_leaves_the_active_list() {
 
     // `get` stays UNFILTERED: an archived squad must remain resolvable so the
     // audit read and the reject-assignment guard can name it.
-    let got = SquadRepo::get(pool, &ws("ws-1"), "sq-1").await.unwrap().expect("still resolvable");
+    let got = SquadRepo::get(pool, &ws("ws-1"), "sq-1")
+        .await
+        .unwrap()
+        .expect("still resolvable");
     assert!(got.archived);
     assert_eq!(got.archived_by, Some(member("user-1")));
     assert!(SquadRepo::is_archived(pool, &ws("ws-1"), "sq-1").await.unwrap());
@@ -241,9 +248,16 @@ async fn squad_archive_records_audit_and_leaves_the_active_list() {
     );
 
     // Restore clears both and returns it to the active list.
-    SquadRepo::set_archived(pool, &ws("ws-1"), "sq-1", false, Some(&member("user-2")), T2)
-        .await
-        .expect("restore");
+    SquadRepo::set_archived(
+        pool,
+        &ws("ws-1"),
+        "sq-1",
+        false,
+        Some(&member("user-2")),
+        T2,
+    )
+    .await
+    .expect("restore");
     assert_eq!(raw_squad_audit(pool, "sq-1").await, (0, None, None));
     assert_eq!(SquadRepo::list(pool, &ws("ws-1")).await.unwrap().len(), 1);
     assert!(!SquadRepo::is_archived(pool, &ws("ws-1"), "sq-1").await.unwrap());

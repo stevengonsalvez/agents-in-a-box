@@ -441,13 +441,12 @@ impl SquadRepo {
         workspace: &WorkspaceId,
         squad_id: &str,
     ) -> Result<bool, sqlx::Error> {
-        let archived: Option<i64> = sqlx::query_scalar(
-            "SELECT archived FROM squad WHERE id = ? AND workspace_id = ?",
-        )
-        .bind(squad_id)
-        .bind(workspace.as_str())
-        .fetch_optional(pool)
-        .await?;
+        let archived: Option<i64> =
+            sqlx::query_scalar("SELECT archived FROM squad WHERE id = ? AND workspace_id = ?")
+                .bind(squad_id)
+                .bind(workspace.as_str())
+                .fetch_optional(pool)
+                .await?;
         Ok(archived.is_some_and(|a| a != 0))
     }
 

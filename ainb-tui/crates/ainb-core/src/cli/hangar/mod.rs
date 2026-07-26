@@ -2358,10 +2358,16 @@ async fn run_agent_set_archived(
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let by = effective_archiver(store, &workspace_id, args.by.as_deref()).await?;
     let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
-    let touched =
-        AgentRepo::set_archived(store.pool(), &workspace_id, &args.id, archived, by.as_ref(), now)
-            .await
-            .with_context(|| format!("archive agent {}", args.id))?;
+    let touched = AgentRepo::set_archived(
+        store.pool(),
+        &workspace_id,
+        &args.id,
+        archived,
+        by.as_ref(),
+        now,
+    )
+    .await
+    .with_context(|| format!("archive agent {}", args.id))?;
     if touched {
         if archived {
             // Report the audit that was actually written, so the operator can see
@@ -2875,12 +2881,12 @@ fn squad_assign_cli_err(
         SquadAssignError::MemberAgentMissing(id) => {
             anyhow::anyhow!("squad member agent `{id}` not found")
         }
-        // gap #8: the invocation gate refused a dispatch target — no task row was
-        // written. Surfaced verbatim so the CLI exits non-zero with the reason.
-        e @ SquadAssignError::NotInvocable { .. } => anyhow::anyhow!("{e}"),
-        // parity #26: an archived squad refuses new work — no task row was
-        // written. Surfaced verbatim so the CLI exits non-zero with the reason.
-        e @ SquadAssignError::Archived(_) => anyhow::anyhow!("{e}"),
+        // Two pre-flight refusals that write NO task row: the gap-#8 invocation
+        // gate, and the parity-#26 archived-squad guard. Both are surfaced
+        // verbatim so the CLI exits non-zero with the store's own reason.
+        e @ (SquadAssignError::NotInvocable { .. } | SquadAssignError::Archived(_)) => {
+            anyhow::anyhow!("{e}")
+        }
         db @ SquadAssignError::Db(_) => anyhow::Error::new(db).context("squad assign failed"),
     }
 }
@@ -5546,10 +5552,10 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
     // The audit pair is `null` (not `0` / `""`) when unstamped — an honest
     // "unknown", distinguishable from an epoch-0 archive by an unattributed actor.
     let archived_at = a.archived_at.map_or_else(|| "null".to_string(), |ms| ms.to_string());
-    let archived_by = a
-        .archived_by
-        .as_ref()
-        .map_or_else(|| "null".to_string(), |actor| json_string(&actor.to_string()));
+    let archived_by = a.archived_by.as_ref().map_or_else(
+        || "null".to_string(),
+        |actor| json_string(&actor.to_string()),
+    );
     let args = json_string_array(a.cli_args.iter().map(String::as_str));
     let env = a
         .agent_env
@@ -5732,9 +5738,10 @@ fn squad_to_json(s: &ainb_hangar_store::repo::squad::Squad) -> String {
         ),
         s.archived,
         s.archived_at.map_or_else(|| "null".to_string(), |ms| ms.to_string()),
-        s.archived_by
-            .as_ref()
-            .map_or_else(|| "null".to_string(), |actor| json_string(&actor.to_string())),
+        s.archived_by.as_ref().map_or_else(
+            || "null".to_string(),
+            |actor| json_string(&actor.to_string())
+        ),
     )
 }
 /// Join a squad's member actor-refs with `, ` for the flat text surfaces.

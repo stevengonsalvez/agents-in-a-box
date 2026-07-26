@@ -2858,7 +2858,10 @@ mod tests {
             archived_by_user_id: Some("user-2".into()),
         };
         let s = serde_json::to_string(&full).unwrap();
-        assert_eq!(serde_json::from_str::<SquadArchiveParams>(&s).unwrap(), full);
+        assert_eq!(
+            serde_json::from_str::<SquadArchiveParams>(&s).unwrap(),
+            full
+        );
 
         // An ACTIVE squad row emits none of the three audit keys, so a pre-0052
         // consumer sees byte-identical JSON to what it saw before.

@@ -1196,14 +1196,7 @@ fn squad_archive_hides_it_from_list_and_records_the_audit() {
 
     let (ok, out) = run(
         tmp.path(),
-        &[
-            "hangar",
-            "squad",
-            "archive",
-            &squad_id,
-            "--by",
-            "user-9",
-        ],
+        &["hangar", "squad", "archive", &squad_id, "--by", "user-9"],
     );
     assert!(ok, "squad archive should exit 0; out={out}");
     assert!(
@@ -1232,10 +1225,7 @@ fn squad_archive_hides_it_from_list_and_records_the_audit() {
     // Restoring returns it to the default list and clears the stamp.
     let (ok, _) = run(tmp.path(), &["hangar", "squad", "unarchive", &squad_id]);
     assert!(ok, "squad unarchive should exit 0");
-    let (_, json) = run(
-        tmp.path(),
-        &["--format", "json", "hangar", "squad", "list"],
-    );
+    let (_, json) = run(tmp.path(), &["--format", "json", "hangar", "squad", "list"]);
     assert!(
         json.contains("shippers")
             && json.contains("\"archived\":false")
