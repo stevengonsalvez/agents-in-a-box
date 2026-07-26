@@ -79,7 +79,7 @@ pub enum SettingsSection {
     /// member with their role so the operator can see who can do what.
     Members,
     /// Per-attention-kind notification routing rules (tcp T5): a grid of kind ×
-    /// channel toggles. `J`/`K` move the kind row, `h`/`l` move the channel column,
+    /// channel toggles. `]`/`[` move the kind row, `h`/`l` move the channel column,
     /// `space` toggles the selected cell (emitting a `SetNotifyRule` intent →
     /// `hangar/notify_rule_set`), and `g` flips the edit scope between the
     /// host-wide GLOBAL rule and the active workspace override
@@ -362,6 +362,15 @@ impl SettingsState {
         self.config_input.as_ref().and_then(|c| c.error.as_deref())
     }
 
+    /// The in-section list cursor (workspaces / keys / providers / members).
+    ///
+    /// Exposed for the #450 reserved-key tests, which prove the rebound `]` / `[`
+    /// bindings actually move it through the real key path.
+    #[must_use]
+    pub const fn list_selected(&self) -> usize {
+        self.list_selected
+    }
+
     /// The active section.
     #[must_use]
     pub const fn section(&self) -> SettingsSection {
@@ -566,7 +575,7 @@ pub fn reduce_settings(state: &SettingsState, ev: SettingsEvent) -> SettingsRedu
 /// selection. A cursor key is inert while a modal owns the keyboard — the
 /// key-entry modal and the numeric overlay both capture the arrows rather than
 /// let them scroll the pane underneath. The Notifications grid keeps its own
-/// 2D cursor keys (`J`/`K` × `h`/`l`) and is left alone here.
+/// 2D cursor keys (`]`/`[` × `h`/`l`) and is left alone here.
 fn reduce_cursor(state: &SettingsState, delta: i32) -> SettingsReduction {
     if state.key_entry.is_some()
         || state.config_input.is_some()
@@ -599,17 +608,19 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
     if state.section == SettingsSection::Notifications {
         return reduce_notify_key(state, c);
     }
-    // The Daemon section is a cursor over the config knobs (J/K move, Enter/Space
-    // edit) plus the `a` auto-standup shortcut; `j`/`k` still leave the section.
+    // The Daemon section is a cursor over the config knobs (Enter/Space edit)
+    // plus the `a` auto-standup shortcut; `j`/`k` still leave the section.
     if state.section == SettingsSection::Daemon {
         return reduce_daemon_key(state, c);
     }
     match c {
         'j' => move_section(state, SettingsSection::next),
         'k' => move_section(state, SettingsSection::prev),
-        // J/K move the in-section list selection (workspaces / keys).
-        'J' => move_list(state, 1),
-        'K' => move_list(state, -1),
+        // `]`/`[` move the in-section list selection (workspaces / keys). They
+        // were `J`/`K` until #450 — the hangar router claims bare `K` as the
+        // Kanban tab, so `K` never reached this reducer.
+        ']' => move_list(state, 1),
+        '[' => move_list(state, -1),
         'n' if state.section == SettingsSection::Keys => open_key_entry(state),
         // Workspace pane controls (P5.5): s set-active, d toggle-default,
         // n new, r rename. All scoped to the Workspaces section.
@@ -887,14 +898,17 @@ fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction 
 }
 
 /// Handle a key on the Notifications grid (tcp T5): `j`/`k` leave to the adjacent
-/// section, `J`/`K` move the kind row, `h`/`l` move the channel column, and
+/// section, `]`/`[` move the kind row, `h`/`l` move the channel column, and
 /// `space`/`t` toggle the selected cell (emitting a `SetNotifyRule` intent).
+///
+/// The kind-row pair was `J`/`K` until #450 — bare `K` is the router's Kanban tab
+/// key and never reached this reducer, so the advertised `J/K kind` hint lied.
 fn reduce_notify_key(state: &SettingsState, c: char) -> SettingsReduction {
     match c {
         'j' => move_section(state, SettingsSection::next),
         'k' => move_section(state, SettingsSection::prev),
-        'J' => move_notify_kind(state, 1),
-        'K' => move_notify_kind(state, -1),
+        ']' => move_notify_kind(state, 1),
+        '[' => move_notify_kind(state, -1),
         'h' => move_notify_channel(state, -1),
         'l' => move_notify_channel(state, 1),
         ' ' | 't' => toggle_notify_cell(state),
@@ -1363,7 +1377,7 @@ fn render_notify_grid(
             buf,
             KIND_COL,
             row,
-            "J/K kind · h/l channel · space toggle",
+            "] [ kind · h/l channel · space toggle",
             DIM,
         );
         row += 1;

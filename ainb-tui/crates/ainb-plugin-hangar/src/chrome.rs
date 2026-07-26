@@ -205,7 +205,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::Fleet => vec![
             ("j/k", "sessions"),
             ("b", "broadcast"),
-            ("→/A", "attach"),
+            ("→/a", "attach"),
             ("s/r", "stop/restart"),
         ],
         // The squads screen: create a squad + edit membership + assign an issue

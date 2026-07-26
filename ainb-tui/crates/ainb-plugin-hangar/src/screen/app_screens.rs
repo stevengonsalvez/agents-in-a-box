@@ -1856,8 +1856,24 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
         }
         return;
     }
+    let Some(ev) = kanban_nav_event(key) else {
+        return;
+    };
+    let out = reduce_kanban(&states.kanban, ev);
+    states.kanban = out.state;
+    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
+        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
+    }
+}
+
+/// Map a raw key to a Kanban navigation / drag event.
+///
+/// Every char bound here must be free of
+/// [`is_reserved_key`](crate::screen::router::is_reserved_key) — a reserved char
+/// never reaches this mapper (#450).
+fn kanban_nav_event(key: &KeyEvent) -> Option<KanbanEvent> {
     let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
-    let ev = match &key.code {
+    match &key.code {
         KeyCode::Left => Some(if shift {
             KanbanEvent::MoveCardLeft
         } else {
@@ -1870,25 +1886,19 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
         }),
         KeyCode::Up => Some(KanbanEvent::FocusUp),
         KeyCode::Down => Some(KanbanEvent::FocusDown),
-        // vi-style fallbacks: capital H/L drag a card, lowercase navigate.
+        // vi-style fallbacks: `<`/`>` drag a card, `h`/`j`/`k`/`l` navigate. The
+        // old `H`/`L` drag pair was dead — `H` is swallowed by the HOST help
+        // toggle and `L` by the plugin router's Logs tab (#450).
         KeyCode::Char { ch } => match ch {
             'h' => Some(KanbanEvent::FocusLeft),
             'l' => Some(KanbanEvent::FocusRight),
             'k' => Some(KanbanEvent::FocusUp),
             'j' => Some(KanbanEvent::FocusDown),
-            'H' => Some(KanbanEvent::MoveCardLeft),
-            'L' => Some(KanbanEvent::MoveCardRight),
+            '<' => Some(KanbanEvent::MoveCardLeft),
+            '>' => Some(KanbanEvent::MoveCardRight),
             _ => None,
         },
         _ => None,
-    };
-    let Some(ev) = ev else {
-        return;
-    };
-    let out = reduce_kanban(&states.kanban, ev);
-    states.kanban = out.state;
-    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
-        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
     }
 }
 
