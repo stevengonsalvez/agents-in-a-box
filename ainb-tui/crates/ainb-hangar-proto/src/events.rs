@@ -577,6 +577,33 @@ pub struct SkillRow {
     pub updated_at: i64,
 }
 
+/// One agent↔skill link on the wire, carrying its per-agent enablement
+/// (`hangar/agent_skills_list`, parity #24).
+///
+/// Deliberately NOT a field bolted onto [`SkillRow`]: `SkillRow` is a
+/// workspace-wide row (its `used` flag means "some agent references this"),
+/// while enablement is per-(agent, skill). Mixing the two would make `SkillRow`
+/// meaningless outside an agent context.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AgentSkillLinkRow {
+    /// The linked skill's id.
+    pub skill_id: String,
+    /// The linked skill's normalised (kebab-case) name.
+    pub name: String,
+    /// Whether this link currently materialises for the agent. Defaults to
+    /// `true`, not `false`: a peer that omits the field predates the toggle
+    /// concept, which means "attached and live". Defaulting to `false` would let
+    /// an old peer's payload silently render every skill as disabled.
+    #[serde(default = "default_link_enabled")]
+    pub enabled: bool,
+}
+
+/// `serde(default)` helper for [`AgentSkillLinkRow::enabled`] — an absent field
+/// means the peer has no toggle concept, i.e. ENABLED.
+const fn default_link_enabled() -> bool {
+    true
+}
+
 /// A wire-side file entry within a skill's directory (`hangar/skill_files`).
 ///
 /// Flat list of the skill's files relative to its root; the file-tree widget

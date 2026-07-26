@@ -113,6 +113,25 @@ pub const HANGAR_SKILL_ATTACH: &str = "hangar/skill_attach";
 /// link is a no-op) and workspace-scoped like [`HANGAR_SKILL_ATTACH`].
 pub const HANGAR_SKILL_DETACH: &str = "hangar/skill_detach";
 
+/// `hangar/skill_set_enabled` — flip one agent↔skill link's `enabled` flag
+/// (parity #24).
+///
+/// Params: `{ workspace_id: String, agent_id: String, skill_id: String,
+/// enabled: bool }`. Result: `{ toggled: bool }` — `false` when the pair is not
+/// attached (a no-op, not an error). Orthogonal to attach/detach: the link stays
+/// attached, it just stops materialising. Idempotent and workspace-scoped like
+/// [`HANGAR_SKILL_ATTACH`].
+pub const HANGAR_SKILL_SET_ENABLED: &str = "hangar/skill_set_enabled";
+
+/// `hangar/agent_skills_list` — list one agent's skill attachments WITH their
+/// enablement (parity #24).
+///
+/// Params: `{ workspace_id: String, agent_id: String }`. Result: a
+/// [`crate::snapshots::AgentSkillsListResult`] listing every link — enabled and
+/// disabled alike — ordered by skill name. A foreign agent id yields an empty
+/// list rather than another tenant's rows.
+pub const HANGAR_AGENT_SKILLS_LIST: &str = "hangar/agent_skills_list";
+
 /// `hangar/autopilots_list` — snapshot the autopilots of a workspace.
 ///
 /// Params: `{ workspace_id: String }`. Result: a
@@ -998,6 +1017,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_SKILLS_SYNC,
     HANGAR_SKILL_ATTACH,
     HANGAR_SKILL_DETACH,
+    HANGAR_SKILL_SET_ENABLED,
+    HANGAR_AGENT_SKILLS_LIST,
     HANGAR_AUTOPILOTS_LIST,
     HANGAR_AUTOPILOT_RUNS,
     HANGAR_AUTOPILOT_FIRE_NOW,
@@ -1167,6 +1188,8 @@ mod tests {
             HANGAR_SKILLS_SYNC,
             HANGAR_SKILL_ATTACH,
             HANGAR_SKILL_DETACH,
+            HANGAR_SKILL_SET_ENABLED,
+            HANGAR_AGENT_SKILLS_LIST,
             HANGAR_AUTOPILOTS_LIST,
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
@@ -1235,6 +1258,8 @@ mod tests {
             HANGAR_SKILLS_SYNC,
             HANGAR_SKILL_ATTACH,
             HANGAR_SKILL_DETACH,
+            HANGAR_SKILL_SET_ENABLED,
+            HANGAR_AGENT_SKILLS_LIST,
             HANGAR_AUTOPILOTS_LIST,
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
