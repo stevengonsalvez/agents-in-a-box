@@ -3366,14 +3366,42 @@ mod tests {
         )
         .await
         .unwrap();
-        SquadRepo::add_member(
+        SquadRepo::add_member_with_role(
             pool,
             &ws_id,
             "squad-alpha",
             &ActorRef::new(ActorKind::Agent, scout.id.clone()).unwrap(),
+            "owns the migrations",
         )
         .await
         .unwrap();
+        let instructions =
+            "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
+        SquadRepo::set_instructions(pool, &ws_id, "squad-alpha", instructions).await.unwrap();
+        // scout's skills, exercising BOTH suppression levers through the real
+        // claim seam: `alpha` + `gamma` materialise, `beta` is link-disabled and
+        // `delta` is suppressed by name on the agent row — neither may be
+        // advertised on the roster the leader actually receives.
+        {
+            use ainb_hangar_core::ids::AgentId;
+            use ainb_hangar_store::repo::agent::AgentRepo;
+            use ainb_hangar_store::repo::skill::SkillRepo;
+
+            let scout_id = AgentId::from_str(scout.id.clone()).unwrap();
+            let mut skill_ids = Vec::new();
+            for name in ["alpha", "beta", "gamma", "delta"] {
+                let id = SkillRepo::create(pool, &ws_id, name, None, Some("# body"), vec![])
+                    .await
+                    .unwrap();
+                SkillRepo::attach_to_agent(pool, &ws_id, &scout_id, &id).await.unwrap();
+                skill_ids.push((name, id));
+            }
+            let beta = &skill_ids.iter().find(|(n, _)| *n == "beta").unwrap().1;
+            SkillRepo::set_enabled(pool, &ws_id, &scout_id, beta, false).await.unwrap();
+            AgentRepo::set_disabled_runtime_skills(pool, &scout.id, &["delta".to_string()])
+                .await
+                .unwrap();
+        }
 
         let task_id =
             ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
@@ -3518,12 +3546,49 @@ mod tests {
             leader_prompt.contains("scout"),
             "leader briefing missing the member name in the roster:\n{leader_prompt}"
         );
+        // Parity #25 + `7-rest` acceptance, through the REAL claim → materialise
+        // seam: the member's WHOLE row, carrying role AND the skills it will
+        // actually have on disk. A whole-line assertion, never a bare substring —
+        // a half-rendered row must not pass.
+        assert!(
+            leader_prompt.contains(&format!(
+                "- scout — agent — {} — role: owns the migrations — skills: alpha, gamma\n",
+                scout.id
+            )),
+            "the materialised roster row must carry the role and the live skills:\n{leader_prompt}"
+        );
+        assert!(
+            !leader_prompt.contains("beta"),
+            "a link-disabled skill must never reach the leader's prompt:\n{leader_prompt}"
+        );
+        assert!(
+            !leader_prompt.contains("delta"),
+            "a disabled_runtime_skills name must never reach the leader's prompt:\n\
+             {leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("## Squad Instructions"),
+            "the materialised briefing must carry the instructions section:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains(instructions),
+            "the instructions must be materialised VERBATIM (embedded newline \
+             preserved):\n{leader_prompt}"
+        );
 
-        // The MEMBER task gets no roster (no file at all, since no workspace ctx).
+        // The MEMBER task gets no roster and no instructions (no file at all,
+        // since no workspace ctx).
         assert!(
             !member_md.exists()
                 || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Roster"),
             "a member task must NOT receive the leader briefing"
+        );
+        assert!(
+            !member_md.exists()
+                || !std::fs::read_to_string(&member_md)
+                    .unwrap()
+                    .contains("## Squad Instructions"),
+            "a member task must NOT receive the squad instructions"
         );
 
         let events: Vec<Ev> = log.lock().expect("event log").clone();
