@@ -532,6 +532,48 @@ impl SkillRepo {
         Ok(out)
     }
 
+    /// The ENABLED skill NAMES attached to `agent`, ordered by name — the
+    /// **roster shape** (parity `7-rest`).
+    ///
+    /// Same `enabled = 1` filter and workspace scoping as
+    /// [`SkillRepo::skills_for_agent`] (the materialisation shape) but WITHOUT
+    /// hydrating file bodies: the squad-leader briefing renders names only, so
+    /// pulling every `skill_file` row to print one comma-separated list is pure
+    /// waste.
+    ///
+    /// Does NOT apply `agent.disabled_runtime_skills` — that is an `agent`-row
+    /// lever the caller already holds (see
+    /// `ainb_hangar_daemon::materialise::materialise_for_agent`, which applies it
+    /// after this same junction read), so this stays a single-table read.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`SkillRepoError::Db`] on a SQL failure or
+    /// [`SkillRepoError::Name`] on a corrupt stored name.
+    pub async fn enabled_skill_names_for_agent(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        agent: &AgentId,
+    ) -> Result<Vec<SkillName>, SkillRepoError> {
+        let rows: Vec<(String,)> = sqlx::query_as(
+            "SELECT s.name \
+             FROM skill s \
+             JOIN agent_skill a ON a.skill_id = s.id \
+             JOIN agent ag ON ag.id = a.agent_id \
+             WHERE a.agent_id = ? AND ag.workspace_id = ? AND a.enabled = 1 \
+             ORDER BY s.name",
+        )
+        .bind(agent.as_str())
+        .bind(workspace.as_str())
+        .fetch_all(pool)
+        .await?;
+        let mut out = Vec::with_capacity(rows.len());
+        for (name,) in rows {
+            out.push(SkillName::new(&name)?);
+        }
+        Ok(out)
+    }
+
     /// List the **enabled** skills attached to an agent as [`SkillWithFiles`],
     /// ordered by skill name.
     ///
