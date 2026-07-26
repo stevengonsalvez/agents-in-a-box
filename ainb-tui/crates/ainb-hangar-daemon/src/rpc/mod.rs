@@ -775,6 +775,8 @@ async fn handle(
         methods::HANGAR_SQUAD_MEMBER_REMOVE => handle_squad_member(pool, req, false).await,
         methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
         methods::HANGAR_SQUAD_ARCHIVE => handle_squad_archive(pool, req).await,
+        methods::HANGAR_SQUAD_MEMBER_ROLE_SET => handle_squad_member_role(pool, req).await,
+        methods::HANGAR_SQUAD_INSTRUCTIONS_SET => handle_squad_instructions(pool, req).await,
         methods::HANGAR_SQUAD_FANOUT => handle_squad_fanout(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
@@ -4236,6 +4238,14 @@ async fn handle_squad_create(
     SquadRepo::create(pool, &ws, &id, &params.name, &leader, SystemClock.now_ms())
         .await
         .map_err(|e| squad_repo_err(&e))?;
+    // Optional initial routing guidance (parity #25). `create`'s signature stays
+    // unchanged — the two writes are one logical unit inside this handler, and an
+    // omitted / empty value leaves the column at its `''` default.
+    if !params.instructions.trim().is_empty() {
+        SquadRepo::set_instructions(pool, &ws, &id, &params.instructions)
+            .await
+            .map_err(|e| squad_repo_err(&e))?;
+    }
     squads_list_value(pool, &ws).await
 }
 
@@ -4267,7 +4277,15 @@ async fn handle_squad_member(
         ))
     })?;
     let outcome = if add {
-        SquadRepo::add_member(pool, &ws, &params.squad_id, &member).await
+        // An explicit role is explicit intent, so it OVERWRITES on a re-add
+        // (parity #25). An omitted / empty role keeps today's exact behavior for
+        // an old client: `DO NOTHING`, which never clears an existing role.
+        if params.role.trim().is_empty() {
+            SquadRepo::add_member(pool, &ws, &params.squad_id, &member).await
+        } else {
+            SquadRepo::add_member_with_role(pool, &ws, &params.squad_id, &member, &params.role)
+                .await
+        }
     } else {
         SquadRepo::remove_member(pool, &ws, &params.squad_id, &member).await
     };
@@ -4307,6 +4325,67 @@ async fn handle_squad_archive(
         )));
     };
     to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
+}
+
+/// Dispatch `hangar/squad_member_role_set` (parity #25): set or clear one
+/// EXISTING membership's free-text role and answer with the refreshed
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// Mirrors [`handle_squad_member`]'s contract: resolve + reject a mistyped
+/// workspace, parse the member actor-ref, then drive the tenant-scoped update.
+/// **Never a silent no-op:** an actor that is not already a member yields
+/// `INVALID_PARAMS` rather than a success answer — this handler edits an existing
+/// membership and never inserts one.
+async fn handle_squad_member_role(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::SquadMemberRoleParams =
+        parse_params(req, "{ workspace_id, squad_id, member, role }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let member = ActorRef::from_str(&params.member).map_err(|e| {
+        invalid_params(&format!(
+            "member must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let updated = SquadRepo::set_member_role(pool, &ws, &params.squad_id, &member, &params.role)
+        .await
+        .map_err(|e| squad_repo_err(&e))?;
+    if !updated {
+        return Err(invalid_params(&format!(
+            "`{}` is not a member of squad `{}`",
+            params.member, params.squad_id
+        )));
+    }
+    squads_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/squad_instructions_set` (parity #25): set or clear one
+/// squad's user-authored routing guidance and answer with the refreshed
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// Mirrors [`handle_squad_archive`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the tenant-scoped write. A `(squad_id, workspace)` pair
+/// that matches no row is rejected with `INVALID_PARAMS`, never a cross-tenant
+/// write. An empty `instructions` CLEARS the field, which makes the leader
+/// briefing omit the `## Squad Instructions` section entirely.
+async fn handle_squad_instructions(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let params: ainb_hangar_proto::snapshots::SquadInstructionsParams =
+        parse_params(req, "{ workspace_id, squad_id, instructions }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    SquadRepo::set_instructions(pool, &ws, &params.squad_id, &params.instructions)
+        .await
+        .map_err(|e| squad_repo_err(&e))?;
+    squads_list_value(pool, &ws).await
 }
 
 /// Re-read `ws`'s squads and serialize them as a

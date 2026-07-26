@@ -560,10 +560,24 @@ pub async fn squads_list(
             id: s.id,
             name: s.name,
             leader: s.leader.to_string(),
-            members: s.members.iter().map(ToString::to_string).collect(),
+            members: s.members.iter().map(|m| m.actor.to_string()).collect(),
             archived: s.archived,
             archived_at: s.archived_at,
             archived_by: s.archived_by.as_ref().map(ToString::to_string).unwrap_or_default(),
+            instructions: s.instructions,
+            // Only ROLED memberships ride the wire (parity #25): a roleless
+            // squad omits the field entirely, keeping the payload
+            // byte-identical to a pre-0053 producer's. `members` above stays
+            // the ordering authority — a consumer joins these by `member`.
+            member_roles: s
+                .members
+                .iter()
+                .filter(|m| !m.role.is_empty())
+                .map(|m| ainb_hangar_proto::snapshots::SquadMemberWireRow {
+                    member: m.actor.to_string(),
+                    role: m.role.clone(),
+                })
+                .collect(),
         })
         .collect())
 }
