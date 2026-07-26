@@ -2871,6 +2871,7 @@ Commands:
   delete    Delete an issue and all its history (dry-run without `--yes`)
   label     Attach or detach a label on an issue
   criteria  Inspect or tick off an issue's acceptance criteria
+  link      Add, remove, or list an issue's typed links to other issues
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3114,6 +3115,27 @@ Commands:
   check    Tick a criterion off (by id or 1-based ordinal). Idempotent
   uncheck  Un-tick a criterion (by id or 1-based ordinal). Idempotent
   help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue link`
+
+Add, remove, or list an issue's typed links to other issues
+
+```console
+$ ainb hangar issue link --help
+Add, remove, or list an issue's typed links to other issues
+
+Usage: ainb hangar issue link [OPTIONS] <COMMAND>
+
+Commands:
+  add     Link two issues. Re-adding a pair with a new kind replaces the kind
+  remove  Remove a link between two issues. Idempotent
+  list    List an issue's links (`🔒`/`✓` blocked-by, `→` blocks, `~` related)
+  help    Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
