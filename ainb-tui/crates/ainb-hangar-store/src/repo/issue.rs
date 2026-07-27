@@ -936,6 +936,17 @@ impl IssueRepo {
             .bind(issue_id)
             .execute(&mut *tx)
             .await?;
+        // 5b. The card's watchers and reactions (migration 0062). Neither table
+        //     carries an FK on `issue_id` (0058's rule), so the reap is explicit
+        //     here, exactly like `issue_label` / `comment` above.
+        sqlx::query("DELETE FROM issue_subscriber WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM issue_reaction WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
 
         // 6. The issue row (workspace-scoped again, belt-and-braces).
         sqlx::query("DELETE FROM issue WHERE id = ? AND workspace_id = ?")

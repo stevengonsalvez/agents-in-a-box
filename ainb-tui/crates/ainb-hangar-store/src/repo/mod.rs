@@ -26,6 +26,8 @@ pub mod event_log;
 pub mod fleet;
 pub mod inbox;
 pub mod issue;
+pub mod issue_reaction;
+pub mod issue_subscriber;
 pub mod label;
 pub mod member;
 pub mod notify_rule;
