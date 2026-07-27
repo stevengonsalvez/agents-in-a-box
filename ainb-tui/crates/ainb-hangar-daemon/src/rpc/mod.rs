@@ -4418,6 +4418,7 @@ async fn handle_invite_accept(
     let params: ainb_hangar_proto::snapshots::InviteActParams =
         parse_params(req, "{ workspace_id, invitation_id, actor_email }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    require_invitation_in_workspace(pool, &ws, &params.invitation_id).await?;
     InvitationRepo::accept(
         pool,
         &SystemClock,
@@ -4441,6 +4442,7 @@ async fn handle_invite_decline(
     let params: ainb_hangar_proto::snapshots::InviteActParams =
         parse_params(req, "{ workspace_id, invitation_id, actor_email }")?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    require_invitation_in_workspace(pool, &ws, &params.invitation_id).await?;
     InvitationRepo::decline(
         pool,
         &SystemClock,
@@ -4468,6 +4470,32 @@ async fn handle_invite_revoke(
         .await
         .map_err(|e| invitation_repo_err(&e))?;
     members_list_value(pool, &ws).await
+}
+
+/// Reject an accept / decline whose invitation does not belong to the workspace
+/// the caller claimed.
+///
+/// `InvitationRepo::accept` / `decline` are keyed on the invitation id alone (the
+/// invitee acts on an id, and the row already carries its own workspace), so the
+/// `workspace_id` on the wire would otherwise be decorative: a request naming
+/// workspace A could act on workspace B's invitation and then be answered with
+/// A's member list — a breached tenant contract and a wrong refreshed view. This
+/// makes the claimed tenant real, mirroring how
+/// [`handle_invite_revoke`]'s `DELETE` is workspace-scoped in SQL. A mismatch is
+/// reported exactly like an unknown id, so it leaks nothing about another
+/// tenant's invitations.
+async fn require_invitation_in_workspace(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    invitation_id: &str,
+) -> Result<(), RpcError> {
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let found = InvitationRepo::get(pool, invitation_id).await.map_err(|e| store_err(&e))?;
+    match found {
+        Some(inv) if inv.workspace_id == ws.as_str() => Ok(()),
+        _ => Err(invalid_params("invitation not found")),
+    }
 }
 
 /// Map an [`InvitationRepoError`] onto an RPC error: every semantic rejection is a
