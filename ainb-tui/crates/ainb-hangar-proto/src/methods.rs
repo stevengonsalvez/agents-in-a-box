@@ -322,6 +322,28 @@ pub const HANGAR_ISSUE_RUN: &str = "hangar/issue_run";
 /// every other list method, so a sibling tenant's attempts are never returned.
 pub const HANGAR_DISPATCH_ATTEMPTS_LIST: &str = "hangar/dispatch_attempts_list";
 
+/// `hangar/issue_timeline` — read one issue's merged activity + comment
+/// timeline (multica parity #13, migration 0059).
+///
+/// The per-issue NARRATIVE: creation, state moves, re-assignments,
+/// priority/title/due-date edits and task outcomes from `activity_log`, merged
+/// at READ time with the issue's comments (comments are never duplicated as
+/// activity rows — the comment body stays the single source of truth, matching
+/// multica's `mergeTimeline`).
+///
+/// Params: [`crate::snapshots::IssueTimelineParams`]
+/// (`{ workspace_id, issue_id, limit? }`); result:
+/// [`crate::snapshots::IssueTimelineResult`] — entries **oldest first**, default
+/// `limit` 200, hard cap 2000 (multica's `timelineHardCap`). Read-only and
+/// workspace-scoped through the same tenant guard as
+/// [`HANGAR_DISPATCH_ATTEMPTS_LIST`]; an `issue_id` that does not resolve inside
+/// the workspace is `INVALID_PARAMS`, never a silent empty list.
+///
+/// **No live push.** multica broadcasts an `activity:created` WS event; hangar
+/// deliberately does not add a `HangarEvent` variant for it — the surfaces fetch
+/// on open and on refresh. Adding one later is append-only.
+pub const HANGAR_ISSUE_TIMELINE: &str = "hangar/issue_timeline";
+
 /// `hangar/issue_label_attach` — attach a label to one issue (e38.10).
 ///
 /// Params: [`crate::snapshots::IssueLabelParams`]
@@ -1276,6 +1298,9 @@ pub const ALL_METHODS: &[&str] = &[
     // Dispatch reason codes (multica parity #12) — APPENDED at the catalogue
     // tail, append-only wire.
     HANGAR_DISPATCH_ATTEMPTS_LIST,
+    // Per-issue activity timeline (multica parity #13) — APPENDED at the
+    // catalogue tail, append-only wire.
+    HANGAR_ISSUE_TIMELINE,
 ];
 
 #[cfg(test)]
@@ -1503,6 +1528,7 @@ mod tests {
             FLEET_ACTION,
             FLEET_BROADCAST,
             HANGAR_DISPATCH_ATTEMPTS_LIST,
+            HANGAR_ISSUE_TIMELINE,
         ];
         for m in declared {
             assert!(

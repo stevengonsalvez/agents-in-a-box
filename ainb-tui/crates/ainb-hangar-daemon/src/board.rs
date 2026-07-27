@@ -20,12 +20,17 @@
 //! committed, and an auto-move failure must never down the claim loop. A task
 //! with no matching auto-move column is a silent no-op.
 
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
+use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::task::Task;
+use ainb_hangar_store::service::activity::ActivityService;
 use sqlx::SqlitePool;
 
 use crate::events::EventSink;
@@ -162,13 +167,33 @@ pub async fn advance_issue_lifecycle_after_transition(
         return;
     }
     match IssueRepo::update_state(pool, issue_id, target.as_str()).await {
-        Ok(()) => tracing::info!(
-            task_id = %task.id,
-            issue_id = %issue_id,
-            from = %current.state,
-            to = target.as_str(),
-            "issue lifecycle advanced"
-        ),
+        Ok(()) => {
+            // multica parity #13: a daemon-driven move is a `system` activity row
+            // carrying `via:"board"`, so the narrative distinguishes it from an
+            // owner edit. Best-effort — never fails the advance.
+            ActivityService::record(
+                pool,
+                &SystemIdGen,
+                &SystemClock,
+                &current.workspace_id,
+                issue_id,
+                &ActivityActor::System,
+                ActivityAction::StatusChanged,
+                serde_json::json!({
+                    "from": current.state,
+                    "to": target.as_str(),
+                    "via": "board",
+                }),
+            )
+            .await;
+            tracing::info!(
+                task_id = %task.id,
+                issue_id = %issue_id,
+                from = %current.state,
+                to = target.as_str(),
+                "issue lifecycle advanced"
+            );
+        }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle advance failed; proceeding");
         }
@@ -363,6 +388,40 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
             tracing::warn!(issue = %issue_id, "auto-run refused (no repo/agent or store fault)")
         }
     }
+}
+
+/// Record a task's terminal OUTCOME on its issue's narrative (multica parity
+/// #13, write sites 8 + 9).
+///
+/// Attributed to `agent:<agent_id>` — the run's own agent, matching multica's
+/// listeners, which force the actor for `task:completed` / `task:failed`
+/// regardless of who triggered the run. `details` carries the task id (additive
+/// over multica's `{}`; the column is free-form).
+///
+/// Best-effort and no-op for a chat task with no issue: the task's terminal
+/// state has already committed and an audit write must never down the run loop.
+pub async fn record_task_outcome(pool: &SqlitePool, task: &Task, completed: bool) {
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    let actor = ActorRef::new(ActorKind::Agent, task.agent_id.clone())
+        .map_or(ActivityActor::System, ActivityActor::Actor);
+    let action = if completed {
+        ActivityAction::TaskCompleted
+    } else {
+        ActivityAction::TaskFailed
+    };
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        &task.workspace_id,
+        issue_id,
+        &actor,
+        action,
+        serde_json::json!({ "task_id": task.id }),
+    )
+    .await;
 }
 
 /// Advance the issue lifecycle, then cascade a completed sub-issue to its parent.

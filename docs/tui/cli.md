@@ -2873,6 +2873,7 @@ Commands:
   criteria  Inspect or tick off an issue's acceptance criteria
   link      Add, remove, or list an issue's typed links to other issues
   why       Explain why an issue did (or did not) dispatch — its admission history
+  timeline  Show one issue's activity timeline: state changes, assignments, comments
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3169,6 +3170,26 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --limit <LIMIT>          How many attempts to show, newest first [default: 20]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue timeline`
+
+Show one issue's activity timeline: state changes, assignments, comments
+
+```console
+$ ainb hangar issue timeline --help
+Show one issue's activity timeline: state changes, assignments, comments
+
+Usage: ainb hangar issue timeline [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) whose narrative to print
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          How many entries to show — the newest window, printed oldest-first [default: 200]
       --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```

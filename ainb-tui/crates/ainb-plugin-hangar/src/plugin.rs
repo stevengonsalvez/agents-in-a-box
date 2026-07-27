@@ -263,6 +263,10 @@ const AGENT_SKILLS_LIST_REQ_ID: i64 = 62;
 /// #11-rest). Fired by the task-detail `t` key; the reply is an `IssueRow` and
 /// the daemon's `IssueUpdated` push re-renders the card.
 const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
+
+/// `hangar/issue_timeline` — the per-issue activity + comment narrative behind
+/// the `y` modal (multica parity #13).
+const ISSUE_TIMELINE_REQ_ID: i64 = 64;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -1030,6 +1034,7 @@ impl HangarPlugin {
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
             RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
+            RpcId::Number(ISSUE_TIMELINE_REQ_ID) => self.apply_issue_timeline(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // tcp T5: the notification routing grid snapshot.
             RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
@@ -3169,6 +3174,48 @@ impl HangarPlugin {
         }
     }
 
+    /// Fold a `hangar/issue_timeline` reply into the open activity modal
+    /// (multica parity #13).
+    ///
+    /// A no-op when the modal has since closed (a stale reply for a dismissed
+    /// overlay), and an error leaves the modal in its loading state rather than
+    /// showing a fabricated empty narrative.
+    fn apply_issue_timeline(&mut self, resp: &ainb_hangar_proto::RpcResponse) {
+        let Some(result) = resp.result.as_ref() else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_value::<ainb_hangar_proto::snapshots::IssueTimelineResult>(
+            result.clone(),
+        ) else {
+            return;
+        };
+        if let Some(activity) = self.screens.activity.as_mut() {
+            activity.apply_entries(parsed.entries);
+        }
+        self.conn.on_event();
+    }
+
+    /// Fire a deferred `hangar/issue_timeline` fetch for the open activity modal
+    /// (multica parity #13). A send failure is logged but non-fatal — the modal
+    /// keeps its loading state and `r` retries.
+    async fn fire_issue_timeline(&mut self, host: &HostClient, issue_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
+        let Ok(body) = encode_request(
+            ISSUE_TIMELINE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_TIMELINE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: issue timeline send failed: {e}")).await;
+        }
+    }
+
     /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
     /// task-detail's issue (e38.34).
     ///
@@ -4686,6 +4733,24 @@ impl HangarPlugin {
                 let reduction = crate::screen::reduce(app, AppEvent::OpenAgentPicker(issue_id));
                 self.app = Some(reduction.state);
             }
+            // multica parity #13: open the card's activity timeline AND arm the
+            // fetch — the modal opens immediately in its loading state and the
+            // `render` pass fires `hangar/issue_timeline`.
+            NavIntent::OpenActivityTimeline(issue_id) => {
+                let title = self
+                    .screens
+                    .issue_list
+                    .visible_rows()
+                    .find(|r| r.id == issue_id)
+                    .map_or_else(|| issue_id.as_str().to_string(), |r| r.title.clone());
+                self.screens.activity = Some(crate::screen::activity::ActivityState::loading(
+                    &issue_id, title,
+                ));
+                self.screens.pending_activity_fetch = Some(issue_id.as_str().to_string());
+                let reduction =
+                    crate::screen::reduce(app, AppEvent::OpenActivityTimeline(issue_id));
+                self.app = Some(reduction.state);
+            }
             NavIntent::OpenTaskForIssue(issue_id) => {
                 // Open task detail bound to the issue's row + the running task.
                 let issue =
@@ -5171,6 +5236,12 @@ impl Plugin for HangarPlugin {
         // auto-moved to Done daemon-side (announced via `IssueUpdated`).
         if let Some(issue_id) = self.pending_pr_status_refresh.take() {
             self.fire_pr_status_refresh(host, issue_id).await;
+        }
+        // multica parity #13: drain a deferred activity-timeline fetch (armed by
+        // `y` opening the modal, or `r` inside it) and fire
+        // `hangar/issue_timeline`. The reply folds the merged narrative in.
+        if let Some(issue_id) = self.screens.pending_activity_fetch.take() {
+            self.fire_issue_timeline(host, issue_id).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active

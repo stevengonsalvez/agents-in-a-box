@@ -30,9 +30,10 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ainb_hangar_core::acceptance::AcceptanceCriterion;
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
-use ainb_hangar_core::clock::HangarClock;
-use ainb_hangar_core::idgen::IdGen;
+use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
 use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_core::task_status::TaskStatus;
@@ -40,7 +41,9 @@ use ainb_hangar_proto::events::{
     ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow,
     InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
-use ainb_hangar_proto::snapshots::{AgentSkillsListResult, SkillDetail, SkillsSyncResult};
+use ainb_hangar_proto::snapshots::{
+    AgentSkillsListResult, SkillDetail, SkillsSyncResult, TimelineEntryRow,
+};
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::attention::AttentionRepo;
@@ -58,6 +61,7 @@ use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
 use ainb_hangar_store::repo::usage::UsageRepo;
 use ainb_hangar_store::repo::workspace::{apply_issue_prefix, issue_display_id};
+use ainb_hangar_store::service::activity::ActivityService;
 use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
@@ -2224,7 +2228,26 @@ pub async fn refresh_pr_status(
     if issue.state == PR_MERGED_DONE_STATE {
         return Ok((status, None));
     }
+    let prev_state = issue.state.clone();
     IssueRepo::update_state(pool, issue_id, PR_MERGED_DONE_STATE).await?;
+    // multica parity #13: a daemon-driven transition is a `system` activity row
+    // carrying `via` so the narrative distinguishes "a human moved this" from
+    // "the merged PR moved this". Best-effort — never fails the transition.
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        workspace_id,
+        issue_id,
+        &ActivityActor::System,
+        ActivityAction::StatusChanged,
+        serde_json::json!({
+            "from": prev_state,
+            "to": PR_MERGED_DONE_STATE,
+            "via": "pr_merged",
+        }),
+    )
+    .await;
     // Re-read the now-Done row so the caller can push `IssueUpdated`.
     let row = read_issue_row(pool, workspace_id, issue_id).await?;
     Ok((status, row))
@@ -3335,4 +3358,76 @@ mod pr_fetch_bound_tests {
             "no urls → no fetches spawned"
         );
     }
+}
+
+/// Merge one issue's activity rows and comments into the wire timeline,
+/// **oldest first**, sorted by `(created_at, id)` — multica's `mergeTimeline`
+/// (parity #13).
+///
+/// Comments are NOT duplicated as `activity_log` rows; they are merged here at
+/// READ time so the comment body stays the single source of truth. Each side is
+/// fetched independently and capped at `limit`; the merged list keeps the NEWEST
+/// `limit` entries and renders them oldest-first.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_timeline(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    limit: i64,
+) -> Result<Vec<TimelineEntryRow>, sqlx::Error> {
+    use ainb_hangar_proto::snapshots::{TIMELINE_KIND_ACTIVITY, TIMELINE_KIND_COMMENT};
+    use ainb_hangar_store::repo::activity::ActivityRepo;
+    use ainb_hangar_store::repo::comment::CommentRepo;
+
+    let activities = ActivityRepo::list_for_issue(pool, issue_id, limit).await?;
+    let comments = CommentRepo::list_by_issue(pool, workspace_id, issue_id).await?;
+
+    let mut entries: Vec<TimelineEntryRow> = Vec::with_capacity(activities.len() + comments.len());
+    for a in activities {
+        // Re-assert the tenant: the per-issue query keys on the issue id, and the
+        // activity row carries its own workspace column.
+        if a.workspace_id != workspace_id {
+            continue;
+        }
+        let details = a.details_json();
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_ACTIVITY.to_string(),
+            id: a.id,
+            actor_type: a.actor_type,
+            actor_id: a.actor_id,
+            created_at: a.created_at,
+            action: Some(a.action),
+            // An empty details object adds no information — omit it so the frame
+            // stays small and an activity with nothing to say looks like one.
+            details: (!details.as_object().is_some_and(serde_json::Map::is_empty))
+                .then_some(details),
+            body: None,
+        });
+    }
+    for c in comments {
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_COMMENT.to_string(),
+            id: c.id,
+            actor_type: Some(c.author.kind().as_str().to_string()),
+            actor_id: Some(c.author.id().to_string()),
+            created_at: c.created_at,
+            action: None,
+            details: None,
+            body: Some(c.body),
+        });
+    }
+
+    // `(created_at, id)` ascending — the id is a deterministic tiebreak for two
+    // entries recorded in the same millisecond.
+    entries.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    // Keep the NEWEST window when the merged list overflows, then render it
+    // oldest-first (multica's flat contract).
+    let cap = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+    if entries.len() > cap {
+        entries.drain(..entries.len() - cap);
+    }
+    Ok(entries)
 }

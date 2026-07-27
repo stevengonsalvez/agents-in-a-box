@@ -12,6 +12,11 @@
 /// (multica parity #11-rest), plus the tolerant legacy/structured JSON codec
 /// shared by the store column and the wire.
 pub mod acceptance;
+/// Per-issue ACTIVITY vocabulary (multica parity #13): the stable
+/// `created | status_changed | assignee_changed | …` action tokens plus the
+/// activity-only `system` actor kind, shared by the diff service that decides a
+/// change happened and the repo/wire that serialize it.
+pub mod activity;
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
 /// Per-agent environment variables with a redact-by-construction contract

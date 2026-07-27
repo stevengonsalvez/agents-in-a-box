@@ -220,6 +220,20 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
     .await
     .expect("dispatch attempts");
 
+    // Activity-log narrative rows (migration 0059). Same contract as the
+    // dispatch attempts above: no FK on `issue_id`, so the reap is an EXPLICIT
+    // cascade step. The sibling issue's row must survive.
+    sqlx::query(
+        "INSERT INTO activity_log \
+         (id, workspace_id, issue_id, actor_type, actor_id, action, details, created_at) \
+         VALUES ('al-1','ws-a','i-1','member','user-ws-a','created','{}',0), \
+                ('al-2','ws-a','i-1','system',NULL,'status_changed','{}',1), \
+                ('al-sibling','ws-a','i-2','system',NULL,'created','{}',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("activity rows");
+
     // Preview agrees with what the cascade is about to do.
     let preview = IssueRepo::delete_preview(pool, "ws-a", "i-1")
         .await
@@ -229,12 +243,14 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
     assert_eq!(preview.summary.comments, 2);
     assert_eq!(preview.summary.tasks, 2);
     assert_eq!(preview.summary.placements, 1);
+    assert_eq!(preview.summary.activities, 2);
     assert_eq!(preview.active_tasks, 0, "both tasks are terminal");
 
     let summary = IssueRepo::delete_cascade(pool, "ws-a", "i-1").await.expect("delete");
     assert_eq!(summary.comments, 2);
     assert_eq!(summary.tasks, 2);
     assert_eq!(summary.placements, 1);
+    assert_eq!(summary.activities, 2);
 
     // The issue and every dependent row are gone.
     assert!(IssueRepo::get_by_id(pool, "i-1").await.expect("get").is_none());
@@ -266,6 +282,10 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
         (
             "SELECT COUNT(*) FROM dispatch_attempt WHERE issue_id = ?",
             "dispatch attempts",
+        ),
+        (
+            "SELECT COUNT(*) FROM activity_log WHERE issue_id = ?",
+            "activity rows",
         ),
     ] {
         let n = if what == "dependency edges" {
@@ -319,6 +339,16 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
         .await,
         1,
         "the sibling issue's dispatch attempt survives"
+    );
+    assert_eq!(
+        count(
+            pool,
+            "SELECT COUNT(*) FROM activity_log WHERE issue_id = ?",
+            "i-2"
+        )
+        .await,
+        1,
+        "the sibling issue's activity row survives"
     );
     // Cost history survives, detached from the vanished task.
     let (runs, linked): (i64, i64) = (

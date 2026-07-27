@@ -5,6 +5,7 @@
 //! [`crate::Store::pool`]) rather than owning a connection, so a single pool is
 //! shared across every repo call.
 
+pub mod activity;
 pub mod agent;
 pub mod agent_invocation_target;
 pub mod agent_runtime;
