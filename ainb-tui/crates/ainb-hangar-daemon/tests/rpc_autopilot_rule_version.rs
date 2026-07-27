@@ -131,18 +131,6 @@ impl Client {
             .await;
         r["versions"].as_array().cloned().unwrap_or_default()
     }
-
-    async fn runs(&mut self, autopilot_id: &str) -> Vec<serde_json::Value> {
-        let r = self
-            .ok(
-                methods::HANGAR_AUTOPILOT_RUNS,
-                serde_json::json!({
-                    "workspace_id": WS_ID, "autopilot_id": autopilot_id, "limit": 50
-                }),
-            )
-            .await;
-        r["runs"].as_array().cloned().unwrap_or_default()
-    }
 }
 
 /// Bind + serve the real listener over a seeded store (mirrors `boot()`).
