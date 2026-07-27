@@ -2993,12 +2993,17 @@ pub async fn comment_add(
         index: "issue_id".to_string(),
         source: format!("malformed issue id {issue_id:?}: {e}").into(),
     })?;
+    // A malformed parent id is dropped from the WIRE row rather than failing the
+    // write: the comment landed with the pointer the caller gave, and a row the
+    // client cannot decode would be a worse outcome than a missing optional.
+    let parent = parent_id.and_then(|p| CommentId::from_str(p.to_string()).ok());
     Ok(Some(CommentRow {
         id: comment_id,
         issue_id: issue,
         author: format!("{}:{}", author.kind().as_str(), author.id()),
         body: body.to_string(),
         created_at,
+        parent_id: parent,
     }))
 }
 

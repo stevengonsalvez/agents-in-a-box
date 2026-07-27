@@ -1132,6 +1132,13 @@ pub struct CommentRow {
     pub body: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The comment this one REPLIES to, or `None` at the top level
+    /// (migration 0067, multica parity #2-rest).
+    ///
+    /// **Append-only**: absent on the wire when unset, so a pre-2-rest snapshot
+    /// still decodes and the bytes an old client sees are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<CommentId>,
 }
 
 #[cfg(test)]

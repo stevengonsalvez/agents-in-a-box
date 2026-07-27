@@ -81,6 +81,7 @@ fn emit_comment(
             author: author.to_string(),
             body: "look at this".into(),
             created_at: 1,
+            parent_id: None,
         }),
     );
 }
