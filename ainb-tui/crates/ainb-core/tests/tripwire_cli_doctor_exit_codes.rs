@@ -44,8 +44,8 @@ git_directories = []
     .unwrap();
     let local_uri = format!("local:{}", src.path().display());
 
-    // source add + skill install (under managed sandbox — keeps the
-    // test deterministic; tier-3 covered by a sibling tripwire).
+    // Source add + skill install under an isolated temp-home. The
+    // installer targets the real Claude config path by default.
     let add = Command::new(&bin)
         .args(["source", "add", &local_uri, "--name", "fix"])
         .env("HOME", home.path())
@@ -78,15 +78,15 @@ git_directories = []
         String::from_utf8_lossy(&install.stderr)
     );
 
-    // Find the deployed file (under the sandbox) and DELETE it to
+    // Find the deployed file (under the isolated Claude home) and DELETE it to
     // break the lockfile's claim.
-    let sandbox = ainb_home.path().join("tools/claude/skills/commit/SKILL.md");
+    let deployed = home.path().join(".claude/skills/commit/SKILL.md");
     assert!(
-        sandbox.exists(),
+        deployed.exists(),
         "install didn't land where expected: {}",
-        sandbox.display()
+        deployed.display()
     );
-    fs::remove_file(&sandbox).expect("nuke deployed file");
+    fs::remove_file(&deployed).expect("nuke deployed file");
 
     // Doctor MUST detect the missing file.
     let doctor = Command::new(&bin)
