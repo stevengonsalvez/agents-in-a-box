@@ -115,6 +115,75 @@ pub enum HangarCommand {
     /// Read the daemon's structured logs.
     #[command(subcommand)]
     Logs(LogsCommand),
+    /// Define and archive a workspace's custom issue properties.
+    #[command(subcommand)]
+    Property(PropertyCommand),
+}
+
+/// `hangar property <verb>` — the per-workspace CUSTOM PROPERTY catalog
+/// (multica parity #17).
+///
+/// Values on issues are keyed by the definition's ID, never by its name, so
+/// renaming a property (`define` again with a new `--name`) is a catalog-only
+/// write that touches zero issue rows. A definition is ARCHIVED, never deleted:
+/// its stored values survive and render again if it is un-archived.
+#[derive(Subcommand, Debug)]
+pub enum PropertyCommand {
+    /// Create or update ONE custom property definition (idempotent by key).
+    Define(PropertyDefineArgs),
+    /// List the workspace's custom property catalog, in render order.
+    List(PropertyListArgs),
+    /// Archive (or un-archive) a definition. NEVER deletes stored values.
+    Archive(PropertyArchiveArgs),
+}
+
+/// Arguments for `hangar property define`.
+#[derive(Args, Debug)]
+pub struct PropertyDefineArgs {
+    /// Stable slug the CLI and RPC address this property by.
+    #[arg(long)]
+    pub key: String,
+    /// Display label. Defaults to the key on a new definition; changing it is
+    /// a free rename.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Value type: text, number, select, multi_select, date, checkbox, url.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// One catalogued option (repeat). Required for select / multi_select.
+    #[arg(long = "option")]
+    pub options: Vec<String>,
+    /// Render order within the workspace (ascending).
+    #[arg(long)]
+    pub position: Option<i64>,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar property list`.
+#[derive(Args, Debug)]
+pub struct PropertyListArgs {
+    /// Include archived definitions too.
+    #[arg(long)]
+    pub include_archived: bool,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar property archive`.
+#[derive(Args, Debug)]
+pub struct PropertyArchiveArgs {
+    /// The definition's stable slug.
+    #[arg(long)]
+    pub key: String,
+    /// Un-archive instead: bring the definition (and its values) back.
+    #[arg(long)]
+    pub unarchive: bool,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar workspace <verb>`.
@@ -1570,6 +1639,108 @@ pub enum IssueCommand {
     /// Show one issue's activity timeline: state changes, assignments, comments.
     #[command(alias = "activity")]
     Timeline(IssueTimelineArgs),
+    /// Set or clear one of the workspace's custom properties on an issue.
+    #[command(subcommand)]
+    Property(IssuePropertyCommand),
+    /// Read and write an issue's agent metadata scratch bag.
+    #[command(subcommand, alias = "metadata")]
+    Meta(IssueMetaCommand),
+}
+
+/// `hangar issue property <verb>` (multica parity #17).
+#[derive(Subcommand, Debug)]
+pub enum IssuePropertyCommand {
+    /// Set ONE custom property's value on an issue.
+    Set(IssuePropertySetArgs),
+    /// Clear ONE custom property from an issue. Idempotent.
+    Clear(IssuePropertyClearArgs),
+}
+
+/// Arguments for `hangar issue property set`.
+#[derive(Args, Debug)]
+pub struct IssuePropertySetArgs {
+    /// Issue id (ULID) to write.
+    pub id: String,
+    /// The definition's stable slug.
+    #[arg(long)]
+    pub key: String,
+    /// The value. Repeat for a multi_select.
+    #[arg(long = "value")]
+    pub values: Vec<String>,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue property clear`.
+#[derive(Args, Debug)]
+pub struct IssuePropertyClearArgs {
+    /// Issue id (ULID) to write.
+    pub id: String,
+    /// The definition's stable slug.
+    #[arg(long)]
+    pub key: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// `hangar issue meta <verb>` — the AGENT scratch bag (multica parity #17).
+///
+/// Flat primitive KV for pipeline bookkeeping. Every mutation is single-key
+/// atomic, so `hangar issue update` never disturbs it.
+#[derive(Subcommand, Debug)]
+pub enum IssueMetaCommand {
+    /// List an issue's metadata entries, key-sorted.
+    List(IssueMetaListArgs),
+    /// Print ONE metadata value.
+    Get(IssueMetaKeyArgs),
+    /// Set ONE metadata key.
+    Set(IssueMetaSetArgs),
+    /// Delete ONE metadata key. Idempotent.
+    Delete(IssueMetaKeyArgs),
+}
+
+/// Arguments for `hangar issue meta list`.
+#[derive(Args, Debug)]
+pub struct IssueMetaListArgs {
+    /// Issue id (ULID) whose bag to read.
+    pub id: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue meta get|delete`.
+#[derive(Args, Debug)]
+pub struct IssueMetaKeyArgs {
+    /// Issue id (ULID) whose bag to address.
+    pub id: String,
+    /// The metadata key.
+    #[arg(long)]
+    pub key: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue meta set`.
+#[derive(Args, Debug)]
+pub struct IssueMetaSetArgs {
+    /// Issue id (ULID) whose bag to write.
+    pub id: String,
+    /// The metadata key (letters, digits, `_`, `.`, `-`; max 64).
+    #[arg(long)]
+    pub key: String,
+    /// The value.
+    #[arg(long)]
+    pub value: String,
+    /// Force the value's type: string, number, or bool. Default sniffs.
+    #[arg(long = "type")]
+    pub value_type: Option<String>,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue timeline` (multica parity #13).
@@ -2239,6 +2410,7 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
         HangarCommand::Workspace(c) => dispatch_workspace(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
+        HangarCommand::Property(c) => dispatch_property(c, format).await,
     }
 }
 
@@ -5069,6 +5241,8 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::React(cmd) => run_issue_react(&store, cmd).await,
         IssueCommand::Why(args) => run_issue_why(&store, args, format).await,
         IssueCommand::Timeline(args) => run_issue_timeline(&store, args, format).await,
+        IssueCommand::Property(cmd) => run_issue_property(&store, cmd).await,
+        IssueCommand::Meta(cmd) => run_issue_meta(&store, cmd, format).await,
     }
 }
 
@@ -5349,6 +5523,261 @@ async fn run_issue_subscribe(
 }
 
 /// `hangar issue react add|remove|list` (multica parity #22).
+/// `hangar property <verb>` — the workspace's CUSTOM PROPERTY catalog
+/// (multica parity #17).
+///
+/// Opens the store DIRECTLY (the `run_issue_label` precedent) and drives the
+/// SAME [`IssuePropertyRepo`] the daemon's RPC handlers use, so the CLI and the
+/// RPC can never validate differently.
+async fn dispatch_property(cmd: PropertyCommand, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_core::properties::PropertyKind;
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace = match &cmd {
+        PropertyCommand::Define(a) => a.workspace.clone(),
+        PropertyCommand::List(a) => a.workspace.clone(),
+        PropertyCommand::Archive(a) => a.workspace.clone(),
+    };
+    let workspace_id = resolve_skills_workspace(&store, workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    match cmd {
+        PropertyCommand::Define(args) => {
+            // Absent flags KEEP whatever the stored definition has, so
+            // `--name` alone is a rename and nothing else moves.
+            let existing = IssuePropertyRepo::get_by_key(store.pool(), &ws, &args.key)
+                .await
+                .context("look up the definition")?;
+            let kind = match args.kind.as_deref() {
+                Some(raw) => PropertyKind::parse_strict(raw)?,
+                None => existing.as_ref().map_or(PropertyKind::Text, |d| d.kind.clone()),
+            };
+            let name = args.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map_or_else(
+                || {
+                    existing
+                        .as_ref()
+                        .map_or_else(|| args.key.trim().to_string(), |d| d.name.clone())
+                },
+                ToString::to_string,
+            );
+            let options = if args.options.is_empty() {
+                existing.as_ref().map(|d| d.options.clone()).unwrap_or_default()
+            } else {
+                args.options.clone()
+            };
+            let position = args.position.unwrap_or_else(|| existing.map_or(0, |d| d.position));
+            let def = IssuePropertyRepo::define(
+                store.pool(),
+                &ws,
+                &args.key,
+                &name,
+                &kind,
+                &options,
+                position,
+                SystemClock.now_ms(),
+            )
+            .await
+            .context("define custom property")?;
+            println!(
+                "defined `{}` ({}) as {} [{}] pos={}",
+                def.key,
+                def.name,
+                def.kind.as_db_str(),
+                def.options.join(", "),
+                def.position
+            );
+            Ok(())
+        }
+        PropertyCommand::List(args) => {
+            let defs = IssuePropertyRepo::list(store.pool(), &ws, args.include_archived)
+                .await
+                .context("list custom properties")?;
+            match format {
+                OutputFormat::Json => {
+                    let rows: Vec<serde_json::Value> = defs
+                        .iter()
+                        .map(|d| {
+                            serde_json::json!({
+                                "key": d.key,
+                                "name": d.name,
+                                "kind": d.kind.as_db_str(),
+                                "options": d.options,
+                                "position": d.position,
+                                "archived": d.archived_at.is_some(),
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                }
+                _ => {
+                    if defs.is_empty() {
+                        println!("no custom properties");
+                    }
+                    for d in &defs {
+                        println!(
+                            "{}\t{}\t{}\t[{}]\tpos={}\t{}",
+                            d.key,
+                            d.name,
+                            d.kind.as_db_str(),
+                            d.options.join(", "),
+                            d.position,
+                            if d.archived_at.is_some() {
+                                "archived"
+                            } else {
+                                "active"
+                            }
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        PropertyCommand::Archive(args) => {
+            let archived = !args.unarchive;
+            let found = IssuePropertyRepo::set_archived(
+                store.pool(),
+                &ws,
+                &args.key,
+                archived,
+                SystemClock.now_ms(),
+            )
+            .await
+            .context("archive custom property")?;
+            if !found {
+                anyhow::bail!("no custom property `{}` in this workspace", args.key);
+            }
+            println!(
+                "{} `{}` (stored values are never deleted)",
+                if archived { "archived" } else { "un-archived" },
+                args.key
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `hangar issue property set|clear` (multica parity #17).
+async fn run_issue_property(store: &Store, cmd: IssuePropertyCommand) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_core::properties::{coerce_value, render_value};
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let (id, key, values, workspace, set) = match cmd {
+        IssuePropertyCommand::Set(a) => (a.id, a.key, a.values, a.workspace, true),
+        IssuePropertyCommand::Clear(a) => (a.id, a.key, Vec::new(), a.workspace, false),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    if set {
+        let def = IssuePropertyRepo::get_by_key(store.pool(), &ws, &key)
+            .await
+            .context("look up the definition")?
+            .filter(|d| d.archived_at.is_none())
+            .with_context(|| format!("no active custom property `{key}` in this workspace"))?;
+        let value = coerce_value(&def.kind, &values)?;
+        IssuePropertyRepo::set_value(store.pool(), &ws, &id, &key, &value)
+            .await
+            .with_context(|| format!("set property `{key}` on issue {id}"))?;
+        println!("{}: {}", def.name, render_value(&value));
+    } else {
+        let cleared = IssuePropertyRepo::clear_value(store.pool(), &ws, &id, &key)
+            .await
+            .with_context(|| format!("clear property `{key}` on issue {id}"))?;
+        println!(
+            "{} `{key}` on issue {id}",
+            if cleared { "cleared" } else { "already unset:" }
+        );
+    }
+    Ok(())
+}
+
+/// `hangar issue meta list|get|set|delete` (multica parity #17).
+async fn run_issue_meta(store: &Store, cmd: IssueMetaCommand, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_core::properties::{coerce_metadata_value, render_metadata};
+    use ainb_hangar_store::repo::issue_metadata::IssueMetadataRepo;
+
+    let workspace = match &cmd {
+        IssueMetaCommand::List(a) => a.workspace.clone(),
+        IssueMetaCommand::Get(a) | IssueMetaCommand::Delete(a) => a.workspace.clone(),
+        IssueMetaCommand::Set(a) => a.workspace.clone(),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    match cmd {
+        IssueMetaCommand::Set(args) => {
+            let value = coerce_metadata_value(&args.value, args.value_type.as_deref())?;
+            IssueMetadataRepo::set(store.pool(), &ws, &args.id, &args.key, &value)
+                .await
+                .with_context(|| format!("set metadata `{}` on issue {}", args.key, args.id))?;
+            println!("{} = {}", args.key, render_metadata(&value));
+            Ok(())
+        }
+        IssueMetaCommand::Delete(args) => {
+            let removed = IssueMetadataRepo::delete(store.pool(), &ws, &args.id, &args.key)
+                .await
+                .with_context(|| {
+                format!("delete metadata `{}` on issue {}", args.key, args.id)
+            })?;
+            println!(
+                "{} `{}` on issue {}",
+                if removed {
+                    "deleted"
+                } else {
+                    "already absent:"
+                },
+                args.key,
+                args.id
+            );
+            Ok(())
+        }
+        IssueMetaCommand::Get(args) => {
+            let bag = IssueMetadataRepo::get(store.pool(), &ws, &args.id)
+                .await
+                .with_context(|| format!("read metadata on issue {}", args.id))?;
+            let value = bag
+                .get(&args.key)
+                .with_context(|| format!("no metadata key `{}` on issue {}", args.key, args.id))?;
+            println!("{}", render_metadata(value));
+            Ok(())
+        }
+        IssueMetaCommand::List(args) => {
+            let bag = IssueMetadataRepo::get(store.pool(), &ws, &args.id)
+                .await
+                .with_context(|| format!("read metadata on issue {}", args.id))?;
+            match format {
+                OutputFormat::Json => {
+                    let rows: Vec<serde_json::Value> = bag
+                        .iter()
+                        .map(|(k, v)| {
+                            serde_json::json!({
+                                "key": k,
+                                "value": render_metadata(v),
+                                "value_json": ainb_hangar_core::properties::metadata_value_json(v),
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                }
+                _ => {
+                    if bag.is_empty() {
+                        println!("no metadata");
+                    }
+                    for (k, v) in &bag {
+                        println!("{k} = {}", render_metadata(v));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
 async fn run_issue_react(store: &Store, cmd: IssueReactCommand) -> Result<()> {
     use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
     use ainb_hangar_store::repo::issue_reaction::{IssueReactionError, IssueReactionRepo};
@@ -6400,6 +6829,33 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
                         .collect::<Vec<_>>()
                         .join("  ");
                     println!("Reactions: {line}");
+                }
+            }
+            // multica parity #17: this issue's RESOLVED custom properties and
+            // its agent metadata scratch bag, rendered through the SAME
+            // `render_value` / `render_metadata` the wire uses. Both silent
+            // when empty, so existing output is unchanged.
+            {
+                use ainb_hangar_core::ids::WorkspaceId;
+                use ainb_hangar_core::properties::{render_metadata, render_value};
+                use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+                let ws = WorkspaceId::from_str(issue.workspace_id.clone())
+                    .context("issue carries an empty workspace id")?;
+                let resolved = IssuePropertyRepo::values_for(store.pool(), &ws, &issue.id)
+                    .await
+                    .context("resolve custom properties")?;
+                if !resolved.is_empty() {
+                    println!("Properties:");
+                    for (def, value) in &resolved {
+                        println!("  {}: {}", def.name, render_value(value));
+                    }
+                }
+                if !issue.metadata.is_empty() {
+                    println!("Metadata:");
+                    for (key, value) in &issue.metadata {
+                        println!("  {key} = {}", render_metadata(value));
+                    }
                 }
             }
             // multica parity #12: WHY this card is not running, when its newest

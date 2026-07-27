@@ -450,6 +450,92 @@ pub const HANGAR_DISPATCH_ATTEMPTS_LIST: &str = "hangar/dispatch_attempts_list";
 /// on open and on refresh. Adding one later is append-only.
 pub const HANGAR_ISSUE_TIMELINE: &str = "hangar/issue_timeline";
 
+/// `hangar/properties_list` — the workspace's CUSTOM PROPERTY catalog (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::PropertiesListParams`]
+/// (`{ workspace_id, include_archived? }`); result:
+/// [`crate::snapshots::PropertiesListResult`] — definitions in `position, key`
+/// order. Archived definitions are omitted unless `include_archived` is set.
+/// Read-only + workspace-scoped.
+pub const HANGAR_PROPERTIES_LIST: &str = "hangar/properties_list";
+
+/// `hangar/property_define` — create or update ONE custom-property definition
+/// (multica parity #17).
+///
+/// Params: [`crate::snapshots::PropertyDefineParams`]
+/// (`{ workspace_id, key, name?, kind?, options?, position? }`); result:
+/// [`crate::events::PropertyDefRow`]. Idempotent resolve-or-update by
+/// `(workspace_id, key)`: re-defining an existing key updates the display label
+/// / kind / options IN PLACE and KEEPS the definition id, so a rename touches
+/// zero issue rows. Defining a 21st ACTIVE definition, a `select` with no
+/// options, or an unknown `kind` is `INVALID_PARAMS`. Mutating +
+/// workspace-scoped.
+pub const HANGAR_PROPERTY_DEFINE: &str = "hangar/property_define";
+
+/// `hangar/property_archive` — archive or un-archive a definition (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::PropertyArchiveParams`]
+/// (`{ workspace_id, key, archived }`); result:
+/// [`crate::events::PropertyDefRow`]. NEVER a delete: stored issue values
+/// survive an archive untouched and render again on un-archive. An unknown key
+/// is `INVALID_PARAMS`. Mutating + workspace-scoped.
+pub const HANGAR_PROPERTY_ARCHIVE: &str = "hangar/property_archive";
+
+/// `hangar/issue_property_set` — set ONE custom property on an issue (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::IssuePropertySetParams`]
+/// (`{ workspace_id, issue_id, key, value?, values? }`; `values` is the
+/// `multi_select` form). Result: the refreshed issue
+/// [`crate::events::IssueRow`]. The value is validated against the catalogued
+/// kind + options; a mismatch, an unknown key, a foreign-tenant issue, and a
+/// bag past 16 KB are all `INVALID_PARAMS`, never a 500. Single-key atomic —
+/// a concurrent write to a DIFFERENT property is never clobbered. Mutating +
+/// workspace-scoped.
+pub const HANGAR_ISSUE_PROPERTY_SET: &str = "hangar/issue_property_set";
+
+/// `hangar/issue_property_clear` — clear ONE custom property from an issue
+/// (multica parity #17).
+///
+/// Params: [`crate::snapshots::IssuePropertyClearParams`]
+/// (`{ workspace_id, issue_id, key }`); result: the refreshed
+/// [`crate::events::IssueRow`]. Clearing an unset property is an idempotent
+/// no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_PROPERTY_CLEAR: &str = "hangar/issue_property_clear";
+
+/// `hangar/issue_metadata_get` — read an issue's AGENT METADATA bag (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::IssueMetadataParams`]
+/// (`{ workspace_id, issue_id }`; `key` narrows to one entry); result:
+/// [`crate::snapshots::IssueMetadataResult`] — entries key-sorted, each
+/// carrying the canonical `value_json` so numeric-vs-string typing survives the
+/// wire. Read-only + workspace-scoped.
+pub const HANGAR_ISSUE_METADATA_GET: &str = "hangar/issue_metadata_get";
+
+/// `hangar/issue_metadata_set` — set ONE metadata key (multica parity #17).
+///
+/// Params: [`crate::snapshots::IssueMetadataParams`]
+/// (`{ workspace_id, issue_id, key, value, value_type? }`; `value_type` is
+/// `string` | `number` | `bool`, absent ⇒ sniff); result:
+/// [`crate::snapshots::IssueMetadataResult`]. Keys match
+/// `^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$`, values are PRIMITIVES only (a null is
+/// rejected — use delete), at most 50 keys and 8 KB per issue; every one of
+/// those is `INVALID_PARAMS`. Single-key atomic: `hangar/issue_update` never
+/// touches the bag. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_METADATA_SET: &str = "hangar/issue_metadata_set";
+
+/// `hangar/issue_metadata_delete` — delete ONE metadata key (multica parity
+/// #17).
+///
+/// Params: [`crate::snapshots::IssueMetadataParams`]
+/// (`{ workspace_id, issue_id, key }`); result:
+/// [`crate::snapshots::IssueMetadataResult`]. Deleting an absent key is an
+/// idempotent no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_METADATA_DELETE: &str = "hangar/issue_metadata_delete";
+
 /// `hangar/issue_label_attach` — attach a label to one issue (e38.10).
 ///
 /// Params: [`crate::snapshots::IssueLabelParams`]
@@ -1541,6 +1627,16 @@ pub const ALL_METHODS: &[&str] = &[
     // Per-issue activity timeline (multica parity #13) — APPENDED at the
     // catalogue tail, append-only wire.
     HANGAR_ISSUE_TIMELINE,
+    // Custom property catalog + issue metadata (multica parity #17) — APPENDED
+    // at the catalogue tail, append-only wire.
+    HANGAR_PROPERTIES_LIST,
+    HANGAR_PROPERTY_DEFINE,
+    HANGAR_PROPERTY_ARCHIVE,
+    HANGAR_ISSUE_PROPERTY_SET,
+    HANGAR_ISSUE_PROPERTY_CLEAR,
+    HANGAR_ISSUE_METADATA_GET,
+    HANGAR_ISSUE_METADATA_SET,
+    HANGAR_ISSUE_METADATA_DELETE,
 ];
 
 #[cfg(test)]
@@ -1802,6 +1898,14 @@ mod tests {
             FLEET_BROADCAST,
             HANGAR_DISPATCH_ATTEMPTS_LIST,
             HANGAR_ISSUE_TIMELINE,
+            HANGAR_PROPERTIES_LIST,
+            HANGAR_PROPERTY_DEFINE,
+            HANGAR_PROPERTY_ARCHIVE,
+            HANGAR_ISSUE_PROPERTY_SET,
+            HANGAR_ISSUE_PROPERTY_CLEAR,
+            HANGAR_ISSUE_METADATA_GET,
+            HANGAR_ISSUE_METADATA_SET,
+            HANGAR_ISSUE_METADATA_DELETE,
         ];
         for m in declared {
             assert!(

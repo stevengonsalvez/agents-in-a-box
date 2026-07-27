@@ -575,6 +575,75 @@ pub struct IssueRow {
     /// card byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<ReactionRow>,
+    /// This issue's resolved CUSTOM PROPERTIES (multica parity #17), driving the
+    /// task-detail card's `Props:` block, in catalog `position` order.
+    ///
+    /// DETAIL PATH ONLY — a list snapshot leaves it empty on purpose, exactly
+    /// like [`Self::dependencies`] and [`Self::subscriber_count`], because
+    /// filling it needs a catalog join per row. Do not "fix" that.
+    /// Append-only: empty ⇒ the key is not sent, so a pre-#17 daemon leaves the
+    /// row byte-identical and a pre-#17 client ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<IssuePropertyRow>,
+    /// This issue's AGENT METADATA scratch bag (multica parity #17), key-sorted.
+    /// Same DETAIL-ONLY + append-only contract as [`Self::properties`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<IssueMetadataRow>,
+}
+
+/// One custom-property DEFINITION from a workspace's catalog (multica parity
+/// #17) — the shape `hangar/properties_list` returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertyDefRow {
+    /// Stable slug the CLI / RPC address this property by.
+    pub key: String,
+    /// Display label; renaming it touches zero issue rows.
+    pub name: String,
+    /// `text` / `number` / `select` / `multi_select` / `date` / `checkbox` /
+    /// `url`. Raw `String`, not a typed enum, so a token from a newer daemon
+    /// renders as text rather than failing the decode.
+    pub kind: String,
+    /// Catalogued options for `select` / `multi_select`; empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Render order within the workspace (ascending).
+    #[serde(default)]
+    pub position: i64,
+    /// Whether the definition is archived (hidden from the active catalog and
+    /// from render, but never deleted).
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// One RESOLVED custom property on an issue's detail card (multica parity #17):
+/// the catalog's display name + kind joined to this issue's stored value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuePropertyRow {
+    /// The definition's stable slug.
+    pub key: String,
+    /// The definition's display label — what the card actually shows.
+    pub name: String,
+    /// The definition's kind token.
+    pub kind: String,
+    /// Already RENDERED (`properties::render_value`) — a `String`, not a
+    /// `serde_json::Value`, so [`IssueRow`] keeps its `Eq` derive. The typed
+    /// read is the repo (CLI) or
+    /// [`crate::methods::HANGAR_ISSUE_METADATA_GET`] (agents).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+}
+
+/// One AGENT METADATA entry on an issue (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMetadataRow {
+    /// The metadata key (`^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$`).
+    pub key: String,
+    /// Canonical JSON TEXT of the primitive (`42`, `"open"`, `true`) — typing
+    /// survives the wire without an `Eq`-breaking `serde_json::Value`.
+    pub value_json: String,
+    /// The same value rendered for display (unquoted).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
 }
 
 /// One TYPED link on an issue's detail card (multica parity #20), always stated

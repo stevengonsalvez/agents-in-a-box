@@ -72,6 +72,11 @@ pub mod pr_url;
 /// down-compilers. Pure + IO-free — the daemon adds disk/DB/watch, the plugin
 /// borrows it for live preview.
 pub mod profile;
+/// Custom issue properties + the agent metadata scratch bag (multica parity
+/// #17): the typed `PropertyKind` / `PropertyValue` / `MetadataValue` model,
+/// the tolerant JSON codecs for the two `issue` columns, and the single
+/// validation + render seam shared by the store, the wire and the CLI.
+pub mod properties;
 /// The structured `agent_task_queue.result` JSON shape ([`result::TaskResult`]).
 pub mod result;
 /// Skill domain vocabulary: normalised [`skill::SkillName`], the

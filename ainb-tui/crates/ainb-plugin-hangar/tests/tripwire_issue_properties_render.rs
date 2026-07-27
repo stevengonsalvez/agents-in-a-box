@@ -1,18 +1,16 @@
-//! Tripwire (multica gap #11-rest): tick ONE acceptance criterion in the REAL
-//! task-detail card, over real wire bytes.
+//! Tripwire (multica parity #17): an issue's CUSTOM PROPERTIES and its AGENT
+//! METADATA render on the REAL task-detail card, over real wire bytes.
 //!
 //! Drives the REAL [`HangarPlugin`] behind the REAL SDK [`Server`], playing the
 //! host: it relays the plugin's reverse `unix_socket_*` calls to a mock daemon
-//! that answers `hangar/issues_list` with ONE issue carrying THREE all-unchecked
-//! criteria, then sends genuine `plugin/handle_key` frames and captures the
-//! `plugin/render` buffer.
+//! that answers `hangar/issues_list` with ONE survivor carrying two resolved
+//! properties + one metadata entry, plus THREE decoy issues that carry none.
 //!
-//! The journey: Enter on the board opens the task-detail card (`Acceptance: 0/3`,
-//! three `☐`), `a a` walks the acceptance cursor to the SECOND criterion, `t`
-//! ticks it. The card must then show `☑` on CRITERION-TWO and `☐` on the other
-//! two, with every DECOY (`Acceptance: 0/3`, a `☑` on one or three) asserted
-//! ABSENT, and the plugin must have fired a real `hangar/issue_criterion_set`
-//! naming the SECOND criterion's stable id.
+//! The journey: the board lands, Enter opens the survivor's task-detail card,
+//! and the card must show `Props:` with `◆ Sprint: S2` and `◆ Owner: amy` in
+//! catalog order, plus `Meta:` with `· pr_number = 471`. Every DECOY title is
+//! asserted ABSENT from the card, and a decoy's own card is asserted to paint
+//! NEITHER block — the "hidden when empty" rule the reference states.
 //!
 //! Hermetic: no tmux, no staged binary (so no macOS AMFI SIGKILL / first-run
 //! wizard flake); every wire byte is a genuine proto envelope. Follows the
@@ -23,7 +21,7 @@ use std::time::Duration;
 
 use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::ids::IssueId;
-use ainb_hangar_proto::events::IssueRow;
+use ainb_hangar_proto::events::{IssueMetadataRow, IssuePropertyRow, IssueRow};
 use ainb_hangar_proto::snapshots::{AgentsListResult, IssuesListResult};
 use ainb_hangar_proto::{RpcRequest, RpcResponse, methods as daemon_methods};
 use ainb_plugin_hangar::HangarPlugin;
@@ -141,19 +139,37 @@ fn crit(id: &str, text: &str) -> AcceptanceCriterion {
     AcceptanceCriterion::with_id(id, text).expect("criterion")
 }
 
-/// ONE issue carrying THREE all-unchecked criteria, so ticking exactly one is
-/// discriminating: the other two must stay `☐`.
+/// ONE SURVIVOR carrying two resolved custom properties and one metadata
+/// entry, among THREE decoy issues that carry none — so a render that paints
+/// the block unconditionally, or paints the wrong issue's block, fails.
 fn seeded_issues() -> serde_json::Value {
+    let mut survivor = row("target", "TARGET property issue", Vec::new());
+    survivor.properties = vec![
+        IssuePropertyRow {
+            key: "sprint".into(),
+            name: "Sprint".into(),
+            kind: "select".into(),
+            value: "S2".into(),
+        },
+        IssuePropertyRow {
+            key: "owner".into(),
+            name: "Owner".into(),
+            kind: "text".into(),
+            value: "amy".into(),
+        },
+    ];
+    survivor.metadata = vec![IssueMetadataRow {
+        key: "pr_number".into(),
+        value_json: "471".into(),
+        value: "471".into(),
+    }];
     serde_json::to_value(IssuesListResult {
-        issues: vec![row(
-            "target",
-            "TARGET acceptance issue",
-            vec![
-                crit("ac-one", "CRITERION-ONE"),
-                crit("ac-two", "CRITERION-TWO"),
-                crit("ac-three", "CRITERION-THREE"),
-            ],
-        )],
+        issues: vec![
+            survivor,
+            row("decoy-1", "DECOYONE plain issue", Vec::new()),
+            row("decoy-2", "DECOYTWO plain issue", Vec::new()),
+            row("decoy-3", "DECOYTHREE plain issue", Vec::new()),
+        ],
     })
     .unwrap()
 }
@@ -544,92 +560,118 @@ fn line_with<'a>(rows: &'a [String], needle: &str) -> &'a str {
         .unwrap_or_else(|| panic!("no pane row contains `{needle}`:\n{}", rows.join("\n")))
 }
 
-/// `a a t` on the task-detail card ticks the SECOND criterion and ONLY it.
+/// The SURVIVOR's card paints `Props:` and `Meta:` with its own values, in
+/// catalog order, and no decoy title bleeds onto it.
 #[tokio::test]
-async fn acceptance_tick_marks_only_the_selected_criterion() {
+async fn custom_properties_and_metadata_render_on_the_detail_card() {
     let body = async {
         let home = tempfile::tempdir().expect("home");
         std::env::set_var("AINB_HANGAR_HOME", home.path());
-        let stream_id = format!("sock-accept-{}", std::process::id());
+        let stream_id = format!("sock-props-{}", std::process::id());
         let seen: Seen = Arc::new(Mutex::new(Vec::new()));
         let (mut hw, mut hr, mut dr, mut dw, server) =
             boot(home.path(), &stream_id, seen.clone()).await;
 
-        // Board first, then Enter opens the task-detail card.
+        // The survivor is the FIRST row, so Enter on the landing board opens it.
         let _ = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
-            r.iter().any(|l| l.contains("TARGET acceptance issue"))
+            r.iter().any(|l| l.contains("TARGET property issue"))
         })
         .await;
         send_char(&mut hw, '\r').await;
 
-        // PRE-TICK: three criteria, ALL unchecked, header 0/3.
-        let pre = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
-            r.iter().any(|l| l.contains("Acceptance: 0/3"))
+        let card = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
+            r.iter().any(|l| l.contains("Props:"))
         })
         .await;
-        let joined = pre.join("\n");
-        assert!(
-            joined.contains("Acceptance: 0/3"),
-            "detail card did not open with a 0/3 header:\n{joined}"
-        );
-        assert!(
-            !joined.contains('☑'),
-            "nothing is ticked before `t`:\n{joined}"
-        );
-        for name in ["CRITERION-ONE", "CRITERION-TWO", "CRITERION-THREE"] {
-            assert!(line_with(&pre, name).contains('☐'), "{name} must be ☐");
-        }
+        let joined = card.join("\n");
 
-        // `a a` walks the cursor to the SECOND criterion, `t` ticks it.
-        send_char(&mut hw, 'a').await;
-        send_char(&mut hw, 'a').await;
-        send_char(&mut hw, 't').await;
+        // The property block, in CATALOG order.
+        assert!(joined.contains("Props:"), "the Props header:\n{joined}");
+        let sprint = line_with(&card, "Sprint");
+        assert!(sprint.contains("◆ Sprint: S2"), "the sprint line: {sprint}");
+        let owner = line_with(&card, "Owner");
+        assert!(owner.contains("◆ Owner: amy"), "the owner line: {owner}");
+        let sprint_y = card.iter().position(|l| l.contains("◆ Sprint: S2")).expect("sprint row");
+        let owner_y = card.iter().position(|l| l.contains("◆ Owner: amy")).expect("owner row");
+        assert!(sprint_y < owner_y, "catalog order is preserved:\n{joined}");
 
-        let post = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
-            r.iter().any(|l| l.contains("Acceptance: 1/3"))
-        })
-        .await;
-        let joined = post.join("\n");
+        // The metadata block.
+        assert!(joined.contains("Meta:"), "the Meta header:\n{joined}");
+        let pr = line_with(&card, "pr_number");
+        assert!(pr.contains("· pr_number = 471"), "the metadata line: {pr}");
 
-        // The counted header moved, and the DECOY headers are absent.
-        assert!(joined.contains("Acceptance: 1/3"), "header:\n{joined}");
-        assert!(!joined.contains("Acceptance: 0/3"), "decoy 0/3:\n{joined}");
-        assert!(!joined.contains("Acceptance: 3/3"), "decoy 3/3:\n{joined}");
-
-        // ONLY the second criterion is ticked — the decoys stay ☐.
-        let two = line_with(&post, "CRITERION-TWO");
-        assert!(
-            two.contains('☑') && !two.contains('☐'),
-            "CRITERION-TWO must be ☑: {two}"
-        );
-        for decoy in ["CRITERION-ONE", "CRITERION-THREE"] {
-            let line = line_with(&post, decoy);
+        // DECOYS: no other issue's title reaches the card.
+        for decoy in ["DECOYONE", "DECOYTWO", "DECOYTHREE"] {
             assert!(
-                line.contains('☐') && !line.contains('☑'),
-                "{decoy} must stay ☐: {line}"
+                !joined.contains(decoy),
+                "{decoy} must not appear on the survivor's card:\n{joined}"
             );
         }
-
-        // The plugin fired a REAL hangar/issue_criterion_set naming the SECOND
-        // criterion's STABLE id — not an ordinal, not the first criterion.
-        let calls = seen.lock().unwrap().clone();
-        let (_, params) = calls
-            .iter()
-            .find(|(m, _)| m == daemon_methods::HANGAR_ISSUE_CRITERION_SET)
-            .unwrap_or_else(|| {
-                panic!(
-                    "no hangar/issue_criterion_set was sent; saw: {:?}",
-                    calls.iter().map(|(m, _)| m).collect::<Vec<_>>()
-                )
-            });
-        assert_eq!(params["criterion"], "ac-two", "params: {params}");
-        assert_eq!(params["issue_id"], "target", "params: {params}");
-        assert_eq!(params["checked"], true, "params: {params}");
 
         drop(hw);
         server.abort();
     };
     tokio::time::timeout(BUDGET, body)
         .await
-        .expect("exceeded acceptance-tick budget");
+        .expect("exceeded custom-property render budget");
+}
+
+/// A DECOY issue carries NEITHER field, so its card paints NEITHER block and
+/// none of the survivor's values bleed onto it — the reference's own
+/// "hidden when empty" rule, and the pre-#17 byte-identical render.
+#[tokio::test]
+async fn a_decoy_issue_paints_no_props_and_no_meta_block() {
+    let body = async {
+        let home = tempfile::tempdir().expect("home");
+        std::env::set_var("AINB_HANGAR_HOME", home.path());
+        let stream_id = format!("sock-props-decoy-{}", std::process::id());
+        let seen: Seen = Arc::new(Mutex::new(Vec::new()));
+        let (mut hw, mut hr, mut dr, mut dw, server) =
+            boot(home.path(), &stream_id, seen.clone()).await;
+
+        let _ = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
+            r.iter().any(|l| l.contains("DECOYONE plain issue"))
+        })
+        .await;
+        // Step DOWN off the survivor before opening, so the card under test is
+        // a genuinely property-less issue.
+        send_char(&mut hw, 'j').await;
+        send_char(&mut hw, '\r').await;
+
+        let card = render_rows_until(&mut hw, &mut hr, &mut dr, &mut dw, &stream_id, |r| {
+            r.iter().any(|l| l.contains("Status:"))
+        })
+        .await;
+        let joined = card.join("\n");
+
+        // The card TITLE is painted over the rounded top border, so its glyphs
+        // interleave with `─`. Strip those to read the title back.
+        let title: String = joined.chars().filter(|c| *c != '─').collect();
+        assert!(
+            title.contains("DECOYONE plain issue"),
+            "the decoy's card is the one under test:\n{joined}"
+        );
+        assert!(
+            !title.contains("TARGET property issue"),
+            "the survivor's card is NOT the one under test:\n{joined}"
+        );
+        assert!(
+            !joined.contains("Props:"),
+            "a property-less issue paints no Props block:\n{joined}"
+        );
+        assert!(
+            !joined.contains("Meta:"),
+            "a metadata-less issue paints no Meta block:\n{joined}"
+        );
+        for bleed in ["Sprint", "amy", "pr_number"] {
+            assert!(
+                !joined.contains(bleed),
+                "`{bleed}` must not bleed onto a decoy's card:\n{joined}"
+            );
+        }
+
+        drop(hw);
+        server.abort();
+    };
+    tokio::time::timeout(BUDGET, body).await.expect("exceeded decoy-absence budget");
 }
