@@ -2566,6 +2566,67 @@ pub struct DispatchAttemptRow {
     pub created_at: i64,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_TIMELINE`] (multica parity #13):
+/// read one card's merged activity + comment narrative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueTimelineParams {
+    /// The subscribed workspace (tenant guard).
+    pub workspace_id: String,
+    /// The card whose timeline to read.
+    pub issue_id: String,
+    /// Max entries: the newest window, rendered oldest-first. Defaults to 200,
+    /// hard-capped at 2000 by the daemon (multica's `timelineHardCap`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUE_TIMELINE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueTimelineResult {
+    /// The merged entries, **oldest first** (multica's default flat contract).
+    #[serde(default)]
+    pub entries: Vec<TimelineEntryRow>,
+}
+
+/// One merged timeline entry (multica parity #13).
+///
+/// [`Self::kind`] discriminates `"activity"` from `"comment"`; every optional
+/// field is `serde(default, skip_serializing_if)` so an older client decodes a
+/// newer daemon's frame and a newer client decodes an older daemon's frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TimelineEntryRow {
+    /// `"activity"` | `"comment"` — a raw string, not an enum, so an unknown
+    /// future kind renders as text instead of failing the decode.
+    pub kind: String,
+    /// The source row's primary key (an `activity_log.id` or a `comment.id`).
+    pub id: String,
+    /// `"member"` | `"agent"` | `"system"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_type: Option<String>,
+    /// The actor's id; absent for a `system` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// When it happened (epoch millis). The primary sort key.
+    pub created_at: i64,
+    /// Activity-only: the stable action token
+    /// (`ActivityAction::as_db_str`). Decode tolerantly with
+    /// `ActivityAction::parse` — an unknown token renders raw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Activity-only: the free-form details object (`{"from":…,"to":…}` and
+    /// friends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    /// Comment-only: the comment body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// The `kind` discriminant for an activity entry.
+pub const TIMELINE_KIND_ACTIVITY: &str = "activity";
+/// The `kind` discriminant for a comment entry.
+pub const TIMELINE_KIND_COMMENT: &str = "comment";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -3865,5 +3926,55 @@ mod tests {
             !s.contains("\"blocks\"") && !s.contains("\"related\""),
             "{s}"
         );
+    }
+
+    /// Parity #13: the timeline entry is append-only — every optional field is
+    /// omitted when absent, so an older daemon's frame decodes and a comment
+    /// entry never carries activity-only keys.
+    #[test]
+    fn timeline_entry_omits_absent_fields_and_roundtrips() {
+        let comment = TimelineEntryRow {
+            kind: TIMELINE_KIND_COMMENT.into(),
+            id: "c-1".into(),
+            actor_type: Some("agent".into()),
+            actor_id: Some("a-1".into()),
+            created_at: 100,
+            body: Some("picked this up".into()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&comment).unwrap();
+        assert!(!s.contains("\"action\""), "{s}");
+        assert!(!s.contains("\"details\""), "{s}");
+        assert_eq!(
+            serde_json::from_str::<TimelineEntryRow>(&s).unwrap(),
+            comment
+        );
+
+        let activity = TimelineEntryRow {
+            kind: TIMELINE_KIND_ACTIVITY.into(),
+            id: "a-1".into(),
+            actor_type: Some("system".into()),
+            created_at: 101,
+            action: Some("status_changed".into()),
+            details: Some(serde_json::json!({"from": "open", "to": "done"})),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&activity).unwrap();
+        assert!(!s.contains("\"body\""), "{s}");
+        assert!(!s.contains("\"actor_id\""), "{s}");
+        assert_eq!(
+            serde_json::from_str::<TimelineEntryRow>(&s).unwrap(),
+            activity
+        );
+
+        // A minimal legacy frame decodes with every optional field defaulted.
+        let bare: TimelineEntryRow =
+            serde_json::from_str(r#"{"kind":"activity","id":"x","created_at":1}"#).unwrap();
+        assert_eq!(bare.action, None);
+        assert_eq!(bare.body, None);
+
+        // An empty result decodes from an absent `entries` key.
+        let empty: IssueTimelineResult = serde_json::from_str("{}").unwrap();
+        assert!(empty.entries.is_empty());
     }
 }
