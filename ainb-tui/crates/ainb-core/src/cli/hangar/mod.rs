@@ -276,6 +276,69 @@ pub enum AutopilotCommand {
     Webhook(AutopilotWebhookArgs),
     /// List the autopilot's recent webhook deliveries (audit log).
     Deliveries(AutopilotDeliveriesArgs),
+    /// Manage the rule's explicit WRITE-GRANT set (multica parity #27).
+    #[command(subcommand)]
+    Collaborator(AutopilotActorCommand),
+    /// Manage the rule's STANDING subscriber list — every issue the rule spawns
+    /// auto-subscribes it (multica parity #27).
+    #[command(subcommand)]
+    Subscriber(AutopilotActorCommand),
+    /// Open or restrict who may WRITE this rule (multica parity #27).
+    Access(AutopilotAccessArgs),
+}
+
+/// The add / remove / list verbs shared by `autopilot collaborator` and
+/// `autopilot subscriber` — the addressed tuple is identical, so the shape is.
+#[derive(Subcommand, Debug)]
+pub enum AutopilotActorCommand {
+    /// Add an actor to the set (idempotent; a re-add keeps the FIRST grant).
+    Add(AutopilotActorArgs),
+    /// Remove an actor from the set (idempotent).
+    Remove(AutopilotActorArgs),
+    /// List the set, oldest first.
+    List(AutopilotActorArgs),
+}
+
+/// Arguments for every `hangar autopilot collaborator|subscriber` verb.
+#[derive(Args, Debug)]
+pub struct AutopilotActorArgs {
+    /// The autopilot id (`autopilot.id`).
+    #[arg(long)]
+    pub id: String,
+    /// The target actor, `member:<id>` / `agent:<id>`. Defaults to the local
+    /// human (`member:me`).
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Collaborator ADD only: `editor` (the default) grants write, `viewer`
+    /// grants visibility only.
+    #[arg(long)]
+    pub role: Option<String>,
+    /// The ACTING human, as the write gate's subject and the grant's
+    /// attribution. Defaults to the local human.
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot access`.
+#[derive(Args, Debug)]
+pub struct AutopilotAccessArgs {
+    /// The autopilot id (`autopilot.id`).
+    #[arg(long)]
+    pub id: String,
+    /// `open` (any actor in the workspace may write — the default and every
+    /// pre-0064 rule) or `restricted` (owner / workspace owner+admin / an
+    /// explicit `editor` collaborator only).
+    #[arg(long)]
+    pub mode: String,
+    /// The acting human (write gate subject + rule-version attribution).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar autopilot webhook <id>`.
@@ -2304,6 +2367,265 @@ async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Resu
         AutopilotCommand::Edit(args) => run_autopilot_edit(&store, args).await,
         AutopilotCommand::Versions(args) => run_autopilot_versions(&store, args, format).await,
         AutopilotCommand::Deliveries(args) => run_autopilot_deliveries(&store, args, format).await,
+        AutopilotCommand::Collaborator(cmd) => {
+            run_autopilot_collaborator(&store, cmd, format).await
+        }
+        AutopilotCommand::Subscriber(cmd) => run_autopilot_subscriber(&store, cmd, format).await,
+        AutopilotCommand::Access(args) => run_autopilot_access(&store, args).await,
+    }
+}
+
+/// Resolve `(workspace_id, autopilot_id)` and fail LOUDLY on a foreign /
+/// unknown id — the repos' tenant join would otherwise turn a typo into a
+/// silent no-op that looks like success.
+async fn require_autopilot_in_workspace(
+    store: &Store,
+    workspace: Option<&str>,
+    id: &str,
+) -> Result<(String, ainb_hangar_core::ids::AutopilotId)> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, workspace).await?.to_string();
+    let ws = WorkspaceId::from_str(workspace_id.clone()).context("workspace id was empty")?;
+    let autopilot_id = AutopilotId::from_str(id.to_string()).context("autopilot id was empty")?;
+    if AutopilotRepo::get(store.pool(), &ws, &autopilot_id)
+        .await
+        .context("read autopilot")?
+        .is_none()
+    {
+        anyhow::bail!("no autopilot `{id}` in this workspace");
+    }
+    Ok((workspace_id, autopilot_id))
+}
+
+/// The CLI writes the sqlite file DIRECTLY, so it must apply the same
+/// restricted-mode write gate the daemon's request seam does — otherwise
+/// `ainb hangar autopilot ...` would be a trivially open back door around it.
+async fn require_autopilot_write(
+    store: &Store,
+    workspace_id: &str,
+    id: &ainb_hangar_core::ids::AutopilotId,
+    actor: &ainb_hangar_core::actor::ActorRef,
+) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::autopilot_access::{WriteDecision, can_write};
+
+    let ws = WorkspaceId::from_str(workspace_id.to_string()).context("workspace id was empty")?;
+    match can_write(store.pool(), &ws, id, actor).await.context("write predicate")? {
+        // No such rule here: fall through so the caller's own not-found path
+        // reports it honestly rather than as a permission refusal.
+        WriteDecision::Allowed(_) | WriteDecision::NotFound => Ok(()),
+        WriteDecision::Denied => anyhow::bail!(
+            "actor `{actor}` may not modify autopilot `{id}` (access_mode = restricted)"
+        ),
+    }
+}
+
+/// `hangar autopilot collaborator add|remove|list` (multica parity #27).
+async fn run_autopilot_collaborator(
+    store: &Store,
+    cmd: AutopilotActorCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_store::repo::autopilot_access::{AutopilotCollaboratorRepo, CollaboratorRole};
+
+    let (args, add) = match cmd {
+        AutopilotActorCommand::Add(a) => (a, Some(true)),
+        AutopilotActorCommand::Remove(a) => (a, Some(false)),
+        AutopilotActorCommand::List(a) => (a, None),
+    };
+    let (workspace_id, id) =
+        require_autopilot_in_workspace(store, args.workspace.as_deref(), &args.id).await?;
+
+    if let Some(add) = add {
+        let target = parse_actor_arg(args.actor.as_deref())?;
+        let acting = resolve_publisher(store, args.as_user.as_deref()).await?;
+        require_autopilot_write(store, &workspace_id, &id, &acting).await?;
+        if add {
+            // An unknown role is a caller error, not a silent downgrade to
+            // viewer — which would look exactly like the grant worked.
+            let role = match args.role.as_deref() {
+                None => CollaboratorRole::Editor,
+                Some(raw) => CollaboratorRole::parse(raw)
+                    .ok_or_else(|| anyhow::anyhow!("--role must be `editor` or `viewer`"))?,
+            };
+            let landed = AutopilotCollaboratorRepo::add(
+                store.pool(),
+                &workspace_id,
+                id.as_str(),
+                &target,
+                role,
+                Some(&acting),
+                <ainb_hangar_core::clock::SystemClock as ainb_hangar_core::clock::HangarClock>::now_ms(
+                    &ainb_hangar_core::clock::SystemClock,
+                ),
+            )
+            .await
+            .context("add collaborator")?;
+            // Set membership: a re-add keeps the FIRST grant, so an explicit
+            // role change stays explicit.
+            if !landed {
+                AutopilotCollaboratorRepo::set_role(
+                    store.pool(),
+                    &workspace_id,
+                    id.as_str(),
+                    &target,
+                    role,
+                )
+                .await
+                .context("update collaborator role")?;
+            }
+        } else {
+            AutopilotCollaboratorRepo::remove(store.pool(), &workspace_id, id.as_str(), &target)
+                .await
+                .context("remove collaborator")?;
+        }
+    }
+
+    let rows = AutopilotCollaboratorRepo::list(store.pool(), id.as_str())
+        .await
+        .context("read collaborators")?;
+    if format == OutputFormat::Json {
+        let json: Vec<_> = rows
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "actor": c.actor.to_string(),
+                    "role": c.role_raw,
+                    "created_by": c.created_by.as_ref().map(ToString::to_string),
+                    "created_at": c.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no collaborators");
+        return Ok(());
+    }
+    for c in rows {
+        println!("{}  {}  {}", c.actor, c.role_raw, c.created_at);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot subscriber add|remove|list` (multica parity #27).
+async fn run_autopilot_subscriber(
+    store: &Store,
+    cmd: AutopilotActorCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_store::repo::autopilot_access::AutopilotSubscriberRepo;
+
+    let (args, add) = match cmd {
+        AutopilotActorCommand::Add(a) => (a, Some(true)),
+        AutopilotActorCommand::Remove(a) => (a, Some(false)),
+        AutopilotActorCommand::List(a) => (a, None),
+    };
+    let (workspace_id, id) =
+        require_autopilot_in_workspace(store, args.workspace.as_deref(), &args.id).await?;
+
+    if let Some(add) = add {
+        let target = parse_actor_arg(args.actor.as_deref())?;
+        let acting = resolve_publisher(store, args.as_user.as_deref()).await?;
+        require_autopilot_write(store, &workspace_id, &id, &acting).await?;
+        if add {
+            AutopilotSubscriberRepo::add(
+                store.pool(),
+                &workspace_id,
+                id.as_str(),
+                &target,
+                Some(&acting),
+                <ainb_hangar_core::clock::SystemClock as ainb_hangar_core::clock::HangarClock>::now_ms(
+                    &ainb_hangar_core::clock::SystemClock,
+                ),
+            )
+            .await
+            .context("add subscriber")?;
+        } else {
+            AutopilotSubscriberRepo::remove(store.pool(), &workspace_id, id.as_str(), &target)
+                .await
+                .context("remove subscriber")?;
+        }
+    }
+
+    let rows = AutopilotSubscriberRepo::list(store.pool(), id.as_str())
+        .await
+        .context("read subscribers")?;
+    if format == OutputFormat::Json {
+        let json: Vec<_> = rows
+            .iter()
+            .map(|sub| {
+                serde_json::json!({
+                    "actor": sub.actor.to_string(),
+                    "created_by": sub.created_by.as_ref().map(ToString::to_string),
+                    "created_at": sub.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no subscribers");
+        return Ok(());
+    }
+    for sub in rows {
+        println!("{}  {}", sub.actor, sub.created_at);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot access --mode open|restricted` (multica parity #27).
+///
+/// Goes through `update_as` with the acting human so the flip mints a rule
+/// version — widening who may write a rule is exactly the kind of publish the
+/// accountability ledger exists to record.
+async fn run_autopilot_access(store: &Store, args: AutopilotAccessArgs) -> Result<()> {
+    use ainb_hangar_store::repo::autopilot::{
+        AccessMode, AutopilotEdit, AutopilotRepo, UpdateOutcome,
+    };
+
+    let mode = match args.mode.as_str() {
+        "open" => AccessMode::Open,
+        "restricted" => AccessMode::Restricted,
+        // Validated, never tolerantly coerced: a typo must not quietly leave a
+        // rule world-writable.
+        other => anyhow::bail!("--mode must be `open` or `restricted`, got `{other}`"),
+    };
+    let (workspace_id, id) =
+        require_autopilot_in_workspace(store, args.workspace.as_deref(), &args.id).await?;
+    let acting = resolve_publisher(store, args.as_user.as_deref()).await?;
+    require_autopilot_write(store, &workspace_id, &id, &acting).await?;
+
+    let ws = ainb_hangar_core::ids::WorkspaceId::from_str(workspace_id)
+        .context("workspace id was empty")?;
+    let outcome = AutopilotRepo::update_as(
+        store.pool(),
+        &ainb_hangar_core::clock::SystemClock,
+        &ws,
+        &id,
+        &AutopilotEdit {
+            access_mode: Some(mode),
+            ..AutopilotEdit::default()
+        },
+        Some(&acting),
+    )
+    .await
+    .context("set access mode")?;
+    match outcome {
+        UpdateOutcome::NotFound => anyhow::bail!("no autopilot `{}` in this workspace", id),
+        UpdateOutcome::Updated { version } => {
+            match version {
+                Some(v) => println!("access_mode = {}  (rule version v{v})", mode.as_str()),
+                // Already in that mode: the write landed, it just was not a
+                // change worth an accountability row.
+                None => println!("access_mode = {}  (unchanged)", mode.as_str()),
+            }
+            Ok(())
+        }
     }
 }
 
@@ -2377,6 +2699,9 @@ async fn run_autopilot_edit(store: &Store, args: AutopilotEditArgs) -> Result<()
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
     let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
     let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    // The CLI writes sqlite DIRECTLY, so it applies the same restricted-mode
+    // write gate the daemon's request seam does (multica parity #27).
+    require_autopilot_write(store, ws.as_str(), &id, &actor).await?;
 
     let edit = AutopilotEdit {
         name: args.name.clone(),
@@ -2393,6 +2718,9 @@ async fn run_autopilot_edit(store: &Store, args: AutopilotEditArgs) -> Result<()
         max_concurrent_runs: args.max_concurrent_runs,
         execution_mode: args.execution_mode.map(Into::into),
         concurrency_policy: args.concurrency_policy.map(Into::into),
+        // `ainb hangar autopilot access` is the one door onto the write-access
+        // mode, so the generic edit patch deliberately leaves it alone.
+        access_mode: None,
     };
     anyhow::ensure!(
         !edit.is_empty(),
@@ -2513,6 +2841,9 @@ async fn run_autopilot_set_enabled(
     // Pausing / resuming is a SUBSTANTIVE publish: it changes whether the rule
     // fires unattended, so it re-stamps who is accountable (multica parity #14).
     let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    // The CLI writes sqlite DIRECTLY, so it applies the same restricted-mode
+    // write gate the daemon's request seam does (multica parity #27).
+    require_autopilot_write(store, ws.as_str(), &id, &actor).await?;
     if enabled {
         AutopilotRepo::enable_as(store.pool(), &SystemClock, &ws, &id, Some(&actor))
             .await
@@ -2604,6 +2935,9 @@ async fn run_autopilot_api_trigger(store: &Store, args: AutopilotIdArgs) -> Resu
     let enabled = !args.disable;
 
     let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    // The CLI writes sqlite DIRECTLY, so it applies the same restricted-mode
+    // write gate the daemon's request seam does (multica parity #27).
+    require_autopilot_write(store, ws.as_str(), &id, &actor).await?;
     let updated = AutopilotRepo::set_api_trigger_enabled_as(
         store.pool(),
         &SystemClock,
@@ -10247,6 +10581,7 @@ mod tests {
             next_tick_at: Some(1_767_258_000_000),
             enabled,
             api_trigger_enabled: false,
+            access_mode: ainb_hangar_store::repo::autopilot::AccessMode::Open,
             created_at: 0,
         }
     }
@@ -10469,5 +10804,115 @@ mod tests {
             .await
             .expect("count issues");
         assert_eq!(count, 0, "a bad origin must fail ahead of the insert");
+    }
+
+    /// End-to-end through the parsed command: `hangar autopilot collaborator add`
+    /// PERSISTS a row, read back with raw SQL after the command returns
+    /// (multica parity #27).
+    #[tokio::test]
+    async fn autopilot_collaborator_add_persists_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        for sql in [
+            "INSERT INTO workspace (id, slug, name, created_at) \
+             VALUES ('ws-1','default','Default',0)",
+            "INSERT INTO user (id, email, created_at) VALUES ('u-amy','amy@x.io',0)",
+            "INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode) \
+             VALUES ('rt-1','ws-1','d-1','claude','local')",
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('ag-1','ws-1','builder','rt-1','workspace','u-amy')",
+            "INSERT INTO autopilot \
+             (id, workspace_id, agent_id, name, cron_expr, max_concurrent_runs, execution_mode, \
+              concurrency_policy, next_tick_at, enabled, api_trigger_enabled, created_at) \
+             VALUES ('ap-1','ws-1','ag-1','nightly','0 3 * * *',1,'run_only','skip', \
+                     999999999999,1,0,0)",
+        ] {
+            sqlx::query(sql).execute(store.pool()).await.expect(sql);
+        }
+
+        let HangarCommand::Autopilot(AutopilotCommand::Collaborator(cmd)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "collaborator",
+            "add",
+            "--id",
+            "ap-1",
+            "--actor",
+            "member:bob",
+            "--role",
+            "editor",
+        ]) else {
+            panic!("expected autopilot collaborator add");
+        };
+        run_autopilot_collaborator(&store, cmd, OutputFormat::Text)
+            .await
+            .expect("add collaborator");
+
+        let (actor_type, actor_id, role): (String, String, String) = sqlx::query_as(
+            "SELECT actor_type, actor_id, role FROM autopilot_collaborator \
+             WHERE autopilot_id = 'ap-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("read the persisted grant");
+        assert_eq!(actor_type, "member");
+        assert_eq!(actor_id, "bob");
+        assert_eq!(role, "editor");
+    }
+
+    /// The CLI honours the restricted-mode gate too — otherwise it would be a
+    /// trivially open back door around the daemon's request seam.
+    #[tokio::test]
+    async fn autopilot_collaborator_add_is_denied_on_a_restricted_rule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        for sql in [
+            "INSERT INTO workspace (id, slug, name, created_at) \
+             VALUES ('ws-1','default','Default',0)",
+            "INSERT INTO user (id, email, created_at) VALUES ('u-amy','amy@x.io',0)",
+            "INSERT INTO member (workspace_id, user_id, role) VALUES ('ws-1','u-amy','member')",
+            "INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode) \
+             VALUES ('rt-1','ws-1','d-1','claude','local')",
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('ag-1','ws-1','builder','rt-1','workspace','u-amy')",
+            "INSERT INTO autopilot \
+             (id, workspace_id, agent_id, name, cron_expr, max_concurrent_runs, execution_mode, \
+              concurrency_policy, next_tick_at, enabled, api_trigger_enabled, access_mode, \
+              created_at) \
+             VALUES ('ap-1','ws-1','ag-1','nightly','0 3 * * *',1,'run_only','skip', \
+                     999999999999,1,0,'restricted',0)",
+        ] {
+            sqlx::query(sql).execute(store.pool()).await.expect(sql);
+        }
+
+        let HangarCommand::Autopilot(AutopilotCommand::Collaborator(cmd)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "collaborator",
+            "add",
+            "--id",
+            "ap-1",
+            "--actor",
+            "member:bob",
+            "--as-user",
+            "u-amy",
+        ]) else {
+            panic!("expected autopilot collaborator add");
+        };
+        let err = run_autopilot_collaborator(&store, cmd, OutputFormat::Text)
+            .await
+            .expect_err("a plain member may not grant on a restricted rule");
+        assert!(
+            err.to_string().contains("access_mode = restricted"),
+            "got {err}"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM autopilot_collaborator")
+            .fetch_one(store.pool())
+            .await
+            .expect("count grants");
+        assert_eq!(count, 0, "a denied grant writes nothing");
     }
 }

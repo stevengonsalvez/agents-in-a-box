@@ -374,7 +374,7 @@ impl AutopilotScheduler {
         sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
                     max_concurrent_runs, execution_mode, concurrency_policy, \
-                    next_tick_at, enabled, api_trigger_enabled, created_at \
+                    next_tick_at, enabled, api_trigger_enabled, access_mode, created_at \
              FROM autopilot \
              WHERE enabled = 1 AND next_tick_at IS NOT NULL \
              ORDER BY next_tick_at ASC",
@@ -588,6 +588,7 @@ mod tests {
             next_tick_at,
             enabled: true,
             api_trigger_enabled: false,
+            access_mode: ainb_hangar_store::repo::autopilot::AccessMode::Open,
             created_at: 0,
         }
     }

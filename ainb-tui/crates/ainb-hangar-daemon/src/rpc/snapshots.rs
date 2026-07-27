@@ -50,6 +50,9 @@ use ainb_hangar_store::repo::attention::AttentionRepo;
 use ainb_hangar_store::repo::autopilot::{
     AutopilotEdit, AutopilotRepo, AutopilotRepoError, UpdateOutcome,
 };
+use ainb_hangar_store::repo::autopilot_access::{
+    AutopilotCollaboratorRepo, AutopilotSubscriberRepo,
+};
 use ainb_hangar_store::repo::autopilot_rule_version::AutopilotRuleVersionRepo;
 use ainb_hangar_store::repo::autopilot_run::{
     DispatchOutcome, FireError, RunAttribution, RunSource, dispatch_with_admission,
@@ -1350,6 +1353,20 @@ pub async fn autopilots_list(
     // #14) — deliberately not N+1 per autopilot. Labels are resolved from the
     // same actor-label cache the version pane uses.
     let latest_versions = AutopilotRuleVersionRepo::latest_by_autopilot(pool, workspace).await?;
+    // Two more GROUP BY reads for the #27 actor-set counts, same rule: one query
+    // per table for the whole workspace, never N+1 per row.
+    let collaborator_counts: HashMap<String, u32> =
+        AutopilotCollaboratorRepo::counts_by_autopilot(pool, workspace.as_str())
+            .await
+            .map_err(AutopilotRepoError::Db)?
+            .into_iter()
+            .collect();
+    let subscriber_counts: HashMap<String, u32> =
+        AutopilotSubscriberRepo::counts_by_autopilot(pool, workspace.as_str())
+            .await
+            .map_err(AutopilotRepoError::Db)?
+            .into_iter()
+            .collect();
     let mut publisher_labels = ActorLabelCache::default();
     let mut versions: HashMap<String, (i64, Option<String>)> = HashMap::new();
     for (autopilot_id, version, published_by) in latest_versions {
@@ -1383,6 +1400,9 @@ pub async fn autopilots_list(
             // honest to report.
             rule_version: versions.get(&id_str).map(|(v, _)| *v),
             last_published_by: versions.get(&id_str).and_then(|(_, l)| l.clone()),
+            collaborator_count: collaborator_counts.get(&id_str).copied().unwrap_or(0),
+            subscriber_count: subscriber_counts.get(&id_str).copied().unwrap_or(0),
+            access_mode: Some(ap.access_mode.as_str().to_string()),
         });
     }
     Ok(out)
@@ -2198,6 +2218,59 @@ pub async fn issue_subscriber_rows(
             created_at: s.created_at,
         })
         .collect())
+}
+
+/// One autopilot rule's write-grant set as wire rows (multica parity #27),
+/// oldest first, with the actor label resolved daemon-side.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn autopilot_collaborator_rows(
+    pool: &SqlitePool,
+    autopilot_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::AutopilotCollaboratorEntry>, sqlx::Error> {
+    let rows = AutopilotCollaboratorRepo::list(pool, autopilot_id).await?;
+    let mut labels = ActorLabelCache::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for c in rows {
+        let actor = c.actor.to_string();
+        let label = labels.label(pool, &actor).await;
+        out.push(ainb_hangar_proto::snapshots::AutopilotCollaboratorEntry {
+            actor,
+            label: Some(label),
+            role: c.role_raw,
+            created_by: c.created_by.map(|a| a.to_string()),
+            created_at: c.created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// One autopilot rule's standing subscriber list as wire rows (multica parity
+/// #27), oldest first.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn autopilot_subscriber_rows(
+    pool: &SqlitePool,
+    autopilot_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::AutopilotSubscriberEntry>, sqlx::Error> {
+    let rows = AutopilotSubscriberRepo::list(pool, autopilot_id).await?;
+    let mut labels = ActorLabelCache::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for sub in rows {
+        let actor = sub.actor.to_string();
+        let label = labels.label(pool, &actor).await;
+        out.push(ainb_hangar_proto::snapshots::AutopilotSubscriberEntry {
+            actor,
+            label: Some(label),
+            created_by: sub.created_by.map(|a| a.to_string()),
+            created_at: sub.created_at,
+        });
+    }
+    Ok(out)
 }
 
 /// One issue's aggregated emoji buckets as wire rows (multica parity #22),

@@ -36,6 +36,13 @@ pub enum SubscribeReason {
     Mentioned,
     /// The actor explicitly asked to watch the issue.
     Manual,
+    /// The actor is a standing SUBSCRIBER of the autopilot that SPAWNED this
+    /// issue (multica parity #27, migration 0064) — they never touched this
+    /// occurrence, they follow the recurring rule behind it.
+    ///
+    /// Appending here needs no migration precisely because 0062 decision 3 put
+    /// the vocabulary in Rust with a tolerant parser and NO SQL `CHECK`.
+    Autopilot,
 }
 
 impl SubscribeReason {
@@ -49,6 +56,7 @@ impl SubscribeReason {
             Self::Commenter => "commenter",
             Self::Mentioned => "mentioned",
             Self::Manual => "manual",
+            Self::Autopilot => "autopilot",
         }
     }
 
@@ -62,6 +70,7 @@ impl SubscribeReason {
             "commenter" => Some(Self::Commenter),
             "mentioned" => Some(Self::Mentioned),
             "manual" => Some(Self::Manual),
+            "autopilot" => Some(Self::Autopilot),
             _ => None,
         }
     }

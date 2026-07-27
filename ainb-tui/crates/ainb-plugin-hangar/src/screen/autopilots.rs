@@ -122,11 +122,31 @@ impl AutopilotsState {
                 // edited since. The ledger was deliberately not backfilled, so
                 // the dash is an honest "unversioned", not a missing value.
                 let ver = ap.rule_version.map_or_else(|| "v—".to_string(), |v| format!("v{v}"));
+                // The #27 actor sets (migration 0064). Each suffix appears only
+                // when it has something to say, so an ordinary rule's card is
+                // exactly as busy as it was before this item.
+                let people = match (ap.collaborator_count, ap.subscriber_count) {
+                    (0, 0) => String::new(),
+                    (c, 0) => format!(" · 👥{c}"),
+                    (0, n) => format!(" · 🔔{n}"),
+                    (c, n) => format!(" · 👥{c} · 🔔{n}"),
+                };
+                // A lock ONLY on an explicit `restricted`. An omitted
+                // `access_mode` (a pre-0064 daemon's payload) is open, so it
+                // renders no lock — never a fabricated restriction.
+                let lock = if ap.access_mode.as_deref() == Some("restricted") {
+                    " · 🔒"
+                } else {
+                    ""
+                };
                 BoardCard {
                     not_dispatched: false,
                     issue_id: ap.id.clone(),
                     display_id: ap.name.clone(),
-                    title: format!("{} · {ver} · {state}{api} · last {last}", ap.cron_expr),
+                    title: format!(
+                        "{} · {ver} · {state}{api}{lock}{people} · last {last}",
+                        ap.cron_expr
+                    ),
                     priority: PriorityChip::from_priority(0),
                     assignee_initial: ap.name.chars().next(),
                     linked: false,
@@ -620,6 +640,54 @@ mod tests {
             cols[0].cards[1].title.contains("v\u{2014}"),
             "an unversioned rule shows a dash, not a fabricated v1: {:?}",
             cols[0].cards[1].title
+        );
+    }
+
+    /// The card carries the #27 collaborator / subscriber counts and the lock,
+    /// and a LEGACY row (no `access_mode`, both counts zero) carries none of
+    /// them — a pre-0064 payload must never render as a restricted rule.
+    #[test]
+    fn card_title_carries_the_actor_set_badges() {
+        let mut shared = autopilot("ap-1", "daily", true);
+        shared.collaborator_count = 3;
+        shared.subscriber_count = 2;
+        shared.access_mode = Some("restricted".into());
+
+        let mut open_rule = autopilot("ap-2", "nightly", true);
+        open_rule.subscriber_count = 1;
+        open_rule.access_mode = Some("open".into());
+
+        // Exactly what a pre-0064 daemon sends: the three fields absent.
+        let legacy = autopilot("ap-3", "legacy", true);
+        assert_eq!(legacy.collaborator_count, 0);
+        assert_eq!(legacy.subscriber_count, 0);
+        assert_eq!(legacy.access_mode, None);
+
+        let state = AutopilotsState::new(vec![shared, open_rule, legacy]);
+        let cards = &state.board_columns()[0].cards;
+
+        assert!(cards[0].title.contains("👥3"), "{:?}", cards[0].title);
+        assert!(cards[0].title.contains("🔔2"), "{:?}", cards[0].title);
+        assert!(cards[0].title.contains('🔒'), "{:?}", cards[0].title);
+
+        assert!(cards[1].title.contains("🔔1"), "{:?}", cards[1].title);
+        assert!(
+            !cards[1].title.contains("👥"),
+            "no grants means no grant badge: {:?}",
+            cards[1].title
+        );
+        assert!(
+            !cards[1].title.contains('🔒'),
+            "an explicitly OPEN rule carries no lock: {:?}",
+            cards[1].title
+        );
+
+        assert!(
+            !cards[2].title.contains('🔒')
+                && !cards[2].title.contains("👥")
+                && !cards[2].title.contains("🔔"),
+            "a legacy payload renders none of the #27 badges: {:?}",
+            cards[2].title
         );
     }
 

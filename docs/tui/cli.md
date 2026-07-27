@@ -4585,18 +4585,21 @@ Create and control cron-scheduled autopilots
 Usage: ainb hangar autopilot [OPTIONS] <COMMAND>
 
 Commands:
-  create       Create a cron-scheduled autopilot (rejects an invalid cron expression)
-  list         List the workspace's autopilots (cron, next tick, last run, enabled)
-  disable      Disable an autopilot so the scheduler stops firing it
-  enable       Re-enable an autopilot, recomputing its next tick from now
-  edit         Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
-  versions     Show the autopilot's rule-version ledger (who published what, when)
-  run          Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
-  api-trigger  Arm (or `--disable`) the bare programmatic `api` trigger
-  runs         List the autopilot's recent runs (status, trigger source, reason)
-  webhook      Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
-  deliveries   List the autopilot's recent webhook deliveries (audit log)
-  help         Print this message or the help of the given subcommand(s)
+  create        Create a cron-scheduled autopilot (rejects an invalid cron expression)
+  list          List the workspace's autopilots (cron, next tick, last run, enabled)
+  disable       Disable an autopilot so the scheduler stops firing it
+  enable        Re-enable an autopilot, recomputing its next tick from now
+  edit          Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
+  versions      Show the autopilot's rule-version ledger (who published what, when)
+  run           Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
+  api-trigger   Arm (or `--disable`) the bare programmatic `api` trigger
+  runs          List the autopilot's recent runs (status, trigger source, reason)
+  webhook       Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
+  deliveries    List the autopilot's recent webhook deliveries (audit log)
+  collaborator  Manage the rule's explicit WRITE-GRANT set (multica parity #27)
+  subscriber    Manage the rule's STANDING subscriber list — every issue the rule spawns auto-subscribes it (multica parity #27)
+  access        Open or restrict who may WRITE this rule (multica parity #27)
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -4929,6 +4932,67 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --limit <LIMIT>          Maximum number of deliveries to show (latest-first) [default: 20]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot collaborator`
+
+Manage the rule's explicit WRITE-GRANT set (multica parity #27)
+
+```console
+$ ainb hangar autopilot collaborator --help
+Manage the rule's explicit WRITE-GRANT set (multica parity #27)
+
+Usage: ainb hangar autopilot collaborator [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add an actor to the set (idempotent; a re-add keeps the FIRST grant)
+  remove  Remove an actor from the set (idempotent)
+  list    List the set, oldest first
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar autopilot subscriber`
+
+Manage the rule's STANDING subscriber list — every issue the rule spawns auto-subscribes it (multica parity #27)
+
+```console
+$ ainb hangar autopilot subscriber --help
+Manage the rule's STANDING subscriber list — every issue the rule spawns auto-subscribes it (multica parity #27)
+
+Usage: ainb hangar autopilot subscriber [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add an actor to the set (idempotent; a re-add keeps the FIRST grant)
+  remove  Remove an actor from the set (idempotent)
+  list    List the set, oldest first
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar autopilot access`
+
+Open or restrict who may WRITE this rule (multica parity #27)
+
+```console
+$ ainb hangar autopilot access --help
+Open or restrict who may WRITE this rule (multica parity #27)
+
+Usage: ainb hangar autopilot access [OPTIONS] --id <ID> --mode <MODE>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --id <ID>                The autopilot id (`autopilot.id`)
+      --mode <MODE>            `open` (any actor in the workspace may write — the default and every pre-0064 rule) or `restricted` (owner / workspace owner+admin / an explicit `editor` collaborator only)
+      --as-user <AS_USER>      The acting human (write gate subject + rule-version attribution)
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```

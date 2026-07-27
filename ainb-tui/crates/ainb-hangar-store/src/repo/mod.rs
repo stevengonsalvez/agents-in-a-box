@@ -12,6 +12,7 @@ pub mod agent_runtime;
 pub mod atc_instance;
 pub mod attention;
 pub mod autopilot;
+pub mod autopilot_access;
 pub mod autopilot_rule_version;
 pub mod autopilot_run;
 pub mod autopilot_webhook;

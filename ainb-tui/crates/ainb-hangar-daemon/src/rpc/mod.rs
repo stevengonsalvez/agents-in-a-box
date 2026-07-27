@@ -75,6 +75,12 @@ const METHOD_NOT_FOUND: i32 = -32601;
 const INVALID_PARAMS: i32 = -32602;
 /// JSON-RPC "internal error" code (spec-reserved) — used for store faults.
 const INTERNAL_ERROR: i32 = -32603;
+/// Application-defined "forbidden": the caller is well-formed and the target
+/// exists, but this actor may not perform the mutation (multica parity #27's
+/// restricted-mode autopilot write gate). Inside the JSON-RPC
+/// implementation-defined server-error band, deliberately distinct from
+/// `INVALID_PARAMS` so a UI can tell "you may not" from "you asked wrong".
+const PERMISSION_DENIED: i32 = -32000;
 /// Soft cap on one request body. Snapshot requests are tiny.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
 
@@ -761,7 +767,14 @@ async fn handle(
         | methods::HANGAR_AUTOPILOT_TRIGGER_API
         | methods::HANGAR_AUTOPILOT_SET_API_TRIGGER
         | methods::HANGAR_AUTOPILOT_UPDATE
-        | methods::HANGAR_AUTOPILOT_VERSIONS => handle_autopilot(pool, req, events).await,
+        | methods::HANGAR_AUTOPILOT_VERSIONS
+        | methods::HANGAR_AUTOPILOT_SET_ACCESS_MODE
+        | methods::HANGAR_AUTOPILOT_COLLABORATOR_ADD
+        | methods::HANGAR_AUTOPILOT_COLLABORATOR_REMOVE
+        | methods::HANGAR_AUTOPILOT_COLLABORATORS
+        | methods::HANGAR_AUTOPILOT_SUBSCRIBER_ADD
+        | methods::HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE
+        | methods::HANGAR_AUTOPILOT_SUBSCRIBERS => handle_autopilot(pool, req, events).await,
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_TASK_RETRY => handle_task_retry(pool, req, events).await,
@@ -7460,6 +7473,10 @@ async fn handle_autopilot(
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
             let actor = member_actor(params.actor_user_id.as_deref());
+            // multica parity #27: the restricted-mode write gate, at the
+            // request seam, after the tenant guard + actor resolution and
+            // BEFORE the repo seam.
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
             snapshots::autopilot_set_enabled(
                 pool,
                 &SystemClock,
@@ -7551,6 +7568,10 @@ async fn handle_autopilot(
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
             let actor = member_actor(params.actor_user_id.as_deref());
+            // multica parity #27: the restricted-mode write gate, at the
+            // request seam, after the tenant guard + actor resolution and
+            // BEFORE the repo seam.
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
             let updated = snapshots::autopilot_set_api_trigger(
                 pool,
                 &SystemClock,
@@ -7581,6 +7602,10 @@ async fn handle_autopilot(
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
             let actor = member_actor(params.actor_user_id.as_deref());
+            // multica parity #27: the restricted-mode write gate, at the
+            // request seam, after the tenant guard + actor resolution and
+            // BEFORE the repo seam.
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
 
             // `clear_instructions` is the explicit "set to NULL" signal: JSON
             // cannot distinguish an omitted key from an explicit null in an
@@ -7607,6 +7632,11 @@ async fn handle_autopilot(
                     .concurrency_policy
                     .as_deref()
                     .map(ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::from_db_str),
+                // Deliberately NOT settable through the generic patch:
+                // `hangar/autopilot_set_access_mode` is the one door, so the
+                // write gate below can never be widened by the same call that
+                // it is guarding.
+                access_mode: None,
             };
 
             let result = match snapshots::autopilot_update(
@@ -7670,12 +7700,275 @@ async fn handle_autopilot(
             };
             to_value(&ainb_hangar_proto::snapshots::AutopilotVersionsResult { versions })
         }
+        methods::HANGAR_AUTOPILOT_SET_ACCESS_MODE => {
+            let params: ainb_hangar_proto::snapshots::AutopilotSetAccessModeParams =
+                parse_params(req, "{ workspace_id, autopilot_id, access_mode }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            let actor = member_actor(params.actor_user_id.as_deref());
+            // A typo must never quietly leave a rule world-writable, so this
+            // one token is validated rather than tolerantly coerced.
+            let mode = match params.access_mode.as_str() {
+                "open" => ainb_hangar_store::repo::autopilot::AccessMode::Open,
+                "restricted" => ainb_hangar_store::repo::autopilot::AccessMode::Restricted,
+                other => {
+                    return Err(invalid_params(&format!(
+                        "access_mode must be `open` or `restricted`, got `{other}`"
+                    )));
+                }
+            };
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
+
+            let edit = ainb_hangar_store::repo::autopilot::AutopilotEdit {
+                access_mode: Some(mode),
+                ..Default::default()
+            };
+            let result = match snapshots::autopilot_update(
+                pool,
+                &SystemClock,
+                &ws,
+                &id,
+                &edit,
+                actor.as_ref(),
+            )
+            .await
+            {
+                Ok(ainb_hangar_store::repo::autopilot::UpdateOutcome::NotFound) => {
+                    ainb_hangar_proto::snapshots::AutopilotUpdateResult {
+                        outcome: "not_found".to_string(),
+                        version: None,
+                    }
+                }
+                Ok(ainb_hangar_store::repo::autopilot::UpdateOutcome::Updated { version }) => {
+                    if let Ok(rows) = snapshots::autopilots_list(pool, &ws).await {
+                        if let Some(row) = rows.into_iter().find(|r| r.id == id.as_str()) {
+                            events.emit(
+                                ws.as_str(),
+                                ainb_hangar_proto::events::HangarEvent::AutopilotUpdated(row),
+                            );
+                        }
+                    }
+                    ainb_hangar_proto::snapshots::AutopilotUpdateResult {
+                        outcome: "updated".to_string(),
+                        version,
+                    }
+                }
+                Err(e) => return Err(autopilot_repo_err(&e)),
+            };
+            to_value(&result)
+        }
+        methods::HANGAR_AUTOPILOT_COLLABORATOR_ADD => {
+            handle_autopilot_collaborator(pool, req, Some(true)).await
+        }
+        methods::HANGAR_AUTOPILOT_COLLABORATOR_REMOVE => {
+            handle_autopilot_collaborator(pool, req, Some(false)).await
+        }
+        methods::HANGAR_AUTOPILOT_COLLABORATORS => {
+            handle_autopilot_collaborator(pool, req, None).await
+        }
+        methods::HANGAR_AUTOPILOT_SUBSCRIBER_ADD => {
+            handle_autopilot_subscriber(pool, req, Some(true)).await
+        }
+        methods::HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE => {
+            handle_autopilot_subscriber(pool, req, Some(false)).await
+        }
+        methods::HANGAR_AUTOPILOT_SUBSCRIBERS => handle_autopilot_subscriber(pool, req, None).await,
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown autopilot method: {other}"),
             data: None,
         }),
     }
+}
+
+/// The RESTRICTED-MODE write gate (multica parity #27, migration 0064).
+///
+/// Applied at the request seam — which is where the reference puts it too — for
+/// every MUTATING autopilot method, after the tenant guard and actor
+/// resolution and before the repo seam. Deliberately NOT baked into
+/// `AutopilotRepo::update_as` and friends: that would change the meaning of
+/// every legacy `actor = None` caller and would red the #14 tests that edit as
+/// a DIFFERENT human than the creator (their rules are `access_mode = 'open'`,
+/// so this gate is a no-op for them).
+///
+/// `actor = None` (no `actor_user_id` in params) stays ALLOWED: an unattributed
+/// local caller is the daemon's own / legacy path, identical to how the #14
+/// ledger treats it.
+///
+/// `hangar/autopilot_fire_now` and `hangar/autopilot_trigger_api` are
+/// deliberately NOT gated here: firing a rule is a read-side grant, not a
+/// write, and the reference judges it through a separate agent-invocation
+/// predicate (which hangar already has as `AgentRepo::can_invoke`).
+async fn autopilot_write_gate(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    id: &AutopilotId,
+    actor: Option<&ActorRef>,
+) -> Result<(), RpcError> {
+    use ainb_hangar_store::repo::autopilot_access::{WriteDecision, can_write};
+
+    let Some(actor) = actor else {
+        return Ok(());
+    };
+    match can_write(pool, workspace, id, actor).await.map_err(|e| store_err(&e))? {
+        WriteDecision::Allowed(_) => Ok(()),
+        // No such rule here: fall through so the repo seam reports its own
+        // honest `not_found` outcome. Every mutation is tenant-scoped anyway,
+        // so passing through writes nothing.
+        WriteDecision::NotFound => Ok(()),
+        WriteDecision::Denied => Err(RpcError {
+            code: PERMISSION_DENIED,
+            message: format!(
+                "actor `{actor}` may not modify autopilot `{id}` (access_mode = restricted)"
+            ),
+            data: None,
+        }),
+    }
+}
+
+/// Resolve the `(workspace, autopilot, target actor, acting actor)` tuple every
+/// #27 actor-set method shares, rejecting a foreign / unknown autopilot loudly
+/// rather than letting the repo's tenant join be a silent no-op.
+async fn autopilot_actor_target(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<(WorkspaceId, AutopilotId, ActorRef, Option<ActorRef>), RpcError> {
+    let params: ainb_hangar_proto::snapshots::AutopilotActorParams = parse_params(
+        req,
+        "{ workspace_id, autopilot_id, actor?, role?, actor_user_id? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let id = autopilot_id(&params.autopilot_id)?;
+    if ainb_hangar_store::repo::autopilot::AutopilotRepo::get(pool, &ws, &id)
+        .await
+        .map_err(|e| autopilot_repo_err(&e))?
+        .is_none()
+    {
+        return Err(invalid_params(&format!(
+            "no autopilot `{}` in this workspace",
+            params.autopilot_id
+        )));
+    }
+    let target = resolve_actor_param(params.actor.as_deref())?;
+    let acting = member_actor(params.actor_user_id.as_deref());
+    Ok((ws, id, target, acting))
+}
+
+/// `hangar/autopilot_collaborator_add` (`Some(true)`) / `_remove`
+/// (`Some(false)`) / `hangar/autopilot_collaborators` (`None`).
+///
+/// Both mutators go through the same write gate as any other rule mutation, so
+/// a non-collaborator cannot grant themselves collaboration. Every arm answers
+/// with the REFRESHED set, so a mutator needs no read-after-write round trip.
+async fn handle_autopilot_collaborator(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: Option<bool>,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::autopilot_access::{AutopilotCollaboratorRepo, CollaboratorRole};
+
+    let (ws, id, target, acting) = autopilot_actor_target(pool, req).await?;
+    if let Some(add) = add {
+        autopilot_write_gate(pool, &ws, &id, acting.as_ref()).await?;
+        let params: ainb_hangar_proto::snapshots::AutopilotActorParams =
+            parse_params(req, "{ workspace_id, autopilot_id, actor?, role? }")?;
+        if add {
+            // An unknown role token is a caller error, not a silent downgrade
+            // to viewer (which would look like the grant worked).
+            let role = match params.role.as_deref() {
+                None => CollaboratorRole::Editor,
+                Some(raw) => CollaboratorRole::parse(raw).ok_or_else(|| {
+                    invalid_params(&format!("role must be `editor` or `viewer`, got `{raw}`"))
+                })?,
+            };
+            let landed = AutopilotCollaboratorRepo::add(
+                pool,
+                ws.as_str(),
+                id.as_str(),
+                &target,
+                role,
+                acting.as_ref(),
+                SystemClock.now_ms(),
+            )
+            .await
+            .map_err(|e| store_err(&e))?;
+            // Set membership: a re-add keeps the FIRST grant, so an explicit
+            // role change is an explicit role change.
+            if !landed {
+                AutopilotCollaboratorRepo::set_role(pool, ws.as_str(), id.as_str(), &target, role)
+                    .await
+                    .map_err(|e| store_err(&e))?;
+            }
+        } else {
+            AutopilotCollaboratorRepo::remove(pool, ws.as_str(), id.as_str(), &target)
+                .await
+                .map_err(|e| store_err(&e))?;
+        }
+    }
+    autopilot_collaborators_value(pool, id.as_str()).await
+}
+
+/// `hangar/autopilot_subscriber_add` / `_remove` / `hangar/autopilot_subscribers`.
+async fn handle_autopilot_subscriber(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: Option<bool>,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::autopilot_access::AutopilotSubscriberRepo;
+
+    let (ws, id, target, acting) = autopilot_actor_target(pool, req).await?;
+    if let Some(add) = add {
+        autopilot_write_gate(pool, &ws, &id, acting.as_ref()).await?;
+        if add {
+            AutopilotSubscriberRepo::add(
+                pool,
+                ws.as_str(),
+                id.as_str(),
+                &target,
+                acting.as_ref(),
+                SystemClock.now_ms(),
+            )
+            .await
+            .map_err(|e| store_err(&e))?;
+        } else {
+            AutopilotSubscriberRepo::remove(pool, ws.as_str(), id.as_str(), &target)
+                .await
+                .map_err(|e| store_err(&e))?;
+        }
+    }
+    autopilot_subscribers_value(pool, id.as_str()).await
+}
+
+/// Build the refreshed `AutopilotCollaboratorsResult` payload for one rule.
+async fn autopilot_collaborators_value(
+    pool: &SqlitePool,
+    autopilot_id: &str,
+) -> Result<serde_json::Value, RpcError> {
+    let collaborators = crate::rpc::snapshots::autopilot_collaborator_rows(pool, autopilot_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(
+        serde_json::to_value(ainb_hangar_proto::snapshots::AutopilotCollaboratorsResult {
+            collaborators,
+        })
+        .unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Build the refreshed `AutopilotSubscribersResult` payload for one rule.
+async fn autopilot_subscribers_value(
+    pool: &SqlitePool,
+    autopilot_id: &str,
+) -> Result<serde_json::Value, RpcError> {
+    let subscribers = crate::rpc::snapshots::autopilot_subscriber_rows(pool, autopilot_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(
+        serde_json::to_value(ainb_hangar_proto::snapshots::AutopilotSubscribersResult {
+            subscribers,
+        })
+        .unwrap_or(serde_json::Value::Null),
+    )
 }
 
 /// Render an optional bare `user.id` from the wire into a canonical

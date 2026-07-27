@@ -208,6 +208,67 @@ pub const HANGAR_AUTOPILOT_UPDATE: &str = "hangar/autopilot_update";
 /// foreign autopilot id yields an empty set.
 pub const HANGAR_AUTOPILOT_VERSIONS: &str = "hangar/autopilot_versions";
 
+/// `hangar/autopilot_collaborator_add` — grant an actor WRITE access to one
+/// autopilot rule (multica parity #27, migration 0064).
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`] (`role` omitted ⇒
+/// `editor`). Result: a [`crate::snapshots::AutopilotCollaboratorsResult`] —
+/// the REFRESHED set, so a mutator needs no read-after-write round trip.
+///
+/// A grant is set membership: re-adding an existing collaborator keeps the
+/// ORIGINAL row. Itself a rule mutation, so it goes through the same
+/// restricted-mode write gate — a non-collaborator cannot grant themselves
+/// collaboration.
+pub const HANGAR_AUTOPILOT_COLLABORATOR_ADD: &str = "hangar/autopilot_collaborator_add";
+
+/// `hangar/autopilot_collaborator_remove` — revoke an actor's write grant.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`]. Result: a
+/// [`crate::snapshots::AutopilotCollaboratorsResult`]. Idempotent.
+pub const HANGAR_AUTOPILOT_COLLABORATOR_REMOVE: &str = "hangar/autopilot_collaborator_remove";
+
+/// `hangar/autopilot_collaborators` — read one rule's write-grant set.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`] (`actor` / `role`
+/// ignored). Result: a [`crate::snapshots::AutopilotCollaboratorsResult`],
+/// oldest first. Workspace-scoped: a foreign id yields an empty set.
+pub const HANGAR_AUTOPILOT_COLLABORATORS: &str = "hangar/autopilot_collaborators";
+
+/// `hangar/autopilot_subscriber_add` — add an actor to a rule's STANDING
+/// subscriber list (multica parity #27).
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`]. Result: a
+/// [`crate::snapshots::AutopilotSubscribersResult`]. Every issue the rule
+/// SPAWNS thereafter auto-subscribes this set, so a human tracking a recurring
+/// automation is notified per occurrence.
+pub const HANGAR_AUTOPILOT_SUBSCRIBER_ADD: &str = "hangar/autopilot_subscriber_add";
+
+/// `hangar/autopilot_subscriber_remove` — drop an actor from the standing list.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`]. Result: a
+/// [`crate::snapshots::AutopilotSubscribersResult`]. Idempotent. Already-spawned
+/// issues keep their own subscriber rows — a past notification is not retracted.
+pub const HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE: &str = "hangar/autopilot_subscriber_remove";
+
+/// `hangar/autopilot_subscribers` — read one rule's standing subscriber list.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`] (`actor` / `role`
+/// ignored). Result: a [`crate::snapshots::AutopilotSubscribersResult`].
+pub const HANGAR_AUTOPILOT_SUBSCRIBERS: &str = "hangar/autopilot_subscribers";
+
+/// `hangar/autopilot_set_access_mode` — open or restrict who may WRITE a rule
+/// (multica parity #27, migration 0064).
+///
+/// Params: a [`crate::snapshots::AutopilotSetAccessModeParams`]. Result: a
+/// [`crate::snapshots::AutopilotUpdateResult`] — flipping the mode is a
+/// SUBSTANTIVE publish, so it mints a rule version like any other.
+///
+/// `"open"` (the default, and every pre-0064 row) means any actor in the
+/// workspace may write, i.e. the behaviour before this method existed.
+/// `"restricted"` means the rule's owner, a workspace owner/admin, or an
+/// explicit `editor` collaborator only.
+pub const HANGAR_AUTOPILOT_SET_ACCESS_MODE: &str = "hangar/autopilot_set_access_mode";
+
 /// `hangar/tasks_list` — snapshot the task queue of a workspace for the Kanban
 /// board (P8.4).
 ///
@@ -1326,6 +1387,13 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_SET_API_TRIGGER,
     HANGAR_AUTOPILOT_UPDATE,
     HANGAR_AUTOPILOT_VERSIONS,
+    HANGAR_AUTOPILOT_COLLABORATOR_ADD,
+    HANGAR_AUTOPILOT_COLLABORATOR_REMOVE,
+    HANGAR_AUTOPILOT_COLLABORATORS,
+    HANGAR_AUTOPILOT_SUBSCRIBER_ADD,
+    HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE,
+    HANGAR_AUTOPILOT_SUBSCRIBERS,
+    HANGAR_AUTOPILOT_SET_ACCESS_MODE,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_TASK_RETRY,
@@ -1525,6 +1593,13 @@ mod tests {
             HANGAR_AUTOPILOT_SET_API_TRIGGER,
             HANGAR_AUTOPILOT_UPDATE,
             HANGAR_AUTOPILOT_VERSIONS,
+            HANGAR_AUTOPILOT_COLLABORATOR_ADD,
+            HANGAR_AUTOPILOT_COLLABORATOR_REMOVE,
+            HANGAR_AUTOPILOT_COLLABORATORS,
+            HANGAR_AUTOPILOT_SUBSCRIBER_ADD,
+            HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE,
+            HANGAR_AUTOPILOT_SUBSCRIBERS,
+            HANGAR_AUTOPILOT_SET_ACCESS_MODE,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
@@ -1607,6 +1682,13 @@ mod tests {
             HANGAR_AUTOPILOT_SET_API_TRIGGER,
             HANGAR_AUTOPILOT_UPDATE,
             HANGAR_AUTOPILOT_VERSIONS,
+            HANGAR_AUTOPILOT_COLLABORATOR_ADD,
+            HANGAR_AUTOPILOT_COLLABORATOR_REMOVE,
+            HANGAR_AUTOPILOT_COLLABORATORS,
+            HANGAR_AUTOPILOT_SUBSCRIBER_ADD,
+            HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE,
+            HANGAR_AUTOPILOT_SUBSCRIBERS,
+            HANGAR_AUTOPILOT_SET_ACCESS_MODE,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,

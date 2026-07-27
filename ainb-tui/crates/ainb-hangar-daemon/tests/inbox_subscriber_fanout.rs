@@ -210,3 +210,95 @@ async fn an_issue_with_no_subscriber_rows_still_notifies_its_participants() {
         "the participant fallback must still fire: {recipients:?}"
     );
 }
+
+/// multica parity #27: a standing AUTOPILOT subscriber ends up in the fan-out
+/// for an issue the rule SPAWNED, without ever touching that occurrence.
+///
+/// This is the end of the chain the whole item exists for: the rule's list is
+/// copied onto the spawned issue's `issue_subscriber` set at fire time, and
+/// this aggregator then reads that set. Before migration 0064 the spawned issue
+/// had NO subscriber rows at all, so `recipients_for` could only ever fall back
+/// to its participants — the agent creator alone.
+#[tokio::test]
+async fn an_autopilot_subscriber_is_notified_about_a_spawned_issue() {
+    use ainb_hangar_core::clock::FixedClock;
+    use ainb_hangar_core::ids::{AgentId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::{
+        AutopilotRepo, ConcurrencyPolicy, ExecutionMode, NewAutopilot,
+    };
+    use ainb_hangar_store::repo::autopilot_access::AutopilotSubscriberRepo;
+    use ainb_hangar_store::repo::autopilot_run::{
+        RunAttribution, RunSource, fire_autopilot_tick_with_attribution,
+    };
+
+    let (_dir, store, sink) = boot().await;
+    let clock = FixedClock(1_767_225_600_000);
+    let ws = WorkspaceId::from_str(WS_ID).unwrap();
+
+    let ap = AutopilotRepo::create(
+        store.pool(),
+        &clock,
+        &NewAutopilot {
+            workspace_id: ws.clone(),
+            agent_id: AgentId::from_str("agent-1").unwrap(),
+            name: "nightly-fanout".to_string(),
+            instructions: Some("nightly sweep".to_string()),
+            cron_expr: "0 3 * * *".to_string(),
+            max_concurrent_runs: 4,
+            execution_mode: ExecutionMode::CreateIssue,
+            concurrency_policy: ConcurrencyPolicy::Queue,
+            api_trigger_enabled: false,
+        },
+    )
+    .await
+    .expect("create autopilot");
+
+    // A human who follows the RULE, and has nothing to do with any occurrence.
+    AutopilotSubscriberRepo::add(
+        store.pool(),
+        WS_ID,
+        ap.as_str(),
+        &member("rule-watcher"),
+        None,
+        0,
+    )
+    .await
+    .expect("subscribe to the rule");
+
+    let autopilot =
+        AutopilotRepo::get(store.pool(), &ws, &ap).await.expect("get").expect("present");
+    fire_autopilot_tick_with_attribution(
+        store.pool(),
+        &clock,
+        &autopilot,
+        RunSource::Schedule,
+        &RunAttribution::RuleOwner,
+    )
+    .await
+    .expect("tick");
+
+    let issue_id: String = sqlx::query_scalar(
+        "SELECT id FROM issue WHERE origin_type = 'autopilot' AND origin_id = ?",
+    )
+    .bind(ap.as_str())
+    .fetch_one(store.pool())
+    .await
+    .expect("the spawned issue");
+
+    sqlx::query(
+        "INSERT INTO comment (id, issue_id, author_type, author_id, body, created_at) \
+         VALUES ('cm-ap', ?, 'member','carol','progress',1)",
+    )
+    .bind(&issue_id)
+    .execute(store.pool())
+    .await
+    .expect("comment on the spawned issue");
+
+    emit_comment(&sink, &issue_id, "cm-ap", "member:carol");
+    let recipients = recipients_for_issue(&store, &issue_id, 1).await;
+
+    assert!(
+        recipients.contains(&"member:rule-watcher".to_string()),
+        "a rule subscriber must be notified about a spawned issue: {recipients:?}"
+    );
+}
