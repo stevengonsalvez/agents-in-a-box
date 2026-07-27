@@ -205,6 +205,21 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
     .await
     .expect("inbox entries");
 
+    // Dispatch-attempt audit rows (migration 0058). The table carries no FK on
+    // `issue_id` on purpose, so the reap is an EXPLICIT step in the cascade —
+    // deleting it strands the rows and turns the assertion below RED. The
+    // sibling issue's attempt must survive.
+    sqlx::query(
+        "INSERT INTO dispatch_attempt \
+         (id, workspace_id, issue_id, reason, detail, source, created_at) \
+         VALUES ('da-1','ws-a','i-1','target_unavailable','no agent','manual',0), \
+                ('da-2','ws-a','i-1','already_active',NULL,'auto_run',1), \
+                ('da-sibling','ws-a','i-2','deferred',NULL,'manual',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("dispatch attempts");
+
     // Preview agrees with what the cascade is about to do.
     let preview = IssueRepo::delete_preview(pool, "ws-a", "i-1")
         .await
@@ -248,6 +263,10 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
             "SELECT COUNT(*) FROM beads_mapping WHERE hangar_id = ?",
             "beads mapping",
         ),
+        (
+            "SELECT COUNT(*) FROM dispatch_attempt WHERE issue_id = ?",
+            "dispatch attempts",
+        ),
     ] {
         let n = if what == "dependency edges" {
             sqlx::query_scalar::<_, i64>(sql)
@@ -290,6 +309,16 @@ async fn delete_cascade_removes_dependents_and_keeps_run_history() {
         .await,
         1,
         "the sibling issue's inbox entry survives"
+    );
+    assert_eq!(
+        count(
+            pool,
+            "SELECT COUNT(*) FROM dispatch_attempt WHERE issue_id = ?",
+            "i-2"
+        )
+        .await,
+        1,
+        "the sibling issue's dispatch attempt survives"
     );
     // Cost history survives, detached from the vanished task.
     let (runs, linked): (i64, i64) = (
