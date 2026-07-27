@@ -321,6 +321,27 @@ pub const HANGAR_TASK_RETRY: &str = "hangar/task_retry";
 /// daemon pushes the matching [`crate::events::HangarEvent::IssueUpdated`].
 pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
 
+/// `hangar/issues_batch_update` — apply ONE lifecycle state to N issues in a
+/// single pass, then run ONE aggregated child-done cascade (multica parity
+/// #3-rest, MUL-4155).
+///
+/// Params: [`crate::snapshots::IssuesBatchUpdateParams`]
+/// (`{ workspace_id, issue_ids, state? }`). Result:
+/// [`crate::snapshots::IssuesBatchUpdateResult`].
+///
+/// The point of the verb is the cascade: several sibling completions closing the
+/// same stage barrier produce a SINGLE parent comment naming all of them, not
+/// one comment per child. The state edits commit in one transaction so the
+/// cascade observes FINAL state, never per-child intermediate state.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_UPDATE`]: the daemon
+/// resolves the workspace and rejects a mistyped one with `INVALID_PARAMS`, and
+/// every edit is scoped by `(id, workspace_id)` so a foreign-tenant id touches
+/// no row. After the commit the daemon pushes one
+/// [`crate::events::HangarEvent::IssueUpdated`] per changed row and one
+/// [`crate::events::HangarEvent::CommentAdded`] per aggregated cascade.
+pub const HANGAR_ISSUES_BATCH_UPDATE: &str = "hangar/issues_batch_update";
+
 /// `hangar/issue_create` — create one new issue in a workspace (e38.29).
 ///
 /// Params: [`crate::snapshots::IssueCreateParams`]
@@ -1398,6 +1419,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_TASK_TRANSITION,
     HANGAR_TASK_RETRY,
     HANGAR_ISSUE_UPDATE,
+    HANGAR_ISSUES_BATCH_UPDATE,
     HANGAR_ISSUE_LABEL_ATTACH,
     HANGAR_ISSUE_LABEL_DETACH,
     HANGAR_ISSUE_CRITERION_SET,
@@ -1604,6 +1626,7 @@ mod tests {
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_ISSUES_BATCH_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
             HANGAR_ISSUE_CRITERION_SET,
@@ -1693,6 +1716,7 @@ mod tests {
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_ISSUES_BATCH_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
             HANGAR_ISSUE_CRITERION_SET,
