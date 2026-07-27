@@ -885,8 +885,9 @@ impl ScreenStates {
         &mut self,
         entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
         unread: i64,
+        recipient: String,
     ) {
-        self.inbox = InboxState::from_snapshot(entries, unread);
+        self.inbox = InboxState::from_snapshot(entries, unread, recipient);
     }
 
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
