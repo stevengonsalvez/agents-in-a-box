@@ -1666,6 +1666,15 @@ pub struct CommentAddParams {
     pub author: String,
     /// The comment body text.
     pub body: String,
+    /// The comment this one REPLIES to (`comment.id`), or `None` for a
+    /// top-level comment (migration 0067, multica parity #2-rest).
+    ///
+    /// **Append-only**: `#[serde(default)]` means a pre-2-rest client that omits
+    /// the key still decodes, and the field is skipped on the wire when unset so
+    /// the serialized shape is byte-identical to what old clients send today.
+    /// The mention router walks it for the reply-to-parent-author fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
 }
 
 /// One workspace member for the settings Members pane

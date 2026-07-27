@@ -2953,6 +2953,7 @@ pub async fn comment_add(
     issue_id: &str,
     author: &ActorRef,
     body: &str,
+    parent_id: Option<&str>,
 ) -> Result<Option<CommentRow>, sqlx::Error> {
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
@@ -2965,6 +2966,7 @@ pub async fn comment_add(
             author: author.clone(),
             body: body.to_string(),
             created_at,
+            parent_id: parent_id.map(str::to_string),
         },
     )
     .await?;

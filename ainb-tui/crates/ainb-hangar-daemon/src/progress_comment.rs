@@ -131,6 +131,7 @@ pub async fn emit_checkpoint(
         author,
         body: checkpoint.body(),
         created_at: clock.now_ms(),
+        parent_id: None,
     };
 
     match CommentRepo::insert(pool, &task.workspace_id, &comment).await {

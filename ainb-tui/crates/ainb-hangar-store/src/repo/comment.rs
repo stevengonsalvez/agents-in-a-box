@@ -36,6 +36,10 @@ pub struct NewComment {
     pub body: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The comment this one REPLIES to (`comment.id`), or `None` for a
+    /// top-level comment (migration 0067, multica `comment.parent_id`). The
+    /// mention router walks it to find the reply's parent author.
+    pub parent_id: Option<String>,
 }
 
 /// A fully-materialised `comment` row read back from the database.
@@ -53,6 +57,9 @@ pub struct Comment {
     pub body: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The comment this one replies to, or `None` at the top level
+    /// (migration 0067).
+    pub parent_id: Option<String>,
 }
 
 /// Stateless typed wrapper over the `comment` table.
@@ -105,8 +112,9 @@ impl CommentRepo {
         // target issue does not belong to `workspace_id`: a foreign-tenant (or
         // unknown) issue id matches no row in the sub-select, so zero rows insert.
         let res = sqlx::query(
-            "INSERT INTO comment (id, issue_id, author_type, author_id, body, created_at) \
-             SELECT ?, ?, ?, ?, ?, ? \
+            "INSERT INTO comment \
+             (id, issue_id, author_type, author_id, body, created_at, parent_id) \
+             SELECT ?, ?, ?, ?, ?, ?, ? \
              WHERE EXISTS (SELECT 1 FROM issue WHERE id = ? AND workspace_id = ?)",
         )
         .bind(&comment.id)
@@ -115,6 +123,7 @@ impl CommentRepo {
         .bind(author_id)
         .bind(&comment.body)
         .bind(comment.created_at)
+        .bind(&comment.parent_id)
         .bind(&comment.issue_id)
         .bind(workspace_id)
         .execute(exec)
@@ -141,7 +150,8 @@ impl CommentRepo {
         issue_id: &str,
     ) -> Result<Vec<Comment>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT c.id, c.issue_id, c.author_type, c.author_id, c.body, c.created_at \
+            "SELECT c.id, c.issue_id, c.author_type, c.author_id, c.body, c.created_at, \
+                    c.parent_id \
              FROM comment c \
              JOIN issue i ON i.id = c.issue_id \
              WHERE c.issue_id = ? AND i.workspace_id = ? \
@@ -153,7 +163,80 @@ impl CommentRepo {
         .await?;
         rows.iter().map(comment_from_row).collect()
     }
+
+    /// Read one comment by id, **workspace-scoped through the join to `issue`**.
+    ///
+    /// A comment id from another tenant resolves to `None` — the same tenant
+    /// guard [`list_by_issue`](Self::list_by_issue) enforces, so a caller
+    /// probing ids learns nothing about a foreign workspace.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails or the stored author pair is
+    /// malformed.
+    pub async fn get(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        comment_id: &str,
+    ) -> Result<Option<Comment>, sqlx::Error> {
+        let row = sqlx::query(
+            "SELECT c.id, c.issue_id, c.author_type, c.author_id, c.body, c.created_at, \
+                    c.parent_id \
+             FROM comment c \
+             JOIN issue i ON i.id = c.issue_id \
+             WHERE c.id = ? AND i.workspace_id = ?",
+        )
+        .bind(comment_id)
+        .bind(workspace_id)
+        .fetch_optional(pool)
+        .await?;
+        row.as_ref().map(comment_from_row).transpose()
+    }
+
+    /// Walk `parent_id` up from `comment_id` and return the THREAD ROOT — the
+    /// topmost ancestor that itself has no parent (multica's thread-root owner
+    /// leg of the mention fallback chain).
+    ///
+    /// Returns `None` when `comment_id` resolves to no comment in this
+    /// workspace. A comment with no parent is its own root.
+    ///
+    /// The walk is **hard-capped at [`THREAD_WALK_MAX_HOPS`] hops**. 0067's
+    /// self-FK has no cycle check (SQLite cannot express one), so a corrupt or
+    /// externally-tampered chain could otherwise spin forever inside a request
+    /// handler; the cap turns that into "the deepest ancestor we reached",
+    /// which is a strictly better failure mode than a hung daemon.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if a lookup fails.
+    pub async fn thread_root(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        comment_id: &str,
+    ) -> Result<Option<Comment>, sqlx::Error> {
+        let Some(mut current) = Self::get(pool, workspace_id, comment_id).await? else {
+            return Ok(None);
+        };
+        for _ in 0..THREAD_WALK_MAX_HOPS {
+            let Some(parent_id) = current.parent_id.clone() else {
+                break;
+            };
+            // A dangling parent pointer (0067 deliberately has no ON DELETE)
+            // stops the walk at the deepest ancestor that still exists.
+            let Some(parent) = Self::get(pool, workspace_id, &parent_id).await? else {
+                break;
+            };
+            current = parent;
+        }
+        Ok(Some(current))
+    }
 }
+
+/// The hop ceiling [`CommentRepo::thread_root`] walks before giving up.
+///
+/// Threads in practice are a handful deep; the cap exists purely so a cyclic or
+/// corrupt `parent_id` chain cannot hang a request handler.
+pub const THREAD_WALK_MAX_HOPS: usize = 32;
 
 /// Re-assemble an [`ActorRef`] from a non-null `(type, id)` author pair.
 ///
@@ -184,6 +267,7 @@ fn comment_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Comment, sqlx::Erro
         author,
         body: row.try_get("body")?,
         created_at: row.try_get("created_at")?,
+        parent_id: row.try_get("parent_id")?,
     })
 }
 
@@ -233,6 +317,7 @@ mod tests {
                 author: author(),
                 body: "first comment".into(),
                 created_at: 1234,
+                parent_id: None,
             },
         )
         .await
@@ -262,6 +347,7 @@ mod tests {
                     author: author(),
                     body: body.into(),
                     created_at: ts,
+                    parent_id: None,
                 },
             )
             .await
@@ -300,6 +386,7 @@ mod tests {
                 author: author(),
                 body: "cross-tenant".into(),
                 created_at: 1234,
+                parent_id: None,
             },
         )
         .await
@@ -310,6 +397,151 @@ mod tests {
         assert!(
             comments.is_empty(),
             "no comment leaked into the real tenant"
+        );
+    }
+
+    /// 0067 threading: a reply carries its `parent_id` through insert → read,
+    /// and `thread_root` walks a chain back to the topmost comment.
+    #[tokio::test]
+    async fn parent_id_round_trips_and_thread_root_walks_to_the_top() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_issue(store.pool(), "ws-a", "issue-a").await;
+        for (id, parent) in [("c1", None), ("c2", Some("c1")), ("c3", Some("c2"))] {
+            CommentRepo::insert(
+                store.pool(),
+                "ws-a",
+                &NewComment {
+                    id: id.into(),
+                    issue_id: "issue-a".into(),
+                    author: author(),
+                    body: id.into(),
+                    created_at: 1000,
+                    parent_id: parent.map(str::to_string),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        let c3 = CommentRepo::get(store.pool(), "ws-a", "c3").await.unwrap().unwrap();
+        assert_eq!(c3.parent_id.as_deref(), Some("c2"), "parent_id round-trips");
+
+        let root = CommentRepo::thread_root(store.pool(), "ws-a", "c3")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(root.id, "c1", "the walk reaches the parentless root");
+        assert!(root.parent_id.is_none());
+
+        // A top-level comment is its own root.
+        let self_root = CommentRepo::thread_root(store.pool(), "ws-a", "c1")
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(self_root.id, "c1");
+    }
+
+    /// A CYCLIC `parent_id` chain (which the self-FK cannot forbid) terminates
+    /// instead of hanging the caller: the hop cap is the whole point.
+    #[tokio::test]
+    async fn thread_root_terminates_on_a_cycle() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_issue(store.pool(), "ws-a", "issue-a").await;
+        for id in ["c1", "c2"] {
+            CommentRepo::insert(
+                store.pool(),
+                "ws-a",
+                &NewComment {
+                    id: id.into(),
+                    issue_id: "issue-a".into(),
+                    author: author(),
+                    body: id.into(),
+                    created_at: 1000,
+                    parent_id: None,
+                },
+            )
+            .await
+            .unwrap();
+        }
+        // c1 -> c2 -> c1. Both FKs are satisfied, so nothing at the schema level
+        // stops this; only the hop cap does.
+        sqlx::query("UPDATE comment SET parent_id = 'c2' WHERE id = 'c1'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        sqlx::query("UPDATE comment SET parent_id = 'c1' WHERE id = 'c2'")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        let root = CommentRepo::thread_root(store.pool(), "ws-a", "c1")
+            .await
+            .unwrap();
+        assert!(root.is_some(), "the walk returns rather than spinning forever");
+    }
+
+    /// Deleting a parent DETACHES its reply (0067 `ON DELETE SET NULL`) rather
+    /// than blocking the delete or cascading the reply away. This is what keeps
+    /// the bulk `DELETE FROM comment WHERE issue_id = ?` in `IssueRepo::delete`
+    /// working on a threaded issue.
+    #[tokio::test]
+    async fn deleting_a_parent_detaches_its_reply() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_issue(store.pool(), "ws-a", "issue-a").await;
+        for (id, parent) in [("c1", None), ("c2", Some("c1"))] {
+            CommentRepo::insert(
+                store.pool(),
+                "ws-a",
+                &NewComment {
+                    id: id.into(),
+                    issue_id: "issue-a".into(),
+                    author: author(),
+                    body: id.into(),
+                    created_at: 1000,
+                    parent_id: parent.map(str::to_string),
+                },
+            )
+            .await
+            .unwrap();
+        }
+        sqlx::query("DELETE FROM comment WHERE id = 'c1'")
+            .execute(store.pool())
+            .await
+            .expect("deleting a parent must not be blocked by its reply");
+        let c2 = CommentRepo::get(store.pool(), "ws-a", "c2").await.unwrap();
+        let c2 = c2.expect("the reply survives its parent");
+        assert!(c2.parent_id.is_none(), "the reply is detached, not deleted");
+    }
+
+    /// `get` is workspace-scoped: a foreign tenant cannot read the comment.
+    #[tokio::test]
+    async fn get_is_workspace_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_issue(store.pool(), "ws-a", "issue-a").await;
+        sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES ('ws-b','b','b',1)")
+            .execute(store.pool())
+            .await
+            .unwrap();
+        CommentRepo::insert(
+            store.pool(),
+            "ws-a",
+            &NewComment {
+                id: "c1".into(),
+                issue_id: "issue-a".into(),
+                author: author(),
+                body: "owner".into(),
+                created_at: 1,
+                parent_id: None,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(CommentRepo::get(store.pool(), "ws-a", "c1").await.unwrap().is_some());
+        assert!(
+            CommentRepo::get(store.pool(), "ws-b", "c1").await.unwrap().is_none(),
+            "a foreign tenant reads nothing"
         );
     }
 
@@ -335,6 +567,7 @@ mod tests {
                 author: author(),
                 body: "owner".into(),
                 created_at: 1234,
+                parent_id: None,
             },
         )
         .await

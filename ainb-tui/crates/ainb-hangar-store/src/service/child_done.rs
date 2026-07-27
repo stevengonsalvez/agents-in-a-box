@@ -294,6 +294,9 @@ pub async fn cascade_children_done(
                 author: author.clone(),
                 body: body.clone(),
                 created_at: now_ms,
+                // The cascade roll-up is a top-level comment on the parent, not
+                // a reply: it summarises a stage, it does not answer anyone.
+                parent_id: None,
             },
         )
         .await?;

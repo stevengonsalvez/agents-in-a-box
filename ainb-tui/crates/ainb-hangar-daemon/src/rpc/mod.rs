@@ -4099,6 +4099,7 @@ async fn handle_comment_add(
         &params.issue_id,
         &author,
         &params.body,
+        params.parent_id.as_deref(),
     )
     .await
     .map_err(|e| store_err(&e))?;
