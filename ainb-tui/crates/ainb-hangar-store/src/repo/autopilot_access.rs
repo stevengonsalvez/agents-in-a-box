@@ -474,6 +474,13 @@ pub enum WriteDecision {
     Allowed(AllowReason),
     /// The actor may not write.
     Denied,
+    /// There is no such autopilot in this workspace, so there is nothing to
+    /// authorise. Deliberately NOT folded into [`Self::Denied`]: a caller must
+    /// report the honest "no such rule here" rather than "you may not touch
+    /// it", which would both mislead the operator and leak that some rule with
+    /// that id exists somewhere. Tenant scoping already makes the mutation a
+    /// no-op, so a caller may pass this through to its own not-found path.
+    NotFound,
 }
 
 impl WriteDecision {
@@ -481,6 +488,13 @@ impl WriteDecision {
     #[must_use]
     pub const fn is_allowed(self) -> bool {
         matches!(self, Self::Allowed(_))
+    }
+
+    /// Whether the decision is an outright refusal (as opposed to an absent
+    /// rule, which is the caller's not-found case).
+    #[must_use]
+    pub const fn is_denied(self) -> bool {
+        matches!(self, Self::Denied)
     }
 }
 
@@ -491,8 +505,9 @@ impl WriteDecision {
 ///
 /// Resolution order:
 ///
-/// 1. the autopilot does not exist in this workspace → `Denied` (the caller
-///    reports not-found; the predicate never leaks a foreign rule's mode);
+/// 1. the autopilot does not exist in this workspace → `NotFound` (the caller
+///    reports not-found; the predicate never leaks a foreign rule's mode, and
+///    never dresses an absent rule up as a permission refusal);
 /// 2. `access_mode = 'open'` → `Allowed(ModeOpen)`;
 /// 3. the actor published rule version **1** → `Allowed(Owner)`. Owner is
 ///    DERIVED, not stored: an unversioned (pre-0061) or unattributed rule
@@ -525,7 +540,7 @@ pub async fn can_write(
             .fetch_optional(pool)
             .await?;
     let Some(mode) = mode else {
-        return Ok(WriteDecision::Denied);
+        return Ok(WriteDecision::NotFound);
     };
     if AccessMode::from_db_str(&mode) == AccessMode::Open {
         return Ok(WriteDecision::Allowed(AllowReason::ModeOpen));

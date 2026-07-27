@@ -2413,7 +2413,9 @@ async fn require_autopilot_write(
 
     let ws = WorkspaceId::from_str(workspace_id.to_string()).context("workspace id was empty")?;
     match can_write(store.pool(), &ws, id, actor).await.context("write predicate")? {
-        WriteDecision::Allowed(_) => Ok(()),
+        // No such rule here: fall through so the caller's own not-found path
+        // reports it honestly rather than as a permission refusal.
+        WriteDecision::Allowed(_) | WriteDecision::NotFound => Ok(()),
         WriteDecision::Denied => anyhow::bail!(
             "actor `{actor}` may not modify autopilot `{id}` (access_mode = restricted)"
         ),

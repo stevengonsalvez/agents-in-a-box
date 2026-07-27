@@ -7473,6 +7473,10 @@ async fn handle_autopilot(
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
             let actor = member_actor(params.actor_user_id.as_deref());
+            // multica parity #27: the restricted-mode write gate, at the
+            // request seam, after the tenant guard + actor resolution and
+            // BEFORE the repo seam.
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
             snapshots::autopilot_set_enabled(
                 pool,
                 &SystemClock,
@@ -7564,6 +7568,10 @@ async fn handle_autopilot(
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
             let actor = member_actor(params.actor_user_id.as_deref());
+            // multica parity #27: the restricted-mode write gate, at the
+            // request seam, after the tenant guard + actor resolution and
+            // BEFORE the repo seam.
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
             let updated = snapshots::autopilot_set_api_trigger(
                 pool,
                 &SystemClock,
@@ -7594,6 +7602,10 @@ async fn handle_autopilot(
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
             let actor = member_actor(params.actor_user_id.as_deref());
+            // multica parity #27: the restricted-mode write gate, at the
+            // request seam, after the tenant guard + actor resolution and
+            // BEFORE the repo seam.
+            autopilot_write_gate(pool, &ws, &id, actor.as_ref()).await?;
 
             // `clear_instructions` is the explicit "set to NULL" signal: JSON
             // cannot distinguish an omitted key from an explicit null in an
@@ -7800,6 +7812,10 @@ async fn autopilot_write_gate(
     };
     match can_write(pool, workspace, id, actor).await.map_err(|e| store_err(&e))? {
         WriteDecision::Allowed(_) => Ok(()),
+        // No such rule here: fall through so the repo seam reports its own
+        // honest `not_found` outcome. Every mutation is tenant-scoped anyway,
+        // so passing through writes nothing.
+        WriteDecision::NotFound => Ok(()),
         WriteDecision::Denied => Err(RpcError {
             code: PERMISSION_DENIED,
             message: format!(

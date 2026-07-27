@@ -254,7 +254,7 @@ async fn an_unversioned_restricted_rule_has_no_owner() {
 }
 
 #[tokio::test]
-async fn a_rule_in_another_workspace_is_denied_not_leaked() {
+async fn a_rule_in_another_workspace_is_not_found_not_denied() {
     let dir = tempfile::tempdir().expect("tempdir");
     let store = Store::open_in(dir.path()).await.expect("open store");
     seed_graph(&store).await;
@@ -273,7 +273,9 @@ async fn a_rule_in_another_workspace_is_denied_not_leaked() {
         )
         .await
         .expect("predicate"),
-        WriteDecision::Denied,
+        // NOT `Denied`: an absent rule must not be dressed up as a permission
+        // refusal, or the caller reports "you may not" for a plain typo.
+        WriteDecision::NotFound,
     );
 }
 
