@@ -1428,6 +1428,15 @@ pub enum IssueCommand {
     /// Add, remove, or list an issue's typed links to other issues.
     #[command(subcommand)]
     Link(IssueLinkCommand),
+    /// Subscribe an actor to an issue's notifications (multica parity #22).
+    Subscribe(IssueSubscribeArgs),
+    /// Unsubscribe an actor from an issue's notifications. Idempotent.
+    Unsubscribe(IssueSubscribeArgs),
+    /// List who watches an issue, with the reason each one was subscribed.
+    Subscribers(IssueSubscribersArgs),
+    /// Add, remove, or list an issue's emoji reactions.
+    #[command(subcommand)]
+    React(IssueReactCommand),
     /// Explain why an issue did (or did not) dispatch — its admission history.
     #[command(alias = "dispatch-log")]
     Why(IssueWhyArgs),
@@ -1526,6 +1535,65 @@ pub struct IssueLinkArgs {
 pub struct IssueLinkListArgs {
     /// Issue id (ULID) whose links to list.
     pub id: String,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue subscribe|unsubscribe` (multica parity #22).
+#[derive(Args, Debug)]
+pub struct IssueSubscribeArgs {
+    /// Issue id (ULID) to watch / stop watching.
+    pub id: String,
+    /// The actor, as `member:<id>` / `agent:<id>`. Defaults to the LOCAL HUMAN
+    /// (`member:me`), mirroring the reference's "the target defaults to the
+    /// caller".
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue subscribers` (multica parity #22).
+#[derive(Args, Debug)]
+pub struct IssueSubscribersArgs {
+    /// Issue id (ULID) whose watchers to list.
+    pub id: String,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// `hangar issue react <verb>` (multica parity #22).
+///
+/// An emoji reaction is unique per `(issue, actor, emoji)`, so `add` is
+/// idempotent and `remove` never errors on an absent one. Talks to the store
+/// repo directly, exactly like `issue link`, so it works with no daemon running.
+#[derive(Subcommand, Debug)]
+pub enum IssueReactCommand {
+    /// React to an issue with an emoji. Idempotent.
+    Add(IssueReactArgs),
+    /// Remove your reaction. Idempotent.
+    Remove(IssueReactArgs),
+    /// List an issue's reactions as `<emoji> <count>` buckets.
+    List(IssueSubscribersArgs),
+}
+
+/// Arguments for `hangar issue react add|remove`.
+#[derive(Args, Debug)]
+pub struct IssueReactArgs {
+    /// Issue id (ULID) to react to.
+    pub id: String,
+    /// The emoji. Required and non-blank (the reference's "emoji is required").
+    #[arg(long)]
+    pub emoji: String,
+    /// The reacting actor. Defaults to the LOCAL HUMAN (`member:me`).
+    #[arg(long)]
+    pub actor: Option<String>,
     /// Workspace slug the issue belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -4399,6 +4467,13 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
         IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
         IssueCommand::Link(cmd) => run_issue_link(&store, cmd).await,
+        IssueCommand::Subscribe(args) => run_issue_subscribe(&store, args, true).await,
+        IssueCommand::Unsubscribe(args) => run_issue_subscribe(&store, args, false).await,
+        IssueCommand::Subscribers(args) => {
+            let ws = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+            print_issue_subscribers(&store, &ws, &args.id).await
+        }
+        IssueCommand::React(cmd) => run_issue_react(&store, cmd).await,
         IssueCommand::Why(args) => run_issue_why(&store, args, format).await,
         IssueCommand::Timeline(args) => run_issue_timeline(&store, args, format).await,
     }
@@ -4635,6 +4710,167 @@ async fn run_issue_criteria(store: &Store, cmd: IssueCriteriaCommand) -> Result<
     for (idx, criterion) in issue.acceptance_criteria.iter().enumerate() {
         println!("{}", criterion_line(idx + 1, criterion));
     }
+    Ok(())
+}
+
+/// `hangar issue subscribe|unsubscribe` (multica parity #22): author an issue's
+/// subscriber set.
+///
+/// Routes through the SAME [`IssueSubscriberRepo`] seam the daemon RPC uses, so
+/// there is exactly one mutator. The actor defaults to the LOCAL HUMAN. An
+/// unknown / foreign-tenant issue is a NON-ZERO exit with the daemon's own
+/// phrasing, never a silent no-op. Prints the refreshed set afterwards.
+///
+/// [`IssueSubscriberRepo`]: ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo
+async fn run_issue_subscribe(
+    store: &Store,
+    args: IssueSubscribeArgs,
+    subscribe: bool,
+) -> Result<()> {
+    use ainb_hangar_store::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let actor = parse_actor_arg(args.actor.as_deref())?;
+    // The repo's tenant join makes a foreign / unknown issue a silent no-op, so
+    // resolve the issue FIRST and fail loudly instead.
+    require_issue_in_workspace(store, &workspace_id, &args.id).await?;
+
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    if subscribe {
+        IssueSubscriberRepo::add(
+            store.pool(),
+            &workspace_id,
+            &args.id,
+            &actor,
+            SubscribeReason::Manual,
+            now,
+        )
+        .await
+        .context("subscribe to issue")?;
+    } else {
+        IssueSubscriberRepo::remove(store.pool(), &workspace_id, &args.id, &actor)
+            .await
+            .context("unsubscribe from issue")?;
+    }
+    print_issue_subscribers(store, &workspace_id, &args.id).await
+}
+
+/// `hangar issue react add|remove|list` (multica parity #22).
+async fn run_issue_react(store: &Store, cmd: IssueReactCommand) -> Result<()> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::issue_reaction::{IssueReactionError, IssueReactionRepo};
+
+    let (id, workspace) = match &cmd {
+        IssueReactCommand::Add(a) | IssueReactCommand::Remove(a) => {
+            (a.id.clone(), a.workspace.clone())
+        }
+        IssueReactCommand::List(a) => (a.id.clone(), a.workspace.clone()),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+    require_issue_in_workspace(store, &workspace_id, &id).await?;
+
+    let map = |e: IssueReactionError| match e {
+        IssueReactionError::EmptyEmoji => anyhow::anyhow!("emoji is required"),
+        IssueReactionError::Db(db) => anyhow::Error::new(db).context("issue reaction"),
+    };
+    match &cmd {
+        IssueReactCommand::Add(args) => {
+            let actor = parse_actor_arg(args.actor.as_deref())?;
+            IssueReactionRepo::add(
+                store.pool(),
+                &workspace_id,
+                &args.id,
+                &actor,
+                &args.emoji,
+                &SystemIdGen.new_ulid(),
+                ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock),
+            )
+            .await
+            .map_err(map)?;
+        }
+        IssueReactCommand::Remove(args) => {
+            let actor = parse_actor_arg(args.actor.as_deref())?;
+            IssueReactionRepo::remove(
+                store.pool(),
+                &workspace_id,
+                &args.id,
+                &actor,
+                &args.emoji,
+            )
+            .await
+            .map_err(map)?;
+        }
+        IssueReactCommand::List(_) => {}
+    }
+    print_issue_reactions(store, &id).await
+}
+
+/// Parse an `--actor` argument, defaulting to the LOCAL HUMAN (`member:me`).
+fn parse_actor_arg(raw: Option<&str>) -> Result<ainb_hangar_core::actor::ActorRef> {
+    match raw {
+        None => Ok(ainb_hangar_core::actor::local_member()),
+        Some(token) => <ainb_hangar_core::actor::ActorRef as std::str::FromStr>::from_str(token)
+            .map_err(|e| anyhow::anyhow!("bad --actor `{token}`: {e}")),
+    }
+}
+
+/// Fail loudly when `issue_id` does not live in `workspace_id` — the repos'
+/// tenant join would otherwise turn it into a silent no-op.
+async fn require_issue_in_workspace(
+    store: &Store,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<()> {
+    let found = IssueRepo::get_by_id(store.pool(), issue_id)
+        .await
+        .context("read issue")?
+        .is_some_and(|i| i.workspace_id == workspace_id);
+    if found {
+        Ok(())
+    } else {
+        anyhow::bail!("no issue `{issue_id}` in this workspace")
+    }
+}
+
+/// Print one issue's subscriber set, one `<actor>  (<reason>)` row each.
+/// No subscribers ⇒ `no subscribers`.
+async fn print_issue_subscribers(
+    store: &Store,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<()> {
+    use ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo;
+
+    require_issue_in_workspace(store, workspace_id, issue_id).await?;
+    let subs =
+        IssueSubscriberRepo::list(store.pool(), issue_id).await.context("read subscribers")?;
+    if subs.is_empty() {
+        println!("no subscribers");
+        return Ok(());
+    }
+    for s in subs {
+        println!("{}  ({})", s.actor, s.reason_raw);
+    }
+    Ok(())
+}
+
+/// Print one issue's aggregated reactions as `<emoji> <count>`, most-used first.
+/// No reactions ⇒ `no reactions`.
+async fn print_issue_reactions(store: &Store, issue_id: &str) -> Result<()> {
+    use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
+
+    let tallies =
+        IssueReactionRepo::tallies(store.pool(), issue_id).await.context("read reactions")?;
+    if tallies.is_empty() {
+        println!("no reactions");
+        return Ok(());
+    }
+    let line = tallies
+        .iter()
+        .map(|t| format!("{} {}", t.emoji, t.count))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("{line}");
     Ok(())
 }
 
@@ -5481,6 +5717,34 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
             if issue_has_links(store, &issue.id).await? {
                 println!("Links:");
                 print_issue_links(store, &issue.workspace_id, &issue.id).await?;
+            }
+            // multica parity #22: who watches this issue and how it was reacted
+            // to — the daemon-free, TUI-free acceptance read. Silent when there
+            // are none, so existing output is unchanged.
+            {
+                use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
+                use ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo;
+
+                let subs = IssueSubscriberRepo::list(store.pool(), &issue.id)
+                    .await
+                    .context("read subscribers")?;
+                if !subs.is_empty() {
+                    println!("Subscribers: {}", subs.len());
+                    for s in &subs {
+                        println!("  {}  ({})", s.actor, s.reason_raw);
+                    }
+                }
+                let tallies = IssueReactionRepo::tallies(store.pool(), &issue.id)
+                    .await
+                    .context("read reactions")?;
+                if !tallies.is_empty() {
+                    let line = tallies
+                        .iter()
+                        .map(|t| format!("{} {}", t.emoji, t.count))
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    println!("Reactions: {line}");
+                }
             }
             // multica parity #12: WHY this card is not running, when its newest
             // admission decision was a decline. Silent on a healthy card, so
