@@ -31,20 +31,14 @@ async fn pool_at_prior_schema(dir: &std::path::Path) -> SqlitePool {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal);
-    let pool = SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool");
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.expect("open pool");
 
     let mut migrator = sqlx::migrate::Migrator::new(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
     )
     .await
     .expect("load migrations directory");
-    migrator
-        .migrations
-        .to_mut()
-        .retain(|m| m.version < NEW_MIGRATION_VERSION);
+    migrator.migrations.to_mut().retain(|m| m.version < NEW_MIGRATION_VERSION);
     assert!(
         !migrator.migrations.is_empty(),
         "prior-migration set must not be empty"

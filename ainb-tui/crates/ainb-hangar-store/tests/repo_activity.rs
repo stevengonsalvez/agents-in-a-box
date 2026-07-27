@@ -94,11 +94,13 @@ async fn records_and_reads_back_newest_first_with_id_tiebreak() {
     )
     .await;
 
-    let rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 50)
-        .await
-        .expect("list");
+    let rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 50).await.expect("list");
     let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
-    assert_eq!(ids, ["act-3", "act-2", "act-1"], "newest first, id tiebreak");
+    assert_eq!(
+        ids,
+        ["act-3", "act-2", "act-1"],
+        "newest first, id tiebreak"
+    );
 
     let status = &rows[1];
     assert_eq!(status.code(), Some(ActivityAction::StatusChanged));
@@ -158,9 +160,7 @@ async fn system_row_stores_no_actor_id() {
     )
     .await;
 
-    let rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 10)
-        .await
-        .expect("list");
+    let rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 10).await.expect("list");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].actor_type.as_deref(), Some("system"));
     assert_eq!(rows[0].actor_id, None);
@@ -184,9 +184,7 @@ async fn unknown_action_token_reads_back_raw() {
     .await
     .expect("raw insert");
 
-    let rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 10)
-        .await
-        .expect("list");
+    let rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 10).await.expect("list");
     assert_eq!(rows.len(), 1);
     assert_eq!(rows[0].action, "teleported_from_2027");
     assert_eq!(rows[0].code(), None);

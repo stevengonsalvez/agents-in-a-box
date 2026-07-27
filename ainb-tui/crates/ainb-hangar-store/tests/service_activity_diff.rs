@@ -118,13 +118,9 @@ async fn edit_and_diff(
     )
     .await;
 
-    let mut rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 100)
-        .await
-        .expect("list");
+    let mut rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 100).await.expect("list");
     rows.reverse(); // repo is newest-first; the timeline reads oldest-first
-    rows.into_iter()
-        .map(|r| (r.action.clone(), r.details_json()))
-        .collect()
+    rows.into_iter().map(|r| (r.action.clone(), r.details_json())).collect()
 }
 
 #[tokio::test]
