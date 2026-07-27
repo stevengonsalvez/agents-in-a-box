@@ -27,8 +27,9 @@
 //!
 //! # Single-key atomic writes
 //!
-//! Every mutation is one `json_set` / `json_remove` of ONE key inside one
-//! transaction. `IssueRepo::update` never touches `properties` — a whole-blob
+//! Every mutation is ONE `json_set` / `json_remove` statement addressing ONE
+//! key, so a stale caps snapshot can never cost another key its value.
+//! `IssueRepo::update` never touches `properties` — a whole-blob
 //! overwrite would race with a concurrent agent's write, which is exactly the
 //! invariant the reference states in its own handler header.
 
