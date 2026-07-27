@@ -225,18 +225,33 @@ fn set_active_unknown_id_is_invalid_params() {
 #[derive(Default)]
 struct FakeMutator {
     known_slugs: Mutex<Vec<String>>,
+    /// Stands in for the store's `workspace.creation_disabled` lockdown.
+    creation_disabled: bool,
 }
 
 impl FakeMutator {
     fn with_existing(slugs: &[&str]) -> Arc<Self> {
         Arc::new(Self {
             known_slugs: Mutex::new(slugs.iter().map(|s| (*s).to_string()).collect()),
+            creation_disabled: false,
+        })
+    }
+
+    /// The same double with the instance lockdown engaged — `create` refuses
+    /// every caller with the store's `-32008`, exactly as the sqlite mutator does.
+    fn locked_down(slugs: &[&str]) -> Arc<Self> {
+        Arc::new(Self {
+            known_slugs: Mutex::new(slugs.iter().map(|s| (*s).to_string()).collect()),
+            creation_disabled: true,
         })
     }
 }
 
 impl WorkspaceCatalogueMutator for FakeMutator {
     fn create(&self, slug: &str, name: &str) -> Result<WorkspaceInfo, RpcError> {
+        if self.creation_disabled {
+            return Err(RpcError::workspace_creation_disabled());
+        }
         let mut known = self.known_slugs.lock().unwrap();
         if known.iter().any(|s| s == slug) {
             return Err(RpcError::invalid_params("slug taken"));
@@ -256,6 +271,10 @@ impl WorkspaceCatalogueMutator for FakeMutator {
             .unwrap()
             .retain(|s| format!("01ID_{}", s.to_uppercase()) != id);
         Ok(())
+    }
+
+    fn creation_disabled(&self) -> bool {
+        self.creation_disabled
     }
 }
 
@@ -339,4 +358,64 @@ fn delete_active_workspace_is_refused() {
     // Still present — nothing was mutated.
     let list: WorkspaceListResult = serde_json::from_value(list_logic(&store)).unwrap();
     assert!(list.workspaces.iter().any(|w| w.id == "01ID_DEFAULT"));
+}
+
+/// The list result carries the lockdown hint so a plugin can hide its create
+/// affordance — and, while the flag is OFF, the serialised reply must not carry
+/// the key at all, or every existing `workspace_list` wire comparison drifts.
+#[test]
+fn list_reports_creation_disabled() {
+    let tmp = tempfile::tempdir().unwrap();
+
+    let locked = store_with_mutator(tmp.path(), FakeMutator::locked_down(&["default", "acme"]));
+    let locked_value = list_logic(&locked);
+    let list: WorkspaceListResult = serde_json::from_value(locked_value.clone()).unwrap();
+    assert!(list.creation_disabled, "the lockdown must reach the plugin");
+    assert_eq!(
+        list.workspaces.len(),
+        catalogue().len(),
+        "the lockdown hides no rows — it only hides the create affordance"
+    );
+
+    let open = store_with_mutator(tmp.path(), FakeMutator::with_existing(&["default", "acme"]));
+    let open_value = list_logic(&open);
+    let list: WorkspaceListResult = serde_json::from_value(open_value.clone()).unwrap();
+    assert!(!list.creation_disabled);
+    assert!(
+        open_value.get("creation_disabled").is_none(),
+        "an unlocked instance must serialise the pre-lockdown wire shape, got {open_value}"
+    );
+    assert!(locked_value.get("creation_disabled").is_some());
+}
+
+/// The lockdown refusal surfaces with its OWN code, so a surface can tell it
+/// apart from a bad/taken slug (`-32602`) or a host fault (`-32603`).
+///
+/// The cap gate still wins: an ungranted plugin gets `-32001` without the store
+/// ever being consulted, lockdown or not.
+#[test]
+fn create_surfaces_lockdown_code() {
+    let tmp = tempfile::tempdir().unwrap();
+    let store = store_with_mutator(tmp.path(), FakeMutator::locked_down(&["default", "acme"]));
+
+    let err = create_logic(&write_grant(), &store, "beta", "Beta")
+        .expect_err("create must be refused under lockdown");
+    assert_eq!(err.code, errors::WORKSPACE_CREATION_DISABLED);
+    assert_ne!(err.code, errors::INVALID_PARAMS);
+    assert_ne!(err.code, errors::INTERNAL_ERROR);
+
+    // …and nothing was folded into the catalogue.
+    let list: WorkspaceListResult = serde_json::from_value(list_logic(&store)).unwrap();
+    assert!(
+        !list.workspaces.iter().any(|w| w.slug == "beta"),
+        "a refused create must not appear in the catalogue"
+    );
+
+    let denied = CapabilityGrant::default();
+    let err = create_logic(&denied, &store, "beta", "Beta").expect_err("cap gate first");
+    assert_eq!(
+        err.code,
+        errors::CAPABILITY_DENIED,
+        "the capability gate must fire before the lockdown is ever consulted"
+    );
 }
