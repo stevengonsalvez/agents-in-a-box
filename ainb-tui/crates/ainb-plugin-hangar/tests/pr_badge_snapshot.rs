@@ -23,6 +23,9 @@ use ainb_plugin_sdk::WireBuffer;
 
 fn issue_with_pr(pr_url: Option<&str>) -> IssueRow {
     IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
         origin_type: None,
         origin_id: None,
         id: IssueId::from_str("i1").unwrap(),

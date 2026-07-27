@@ -132,6 +132,9 @@ fn seeded_agents() -> serde_json::Value {
 fn seeded_issues() -> serde_json::Value {
     serde_json::to_value(IssuesListResult {
         issues: vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: IssueId::from_str("issue-1").unwrap(),

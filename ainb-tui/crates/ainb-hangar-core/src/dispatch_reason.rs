@@ -244,11 +244,7 @@ mod tests {
     use super::{DispatchReason, DispatchSource};
 
     fn serde_token(r: DispatchReason) -> String {
-        serde_json::to_value(r)
-            .expect("serialize")
-            .as_str()
-            .expect("string")
-            .to_owned()
+        serde_json::to_value(r).expect("serialize").as_str().expect("string").to_owned()
     }
 
     #[test]
@@ -257,11 +253,8 @@ mod tests {
             assert_eq!(serde_token(r), r.as_db_str(), "drift on {r:?}");
         }
         for s in DispatchSource::ALL {
-            let tok = serde_json::to_value(s)
-                .expect("serialize")
-                .as_str()
-                .expect("string")
-                .to_owned();
+            let tok =
+                serde_json::to_value(s).expect("serialize").as_str().expect("string").to_owned();
             assert_eq!(tok, s.as_db_str(), "drift on {s:?}");
         }
     }

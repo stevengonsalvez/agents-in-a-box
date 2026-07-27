@@ -531,6 +531,32 @@ pub struct IssueRow {
     /// detail card simply renders no `Links:` block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<IssueLinkRow>,
+    /// WHY this card is not running — the stable admission code of its newest
+    /// `dispatch_attempt` (multica parity #12, migration 0058), e.g.
+    /// `target_unavailable` / `runtime_offline` / `deferred` / `already_active`.
+    ///
+    /// Filled ONLY when that newest attempt is a DECLINE
+    /// (`!DispatchReason::is_dispatched()`), so the field means "why nothing is
+    /// happening" and a healthy card carries no extra bytes. `runtime_offline`
+    /// counts as a decline even though hangar does write the task row — that is
+    /// exactly the invisible-but-queued case this exists to surface.
+    ///
+    /// Kept as a raw `String` rather than the typed enum so a token from a newer
+    /// daemon renders as raw text instead of failing the decode. Append-only:
+    /// omitted from the wire when `None` (`skip_serializing_if`), so a pre-#12
+    /// snapshot decodes to `None` and a healthy row serializes byte-identically
+    /// to today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dispatch_reason: Option<String>,
+    /// The free-text specifics behind [`Self::last_dispatch_reason`] (the code is
+    /// deliberately generic — the detail names the runtime, the blockers, the
+    /// missing repo). Same append-only contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dispatch_detail: Option<String>,
+    /// When that declined attempt was recorded (epoch millis). Same append-only
+    /// contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dispatch_at: Option<i64>,
 }
 
 /// One TYPED link on an issue's detail card (multica parity #20), always stated

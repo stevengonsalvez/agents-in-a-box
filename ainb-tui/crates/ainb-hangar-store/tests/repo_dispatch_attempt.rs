@@ -188,7 +188,11 @@ async fn trim_is_scoped_to_one_issue() {
     let other = DispatchAttemptRepo::list_for_issue(store.pool(), "iss-2", 100)
         .await
         .expect("list");
-    assert_eq!(other.len(), 1, "sibling card's history must survive the trim");
+    assert_eq!(
+        other.len(),
+        1,
+        "sibling card's history must survive the trim"
+    );
 }
 
 /// Mirrors `workspace_data_isolation.rs`: a sibling tenant's attempts are never

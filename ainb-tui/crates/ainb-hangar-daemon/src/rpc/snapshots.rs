@@ -126,6 +126,9 @@ pub async fn issues_list(
             // task-detail card.
             let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
                 // row a snapshot carries and the row an event pushes agree.
                 origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -302,6 +305,9 @@ pub async fn issues_search(
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
             // row a snapshot carries and the row an event pushes agree.
             origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -1889,6 +1895,9 @@ pub async fn issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
         // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
         // row a snapshot carries and the row an event pushes agree.
         origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -2092,6 +2101,9 @@ async fn read_issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
         // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
         // row a snapshot carries and the row an event pushes agree.
         origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -2347,6 +2359,9 @@ pub async fn issue_create(
     // shows.
     let display_id = issue_display_row(pool, workspace_id, &id, prefix.as_deref()).await?;
     Ok(IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
         // ORIGIN PROVENANCE (0056): echo exactly what was just stamped, so the
         // response row and the pushed IssueCreated event stay byte-identical to
         // a later list snapshot of the same issue.

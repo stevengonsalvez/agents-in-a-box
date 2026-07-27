@@ -30,20 +30,14 @@ async fn pool_at_prior_schema(dir: &std::path::Path) -> SqlitePool {
         .create_if_missing(true)
         .foreign_keys(true)
         .journal_mode(SqliteJournalMode::Wal);
-    let pool = SqlitePoolOptions::new()
-        .connect_with(opts)
-        .await
-        .expect("open pool");
+    let pool = SqlitePoolOptions::new().connect_with(opts).await.expect("open pool");
 
     let mut migrator = sqlx::migrate::Migrator::new(
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
     )
     .await
     .expect("load migrations directory");
-    migrator
-        .migrations
-        .to_mut()
-        .retain(|m| m.version < NEW_MIGRATION_VERSION);
+    migrator.migrations.to_mut().retain(|m| m.version < NEW_MIGRATION_VERSION);
     assert!(
         !migrator.migrations.is_empty(),
         "prior-migration set must not be empty"
@@ -139,13 +133,18 @@ async fn upgrades_populated_db_and_creates_the_audit_table() {
     .execute(&pool)
     .await
     .expect("record on upgraded db");
-    let row = sqlx::query("SELECT reason, detail, task_id, source FROM dispatch_attempt WHERE id = 'att-1'")
-        .fetch_one(&pool)
-        .await
-        .expect("read back");
+    let row = sqlx::query(
+        "SELECT reason, detail, task_id, source FROM dispatch_attempt WHERE id = 'att-1'",
+    )
+    .fetch_one(&pool)
+    .await
+    .expect("read back");
     assert_eq!(row.get::<String, _>("reason"), "runtime_offline");
     assert_eq!(row.get::<String, _>("source"), "manual");
-    assert_eq!(row.get::<Option<String>, _>("task_id").as_deref(), Some("task-1"));
+    assert_eq!(
+        row.get::<Option<String>, _>("task_id").as_deref(),
+        Some("task-1")
+    );
     assert_eq!(
         row.get::<Option<String>, _>("detail").as_deref(),
         Some("rt-1 is offline")
@@ -159,11 +158,10 @@ async fn upgrades_populated_db_and_creates_the_audit_table() {
     .execute(&pool)
     .await
     .expect("default source");
-    let src: String =
-        sqlx::query_scalar("SELECT source FROM dispatch_attempt WHERE id = 'att-2'")
-            .fetch_one(&pool)
-            .await
-            .expect("read source");
+    let src: String = sqlx::query_scalar("SELECT source FROM dispatch_attempt WHERE id = 'att-2'")
+        .fetch_one(&pool)
+        .await
+        .expect("read source");
     assert_eq!(src, "manual");
 
     assert!(

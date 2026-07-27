@@ -2545,6 +2545,9 @@ mod tests {
 
         let issues = IssuesListResult {
             issues: vec![IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("i1").unwrap(),

@@ -30,7 +30,7 @@
 //! than failing the read.
 
 use ainb_hangar_core::dispatch_reason::{DispatchReason, DispatchSource};
-use sqlx::{Row, SqlitePool, Sqlite, Transaction};
+use sqlx::{Row, Sqlite, SqlitePool, Transaction};
 
 /// How many attempts are retained per issue. The recorder trims to this on every
 /// insert (migration 0058, decision 3).
