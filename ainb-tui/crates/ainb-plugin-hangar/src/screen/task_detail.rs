@@ -1277,6 +1277,41 @@ fn render_detail_card(
         row = row.saturating_add(1);
     }
 
+    // --- Custom properties (multica parity #17). DETAIL-ONLY wire field, so a
+    //     list snapshot (and any pre-#17 daemon) leaves it empty and the card
+    //     renders byte-identically to today. ---
+    if !issue.properties.is_empty() {
+        card_field_row(buf, card_w, row, &[("Props:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for prop in &issue.properties {
+            let head = format!("  ◆ {}: ", prop.name);
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[(&head, CARD_LABEL), (&prop.value, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+    // --- Agent metadata scratch (multica parity #17). Read-only, and HIDDEN
+    //     when empty — the reference's own UI rule, so it stays quiet in the
+    //     common case. ---
+    if !issue.metadata.is_empty() {
+        card_field_row(buf, card_w, row, &[("Meta:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for entry in &issue.metadata {
+            let head = format!("  · {} = ", entry.key);
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[(&head, CARD_LABEL), (&entry.value, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
     // --- divider ---
     draw_card_divider(buf, row, card_w);
     row = row.saturating_add(1);
@@ -1536,7 +1571,9 @@ pub const fn color_for(kind: MessageKind) -> ainb_plugin_sdk::Color {
 
 #[cfg(test)]
 mod card_tests {
-    use ainb_hangar_proto::events::{IssueLinkRow, ReactionRow};
+    use ainb_hangar_proto::events::{
+        IssueLinkRow, IssueMetadataRow, IssuePropertyRow, ReactionRow,
+    };
 
     use super::*;
     use ainb_hangar_core::ids::{IssueId, TaskId};
@@ -1959,6 +1996,100 @@ mod card_tests {
         let text = painted_text(&buf);
         assert!(!text.contains("Subs:"), "no subscribers ⇒ no line: {text}");
         assert!(!text.contains("React:"), "no reactions ⇒ no line: {text}");
+    }
+
+    /// multica parity #17: an issue's resolved CUSTOM PROPERTIES render as a
+    /// `Props:` header followed by one `◆ Name: value` line per definition, in
+    /// the catalog order the daemon sent.
+    #[test]
+    fn detail_card_renders_a_props_block_in_catalog_order() {
+        let mut issue = full_issue();
+        issue.properties = vec![
+            IssuePropertyRow {
+                key: "sprint".into(),
+                name: "Sprint".into(),
+                kind: "select".into(),
+                value: "S2".into(),
+            },
+            IssuePropertyRow {
+                key: "owner".into(),
+                name: "Owner".into(),
+                kind: "text".into(),
+                value: "amy".into(),
+            },
+        ];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(squashed.contains("Props:"), "the header: {squashed}");
+        let sprint = squashed
+            .find("◆ Sprint: S2")
+            .unwrap_or_else(|| panic!("the sprint line: {squashed}"));
+        let owner = squashed
+            .find("◆ Owner: amy")
+            .unwrap_or_else(|| panic!("the owner line: {squashed}"));
+        assert!(sprint < owner, "catalog order is preserved: {squashed}");
+    }
+
+    /// multica parity #17: the AGENT METADATA scratch bag renders as a `Meta:`
+    /// header followed by one `· key = value` line per entry.
+    #[test]
+    fn detail_card_renders_a_meta_block() {
+        let mut issue = full_issue();
+        issue.metadata = vec![IssueMetadataRow {
+            key: "pr_number".into(),
+            value_json: "42".into(),
+            value: "42".into(),
+        }];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(squashed.contains("Meta:"), "the header: {squashed}");
+        assert!(
+            squashed.contains("· pr_number = 42"),
+            "the entry: {squashed}"
+        );
+    }
+
+    /// A pre-#17 daemon sends neither field, so the card renders exactly as it
+    /// does today — no `Props:` line and no `Meta:` line.
+    #[test]
+    fn detail_card_omits_props_and_meta_when_empty() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(!text.contains("Props:"), "no properties ⇒ no line: {text}");
+        assert!(!text.contains("Meta:"), "no metadata ⇒ no line: {text}");
+    }
+
+    /// DECOY: a property whose RENDERED value is empty still shows its name and
+    /// never paints a bare `◆ :` with a dangling colon.
+    #[test]
+    fn detail_card_keeps_the_name_when_a_property_value_is_empty() {
+        let mut issue = full_issue();
+        issue.properties = vec![IssuePropertyRow {
+            key: "risk".into(),
+            name: "Risk".into(),
+            kind: "text".into(),
+            value: String::new(),
+        }];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            squashed.contains("◆ Risk:"),
+            "the name survives: {squashed}"
+        );
+        assert!(
+            !squashed.contains("◆ :"),
+            "no dangling bare marker: {squashed}"
+        );
     }
 
     /// A subscriber count with the LOCAL HUMAN absent renders the count but no
