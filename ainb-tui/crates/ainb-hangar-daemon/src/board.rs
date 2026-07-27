@@ -477,10 +477,8 @@ pub async fn maybe_cascade_child_done(
     new_state: &str,
     events: &EventSink,
 ) {
-    use ainb_hangar_core::actor::ActorKind;
     use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
     use ainb_hangar_core::idgen::{IdGen as _, SystemIdGen};
-    use ainb_hangar_proto::events::{CommentRow, HangarEvent};
     use ainb_hangar_store::service::child_done::cascade_child_done;
 
     let now_ms = SystemClock.now_ms();
@@ -503,6 +501,28 @@ pub async fn maybe_cascade_child_done(
             return;
         }
     };
+    deliver_cascade(pool, ws, &cascade, now_ms, events).await;
+}
+
+/// Deliver a FIRED cascade: push its comment as a live event and wake the parent.
+///
+/// The daemon-only tail of the cascade, shared by the single-child seam
+/// ([`maybe_cascade_child_done`]) and the batch handler
+/// (`hangar/issues_batch_update`) so the two cannot drift — a batch that
+/// aggregates N completions into ONE comment must also emit exactly ONE
+/// `CommentAdded` and run exactly ONE parent wake.
+///
+/// Best-effort: the comment is already durable, so a malformed id only skips the
+/// event and a refused wake is logged, never propagated.
+pub async fn deliver_cascade(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    cascade: &ainb_hangar_store::service::child_done::ParentCascade,
+    now_ms: i64,
+    events: &EventSink,
+) {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_proto::events::{CommentRow, HangarEvent};
 
     // Push the parent's new comment so a subscribed parent-detail view refreshes
     // live (best-effort: a malformed id only skips the event, not the wake).
