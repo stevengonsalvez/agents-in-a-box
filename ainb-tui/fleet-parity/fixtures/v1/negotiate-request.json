@@ -1,0 +1,17 @@
+{
+  "id": 2,
+  "jsonrpc": "2.0",
+  "method": "fleet/negotiate",
+  "params": {
+    "client_name": "ainb-fleet-macos",
+    "client_version": "0.1.0",
+    "read_versions": {
+      "max": 1,
+      "min": 1
+    },
+    "write_versions": {
+      "max": 1,
+      "min": 1
+    }
+  }
+}

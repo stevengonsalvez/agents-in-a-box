@@ -3,6 +3,7 @@
 //! byte-identically in shape and that the error envelope matches the
 //! JSON-RPC 2.0 `{code, message, data?}` contract.
 
+use ainb_hangar_proto::fleet::{FleetProtocolRange, FleetReplayResetReason, FleetReplayState};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
 
 #[test]
@@ -92,4 +93,52 @@ fn error_envelope_carries_code_and_message() {
     let decoded: RpcError =
         serde_json::from_value(serde_json::to_value(&err2).expect("encode")).expect("decode");
     assert_eq!(decoded, err2);
+}
+
+#[test]
+fn fleet_protocol_range_rejects_invalid_bounds() {
+    assert!(!FleetProtocolRange { min: 0, max: 1 }.is_valid());
+    assert!(!FleetProtocolRange { min: 2, max: 1 }.is_valid());
+    assert!(FleetProtocolRange { min: 1, max: 1 }.is_valid());
+    assert!(FleetProtocolRange { min: 1, max: 2 }.contains(1));
+    assert!(!FleetProtocolRange { min: 1, max: 2 }.contains(3));
+}
+
+#[test]
+fn replay_state_round_trips_each_valid_tagged_variant() {
+    for value in [
+        FleetReplayState::Complete,
+        FleetReplayState::SnapshotReset {
+            reason: FleetReplayResetReason::Bootstrap,
+        },
+        FleetReplayState::SnapshotReset {
+            reason: FleetReplayResetReason::CursorAhead,
+        },
+        FleetReplayState::SnapshotReset {
+            reason: FleetReplayResetReason::ReplayLimitExceeded,
+        },
+    ] {
+        let decoded: FleetReplayState =
+            serde_json::from_value(serde_json::to_value(&value).unwrap()).unwrap();
+        assert_eq!(decoded, value);
+    }
+    assert!(
+        serde_json::from_value::<FleetReplayState>(serde_json::json!({"state":"unknown"})).is_err()
+    );
+    assert!(
+        serde_json::from_value::<FleetReplayState>(serde_json::json!({"state":"snapshot_reset"}))
+            .is_err()
+    );
+    assert!(
+        serde_json::from_value::<FleetReplayState>(
+            serde_json::json!({"state":"complete","reason":"bootstrap"})
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_value::<FleetReplayState>(
+            serde_json::json!({"state":"snapshot_reset","reason":"not_a_reason"})
+        )
+        .is_err()
+    );
 }

@@ -1,0 +1,54 @@
+{
+  "replay": [],
+  "replay_state": {
+    "reason": "bootstrap",
+    "state": "snapshot_reset"
+  },
+  "snapshot": {
+    "head_revision": 42,
+    "sessions": [
+      {
+        "attention": "ASK",
+        "attention_updated_at": 1700000000075,
+        "capabilities": {
+          "approvals": true,
+          "archive": true,
+          "continue_turn": true,
+          "interrupt": true,
+          "kill": true,
+          "restart": true,
+          "retry": true,
+          "send_prompt": true,
+          "start": false,
+          "stop": true,
+          "structured_answer": true,
+          "tmux_attach": true,
+          "tmux_text": true,
+          "verified_picker": true
+        },
+        "confidence": "HIGH",
+        "current_request": {
+          "kind": "question",
+          "opaque": "fixture"
+        },
+        "current_request_fingerprint": "sha256:request-001",
+        "cwd": "/workspace/fleet-fixture",
+        "discovered_at": 1700000000000,
+        "display_name": "Fixture Fleet",
+        "last_observed_at": 1700000000100,
+        "lifecycle": "RUNNING",
+        "lifecycle_updated_at": 1700000000050,
+        "management": "MANAGED",
+        "process_start_fingerprint": "proc-001",
+        "provenance": "authoritative",
+        "provider": "codex",
+        "provider_session_id": "provider-session-001",
+        "session_key": "fleet-session-001",
+        "tmux_target": "fleet:1.0",
+        "transport_health": "HEALTHY",
+        "updated_revision": 42,
+        "version": 7
+      }
+    ]
+  }
+}

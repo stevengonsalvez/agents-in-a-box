@@ -217,6 +217,26 @@ pub struct FleetSnapshot {
     pub sessions: Vec<FleetSessionRow>,
 }
 
+/// One session row and its current request payload from one subscription read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSessionProjectionRow {
+    /// Canonical session state.
+    pub session: FleetSessionRow,
+    /// Complete current structured request or approval, if one remains active.
+    pub current_request: Option<serde_json::Value>,
+}
+
+/// Atomic subscription baseline and bounded durable replay interval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetSubscriptionProjection {
+    /// Highest durable revision included by this projection.
+    pub head_revision: i64,
+    /// Canonical sessions and current request payloads at `head_revision`.
+    pub sessions: Vec<FleetSessionProjectionRow>,
+    /// Durable rows after the requested cursor, capped by the caller limit.
+    pub replay: Vec<FleetEventRow>,
+}
+
 /// Action receipt insert or status update.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NewActionReceipt {
@@ -349,8 +369,8 @@ impl FleetRepo {
         let revision = sqlx::query(
             "INSERT INTO fleet_event \
              (event_id, session_key, observed_at, authority, event_type, payload, \
-              session_version, applied) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+              request_fingerprint, session_version, applied) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&event.event_id)
         .bind(&event.session_key)
@@ -358,6 +378,7 @@ impl FleetRepo {
         .bind(event.authority.as_str())
         .bind(&event.event_type)
         .bind(&event.payload)
+        .bind(event.patch.current_request_fingerprint.as_ref().and_then(Clone::clone))
         .bind(session.version)
         .bind(i64::from(changed))
         .execute(&mut *tx)
@@ -504,6 +525,77 @@ impl FleetRepo {
         Ok(FleetSnapshot {
             head_revision,
             sessions,
+        })
+    }
+
+    /// Read one subscription projection in a single transaction.
+    ///
+    /// The durable head, session rows, active request bodies, and replay rows
+    /// all come from the same SQLite read transaction. Callers request one
+    /// extra replay row when they need to distinguish a full capped replay from
+    /// an over-limit cursor.
+    pub async fn subscription_projection(
+        pool: &SqlitePool,
+        after_revision: i64,
+        replay_limit: i64,
+    ) -> Result<FleetSubscriptionProjection, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        let head_revision: i64 =
+            sqlx::query_scalar("SELECT COALESCE(MAX(revision), 0) FROM fleet_event")
+                .fetch_one(&mut *tx)
+                .await?;
+        let rows = sqlx::query(SESSION_SELECT_ALL).fetch_all(&mut *tx).await?;
+        let mut sessions = Vec::with_capacity(rows.len());
+        for row in &rows {
+            let session = session_from_row(row)?;
+            let current_request =
+                if let Some(request_fingerprint) = session.current_request_fingerprint.as_deref() {
+                    sqlx::query_scalar::<_, String>(
+                        "SELECT payload FROM fleet_event \
+                     WHERE session_key = ? AND event_type IN (\
+                        'AskUserQuestion', 'PermissionRequest', \
+                        'item/tool/requestUserInput', \
+                        'item/commandExecution/requestApproval', \
+                        'item/fileChange/requestApproval', \
+                        'item/permissions/requestApproval'\
+                     ) AND request_fingerprint = ? AND applied = 1 AND revision <= ? \
+                     ORDER BY revision DESC LIMIT 1",
+                    )
+                    .bind(&session.session_key)
+                    .bind(request_fingerprint)
+                    .bind(head_revision)
+                    .fetch_optional(&mut *tx)
+                    .await?
+                    .and_then(|payload| serde_json::from_str(&payload).ok())
+                } else {
+                    None
+                };
+            sessions.push(FleetSessionProjectionRow {
+                session,
+                current_request,
+            });
+        }
+        let replay = if after_revision > 0 && after_revision < head_revision {
+            let rows = sqlx::query(
+                "SELECT revision, event_id, session_key, observed_at, authority, event_type, \
+                        payload, session_version, applied \
+                 FROM fleet_event WHERE revision > ? AND revision <= ? \
+                 ORDER BY revision ASC LIMIT ?",
+            )
+            .bind(after_revision)
+            .bind(head_revision)
+            .bind(replay_limit.max(0))
+            .fetch_all(&mut *tx)
+            .await?;
+            rows.iter().map(event_from_row).collect::<Result<_, _>>()?
+        } else {
+            Vec::new()
+        };
+        tx.commit().await?;
+        Ok(FleetSubscriptionProjection {
+            head_revision,
+            sessions,
+            replay,
         })
     }
 
@@ -1237,5 +1329,52 @@ mod tests {
         .unwrap();
         assert_eq!(cleared.session.attention_state, "NONE");
         assert_eq!(cleared.session.current_request_fingerprint, None);
+    }
+
+    #[tokio::test]
+    async fn subscription_projection_selects_payload_matching_current_request_fingerprint() {
+        let (_dir, store) = store().await;
+        let mut current = event(
+            "e-current-request",
+            "claude:s-1",
+            200,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                attention_state: Some("ASK".to_string()),
+                current_request_fingerprint: Some(Some("fnv1a64:current".to_string())),
+                ..FleetSessionPatch::default()
+            },
+        );
+        current.event_type = "AskUserQuestion".to_string();
+        current.payload = serde_json::json!({ "request": "current" }).to_string();
+        FleetRepo::apply_event(store.pool(), &current).await.unwrap();
+
+        let mut stale = event(
+            "e-stale-request",
+            "claude:s-1",
+            100,
+            ObservationAuthority::Authoritative,
+            FleetSessionPatch {
+                attention_state: Some("ASK".to_string()),
+                current_request_fingerprint: Some(Some("fnv1a64:stale".to_string())),
+                transport_health: Some("HEALTHY".to_string()),
+                ..FleetSessionPatch::default()
+            },
+        );
+        stale.event_type = "AskUserQuestion".to_string();
+        stale.payload = serde_json::json!({ "request": "stale" }).to_string();
+        let stale_result = FleetRepo::apply_event(store.pool(), &stale).await.unwrap();
+        assert!(stale_result.applied);
+        assert_eq!(
+            stale_result.session.current_request_fingerprint.as_deref(),
+            Some("fnv1a64:current")
+        );
+
+        let projection = FleetRepo::subscription_projection(store.pool(), 0, 100).await.unwrap();
+        assert_eq!(projection.sessions.len(), 1);
+        assert_eq!(
+            projection.sessions[0].current_request.as_ref().unwrap()["request"],
+            "current"
+        );
     }
 }

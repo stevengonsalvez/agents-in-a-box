@@ -266,12 +266,17 @@ pub const HANGAR_ISSUE_DELETE: &str = "hangar/issue_delete";
 pub const HANGAR_ISSUE_CANCEL_ACTIVE: &str = "hangar/issue_cancel_active";
 /// Fetch canonical Fleet snapshot and revision head.
 pub const FLEET_SNAPSHOT: &str = "fleet/snapshot";
+/// Negotiate Fleet protocol version and capability catalogue.
+pub const FLEET_NEGOTIATE: &str = "fleet/negotiate";
 /// Subscribe after a global Fleet revision.
 pub const FLEET_SUBSCRIBE: &str = "fleet/subscribe";
 /// Execute one versioned Fleet action.
 pub const FLEET_ACTION: &str = "fleet/action";
 /// Deliver text to explicit Fleet targets.
 pub const FLEET_BROADCAST: &str = "fleet/broadcast";
+
+/// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
+pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &["fleet/resync_required"];
 
 /// `hangar/issue_run` — enqueue a run of one issue WITHOUT a board (the Issues
 /// screen's create-wizard dispatch; plans/hangar-task-agent-model.md).
@@ -1233,6 +1238,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_SUBSCRIBE,
     FLEET_ACTION,
     FLEET_BROADCAST,
+    FLEET_NEGOTIATE,
 ];
 
 #[cfg(test)]
@@ -1455,6 +1461,7 @@ mod tests {
             FLEET_SUBSCRIBE,
             FLEET_ACTION,
             FLEET_BROADCAST,
+            FLEET_NEGOTIATE,
         ];
         for m in declared {
             assert!(

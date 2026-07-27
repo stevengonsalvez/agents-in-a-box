@@ -7644,7 +7644,8 @@ mod tests {
                     "payload": {},
                     "session_version": 4,
                     "applied": false
-                }]
+                }],
+                "replay_state": {"state": "complete"}
             })),
             error: None,
         };
@@ -7660,6 +7661,30 @@ mod tests {
             .expect("complete questions");
         assert_eq!(questions[0]["options"].as_array().unwrap().len(), 2);
         assert_eq!(questions[0]["multiSelect"], true);
+    }
+
+    #[test]
+    fn fleet_subscribe_decoder_accepts_every_tagged_replay_state() {
+        let states = [
+            serde_json::json!({"state": "complete"}),
+            serde_json::json!({"state": "snapshot_reset", "reason": "bootstrap"}),
+            serde_json::json!({"state": "snapshot_reset", "reason": "cursor_ahead"}),
+            serde_json::json!({"state": "snapshot_reset", "reason": "replay_limit_exceeded"}),
+        ];
+        for replay_state in states {
+            let mut plugin = HangarPlugin::new();
+            plugin.on_daemon_response(&RpcResponse {
+                jsonrpc: "2.0".into(),
+                id: RpcId::Number(FLEET_SUBSCRIBE_REQ_ID),
+                result: Some(serde_json::json!({
+                    "snapshot": {"head_revision": 7, "sessions": []},
+                    "replay": [],
+                    "replay_state": replay_state,
+                })),
+                error: None,
+            });
+            assert_eq!(plugin.screens.fleet.head_revision(), 7);
+        }
     }
 
     #[test]

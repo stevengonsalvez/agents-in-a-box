@@ -540,6 +540,135 @@ async fn subscribe_delivers_every_revision_after_snapshot_in_order() {
 }
 
 #[tokio::test]
+async fn authenticated_negotiate_reports_compatibility_and_rejects_invalid_ranges() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store, _sink) = start_server(dir.path()).await;
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+
+    let compatible = client
+        .call(
+            methods::FLEET_NEGOTIATE,
+            serde_json::json!({
+                "client_name": "rpc_fleet_test",
+                "client_version": "1",
+                "read_versions": {"min": 1, "max": 1},
+                "write_versions": {"min": 1, "max": 1}
+            }),
+        )
+        .await;
+    assert!(
+        compatible["error"].is_null(),
+        "negotiate must ack: {compatible}"
+    );
+    assert_eq!(compatible["result"]["read_compatible"], true);
+    assert_eq!(compatible["result"]["write_compatible"], true);
+    assert!(
+        compatible["result"]["capability_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|id| id == "fleet.protocol.negotiate")
+    );
+
+    let read_only = client
+        .call(
+            methods::FLEET_NEGOTIATE,
+            serde_json::json!({
+                "client_name": "rpc_fleet_test",
+                "client_version": "1",
+                "read_versions": {"min": 1, "max": 1},
+                "write_versions": {"min": 2, "max": 2}
+            }),
+        )
+        .await;
+    assert_eq!(read_only["result"]["read_compatible"], true);
+    assert_eq!(read_only["result"]["write_compatible"], false);
+
+    let invalid = client
+        .call(
+            methods::FLEET_NEGOTIATE,
+            serde_json::json!({
+                "client_name": "rpc_fleet_test",
+                "client_version": "1",
+                "read_versions": {"min": 0, "max": 1},
+                "write_versions": {"min": 1, "max": 1}
+            }),
+        )
+        .await;
+    assert_eq!(invalid["error"]["code"], -32602);
+}
+
+#[tokio::test]
+async fn subscribe_replays_nonzero_cursor_and_resets_ahead_or_over_limit_cursor() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    let payload = serde_json::json!({ "source": "hook" });
+    for index in 1..=2 {
+        apply_hook(
+            &store,
+            &sink,
+            &format!("replay-{index}"),
+            "claude",
+            "replay-session",
+            if index == 1 {
+                "SessionStart"
+            } else {
+                "UserPromptSubmit"
+            },
+            &payload,
+            400 + i64::from(index),
+        )
+        .await;
+    }
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+    let replay = client
+        .call(
+            methods::FLEET_SUBSCRIBE,
+            serde_json::json!({ "after_revision": 1 }),
+        )
+        .await;
+    assert_eq!(replay["result"]["replay_state"]["state"], "complete");
+    assert_eq!(replay["result"]["replay"].as_array().unwrap().len(), 1);
+    assert_eq!(replay["result"]["replay"][0]["revision"], 2);
+
+    let ahead = client
+        .call(
+            methods::FLEET_SUBSCRIBE,
+            serde_json::json!({ "after_revision": 3 }),
+        )
+        .await;
+    assert_eq!(ahead["result"]["replay"], serde_json::json!([]));
+    assert_eq!(ahead["result"]["replay_state"]["reason"], "cursor_ahead");
+
+    for index in 3..=1027 {
+        apply_hook(
+            &store,
+            &sink,
+            &format!("limit-{index}"),
+            "claude",
+            "replay-session",
+            "UserPromptSubmit",
+            &payload,
+            400 + i64::from(index),
+        )
+        .await;
+    }
+    let limit = client
+        .call(
+            methods::FLEET_SUBSCRIBE,
+            serde_json::json!({ "after_revision": 1 }),
+        )
+        .await;
+    assert_eq!(limit["result"]["replay"], serde_json::json!([]));
+    assert_eq!(
+        limit["result"]["replay_state"]["reason"],
+        "replay_limit_exceeded"
+    );
+}
+
+#[tokio::test]
 async fn broadcast_returns_ordered_receipt_for_every_target() {
     let dir = tempfile::tempdir().unwrap();
     let (socket, store, sink) = start_server(dir.path()).await;

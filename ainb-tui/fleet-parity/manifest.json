@@ -1,0 +1,195 @@
+{
+  "schema_version": 1,
+  "phase": "e01_exit",
+  "tui_deferral": {
+    "bead": "agents-in-a-box-afm-e01.1",
+    "gaps": [
+      "No existing tripwire drives one real TUI plugin through bootstrap, retained-cursor replay, live revision, and resync.",
+      "Current proof script needs exact tmux pane targeting because reattach-to-user-namespace creates shell window index 1.",
+      "TUI has no automatic reconnect: retained-cursor redial requires offline [s] path.",
+      "fleet/resync_required has no TUI-visible marker; runtime resync proof needs a trustworthy observable artifact.",
+      "Three isolated tmux captures do not yet exist."
+    ]
+  },
+  "capabilities": [
+    {
+      "id": "fleet.action.execute",
+      "tier": "v1",
+      "daemon_request_method": "fleet/action",
+      "expected_behavior": "Daemon accepts one versioned Fleet action and returns its durable receipt.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "not_applicable",
+        "evidence_paths": [],
+        "rationale": "AFM-E01 exposes no product writes. AFM-E03 owns the Swift action and receipt proof."
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.broadcast.execute",
+      "tier": "v1",
+      "daemon_request_method": "fleet/broadcast",
+      "expected_behavior": "Daemon sends a text broadcast to explicit Fleet session keys.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "not_applicable",
+        "evidence_paths": [],
+        "rationale": "AFM-E01 exposes no product writes. AFM-E03 owns the Swift broadcast and receipt proof."
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.protocol.negotiate",
+      "tier": "foundation",
+      "daemon_request_method": "fleet/negotiate",
+      "expected_behavior": "Daemon reports exact protocol compatibility and stable capability IDs.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "pass",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetDaemonContractTests.swift"
+        ]
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.snapshot.read",
+      "tier": "foundation",
+      "daemon_request_method": "fleet/snapshot",
+      "expected_behavior": "Daemon returns one canonical Fleet snapshot at its durable revision head.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/fleet.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "pass",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetDaemonContractTests.swift"
+        ]
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.subscription.live",
+      "tier": "foundation",
+      "daemon_request_method": "fleet/subscribe",
+      "expected_behavior": "Daemon streams live Fleet revisions after a subscription acknowledgement.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "pass",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetDaemonContractTests.swift"
+        ]
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.subscription.replay",
+      "tier": "foundation",
+      "daemon_request_method": "fleet/subscribe",
+      "expected_behavior": "Daemon either replays every missed revision or returns an explicit snapshot reset.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "pass",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetDaemonContractTests.swift"
+        ]
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.subscription.resync",
+      "tier": "foundation",
+      "daemon_request_method": "fleet/subscribe",
+      "daemon_notification_method": "fleet/resync_required",
+      "expected_behavior": "Daemon tells subscribers to resync when live delivery loses continuity.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "pass",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetProjectionReducer.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetConnectionTests.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetProjectionReducerTests.swift"
+        ]
+      },
+      "release_classification": "deferred_tui"
+    }
+  ]
+}

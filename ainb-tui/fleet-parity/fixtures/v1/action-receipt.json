@@ -1,0 +1,13 @@
+{
+  "action_fingerprint": "sha256:action-001",
+  "action_kind": "structured_answer",
+  "created_at": 1700000000200,
+  "detail": "fixture delivery",
+  "expected_version": 7,
+  "idempotency_key": "broadcast-001",
+  "request_id": "action-request-001",
+  "session_key": "fleet-session-001",
+  "session_version": 8,
+  "status": "DELIVERED",
+  "updated_at": 1700000000300
+}

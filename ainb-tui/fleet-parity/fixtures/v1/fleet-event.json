@@ -1,0 +1,13 @@
+{
+  "applied": true,
+  "event_id": "fleet-event-042",
+  "event_type": "request_raised",
+  "observed_at": 1700000000100,
+  "payload": {
+    "opaque": "fixture-event"
+  },
+  "provenance": "authoritative",
+  "revision": 42,
+  "session_key": "fleet-session-001",
+  "session_version": 7
+}

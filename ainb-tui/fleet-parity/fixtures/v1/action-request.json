@@ -1,0 +1,24 @@
+{
+  "action": {
+    "action": "structured_answer",
+    "answers": [
+      {
+        "question_id": "question-001",
+        "selected_options": [
+          "option-a"
+        ],
+        "text": "fixture answer"
+      }
+    ],
+    "request_fingerprint": "sha256:request-001",
+    "request_identity": {
+      "item_id": "item-001",
+      "request_id": 73,
+      "thread_id": "thread-001",
+      "turn_id": "turn-001"
+    }
+  },
+  "expected_version": 7,
+  "request_id": "action-request-001",
+  "session_key": "fleet-session-001"
+}

@@ -1,0 +1,8 @@
+{
+  "idempotency_key": "broadcast-001",
+  "target_keys": [
+    "fleet-session-001",
+    "fleet-session-002"
+  ],
+  "text": "fixture broadcast"
+}

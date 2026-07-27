@@ -1,0 +1,15 @@
+{
+  "capability_ids": [
+    "fleet.action.execute",
+    "fleet.broadcast.execute",
+    "fleet.protocol.negotiate",
+    "fleet.snapshot.read",
+    "fleet.subscription.live",
+    "fleet.subscription.replay",
+    "fleet.subscription.resync"
+  ],
+  "daemon_version": "fixture-daemon-1.0.0",
+  "protocol_version": 1,
+  "read_compatible": true,
+  "write_compatible": false
+}

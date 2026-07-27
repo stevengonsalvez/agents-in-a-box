@@ -270,6 +270,36 @@ async fn wrong_token_is_rejected_and_closed() {
     );
 }
 
+#[tokio::test]
+async fn invalid_frame_headers_close_authenticated_connection() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+    let cases = [
+        ("missing", b"\r\n".as_slice()),
+        (
+            "duplicate",
+            b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+        ),
+        ("malformed", b"Content-Length 2\r\n\r\n".as_slice()),
+        (
+            "unsupported",
+            b"Content-Type: application/json\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+        ),
+        ("oversized", b"Content-Length: 16777217\r\n\r\n".as_slice()),
+    ];
+    for (name, frame) in cases {
+        let mut conn = connect(&socket_path).await;
+        auth_from_file(&mut conn, dir.path()).await;
+        conn.write_all(frame).await.unwrap();
+        conn.flush().await.unwrap();
+        let mut reader = BufReader::new(&mut conn);
+        assert!(
+            read_resp_opt(&mut reader).await.is_none(),
+            "daemon must close on {name} frame header"
+        );
+    }
+}
+
 /// Anchor (b) + (c): a same-uid client (any in-test connection IS same-uid)
 /// that reads the token file and authenticates gets full RPC access — the
 /// peer-cred gate passes it and the snapshot round-trips.
