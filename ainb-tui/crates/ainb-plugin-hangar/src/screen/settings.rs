@@ -246,6 +246,15 @@ pub struct SettingsState {
     /// [`SettingsIntent::CreateWorkspace`], Esc cancels. `None` when closed
     /// (P-multica#4).
     workspace_name_input: Option<String>,
+    /// Whether this instance refuses new workspaces
+    /// (`daemon_config: workspace.creation_disabled`), read off the
+    /// `host/workspace_list` reply.
+    ///
+    /// ADVISORY: it only suppresses the "new workspace" affordance (multica hides
+    /// every Create-workspace CTA off the same `/api/config` field). The
+    /// authoritative refusal lives store-side, so a stale `false` here costs at
+    /// most one rejected RPC, never a workspace created under lockdown.
+    workspace_creation_disabled: bool,
 }
 
 /// The in-flight numeric-input overlay for editing an `Int` daemon-config knob.
@@ -306,6 +315,7 @@ impl SettingsState {
             config_sel: 0,
             config_input: None,
             workspace_name_input: None,
+            workspace_creation_disabled: false,
         }
     }
 
@@ -392,6 +402,21 @@ impl SettingsState {
     #[must_use]
     pub fn workspaces(&self) -> &[WorkspaceRow] {
         &self.workspaces
+    }
+
+    /// Record whether the host instance refuses new workspaces (from the
+    /// `host/workspace_list` reply's `creation_disabled` hint).
+    ///
+    /// Held separately from [`Self::set_workspaces`] so a caller that only has
+    /// rows cannot accidentally clear the flag.
+    pub const fn set_workspace_creation_disabled(&mut self, disabled: bool) {
+        self.workspace_creation_disabled = disabled;
+    }
+
+    /// Whether the new-workspace affordance is suppressed (for render / tests).
+    #[must_use]
+    pub const fn workspace_creation_disabled(&self) -> bool {
+        self.workspace_creation_disabled
     }
 
     /// Replace the member rows (after a `hangar/members_list` fetch). The pane is
@@ -671,7 +696,16 @@ fn workspace_delete_intent(state: &SettingsState) -> SettingsReduction {
 }
 
 /// Open the new-workspace name modal with an empty buffer (P-multica#4).
+///
+/// Inert under the instance lockdown: the modal is the ONLY way to reach
+/// [`SettingsIntent::CreateWorkspace`], so refusing to open it means the intent
+/// can never be emitted — matching multica's follow-up fix, which derived the
+/// create-intent state from the config flag so a late-arriving config could not
+/// leave a live create CTA behind.
 fn open_workspace_name_entry(state: &SettingsState) -> SettingsReduction {
+    if state.workspace_creation_disabled {
+        return unchanged(state);
+    }
     let mut next = state.clone();
     next.workspace_name_input = Some(String::new());
     no_intent(next)
@@ -1477,6 +1511,8 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
     const TEXT: Color = Color::rgb(220, 220, 230);
     // Active-workspace indicator colour (TUI palette SELECTION_GREEN).
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+    // Muted grey for the advisory lockdown marker (TUI palette MUTED_GRAY).
+    const MUTED: Color = Color::rgb(120, 120, 140);
 
     let top = 0;
     let bottom = u16::MAX;
@@ -1539,6 +1575,14 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
                 }
             }
             SettingsSection::Workspaces => {
+                // Multica hides every "Create workspace" affordance when the
+                // instance is locked down; the hangar analogue is swapping the
+                // `n new` hint for a muted marker, so the key that no longer does
+                // anything is not advertised as if it did.
+                if state.workspace_creation_disabled && row < bottom {
+                    put(buf, 4, row, "creation locked · ask for an invite", MUTED);
+                    row += 1;
+                }
                 for (i, w) in state.workspaces.iter().enumerate() {
                     if row >= bottom {
                         break;

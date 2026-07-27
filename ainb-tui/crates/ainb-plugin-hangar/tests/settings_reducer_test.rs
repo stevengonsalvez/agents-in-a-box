@@ -799,3 +799,73 @@ fn esc_aborts_key_entry_modal() {
     assert!(!out.state.key_entry_open());
     assert!(out.intent.is_none());
 }
+
+/// Under the instance lockdown the new-workspace affordance is inert: `n` on the
+/// Workspaces pane neither opens the name modal nor emits an intent, so
+/// `CreateWorkspace` is unreachable from the UI (multica hides every "Create
+/// workspace" CTA off the same config flag).
+///
+/// The decoys matter as much as the assertion: this must gate ONLY the create
+/// path, so the same test proves `n` still opens the key-entry modal on the Keys
+/// section and that `x`/`s`/`d` on Workspaces still emit their intents.
+#[test]
+fn n_on_workspaces_is_inert_under_lockdown() {
+    let mut s = workspaces_pane();
+    s.set_workspace_creation_disabled(true);
+    assert!(s.workspace_creation_disabled());
+
+    let out = reduce_settings(&s, SettingsEvent::Key('n'));
+    assert_eq!(
+        out.state.workspace_name_input(),
+        None,
+        "the name modal must not open under lockdown"
+    );
+    assert_eq!(
+        out.intent, None,
+        "no intent may be emitted under lockdown, got {:?}",
+        out.intent
+    );
+
+    // Decoy 1: the OTHER workspace verbs are untouched — the flag is
+    // creation-only.
+    for (key, label) in [('s', "switch"), ('d', "default"), ('r', "rename")] {
+        let out = reduce_settings(&s, SettingsEvent::Key(key));
+        assert!(
+            out.intent.is_some(),
+            "`{key}` ({label}) must still emit its intent under lockdown"
+        );
+    }
+    // `x` (delete) needs a non-active row selected — you can never delete the
+    // tenant you are standing in, lockdown or not.
+    let on_globex = reduce_settings(&s, SettingsEvent::Key(']')).state;
+    let out = reduce_settings(&on_globex, SettingsEvent::Key('x'));
+    assert!(
+        matches!(out.intent, Some(SettingsIntent::DeleteWorkspace(_))),
+        "`x` (delete) must still emit its intent under lockdown, got {:?}",
+        out.intent
+    );
+
+    // Decoy 2: `n` on the Keys section still opens the key-entry modal — the
+    // guard is scoped to the Workspaces section, not to the key.
+    let mut keys = state();
+    keys.set_workspace_creation_disabled(true);
+    for _ in 0..2 {
+        keys = reduce_settings(&keys, SettingsEvent::Key('j')).state;
+    }
+    assert_eq!(keys.section(), SettingsSection::Keys);
+    let out = reduce_settings(&keys, SettingsEvent::Key('n'));
+    assert!(
+        out.state.key_entry_open(),
+        "`n` on Keys must still open the key-entry modal under lockdown"
+    );
+}
+
+/// With the lockdown OFF (the default), nothing changes — the guard must not
+/// have made `n` conditional on anything else.
+#[test]
+fn n_on_workspaces_still_opens_the_modal_without_lockdown() {
+    let s = workspaces_pane();
+    assert!(!s.workspace_creation_disabled(), "default is unlocked");
+    let out = reduce_settings(&s, SettingsEvent::Key('n'));
+    assert_eq!(out.state.workspace_name_input(), Some(""));
+}

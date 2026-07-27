@@ -131,11 +131,40 @@ pub enum HangarCommand {
 ///   (persisted + validated; the checkout flow that consumes it lands later).
 #[derive(Subcommand, Debug)]
 pub enum WorkspaceCommand {
+    /// Create a new workspace (slug + display name).
+    Create(WorkspaceCreateArgs),
+    /// List every workspace on this instance.
+    List(WorkspaceListArgs),
     /// Set one or more of the workspace's config knobs.
     Config(WorkspaceConfigArgs),
     /// Show the workspace's current config.
     Show(WorkspaceShowArgs),
 }
+
+/// Arguments for `hangar workspace create`.
+///
+/// Refused when the instance has workspace creation locked down
+/// (`daemon config set workspace.creation_disabled true`, or the
+/// `HANGAR_DISABLE_WORKSPACE_CREATION` env override) — the refusal is
+/// store-side and exits non-zero.
+#[derive(Args, Debug)]
+pub struct WorkspaceCreateArgs {
+    /// Short handle for the workspace (`^[a-z0-9]+(-[a-z0-9]+)*$`), unique
+    /// host-wide.
+    #[arg(long)]
+    pub slug: String,
+    /// Human-readable display name.
+    #[arg(long)]
+    pub name: String,
+    /// Optional prefix prepended to a newly-created issue's title in this
+    /// workspace (e.g. `OPS`). Omitted leaves titles verbatim.
+    #[arg(long)]
+    pub issue_prefix: Option<String>,
+}
+
+/// Arguments for `hangar workspace list` — host-wide, so no `--workspace`.
+#[derive(Args, Debug)]
+pub struct WorkspaceListArgs {}
 
 /// Arguments for `hangar workspace config`.
 ///
@@ -3061,15 +3090,103 @@ fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow
 
 /// Dispatch the `hangar workspace` verbs against a local store (e38.21).
 ///
-/// `config` sets one or more of the workspace's agent-run config knobs (context
-/// prompt, issue prefix, repo whitelist); `show` renders the current config.
-/// Both resolve the workspace the same way the skills/member verbs do.
+/// `create` makes a workspace (refused under the instance lockdown), `list`
+/// enumerates them host-wide, `config` sets one or more of the workspace's
+/// agent-run config knobs (context prompt, issue prefix, repo whitelist), and
+/// `show` renders the current config. The scoped verbs resolve the workspace the
+/// same way the skills/member verbs do.
 async fn dispatch_workspace(cmd: WorkspaceCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
+        WorkspaceCommand::Create(args) => run_workspace_create(&store, args).await,
+        WorkspaceCommand::List(args) => run_workspace_list(&store, &args, format).await,
         WorkspaceCommand::Config(args) => run_workspace_config(&store, args).await,
         WorkspaceCommand::Show(args) => run_workspace_show(&store, args, format).await,
     }
+}
+
+/// `hangar workspace create`: validate the slug, then create the workspace + its
+/// owner member row.
+///
+/// The instance lockdown (`workspace.creation_disabled`) is enforced store-side
+/// inside `WorkspaceRepo::create`, so a locked-down instance surfaces
+/// [`WorkspaceRepoError::CreationDisabled`] here and the command exits non-zero
+/// having written nothing.
+///
+/// [`WorkspaceRepoError::CreationDisabled`]: ainb_hangar_store::repo::workspace::WorkspaceRepoError::CreationDisabled
+async fn run_workspace_create(store: &Store, args: WorkspaceCreateArgs) -> Result<()> {
+    use ainb_hangar_store::repo::workspace::{WorkspaceRepo, validate_slug};
+
+    // A create needs the bootstrap owner user to link as the new workspace's
+    // `owner` member, so seed it the way every other write verb does rather than
+    // failing "no such workspace" on a never-touched database. This is
+    // platform-owned creation and is deliberately NOT gated by the lockdown — a
+    // locked-down instance still needs its default tenant.
+    ensure_default_workspace(store).await?;
+    let slug = validate_slug(&args.slug).map_err(workspace_cli_err)?;
+    let row = WorkspaceRepo::create(
+        store.pool(),
+        &slug,
+        &args.name,
+        args.issue_prefix.as_deref(),
+    )
+    .await
+    .map_err(workspace_cli_err)?;
+    println!("created workspace {} ({})", row.slug, row.id);
+    Ok(())
+}
+
+/// `hangar workspace list`: every workspace on this instance, in creation order.
+///
+/// Host-wide (no `--workspace` scope) — it is the surface that answers "did the
+/// create land?", so it reads the `workspace` table directly rather than any
+/// per-workspace config.
+async fn run_workspace_list(
+    store: &Store,
+    _args: &WorkspaceListArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, slug, name FROM workspace ORDER BY created_at")
+            .fetch_all(store.pool())
+            .await
+            .context("list workspaces")?;
+
+    match format {
+        OutputFormat::Json => {
+            let v: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(id, slug, name)| serde_json::json!({ "id": id, "slug": slug, "name": name }))
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).context("render workspace list json")?
+            );
+        }
+        OutputFormat::Csv => {
+            println!("id,slug,name");
+            for (id, slug, name) in &rows {
+                println!("{id},{slug},{name}");
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| id | slug | name |");
+            println!("| --- | --- | --- |");
+            for (id, slug, name) in &rows {
+                println!("| {id} | {slug} | {name} |");
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no workspaces");
+            } else {
+                for (id, slug, name) in &rows {
+                    println!("{id}  {slug}  {name}");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `hangar workspace config`: overwrite one or more of the workspace's config
@@ -3175,6 +3292,10 @@ fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) 
             anyhow::anyhow!("a workspace with that slug already exists")
         }
         WorkspaceRepoError::LastWorkspace => anyhow::anyhow!("cannot delete the last workspace"),
+        WorkspaceRepoError::CreationDisabled => anyhow::anyhow!(
+            "workspace creation is disabled for this instance \
+             (unset with: ainb hangar daemon config set workspace.creation_disabled false)"
+        ),
         db @ WorkspaceRepoError::Db(_) => {
             anyhow::Error::new(db).context("workspace config mutation failed")
         }

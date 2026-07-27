@@ -49,6 +49,15 @@ pub const SECRET_BACKEND_LOCKED: i32 = -32006;
 /// dismissed the Keychain authorization prompt).
 pub const SECRET_ACCESS_DENIED: i32 = -32007;
 
+/// The host refuses new workspaces: this instance has workspace creation
+/// locked down (`daemon_config: workspace.creation_disabled`, or the
+/// `HANGAR_DISABLE_WORKSPACE_CREATION` env override).
+///
+/// Deliberately distinct from [`INVALID_PARAMS`] so a surface can tell
+/// "this instance is locked down" apart from "that slug is bad or taken"
+/// and render the right thing. Multica's 403.
+pub const WORKSPACE_CREATION_DISABLED: i32 = -32008;
+
 /// Wire shape of a JSON-RPC 2.0 error object.
 ///
 /// Carried inside a `{"jsonrpc":"2.0","id":..,"error":{..}}` envelope.
@@ -159,6 +168,16 @@ impl RpcError {
     pub fn not_implemented(reason: impl Into<String>) -> Self {
         Self::new(NOT_IMPLEMENTED, reason)
     }
+
+    /// Constructor for [`WORKSPACE_CREATION_DISABLED`] — the instance refuses
+    /// new workspaces.
+    #[must_use]
+    pub fn workspace_creation_disabled() -> Self {
+        Self::new(
+            WORKSPACE_CREATION_DISABLED,
+            "workspace creation is disabled for this instance",
+        )
+    }
 }
 
 /// Errors raised while encoding/decoding the wire protocol.
@@ -233,6 +252,7 @@ mod tests {
             NOT_IMPLEMENTED,
             SECRET_BACKEND_LOCKED,
             SECRET_ACCESS_DENIED,
+            WORKSPACE_CREATION_DISABLED,
         ];
         let mut sorted = codes.to_vec();
         sorted.sort_unstable();
@@ -247,6 +267,20 @@ mod tests {
         assert_eq!(NOT_IMPLEMENTED, -32005);
         assert_eq!(SECRET_BACKEND_LOCKED, -32006);
         assert_eq!(SECRET_ACCESS_DENIED, -32007);
+    }
+
+    /// The lockdown code is part of the wire contract — a surface branching on
+    /// `-32008` must keep matching after any renumbering, so pin the literal.
+    #[test]
+    fn workspace_creation_disabled_code_has_expected_value() {
+        assert_eq!(WORKSPACE_CREATION_DISABLED, -32008);
+        let e = RpcError::workspace_creation_disabled();
+        assert_eq!(e.code, WORKSPACE_CREATION_DISABLED);
+        assert_ne!(
+            e.code, INVALID_PARAMS,
+            "a lockdown must be distinguishable from a bad slug"
+        );
+        assert!(e.message.contains("disabled"));
     }
 
     #[test]
