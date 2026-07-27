@@ -13,3 +13,4 @@
 | 21 | #491 | 05edfd858a8ec6c815aec489001a8c095ec6b3bc | 2026-07-26 | gate green both OSes |
 | 15 | #492 | 0b4dcf13427d7c9005914f2a29f280130aca871b | 2026-07-26 | gate green both OSes |
 | 30 | #494 | 9c5cf05858b71971d20fba6a6d6b0e68231cac8f | 2026-07-27 | gate green both OSes |
+| 4-rest | #495 | 97c2b5577f9359afb5fa2bafaced584a6718c3ab | 2026-07-27 | gate green both OSes |
