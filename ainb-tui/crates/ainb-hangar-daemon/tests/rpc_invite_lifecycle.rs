@@ -8,7 +8,9 @@
 //!   re-renders from the response without a second round-trip;
 //! * a spent invitation cannot be accepted again;
 //! * `role: "owner"` is rejected;
-//! * a mistyped / foreign `workspace_id` is `INVALID_PARAMS`, never a silent no-op;
+//! * a mistyped / foreign `workspace_id` is `INVALID_PARAMS`, never a silent
+//!   no-op — including an accept that names a DIFFERENT tenant than the
+//!   invitation's own;
 //! * declining and revoking close an invite without ever adding a member.
 
 use std::time::{Duration, Instant};
@@ -419,4 +421,117 @@ async fn invite_decline_and_revoke_close_without_adding_a_member() {
         )
         .await;
     assert!(!again["error"].is_null(), "nothing left to revoke: {again}");
+}
+
+/// An accept that names a different workspace than the invitation's own is
+/// refused — the `workspace_id` on the wire is a real tenant guard, not
+/// decoration.
+///
+/// Without the guard this succeeds (the invitee still only joins the workspace
+/// they were invited to) but the response carries the WRONG workspace's member
+/// list, so the pane that made the call renders a membership that did not change.
+#[tokio::test]
+async fn invite_accept_rejects_a_foreign_workspace_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    // A second, real tenant that does NOT own the invitation.
+    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+        .bind("01HANGARFIXTUREWSB00000000")
+        .bind("other")
+        .bind("Other")
+        .bind(1_700_000_000_000_i64)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = invite_dana(&mut c).await;
+    let invitation_id = invites(&created)[0]["id"].as_str().unwrap().to_string();
+
+    let resp = c
+        .call(
+            methods::HANGAR_INVITE_ACCEPT,
+            serde_json::json!({
+                "workspace_id": "other",
+                "invitation_id": invitation_id,
+                "actor_email": "dana@example.com",
+            }),
+        )
+        .await;
+    assert!(
+        !resp["error"].is_null(),
+        "a cross-tenant accept must be rejected: {resp}"
+    );
+
+    // Nothing moved: the invitation is still pending in its own workspace and no
+    // member was added anywhere.
+    let list = c
+        .call(
+            methods::HANGAR_MEMBERS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert_eq!(members(&list).len(), 1, "no member created: {list}");
+    assert_eq!(invites(&list).len(), 1, "still pending: {list}");
+
+    // …and it still accepts correctly under its OWN workspace.
+    let ok = c
+        .call(
+            methods::HANGAR_INVITE_ACCEPT,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "invitation_id": invitation_id,
+                "actor_email": "dana@example.com",
+            }),
+        )
+        .await;
+    assert!(ok["error"].is_null(), "the real tenant still accepts: {ok}");
+    assert_eq!(members(&ok).len(), 2, "{ok}");
+}
+
+/// The same guard on decline.
+#[tokio::test]
+async fn invite_decline_rejects_a_foreign_workspace_id() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
+        .bind("01HANGARFIXTUREWSB00000000")
+        .bind("other")
+        .bind("Other")
+        .bind(1_700_000_000_000_i64)
+        .execute(store.pool())
+        .await
+        .unwrap();
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let created = invite_dana(&mut c).await;
+    let invitation_id = invites(&created)[0]["id"].as_str().unwrap().to_string();
+
+    let resp = c
+        .call(
+            methods::HANGAR_INVITE_DECLINE,
+            serde_json::json!({
+                "workspace_id": "other",
+                "invitation_id": invitation_id,
+                "actor_email": "dana@example.com",
+            }),
+        )
+        .await;
+    assert!(
+        !resp["error"].is_null(),
+        "a cross-tenant decline must be rejected: {resp}"
+    );
+
+    let list = c
+        .call(
+            methods::HANGAR_MEMBERS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert_eq!(invites(&list).len(), 1, "the invite is untouched: {list}");
 }
