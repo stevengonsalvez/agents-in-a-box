@@ -2839,6 +2839,7 @@ Commands:
   autopilot  Create and control cron-scheduled autopilots
   workspace  View + set per-workspace config (context prompt, issue prefix, repo whitelist)
   logs       Read the daemon's structured logs
+  property   Define and archive a workspace's custom issue properties
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2879,6 +2880,8 @@ Commands:
   react        Add, remove, or list an issue's emoji reactions
   why          Explain why an issue did (or did not) dispatch — its admission history
   timeline     Show one issue's activity timeline: state changes, assignments, comments
+  property     Set or clear one of the workspace's custom properties on an issue
+  meta         Read and write an issue's agent metadata scratch bag
   help         Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3302,6 +3305,48 @@ Options:
       --limit <LIMIT>          How many entries to show — the newest window, printed oldest-first [default: 200]
       --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
+```
+
+#### `ainb hangar issue property`
+
+Set or clear one of the workspace's custom properties on an issue
+
+```console
+$ ainb hangar issue property --help
+Set or clear one of the workspace's custom properties on an issue
+
+Usage: ainb hangar issue property [OPTIONS] <COMMAND>
+
+Commands:
+  set    Set ONE custom property's value on an issue
+  clear  Clear ONE custom property from an issue. Idempotent
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue meta`
+
+Read and write an issue's agent metadata scratch bag
+
+```console
+$ ainb hangar issue meta --help
+Read and write an issue's agent metadata scratch bag
+
+Usage: ainb hangar issue meta [OPTIONS] <COMMAND>
+
+Commands:
+  list    List an issue's metadata entries, key-sorted
+  get     Print ONE metadata value
+  set     Set ONE metadata key
+  delete  Delete ONE metadata key. Idempotent
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
 ```
 
 ### `ainb hangar task`
@@ -5161,6 +5206,83 @@ Options:
       --level <LEVEL>    Only show events at or above this level (`trace`/`debug`/`info`/`warn`/`error`)
       --no-follow        Print + exit even when `--follow` is set (bounded mode for tests/CI)
   -h, --help             Print help
+```
+
+### `ainb hangar property`
+
+Define and archive a workspace's custom issue properties
+
+```console
+$ ainb hangar property --help
+Define and archive a workspace's custom issue properties
+
+Usage: ainb hangar property [OPTIONS] <COMMAND>
+
+Commands:
+  define   Create or update ONE custom property definition (idempotent by key)
+  list     List the workspace's custom property catalog, in render order
+  archive  Archive (or un-archive) a definition. NEVER deletes stored values
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar property define`
+
+Create or update ONE custom property definition (idempotent by key)
+
+```console
+$ ainb hangar property define --help
+Create or update ONE custom property definition (idempotent by key)
+
+Usage: ainb hangar property define [OPTIONS] --key <KEY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --key <KEY>              Stable slug the CLI and RPC address this property by
+      --name <NAME>            Display label. Defaults to the key on a new definition; changing it is a free rename
+      --kind <KIND>            Value type: text, number, select, multi_select, date, checkbox, url
+      --option <OPTIONS>       One catalogued option (repeat). Required for select / multi_select
+      --position <POSITION>    Render order within the workspace (ascending)
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar property list`
+
+List the workspace's custom property catalog, in render order
+
+```console
+$ ainb hangar property list --help
+List the workspace's custom property catalog, in render order
+
+Usage: ainb hangar property list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --include-archived       Include archived definitions too
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar property archive`
+
+Archive (or un-archive) a definition. NEVER deletes stored values
+
+```console
+$ ainb hangar property archive --help
+Archive (or un-archive) a definition. NEVER deletes stored values
+
+Usage: ainb hangar property archive [OPTIONS] --key <KEY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --key <KEY>              The definition's stable slug
+      --unarchive              Un-archive instead: bring the definition (and its values) back
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
 ```
 
 ## `ainb rtk`
