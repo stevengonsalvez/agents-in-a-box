@@ -42,6 +42,7 @@ use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::inbox::{InboxKind, InboxRepo, NewInboxEntry};
 use ainb_hangar_store::repo::issue::IssueRepo;
+use ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo;
 use ainb_hangar_store::repo::member::MemberRepo;
 use ainb_hangar_store::repo::task::TaskRepo;
 use sqlx::SqlitePool;
@@ -161,6 +162,25 @@ async fn fallback_recipient(pool: &SqlitePool, workspace_id: &str) -> ActorRef {
         .unwrap_or_else(local_member)
 }
 
+/// The issue's SUBSCRIBER set (multica parity #22, migration 0062), falling back
+/// to the participant derivation when the issue has no subscriber rows at all.
+///
+/// The fallback is what makes the conversion upgrade-safe: an issue written by a
+/// path that predates the auto-subscribe writers (or one whose backfill found
+/// nothing) still notifies its creator and assignee, so no upgrade can silence a
+/// notification. Once ANY row exists the table is authoritative — that is how an
+/// unsubscribe actually takes effect.
+async fn issue_subscribers_or_participants(pool: &SqlitePool, issue_id: &str) -> Vec<ActorRef> {
+    match IssueSubscriberRepo::actors(pool, issue_id).await {
+        Ok(subs) if !subs.is_empty() => subs,
+        Ok(_) => issue_participants(pool, issue_id).await,
+        Err(e) => {
+            tracing::warn!(error = %e, issue_id, "inbox subscriber lookup failed");
+            issue_participants(pool, issue_id).await
+        }
+    }
+}
+
 /// The participants of an issue: its creator plus its assignee (when set).
 async fn issue_participants(pool: &SqlitePool, issue_id: &str) -> Vec<ActorRef> {
     match IssueRepo::get_by_id(pool, issue_id).await {
@@ -178,16 +198,16 @@ async fn issue_participants(pool: &SqlitePool, issue_id: &str) -> Vec<ActorRef> 
 }
 
 /// Who an aggregated event is FOR — the reference's `notifySubscribers`
-/// (participants minus the actor) plus `notifyDirect` (a targeted actor),
+/// (subscribers minus the actor) plus `notifyDirect` (a targeted actor),
 /// expressed against hangar's schema.
 ///
-/// **Deviation from multica, deliberate:** hangar has no `issue_subscriber`
-/// table, so "subscribers" is approximated by the issue's PARTICIPANTS (its
-/// creator plus its assignee) minus the actor who caused the event — you are
-/// never notified of your own action (multica
-/// `notification_listeners.go:316`). An event with no derivable participant
-/// falls back to the workspace OWNER, then to [`local_member`], so a
-/// notification is never silently dropped.
+/// Since migration 0062 (multica parity #22) "subscribers" is a REAL
+/// `issue_subscriber` read, not the participant approximation the previous
+/// revision documented: a watcher who is neither creator nor assignee now hears
+/// about a comment, and an actor who unsubscribed does not. You are still never
+/// notified of your own action (multica `notification_listeners.go:316`). An
+/// event with no derivable recipient falls back to the workspace OWNER, then to
+/// [`local_member`], so a notification is never silently dropped.
 async fn recipients_for(pool: &SqlitePool, scoped: &ScopedEvent) -> Vec<ActorRef> {
     let ws = scoped.workspace_id.as_str();
     let mut out: Vec<ActorRef> = match &scoped.event {
@@ -214,8 +234,8 @@ async fn recipients_for(pool: &SqlitePool, scoped: &ScopedEvent) -> Vec<ActorRef
         // to `notifySubscribers`.
         HangarEvent::CommentAdded(row) => {
             let author = actor(&row.author);
-            let participants = issue_participants(pool, row.issue_id.as_str()).await;
-            participants.into_iter().filter(|p| Some(p) != author.as_ref()).collect()
+            let watchers = issue_subscribers_or_participants(pool, row.issue_id.as_str()).await;
+            watchers.into_iter().filter(|p| Some(p) != author.as_ref()).collect()
         }
         // `notifyDirect` with an AGENT recipient: the agent's own work queue.
         // This is the row that proves an agent has an inbox of its own.
@@ -339,6 +359,9 @@ mod tests {
 
     fn issue_row(id: &str, title: &str) -> IssueRow {
         IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,
