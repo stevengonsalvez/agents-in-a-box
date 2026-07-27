@@ -1149,6 +1149,24 @@ fn render_detail_card(
         row = row.saturating_add(1);
     }
 
+    // --- Why this card is NOT running (multica parity #12, migration 0058):
+    //     the newest DECLINED dispatch attempt, rendered only when there is one.
+    //     A card that ran fine reads exactly as before — the whole point is that
+    //     "queued forever with no explanation" becomes a stated cause. Amber,
+    //     matching the `unstable` presence band: it is a warning, not a failure. ---
+    if let Some(line) = dispatch_decline_line(
+        issue.last_dispatch_reason.as_deref(),
+        issue.last_dispatch_detail.as_deref(),
+    ) {
+        card_field_row(
+            buf,
+            card_w,
+            row,
+            &[("⚠ Not dispatched: ", CARD_LABEL), (&line, STATUS_AMBER)],
+        );
+        row = row.saturating_add(1);
+    }
+
     // --- Acceptance criteria (0048 + #11-rest): a `Acceptance: <done>/<total>`
     //     header then one `☑`/`☐ <criterion>` line per element, rendered ONLY when
     //     non-empty so an issue without them reads unchanged (mirrors the Linked
@@ -1336,6 +1354,29 @@ fn origin_badge(origin_type: Option<&str>) -> Option<&'static str> {
         "comment_mention" => Some("💬 comment mention"),
         _ => None,
     }
+}
+
+/// The human phrase for a declined dispatch (multica parity #12): the code's
+/// [`DispatchReason::label`] plus the free-text detail, e.g.
+/// `runtime offline — task 01J… queued; runtime rt-1 is offline`.
+///
+/// Returns `None` when there is no code, so a healthy card renders no line at
+/// all. A code this build does not know falls back to the RAW token rather than
+/// hiding the line — an older plugin against a newer daemon must still tell the
+/// user something is wrong, and the detail carries the specifics regardless.
+fn dispatch_decline_line(reason: Option<&str>, detail: Option<&str>) -> Option<String> {
+    let raw = reason?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let label: &str = match ainb_hangar_core::dispatch_reason::DispatchReason::parse(raw) {
+        Some(code) => code.label(),
+        None => raw,
+    };
+    Some(match detail.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!("{label} — {d}"),
+        None => label.to_string(),
+    })
 }
 
 fn card_field_row(buf: &mut WireBuffer, card_w: u16, row: u16, segments: &[(&str, Color)]) {
@@ -1685,6 +1726,80 @@ mod card_tests {
                 "no badge for {manual:?}"
             );
         }
+    }
+
+    /// multica parity #12: a card whose newest dispatch attempt was DECLINED
+    /// renders `⚠ Not dispatched: <human label> — <detail>`, so "queued forever
+    /// with no explanation" becomes a stated cause on the card the user opens.
+    #[test]
+    fn detail_card_renders_the_not_dispatched_line() {
+        let mut issue = full_issue();
+        issue.last_dispatch_reason = Some("runtime_offline".into());
+        issue.last_dispatch_detail = Some("task 01J9 queued; runtime rt-1 is offline".into());
+        issue.last_dispatch_at = Some(1_700_000_000_000);
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(100, 40);
+        render_task_detail(&mut buf, 100, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Not dispatched: "), "label: {text}");
+        assert!(
+            text.contains("runtime offline"),
+            "the HUMAN label, not the raw token: {text}"
+        );
+        assert!(text.contains("runtime rt-1 is offline"), "detail: {text}");
+    }
+
+    /// The negative twin (mirroring `detail_card_renders_linked_line_only_when_linked`):
+    /// a healthy card paints NO such line, so the card reads exactly as it did
+    /// before parity #12.
+    #[test]
+    fn detail_card_omits_the_not_dispatched_line_when_healthy() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(100, 40);
+        render_task_detail(&mut buf, 100, 0, 39, &s);
+        assert!(
+            !painted_text(&buf).contains("Not dispatched"),
+            "a healthy card shows no dispatch warning"
+        );
+    }
+
+    /// A code this build does not know renders the RAW token rather than hiding
+    /// the line or panicking — an older plugin against a newer daemon must still
+    /// tell the user something is wrong.
+    #[test]
+    fn detail_card_renders_an_unknown_dispatch_code_verbatim() {
+        let mut issue = full_issue();
+        issue.last_dispatch_reason = Some("nonsense_code".into());
+        issue.last_dispatch_detail = Some("something new happened".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(100, 40);
+        render_task_detail(&mut buf, 100, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("Not dispatched: "),
+            "line still painted: {text}"
+        );
+        assert!(text.contains("nonsense_code"), "raw token kept: {text}");
+    }
+
+    /// The line composer itself, unit-level: known code → human label, unknown
+    /// code → raw token, empty / absent code → no line at all.
+    #[test]
+    fn dispatch_decline_line_maps_codes_and_details() {
+        assert_eq!(
+            dispatch_decline_line(Some("target_unavailable"), Some("no agent")),
+            Some("no dispatch target — no agent".to_string())
+        );
+        assert_eq!(
+            dispatch_decline_line(Some("deferred"), None),
+            Some("waiting on blockers".to_string())
+        );
+        assert_eq!(
+            dispatch_decline_line(Some("future_code"), None),
+            Some("future_code".to_string())
+        );
+        assert_eq!(dispatch_decline_line(None, Some("orphan detail")), None);
+        assert_eq!(dispatch_decline_line(Some("   "), None), None);
     }
 
     /// The badge mapper itself: only the two platform kinds earn a badge, and an

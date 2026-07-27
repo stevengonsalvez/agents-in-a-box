@@ -220,6 +220,7 @@ impl KanbanState {
                     .cards
                     .iter()
                     .map(|c| BoardCard {
+                        not_dispatched: false,
                         issue_id: c.task_id.clone(),
                         display_id: format!("#{}", c.short_id),
                         title: card_title(c, now_ms),

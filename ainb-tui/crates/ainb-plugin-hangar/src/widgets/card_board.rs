@@ -183,6 +183,11 @@ pub struct BoardCard {
     /// complete — so a parent card visibly flips to `1/1` when its last child
     /// finishes (the board-observable side of the child-done cascade).
     pub subtasks: Option<(u32, u32)>,
+    /// Whether the card's newest dispatch attempt was DECLINED (multica parity
+    /// #12, `IssueRow.last_dispatch_reason`): drives an amber `⚠` on the id line
+    /// so "this is not running, and there is a reason" is discoverable from the
+    /// board without opening the card. The reason itself is on the detail card.
+    pub not_dispatched: bool,
 }
 
 /// One status column's input to the board.
@@ -308,6 +313,9 @@ const COLUMN_BORDER: Color = Color::rgb(52, 58, 80);
 const CARD_BORDER: Color = Color::rgb(70, 80, 110);
 /// Card fill behind content: the palette panel background, one step above the
 /// app background so cards sit on a raised surface.
+/// Amber warning accent — the same band `unstable` presence uses. Marks a card
+/// whose newest dispatch attempt was declined (multica parity #12).
+const WARN_AMBER: Color = Color::rgb(230, 190, 90);
 const CARD_BG: Color = Color::rgb(30, 30, 40);
 /// Selected-card fill (the palette list-highlight background).
 const CARD_BG_SELECTED: Color = Color::rgb(40, 40, 60);
@@ -601,6 +609,18 @@ fn render_card(buf: &mut WireBuffer, rect: Rect, card: &BoardCard, selected: boo
         let glyph_x = inner_right.saturating_sub(1);
         if glyph_x >= inner_x {
             put_char_bg(buf, glyph_x, id_y, '⧉', ID_ACCENT, fill, inner_right);
+        }
+    }
+    // multica parity #12: an amber `⚠` immediately after the display id marks a
+    // card whose newest dispatch attempt was DECLINED. Placed left (beside the id)
+    // rather than flush-right so it never contends with the `⧉` link glyph, and so
+    // a card can carry both.
+    if card.not_dispatched {
+        let glyph_x = inner_x.saturating_add(
+            u16::try_from(card.display_id.chars().count().min(usize::from(inner_w))).unwrap_or(0),
+        );
+        if glyph_x < inner_right {
+            put_char_bg(buf, glyph_x, id_y, '⚠', WARN_AMBER, fill, inner_right);
         }
     }
 
@@ -948,6 +968,7 @@ mod tests {
     /// A board card with the given id, title, priority and assignee.
     fn card(id: &str, title: &str, priority: PriorityChip, assignee: Option<char>) -> BoardCard {
         BoardCard {
+            not_dispatched: false,
             issue_id: id.to_string(),
             display_id: id.to_string(),
             title: title.to_string(),
@@ -1179,6 +1200,34 @@ mod tests {
         assert!(
             has_red,
             "the urgent chip must be painted in the urgent colour"
+        );
+    }
+
+    /// multica parity #12: a card whose newest dispatch attempt was DECLINED
+    /// wears an amber `⚠` beside its id, so "this is not running" is discoverable
+    /// from the board without opening the card. A healthy card wears none.
+    #[test]
+    fn undispatched_card_shows_the_warning_glyph() {
+        let mut warned = card("HGR-9", "Ship it", PriorityChip::Low, Some('a'));
+        warned.not_dispatched = true;
+        let cols = vec![column('☰', "Backlog", vec![warned])];
+        let mut buf = WireBuffer::new(120, 24);
+        let _ = render_card_board(&mut buf, 120, 0, 23, &cols, None);
+        assert!(
+            painted_text(&buf).contains('⚠'),
+            "a declined card shows the ⚠ glyph"
+        );
+        assert!(
+            buf.cells.iter().any(|(_, c)| c.fg == Some(WARN_AMBER)),
+            "the warning glyph is painted amber, not the default text colour"
+        );
+
+        // A healthy card (the default) paints no glyph.
+        let mut buf = WireBuffer::new(120, 24);
+        let _ = render_card_board(&mut buf, 120, 0, 23, &five_columns(), None);
+        assert!(
+            !painted_text(&buf).contains('⚠'),
+            "healthy cards show no warning glyph"
         );
     }
 

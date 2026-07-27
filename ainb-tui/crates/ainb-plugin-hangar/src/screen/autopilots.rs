@@ -118,6 +118,7 @@ impl AutopilotsState {
                     ""
                 };
                 BoardCard {
+                    not_dispatched: false,
                     issue_id: ap.id.clone(),
                     display_id: ap.name.clone(),
                     title: format!("{} · {state}{api} · last {last}", ap.cron_expr),

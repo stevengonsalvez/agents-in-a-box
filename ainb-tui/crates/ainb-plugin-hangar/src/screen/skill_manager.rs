@@ -202,6 +202,7 @@ impl SkillManagerState {
             .visible_skills()
             .into_iter()
             .map(|s| BoardCard {
+                not_dispatched: false,
                 issue_id: s.slug.clone(),
                 display_id: s.name.clone(),
                 // Attachment-based `used`/`unused` (deviation D3 — the filter
