@@ -37,6 +37,9 @@ pub const KEY_AUTOSTANDUP_COOLDOWN_MIN: &str = "autostandup.cooldown_min";
 pub const KEY_AUTOSTANDUP_MAX_CONCURRENT: &str = "autostandup.max_concurrent";
 /// `daemon_config` key: the host-wide default card agent (F4 global tier).
 pub const KEY_CARD_AGENT_DEFAULT: &str = "card_agent.default";
+/// `daemon_config` key: the per-instance workspace-creation lockdown
+/// (multica's `DISABLE_WORKSPACE_CREATION`). Default OFF.
+pub const KEY_WORKSPACE_CREATION_DISABLED: &str = "workspace.creation_disabled";
 
 /// Declare a coded default ONCE, emitting both forms it has to exist in: the
 /// typed const the daemon reads, and the canonical stored string the registry
@@ -73,9 +76,46 @@ coded_default! {
     /// Coded default: at most one concurrent standup.
     DEFAULT_AUTOSTANDUP_MAX_CONCURRENT: i64 = 1 => DEFAULT_AUTOSTANDUP_MAX_CONCURRENT_STR
 }
+coded_default! {
+    /// Coded default: workspace creation is ALLOWED (the lockdown is opt-in).
+    DEFAULT_WORKSPACE_CREATION_DISABLED: bool = false => DEFAULT_WORKSPACE_CREATION_DISABLED_STR
+}
 /// Coded default: the host-wide default card agent is `claude`. Already a string,
 /// so the registry wires this const through directly.
 pub const DEFAULT_CARD_AGENT_DEFAULT: &str = "claude";
+
+/// Env override for the workspace-creation lockdown: when this parses as a true
+/// token, the instance is locked down regardless of the stored `daemon_config`
+/// row.
+///
+/// **ONE-WAY by design.** A `false`/unparseable/absent value defers to the DB, it
+/// never unlocks. Two reasons: an operator who env-locks a self-hosted instance
+/// must not be undone by anyone with DB write access, and a stray
+/// `HANGAR_DISABLE_WORKSPACE_CREATION=false` left in a shell profile must not
+/// silently unlock a DB-locked instance. Do not "fix" this into a two-way toggle
+/// — that removes the operator lock.
+pub const ENV_WORKSPACE_CREATION_DISABLED: &str = "HANGAR_DISABLE_WORKSPACE_CREATION";
+
+/// Resolve the effective workspace-creation lockdown from the raw stored value
+/// and the raw env value.
+///
+/// Precedence: env-true wins (one-way, see [`ENV_WORKSPACE_CREATION_DISABLED`]),
+/// else the stored `daemon_config` row, else the coded default (allowed). A
+/// malformed stored value falls back to the default rather than erroring — a
+/// corrupt knob must never brick workspace creation, matching
+/// `DaemonConfigRepo::get_bool`.
+///
+/// Pure (takes the raw strings, reads no process state) so the precedence is
+/// unit-testable without mutating the environment.
+#[must_use]
+pub fn workspace_creation_disabled(stored: Option<&str>, env: Option<&str>) -> bool {
+    if env.and_then(parse_bool_token) == Some(true) {
+        return true;
+    }
+    stored
+        .and_then(parse_bool_token)
+        .unwrap_or(DEFAULT_WORKSPACE_CREATION_DISABLED)
+}
 
 /// The minimum legal per-session cooldown, in minutes.
 ///
@@ -265,6 +305,13 @@ pub const DAEMON_CONFIG_REGISTRY: &[ConfigDescriptor] = &[
         default: DEFAULT_CARD_AGENT_DEFAULT,
         help: "Host-wide default provider backend for new cards.",
     },
+    ConfigDescriptor {
+        key: KEY_WORKSPACE_CREATION_DISABLED,
+        label: "Lock workspace creation",
+        kind: ConfigKind::Bool,
+        default: DEFAULT_WORKSPACE_CREATION_DISABLED_STR,
+        help: "Refuse every new-workspace create on this instance (self-host lockdown).",
+    },
 ];
 
 /// Look up the descriptor for `key`, or `None` when the key is not a known
@@ -331,6 +378,45 @@ mod tests {
             descriptor(KEY_CARD_AGENT_DEFAULT).unwrap().default,
             DEFAULT_CARD_AGENT_DEFAULT
         );
+        assert_eq!(
+            parse_bool_token(descriptor(KEY_WORKSPACE_CREATION_DISABLED).unwrap().default),
+            Some(DEFAULT_WORKSPACE_CREATION_DISABLED),
+            "workspace.creation_disabled default must decode to the store's const"
+        );
+        assert!(
+            !DEFAULT_WORKSPACE_CREATION_DISABLED,
+            "the lockdown must stay OFF by default — it refuses every workspace create"
+        );
+    }
+
+    /// The env override is the operator's lock: an env-true wins over a DB row
+    /// that says `false`, so an operator can lock a self-hosted instance down
+    /// without trusting DB write access.
+    #[test]
+    fn env_true_locks_down_even_when_db_says_false() {
+        assert!(workspace_creation_disabled(Some("false"), Some("true")));
+        assert!(workspace_creation_disabled(None, Some("1")));
+        assert!(workspace_creation_disabled(Some("0"), Some("YES")));
+    }
+
+    /// …and it is ONE-WAY: a false/garbage/absent env value defers to the DB
+    /// rather than unlocking, so a stray `=false` in a shell profile cannot
+    /// silently unlock a DB-locked instance.
+    #[test]
+    fn env_false_defers_to_the_db() {
+        assert!(workspace_creation_disabled(Some("true"), Some("false")));
+        assert!(workspace_creation_disabled(Some("true"), Some("garbage")));
+        assert!(workspace_creation_disabled(Some("true"), None));
+        assert!(!workspace_creation_disabled(Some("false"), Some("false")));
+        assert!(!workspace_creation_disabled(None, None));
+    }
+
+    /// A corrupt stored value falls back to the coded default (allowed) — a
+    /// malformed knob must never brick workspace creation.
+    #[test]
+    fn malformed_stored_value_falls_back_to_the_coded_default() {
+        assert!(!workspace_creation_disabled(Some("maybe"), None));
+        assert!(!workspace_creation_disabled(Some(""), None));
     }
 
     /// The cooldown floor is a SAFETY bound, not a UI nicety: `0` defeats both the
