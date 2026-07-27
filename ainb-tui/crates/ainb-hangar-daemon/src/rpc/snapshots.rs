@@ -61,6 +61,7 @@ use ainb_hangar_store::repo::autopilot_run::{
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::{CriterionError, IssueRepo};
+use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
 use ainb_hangar_store::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
@@ -2154,12 +2155,17 @@ pub async fn issue_row(
     let subscriber_count = IssueSubscriberRepo::count(pool, &issue.id).await?;
     let subscribed = IssueSubscriberRepo::is_subscribed(pool, &issue.id, &viewer).await?;
     let reactions = issue_reaction_rows(pool, &issue.id, &viewer).await?;
+    // multica parity #17: same DETAIL-ONLY rule again — resolving the value bag
+    // against the catalog costs an extra join per row, so a list snapshot
+    // leaves both at their `Default` and a pre-#17 client sees no new keys.
+    let properties = issue_property_rows(pool, workspace_id, &issue.id).await?;
+    let metadata = issue_metadata_rows(&issue.metadata);
     Ok(Some(IssueRow {
         subscriber_count,
         subscribed,
         reactions,
-        properties: Vec::new(),
-        metadata: Vec::new(),
+        properties,
+        metadata,
         // multica parity #12: WHY this card is not running, from the newest
         // dispatch_attempt when that attempt was a decline. All `None` on a
         // healthy card, so the row grows by zero keys.
@@ -2441,6 +2447,50 @@ pub async fn issue_criterion_set(
     Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
 }
 
+/// Resolve one issue's stored custom-property bag against the workspace catalog
+/// (multica parity #17).
+///
+/// ARCHIVED definitions and ORPHAN ids are dropped by
+/// [`IssuePropertyRepo::values_for`] — the value stays on disk, it just stops
+/// rendering. The wire carries the ALREADY-RENDERED text so [`IssueRow`] keeps
+/// its `Eq` derive.
+async fn issue_property_rows(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Vec<ainb_hangar_proto::events::IssuePropertyRow>, sqlx::Error> {
+    let Ok(ws) = WorkspaceId::from_str(workspace_id) else {
+        return Ok(Vec::new());
+    };
+    let values = IssuePropertyRepo::values_for(pool, &ws, issue_id).await?;
+    Ok(values
+        .into_iter()
+        .map(|(def, value)| ainb_hangar_proto::events::IssuePropertyRow {
+            key: def.key,
+            name: def.name,
+            kind: def.kind.as_db_str().to_string(),
+            value: ainb_hangar_core::properties::render_value(&value),
+        })
+        .collect())
+}
+
+/// Project an issue's decoded AGENT METADATA bag onto the wire, key-sorted
+/// (multica parity #17).
+///
+/// `value_json` carries the canonical primitive JSON so integer-vs-string
+/// typing survives; `value` is the same thing rendered unquoted for display.
+fn issue_metadata_rows(
+    bag: &std::collections::BTreeMap<String, ainb_hangar_core::properties::MetadataValue>,
+) -> Vec<ainb_hangar_proto::events::IssueMetadataRow> {
+    bag.iter()
+        .map(|(key, value)| ainb_hangar_proto::events::IssueMetadataRow {
+            key: key.clone(),
+            value_json: ainb_hangar_core::properties::metadata_value_json(value),
+            value: ainb_hangar_core::properties::render_metadata(value),
+        })
+        .collect()
+}
+
 /// Re-read one issue as a wire [`IssueRow`], mapped exactly as `issues_list`
 /// emits it (including the P9 `pr_url` derivation) so a re-read row is
 /// byte-identical to a list snapshot of the same issue. `None` when the id
@@ -2476,12 +2526,17 @@ async fn read_issue_row(
     let subscriber_count = IssueSubscriberRepo::count(pool, &issue.id).await?;
     let subscribed = IssueSubscriberRepo::is_subscribed(pool, &issue.id, &viewer).await?;
     let reactions = issue_reaction_rows(pool, &issue.id, &viewer).await?;
+    // multica parity #17: same DETAIL-ONLY rule again — resolving the value bag
+    // against the catalog costs an extra join per row, so a list snapshot
+    // leaves both at their `Default` and a pre-#17 client sees no new keys.
+    let properties = issue_property_rows(pool, workspace_id, &issue.id).await?;
+    let metadata = issue_metadata_rows(&issue.metadata);
     Ok(Some(IssueRow {
         subscriber_count,
         subscribed,
         reactions,
-        properties: Vec::new(),
-        metadata: Vec::new(),
+        properties,
+        metadata,
         // multica parity #12: WHY this card is not running, from the newest
         // dispatch_attempt when that attempt was a decline. All `None` on a
         // healthy card, so the row grows by zero keys.

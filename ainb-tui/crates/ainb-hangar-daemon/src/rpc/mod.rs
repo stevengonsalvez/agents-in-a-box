@@ -786,6 +786,23 @@ async fn handle(
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
         methods::HANGAR_ISSUE_CRITERION_SET => handle_issue_criterion_set(pool, req, events).await,
+        // Custom property catalog + issue metadata (multica parity #17).
+        methods::HANGAR_PROPERTIES_LIST => handle_properties_list(pool, req).await,
+        methods::HANGAR_PROPERTY_DEFINE => handle_property_define(pool, req).await,
+        methods::HANGAR_PROPERTY_ARCHIVE => handle_property_archive(pool, req).await,
+        methods::HANGAR_ISSUE_PROPERTY_SET => handle_issue_property(pool, req, events, true).await,
+        methods::HANGAR_ISSUE_PROPERTY_CLEAR => {
+            handle_issue_property(pool, req, events, false).await
+        }
+        methods::HANGAR_ISSUE_METADATA_GET => {
+            handle_issue_metadata(pool, req, events, MetaOp::Get).await
+        }
+        methods::HANGAR_ISSUE_METADATA_SET => {
+            handle_issue_metadata(pool, req, events, MetaOp::Set).await
+        }
+        methods::HANGAR_ISSUE_METADATA_DELETE => {
+            handle_issue_metadata(pool, req, events, MetaOp::Delete).await
+        }
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
         methods::HANGAR_AGENT_DELETE => handle_agent_delete(pool, req).await,
@@ -11786,4 +11803,288 @@ mod tests {
             "the named-agent auto-dispatch must branch from the persisted source"
         );
     }
+}
+
+// ─────────── custom property catalog + issue metadata (parity #17) ───────────
+
+/// Map a [`PropertyRepoError`] onto an RPC error.
+///
+/// Every cap / kind / options / addressing rejection is a CLIENT error
+/// (`INVALID_PARAMS`), never a 500 — only a store fault is internal.
+///
+/// [`PropertyRepoError`]: ainb_hangar_store::repo::issue_property::PropertyRepoError
+fn property_repo_err(e: &ainb_hangar_store::repo::issue_property::PropertyRepoError) -> RpcError {
+    use ainb_hangar_store::repo::issue_property::PropertyRepoError;
+    match e {
+        PropertyRepoError::IssueNotFound => invalid_params("no issue in this workspace"),
+        PropertyRepoError::PropertyNotFound => {
+            invalid_params("no active custom property with that key")
+        }
+        PropertyRepoError::TooManyProperties => {
+            invalid_params("a workspace may define at most 20 active custom properties")
+        }
+        PropertyRepoError::Value(v) => invalid_params(&v.to_string()),
+        PropertyRepoError::Db(db) => internal(&format!("property store error: {db}")),
+    }
+}
+
+/// Project one stored definition onto the wire.
+fn property_def_row(
+    def: &ainb_hangar_store::repo::issue_property::IssueProperty,
+) -> ainb_hangar_proto::events::PropertyDefRow {
+    ainb_hangar_proto::events::PropertyDefRow {
+        key: def.key.clone(),
+        name: def.name.clone(),
+        kind: def.kind.as_db_str().to_string(),
+        options: def.options.clone(),
+        position: def.position,
+        archived: def.archived_at.is_some(),
+    }
+}
+
+/// `hangar/properties_list` — the workspace's custom-property catalog.
+async fn handle_properties_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let params: ainb_hangar_proto::snapshots::PropertiesListParams =
+        parse_params(req, "{ workspace_id, include_archived? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let defs = IssuePropertyRepo::list(pool, &ws, params.include_archived)
+        .await
+        .map_err(|e| internal(&format!("property store error: {e}")))?;
+    to_value(&ainb_hangar_proto::snapshots::PropertiesListResult {
+        properties: defs.iter().map(property_def_row).collect(),
+    })
+}
+
+/// `hangar/property_define` — resolve-or-update ONE definition by (ws, key).
+async fn handle_property_define(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::properties::PropertyKind;
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let params: ainb_hangar_proto::snapshots::PropertyDefineParams = parse_params(
+        req,
+        "{ workspace_id, key, name?, kind?, options?, position? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let key = params.key.trim();
+    if key.is_empty() {
+        return Err(invalid_params("key must not be empty"));
+    }
+    // Absent optional fields keep whatever the stored definition already has,
+    // so a RENAME is `{ workspace_id, key, name }` and nothing else moves.
+    let existing = IssuePropertyRepo::get_by_key(pool, &ws, key)
+        .await
+        .map_err(|e| internal(&format!("property store error: {e}")))?;
+    let kind = match params.kind.as_deref() {
+        Some(raw) => PropertyKind::parse_strict(raw).map_err(|e| invalid_params(&e.to_string()))?,
+        None => existing.as_ref().map_or(PropertyKind::Text, |d| d.kind.clone()),
+    };
+    let name = params.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map_or_else(
+        || existing.as_ref().map_or_else(|| key.to_string(), |d| d.name.clone()),
+        ToString::to_string,
+    );
+    let options = if params.options.is_empty() {
+        existing.as_ref().map(|d| d.options.clone()).unwrap_or_default()
+    } else {
+        params.options.clone()
+    };
+    let position = params.position.unwrap_or_else(|| existing.as_ref().map_or(0, |d| d.position));
+
+    let def = IssuePropertyRepo::define(
+        pool,
+        &ws,
+        key,
+        &name,
+        &kind,
+        &options,
+        position,
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| property_repo_err(&e))?;
+    to_value(&property_def_row(&def))
+}
+
+/// `hangar/property_archive` — archive / un-archive ONE definition.
+async fn handle_property_archive(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let params: ainb_hangar_proto::snapshots::PropertyArchiveParams =
+        parse_params(req, "{ workspace_id, key, archived }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let found = IssuePropertyRepo::set_archived(
+        pool,
+        &ws,
+        &params.key,
+        params.archived,
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| property_repo_err(&e))?;
+    if !found {
+        return Err(invalid_params(&format!(
+            "no custom property `{}` in this workspace",
+            params.key
+        )));
+    }
+    let def = IssuePropertyRepo::get_by_key(pool, &ws, &params.key)
+        .await
+        .map_err(|e| internal(&format!("property store error: {e}")))?
+        .ok_or_else(|| internal("definition vanished after archive"))?;
+    to_value(&property_def_row(&def))
+}
+
+/// `hangar/issue_property_set` / `_clear` — write ONE custom property value.
+///
+/// `set = false` is the clear path; both answer with the issue's REFRESHED
+/// [`ainb_hangar_proto::events::IssueRow`] and announce it, so the detail card
+/// repaints without a read-after-write round trip.
+async fn handle_issue_property(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+    set: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::properties::coerce_value;
+    use ainb_hangar_proto::events::HangarEvent;
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let (workspace_id, issue_id, key, values) = if set {
+        let p: ainb_hangar_proto::snapshots::IssuePropertySetParams =
+            parse_params(req, "{ workspace_id, issue_id, key, value?, values? }")?;
+        let mut values = p.values.clone();
+        if values.is_empty() {
+            values.extend(p.value.clone());
+        }
+        (p.workspace_id, p.issue_id, p.key, values)
+    } else {
+        let p: ainb_hangar_proto::snapshots::IssuePropertyClearParams =
+            parse_params(req, "{ workspace_id, issue_id, key }")?;
+        (p.workspace_id, p.issue_id, p.key, Vec::new())
+    };
+    let ws = resolve_wire_or_reject(pool, &workspace_id).await?;
+
+    if set {
+        let def = IssuePropertyRepo::get_by_key(pool, &ws, &key)
+            .await
+            .map_err(|e| internal(&format!("property store error: {e}")))?
+            .filter(|d| d.archived_at.is_none())
+            .ok_or_else(|| invalid_params("no active custom property with that key"))?;
+        let value = coerce_value(&def.kind, &values).map_err(|e| invalid_params(&e.to_string()))?;
+        IssuePropertyRepo::set_value(pool, &ws, &issue_id, &key, &value)
+            .await
+            .map_err(|e| property_repo_err(&e))?;
+    } else {
+        IssuePropertyRepo::clear_value(pool, &ws, &issue_id, &key)
+            .await
+            .map_err(|e| property_repo_err(&e))?;
+    }
+
+    let row = snapshots::issue_row(pool, ws.as_str(), &issue_id)
+        .await
+        .map_err(|e| internal(&format!("property store error: {e}")))?
+        .ok_or_else(|| invalid_params("no issue in this workspace"))?;
+    events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
+    to_value(&row)
+}
+
+/// Which of the three `hangar/issue_metadata_*` verbs a dispatch arm wants.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MetaOp {
+    /// Read the whole bag (or one key when `key` is present).
+    Get,
+    /// Write ONE key.
+    Set,
+    /// Remove ONE key.
+    Delete,
+}
+
+/// `hangar/issue_metadata_{get,set,delete}` — the agent scratch bag.
+///
+/// Every mutation announces the issue's refreshed row, so a plugin watching the
+/// workspace repaints the `Meta:` block without polling.
+async fn handle_issue_metadata(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+    op: MetaOp,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::properties::{
+        coerce_metadata_value, metadata_value_json, render_metadata,
+    };
+    use ainb_hangar_proto::events::HangarEvent;
+    use ainb_hangar_store::repo::issue_metadata::IssueMetadataRepo;
+
+    let params: ainb_hangar_proto::snapshots::IssueMetadataParams =
+        parse_params(req, "{ workspace_id, issue_id, key?, value?, value_type? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    match op {
+        MetaOp::Get => {}
+        MetaOp::Set => {
+            let key = params
+                .key
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| invalid_params("key is required"))?;
+            let raw = params.value.as_deref().ok_or_else(|| {
+                invalid_params("value cannot be null (use DELETE to remove a key)")
+            })?;
+            let value = coerce_metadata_value(raw, params.value_type.as_deref())
+                .map_err(|e| invalid_params(&e.to_string()))?;
+            IssueMetadataRepo::set(pool, &ws, &params.issue_id, key, &value)
+                .await
+                .map_err(|e| property_repo_err(&e))?;
+        }
+        MetaOp::Delete => {
+            let key = params
+                .key
+                .as_deref()
+                .map(str::trim)
+                .filter(|k| !k.is_empty())
+                .ok_or_else(|| invalid_params("key is required"))?;
+            IssueMetadataRepo::delete(pool, &ws, &params.issue_id, key)
+                .await
+                .map_err(|e| property_repo_err(&e))?;
+        }
+    }
+
+    let bag = IssueMetadataRepo::get(pool, &ws, &params.issue_id)
+        .await
+        .map_err(|e| property_repo_err(&e))?;
+    // On GET a `key` NARROWS the answer to that one entry; on a mutation the
+    // caller gets the whole refreshed bag.
+    let narrow = matches!(op, MetaOp::Get).then(|| params.key.clone()).flatten();
+    let entries = bag
+        .iter()
+        .filter(|(k, _)| narrow.as_deref().is_none_or(|want| want == k.as_str()))
+        .map(|(k, v)| ainb_hangar_proto::events::IssueMetadataRow {
+            key: k.clone(),
+            value_json: metadata_value_json(v),
+            value: render_metadata(v),
+        })
+        .collect();
+
+    if !matches!(op, MetaOp::Get) {
+        if let Some(row) = snapshots::issue_row(pool, ws.as_str(), &params.issue_id)
+            .await
+            .map_err(|e| internal(&format!("metadata store error: {e}")))?
+        {
+            events.emit(ws.as_str(), HangarEvent::IssueUpdated(row));
+        }
+    }
+    to_value(&ainb_hangar_proto::snapshots::IssueMetadataResult { entries })
 }
