@@ -22,7 +22,11 @@ use ainb_hangar_core::acceptance::{
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::idgen::IdGen;
 use ainb_hangar_core::origin::{IssueOrigin, OriginKind};
+use ainb_hangar_core::properties::{
+    MetadataValue, PropertyValue, metadata_from_json, properties_from_json,
+};
 use sqlx::{Row, SqlitePool};
+use std::collections::BTreeMap;
 
 /// Parameters for inserting a new `issue` row.
 ///
@@ -120,6 +124,21 @@ pub struct Issue {
     /// `('manual', NULL)`. `None` for every pre-0056 row — "provenance
     /// unknown", deliberately distinct from an explicit `manual`.
     pub origin: Option<IssueOrigin>,
+    /// USER-facing custom property values (migration 0066, multica parity #17),
+    /// keyed by `issue_property.id` — never by the property's key or display
+    /// name, so a rename is a catalog-only write. Decoded tolerantly: a
+    /// malformed bag reads as empty rather than failing the whole row.
+    ///
+    /// **Never written by [`IssueRepo::update`]** — see
+    /// [`IssuePropertyRepo`](crate::repo::issue_property::IssuePropertyRepo),
+    /// the only writer, whose mutations are single-key atomic so concurrent
+    /// agents cannot clobber each other with a whole-blob overwrite.
+    pub properties: BTreeMap<String, PropertyValue>,
+    /// AGENT-internal metadata scratch bag (migration 0066, multica parity
+    /// #17): flat primitive KV, no catalog. Same tolerant decode and same
+    /// never-written-by-`update` rule as [`Self::properties`]; the only writer
+    /// is [`IssueMetadataRepo`](crate::repo::issue_metadata::IssueMetadataRepo).
+    pub metadata: BTreeMap<String, MetadataValue>,
 }
 
 /// A partial-edit instruction for one issue's mutable fields (e38.8).
@@ -373,7 +392,8 @@ impl IssueRepo {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id, \
+             properties, metadata \
              FROM issue WHERE id = ?",
         )
         .bind(id)
@@ -437,7 +457,8 @@ impl IssueRepo {
         let row = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id, \
+             properties, metadata \
              FROM issue \
              WHERE workspace_id = ? AND origin_type = ? AND origin_id IS ? \
              ORDER BY created_at, id LIMIT 1",
@@ -467,7 +488,8 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id, \
+             properties, metadata \
              FROM issue \
              WHERE workspace_id = ? AND origin_type = ? \
              ORDER BY created_at, id",
@@ -656,7 +678,8 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id, \
+             properties, metadata \
              FROM issue WHERE workspace_id = ? AND state = ? ORDER BY created_at",
         )
         .bind(workspace_id)
@@ -684,7 +707,8 @@ impl IssueRepo {
         let rows = sqlx::query(
             "SELECT id, workspace_id, title, description, state, \
              assignee_type, assignee_id, creator_type, creator_id, created_at, \
-             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id \
+             priority, due_date, labels, acceptance_criteria, context_refs, external_ref, parent_issue_id, stage, origin_type, origin_id, \
+             properties, metadata \
              FROM issue WHERE parent_issue_id = ? \
              ORDER BY stage IS NULL, stage, created_at, id",
         )
@@ -815,6 +839,7 @@ impl IssueRepo {
             "SELECT i.id, i.workspace_id, i.title, i.description, i.state, \
              i.assignee_type, i.assignee_id, i.creator_type, i.creator_id, i.created_at, \
              i.priority, i.due_date, i.labels, i.acceptance_criteria, i.context_refs, i.external_ref, i.parent_issue_id, i.stage, i.origin_type, i.origin_id, \
+             i.properties, i.metadata, \
              MAX(CASE \
                  WHEN LOWER(i.title) LIKE ?2 ESCAPE '\\' THEN 3 \
                  WHEN LOWER(i.description) LIKE ?2 ESCAPE '\\' THEN 2 \
@@ -1277,6 +1302,11 @@ fn issue_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Issue, sqlx::Error> {
         // allow-list degrades to `manual` instead of failing the whole row, so
         // a newer daemon's future kind cannot brick an older reader.
         origin: IssueOrigin::from_db(row.try_get("origin_type")?, row.try_get("origin_id")?),
+        // TOLERANT by design (migration 0066): both bags decode to empty rather
+        // than failing the row, so a bag written by a future/foreign writer can
+        // never wedge every read path that touches the issue.
+        properties: properties_from_json(&row.try_get::<String, _>("properties")?),
+        metadata: metadata_from_json(&row.try_get::<String, _>("metadata")?),
     })
 }
 

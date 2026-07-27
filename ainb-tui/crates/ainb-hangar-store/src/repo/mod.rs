@@ -28,6 +28,8 @@ pub mod fleet;
 pub mod inbox;
 pub mod invitation;
 pub mod issue;
+pub mod issue_metadata;
+pub mod issue_property;
 pub mod issue_reaction;
 pub mod issue_subscriber;
 pub mod label;
