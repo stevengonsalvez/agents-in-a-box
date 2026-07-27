@@ -5536,14 +5536,13 @@ async fn dispatch_property(cmd: PropertyCommand, format: OutputFormat) -> Result
     use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
 
     let store = Store::open_default().await.context("open hangar database")?;
-    let (workspace, key) = match &cmd {
-        PropertyCommand::Define(a) => (a.workspace.clone(), Some(a.key.clone())),
-        PropertyCommand::List(a) => (a.workspace.clone(), None),
-        PropertyCommand::Archive(a) => (a.workspace.clone(), Some(a.key.clone())),
+    let workspace = match &cmd {
+        PropertyCommand::Define(a) => a.workspace.clone(),
+        PropertyCommand::List(a) => a.workspace.clone(),
+        PropertyCommand::Archive(a) => a.workspace.clone(),
     };
     let workspace_id = resolve_skills_workspace(&store, workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
-    let _ = key;
 
     match cmd {
         PropertyCommand::Define(args) => {
