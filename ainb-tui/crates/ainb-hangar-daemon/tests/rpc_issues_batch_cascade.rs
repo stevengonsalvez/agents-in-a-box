@@ -160,7 +160,6 @@ async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     (socket_path, store)
 }
 
-
 /// Create one issue through the RPC and return its id.
 async fn create_issue(
     c: &mut Client,
@@ -232,7 +231,11 @@ async fn issues_batch_update_posts_one_aggregated_cascade_comment() {
     assert!(resp["error"].is_null(), "batch update must ack: {resp}");
 
     let cascades = resp["result"]["cascades"].as_array().expect("cascades array");
-    assert_eq!(cascades.len(), 1, "ONE cascade for one closed barrier: {resp}");
+    assert_eq!(
+        cascades.len(),
+        1,
+        "ONE cascade for one closed barrier: {resp}"
+    );
     assert_eq!(cascades[0]["parent_id"], serde_json::json!(parent));
     let child_ids: Vec<String> = cascades[0]["child_ids"]
         .as_array()
@@ -252,7 +255,12 @@ async fn issues_batch_update_posts_one_aggregated_cascade_comment() {
 
     // The literal acceptance, read from the daemon's own database.
     assert_eq!(
-        scalar(&store, "SELECT COUNT(*) FROM comment WHERE issue_id = ?", &parent).await,
+        scalar(
+            &store,
+            "SELECT COUNT(*) FROM comment WHERE issue_id = ?",
+            &parent
+        )
+        .await,
         1,
         "EXACTLY one cascade comment on the parent, never two"
     );
@@ -266,14 +274,16 @@ async fn issues_batch_update_posts_one_aggregated_cascade_comment() {
         1,
         "one closed barrier = one claim row"
     );
-    let body: String =
-        sqlx::query_scalar("SELECT body FROM comment WHERE issue_id = ? LIMIT 1")
-            .bind(&parent)
-            .fetch_one(store.pool())
-            .await
-            .expect("the cascade comment");
+    let body: String = sqlx::query_scalar("SELECT body FROM comment WHERE issue_id = ? LIMIT 1")
+        .bind(&parent)
+        .fetch_one(store.pool())
+        .await
+        .expect("the cascade comment");
     assert!(body.contains(&a) && body.contains(&b), "names both: {body}");
-    assert!(body.contains("Closed stage 1."), "names the barrier: {body}");
+    assert!(
+        body.contains("Closed stage 1."),
+        "names the barrier: {body}"
+    );
 
     // Exactly ONE comment_added push, not one per child.
     let mut comment_events = 0;
@@ -334,7 +344,10 @@ async fn issues_batch_update_rejects_an_unknown_state_without_writing() {
             }),
         )
         .await;
-    assert!(!resp["error"].is_null(), "a typo'd state must be rejected: {resp}");
+    assert!(
+        !resp["error"].is_null(),
+        "a typo'd state must be rejected: {resp}"
+    );
     let after = scalar(&store, "SELECT COUNT(*) FROM issue WHERE state = ?", "done").await;
     assert_eq!(before, after, "nothing may be written by a rejected batch");
 }

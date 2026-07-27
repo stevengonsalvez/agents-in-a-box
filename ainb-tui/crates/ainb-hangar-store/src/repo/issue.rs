@@ -616,13 +616,12 @@ impl IssueRepo {
         let mut tx = pool.begin().await?;
         let mut changed = Vec::new();
         for id in ids {
-            let prev: Option<String> = sqlx::query_scalar(
-                "SELECT state FROM issue WHERE id = ? AND workspace_id = ?",
-            )
-            .bind(id)
-            .bind(workspace_id)
-            .fetch_optional(&mut *tx)
-            .await?;
+            let prev: Option<String> =
+                sqlx::query_scalar("SELECT state FROM issue WHERE id = ? AND workspace_id = ?")
+                    .bind(id)
+                    .bind(workspace_id)
+                    .fetch_optional(&mut *tx)
+                    .await?;
             let Some(prev) = prev else { continue };
             if prev == state {
                 continue;

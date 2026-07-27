@@ -66,10 +66,7 @@ fn batch_state_posts_one_aggregated_rollup_on_the_parent() {
         out.contains("updated 2 of 2 issue(s) to done"),
         "both children must transition:\n{out}"
     );
-    let rollups = out
-        .lines()
-        .filter(|l| l.contains("posted sub-issue roll-up on parent"))
-        .count();
+    let rollups = out.lines().filter(|l| l.contains("posted sub-issue roll-up on parent")).count();
     assert_eq!(
         rollups, 1,
         "EXACTLY one roll-up line — one per child is the bug:\n{out}"
@@ -84,10 +81,7 @@ fn batch_state_posts_one_aggregated_rollup_on_the_parent() {
     // The parent's narrative carries exactly ONE cascade comment, naming both.
     let (ok, timeline) = run(home, &["hangar", "issue", "timeline", &parent]);
     assert!(ok, "timeline must exit 0; out={timeline}");
-    let cascade_comments = timeline
-        .lines()
-        .filter(|l| l.contains("sub-issues complete."))
-        .count();
+    let cascade_comments = timeline.lines().filter(|l| l.contains("sub-issues complete.")).count();
     assert_eq!(
         cascade_comments, 1,
         "EXACTLY one cascade comment on the parent, never one per child:\n{timeline}"

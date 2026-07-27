@@ -111,7 +111,10 @@ async fn migration_0065_adds_an_empty_barrier_ledger_with_a_biting_pk() {
         .fetch_one(&pool)
         .await
         .expect("seeded comment survives");
-    assert!(body.contains("Sub-issue c-1"), "comment body preserved: {body}");
+    assert!(
+        body.contains("Sub-issue c-1"),
+        "comment body preserved: {body}"
+    );
 
     // (d) The PK bites: a barrier can be claimed exactly once. This is the whole
     //     dedupe mechanism, so it is asserted at the engine level.

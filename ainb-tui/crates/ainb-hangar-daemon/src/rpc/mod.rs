@@ -3582,10 +3582,7 @@ async fn handle_issues_batch_update(
     let mut updated = Vec::new();
     for (id, _) in &changed {
         if let Some(prior) = before.iter().find(|(bid, _)| bid == id).map(|(_, r)| r) {
-            if let Some(after) = IssueRepo::get_by_id(pool, id)
-                .await
-                .map_err(|e| store_err(&e))?
-            {
+            if let Some(after) = IssueRepo::get_by_id(pool, id).await.map_err(|e| store_err(&e))? {
                 ActivityService::record_issue_diff(
                     pool,
                     &SystemIdGen,
@@ -3598,9 +3595,8 @@ async fn handle_issues_batch_update(
                 .await;
             }
         }
-        if let Some(row) = snapshots::issue_row(pool, ws.as_str(), id)
-            .await
-            .map_err(|e| store_err(&e))?
+        if let Some(row) =
+            snapshots::issue_row(pool, ws.as_str(), id).await.map_err(|e| store_err(&e))?
         {
             events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
             updated.push(row);

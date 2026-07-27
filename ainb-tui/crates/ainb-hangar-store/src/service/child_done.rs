@@ -272,10 +272,8 @@ pub async fn cascade_children_done(
         //    belongs to no barrier and so never triggers a comment, exactly as
         //    before.
         moved.sort_by(|a, b| (a.stage, &a.id).cmp(&(b.stage, &b.id)));
-        let reported: Vec<&Issue> = moved
-            .iter()
-            .filter(|c| claimed.iter().any(|b| b.stage == c.stage))
-            .collect();
+        let reported: Vec<&Issue> =
+            moved.iter().filter(|c| claimed.iter().any(|b| b.stage == c.stage)).collect();
         if reported.is_empty() {
             tx.rollback().await?;
             continue;
@@ -283,10 +281,7 @@ pub async fn cascade_children_done(
 
         // 6. Author = the completing actor of the FIRST reported child (assignee
         //    else creator); both are guaranteed `member|agent`.
-        let author = reported[0]
-            .assignee
-            .clone()
-            .unwrap_or_else(|| reported[0].creator.clone());
+        let author = reported[0].assignee.clone().unwrap_or_else(|| reported[0].creator.clone());
         let (done, total) = children_progress(&children);
         let body = cascade_body(&reported, done, total, &claimed);
 
@@ -802,7 +797,16 @@ mod tests {
         seed_ws(pool, "ws").await;
         seed_issue(pool, "ws", "parent", "open", Some(agent()), None, None).await;
         for (id, stage) in children {
-            seed_issue(pool, "ws", id, "done", Some(agent()), Some("parent"), *stage).await;
+            seed_issue(
+                pool,
+                "ws",
+                id,
+                "done",
+                Some(agent()),
+                Some("parent"),
+                *stage,
+            )
+            .await;
         }
     }
 
@@ -827,15 +831,25 @@ mod tests {
         .unwrap();
 
         assert_eq!(out.len(), 1, "one parent, one cascade");
-        assert_eq!(out[0].children.len(), 2, "the comment reports BOTH children");
+        assert_eq!(
+            out[0].children.len(),
+            2,
+            "the comment reports BOTH children"
+        );
 
         let bodies = parent_comments(pool, "ws", "parent").await;
         assert_eq!(bodies.len(), 1, "exactly one comment on the parent");
         let body = &bodies[0];
         assert!(body.starts_with("Sub-issues "), "plural form: {body}");
-        assert!(body.contains("c1") && body.contains("c2"), "names both: {body}");
+        assert!(
+            body.contains("c1") && body.contains("c2"),
+            "names both: {body}"
+        );
         assert!(body.contains("2/2 sub-issues complete."), "roll-up: {body}");
-        assert!(body.contains("Closed stage 1."), "names the barrier: {body}");
+        assert!(
+            body.contains("Closed stage 1."),
+            "names the barrier: {body}"
+        );
     }
 
     /// §6.1.2 — two stages closing in one batch: ONE comment, and TWO ledger rows
@@ -918,7 +932,10 @@ mod tests {
         .unwrap();
 
         assert_eq!(reversed.len(), 1);
-        assert_eq!(reversed[0].comment_body, forward, "input order must not matter");
+        assert_eq!(
+            reversed[0].comment_body, forward,
+            "input order must not matter"
+        );
         assert_eq!(barrier_rows(pool, "parent").await.len(), 2);
     }
 
@@ -932,8 +949,26 @@ mod tests {
         let pool = store.pool();
         seed_ws(pool, "ws").await;
         seed_issue(pool, "ws", "parent", "open", Some(agent()), None, None).await;
-        seed_issue(pool, "ws", "s1", "open", Some(agent()), Some("parent"), Some(1)).await;
-        seed_issue(pool, "ws", "s2", "done", Some(agent()), Some("parent"), Some(2)).await;
+        seed_issue(
+            pool,
+            "ws",
+            "s1",
+            "open",
+            Some(agent()),
+            Some("parent"),
+            Some(1),
+        )
+        .await;
+        seed_issue(
+            pool,
+            "ws",
+            "s2",
+            "done",
+            Some(agent()),
+            Some("parent"),
+            Some(2),
+        )
+        .await;
 
         // Stage 2 finished first: nothing closes (stage 1 still open).
         let r = cascade_child_done(pool, "ws", "s2", "open", "done", 10, "cm-1".into())
@@ -997,7 +1032,16 @@ mod tests {
         assert_eq!(parent_comments(pool, "ws", "parent").await.len(), 1);
 
         // A third child joins and completes → key `unstaged:3` ≠ `unstaged:2`.
-        seed_issue(pool, "ws", "c3", "done", Some(agent()), Some("parent"), None).await;
+        seed_issue(
+            pool,
+            "ws",
+            "c3",
+            "done",
+            Some(agent()),
+            Some("parent"),
+            None,
+        )
+        .await;
         let c = cascade_child_done(pool, "ws", "c3", "open", "done", 20, "cm-2".into())
             .await
             .unwrap()
