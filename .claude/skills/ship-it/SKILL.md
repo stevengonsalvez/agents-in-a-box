@@ -55,17 +55,28 @@ If the working tree is already clean and the branch is pushed, skip ahead.
 ```bash
 BRANCH=$(git branch --show-current)
 git fetch origin
-# Sync against the PR's OWN base, not a hardcoded main (stacked PRs exist).
-BASE=$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null || echo main)
+# Sync against the PR's OWN base, never a hardcoded main (stacked PRs exist).
+# Resolution order: caller-supplied base > this branch's OPEN PR > repo default.
+# `gh pr view` with no number is deliberately NOT used: it resolves a merged or
+# closed PR too, handing back a stale base.
+BASE="${SHIP_IT_BASE:-}"
+[ -n "$BASE" ] || BASE=$(gh pr list --head "$BRANCH" --state open \
+                           --json baseRefName --jq '.[0].baseRefName' 2>/dev/null)
+[ -n "$BASE" ] || BASE=$(gh repo view --json defaultBranchRef \
+                           --jq .defaultBranchRef.name)
 git merge "origin/$BASE"                         # MERGE, never rebase a pushed PR branch
 gh pr list --head "$BRANCH" --state open --json number,url   # reuse existing PR if open
-gh pr create --fill                              # otherwise create
+gh pr create --fill --base "$BASE"               # otherwise create, onto the SAME base
 ```
 
 Sync first: reviewing a branch that is far behind base wastes the whole loop
 on conflicts at merge time. Resolve merge conflicts before the first review
 pass. Roll new commits into an existing open PR for this branch, never open
 a second one. PR body: summary, test evidence, no AI attribution.
+
+Stacking a NEW PR on a parent branch: nothing can infer that intent, so the
+caller must pass it (`SHIP_IT_BASE=<parent-branch>`). Without it a new PR
+syncs and targets the repo default branch.
 
 ## Step 3: Review (tier switch)
 
@@ -93,6 +104,12 @@ Spin up a dynamic Workflow (Workflow tool). Template:
   So `codexPrompt` must contain the literal token `--effort high` (NOT
   `codex exec -c model_reasoning_effort=...`, which this agent never runs and
   would pass through as prose).
+  **The peer must also be framed read-only.** `codex-rescue` defaults to
+  adding `--write` (workspace-write sandbox) unless the prompt asks for
+  review/diagnosis only, so a peer told to "review and fix" will edit the
+  live worktree mid-review, behind the conductor's back and outside
+  `/commit` staging. `codexPrompt` carries no fix mandate: say "review only,
+  report findings, do not edit any files".
 - Synthesis: conductor (not another agent) merges persona + Codex findings,
   dedupes by file:line, tags P0-P3, promotes confidence when two reviewers
   agree, discards unverifiable style noise.
@@ -156,23 +173,45 @@ gh pr checks <N>                 # CI per-job
 gh pr view <N> --json mergeable,mergeStateStatus,reviewDecision
 ```
 
-- CI red from THIS PR's code: go back to Step 4.
-- CI red that is pre-existing drift: prove it (git history + clean local
-  test run on base), then present merge options honestly, do not force a
-  cleanup commit into this PR.
-- `mergeable` is `UNKNOWN`: GitHub is still recomputing after the last push.
-  This is NOT green. Poll (a few seconds apart, ~5 tries) until it resolves;
-  merge only on a literal `MERGEABLE`.
-- `mergeable` is `CONFLICTING` (or `mergeStateStatus` is `DIRTY`): re-run the
-  Step 2 sync against the PR's own base branch, resolve, push, re-check;
-  never merge a conflicting PR.
-- `reviewDecision` is `CHANGES_REQUESTED`: treat the requested changes as
-  findings, back to Step 4.
-- `reviewDecision` is `REVIEW_REQUIRED`: a human approval the conductor
-  cannot self-grant. Stop and escalate to Stevie; do not merge past it.
-  (Empty string means no review gate is configured, which IS green.)
-- All gates green (CI + `mergeable == MERGEABLE` + review decision) and zero
-  findings:
+Evaluate every state below. A state with no matching branch is NOT green:
+stop and escalate rather than guessing.
+
+CI (`gh pr checks`):
+- Any check still pending (exit 8): not decidable yet. Wait for every check
+  to reach a terminal state before judging CI at all.
+- No checks reported at all (exit 1): the repo may have no CI, or none
+  triggered. Do not read this as green; confirm which it is, escalate if the
+  PR was expected to run checks.
+- Red from THIS PR's code: go back to Step 4.
+- Red that is pre-existing drift: prove it (git history + clean local test
+  run on base), then present merge options honestly, do not force a cleanup
+  commit into this PR.
+
+`mergeable`:
+- `UNKNOWN`: GitHub is still recomputing after the last push. NOT green.
+  Poll a few seconds apart, ~5 tries. Still `UNKNOWN` after that: escalate
+  to Stevie, never merge on an unresolved state.
+- `CONFLICTING`: re-run the Step 2 sync against the PR's own base branch,
+  resolve, push, re-check. Never merge a conflicting PR.
+- `MERGEABLE`: green.
+
+`mergeStateStatus` (fetched, so consume more than `DIRTY`):
+- `CLEAN` or `UNSTABLE`: green. (`UNSTABLE` = non-required check failing;
+  the CI rules above still decide whether that failure blocks.)
+- `DIRTY`: conflicts, same remedy as `CONFLICTING`.
+- `BEHIND`: base requires an up-to-date branch. Re-run the Step 2 sync.
+- `DRAFT`: `gh pr ready <N>` first, or escalate if draft was intentional.
+- `BLOCKED`: unresolved review threads or an unmet protection rule.
+  Escalate; `gh pr merge` would fail anyway.
+
+`reviewDecision`:
+- `CHANGES_REQUESTED`: treat the requested changes as findings, back to
+  Step 4.
+- `REVIEW_REQUIRED`: a human approval the conductor cannot self-grant. Stop
+  and escalate to Stevie.
+- `APPROVED` or empty string (no review gate configured): green.
+
+All four gates green and zero findings:
 
 ```bash
 gh pr merge <N> --merge     # merge commit, NEVER squash
