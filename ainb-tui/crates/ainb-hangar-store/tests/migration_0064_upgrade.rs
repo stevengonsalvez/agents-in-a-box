@@ -88,7 +88,10 @@ async fn migration_0064_adds_autopilot_actor_sets_and_keeps_the_rule_open() {
     seed_populated(&pool).await;
 
     for t in ["autopilot_subscriber", "autopilot_collaborator"] {
-        assert!(!object_exists(&pool, "table", t).await, "{t} must not exist before 0064");
+        assert!(
+            !object_exists(&pool, "table", t).await,
+            "{t} must not exist before 0064"
+        );
     }
 
     apply_migrations(&pool).await.expect("upgrade applies 0064");
@@ -113,8 +116,14 @@ async fn migration_0064_adds_autopilot_actor_sets_and_keeps_the_rule_open() {
     for t in ["autopilot_subscriber", "autopilot_collaborator"] {
         assert!(object_exists(&pool, "table", t).await, "missing table {t}");
     }
-    for idx in ["idx_autopilot_subscriber_actor", "idx_autopilot_collaborator_actor"] {
-        assert!(object_exists(&pool, "index", idx).await, "missing index {idx}");
+    for idx in [
+        "idx_autopilot_subscriber_actor",
+        "idx_autopilot_collaborator_actor",
+    ] {
+        assert!(
+            object_exists(&pool, "index", idx).await,
+            "missing index {idx}"
+        );
     }
 
     // (c) NOTHING was backfilled — not even "the creator is a collaborator",
@@ -140,13 +149,24 @@ async fn migration_0064_adds_autopilot_actor_sets_and_keeps_the_rule_open() {
 
     // (e) The actor_type CHECK bites on both new tables.
     for t in ["autopilot_subscriber", "autopilot_collaborator"] {
-        let extra = if t == "autopilot_collaborator" { ", role" } else { "" };
-        let extra_val = if t == "autopilot_collaborator" { ", 'editor'" } else { "" };
+        let extra = if t == "autopilot_collaborator" {
+            ", role"
+        } else {
+            ""
+        };
+        let extra_val = if t == "autopilot_collaborator" {
+            ", 'editor'"
+        } else {
+            ""
+        };
         let sql = format!(
             "INSERT INTO {t} (autopilot_id, workspace_id, actor_type, actor_id{extra}, created_at) \
              VALUES ('ap-1','ws-1','robot','x'{extra_val}, 40)"
         );
-        assert!(sqlx::query(&sql).execute(&pool).await.is_err(), "{t} actor_type CHECK");
+        assert!(
+            sqlx::query(&sql).execute(&pool).await.is_err(),
+            "{t} actor_type CHECK"
+        );
     }
 
     // (f) Re-applying is a ledgered no-op.
