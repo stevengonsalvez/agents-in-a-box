@@ -2459,6 +2459,65 @@ pub struct IssueLinksResult {
     pub links: Vec<crate::events::IssueLinkRow>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_SUBSCRIBE`] /
+/// [`crate::methods::HANGAR_ISSUE_UNSUBSCRIBE`] (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscribeParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to watch / stop watching.
+    pub issue_id: String,
+    /// The target actor in canonical `member:<id>` / `agent:<id>` form. Omitted
+    /// ⇒ the LOCAL HUMAN (`member:me`), mirroring the reference's "the target
+    /// defaults to the caller" — an agent caller subscribes ITSELF, not the
+    /// human behind it. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_SUBSCRIBERS`] (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscribersParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose subscriber set to read.
+    pub issue_id: String,
+}
+
+/// Result of every #22 subscriber method: the issue's REFRESHED subscriber set,
+/// so a mutator needs no read-after-write round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscribersResult {
+    /// Every watcher, oldest first. Empty ⇒ nobody watches the issue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscribers: Vec<crate::events::IssueSubscriberRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_REACTION_ADD`] /
+/// [`crate::methods::HANGAR_ISSUE_REACTION_REMOVE`] (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueReactionParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue reacted to.
+    pub issue_id: String,
+    /// The emoji. Blank is rejected (`INVALID_PARAMS`), matching the reference's
+    /// `400 "emoji is required"`.
+    pub emoji: String,
+    /// The reacting actor. Omitted ⇒ the LOCAL HUMAN. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// Result of every #22 reaction method: the issue's REFRESHED aggregated
+/// buckets, most-used first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueReactionsResult {
+    /// One bucket per distinct emoji. Empty ⇒ the issue has no reactions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<crate::events::ReactionRow>,
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_SET_AUTO_RUN`] (tcp T4 / F7):
 /// flip a card's auto-run flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2805,6 +2864,9 @@ mod tests {
 
         let issues = IssuesListResult {
             issues: vec![IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 last_dispatch_reason: None,
                 last_dispatch_detail: None,
                 last_dispatch_at: None,
