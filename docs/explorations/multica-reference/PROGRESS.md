@@ -14,3 +14,4 @@
 | 15 | #492 | 0b4dcf13427d7c9005914f2a29f280130aca871b | 2026-07-26 | gate green both OSes |
 | 30 | #494 | 9c5cf05858b71971d20fba6a6d6b0e68231cac8f | 2026-07-27 | gate green both OSes |
 | 4-rest | #495 | 97c2b5577f9359afb5fa2bafaced584a6718c3ab | 2026-07-27 | gate green both OSes |
+| 12 | #496 | d9dbbf9df7f0ab909e071dd944ee91bc6fb05ea9 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit before merge) |
