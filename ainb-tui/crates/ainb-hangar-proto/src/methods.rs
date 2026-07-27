@@ -698,31 +698,42 @@ pub const HANGAR_USAGE_ROLLUP: &str = "hangar/usage_rollup";
 /// error).
 pub const HANGAR_PR_STATUS_REFRESH: &str = "hangar/pr_status_refresh";
 
-/// `hangar/inbox_list` — snapshot the aggregated notification inbox of a
-/// workspace (e38.14).
+/// `hangar/inbox_list` — snapshot ONE ACTOR's aggregated notification inbox in a
+/// workspace (e38.14; per-recipient since store migration 0060).
 ///
-/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
-/// Result: [`crate::snapshots::InboxListResult`] — the workspace's inbox entries
-/// (newest-first) plus the unread count. Drives the Inbox screen's list + unread
-/// badge. The entries are the durable aggregate the daemon's inbox writer folds
-/// live issue / comment / task events into (store migration 0021), so an event
-/// that fired while no plugin was attached is still here. Workspace-scoped like
-/// every snapshot: a foreign / unknown workspace yields an empty list + zero
-/// unread (a read, so no `INVALID_PARAMS` rejection — mirrors `issues_list`).
+/// Params: [`crate::snapshots::InboxScopedParams`]
+/// (`{ workspace_id, recipient? }`).
+/// Result: [`crate::snapshots::InboxListResult`] — that recipient's inbox entries
+/// (newest-first) plus THEIR unread count. Drives the Inbox screen's list +
+/// unread badge. The entries are the durable aggregate the daemon's inbox writer
+/// folds live issue / comment / task events into, each addressed to exactly one
+/// actor, so an event that fired while no plugin was attached is still here and
+/// another actor's notifications never leak in.
+///
+/// Scoped on both axes: a foreign / unknown workspace yields an empty list +
+/// zero unread (a read, so no `INVALID_PARAMS` rejection — mirrors
+/// `issues_list`), and only the named recipient's rows are returned. An OMITTED
+/// `recipient` defaults to the LOCAL HUMAN (`member:me`) — never the union of
+/// every actor's entries; a MALFORMED one is rejected with `INVALID_PARAMS`.
 pub const HANGAR_INBOX_LIST: &str = "hangar/inbox_list";
 
-/// `hangar/inbox_mark_read` — mark a workspace's inbox entries read (e38.14).
+/// `hangar/inbox_mark_read` — mark ONE ACTOR's inbox entries read in a workspace
+/// (e38.14; per-recipient since store migration 0060).
 ///
-/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
-/// Result: [`crate::snapshots::InboxMarkReadResult`] — how many entries the sweep
-/// flipped + the unread count after (which is `0` for a whole-workspace sweep).
-/// This is the mark-read sweep: it stamps `read_at` on every currently-unread
-/// entry so the unread count drops to zero. Idempotent (a re-sweep flips nothing
-/// and leaves already-read entries on their original timestamp).
+/// Params: [`crate::snapshots::InboxScopedParams`]
+/// (`{ workspace_id, recipient? }`).
+/// Result: [`crate::snapshots::InboxMarkReadResult`] — how many of THAT
+/// recipient's entries the sweep flipped + their unread count after (which is
+/// `0` once their own sweep commits). It stamps `read_at` on every currently-
+/// unread entry addressed to that actor so their unread count drops to zero.
+/// Idempotent (a re-sweep flips nothing and leaves already-read entries on their
+/// original timestamp).
 ///
-/// Mutating + workspace-scoped: the daemon resolves the workspace and rejects a
-/// mistyped one with `INVALID_PARAMS` (never a silent no-op, mirroring
-/// `hangar/task_transition`); a sibling tenant's inbox is never touched.
+/// Mutating + scoped on both axes: the daemon resolves the workspace and rejects
+/// a mistyped one with `INVALID_PARAMS` (never a silent no-op, mirroring
+/// `hangar/task_transition`); neither a sibling tenant's nor a sibling ACTOR's
+/// entries are ever touched. An omitted `recipient` sweeps the LOCAL HUMAN's
+/// inbox (`member:me`); a malformed one is `INVALID_PARAMS`.
 pub const HANGAR_INBOX_MARK_READ: &str = "hangar/inbox_mark_read";
 
 /// `hangar/boards_list` — snapshot the user-defined kanban boards of a workspace

@@ -275,6 +275,17 @@ const ISSUE_TIMELINE_REQ_ID: i64 = 64;
 /// `comment.author_type` CHECK), so this is accepted as-is; swapping in the real
 /// signed-in member is a drop-in change once identity lands.
 const SELF_AUTHOR_REF: &str = "member:me";
+
+/// Params for the two inbox RPCs: the workspace plus WHOSE inbox this is.
+///
+/// Every inbox entry is addressed to exactly one actor (store migration 0060),
+/// so the Inbox screen is THE LOCAL HUMAN's inbox, not a workspace-wide feed:
+/// the request names [`SELF_AUTHOR_REF`] as the recipient, and the daemon
+/// returns / sweeps only that actor's rows. When a real signed-in identity
+/// lands, only that constant changes.
+fn inbox_params(ws: &str) -> serde_json::Value {
+    serde_json::json!({ "workspace_id": ws, "recipient": SELF_AUTHOR_REF })
+}
 /// How many trailing log lines the logs pane reads from the newest `daemon.*`
 /// file on each refresh (P8.6). Bounded so a huge log file never blows up the
 /// pane; the daily rotation keeps a single day's file the practical ceiling.
@@ -1299,7 +1310,9 @@ impl HangarPlugin {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::InboxListResult>(
                 result.clone(),
             ) {
-                self.screens.set_inbox(r.entries, r.unread);
+                // The snapshot was requested for the local human, so the screen
+                // is tagged with the actor it belongs to.
+                self.screens.set_inbox(r.entries, r.unread, SELF_AUTHOR_REF.to_string());
             }
         }
     }
@@ -1725,7 +1738,8 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let params = serde_json::json!({ "workspace_id": ws });
+        // The sweep names the local human: it must never clear an agent's rows.
+        let params = inbox_params(&ws);
         let Ok(body) = encode_request(
             INBOX_MARK_READ_REQ_ID,
             daemon_methods::HANGAR_INBOX_MARK_READ,
@@ -2103,7 +2117,7 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let scoped = serde_json::json!({ "workspace_id": ws });
+        let scoped = serde_json::json!({ "workspace_id": ws.clone() });
         let requests = [
             (
                 ISSUES_REQ_ID,
@@ -2166,10 +2180,14 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_DAEMON_CONFIG_LIST,
                 serde_json::json!({}),
             ),
+            // The Inbox screen is THE LOCAL HUMAN's inbox, not the workspace's:
+            // every entry is addressed to one actor (store migration 0060), so
+            // the request names whose inbox this is. When a real signed-in
+            // identity lands, only `SELF_AUTHOR_REF` changes.
             (
                 INBOX_LIST_REQ_ID,
                 daemon_methods::HANGAR_INBOX_LIST,
-                scoped.clone(),
+                inbox_params(&ws),
             ),
             // The control-center board is FLEET-WIDE (every workspace + the
             // no-workspace host sessions), so its feed is unscoped by design.
@@ -5357,6 +5375,35 @@ impl Plugin for HangarPlugin {
 mod tests {
     use super::*;
     use ainb_plugin_protocol::manifest::{CapabilityGrant, Manifest};
+
+    /// Both inbox RPCs must carry the local human as the `recipient`, or the
+    /// daemon silently answers with `member:me`'s inbox by default while the
+    /// screen claims to be someone else's.
+    ///
+    /// MUTATION GUARD: dropping `recipient` from [`inbox_params`] fails this,
+    /// and both `hangar/inbox_list` and `hangar/inbox_mark_read` are encoded
+    /// from it, so the wire shape is pinned end to end.
+    #[test]
+    fn inbox_requests_name_the_local_human_as_recipient() {
+        let params = inbox_params("default");
+        assert_eq!(params["workspace_id"], "default");
+        assert_eq!(
+            params["recipient"], SELF_AUTHOR_REF,
+            "the inbox request must name whose inbox it reads: {params}"
+        );
+
+        for method in [
+            daemon_methods::HANGAR_INBOX_LIST,
+            daemon_methods::HANGAR_INBOX_MARK_READ,
+        ] {
+            let frame = encode_request(29, method, inbox_params("default")).expect("encode");
+            let body = String::from_utf8(frame).expect("utf8 frame");
+            assert!(
+                body.contains("\"recipient\":\"member:me\""),
+                "{method} must carry the recipient on the wire: {body}"
+            );
+        }
+    }
 
     #[test]
     fn manifest_returns_canonical_toml() {

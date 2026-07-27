@@ -35,19 +35,37 @@ pub struct InboxState {
     entries: Vec<InboxEntryRow>,
     /// The unread count (`read_at IS NULL`) the badge renders.
     unread: i64,
+    /// The actor whose inbox this is (`member:me` today), painted in the header
+    /// so the screen visibly proves WHOSE notifications these are.
+    recipient: String,
 }
 
 impl InboxState {
-    /// Build the state from an `hangar/inbox_list` snapshot result.
+    /// Build the state from an `hangar/inbox_list` snapshot result, tagged with
+    /// the actor the snapshot was requested for.
     #[must_use]
-    pub const fn from_snapshot(entries: Vec<InboxEntryRow>, unread: i64) -> Self {
-        Self { entries, unread }
+    pub const fn from_snapshot(
+        entries: Vec<InboxEntryRow>,
+        unread: i64,
+        recipient: String,
+    ) -> Self {
+        Self {
+            entries,
+            unread,
+            recipient,
+        }
     }
 
     /// The unread count (read accessor for the glue / tests).
     #[must_use]
     pub const fn unread(&self) -> i64 {
         self.unread
+    }
+
+    /// The actor whose inbox this is (read accessor for the glue / tests).
+    #[must_use]
+    pub fn recipient(&self) -> &str {
+        &self.recipient
     }
 
     /// The aggregated entries (read accessor for tests).
@@ -62,7 +80,7 @@ impl InboxState {
 /// Layout (top-to-bottom):
 ///
 /// ```text
-/// Inbox  [3 unread]
+/// Inbox (member:me)  [3 unread]
 /// r mark all read
 /// issue    New issue: Refactor API
 /// comment  New comment on issue-1
@@ -77,8 +95,15 @@ impl InboxState {
 pub fn render_inbox(buf: &mut WireBuffer, area_w: u16, top: u16, bottom: u16, state: &InboxState) {
     let mut row = top;
 
-    // Title + unread badge.
+    // Title + the actor this inbox belongs to + unread badge. Every entry is
+    // addressed to exactly one actor (store migration 0060), so the header names
+    // whose inbox is on screen rather than implying a workspace-wide feed.
     let mut x = put_str(buf, 0, row, "Inbox", GOLD, area_w);
+    if !state.recipient.is_empty() {
+        x = put_str(buf, x, row, " (", MUTED_GRAY, area_w);
+        x = put_str(buf, x, row, &state.recipient, MUTED_GRAY, area_w);
+        x = put_str(buf, x, row, ")", MUTED_GRAY, area_w);
+    }
     if state.unread > 0 {
         x = put_str(buf, x, row, "  ", MUTED_GRAY, area_w);
         x = put_str(buf, x, row, "[", MUTED_GRAY, area_w);
@@ -172,6 +197,7 @@ mod tests {
             event: "issue_created".into(),
             subject_id: "s-1".into(),
             summary: summary.into(),
+            recipient: "member:me".into(),
             created_at: 0,
             read_at: if read { Some(100) } else { None },
         }
@@ -199,6 +225,7 @@ mod tests {
                 entry("comment", "New comment on issue-1", false),
             ],
             2,
+            "member:me".into(),
         );
         let mut buf = WireBuffer::new(60, 24);
         render_inbox(&mut buf, 60, 0, 20, &state);
@@ -222,9 +249,44 @@ mod tests {
         );
     }
 
+    /// The header names WHOSE inbox is on screen, and the pane paints only the
+    /// entries it was handed.
+    ///
+    /// MUTATION GUARD: dropping the recipient from the title line fails the
+    /// header assertion — the screen would imply a workspace-wide feed while the
+    /// data plane returns one actor's rows.
+    #[test]
+    fn header_names_the_recipient_and_only_their_entries_render() {
+        let state = InboxState::from_snapshot(
+            vec![entry("comment", "New comment on issue-1", false)],
+            1,
+            "member:me".into(),
+        );
+        let mut buf = WireBuffer::new(60, 24);
+        render_inbox(&mut buf, 60, 0, 20, &state);
+
+        let title = row_text(&buf, 0, 60);
+        assert!(
+            title.contains("member:me"),
+            "the header names the recipient: {title:?}"
+        );
+        assert!(title.starts_with("Inbox"), "title: {title:?}");
+        assert_eq!(state.recipient(), "member:me");
+
+        // Only the one handed-in entry paints; no other actor's row appears.
+        let body = (3..8).map(|r| row_text(&buf, r, 60)).collect::<Vec<_>>().join("\n");
+        assert!(body.contains("New comment on issue-1"), "{body}");
+        assert_eq!(
+            body.lines().filter(|l| !l.trim().is_empty()).count(),
+            1,
+            "exactly the entries handed to the screen render: {body}"
+        );
+    }
+
     #[test]
     fn unread_entries_render_amber_read_entries_white() {
-        let state = InboxState::from_snapshot(vec![entry("task", "Task finished", true)], 0);
+        let state =
+            InboxState::from_snapshot(vec![entry("task", "Task finished", true)], 0, String::new());
         let mut buf = WireBuffer::new(60, 24);
         render_inbox(&mut buf, 60, 0, 20, &state);
 
