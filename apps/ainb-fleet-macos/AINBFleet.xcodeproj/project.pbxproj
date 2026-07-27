@@ -1,0 +1,372 @@
+// !$*UTF8*$!
+{
+	archiveVersion = 1;
+	classes = {
+	};
+	objectVersion = 56;
+	objects = {
+
+/* Begin PBXBuildFile section */
+		A10000000000000000000011 /* AINBFleetApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000021 /* AINBFleetApp.swift */; };
+		A10000000000000000000012 /* BuildConfigurationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000022 /* BuildConfigurationTests.swift */; };
+		A10000000000000000000013 /* ContentLengthCodec.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000024 /* ContentLengthCodec.swift */; };
+		A10000000000000000000014 /* FleetWire.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000025 /* FleetWire.swift */; };
+		A10000000000000000000015 /* FleetProjectionReducer.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000026 /* FleetProjectionReducer.swift */; };
+		A10000000000000000000016 /* ContentLengthCodecTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000027 /* ContentLengthCodecTests.swift */; };
+		A10000000000000000000017 /* CanonicalFixtureTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000028 /* CanonicalFixtureTests.swift */; };
+		A10000000000000000000018 /* FleetProjectionReducerTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000029 /* FleetProjectionReducerTests.swift */; };
+		A10000000000000000000019 /* FleetSemanticBoundaryTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */; };
+		A1000000000000000000001A /* HangarLocation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002B /* HangarLocation.swift */; };
+		A1000000000000000000001B /* FleetConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002C /* FleetConnection.swift */; };
+		A1000000000000000000001C /* FleetConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002D /* FleetConnectionTests.swift */; };
+		A1000000000000000000001D /* FleetDaemonContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002E /* FleetDaemonContractTests.swift */; };
+/* End PBXBuildFile section */
+
+/* Begin PBXContainerItemProxy section */
+		A10000000000000000000091 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000001;
+			remoteInfo = AINBFleet;
+		};
+/* End PBXContainerItemProxy section */
+
+/* Begin PBXFileReference section */
+		A10000000000000000000021 /* AINBFleetApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AINBFleetApp.swift; sourceTree = "<group>"; };
+		A10000000000000000000022 /* BuildConfigurationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = BuildConfigurationTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000023 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		A10000000000000000000024 /* ContentLengthCodec.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentLengthCodec.swift; sourceTree = "<group>"; };
+		A10000000000000000000025 /* FleetWire.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetWire.swift; sourceTree = "<group>"; };
+		A10000000000000000000026 /* FleetProjectionReducer.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetProjectionReducer.swift; sourceTree = "<group>"; };
+		A10000000000000000000027 /* ContentLengthCodecTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ContentLengthCodecTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000028 /* CanonicalFixtureTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CanonicalFixtureTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000029 /* FleetProjectionReducerTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetProjectionReducerTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetSemanticBoundaryTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000002B /* HangarLocation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = HangarLocation.swift; sourceTree = "<group>"; };
+		A1000000000000000000002C /* FleetConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnection.swift; sourceTree = "<group>"; };
+		A1000000000000000000002D /* FleetConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnectionTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000002E /* FleetDaemonContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetDaemonContractTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000031 /* AINBFleet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AINBFleet.app; sourceTree = BUILT_PRODUCTS_DIR; };
+		A10000000000000000000032 /* FleetRPCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetRPCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
+/* End PBXFileReference section */
+
+/* Begin PBXFrameworksBuildPhase section */
+		A10000000000000000000041 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000042 /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXGroup section */
+		A10000000000000000000051 = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000052 /* App */,
+				A10000000000000000000056 /* FleetRPC */,
+				A10000000000000000000053 /* Resources */,
+				A10000000000000000000054 /* FleetRPCTests */,
+				A10000000000000000000055 /* Products */,
+			);
+			sourceTree = "<group>";
+		};
+		A10000000000000000000052 /* App */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000021 /* AINBFleetApp.swift */,
+			);
+			path = Sources/App;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000053 /* Resources */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000023 /* Info.plist */,
+			);
+			path = Resources;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000056 /* FleetRPC */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000024 /* ContentLengthCodec.swift */,
+				A10000000000000000000025 /* FleetWire.swift */,
+				A10000000000000000000026 /* FleetProjectionReducer.swift */,
+				A1000000000000000000002B /* HangarLocation.swift */,
+				A1000000000000000000002C /* FleetConnection.swift */,
+			);
+			path = Sources/FleetRPC;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000054 /* FleetRPCTests */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000022 /* BuildConfigurationTests.swift */,
+				A10000000000000000000027 /* ContentLengthCodecTests.swift */,
+				A10000000000000000000028 /* CanonicalFixtureTests.swift */,
+				A10000000000000000000029 /* FleetProjectionReducerTests.swift */,
+				A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */,
+				A1000000000000000000002D /* FleetConnectionTests.swift */,
+				A1000000000000000000002E /* FleetDaemonContractTests.swift */,
+			);
+			path = Tests/FleetRPCTests;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000055 /* Products */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000031 /* AINBFleet.app */,
+				A10000000000000000000032 /* FleetRPCTests.xctest */,
+			);
+			name = Products;
+			sourceTree = "<group>";
+		};
+/* End PBXGroup section */
+
+/* Begin PBXNativeTarget section */
+		A10000000000000000000001 /* AINBFleet */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000061 /* Build configuration list for PBXNativeTarget "AINBFleet" */;
+			buildPhases = (
+				A10000000000000000000041 /* Frameworks */,
+				A10000000000000000000071 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = AINBFleet;
+			productName = AINBFleet;
+			productReference = A10000000000000000000031 /* AINBFleet.app */;
+			productType = "com.apple.product-type.application";
+		};
+		A10000000000000000000002 /* FleetRPCTests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000062 /* Build configuration list for PBXNativeTarget "FleetRPCTests" */;
+			buildPhases = (
+				A10000000000000000000042 /* Frameworks */,
+				A10000000000000000000072 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10000000000000000000092 /* PBXTargetDependency */,
+			);
+			name = FleetRPCTests;
+			productName = FleetRPCTests;
+			productReference = A10000000000000000000032 /* FleetRPCTests.xctest */;
+			productType = "com.apple.product-type.bundle.unit-test";
+		};
+/* End PBXNativeTarget section */
+
+/* Begin PBXProject section */
+		A10000000000000000000000 /* Project object */ = {
+			isa = PBXProject;
+			attributes = {
+				BuildIndependentTargetsInParallel = 1;
+				LastSwiftUpdateCheck = 2640;
+				LastUpgradeCheck = 2640;
+				TargetAttributes = {
+					A10000000000000000000001 = {
+						CreatedOnToolsVersion = 26.4.1;
+					};
+					A10000000000000000000002 = {
+						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = A10000000000000000000001;
+					};
+				};
+			};
+			buildConfigurationList = A10000000000000000000060 /* Build configuration list for PBXProject "AINBFleet" */;
+			compatibilityVersion = "Xcode 14.0";
+			developmentRegion = en;
+			hasScannedForEncodings = 0;
+			knownRegions = (
+				en,
+				Base,
+			);
+			mainGroup = A10000000000000000000051;
+			productRefGroup = A10000000000000000000055 /* Products */;
+			projectDirPath = "";
+			projectRoot = "";
+			targets = (
+				A10000000000000000000001 /* AINBFleet */,
+				A10000000000000000000002 /* FleetRPCTests */,
+			);
+		};
+/* End PBXProject section */
+
+/* Begin PBXTargetDependency section */
+		A10000000000000000000092 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			targetProxy = A10000000000000000000091 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXSourcesBuildPhase section */
+		A10000000000000000000071 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000011 /* AINBFleetApp.swift in Sources */,
+				A10000000000000000000013 /* ContentLengthCodec.swift in Sources */,
+				A10000000000000000000014 /* FleetWire.swift in Sources */,
+				A10000000000000000000015 /* FleetProjectionReducer.swift in Sources */,
+				A1000000000000000000001A /* HangarLocation.swift in Sources */,
+				A1000000000000000000001B /* FleetConnection.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000072 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000012 /* BuildConfigurationTests.swift in Sources */,
+				A10000000000000000000016 /* ContentLengthCodecTests.swift in Sources */,
+				A10000000000000000000017 /* CanonicalFixtureTests.swift in Sources */,
+				A10000000000000000000018 /* FleetProjectionReducerTests.swift in Sources */,
+				A10000000000000000000019 /* FleetSemanticBoundaryTests.swift in Sources */,
+				A1000000000000000000001C /* FleetConnectionTests.swift in Sources */,
+				A1000000000000000000001D /* FleetDaemonContractTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXSourcesBuildPhase section */
+
+/* Begin XCBuildConfiguration section */
+		A10000000000000000000081 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Debug;
+		};
+		A10000000000000000000082 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CLANG_ENABLE_MODULES = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				SDKROOT = macosx;
+			};
+			name = Release;
+		};
+		A10000000000000000000083 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				ENABLE_TESTABILITY = YES;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ainb.fleet;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Debug;
+		};
+		A10000000000000000000084 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				ENABLE_APP_SANDBOX = NO;
+				GENERATE_INFOPLIST_FILE = NO;
+				INFOPLIST_FILE = Resources/Info.plist;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				MARKETING_VERSION = 0.1;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ainb.fleet;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_VERSION = 6.0;
+			};
+			name = Release;
+		};
+		A10000000000000000000085 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ainb.fleet.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AINBFleet.app/Contents/MacOS/AINBFleet";
+				TEST_TARGET_NAME = AINBFleet;
+			};
+			name = Debug;
+		};
+		A10000000000000000000086 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				BUNDLE_LOADER = "$(TEST_HOST)";
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ainb.fleet.tests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_HOST = "$(BUILT_PRODUCTS_DIR)/AINBFleet.app/Contents/MacOS/AINBFleet";
+				TEST_TARGET_NAME = AINBFleet;
+			};
+			name = Release;
+		};
+/* End XCBuildConfiguration section */
+
+/* Begin XCConfigurationList section */
+		A10000000000000000000060 /* Build configuration list for PBXProject "AINBFleet" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000081 /* Debug */,
+				A10000000000000000000082 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000061 /* Build configuration list for PBXNativeTarget "AINBFleet" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000083 /* Debug */,
+				A10000000000000000000084 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000062 /* Build configuration list for PBXNativeTarget "FleetRPCTests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000085 /* Debug */,
+				A10000000000000000000086 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+/* End XCConfigurationList section */
+	};
+	rootObject = A10000000000000000000000 /* Project object */;
+}
