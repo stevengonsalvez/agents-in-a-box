@@ -4387,6 +4387,8 @@ Commands:
   list         List the workspace's autopilots (cron, next tick, last run, enabled)
   disable      Disable an autopilot so the scheduler stops firing it
   enable       Re-enable an autopilot, recomputing its next tick from now
+  edit         Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
+  versions     Show the autopilot's rule-version ledger (who published what, when)
   run          Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
   api-trigger  Arm (or `--disable`) the bare programmatic `api` trigger
   runs         List the autopilot's recent runs (status, trigger source, reason)
@@ -4452,6 +4454,9 @@ Options:
           
           [default: skip]
 
+      --as-user <AS_USER>
+          The ACCOUNTABLE HUMAN for this rule (`user.id` or email). Recorded on rule-version v1, which creation writes in the same transaction. Omitted defaults to the local human (`member:me`) — a CLI create always has a human at the keyboard
+
       --workspace <WORKSPACE>
           Workspace slug to create in. Defaults to the bootstrapped `default`
 
@@ -4491,6 +4496,7 @@ Arguments:
 Options:
       --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --as-user <AS_USER>      The accountable human for this publish (`user.id` or email). Pausing, resuming and arming a trigger are all SUBSTANTIVE publishes, so each stamps a rule version. Defaults to the local human (`member:me`)
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```
@@ -4511,6 +4517,91 @@ Arguments:
 Options:
       --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --as-user <AS_USER>      The accountable human for this publish (`user.id` or email). Pausing, resuming and arming a trigger are all SUBSTANTIVE publishes, so each stamps a rule version. Defaults to the local human (`member:me`)
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot edit`
+
+Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
+
+```console
+$ ainb hangar autopilot edit --help
+Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
+
+Usage: ainb hangar autopilot edit [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --name <NAME>
+          New display name (cosmetic on its own)
+
+      --cron <CRON>
+          New cron expression (UTC, 5-field) — revalidated before any write
+
+      --agent <AGENT>
+          Re-target the rule at a different agent (`agent.id`)
+
+      --instructions <INSTRUCTIONS>
+          New instructions handed to the agent on every tick
+
+      --clear-instructions
+          Clear the instructions entirely
+
+      --max-concurrent-runs <MAX_CONCURRENT_RUNS>
+          New maximum simultaneous in-flight runs
+
+      --execution-mode <EXECUTION_MODE>
+          New execution mode (`run-only` | `create-issue`)
+
+          Possible values:
+          - run-only:     Enqueue a task with no issue (the v1 default)
+          - create-issue: Create an issue, then enqueue a task against it
+
+      --concurrency-policy <CONCURRENCY_POLICY>
+          New concurrency policy (`skip` | `queue` | `replace`)
+
+          Possible values:
+          - skip:    Drop a tick that comes due at the in-flight limit (the v1 default)
+          - queue:   Fire the tick anyway; the queue runs it after the in-flight one
+          - replace: Supersede the in-flight run and fire fresh
+
+      --as-user <AS_USER>
+          The ACCOUNTABLE HUMAN for this edit (`user.id` or email) — the name recorded on the minted rule version. Defaults to the local human (`member:me`)
+
+      --workspace <WORKSPACE>
+          Workspace slug the autopilot belongs to. Defaults to `default`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar autopilot versions`
+
+Show the autopilot's rule-version ledger (who published what, when)
+
+```console
+$ ainb hangar autopilot versions --help
+Show the autopilot's rule-version ledger (who published what, when)
+
+Usage: ainb hangar autopilot versions [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          Maximum number of versions to show (newest-first) [default: 20]
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```
@@ -4545,6 +4636,9 @@ Options:
           
           [default: manual]
 
+      --as-user <AS_USER>
+          The human firing it (`user.id` or email). A `manual` run attributes to this human (`direct_human`) — them, not the rule's owner. An `api` run stays UNATTENDED (`rule_owner`), matching multica. Defaults to the local human (`member:me`)
+
       --workspace <WORKSPACE>
           Workspace slug the autopilot belongs to. Defaults to `default`
 
@@ -4568,6 +4662,7 @@ Arguments:
 Options:
       --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --as-user <AS_USER>      The accountable human for this publish (`user.id` or email). Pausing, resuming and arming a trigger are all SUBSTANTIVE publishes, so each stamps a rule version. Defaults to the local human (`member:me`)
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```
