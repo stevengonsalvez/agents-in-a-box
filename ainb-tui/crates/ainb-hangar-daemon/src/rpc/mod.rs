@@ -782,6 +782,7 @@ async fn handle(
         methods::HANGAR_ISSUE_DELETE => handle_issue_delete(pool, req, events).await,
         methods::HANGAR_ISSUE_CANCEL_ACTIVE => handle_issue_cancel_active(pool, req, events).await,
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
+        methods::HANGAR_ISSUES_BATCH_UPDATE => handle_issues_batch_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
         methods::HANGAR_ISSUE_CRITERION_SET => handle_issue_criterion_set(pool, req, events).await,
@@ -3147,7 +3148,7 @@ async fn handle_issue_create(
 
     let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
         req,
-        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels?, origin_type?, origin_id? }",
+        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels?, origin_type?, origin_id?, parent_issue_id?, stage? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -3189,6 +3190,12 @@ async fn handle_issue_create(
     let priority = params.priority.unwrap_or(0);
     if !(0..=3).contains(&priority) {
         return Err(invalid_params("issue priority must be 0..3 (P3..P0)"));
+    }
+    // 0046 stage: 1-based, so 0 / negative is a client error rather than an
+    // opaque sqlite CHECK fault surfacing as an internal store error. Same
+    // reject-never-clamp contract as `priority`.
+    if params.stage.is_some_and(|s| s < 1) {
+        return Err(invalid_params("issue stage must be >= 1"));
     }
     // 0014 due date: the wire carries epoch ms at UTC midnight (the client parses
     // the `YYYY-MM-DD` calendar day with `proto::dates::parse_calendar_date_ms`),
@@ -3237,6 +3244,7 @@ async fn handle_issue_create(
             creator: &creator,
             external_ref,
             parent_issue_id,
+            stage: params.stage,
             acceptance_criteria: &acceptance_criteria,
             context_refs: &context_refs,
             priority,
@@ -3495,6 +3503,137 @@ async fn issue_prev_state_for_cascade(
             .filter(|i| i.workspace_id == ws.as_str())
             .map(|i| i.state),
     )
+}
+
+/// Dispatch `hangar/issues_batch_update` (multica parity #3-rest, MUL-4155):
+/// apply ONE lifecycle state to N issues, then run ONE aggregated child-done
+/// cascade over the whole batch.
+///
+/// The verb exists for the cascade. Sibling completions that close the same
+/// stage barrier used to post one parent comment EACH (and, with the old
+/// single-frontier check, could drop a stage's close entirely when the stages
+/// completed out of order). Here the state edits commit in one transaction, then
+/// [`cascade_children_done`](ainb_hangar_store::service::child_done::cascade_children_done)
+/// runs ONCE over the final state and posts at most one comment per parent.
+///
+/// Mutating + workspace-scoped, mirroring [`handle_issue_update`]: a typo'd
+/// workspace is `INVALID_PARAMS` (never a silent no-op), a non-canonical state is
+/// rejected before any write, and every edit is scoped by `(id, workspace_id)` so
+/// a foreign-tenant id touches no row. Per changed row the daemon records the
+/// activity diff and pushes `IssueUpdated`; per aggregated cascade it pushes
+/// exactly ONE `CommentAdded` and runs one parent wake, through the same
+/// [`deliver_cascade`](crate::board::deliver_cascade) the single-child seam uses.
+async fn handle_issues_batch_update(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
+    use ainb_hangar_proto::snapshots::{BatchCascadeRow, IssuesBatchUpdateResult};
+    use ainb_hangar_store::repo::issue::IssueRepo;
+    use ainb_hangar_store::service::child_done::{ChildTransition, cascade_children_done};
+
+    let params: ainb_hangar_proto::snapshots::IssuesBatchUpdateParams =
+        parse_params(req, "{ workspace_id, issue_ids, state? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+
+    // No state = nothing to apply. The verb carries no other edit, so this is an
+    // honest empty result rather than an error.
+    let Some(state) = params.state.as_deref() else {
+        return to_value(&IssuesBatchUpdateResult::default());
+    };
+    // Same STRICT lifecycle vocabulary as `issue_update`: a typo is a clean
+    // INVALID_PARAMS before any write, never a partially-applied batch.
+    if IssueLifecycle::parse_canonical(state).is_none() {
+        return Err(invalid_params(&format!(
+            "invalid state {state:?}; valid values: {}",
+            IssueLifecycle::canonical_list()
+        )));
+    }
+
+    // Dedupe preserving caller order — a repeated id must not be counted twice.
+    let mut ids: Vec<String> = Vec::new();
+    for id in &params.issue_ids {
+        if !ids.iter().any(|seen| seen == id) {
+            ids.push(id.clone());
+        }
+    }
+
+    // multica parity #13: the pre-edit rows, so the post-edit diff can write one
+    // activity row per changed field — the batch path must not be an
+    // activity-log blind spot.
+    let mut before: Vec<(String, ainb_hangar_store::repo::issue::Issue)> = Vec::new();
+    for id in &ids {
+        if let Some(row) = IssueRepo::get_by_id(pool, id)
+            .await
+            .map_err(|e| store_err(&e))?
+            .filter(|i| i.workspace_id == ws.as_str())
+        {
+            before.push((id.clone(), row));
+        }
+    }
+
+    // ONE transaction, so the cascade below observes the batch's FINAL state.
+    let changed = IssueRepo::set_state_batch(pool, ws.as_str(), &ids, state)
+        .await
+        .map_err(|e| store_err(&e))?;
+
+    let mut updated = Vec::new();
+    for (id, _) in &changed {
+        if let Some(prior) = before.iter().find(|(bid, _)| bid == id).map(|(_, r)| r) {
+            if let Some(after) = IssueRepo::get_by_id(pool, id).await.map_err(|e| store_err(&e))? {
+                ActivityService::record_issue_diff(
+                    pool,
+                    &SystemIdGen,
+                    &SystemClock,
+                    ws.as_str(),
+                    &ActivityActor::System,
+                    prior,
+                    &after,
+                )
+                .await;
+            }
+        }
+        if let Some(row) =
+            snapshots::issue_row(pool, ws.as_str(), id).await.map_err(|e| store_err(&e))?
+        {
+            events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
+            updated.push(row);
+        }
+    }
+
+    // THE aggregation: one pass over every real transition, at most one comment
+    // per parent however many children closed the barrier.
+    let transitions: Vec<ChildTransition> = changed
+        .iter()
+        .map(|(id, prev)| ChildTransition {
+            child_id: id.clone(),
+            prev_state: prev.clone(),
+            new_state: state.to_string(),
+        })
+        .collect();
+    let now_ms = SystemClock.now_ms();
+    let cascades = cascade_children_done(pool, ws.as_str(), &transitions, now_ms, &SystemIdGen)
+        .await
+        .map_err(|e| store_err(&e))?;
+
+    let mut cascade_rows = Vec::new();
+    for cascade in &cascades {
+        crate::board::deliver_cascade(pool, &ws, cascade, now_ms, events).await;
+        cascade_rows.push(BatchCascadeRow {
+            parent_id: cascade.parent_id.clone(),
+            comment_id: cascade.comment_id.clone(),
+            child_ids: cascade.children.iter().map(|c| c.id.clone()).collect(),
+            children_done: cascade.children_done,
+            children_total: cascade.children_total,
+        });
+    }
+
+    to_value(&IssuesBatchUpdateResult {
+        updated,
+        cascades: cascade_rows,
+    })
 }
 
 async fn handle_issue_update(

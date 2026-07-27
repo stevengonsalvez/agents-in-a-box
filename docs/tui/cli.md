@@ -2868,6 +2868,7 @@ Commands:
   search       Search issues by title, description, or comment body (ranked)
   show         Show one issue by id
   update       Edit an existing issue's state, assignee, priority, or due date
+  batch-state  Apply ONE lifecycle state to several issues, cascading to parents ONCE
   delete       Delete an issue and all its history (dry-run without `--yes`)
   label        Attach or detach a label on an issue
   criteria     Inspect or tick off an issue's acceptance criteria
@@ -2958,6 +2959,11 @@ Options:
           Make this a SUB-ISSUE of an existing issue (`issue.id`, migration 0046).
           
           The parent must exist in the same workspace; completing the last child of the lowest unfinished stage cascades a roll-up comment onto the parent.
+
+      --stage <STAGE>
+          The 1-based STAGE BARRIER this sub-issue belongs to (migration 0046).
+          
+          Only meaningful with `--parent`. Siblings sharing a stage close their barrier together: when the LAST of them finishes, ONE aggregated roll-up comment is posted on the parent naming every child that closed it (multica parity #3-rest), not one comment per child.
 
       --origin-type <ORIGIN_TYPE>
           Provenance of this issue: `autopilot` | `comment_mention` | `manual` (migration 0056, multica parity #21).
@@ -3074,6 +3080,26 @@ Options:
 
   -h, --help
           Print help (see a summary with '-h')
+```
+
+#### `ainb hangar issue batch-state`
+
+Apply ONE lifecycle state to several issues, cascading to parents ONCE
+
+```console
+$ ainb hangar issue batch-state --help
+Apply ONE lifecycle state to several issues, cascading to parents ONCE
+
+Usage: ainb hangar issue batch-state [OPTIONS] --state <STATE> <IDS>...
+
+Arguments:
+  <IDS>...  Issue ids (ULIDs) to transition. Duplicates collapse
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --state <STATE>          The lifecycle state applied to EVERY id — one of `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`
+      --workspace <WORKSPACE>  Workspace slug the issues belong to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
 ```
 
 #### `ainb hangar issue delete`

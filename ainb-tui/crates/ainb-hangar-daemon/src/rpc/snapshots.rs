@@ -2614,6 +2614,12 @@ pub struct IssueCreateInput<'a> {
     pub external_ref: Option<&'a str>,
     /// Optional parent issue, making this a sub-issue (migration 0046).
     pub parent_issue_id: Option<&'a str>,
+    /// Optional 1-based STAGE BARRIER among the parent's children (migration
+    /// 0046). Siblings sharing a stage close their barrier together, and the
+    /// child-done cascade posts ONE aggregated roll-up when it closes (parity
+    /// #3-rest). Range-validated at the handler boundary; ignored without a
+    /// parent.
+    pub stage: Option<i64>,
     /// Ordered acceptance criteria (migration 0048).
     pub acceptance_criteria: &'a [String],
     /// Ordered context references (migration 0048).
@@ -2664,6 +2670,7 @@ pub async fn issue_create(
         creator,
         external_ref,
         parent_issue_id,
+        stage,
         acceptance_criteria,
         context_refs,
         priority,
@@ -2706,7 +2713,9 @@ pub async fn issue_create(
             acceptance_criteria: minted_criteria.clone(),
             context_refs: context_refs.to_vec(),
             parent_issue_id: parent_issue_id.map(ToString::to_string),
-            stage: None,
+            // 0046: the authored stage barrier. Only meaningful with a parent,
+            // so a stage without one is stored but inert.
+            stage,
         },
     )
     .await?;

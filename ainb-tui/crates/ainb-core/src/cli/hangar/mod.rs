@@ -1541,6 +1541,9 @@ pub enum IssueCommand {
     Show(IssueShowArgs),
     /// Edit an existing issue's state, assignee, priority, or due date.
     Update(IssueUpdateArgs),
+    /// Apply ONE lifecycle state to several issues, cascading to parents ONCE.
+    #[command(name = "batch-state")]
+    BatchState(IssueBatchStateArgs),
     /// Delete an issue and all its history (dry-run without `--yes`).
     Delete(IssueDeleteArgs),
     /// Attach or detach a label on an issue.
@@ -1872,6 +1875,22 @@ pub struct IssueUpdateArgs {
     pub workspace: Option<String>,
 }
 
+/// Arguments for `hangar issue batch-state` (multica parity #3-rest).
+#[derive(Args, Debug)]
+pub struct IssueBatchStateArgs {
+    /// Issue ids (ULIDs) to transition. Duplicates collapse.
+    #[arg(num_args = 1.., required = true)]
+    pub ids: Vec<String>,
+    /// The lifecycle state applied to EVERY id — one of `backlog`, `todo`,
+    /// `in_progress`, `in_review`, `done`, `blocked`, `cancelled`.
+    #[arg(long)]
+    pub state: String,
+    /// Workspace slug the issues belong to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
 /// Arguments for `hangar issue create`.
 #[derive(Args, Debug)]
 pub struct IssueCreateArgs {
@@ -1945,6 +1964,14 @@ pub struct IssueCreateArgs {
     /// the lowest unfinished stage cascades a roll-up comment onto the parent.
     #[arg(long)]
     pub parent: Option<String>,
+    /// The 1-based STAGE BARRIER this sub-issue belongs to (migration 0046).
+    ///
+    /// Only meaningful with `--parent`. Siblings sharing a stage close their
+    /// barrier together: when the LAST of them finishes, ONE aggregated roll-up
+    /// comment is posted on the parent naming every child that closed it
+    /// (multica parity #3-rest), not one comment per child.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    pub stage: Option<i64>,
     /// Provenance of this issue: `autopilot` | `comment_mention` | `manual`
     /// (migration 0056, multica parity #21).
     ///
@@ -5028,6 +5055,7 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Search(args) => run_issue_search(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
+        IssueCommand::BatchState(args) => run_issue_batch_state(&store, args).await,
         IssueCommand::Delete(args) => run_issue_delete(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
         IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
@@ -5570,6 +5598,75 @@ async fn issue_display_ref(store: &Store, workspace_id: &str, issue_id: &str) ->
 /// that resolves to no row in the workspace (an unknown id or a foreign tenant's
 /// issue) is reported as an error — never a silent no-op. The mutually-exclusive
 /// `--assign`/`--unassign` and `--due`/`--clear-due` pairs are enforced by clap.
+/// `hangar issue batch-state --state <S> <ID>…` — apply ONE lifecycle state to
+/// several issues, then run the child-done cascade ONCE over the whole batch
+/// (multica parity #3-rest, MUL-4155).
+///
+/// The verb exists for the cascade. Completing two siblings of the same stage
+/// one-at-a-time through `issue update` used to post a roll-up comment on the
+/// parent EACH TIME; here the whole batch closes the barrier once and posts a
+/// SINGLE comment naming every child that closed it. Store-direct like
+/// `issue update` — no daemon needed, so there is no agent wake; the comment is
+/// the observable side.
+async fn run_issue_batch_state(store: &Store, args: IssueBatchStateArgs) -> Result<()> {
+    use ainb_hangar_store::repo::issue::IssueRepo;
+    use ainb_hangar_store::service::child_done::{ChildTransition, cascade_children_done};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // 0049: reject a non-canonical state BEFORE any write — a typo must never
+    // half-apply a batch.
+    if ainb_hangar_proto::lifecycle::IssueLifecycle::parse_canonical(&args.state).is_none() {
+        anyhow::bail!(
+            "invalid --state {:?}; valid values: {}",
+            args.state,
+            ainb_hangar_proto::lifecycle::IssueLifecycle::canonical_list()
+        );
+    }
+
+    // Dedupe preserving caller order — a repeated id must not be counted twice.
+    let mut ids: Vec<String> = Vec::new();
+    for id in &args.ids {
+        if !ids.iter().any(|seen| seen == id) {
+            ids.push(id.clone());
+        }
+    }
+
+    let changed = IssueRepo::set_state_batch(store.pool(), &workspace_id, &ids, &args.state)
+        .await
+        .context("apply batch state")?;
+    println!(
+        "updated {} of {} issue(s) to {}",
+        changed.len(),
+        ids.len(),
+        args.state
+    );
+
+    let transitions: Vec<ChildTransition> = changed
+        .iter()
+        .map(|(id, prev)| ChildTransition {
+            child_id: id.clone(),
+            prev_state: prev.clone(),
+            new_state: args.state.clone(),
+        })
+        .collect();
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    let cascades =
+        cascade_children_done(store.pool(), &workspace_id, &transitions, now, &SystemIdGen)
+            .await
+            .context("child-done cascade")?;
+    for c in &cascades {
+        println!(
+            "posted sub-issue roll-up on parent {} ({}/{}) covering {} sub-issues",
+            c.parent_id,
+            c.children_done,
+            c.children_total,
+            c.children.len()
+        );
+    }
+    Ok(())
+}
+
 async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     use ainb_hangar_store::repo::issue::IssueFieldUpdate;
 
@@ -6014,7 +6111,9 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
             .map(ToString::to_string)
             .collect(),
         parent_issue_id: parent_issue_id.map(ToString::to_string),
-        stage: None,
+        // #3-rest: the authored stage barrier (clap range-checks >= 1). Only
+        // meaningful with a parent; without one it is stored and inert.
+        stage: args.stage,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
     // multica parity #13: open the card's narrative. Best-effort — an audit

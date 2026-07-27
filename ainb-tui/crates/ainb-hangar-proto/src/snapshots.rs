@@ -1429,6 +1429,62 @@ pub struct IssueCreateParams {
     /// daemon ignores it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Optional 1-based **stage barrier** this sub-issue belongs to (migration
+    /// 0046). Only meaningful together with [`Self::parent_issue_id`]: siblings
+    /// sharing a stage close their barrier together, and the child-done cascade
+    /// posts ONE aggregated roll-up comment when a stage closes (parity #3-rest).
+    /// A value below 1 is `INVALID_PARAMS`. Append-only field: an old client
+    /// omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<i64>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUES_BATCH_UPDATE`] (multica parity
+/// #3-rest): apply ONE lifecycle state to N issues, then cascade ONCE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuesBatchUpdateParams {
+    /// The subscribed workspace every id must belong to (tenant guard).
+    pub workspace_id: String,
+    /// Issue ids to transition, in caller order. Duplicates collapse (first wins)
+    /// and a foreign-tenant / unknown id touches nothing.
+    #[serde(default)]
+    pub issue_ids: Vec<String>,
+    /// The single lifecycle state applied to every id. Absent = no-op (the verb
+    /// exists for the aggregated cascade, so there is nothing else to apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUES_BATCH_UPDATE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuesBatchUpdateResult {
+    /// The refreshed rows, one per id that actually changed.
+    #[serde(default)]
+    pub updated: Vec<crate::events::IssueRow>,
+    /// One entry per parent that received an AGGREGATED cascade comment. A batch
+    /// closing one barrier under one parent yields exactly one entry, however
+    /// many children it names.
+    #[serde(default)]
+    pub cascades: Vec<BatchCascadeRow>,
+}
+
+/// One parent's aggregated child-done cascade, as reported by
+/// [`IssuesBatchUpdateResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BatchCascadeRow {
+    /// The parent issue that received the comment.
+    pub parent_id: String,
+    /// The id of the ONE comment written on it.
+    pub comment_id: String,
+    /// Ids of the children this one comment reports (>1 = aggregated).
+    #[serde(default)]
+    pub child_ids: Vec<String>,
+    /// How many of the parent's sub-issues are now terminal.
+    #[serde(default)]
+    pub children_done: i64,
+    /// The parent's total sub-issue count.
+    #[serde(default)]
+    pub children_total: i64,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's

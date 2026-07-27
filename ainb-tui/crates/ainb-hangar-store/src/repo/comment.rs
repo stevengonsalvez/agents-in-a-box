@@ -78,6 +78,27 @@ impl CommentRepo {
         workspace_id: &str,
         comment: &NewComment,
     ) -> Result<bool, sqlx::Error> {
+        Self::insert_with(pool, workspace_id, comment).await
+    }
+
+    /// [`insert`](Self::insert) over an arbitrary executor — a pool OR a live
+    /// transaction.
+    ///
+    /// The child-done cascade (parity #3-rest) claims its barrier row and writes
+    /// this comment in ONE transaction, so the claim can never be committed
+    /// without the comment it promises. Same `WHERE EXISTS` tenant guard.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the insert fails.
+    pub async fn insert_with<'e, E>(
+        exec: E,
+        workspace_id: &str,
+        comment: &NewComment,
+    ) -> Result<bool, sqlx::Error>
+    where
+        E: sqlx::Executor<'e, Database = sqlx::Sqlite>,
+    {
         let author_type = comment.author.kind().as_str();
         let author_id = comment.author.id();
         // The `SELECT ... WHERE EXISTS` form makes the insert a no-op when the
@@ -96,7 +117,7 @@ impl CommentRepo {
         .bind(comment.created_at)
         .bind(&comment.issue_id)
         .bind(workspace_id)
-        .execute(pool)
+        .execute(exec)
         .await?;
         Ok(res.rows_affected() == 1)
     }

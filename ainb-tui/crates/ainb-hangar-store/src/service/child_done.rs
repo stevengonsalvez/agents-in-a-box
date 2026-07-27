@@ -23,16 +23,60 @@
 //! `member|agent`) and identified by a distinctive body string, so no comment
 //! schema change is needed.
 
+use std::collections::HashSet;
+use std::sync::atomic::{AtomicUsize, Ordering};
+
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::idgen::IdGen;
 use sqlx::SqlitePool;
 
 use crate::repo::comment::{CommentRepo, NewComment};
 use crate::repo::issue::{Issue, IssueRepo};
 
+/// One child's lifecycle move, the input unit of [`cascade_children_done`].
+///
+/// A batch is just a slice of these. Duplicated `child_id`s collapse (first
+/// wins) and a move that is not *into* terminal is dropped before any read.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChildTransition {
+    /// The sub-issue that moved.
+    pub child_id: String,
+    /// Its state BEFORE the edit committed.
+    pub prev_state: String,
+    /// Its state AFTER the edit committed.
+    pub new_state: String,
+}
+
+/// One child named by a fired cascade comment.
+///
+/// A comment reports >1 child exactly when a batch closed a barrier with several
+/// completions in it (or a late low-stage completion closed several stages at
+/// once) — that aggregation is the point of parity #3-rest.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CascadeChild {
+    /// The sub-issue id.
+    pub id: String,
+    /// Its title, as written into the comment (already sanitised).
+    pub title: String,
+    /// Its stage barrier, `None` for an unstaged child.
+    pub stage: Option<i64>,
+}
+
+/// A closed stage barrier: the ledger key it claims plus the stage it reports.
+///
+/// `stage: None` is the implicit single stage of an unstaged sibling set.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct Barrier {
+    stage: Option<i64>,
+    key: String,
+}
+
 /// The outcome of a FIRED cascade, returned so the daemon can wake the parent.
 ///
 /// A `None` from [`cascade_child_done`] means nothing fired (not a terminal
-/// transition, no parent, a guard tripped, or the barrier is not closed).
+/// transition, no parent, a guard tripped, the barrier is not closed, or the
+/// barrier was ALREADY reported by another completion — see the claim ledger in
+/// migration 0065).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ParentCascade {
     /// The parent issue that received the comment.
@@ -53,6 +97,12 @@ pub struct ParentCascade {
     pub children_done: i64,
     /// The parent's total sub-issue count.
     pub children_total: i64,
+    /// Every child this ONE comment reports, in `(stage, id)` order. Length > 1
+    /// means the batch aggregated several completions into a single comment.
+    pub children: Vec<CascadeChild>,
+    /// The barriers this comment closed (`None` = the unstaged implicit stage),
+    /// in stage order. Length > 1 means several stages closed together.
+    pub stages_closed: Vec<Option<i64>>,
 }
 
 /// `true` when a state token is terminal for the child-done cascade — `done` OR
@@ -62,10 +112,13 @@ fn is_terminal(state: &str) -> bool {
 }
 
 /// Post the child-done comment on the parent iff `child_id`'s transition from
-/// `prev_state` to `new_state` CLOSES a stage barrier (migration 0046).
+/// `prev_state` to `new_state` CLOSES a stage barrier (migration 0046) that has
+/// not already been reported (the claim ledger, migration 0065).
 ///
-/// Returns `Ok(Some(cascade))` when a comment was written, `Ok(None)` when the
-/// cascade did not fire. The guards, in multica order:
+/// A one-element wrapper over [`cascade_children_done`] — the single-child and
+/// batch paths share ONE implementation, so their guards, comment body and
+/// dedupe cannot drift. Returns `Ok(Some(cascade))` when a comment was written,
+/// `Ok(None)` when it did not fire. The guards, in multica order:
 /// 1. the transition must be *into* terminal (`!is_terminal(prev) &&
 ///    is_terminal(new)`) — a repeat terminal save never re-fires;
 /// 2. the child must have a `parent_issue_id`, and the parent must resolve in the
@@ -73,10 +126,8 @@ fn is_terminal(state: &str) -> bool {
 /// 3. the parent must not already be `done`/`cancelled`, must not be `backlog` (a
 ///    parked parent stays inert), and its assignee must not be a human `member`
 ///    (no agent to trigger — an *unassigned* parent still gets the comment);
-/// 4. the completion must close the barrier: for an unstaged sibling set, every
-///    child is terminal; for a staged set, every staged sibling at-or-below the
-///    completing child's stage is terminal (frontier closure; unstaged siblings
-///    ignored).
+/// 4. the completion must close a barrier (see [`closed_barriers`]) that no
+///    earlier completion has already claimed.
 ///
 /// `now_ms` / `new_id` are injected so the write is deterministic under test.
 ///
@@ -93,89 +144,241 @@ pub async fn cascade_child_done(
     now_ms: i64,
     new_id: String,
 ) -> Result<Option<ParentCascade>, sqlx::Error> {
-    // 1. Only a non-terminal → terminal transition fires. A repeat `done` save,
-    //    or a move between two non-terminal states, is a no-op.
-    if is_terminal(prev_state) || !is_terminal(new_state) {
-        return Ok(None);
+    let transitions = [ChildTransition {
+        child_id: child_id.to_string(),
+        prev_state: prev_state.to_string(),
+        new_state: new_state.to_string(),
+    }];
+    let idgen = OneShotIdGen::new(new_id);
+    cascade_children_done(pool, workspace_id, &transitions, now_ms, &idgen)
+        .await
+        .map(|v| v.into_iter().next())
+}
+
+/// Cascade a WHOLE BATCH of child completions, posting at most ONE aggregated
+/// comment per parent (multica parity #3-rest, MUL-4155).
+///
+/// Three invariants, all durable rather than request-scoped (hangar has no
+/// request boundary on the agent-completion path — two sibling tasks genuinely
+/// finish concurrently):
+///
+/// - **B1 one comment per parent per barrier.** Barriers are claimed in the same
+///   transaction that writes the comment (`issue_cascade_barrier`, migration
+///   0065), so N completions closing one barrier post ONE comment; the losing
+///   claimant affects 0 rows and posts nothing.
+/// - **B2 computed from FINAL state.** The sibling set is re-read after the whole
+///   batch committed, never from per-child intermediate state.
+/// - **B3 order independence.** [`closed_barriers`] is a pure function of the
+///   final sibling set, so a late low-stage completion closes every stage whose
+///   prefix is now terminal. Under the old single-frontier check a stage that
+///   completed early had its close DROPPED FOREVER.
+///
+/// Returns one [`ParentCascade`] per parent that actually received a comment, in
+/// first-seen parent order.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on any store fault; nothing is left half-written
+/// because the claim + the comment share one transaction.
+pub async fn cascade_children_done(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    transitions: &[ChildTransition],
+    now_ms: i64,
+    idgen: &impl IdGen,
+) -> Result<Vec<ParentCascade>, sqlx::Error> {
+    // 1. Keep only real non-terminal → terminal moves, first occurrence of each
+    //    child, then group the moved children by parent (parentless children and
+    //    unknown ids drop out here).
+    let mut seen: HashSet<&str> = HashSet::new();
+    let mut groups: Vec<(String, Vec<Issue>)> = Vec::new();
+    for t in transitions {
+        if !seen.insert(t.child_id.as_str()) {
+            continue;
+        }
+        if is_terminal(&t.prev_state) || !is_terminal(&t.new_state) {
+            continue;
+        }
+        let Some(child) = IssueRepo::get_by_id(pool, &t.child_id).await? else {
+            continue;
+        };
+        let Some(parent_id) = child.parent_issue_id.clone() else {
+            continue;
+        };
+        match groups.iter_mut().find(|(p, _)| *p == parent_id) {
+            Some((_, moved)) => moved.push(child),
+            None => groups.push((parent_id, vec![child])),
+        }
     }
 
-    // 2. The child must be a sub-issue; load it and its parent (workspace-scoped).
-    let Some(child) = IssueRepo::get_by_id(pool, child_id).await? else {
-        return Ok(None);
+    let mut out = Vec::new();
+    for (parent_id, mut moved) in groups {
+        // 2. Parent guards, run ONCE per parent (unchanged semantics).
+        let Some(parent) = IssueRepo::get_by_id(pool, &parent_id).await? else {
+            continue;
+        };
+        if parent.workspace_id != workspace_id {
+            continue;
+        }
+        if is_terminal(&parent.state) || parent.state == "backlog" {
+            continue;
+        }
+        if matches!(
+            parent.assignee.as_ref().map(ActorRef::kind),
+            Some(ActorKind::Member)
+        ) {
+            continue;
+        }
+
+        // 3. Barriers closed by the FINAL sibling set (B2/B3).
+        let children = IssueRepo::list_children(pool, &parent_id).await?;
+        let barriers = closed_barriers(&children);
+        if barriers.is_empty() {
+            continue;
+        }
+
+        // 4. ONE transaction: claim the barriers, then write the comment. A
+        //    crash between them is impossible and two racing daemons resolve to
+        //    exactly one winner.
+        let comment_id = idgen.new_ulid();
+        let mut tx = pool.begin().await?;
+        let mut claimed: Vec<Barrier> = Vec::new();
+        for b in &barriers {
+            let res = sqlx::query(
+                "INSERT OR IGNORE INTO issue_cascade_barrier \
+                 (parent_issue_id, workspace_id, stage_key, comment_id, created_at) \
+                 VALUES (?, ?, ?, ?, ?)",
+            )
+            .bind(&parent_id)
+            .bind(workspace_id)
+            .bind(&b.key)
+            .bind(&comment_id)
+            .bind(now_ms)
+            .execute(&mut *tx)
+            .await?;
+            if res.rows_affected() == 1 {
+                claimed.push(b.clone());
+            }
+        }
+        if claimed.is_empty() {
+            // Every closed barrier was already reported — post nothing.
+            tx.rollback().await?;
+            continue;
+        }
+
+        // 5. The comment reports the children of the NEWLY claimed barriers, in
+        //    `(stage, id)` order so the body is byte-identical whatever order the
+        //    batch supplied (B3). An unstaged child in an otherwise-staged set
+        //    belongs to no barrier and so never triggers a comment, exactly as
+        //    before.
+        moved.sort_by(|a, b| (a.stage, &a.id).cmp(&(b.stage, &b.id)));
+        let reported: Vec<&Issue> =
+            moved.iter().filter(|c| claimed.iter().any(|b| b.stage == c.stage)).collect();
+        if reported.is_empty() {
+            tx.rollback().await?;
+            continue;
+        }
+
+        // 6. Author = the completing actor of the FIRST reported child (assignee
+        //    else creator); both are guaranteed `member|agent`.
+        let author = reported[0].assignee.clone().unwrap_or_else(|| reported[0].creator.clone());
+        let (done, total) = children_progress(&children);
+        let body = cascade_body(&reported, done, total, &claimed);
+
+        CommentRepo::insert_with(
+            &mut *tx,
+            workspace_id,
+            &NewComment {
+                id: comment_id.clone(),
+                issue_id: parent_id.clone(),
+                author: author.clone(),
+                body: body.clone(),
+                created_at: now_ms,
+            },
+        )
+        .await?;
+        tx.commit().await?;
+
+        out.push(ParentCascade {
+            parent_id,
+            parent_assignee: parent.assignee,
+            comment_id,
+            comment_author: author,
+            comment_body: body,
+            children_done: done,
+            children_total: total,
+            children: reported
+                .iter()
+                .map(|c| CascadeChild {
+                    id: c.id.clone(),
+                    title: sanitize_child_title(&c.title),
+                    stage: c.stage,
+                })
+                .collect(),
+            stages_closed: claimed.iter().map(|b| b.stage).collect(),
+        });
+    }
+    Ok(out)
+}
+
+/// The distinctive, queryable comment body.
+///
+/// The single-child unstaged form is BYTE-IDENTICAL to the pre-#3-rest string so
+/// the shipped tripwire and every existing assertion stay green. Stable greppable
+/// tokens: `sub-issues complete.` always, `Sub-issue ` vs `Sub-issues `, and
+/// `Closed stage`.
+fn cascade_body(reported: &[&Issue], done: i64, total: i64, claimed: &[Barrier]) -> String {
+    let list = reported
+        .iter()
+        .map(|c| format!("{} \"{}\"", c.id, sanitize_child_title(&c.title)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let mut body = if reported.len() == 1 {
+        format!("Sub-issue {list} is done. {done}/{total} sub-issues complete.")
+    } else {
+        format!("Sub-issues {list} are done. {done}/{total} sub-issues complete.")
     };
-    let Some(parent_id) = child.parent_issue_id.clone() else {
-        return Ok(None);
-    };
-    let Some(parent) = IssueRepo::get_by_id(pool, &parent_id).await? else {
-        return Ok(None);
-    };
-    // Tenant guard: the parent must live in the same workspace as the caller's
-    // scope. A cross-workspace parent link (which the create path forbids) never
-    // cascades.
-    if parent.workspace_id != workspace_id {
-        return Ok(None);
+    let mut stages: Vec<i64> = claimed.iter().filter_map(|b| b.stage).collect();
+    stages.sort_unstable();
+    if !stages.is_empty() {
+        let names = stages.iter().map(i64::to_string).collect::<Vec<_>>().join(", ");
+        if stages.len() == 1 {
+            body.push_str(&format!(" Closed stage {names}."));
+        } else {
+            body.push_str(&format!(" Closed stages {names}."));
+        }
     }
+    body
+}
 
-    // 3. Parent-state guards.
-    //    - already terminal: nothing to wake, no progress to record.
-    //    - `backlog`: a parked parent stays inert (multica MUL-3497/#4320). Hangar
-    //      has no `backlog` issue state today, so this is a defensive no-op that
-    //      keeps parity if one is ever added.
-    if is_terminal(&parent.state) || parent.state == "backlog" {
-        return Ok(None);
+/// An [`IdGen`] over ONE pre-minted id, so [`cascade_child_done`] can keep its
+/// exact signature while delegating to the batch implementation.
+///
+/// A single transition can only ever reach one parent, so the suffixed fallback
+/// is unreachable — it exists so the impl is total rather than panicking.
+struct OneShotIdGen {
+    base: String,
+    used: AtomicUsize,
+}
+
+impl OneShotIdGen {
+    fn new(base: String) -> Self {
+        Self {
+            base,
+            used: AtomicUsize::new(0),
+        }
     }
-    //    - a human `member` parent has no agent to trigger → skip the whole
-    //      cascade (multica MUL-2538). An *unassigned* parent is NOT skipped.
-    if matches!(
-        parent.assignee.as_ref().map(ActorRef::kind),
-        Some(ActorKind::Member)
-    ) {
-        return Ok(None);
+}
+
+impl IdGen for OneShotIdGen {
+    fn new_ulid(&self) -> String {
+        let n = self.used.fetch_add(1, Ordering::Relaxed);
+        if n == 0 {
+            self.base.clone()
+        } else {
+            format!("{}-{n}", self.base)
+        }
     }
-
-    // 4. Stage barrier: only fire when this completion closes the lowest unfinished
-    //    stage.
-    let children = IssueRepo::list_children(pool, &parent_id).await?;
-    if !stage_barrier_closed(&children, &child) {
-        return Ok(None);
-    }
-
-    // 5. Comment author = the child's completing actor (assignee, else creator);
-    //    both are guaranteed `member|agent`, so no `system` author is needed.
-    let author = child.assignee.clone().unwrap_or_else(|| child.creator.clone());
-
-    // 6. Roll-up counts + distinctive, queryable body.
-    let (done, total) = children_progress(&children);
-    let title = sanitize_child_title(&child.title);
-    let body = format!(
-        "Sub-issue {id} \"{title}\" is done. {done}/{total} sub-issues complete.",
-        id = child.id,
-    );
-
-    // 7. Write the comment on the PARENT (workspace-scoped insert).
-    let comment_id = new_id;
-    CommentRepo::insert(
-        pool,
-        workspace_id,
-        &NewComment {
-            id: comment_id.clone(),
-            issue_id: parent_id.clone(),
-            author: author.clone(),
-            body: body.clone(),
-            created_at: now_ms,
-        },
-    )
-    .await?;
-
-    Ok(Some(ParentCascade {
-        parent_id,
-        parent_assignee: parent.assignee,
-        comment_id,
-        comment_author: author,
-        comment_body: body,
-        children_done: done,
-        children_total: total,
-    }))
 }
 
 /// Roll-up counts over a parent's sub-issues: `(done, total)` where `done` counts
@@ -188,30 +391,55 @@ fn children_progress(children: &[Issue]) -> (i64, i64) {
     )
 }
 
-/// Whether `child`'s completion closes the lowest unfinished stage barrier among
-/// its siblings (`children` = the full sibling set, `child` included).
+/// Every stage barrier that is CLOSED for this sibling set — a pure function of
+/// FINAL state, independent of which child triggered the call.
 ///
-/// - **Unstaged set** (no sibling has a `stage`): one implicit stage — closed only
-///   when EVERY child is terminal (fires once, when the last child finishes).
-/// - **Staged set**: the completing child carries a stage `S`; the barrier is
-///   closed when every staged sibling with `stage <= S` is terminal (frontier
-///   closure). Unstaged siblings are ignored. A child with no stage in an
-///   otherwise-staged set has no barrier of its own → never closes one.
-fn stage_barrier_closed(children: &[Issue], child: &Issue) -> bool {
-    let any_staged = children.iter().any(|c| c.stage.is_some());
-    if !any_staged {
-        // Implicit single stage: fire when the whole set is terminal.
-        return children.iter().all(|c| is_terminal(&c.state));
+/// - **Unstaged set** (no sibling carries a `stage`): one implicit barrier,
+///   closed iff every child is terminal.
+/// - **Staged set**: every stage `n` present such that EVERY staged sibling with
+///   `stage <= n` is terminal (frontier prefix). Unstaged siblings in a mixed set
+///   are ignored, as before.
+///
+/// Returning the whole closed prefix (not just the triggering child's stage) is
+/// the order-independence fix: when a late stage-1 completion lands after stage 2
+/// already finished, BOTH barriers are reported. The single-frontier predicate it
+/// replaces dropped stage 2's close forever.
+///
+/// The `stage_key` embeds the barrier's member count so a sibling set that GROWS
+/// after closing forms a NEW barrier and still fires, rather than being
+/// suppressed by a stale claim.
+fn closed_barriers(children: &[Issue]) -> Vec<Barrier> {
+    if children.is_empty() {
+        return Vec::new();
     }
-    // Staged set: the completing child must itself carry a stage.
-    let Some(s) = child.stage else {
-        return false;
-    };
-    // Frontier closure: every staged sibling at-or-below this stage is terminal.
-    children
-        .iter()
-        .filter(|c| c.stage.is_some_and(|cs| cs <= s))
-        .all(|c| is_terminal(&c.state))
+    if children.iter().all(|c| c.stage.is_none()) {
+        if children.iter().all(|c| is_terminal(&c.state)) {
+            return vec![Barrier {
+                stage: None,
+                key: format!("unstaged:{}", children.len()),
+            }];
+        }
+        return Vec::new();
+    }
+    let mut stages: Vec<i64> = children.iter().filter_map(|c| c.stage).collect();
+    stages.sort_unstable();
+    stages.dedup();
+    stages
+        .into_iter()
+        .filter(|n| {
+            children
+                .iter()
+                .filter(|c| c.stage.is_some_and(|cs| cs <= *n))
+                .all(|c| is_terminal(&c.state))
+        })
+        .map(|n| {
+            let members = children.iter().filter(|c| c.stage == Some(n)).count();
+            Barrier {
+                stage: Some(n),
+                key: format!("stage:{n}:{members}"),
+            }
+        })
+        .collect()
 }
 
 /// Strip the `](mention://` marker from a child title before embedding it in the
@@ -541,6 +769,360 @@ mod tests {
             .unwrap();
         assert!(r.is_some(), "stage-2 barrier closed");
         assert_eq!(parent_comments(pool, "ws", "parent").await.len(), 2);
+    }
+
+    /// Barrier-ledger rows for a parent, as `(stage_key, comment_id)` pairs.
+    async fn barrier_rows(pool: &SqlitePool, parent: &str) -> Vec<(String, String)> {
+        sqlx::query_as::<_, (String, String)>(
+            "SELECT stage_key, comment_id FROM issue_cascade_barrier \
+             WHERE parent_issue_id = ? ORDER BY stage_key",
+        )
+        .bind(parent)
+        .fetch_all(pool)
+        .await
+        .unwrap()
+    }
+
+    fn done_transition(child: &str) -> ChildTransition {
+        ChildTransition {
+            child_id: child.into(),
+            prev_state: "open".into(),
+            new_state: "done".into(),
+        }
+    }
+
+    /// Seed `parent` + the named children, all already terminal in sqlite (the
+    /// shape both the batch and the concurrent-completion paths present).
+    async fn seed_done_family(pool: &SqlitePool, children: &[(&str, Option<i64>)]) {
+        seed_ws(pool, "ws").await;
+        seed_issue(pool, "ws", "parent", "open", Some(agent()), None, None).await;
+        for (id, stage) in children {
+            seed_issue(
+                pool,
+                "ws",
+                id,
+                "done",
+                Some(agent()),
+                Some("parent"),
+                *stage,
+            )
+            .await;
+        }
+    }
+
+    /// **THE ACCEPTANCE (§6.1.1).** Two same-stage children completing in ONE
+    /// batch produce exactly ONE aggregated comment on the parent.
+    #[tokio::test]
+    async fn batch_two_same_stage_children_one_aggregated_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_done_family(pool, &[("c1", Some(1)), ("c2", Some(1))]).await;
+
+        let idgen = ainb_hangar_core::idgen::FixedIdGen::new(vec!["cm-1".into()]);
+        let out = cascade_children_done(
+            pool,
+            "ws",
+            &[done_transition("c1"), done_transition("c2")],
+            10,
+            &idgen,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(out.len(), 1, "one parent, one cascade");
+        assert_eq!(
+            out[0].children.len(),
+            2,
+            "the comment reports BOTH children"
+        );
+
+        let bodies = parent_comments(pool, "ws", "parent").await;
+        assert_eq!(bodies.len(), 1, "exactly one comment on the parent");
+        let body = &bodies[0];
+        assert!(body.starts_with("Sub-issues "), "plural form: {body}");
+        assert!(
+            body.contains("c1") && body.contains("c2"),
+            "names both: {body}"
+        );
+        assert!(body.contains("2/2 sub-issues complete."), "roll-up: {body}");
+        assert!(
+            body.contains("Closed stage 1."),
+            "names the barrier: {body}"
+        );
+    }
+
+    /// §6.1.2 — two stages closing in one batch: ONE comment, and TWO ledger rows
+    /// sharing that comment's id (which is exactly what aggregation means).
+    #[tokio::test]
+    async fn batch_two_stages_closing_together_one_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_done_family(pool, &[("s1", Some(1)), ("s2", Some(2))]).await;
+
+        let idgen = ainb_hangar_core::idgen::FixedIdGen::new(vec!["cm-1".into()]);
+        let out = cascade_children_done(
+            pool,
+            "ws",
+            &[done_transition("s1"), done_transition("s2")],
+            10,
+            &idgen,
+        )
+        .await
+        .unwrap();
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].stages_closed, vec![Some(1), Some(2)]);
+
+        let bodies = parent_comments(pool, "ws", "parent").await;
+        assert_eq!(bodies.len(), 1, "one comment for two stages");
+        assert!(
+            bodies[0].contains("Closed stages 1, 2."),
+            "names both stages: {}",
+            bodies[0]
+        );
+
+        let rows = barrier_rows(pool, "parent").await;
+        assert_eq!(
+            rows,
+            vec![
+                ("stage:1:1".to_string(), "cm-1".to_string()),
+                ("stage:2:1".to_string(), "cm-1".to_string()),
+            ],
+            "two claims, ONE comment id"
+        );
+    }
+
+    /// §6.1.3 (B3) — the same transitions supplied in reverse order produce a
+    /// BYTE-IDENTICAL comment and the same ledger.
+    #[tokio::test]
+    async fn order_independence_reversed_batch_is_byte_identical() {
+        let forward = {
+            let dir = tempfile::tempdir().unwrap();
+            let store = Store::open_in(dir.path()).await.unwrap();
+            let pool = store.pool();
+            seed_done_family(pool, &[("s1", Some(1)), ("s2", Some(2))]).await;
+            let idgen = ainb_hangar_core::idgen::FixedIdGen::new(vec!["cm-1".into()]);
+            cascade_children_done(
+                pool,
+                "ws",
+                &[done_transition("s1"), done_transition("s2")],
+                10,
+                &idgen,
+            )
+            .await
+            .unwrap()
+            .remove(0)
+            .comment_body
+        };
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_done_family(pool, &[("s1", Some(1)), ("s2", Some(2))]).await;
+        let idgen = ainb_hangar_core::idgen::FixedIdGen::new(vec!["cm-1".into()]);
+        let reversed = cascade_children_done(
+            pool,
+            "ws",
+            &[done_transition("s2"), done_transition("s1")],
+            10,
+            &idgen,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(reversed.len(), 1);
+        assert_eq!(
+            reversed[0].comment_body, forward,
+            "input order must not matter"
+        );
+        assert_eq!(barrier_rows(pool, "parent").await.len(), 2);
+    }
+
+    /// §6.1.3, sequential form — the bug MUL-4155 fixed. Stage 2 completes FIRST
+    /// (closing nothing), then stage 1: the single comment must report BOTH
+    /// stages. The old single-frontier check dropped stage 2's close forever.
+    #[tokio::test]
+    async fn late_low_stage_completion_reports_the_stage_that_finished_early() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_ws(pool, "ws").await;
+        seed_issue(pool, "ws", "parent", "open", Some(agent()), None, None).await;
+        seed_issue(
+            pool,
+            "ws",
+            "s1",
+            "open",
+            Some(agent()),
+            Some("parent"),
+            Some(1),
+        )
+        .await;
+        seed_issue(
+            pool,
+            "ws",
+            "s2",
+            "done",
+            Some(agent()),
+            Some("parent"),
+            Some(2),
+        )
+        .await;
+
+        // Stage 2 finished first: nothing closes (stage 1 still open).
+        let r = cascade_child_done(pool, "ws", "s2", "open", "done", 10, "cm-1".into())
+            .await
+            .unwrap();
+        assert!(r.is_none(), "stage 1 is still open; no barrier closed");
+        assert!(parent_comments(pool, "ws", "parent").await.is_empty());
+
+        // Stage 1 finishes later → BOTH barriers close in one comment.
+        IssueRepo::update_state(pool, "s1", "done").await.unwrap();
+        let c = cascade_child_done(pool, "ws", "s1", "open", "done", 20, "cm-2".into())
+            .await
+            .unwrap()
+            .expect("the late stage-1 completion closes stages 1 AND 2");
+        assert_eq!(c.stages_closed, vec![Some(1), Some(2)]);
+        let bodies = parent_comments(pool, "ws", "parent").await;
+        assert_eq!(bodies.len(), 1, "one comment, not one per stage");
+        assert!(
+            bodies[0].contains("Closed stages 1, 2."),
+            "stage 2's close is NOT dropped: {}",
+            bodies[0]
+        );
+    }
+
+    /// §6.1.4 — the `advance_and_cascade_child` shape: both siblings are already
+    /// terminal in sqlite and each fires its own single-child cascade. The ledger
+    /// collapses them to ONE comment. RED before the claim ledger existed.
+    #[tokio::test]
+    async fn concurrent_single_calls_collapse_to_one_comment() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_done_family(pool, &[("c1", Some(1)), ("c2", Some(1))]).await;
+
+        for (i, c) in ["c1", "c2"].iter().enumerate() {
+            cascade_child_done(pool, "ws", c, "open", "done", 10, format!("cm-{i}"))
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            parent_comments(pool, "ws", "parent").await.len(),
+            1,
+            "one barrier close = one comment, however many completions raced it"
+        );
+        assert_eq!(barrier_rows(pool, "parent").await.len(), 1);
+    }
+
+    /// §6.1.5 — a sibling set that GROWS after closing forms a NEW barrier and
+    /// fires again: the ledger must not suppress a legitimately new close.
+    #[tokio::test]
+    async fn unstaged_growth_refires() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        seed_done_family(pool, &[("c1", None), ("c2", None)]).await;
+
+        cascade_child_done(pool, "ws", "c2", "open", "done", 10, "cm-1".into())
+            .await
+            .unwrap()
+            .expect("the 2-child set closes");
+        assert_eq!(parent_comments(pool, "ws", "parent").await.len(), 1);
+
+        // A third child joins and completes → key `unstaged:3` ≠ `unstaged:2`.
+        seed_issue(
+            pool,
+            "ws",
+            "c3",
+            "done",
+            Some(agent()),
+            Some("parent"),
+            None,
+        )
+        .await;
+        let c = cascade_child_done(pool, "ws", "c3", "open", "done", 20, "cm-2".into())
+            .await
+            .unwrap()
+            .expect("the grown set is a NEW barrier");
+        assert_eq!((c.children_done, c.children_total), (3, 3));
+        assert_eq!(parent_comments(pool, "ws", "parent").await.len(), 2);
+        assert_eq!(
+            barrier_rows(pool, "parent")
+                .await
+                .into_iter()
+                .map(|(k, _)| k)
+                .collect::<Vec<_>>(),
+            vec!["unstaged:2".to_string(), "unstaged:3".to_string()]
+        );
+    }
+
+    /// §6.1.6 — `closed_barriers` as a pure-function table.
+    #[test]
+    fn closed_barriers_table() {
+        fn issue(id: &str, state: &str, stage: Option<i64>) -> Issue {
+            Issue {
+                id: id.into(),
+                workspace_id: "ws".into(),
+                title: id.into(),
+                description: None,
+                state: state.into(),
+                assignee: None,
+                creator: member(),
+                created_at: 0,
+                priority: 0,
+                due_date: None,
+                labels: Vec::new(),
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
+                external_ref: None,
+                parent_issue_id: Some("parent".into()),
+                stage,
+                origin: None,
+            }
+        }
+        fn keys(children: &[Issue]) -> Vec<String> {
+            closed_barriers(children).into_iter().map(|b| b.key).collect()
+        }
+
+        // Empty set: no barrier at all.
+        assert!(keys(&[]).is_empty());
+        // Unstaged, partially done → nothing closes.
+        assert!(keys(&[issue("a", "done", None), issue("b", "open", None)]).is_empty());
+        // Unstaged, fully done → the implicit barrier, keyed by member count.
+        assert_eq!(
+            keys(&[issue("a", "done", None), issue("b", "cancelled", None)]),
+            vec!["unstaged:2"]
+        );
+        // Staged frontier: stage 1 closed, stage 2 still open.
+        assert_eq!(
+            keys(&[
+                issue("a", "done", Some(1)),
+                issue("b", "done", Some(1)),
+                issue("c", "open", Some(2)),
+            ]),
+            vec!["stage:1:2"]
+        );
+        // Stage 2 done but stage 1 open → NO barrier closes (prefix rule).
+        assert!(
+            keys(&[issue("a", "open", Some(1)), issue("b", "done", Some(2))]).is_empty(),
+            "a higher stage cannot close over an open lower stage"
+        );
+        // Both stages terminal → BOTH barriers, in stage order.
+        assert_eq!(
+            keys(&[issue("a", "done", Some(1)), issue("b", "done", Some(2))]),
+            vec!["stage:1:1", "stage:2:1"]
+        );
+        // Mixed set: unstaged siblings are ignored by the staged closure.
+        assert_eq!(
+            keys(&[
+                issue("a", "done", Some(1)),
+                issue("u", "open", None),
+                issue("b", "open", Some(2)),
+            ]),
+            vec!["stage:1:1"]
+        );
     }
 
     /// Deleting a parent orphans its children (`parent_issue_id` → NULL) and does
