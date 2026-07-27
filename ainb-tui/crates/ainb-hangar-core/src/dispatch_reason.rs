@@ -35,13 +35,20 @@
 //!
 //! # Reserved variants
 //!
-//! [`DispatchReason::Coalesced`], [`DispatchReason::AttributionBlocked`] and
-//! [`DispatchReason::SelfTriggerSuppressed`] ship with **no producer** at this
+//! [`DispatchReason::AttributionBlocked`] ships with **no producer** at this
 //! stage. That is deliberate, not an oversight: the vocabulary is a *wire
 //! contract*, so a reader must already accept codes a future writer will emit.
-//! Those three belong to the mention-routing layer, which is unstarted. The
-//! [`DispatchReason::RESERVED`] list pins the set — a future change that adds a
-//! producer has to remove its variant from that list deliberately.
+//! It belongs with the `originator_user_id` attribution chain (multica 184/185),
+//! which hangar has not started.
+//!
+//! [`DispatchReason::Coalesced`] and [`DispatchReason::SelfTriggerSuppressed`]
+//! WERE reserved alongside it until the mention-routing layer (multica parity
+//! #2-rest) shipped their producers:
+//! `ainb_hangar_store::service::mention::route` emits `Coalesced` when a mention
+//! folds into a pending task and `SelfTriggerSuppressed` when an agent's own
+//! comment would have re-triggered itself. The
+//! [`DispatchReason::RESERVED`] list pins the remaining set — a future change
+//! that adds a producer has to remove its variant from that list deliberately.
 
 use serde::{Deserialize, Serialize};
 
@@ -63,7 +70,8 @@ pub enum DispatchReason {
     Queued,
     /// Folded into an existing pending task rather than creating a second one.
     ///
-    /// **Reserved** — no producer yet (see the module docs).
+    /// Produced by the mention router when the mentioned agent already holds a
+    /// `queued`/`dispatched` task on the issue (multica's merge-into-pending).
     Coalesced,
     /// Admitted but parked: a later event promotes it. hangar's producer is a
     /// card blocked by unfinished dependencies, which `board::auto_run_dependent`
@@ -94,7 +102,8 @@ pub enum DispatchReason {
     /// The trigger was produced by the same agent it would have targeted, and
     /// was suppressed to stop a self-driving loop.
     ///
-    /// **Reserved** — no producer yet (see the module docs).
+    /// Produced by the mention router when a comment's agent author mentions
+    /// itself (multica `comment.go`'s `authorType == "agent" && authorID == m.ID`).
     SelfTriggerSuppressed,
     /// The admission path itself faulted (e.g. a database error).
     InternalError,
@@ -120,11 +129,7 @@ impl DispatchReason {
     /// Variants that ship in the vocabulary with **no producer** in this
     /// codebase (see the module docs). Pinned by a test so adding a producer is
     /// a deliberate edit here, and so the list can never quietly grow.
-    pub const RESERVED: [Self; 3] = [
-        Self::Coalesced,
-        Self::AttributionBlocked,
-        Self::SelfTriggerSuppressed,
-    ];
+    pub const RESERVED: [Self; 1] = [Self::AttributionBlocked];
 
     /// The `snake_case` token persisted to `dispatch_attempt.reason` and put on
     /// the wire.
@@ -300,11 +305,10 @@ mod tests {
         // the variant from `RESERVED` here.
         assert_eq!(
             DispatchReason::RESERVED,
-            [
-                DispatchReason::Coalesced,
-                DispatchReason::AttributionBlocked,
-                DispatchReason::SelfTriggerSuppressed,
-            ]
+            [DispatchReason::AttributionBlocked],
+            "the mention router (parity #2-rest) ships the Coalesced and \
+             SelfTriggerSuppressed producers, so only the attribution-chain \
+             code stays reserved"
         );
         for r in DispatchReason::RESERVED {
             assert!(
