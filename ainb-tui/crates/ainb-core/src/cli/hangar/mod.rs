@@ -3117,6 +3117,12 @@ async fn dispatch_workspace(cmd: WorkspaceCommand, format: OutputFormat) -> Resu
 async fn run_workspace_create(store: &Store, args: WorkspaceCreateArgs) -> Result<()> {
     use ainb_hangar_store::repo::workspace::{WorkspaceRepo, validate_slug};
 
+    // A create needs the bootstrap owner user to link as the new workspace's
+    // `owner` member, so seed it the way every other write verb does rather than
+    // failing "no such workspace" on a never-touched database. This is
+    // platform-owned creation and is deliberately NOT gated by the lockdown — a
+    // locked-down instance still needs its default tenant.
+    ensure_default_workspace(store).await?;
     let slug = validate_slug(&args.slug).map_err(workspace_cli_err)?;
     let row = WorkspaceRepo::create(
         store.pool(),
