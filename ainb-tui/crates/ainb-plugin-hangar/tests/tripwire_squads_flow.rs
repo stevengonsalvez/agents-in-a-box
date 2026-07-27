@@ -132,6 +132,9 @@ fn seeded_agents() -> serde_json::Value {
 fn seeded_issues() -> serde_json::Value {
     serde_json::to_value(IssuesListResult {
         issues: vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,

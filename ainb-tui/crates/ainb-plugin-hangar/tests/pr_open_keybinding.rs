@@ -22,6 +22,9 @@ const fn key(ch: char) -> KeyEvent {
 
 fn issue(pr_url: Option<&str>) -> IssueRow {
     IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,

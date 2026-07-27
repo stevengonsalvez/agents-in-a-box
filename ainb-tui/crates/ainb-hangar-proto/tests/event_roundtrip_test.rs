@@ -31,6 +31,9 @@ fn comment_id(s: &str) -> CommentId {
 
 fn sample_issue() -> IssueRow {
     IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,
@@ -215,6 +218,9 @@ fn presence_state_three_states_roundtrip() {
 #[test]
 fn issue_row_pr_url_is_additive() {
     let no_pr = IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         origin_type: None,
         origin_id: None,
         pr_url: None,
@@ -247,6 +253,9 @@ fn issue_row_pr_url_is_additive() {
 #[test]
 fn issue_row_priority_due_date_labels_roundtrip_and_default() {
     let row = IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         origin_type: None,
         origin_id: None,
         priority: 3,
@@ -273,6 +282,9 @@ fn issue_row_priority_due_date_labels_roundtrip_and_default() {
 #[test]
 fn issue_row_subtask_fields_roundtrip_and_default() {
     let row = IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         origin_type: None,
         origin_id: None,
         parent_id: Some("parent-issue".to_string()),
@@ -287,6 +299,9 @@ fn issue_row_subtask_fields_roundtrip_and_default() {
     // A top-level issue omits parent_id entirely (skip_serializing_if), and a zero
     // roll-up omits nothing that breaks an old reader.
     let top = IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         origin_type: None,
         origin_id: None,
         child_total: 0,

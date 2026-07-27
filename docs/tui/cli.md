@@ -2863,18 +2863,22 @@ Manage Hangar issues
 Usage: ainb hangar issue [OPTIONS] <COMMAND>
 
 Commands:
-  create    Create a new issue (bootstraps a default workspace on first use)
-  list      List issues in the default workspace
-  search    Search issues by title, description, or comment body (ranked)
-  show      Show one issue by id
-  update    Edit an existing issue's state, assignee, priority, or due date
-  delete    Delete an issue and all its history (dry-run without `--yes`)
-  label     Attach or detach a label on an issue
-  criteria  Inspect or tick off an issue's acceptance criteria
-  link      Add, remove, or list an issue's typed links to other issues
-  why       Explain why an issue did (or did not) dispatch — its admission history
-  timeline  Show one issue's activity timeline: state changes, assignments, comments
-  help      Print this message or the help of the given subcommand(s)
+  create       Create a new issue (bootstraps a default workspace on first use)
+  list         List issues in the default workspace
+  search       Search issues by title, description, or comment body (ranked)
+  show         Show one issue by id
+  update       Edit an existing issue's state, assignee, priority, or due date
+  delete       Delete an issue and all its history (dry-run without `--yes`)
+  label        Attach or detach a label on an issue
+  criteria     Inspect or tick off an issue's acceptance criteria
+  link         Add, remove, or list an issue's typed links to other issues
+  subscribe    Subscribe an actor to an issue's notifications (multica parity #22)
+  unsubscribe  Unsubscribe an actor from an issue's notifications. Idempotent
+  subscribers  List who watches an issue, with the reason each one was subscribed
+  react        Add, remove, or list an issue's emoji reactions
+  why          Explain why an issue did (or did not) dispatch — its admission history
+  timeline     Show one issue's activity timeline: state changes, assignments, comments
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -3147,6 +3151,86 @@ Commands:
   add     Link two issues. Re-adding a pair with a new kind replaces the kind
   remove  Remove a link between two issues. Idempotent
   list    List an issue's links (`🔒`/`✓` blocked-by, `→` blocks, `~` related)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue subscribe`
+
+Subscribe an actor to an issue's notifications (multica parity #22)
+
+```console
+$ ainb hangar issue subscribe --help
+Subscribe an actor to an issue's notifications (multica parity #22)
+
+Usage: ainb hangar issue subscribe [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) to watch / stop watching
+
+Options:
+      --actor <ACTOR>          The actor, as `member:<id>` / `agent:<id>`. Defaults to the LOCAL HUMAN (`member:me`), mirroring the reference's "the target defaults to the caller"
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue unsubscribe`
+
+Unsubscribe an actor from an issue's notifications. Idempotent
+
+```console
+$ ainb hangar issue unsubscribe --help
+Unsubscribe an actor from an issue's notifications. Idempotent
+
+Usage: ainb hangar issue unsubscribe [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) to watch / stop watching
+
+Options:
+      --actor <ACTOR>          The actor, as `member:<id>` / `agent:<id>`. Defaults to the LOCAL HUMAN (`member:me`), mirroring the reference's "the target defaults to the caller"
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue subscribers`
+
+List who watches an issue, with the reason each one was subscribed
+
+```console
+$ ainb hangar issue subscribers --help
+List who watches an issue, with the reason each one was subscribed
+
+Usage: ainb hangar issue subscribers [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) whose watchers to list
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue react`
+
+Add, remove, or list an issue's emoji reactions
+
+```console
+$ ainb hangar issue react --help
+Add, remove, or list an issue's emoji reactions
+
+Usage: ainb hangar issue react [OPTIONS] <COMMAND>
+
+Commands:
+  add     React to an issue with an emoji. Idempotent
+  remove  Remove your reaction. Idempotent
+  list    List an issue's reactions as `<emoji> <count>` buckets
   help    Print this message or the help of the given subcommand(s)
 
 Options:

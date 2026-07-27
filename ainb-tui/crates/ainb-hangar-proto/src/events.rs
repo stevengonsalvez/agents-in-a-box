@@ -557,6 +557,24 @@ pub struct IssueRow {
     /// contract.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_dispatch_at: Option<i64>,
+    /// How many actors watch this issue (multica parity #22, migration 0062).
+    ///
+    /// DETAIL PATH ONLY — a list snapshot leaves it `0`, exactly like
+    /// [`Self::dependencies`], because filling it would need an N-query fan-out
+    /// per row. `#[serde(default)]` keeps a pre-0062 snapshot decodable.
+    #[serde(default)]
+    pub subscriber_count: u32,
+    /// Whether the LOCAL HUMAN (`member:me`) watches this issue — the viewer the
+    /// TUI renders for. The authoritative read is
+    /// [`crate::methods::HANGAR_ISSUE_SUBSCRIBERS`]; this is the convenience the
+    /// detail card's `✓ you` marker needs. Detail path only.
+    #[serde(default)]
+    pub subscribed: bool,
+    /// Aggregated emoji reactions, most-used first (multica parity #22). Detail
+    /// path only; empty ⇒ the key is not sent, so a pre-#22 daemon leaves the
+    /// card byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<ReactionRow>,
 }
 
 /// One TYPED link on an issue's detail card (multica parity #20), always stated
@@ -581,6 +599,33 @@ pub struct IssueLinkRow {
     /// the subject. Always `false` for `blocks` / `related` (neither gates).
     #[serde(default)]
     pub satisfied: bool,
+}
+
+/// One watcher on an issue's subscriber set (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscriberRow {
+    /// The watching actor in canonical `member:<id>` / `agent:<id>` form.
+    pub actor: String,
+    /// WHY they watch — `creator` / `assignee` / `commenter` / `mentioned` /
+    /// `manual`. PROVENANCE, not state: the FIRST reason wins, so an actor who
+    /// created the issue and later commented stays `creator`. Kept as a raw
+    /// `String` so a token from a newer daemon renders instead of failing the
+    /// decode.
+    pub reason: String,
+    /// When the subscription was created (epoch millis).
+    pub created_at: i64,
+}
+
+/// One aggregated emoji bucket on an issue (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReactionRow {
+    /// The emoji this bucket counts.
+    pub emoji: String,
+    /// How many distinct actors used it.
+    pub count: u32,
+    /// True when the LOCAL HUMAN is one of those actors (drives the `✓` pip).
+    #[serde(default)]
+    pub mine: bool,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).

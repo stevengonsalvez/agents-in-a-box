@@ -213,6 +213,9 @@ async fn wait_for_inbox_count(store: &Store, ws_id: &str, want: i64) {
 
 fn issue_event() -> HangarEvent {
     HangarEvent::IssueCreated(IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,

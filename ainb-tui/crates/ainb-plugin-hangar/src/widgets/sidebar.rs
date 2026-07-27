@@ -117,6 +117,9 @@ mod tests {
 
     fn issue(description: Option<&str>, assignee: Option<&str>) -> IssueRow {
         IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,

@@ -73,6 +73,9 @@ fn seeded() -> ActivityState {
 /// One issue row with only the fields this test cares about set.
 fn row(id: &str) -> ainb_hangar_proto::events::IssueRow {
     ainb_hangar_proto::events::IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,

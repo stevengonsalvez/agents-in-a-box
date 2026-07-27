@@ -58,6 +58,7 @@ use ainb_hangar_store::repo::autopilot_run::{
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::{CriterionError, IssueRepo};
+use ainb_hangar_store::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
 use ainb_hangar_store::repo::run_history::RunHistoryRepo;
@@ -134,6 +135,9 @@ pub async fn issues_list(
             // task-detail card.
             let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 // multica parity #12: WHY this card is not running, from the newest
                 // dispatch_attempt when that attempt was a decline. All `None` on a
                 // healthy card, so the row grows by zero keys.
@@ -336,6 +340,9 @@ pub async fn issues_search(
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             // multica parity #12: WHY this card is not running, from the newest
             // dispatch_attempt when that attempt was a decline. All `None` on a
             // healthy card, so the row grows by zero keys.
@@ -2074,7 +2081,17 @@ pub async fn issue_row(
     // graph — a list snapshot leaves `dependencies` empty on purpose, because
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
+    // multica parity #22: same DETAIL-ONLY rule as `dependencies` above -- the
+    // watcher count / `subscribed` flag / reaction tallies cost extra queries
+    // per row, so a list snapshot leaves them at their `Default`.
+    let viewer = ainb_hangar_core::actor::local_member();
+    let subscriber_count = IssueSubscriberRepo::count(pool, &issue.id).await?;
+    let subscribed = IssueSubscriberRepo::is_subscribed(pool, &issue.id, &viewer).await?;
+    let reactions = issue_reaction_rows(pool, &issue.id, &viewer).await?;
     Ok(Some(IssueRow {
+        subscriber_count,
+        subscribed,
+        reactions,
         // multica parity #12: WHY this card is not running, from the newest
         // dispatch_attempt when that attempt was a decline. All `None` on a
         // healthy card, so the row grows by zero keys.
@@ -2115,6 +2132,54 @@ pub async fn issue_row(
         context_refs: issue.context_refs,
         dependencies,
     }))
+}
+
+/// One issue's SUBSCRIBER set as wire rows (multica parity #22), oldest first.
+///
+/// The `reason` half is the RAW stored token, not the parsed enum, so a
+/// provenance written by a newer daemon renders as text instead of failing the
+/// decode.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_subscriber_rows(
+    pool: &SqlitePool,
+    issue_id: &str,
+) -> Result<Vec<ainb_hangar_proto::events::IssueSubscriberRow>, sqlx::Error> {
+    Ok(IssueSubscriberRepo::list(pool, issue_id)
+        .await?
+        .into_iter()
+        .map(|s| ainb_hangar_proto::events::IssueSubscriberRow {
+            actor: s.actor.to_string(),
+            reason: s.reason_raw,
+            created_at: s.created_at,
+        })
+        .collect())
+}
+
+/// One issue's aggregated emoji buckets as wire rows (multica parity #22),
+/// most-used first, with `mine` set for the buckets `viewer` is in.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_reaction_rows(
+    pool: &SqlitePool,
+    issue_id: &str,
+    viewer: &ainb_hangar_core::actor::ActorRef,
+) -> Result<Vec<ainb_hangar_proto::events::ReactionRow>, sqlx::Error> {
+    use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
+
+    Ok(IssueReactionRepo::tallies(pool, issue_id)
+        .await?
+        .into_iter()
+        .map(|t| ainb_hangar_proto::events::ReactionRow {
+            emoji: t.emoji,
+            count: t.count,
+            mine: t.actors.iter().any(|a| a == viewer),
+        })
+        .collect())
 }
 
 /// One issue's TYPED links (multica parity #20), in render order: `blocked_by`
@@ -2283,7 +2348,17 @@ async fn read_issue_row(
     // graph — a list snapshot leaves `dependencies` empty on purpose, because
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
+    // multica parity #22: same DETAIL-ONLY rule as `dependencies` above -- the
+    // watcher count / `subscribed` flag / reaction tallies cost extra queries
+    // per row, so a list snapshot leaves them at their `Default`.
+    let viewer = ainb_hangar_core::actor::local_member();
+    let subscriber_count = IssueSubscriberRepo::count(pool, &issue.id).await?;
+    let subscribed = IssueSubscriberRepo::is_subscribed(pool, &issue.id, &viewer).await?;
+    let reactions = issue_reaction_rows(pool, &issue.id, &viewer).await?;
     Ok(Some(IssueRow {
+        subscriber_count,
+        subscribed,
+        reactions,
         // multica parity #12: WHY this card is not running, from the newest
         // dispatch_attempt when that attempt was a decline. All `None` on a
         // healthy card, so the row grows by zero keys.
@@ -2564,6 +2639,9 @@ pub async fn issue_create(
     // shows.
     let display_id = issue_display_row(pool, workspace_id, &id, prefix.as_deref()).await?;
     Ok(IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,
@@ -2650,6 +2728,34 @@ async fn workspace_issue_prefix(
 ///
 /// Returns a [`sqlx::Error`] on a store fault, or a malformed minted id on the
 /// re-wrap (impossible for a ULID).
+/// Auto-subscribe `actor` to `issue_id` (multica parity #22).
+///
+/// BEST EFFORT by design, matching the reference's rule at `service/task.go:1877`:
+/// a failure is logged and swallowed, never propagated, because a subscription
+/// side effect must not turn a successful comment / create / assign into an
+/// error. The write is idempotent and FIRST-REASON-WINS, so calling it from
+/// several seams for the same actor keeps the earliest provenance.
+pub async fn auto_subscribe(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    actor: &ActorRef,
+    reason: SubscribeReason,
+    now_ms: i64,
+) {
+    if let Err(e) =
+        IssueSubscriberRepo::add(pool, workspace_id, issue_id, actor, reason, now_ms).await
+    {
+        tracing::warn!(
+            error = %e,
+            issue_id,
+            actor = %actor,
+            reason = reason.as_db_str(),
+            "auto-subscribe failed"
+        );
+    }
+}
+
 pub async fn comment_add(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
@@ -2676,6 +2782,18 @@ pub async fn comment_add(
     if !landed {
         return Ok(None);
     }
+    // multica parity #22: commenting subscribes you to the thread. The reference
+    // seeds `reason='commenter'` the same way; first-reason-wins keeps an
+    // author who also created the issue on `creator`.
+    auto_subscribe(
+        pool,
+        workspace_id,
+        issue_id,
+        author,
+        SubscribeReason::Commenter,
+        created_at,
+    )
+    .await;
     let comment_id = CommentId::from_str(id.clone()).map_err(|e| sqlx::Error::ColumnDecode {
         index: "id".to_string(),
         source: format!("malformed comment id {id:?}: {e}").into(),
@@ -2815,6 +2933,20 @@ pub async fn spawn_mention_tasks(
                 // the invocation gate: a refused mention writes no row and
                 // therefore no provenance.
                 TaskRepo::set_origin(pool, &task.id, &mention_origin).await?;
+                // multica parity #22: being @-mentioned subscribes you.
+                if let Ok(actor) =
+                    ainb_hangar_core::actor::ActorRef::new(ActorKind::Agent, agent.id.clone())
+                {
+                    auto_subscribe(
+                        pool,
+                        workspace_id,
+                        issue_id,
+                        &actor,
+                        SubscribeReason::Mentioned,
+                        now,
+                    )
+                    .await;
+                }
                 spawned.push(agent.id.clone());
             }
             // The agent already has a pending task on this issue (the per-(issue,

@@ -1030,6 +1030,60 @@ pub const HANGAR_ISSUE_LINK_REMOVE: &str = "hangar/issue_link_remove";
 /// Read-only + workspace-scoped.
 pub const HANGAR_ISSUE_LINKS: &str = "hangar/issue_links";
 
+/// `hangar/issue_subscribe` — subscribe an actor to an issue (multica parity
+/// #22).
+///
+/// Params: [`crate::snapshots::IssueSubscribeParams`] (`{ workspace_id,
+/// issue_id, actor? }`). Result: the refreshed
+/// [`crate::snapshots::IssueSubscribersResult`]. `actor` defaults to the LOCAL
+/// HUMAN (`member:me`), mirroring the reference's "the target defaults to the
+/// caller" (`internal/handler/subscriber.go`). The write is idempotent and
+/// first-reason-wins: subscribing over an existing `creator` row is a no-op that
+/// still answers "subscribed", because the caller's intent is already satisfied.
+/// A target outside the workspace, a malformed actor token, or an unknown issue
+/// is rejected (`INVALID_PARAMS`). Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_SUBSCRIBE: &str = "hangar/issue_subscribe";
+
+/// `hangar/issue_unsubscribe` — unsubscribe an actor from an issue (multica
+/// parity #22).
+///
+/// Params: [`crate::snapshots::IssueSubscribeParams`]. Result: the refreshed
+/// [`crate::snapshots::IssueSubscribersResult`]. Removing an absent subscription
+/// is an idempotent no-op. Matched to the reference, there is NO mute flag: a
+/// later auto-subscribe trigger (a fresh comment by that actor) re-adds the row.
+/// Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_UNSUBSCRIBE: &str = "hangar/issue_unsubscribe";
+
+/// `hangar/issue_subscribers` — read one issue's subscriber set (multica parity
+/// #22).
+///
+/// Params: [`crate::snapshots::IssueSubscribersParams`] (`{ workspace_id,
+/// issue_id }`). Result: [`crate::snapshots::IssueSubscribersResult`] — one
+/// [`crate::events::IssueSubscriberRow`] per watcher, oldest first, each
+/// carrying the `reason` PROVENANCE token (`creator` / `assignee` / `commenter`
+/// / `mentioned` / `manual`). This set is what the inbox aggregator fans out to.
+/// Read-only + workspace-scoped.
+pub const HANGAR_ISSUE_SUBSCRIBERS: &str = "hangar/issue_subscribers";
+
+/// `hangar/issue_reaction_add` — add an emoji reaction to an issue (multica
+/// parity #22).
+///
+/// Params: [`crate::snapshots::IssueReactionParams`] (`{ workspace_id, issue_id,
+/// emoji, actor? }`). Result: the refreshed
+/// [`crate::snapshots::IssueReactionsResult`] (aggregated buckets, most-used
+/// first). `actor` defaults to the LOCAL HUMAN. A blank `emoji` is rejected
+/// (`INVALID_PARAMS`, the reference's `400 "emoji is required"`); reacting twice
+/// with the same emoji is an idempotent no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_REACTION_ADD: &str = "hangar/issue_reaction_add";
+
+/// `hangar/issue_reaction_remove` — remove an emoji reaction (multica parity
+/// #22).
+///
+/// Params: [`crate::snapshots::IssueReactionParams`]. Result: the refreshed
+/// [`crate::snapshots::IssueReactionsResult`]. Removing an absent reaction is an
+/// idempotent no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_REACTION_REMOVE: &str = "hangar/issue_reaction_remove";
+
 /// `hangar/board_card_set_auto_run` — flip a card's auto-run flag (tcp T4 / F7).
 ///
 /// Params: [`crate::snapshots::BoardCardAutoRunParams`] (`{ workspace_id, board_id,
@@ -1327,6 +1381,11 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_LINK_ADD,
     HANGAR_ISSUE_LINK_REMOVE,
     HANGAR_ISSUE_LINKS,
+    HANGAR_ISSUE_SUBSCRIBE,
+    HANGAR_ISSUE_UNSUBSCRIBE,
+    HANGAR_ISSUE_SUBSCRIBERS,
+    HANGAR_ISSUE_REACTION_ADD,
+    HANGAR_ISSUE_REACTION_REMOVE,
     // Fleet control-plane methods are appended at the wire catalogue tail.
     FLEET_SNAPSHOT,
     FLEET_SUBSCRIBE,
@@ -1564,6 +1623,11 @@ mod tests {
             HANGAR_ISSUE_LINK_ADD,
             HANGAR_ISSUE_LINK_REMOVE,
             HANGAR_ISSUE_LINKS,
+            HANGAR_ISSUE_SUBSCRIBE,
+            HANGAR_ISSUE_UNSUBSCRIBE,
+            HANGAR_ISSUE_SUBSCRIBERS,
+            HANGAR_ISSUE_REACTION_ADD,
+            HANGAR_ISSUE_REACTION_REMOVE,
             FLEET_SNAPSHOT,
             FLEET_SUBSCRIBE,
             FLEET_ACTION,

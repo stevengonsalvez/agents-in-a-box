@@ -22,6 +22,9 @@ use ainb_plugin_sdk::WireBuffer;
 /// A wire row with explicit state / priority / labels for facet rendering.
 fn row(id: &str, state: &str, priority: i64, labels: &[&str]) -> IssueRow {
     IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,

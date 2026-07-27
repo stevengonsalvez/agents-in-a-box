@@ -270,6 +270,41 @@ async fn count_dependents(
     })
 }
 
+/// Wall-clock millis for a subscription row minted as a side effect.
+///
+/// The subscription writers below are best-effort side effects, not part of the
+/// caller's logical write, so they do not thread the caller's clock through
+/// every signature. `created_at` on `issue_subscriber` is ordering metadata
+/// only — nothing branches on it.
+fn now_ms_for_subscription() -> i64 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
+}
+
+/// Subscribe a new issue's creator (and assignee, when set) — multica parity
+/// #22. Best effort: a failure is logged, never propagated, because the issue
+/// itself has already committed.
+async fn auto_subscribe_on_create(pool: &SqlitePool, issue: &NewIssue) {
+    use crate::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
+    let now = now_ms_for_subscription();
+    // Order matters: `creator` first, so an actor who is BOTH creator and
+    // assignee keeps `creator` (first reason wins, as the reference's backfill).
+    let pairs = [
+        (Some(&issue.creator), SubscribeReason::Creator),
+        (issue.assignee.as_ref(), SubscribeReason::Assignee),
+    ];
+    for (actor, reason) in pairs {
+        let Some(actor) = actor else { continue };
+        if let Err(e) =
+            IssueSubscriberRepo::add(pool, &issue.workspace_id, &issue.id, actor, reason, now).await
+        {
+            tracing::warn!(error = %e, issue_id = %issue.id, "create auto-subscribe failed");
+        }
+    }
+}
+
 /// Stateless typed wrapper over the `issue` table.
 pub struct IssueRepo;
 
@@ -316,6 +351,14 @@ impl IssueRepo {
         .bind(issue.stage)
         .execute(pool)
         .await?;
+        // multica parity #22: the creator (and the assignee, when set) become
+        // SUBSCRIBERS of the new issue -- the reference's `016_backfill` seeds
+        // exactly this pair, and its live writer does the same at create time.
+        // Done HERE rather than in each daemon handler because `insert` is the
+        // one create seam every path shares (issue create RPC, board-card
+        // create, autopilot fire, the CLI). Best effort: a subscription is a
+        // side effect and must never fail an otherwise committed create.
+        auto_subscribe_on_create(pool, issue).await;
         Ok(())
     }
 
@@ -529,7 +572,25 @@ impl IssueRepo {
             query = query.bind(due_date);
         }
         let res = query.bind(id).bind(workspace_id).execute(pool).await?;
-        Ok(res.rows_affected() == 1)
+        let touched = res.rows_affected() == 1;
+        // multica parity #22: a NEW assignee starts watching the issue. Clearing
+        // the assignee subscribes nobody and un-subscribes nobody (the reference
+        // has no un-subscribe-on-reassign either -- membership only grows until
+        // someone explicitly opts out). Best effort, as at create.
+        if let (true, Some(Some(assignee))) = (touched, update.assignee.as_ref()) {
+            crate::repo::issue_subscriber::IssueSubscriberRepo::add(
+                pool,
+                workspace_id,
+                id,
+                assignee,
+                crate::repo::issue_subscriber::SubscribeReason::Assignee,
+                now_ms_for_subscription(),
+            )
+            .await
+            .map_err(|e| tracing::warn!(error = %e, id, "assignee auto-subscribe failed"))
+            .ok();
+        }
+        Ok(touched)
     }
 
     /// List issues in a workspace filtered by `state`, ordered by `created_at`.
@@ -933,6 +994,17 @@ impl IssueRepo {
         .execute(&mut *tx)
         .await?;
         sqlx::query("DELETE FROM beads_mapping WHERE hangar_kind = 'issue' AND hangar_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        // 5b. The card's watchers and reactions (migration 0062). Neither table
+        //     carries an FK on `issue_id` (0058's rule), so the reap is explicit
+        //     here, exactly like `issue_label` / `comment` above.
+        sqlx::query("DELETE FROM issue_subscriber WHERE issue_id = ?")
+            .bind(issue_id)
+            .execute(&mut *tx)
+            .await?;
+        sqlx::query("DELETE FROM issue_reaction WHERE issue_id = ?")
             .bind(issue_id)
             .execute(&mut *tx)
             .await?;
