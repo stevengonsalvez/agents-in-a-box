@@ -2773,6 +2773,121 @@ pub struct IssueReactionsResult {
     pub reactions: Vec<crate::events::ReactionRow>,
 }
 
+/// Params for [`crate::methods::HANGAR_PROPERTIES_LIST`] (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertiesListParams {
+    /// The subscribed workspace whose catalog is read (tenant guard).
+    pub workspace_id: String,
+    /// Include ARCHIVED definitions too. Default `false` = the active catalog.
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+/// Result of [`crate::methods::HANGAR_PROPERTIES_LIST`] (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertiesListResult {
+    /// Definitions in `position, key` order. Empty ⇒ no custom properties.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<crate::events::PropertyDefRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_PROPERTY_DEFINE`] (multica parity #17).
+///
+/// Idempotent by `(workspace_id, key)`: every optional field left absent keeps
+/// the stored value, so a rename is `{ workspace_id, key, name }` alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertyDefineParams {
+    /// The subscribed workspace the definition belongs to (tenant guard).
+    pub workspace_id: String,
+    /// Stable slug. Blank is rejected (`INVALID_PARAMS`).
+    pub key: String,
+    /// Display label. Absent on a NEW definition ⇒ the key is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `text` / `number` / `select` / `multi_select` / `date` / `checkbox` /
+    /// `url`. Absent on a NEW definition ⇒ `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Option catalog for `select` / `multi_select`; required for those kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Render order within the workspace. Absent ⇒ unchanged (0 when new).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
+}
+
+/// Params for [`crate::methods::HANGAR_PROPERTY_ARCHIVE`] (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertyArchiveParams {
+    /// The subscribed workspace the definition belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The definition's stable slug.
+    pub key: String,
+    /// `true` archives, `false` un-archives. NEVER a delete.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_PROPERTY_SET`] (multica parity
+/// #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuePropertySetParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose value bag is written.
+    pub issue_id: String,
+    /// The definition's stable slug.
+    pub key: String,
+    /// The scalar value for every kind except `multi_select`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The `multi_select` form. Takes precedence over `value` when non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_PROPERTY_CLEAR`] (multica parity
+/// #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuePropertyClearParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose value bag is written.
+    pub issue_id: String,
+    /// The definition's stable slug.
+    pub key: String,
+}
+
+/// Params shared by the three `hangar/issue_metadata_*` methods (multica parity
+/// #17) — get, set and delete take one shape so an agent binds one struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMetadataParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose scratch bag is read or written.
+    pub issue_id: String,
+    /// The metadata key. Required for set / delete; on get it narrows the
+    /// result to that one entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The value, as TEXT. Required for set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// `string` | `number` | `bool`. ABSENT ⇒ sniff (`true`/`false` ⇒ bool, a
+    /// valid decimal ⇒ number, else string), the reference's `--type` override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+}
+
+/// Result of every `hangar/issue_metadata_*` method (multica parity #17): the
+/// issue's REFRESHED bag, so a mutator needs no read-after-write round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMetadataResult {
+    /// Entries key-sorted. Empty ⇒ the issue carries no metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<crate::events::IssueMetadataRow>,
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_SET_AUTO_RUN`] (tcp T4 / F7):
 /// flip a card's auto-run flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
