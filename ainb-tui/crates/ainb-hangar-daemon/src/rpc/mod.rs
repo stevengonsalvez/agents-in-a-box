@@ -45,13 +45,16 @@ use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::dispatch_reason::{DispatchReason, DispatchSource};
+use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
+use ainb_hangar_store::service::activity::ActivityService;
 use futures_util::future::join_all;
 use sqlx::SqlitePool;
 
@@ -813,6 +816,7 @@ async fn handle(
         methods::HANGAR_ISSUE_LINK_REMOVE => handle_issue_link(pool, req, false).await,
         methods::HANGAR_ISSUE_LINKS => handle_issue_links(pool, req).await,
         methods::HANGAR_DISPATCH_ATTEMPTS_LIST => handle_dispatch_attempts_list(pool, req).await,
+        methods::HANGAR_ISSUE_TIMELINE => handle_issue_timeline(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
@@ -3217,6 +3221,21 @@ async fn handle_issue_create(
     )
     .await
     .map_err(|e| store_err(&e))?;
+    // multica parity #13: open the card's narrative. Attributed to the
+    // wire-supplied creator (hangar has no request-auth context, so that is the
+    // most honest actor available here). Best-effort — an audit failure never
+    // fails the create.
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        ws.as_str(),
+        &row.id.to_string(),
+        &ActivityActor::Actor(creator.clone()),
+        ActivityAction::Created,
+        serde_json::json!({}),
+    )
+    .await;
     // A committed insert announces the new issue to subscribers.
     events.emit(ws.as_str(), HangarEvent::IssueCreated(row.clone()));
     to_value(&row)
@@ -3488,6 +3507,18 @@ async fn handle_issue_update(
     // requested) so a completion can fire the child-done → parent cascade below.
     let prev_state = issue_prev_state_for_cascade(pool, &ws, &params.issue_id, &update).await?;
 
+    // multica parity #13: the FULL pre-edit row, so the post-edit diff can write
+    // one activity row per changed field. Deliberately separate from
+    // `prev_state` above, which only carries the state token for the cascade.
+    let before_issue = if update.is_empty() {
+        None
+    } else {
+        ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+            .await
+            .map_err(|e| store_err(&e))?
+            .filter(|i| i.workspace_id == ws.as_str())
+    };
+
     // F6 card edit: the card's repo + chosen agent are persisted on the durable
     // card (the issue) exactly as `board_card_create` does — trim the repo, drop an
     // unrecognised agent token (the F4 cascade decides), and only write when a
@@ -3547,6 +3578,28 @@ async fn handle_issue_update(
             target_branch,
         )
         .await?;
+    }
+
+    // multica parity #13: diff the pre-edit row against the committed one and
+    // record one activity row per changed field. Best-effort throughout.
+    if let Some(before) = before_issue.as_ref() {
+        if let Some(after) =
+            ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+                .await
+                .map_err(|e| store_err(&e))?
+        {
+            let actor = acting_actor(pool).await;
+            ActivityService::record_issue_diff(
+                pool,
+                &SystemIdGen,
+                &SystemClock,
+                ws.as_str(),
+                &actor,
+                before,
+                &after,
+            )
+            .await;
+        }
     }
 
     // A committed edit announces the refreshed row to subscribers. Re-read AFTER
@@ -6348,6 +6401,59 @@ async fn handle_dispatch_attempts_list(
         .collect();
 
     to_value(&ainb_hangar_proto::snapshots::DispatchAttemptsListResult { attempts })
+}
+
+/// Who a daemon-side owner edit is attributed to (multica parity #13).
+///
+/// hangar has no per-request auth context, so an owner-driven edit is credited
+/// to the single bootstrapped default member; when none resolves (or the lookup
+/// faults) the row is a `system` fact rather than a fabricated member. When
+/// per-request actor identity lands (parity #1's member work), swap this body —
+/// no call site changes.
+async fn acting_actor(pool: &SqlitePool) -> ainb_hangar_core::activity::ActivityActor {
+    let owner = ainb_hangar_store::bootstrap::default_owner_id(pool).await.ok().flatten();
+    ainb_hangar_core::activity::ActivityActor::member_or_system(owner.as_deref())
+}
+
+/// `hangar/issue_timeline` (multica parity #13): one card's merged activity +
+/// comment narrative, **oldest first**.
+///
+/// Read-only and workspace-scoped through the same tenant guard as
+/// [`handle_dispatch_attempts_list`]. An `(issue_id, workspace)` pair that
+/// resolves to no issue is `INVALID_PARAMS`, never a silent empty list — an
+/// empty timeline and a cross-tenant probe must not look identical.
+async fn handle_issue_timeline(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    /// Default window when the caller does not ask for one.
+    const DEFAULT_LIMIT: u32 = 200;
+    /// multica's `timelineHardCap`.
+    const MAX_LIMIT: u32 = 2000;
+
+    let params: ainb_hangar_proto::snapshots::IssueTimelineParams =
+        parse_params(req, "{ workspace_id, issue_id, limit? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let limit = i64::from(params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
+
+    // Resolve the card inside the tenant BEFORE reading, so a foreign id is a
+    // clean rejection rather than an empty list that leaks nothing but also
+    // tells the caller nothing.
+    let known = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .is_some_and(|i| i.workspace_id == ws.as_str());
+    if !known {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    }
+
+    let entries = snapshots::issue_timeline(pool, ws.as_str(), &params.issue_id, limit)
+        .await
+        .map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::IssueTimelineResult { entries })
 }
 
 /// `hangar/board_card_set_auto_run` (tcp T4 / F7): flip a card's auto-run flag.

@@ -1671,6 +1671,9 @@ async fn finalize_success(
     // card does not slide to `done` while its leader / other members still run.
     // Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative,
+    // attributed to the agent that ran it. Best-effort.
+    crate::board::record_task_outcome(pool, task, true).await;
     // Twin the durable-card move on the issue's own `state` (the default board
     // buckets by it): an aggregate-`done` set promotes the issue to `done`;
     // failed/cancelled sets leave it untouched. Advance-only + best-effort.
@@ -1870,6 +1873,8 @@ async fn finalize_failure(
     // and one failed sibling lands the whole card in the `failed` column (aggregate
     // precedence). Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative.
+    crate::board::record_task_outcome(pool, task, false).await;
     // Twin on `issue.state`: the aggregate is `failed`/`cancelled` here (this
     // task's own failure is in the set), so this no-ops — but it keeps the
     // lifecycle seam symmetric with the board seam. Advance-only + best-effort.
@@ -1994,6 +1999,8 @@ async fn finalize_setup_failure(
         clock,
     );
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative.
+    crate::board::record_task_outcome(pool, task, false).await;
     // Twin on `issue.state`; no-ops on the failed aggregate, kept for symmetry
     // with the board seam. Advance-only + best-effort.
     crate::board::advance_and_cascade_child(pool, task, events).await;
