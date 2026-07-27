@@ -633,6 +633,12 @@ pub struct ScreenStates {
     pub task_detail: Option<TaskDetailState>,
     /// Agent-picker modal cache (present only while the modal is open).
     pub agent_picker: Option<AgentPickerState>,
+    /// Activity-timeline modal cache (multica parity #13; present only while the
+    /// modal is open).
+    pub activity: Option<super::activity::ActivityState>,
+    /// An issue id whose `hangar/issue_timeline` fetch is armed, awaiting the
+    /// `render` pass to fire it over the daemon socket. `None` when idle.
+    pub pending_activity_fetch: Option<String>,
     /// Command-palette modal cache (present only while the palette is open,
     /// e38.13).
     pub command_palette: Option<CommandPaletteState>,
@@ -1247,6 +1253,9 @@ impl ScreenStates {
 pub enum NavIntent {
     /// Open the agent-picker modal for an issue (raised by `a`).
     OpenAgentPicker(ainb_hangar_core::ids::IssueId),
+    /// Open the activity-timeline modal for an issue (raised by `y`, multica
+    /// parity #13).
+    OpenActivityTimeline(ainb_hangar_core::ids::IssueId),
     /// Open task detail for the issue under the selection (raised by Enter).
     OpenTaskForIssue(ainb_hangar_core::ids::IssueId),
     /// 0046 sub-issues: mark an issue Done from the keyboard (`d`). The glue moves
@@ -1358,6 +1367,16 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             }
             if let Some(picker) = &states.agent_picker {
                 super::agent_picker::render_agent_picker(buf, w, h, picker);
+            }
+        }
+        Screen::ActivityTimeline(_) => {
+            // The timeline is a modal: paint the screen it overlays first, then
+            // the modal centred over the whole area (multica parity #13).
+            if let Some(prior) = &app.prior_screen {
+                render_prior(buf, w, h, prior, states);
+            }
+            if let Some(activity) = &states.activity {
+                super::activity::render_activity(buf, w, h, activity);
             }
         }
         Screen::CommandPalette => {
@@ -1591,6 +1610,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::TaskDetail(_) => route_task_detail(states, key),
         Screen::AgentPicker(_) => route_agent_picker(states, key),
+        Screen::ActivityTimeline(_) => route_activity(states, key),
         Screen::CommandPalette => route_command_palette(states, key),
         Screen::Logs => {
             // The logs pane owns the level-filter chips (`a`/`i`/`w`/`e`). A
@@ -1773,6 +1793,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     states.issue_list = out.state;
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
+        // multica parity #13: `y` opens the card's activity timeline.
+        Some(IssueListIntent::OpenActivityTimeline(id)) => {
+            Some(NavIntent::OpenActivityTimeline(id))
+        }
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
         // 0046: `d` marks the highlighted issue Done, surfaced as a NavIntent the
         // glue lifts into the SAME optimistic-move + `hangar/issue_update{state}`
@@ -2452,6 +2476,32 @@ fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIn
     } else {
         None
     }
+}
+
+/// Activity-timeline key routing (multica parity #13): fold the key into the
+/// pure reducer, then act on the reduction.
+///
+/// `j`/`k` scroll, `r` arms a re-fetch the `render` pass fires, Esc dismisses
+/// the modal back to the screen that opened it (the host reserves only Ctrl+C,
+/// so a modal MUST offer its own way out).
+fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
+    use super::activity::{ActivityEvent, ActivityIntent, reduce_activity};
+
+    if matches!(key.code, KeyCode::Esc) {
+        states.activity = None;
+        return Some(NavIntent::CloseModal);
+    }
+    let state = states.activity.take()?;
+    let Some(c) = key_char(key) else {
+        states.activity = Some(state);
+        return None;
+    };
+    let out = reduce_activity(&state, ActivityEvent::Key(c));
+    if let Some(ActivityIntent::Refresh { issue_id }) = out.intent {
+        states.pending_activity_fetch = Some(issue_id);
+    }
+    states.activity = Some(out.state);
+    None
 }
 
 /// Command-palette key routing (e38.13): fold the key into the pure reducer, then

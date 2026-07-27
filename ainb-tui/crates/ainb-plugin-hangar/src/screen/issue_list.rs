@@ -1780,6 +1780,10 @@ pub enum IssueListIntent {
     OpenTaskDetail(IssueId),
     /// Open the agent-picker modal for the issue under the selection.
     OpenAgentPicker(IssueId),
+    /// Open the activity-timeline modal for the issue under the selection
+    /// (raised by `y`, multica parity #13). `y` is free: the host reserves only
+    /// the uppercase tab keys plus `,` `?` and `1-4`.
+    OpenActivityTimeline(IssueId),
     /// Commit the create wizard (Phase 5): create the issue AND dispatch it.
     /// Raised ONLY by Enter on the wizard's final Agent stage — there is no path
     /// to this intent without an agent, so a title-only inert issue (assignee
@@ -1938,6 +1942,17 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
                 with_intent(
                     state.clone(),
                     IssueListIntent::OpenAgentPicker(row.id.clone()),
+                )
+            },
+        ),
+        // multica parity #13: the card's activity timeline. A no-op with no row
+        // selected — never a modal opened on nothing.
+        'y' => state.selected_row().map_or_else(
+            || unchanged(state),
+            |row| {
+                with_intent(
+                    state.clone(),
+                    IssueListIntent::OpenActivityTimeline(row.id.clone()),
                 )
             },
         ),
