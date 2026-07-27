@@ -10,12 +10,26 @@
 //! `read_at` (epoch milliseconds, nullable) is the whole unread model: `NULL` =
 //! unread, a stamped value = read. [`InboxRepo::unread_count`] counts the `NULL`
 //! rows; [`InboxRepo::mark_all_read`] stamps every currently-unread row so the
-//! count drops to zero (the mark-read sweep). Every method is **workspace-scoped**
-//! by the `workspace_id` column, mirroring the tenant isolation the issue/comment
-//! repos enforce: a foreign tenant's inbox is never read or mutated.
+//! count drops to zero (the mark-read sweep).
+//!
+//! ## Recipient scoping (migration 0060, multica parity #1)
+//!
+//! Every entry is addressed to exactly ONE actor — a `member` or an `agent` —
+//! via the `(recipient_type, recipient_id)` pair the repo carries as a typed
+//! [`ActorRef`]. Every read and every sweep therefore takes `(workspace,
+//! recipient)`: an entry addressed to `agent:a1` is invisible to `member:me`,
+//! and `member:me`'s mark-read sweep never clears the agent's unread rows.
+//! Workspace scoping is unchanged and still enforced alongside, mirroring the
+//! tenant isolation the issue/comment repos enforce: a foreign tenant's inbox is
+//! never read or mutated.
+//!
+//! The recipient is a REQUIRED, typed field on [`NewInboxEntry`], not an
+//! optional column: a writer that forgets who a notification is for is a compile
+//! error, not a silently-invisible row.
 //!
 //! [`HangarEvent`]: ../../../ainb_hangar_proto/events/enum.HangarEvent.html
 
+use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use sqlx::{Row, SqlitePool};
 
 /// The entity family an [`InboxEntry`] is about — the `kind` column, CHECK-
@@ -68,6 +82,10 @@ pub struct NewInboxEntry {
     pub id: String,
     /// The owning workspace's resolved row id (never the slug).
     pub workspace_id: String,
+    /// The single actor this entry is addressed TO (migration 0060). Required by
+    /// design: an inbox entry with no recipient would be invisible to everyone,
+    /// so the type system refuses to build one.
+    pub recipient: ActorRef,
     /// The entity family the entry is about.
     pub kind: InboxKind,
     /// The wire event discriminant that produced this entry (e.g.
@@ -88,6 +106,8 @@ pub struct InboxEntry {
     pub id: String,
     /// The owning workspace.
     pub workspace_id: String,
+    /// The single actor this entry is addressed to (migration 0060).
+    pub recipient: ActorRef,
     /// The entity family the entry is about.
     pub kind: InboxKind,
     /// The wire event discriminant.
@@ -121,11 +141,13 @@ impl InboxRepo {
     pub async fn insert(pool: &SqlitePool, entry: &NewInboxEntry) -> Result<(), sqlx::Error> {
         sqlx::query(
             "INSERT INTO inbox_entry \
-             (id, workspace_id, kind, event, subject_id, summary, created_at, read_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+             (id, workspace_id, recipient_type, recipient_id, kind, event, subject_id, summary, created_at, read_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL)",
         )
         .bind(&entry.id)
         .bind(&entry.workspace_id)
+        .bind(entry.recipient.kind().as_str())
+        .bind(entry.recipient.id())
         .bind(entry.kind.as_str())
         .bind(&entry.event)
         .bind(&entry.subject_id)
@@ -136,61 +158,78 @@ impl InboxRepo {
         Ok(())
     }
 
-    /// List a workspace's inbox entries, newest first, capped at `limit`.
+    /// List the entries addressed to `recipient` in a workspace, newest first,
+    /// capped at `limit`.
     ///
-    /// Workspace-scoped by the `workspace_id` column: a foreign tenant's entries
-    /// are never returned, and an unknown workspace yields an empty list. Ordered
-    /// `created_at DESC, id DESC` so the newest notification is the first row (the
-    /// `id` tiebreak keeps two same-millisecond entries deterministic).
+    /// Scoped on BOTH axes: the `workspace_id` column (a foreign tenant's entries
+    /// are never returned, an unknown workspace yields an empty list) and the
+    /// `(recipient_type, recipient_id)` pair (another actor's entries are never
+    /// returned — migration 0060). Ordered `created_at DESC, id DESC` so the
+    /// newest notification is the first row (the `id` tiebreak keeps two
+    /// same-millisecond entries deterministic).
     ///
     /// # Errors
     ///
-    /// Returns a [`sqlx::Error`] if the query fails or a stored `kind` token is
-    /// malformed (impossible given the CHECK constraint).
+    /// Returns a [`sqlx::Error`] if the query fails or a stored `kind` /
+    /// recipient token is malformed (impossible given the CHECK constraints).
     pub async fn list(
         pool: &SqlitePool,
         workspace_id: &str,
+        recipient: &ActorRef,
         limit: i64,
     ) -> Result<Vec<InboxEntry>, sqlx::Error> {
         let rows = sqlx::query(
-            "SELECT id, workspace_id, kind, event, subject_id, summary, created_at, read_at \
+            "SELECT id, workspace_id, recipient_type, recipient_id, kind, event, subject_id, \
+             summary, created_at, read_at \
              FROM inbox_entry \
-             WHERE workspace_id = ? \
+             WHERE workspace_id = ? AND recipient_type = ? AND recipient_id = ? \
              ORDER BY created_at DESC, id DESC \
              LIMIT ?",
         )
         .bind(workspace_id)
+        .bind(recipient.kind().as_str())
+        .bind(recipient.id())
         .bind(limit)
         .fetch_all(pool)
         .await?;
         rows.iter().map(entry_from_row).collect()
     }
 
-    /// Count a workspace's UNREAD entries (`read_at IS NULL`).
+    /// Count `recipient`'s UNREAD entries (`read_at IS NULL`) in a workspace.
     ///
-    /// Workspace-scoped: a foreign tenant's unread entries never count. This is the
-    /// figure the inbox badge renders and the mark-read sweep drives to zero.
+    /// Scoped on both the workspace and the recipient: neither a foreign tenant's
+    /// nor a sibling actor's unread entries ever count. This is the figure the
+    /// inbox badge renders and the mark-read sweep drives to zero.
     ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the count query fails.
-    pub async fn unread_count(pool: &SqlitePool, workspace_id: &str) -> Result<i64, sqlx::Error> {
+    pub async fn unread_count(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        recipient: &ActorRef,
+    ) -> Result<i64, sqlx::Error> {
         sqlx::query_scalar(
-            "SELECT COUNT(*) FROM inbox_entry WHERE workspace_id = ? AND read_at IS NULL",
+            "SELECT COUNT(*) FROM inbox_entry \
+             WHERE workspace_id = ? AND recipient_type = ? AND recipient_id = ? \
+             AND read_at IS NULL",
         )
         .bind(workspace_id)
+        .bind(recipient.kind().as_str())
+        .bind(recipient.id())
         .fetch_one(pool)
         .await
     }
 
-    /// Mark every currently-unread entry in a workspace as read, stamping
-    /// `read_at = now_ms`. Returns the number of rows flipped (which equals the
-    /// unread count before the sweep).
+    /// Mark every currently-unread entry addressed to `recipient` in a workspace
+    /// as read, stamping `read_at = now_ms`. Returns the number of rows flipped
+    /// (which equals that recipient's unread count before the sweep).
     ///
     /// Idempotent: a second sweep touches no row (every entry already has a
     /// `read_at`), so the count stays at zero. Only `NULL`-`read_at` rows are
     /// stamped, so an already-read entry keeps its original read timestamp.
-    /// Workspace-scoped: a foreign tenant's entries are never touched.
+    /// Scoped on both axes: neither a foreign tenant's nor a sibling actor's
+    /// entries are ever touched.
     ///
     /// # Errors
     ///
@@ -198,14 +237,18 @@ impl InboxRepo {
     pub async fn mark_all_read(
         pool: &SqlitePool,
         workspace_id: &str,
+        recipient: &ActorRef,
         now_ms: i64,
     ) -> Result<u64, sqlx::Error> {
         let res = sqlx::query(
             "UPDATE inbox_entry SET read_at = ? \
-             WHERE workspace_id = ? AND read_at IS NULL",
+             WHERE workspace_id = ? AND recipient_type = ? AND recipient_id = ? \
+             AND read_at IS NULL",
         )
         .bind(now_ms)
         .bind(workspace_id)
+        .bind(recipient.kind().as_str())
+        .bind(recipient.id())
         .execute(pool)
         .await?;
         Ok(res.rows_affected())
@@ -219,9 +262,21 @@ fn entry_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<InboxEntry, sqlx::Err
         index: "kind".to_string(),
         source: format!("unknown inbox kind {kind_token:?}").into(),
     })?;
+    let recipient_type: String = row.try_get("recipient_type")?;
+    let recipient_id: String = row.try_get("recipient_id")?;
+    let recipient = recipient_type
+        .parse::<ActorKind>()
+        .map_err(|e| e.to_string())
+        .and_then(|kind| ActorRef::new(kind, recipient_id.clone()).map_err(|e| e.to_string()))
+        .map_err(|source| sqlx::Error::ColumnDecode {
+            index: "recipient_type".to_string(),
+            source: format!("malformed inbox recipient {recipient_type}:{recipient_id} ({source})")
+                .into(),
+        })?;
     Ok(InboxEntry {
         id: row.try_get("id")?,
         workspace_id: row.try_get("workspace_id")?,
+        recipient,
         kind,
         event: row.try_get("event")?,
         subject_id: row.try_get("subject_id")?,
@@ -248,10 +303,31 @@ mod tests {
             .unwrap();
     }
 
+    /// The local human — the default recipient the pre-0060 tests implicitly used.
+    fn me() -> ActorRef {
+        ainb_hangar_core::actor::local_member()
+    }
+
+    fn agent(id: &str) -> ActorRef {
+        ActorRef::new(ActorKind::Agent, id).unwrap()
+    }
+
     fn entry(id: &str, ws: &str, kind: InboxKind, subject: &str, ts: i64) -> NewInboxEntry {
+        entry_for(id, ws, me(), kind, subject, ts)
+    }
+
+    fn entry_for(
+        id: &str,
+        ws: &str,
+        recipient: ActorRef,
+        kind: InboxKind,
+        subject: &str,
+        ts: i64,
+    ) -> NewInboxEntry {
         NewInboxEntry {
             id: id.into(),
             workspace_id: ws.into(),
+            recipient,
             kind,
             event: "issue_created".into(),
             subject_id: subject.into(),
@@ -275,7 +351,7 @@ mod tests {
             .unwrap();
         }
 
-        let list = InboxRepo::list(store.pool(), "ws-a", 100).await.unwrap();
+        let list = InboxRepo::list(store.pool(), "ws-a", &me(), 100).await.unwrap();
         let ids: Vec<_> = list.iter().map(|e| e.id.as_str()).collect();
         assert_eq!(ids, ["e3", "e2", "e1"], "newest first");
         assert!(
@@ -283,7 +359,7 @@ mod tests {
             "fresh entries are unread"
         );
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-a").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
             3
         );
     }
@@ -302,25 +378,25 @@ mod tests {
             .unwrap();
         }
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-a").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
             2
         );
 
-        let flipped = InboxRepo::mark_all_read(store.pool(), "ws-a", 5000).await.unwrap();
+        let flipped = InboxRepo::mark_all_read(store.pool(), "ws-a", &me(), 5000).await.unwrap();
         assert_eq!(flipped, 2, "both unread rows flip");
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-a").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
             0,
             "unread count drops to zero after the sweep"
         );
         // The read entries kept their stamp.
-        let list = InboxRepo::list(store.pool(), "ws-a", 100).await.unwrap();
+        let list = InboxRepo::list(store.pool(), "ws-a", &me(), 100).await.unwrap();
         assert!(list.iter().all(|e| e.read_at == Some(5000)));
 
         // A second sweep touches no row (idempotent).
-        let again = InboxRepo::mark_all_read(store.pool(), "ws-a", 9999).await.unwrap();
+        let again = InboxRepo::mark_all_read(store.pool(), "ws-a", &me(), 9999).await.unwrap();
         assert_eq!(again, 0, "a re-sweep flips nothing");
-        let list = InboxRepo::list(store.pool(), "ws-a", 100).await.unwrap();
+        let list = InboxRepo::list(store.pool(), "ws-a", &me(), 100).await.unwrap();
         assert!(
             list.iter().all(|e| e.read_at == Some(5000)),
             "already-read entries keep their original read timestamp"
@@ -347,31 +423,118 @@ mod tests {
         .unwrap();
 
         // ws-a sees only its own entry, and its unread count is its own.
-        let list_a = InboxRepo::list(store.pool(), "ws-a", 100).await.unwrap();
+        let list_a = InboxRepo::list(store.pool(), "ws-a", &me(), 100).await.unwrap();
         assert_eq!(list_a.len(), 1);
         assert_eq!(list_a[0].id, "a1");
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-a").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
             1
         );
 
         // Marking ws-a read does not touch ws-b's unread entry.
-        InboxRepo::mark_all_read(store.pool(), "ws-a", 5000).await.unwrap();
+        InboxRepo::mark_all_read(store.pool(), "ws-a", &me(), 5000).await.unwrap();
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-a").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
             0
         );
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-b").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-b", &me()).await.unwrap(),
             1,
             "a sibling tenant's inbox is untouched by another's mark-read"
         );
 
         // An unknown workspace yields an empty list + zero unread.
-        assert!(InboxRepo::list(store.pool(), "ws-nope", 100).await.unwrap().is_empty());
+        assert!(InboxRepo::list(store.pool(), "ws-nope", &me(), 100).await.unwrap().is_empty());
         assert_eq!(
-            InboxRepo::unread_count(store.pool(), "ws-nope").await.unwrap(),
+            InboxRepo::unread_count(store.pool(), "ws-nope", &me()).await.unwrap(),
             0
         );
+    }
+
+    /// The parity acceptance at the store layer: two actors on ONE workspace see
+    /// disjoint inboxes. Dropping the recipient predicate from `list` /
+    /// `unread_count` makes both actors see both rows and fails this test.
+    #[tokio::test]
+    async fn entry_addressed_to_one_actor_is_invisible_to_another() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_workspace(store.pool(), "ws-a").await;
+
+        InboxRepo::insert(
+            store.pool(),
+            &entry_for("m1", "ws-a", me(), InboxKind::Comment, "i1", 1000),
+        )
+        .await
+        .unwrap();
+        InboxRepo::insert(
+            store.pool(),
+            &entry_for("g1", "ws-a", agent("a1"), InboxKind::Task, "t1", 2000),
+        )
+        .await
+        .unwrap();
+
+        let mine = InboxRepo::list(store.pool(), "ws-a", &me(), 100).await.unwrap();
+        assert_eq!(
+            mine.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["m1"],
+            "the human sees only the entry addressed to them"
+        );
+        assert_eq!(mine[0].recipient, me(), "the recipient round-trips");
+
+        let theirs = InboxRepo::list(store.pool(), "ws-a", &agent("a1"), 100).await.unwrap();
+        assert_eq!(
+            theirs.iter().map(|e| e.id.as_str()).collect::<Vec<_>>(),
+            ["g1"],
+            "the agent sees only the entry addressed to it"
+        );
+        assert_eq!(theirs[0].recipient, agent("a1"));
+
+        assert_eq!(
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
+            1
+        );
+        assert_eq!(
+            InboxRepo::unread_count(store.pool(), "ws-a", &agent("a1")).await.unwrap(),
+            1
+        );
+        // A third actor with no entries has an empty inbox, not everyone's.
+        assert!(
+            InboxRepo::list(store.pool(), "ws-a", &agent("a2"), 100).await.unwrap().is_empty()
+        );
+    }
+
+    /// The mark-read sweep never crosses actors: sweeping the human leaves the
+    /// agent's row unread and its `read_at` NULL.
+    #[tokio::test]
+    async fn mark_all_read_is_recipient_scoped() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        seed_workspace(store.pool(), "ws-a").await;
+        InboxRepo::insert(
+            store.pool(),
+            &entry_for("m1", "ws-a", me(), InboxKind::Comment, "i1", 1000),
+        )
+        .await
+        .unwrap();
+        InboxRepo::insert(
+            store.pool(),
+            &entry_for("g1", "ws-a", agent("a1"), InboxKind::Task, "t1", 2000),
+        )
+        .await
+        .unwrap();
+
+        let flipped = InboxRepo::mark_all_read(store.pool(), "ws-a", &me(), 5000).await.unwrap();
+        assert_eq!(flipped, 1, "only the human's own row flips");
+        assert_eq!(
+            InboxRepo::unread_count(store.pool(), "ws-a", &me()).await.unwrap(),
+            0
+        );
+        assert_eq!(
+            InboxRepo::unread_count(store.pool(), "ws-a", &agent("a1")).await.unwrap(),
+            1,
+            "a sibling actor's inbox is untouched by another's mark-read"
+        );
+        let theirs = InboxRepo::list(store.pool(), "ws-a", &agent("a1"), 100).await.unwrap();
+        assert_eq!(theirs[0].read_at, None, "the agent's row stays unread");
     }
 }
