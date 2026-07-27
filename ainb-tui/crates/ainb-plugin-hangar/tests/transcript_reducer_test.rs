@@ -342,6 +342,7 @@ fn comments_interleave_with_transcript_in_arrival_order() {
             author: "member:alice".into(),
             body: "a comment".into(),
             created_at: 5,
+            parent_id: None,
         })),
     )
     .state;

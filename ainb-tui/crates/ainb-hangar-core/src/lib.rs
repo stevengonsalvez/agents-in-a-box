@@ -56,6 +56,10 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// Comment `@mention` grammar (`mention://` links + bare `@handle`) and the
+/// per-target routing outcome vocabulary (multica parity #2-rest). The pure
+/// half; resolution + writes live in `ainb_hangar_store::service::mention`.
+pub mod mention;
 /// Issue / task ORIGIN PROVENANCE: the validated `(origin_type, origin_id)`
 /// pair over the closed `{autopilot, comment_mention, manual}` allow-list
 /// (multica parity #21, migration 0056).

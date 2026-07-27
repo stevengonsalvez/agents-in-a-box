@@ -283,6 +283,47 @@ const SELF_AUTHOR_REF: &str = "member:me";
 /// the request names [`SELF_AUTHOR_REF`] as the recipient, and the daemon
 /// returns / sweeps only that actor's rows. When a real signed-in identity
 /// lands, only that constant changes.
+/// Render the `@`-mention routing outcomes of one `comment_add` reply as a
+/// single transcript line, or `None` when there is nothing to say
+/// (multica parity #2-rest).
+///
+/// Shape: `↪ @alice notified · @builder queued · @bot blocked (invocation not allowed)`.
+/// A `blocked` / `deferred` row carries the DispatchReason's human label in
+/// parentheses — that parenthetical IS the feature: before this item a refused
+/// mention was indistinguishable from one that ran.
+///
+/// An EMPTY outcome set renders nothing, so a comment with no mentions looks
+/// exactly as it did before.
+fn render_mention_outcomes(
+    rows: &[ainb_hangar_proto::snapshots::MentionOutcomeRow],
+) -> Option<String> {
+    use ainb_hangar_core::dispatch_reason::DispatchReason;
+
+    if rows.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let who = if r.handle.is_empty() {
+                "(unknown)".to_string()
+            } else {
+                format!("@{}", r.handle)
+            };
+            // Only a refusal / deferral needs the WHY; `queued` and `notified`
+            // already say everything.
+            let why = match r.outcome.as_str() {
+                "blocked" | "deferred" => DispatchReason::parse(&r.reason)
+                    .map(|d| format!(" ({})", d.label()))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            format!("{who} {}{why}", r.outcome)
+        })
+        .collect();
+    Some(format!("↪ {}", parts.join(" · ")))
+}
+
 fn inbox_params(ws: &str) -> serde_json::Value {
     serde_json::json!({ "workspace_id": ws, "recipient": SELF_AUTHOR_REF })
 }
@@ -1040,6 +1081,11 @@ impl HangarPlugin {
                 }
                 self.conn.on_event();
             }
+            // multica parity #2-rest: the `comment_add` reply now carries one
+            // outcome row per `@`-mention. Before this the reply was dropped on
+            // the floor, so a refused or coalesced mention looked exactly like
+            // one that ran.
+            RpcId::Number(COMMENT_ADD_REQ_ID) => self.apply_comment_mention_outcomes(resp),
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
@@ -1466,6 +1512,28 @@ impl HangarPlugin {
         }
         self.fetch_pending = true;
         self.conn.on_event();
+    }
+
+    /// Fold the `@`-mention routing outcomes off a `comment_add` reply into the
+    /// open task-detail transcript (multica parity #2-rest).
+    ///
+    /// Renders ONE line, e.g.
+    /// `↪ @alice notified · @builder queued · @secret-bot blocked (invocation not allowed)`.
+    /// A comment that mentioned nobody produces an empty vector and therefore
+    /// renders NOTHING, so a plain comment looks exactly as it did before.
+    fn apply_comment_mention_outcomes(&mut self, resp: &RpcResponse) {
+        let Some(result) = resp.result.as_ref() else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_value::<ainb_hangar_proto::snapshots::CommentAddResult>(
+            result.clone(),
+        ) else {
+            return;
+        };
+        if let Some(line) = render_mention_outcomes(&parsed.mention_outcomes) {
+            self.screens.push_task_detail_system_line(line);
+            self.conn.on_event();
+        }
     }
 
     /// Surface a `hangar/board_card_cancel` reply (tcp T3 / F6): a transient note
@@ -7374,6 +7442,68 @@ mod tests {
     /// into the draft, not routed to the control-center tab-switch. Before the
     /// text-capture guard the routing layer swallowed `C`/`U`/`I` first,
     /// navigating away and abandoning the compose draft.
+    /// **2-rest** — a comment that mentioned NOBODY renders nothing, so a plain
+    /// comment's transcript is byte-identical to what it was before this item.
+    #[test]
+    fn no_mentions_renders_no_transcript_line() {
+        assert_eq!(super::render_mention_outcomes(&[]), None);
+    }
+
+    /// **2-rest** — every outcome is named, and a REFUSAL carries the reason's
+    /// human label in parentheses. Asserted on the exact phrase, not a
+    /// substring-OR: the parenthetical is the whole point of the item.
+    #[test]
+    fn outcomes_render_with_the_refusal_reason_spelled_out() {
+        use ainb_hangar_proto::snapshots::MentionOutcomeRow;
+
+        let row = |handle: &str, outcome: &str, reason: &str| MentionOutcomeRow {
+            target_type: "agent".into(),
+            target_id: "x".into(),
+            handle: handle.into(),
+            outcome: outcome.into(),
+            reason: reason.into(),
+            task_id: None,
+            detail: String::new(),
+            source: "explicit".into(),
+        };
+        let line = super::render_mention_outcomes(&[
+            row("alice", "notified", ""),
+            row("builder", "queued", "queued"),
+            row("secret-bot", "blocked", "invocation_not_allowed"),
+        ])
+        .expect("a non-empty outcome set renders a line");
+        assert_eq!(
+            line,
+            "↪ @alice notified · @builder queued · @secret-bot blocked (invocation not allowed)"
+        );
+    }
+
+    /// **2-rest** — a `coalesced` row says so without a parenthetical (the
+    /// bucket already carries the meaning), and a `deferred` row explains why.
+    #[test]
+    fn coalesced_is_bare_and_deferred_explains_itself() {
+        use ainb_hangar_proto::snapshots::MentionOutcomeRow;
+
+        let row = |outcome: &str, reason: &str| MentionOutcomeRow {
+            target_type: "agent".into(),
+            target_id: "x".into(),
+            handle: "bot".into(),
+            outcome: outcome.into(),
+            reason: reason.into(),
+            task_id: None,
+            detail: String::new(),
+            source: "explicit".into(),
+        };
+        assert_eq!(
+            super::render_mention_outcomes(&[row("coalesced", "coalesced")]).unwrap(),
+            "↪ @bot coalesced"
+        );
+        assert_eq!(
+            super::render_mention_outcomes(&[row("deferred", "deferred")]).unwrap(),
+            "↪ @bot deferred (waiting on blockers)"
+        );
+    }
+
     #[test]
     fn uppercase_c_types_into_task_detail_compose_not_tab_switch() {
         use ainb_hangar_proto::events::IssueRow;

@@ -253,6 +253,7 @@ mod tests {
                 author: "member:u1".into(),
                 body: "lgtm".into(),
                 created_at: 0,
+                parent_id: None,
             }),
             HangarEvent::AgentPresence {
                 agent_id: AgentId::from_str("a1").unwrap(),

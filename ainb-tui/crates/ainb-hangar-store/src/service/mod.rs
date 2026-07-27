@@ -37,6 +37,11 @@ pub mod child_done;
 pub mod complete;
 /// `{running|queued} -> failed` with a typed [`fail::FailureReason`].
 pub mod fail;
+/// Comment `@mention` ROUTING (multica parity #2-rest): resolve every mention
+/// in a comment body to an agent / member / squad-leader, gate it, act on it,
+/// and report a per-target outcome code. One seam behind both the `comment_add`
+/// write and the `comment_mention_preview` dry run.
+pub mod mention;
 /// Spawn a `parent_task_id`-chained child row for a retryable failed task.
 pub mod retry;
 /// Route a squad assignment to its leader by enqueueing a leader-keyed task.

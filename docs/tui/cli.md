@@ -2840,6 +2840,8 @@ Commands:
   workspace  View + set per-workspace config (context prompt, issue prefix, repo whitelist)
   logs       Read the daemon's structured logs
   property   Define and archive a workspace's custom issue properties
+  comment    Post issue comments and preview their `@`-mention routing
+  inbox      Read an actor's notification inbox
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -5281,6 +5283,104 @@ Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --key <KEY>              The definition's stable slug
       --unarchive              Un-archive instead: bring the definition (and its values) back
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar comment`
+
+Post issue comments and preview their `@`-mention routing
+
+```console
+$ ainb hangar comment --help
+Post issue comments and preview their `@`-mention routing
+
+Usage: ainb hangar comment [OPTIONS] <COMMAND>
+
+Commands:
+  add      Post a comment on an issue and print one row per routed `@`-mention
+  preview  DRY-RUN the mention router over a draft body: identical resolution and identical gates, zero writes
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar comment add`
+
+Post a comment on an issue and print one row per routed `@`-mention
+
+```console
+$ ainb hangar comment add --help
+Post a comment on an issue and print one row per routed `@`-mention
+
+Usage: ainb hangar comment add [OPTIONS] --issue <ISSUE> --body <BODY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --issue <ISSUE>          Issue id (ULID) to comment on
+      --body <BODY>            The comment body. `@handle` and `[@Label](mention://type/id)` both route
+      --author <AUTHOR>        The author as a canonical actor-ref. `member:me` is the local operator, which the invocation gate resolves to the workspace owner [default: member:me]
+      --parent <PARENT>        The comment this one replies to — drives the reply-parent fallback and multica's parent-mention inheritance
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar comment preview`
+
+DRY-RUN the mention router over a draft body: identical resolution and identical gates, zero writes
+
+```console
+$ ainb hangar comment preview --help
+DRY-RUN the mention router over a draft body: identical resolution and identical gates, zero writes
+
+Usage: ainb hangar comment preview [OPTIONS] --issue <ISSUE> --body <BODY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --issue <ISSUE>          Issue id (ULID) to comment on
+      --body <BODY>            The comment body. `@handle` and `[@Label](mention://type/id)` both route
+      --author <AUTHOR>        The author as a canonical actor-ref. `member:me` is the local operator, which the invocation gate resolves to the workspace owner [default: member:me]
+      --parent <PARENT>        The comment this one replies to — drives the reply-parent fallback and multica's parent-mention inheritance
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar inbox`
+
+Read an actor's notification inbox
+
+```console
+$ ainb hangar inbox --help
+Read an actor's notification inbox
+
+Usage: ainb hangar inbox [OPTIONS] <COMMAND>
+
+Commands:
+  list  List one actor's inbox entries, newest first
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar inbox list`
+
+List one actor's inbox entries, newest first
+
+```console
+$ ainb hangar inbox list --help
+List one actor's inbox entries, newest first
+
+Usage: ainb hangar inbox list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --recipient <RECIPIENT>  Whose inbox to read, as `member:<user-id>` / `agent:<agent-id>` [default: member:me]
+      --unread                 Show only UNREAD entries
+      --limit <LIMIT>          How many entries to show, newest first [default: 50]
       --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```

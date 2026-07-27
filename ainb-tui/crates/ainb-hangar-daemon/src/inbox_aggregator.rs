@@ -419,6 +419,7 @@ mod tests {
             author: "member:u1".into(),
             body: "lgtm".into(),
             created_at: 0,
+            parent_id: None,
         };
         let f = entry_for_event(&HangarEvent::CommentAdded(row)).expect("comment aggregates");
         assert_eq!(f.kind, InboxKind::Comment);
@@ -478,6 +479,7 @@ mod tests {
             author: author.into(),
             body: "lgtm".into(),
             created_at: 0,
+            parent_id: None,
         })
     }
 

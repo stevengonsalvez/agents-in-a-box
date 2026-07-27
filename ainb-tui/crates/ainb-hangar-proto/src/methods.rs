@@ -605,6 +605,23 @@ pub const HANGAR_ISSUE_CRITERION_SET: &str = "hangar/issue_criterion_set";
 /// subscribed task-detail screen re-renders the new comment.
 pub const HANGAR_COMMENT_ADD: &str = "hangar/comment_add";
 
+/// `hangar/comment_mention_preview` — dry-run the mention router over a comment
+/// body WITHOUT writing anything (multica `PreviewCommentTriggers`, parity
+/// #2-rest).
+///
+/// Params: [`crate::snapshots::CommentMentionPreviewParams`]
+/// (`{ workspace_id, issue_id, author, body, parent_id? }`). Result:
+/// [`crate::snapshots::CommentMentionPreviewResult`] — the SAME
+/// [`crate::snapshots::MentionOutcomeRow`] vector
+/// [`HANGAR_COMMENT_ADD`] returns, produced by the same code path with
+/// `dry_run` set. That shared path is the contract: the preview runs the
+/// identical visibility / invocation gate, so it can never leak a private
+/// agent's readiness, and it can never disagree with the write it previews.
+///
+/// Read-only but workspace-scoped like the mutating handlers: a mistyped
+/// workspace is `INVALID_PARAMS`, never a silently empty preview.
+pub const HANGAR_COMMENT_MENTION_PREVIEW: &str = "hangar/comment_mention_preview";
+
 /// `hangar/agent_update` — edit one agent's config knobs (e38.15).
 ///
 /// Params: [`crate::snapshots::AgentUpdateParams`]
@@ -1510,6 +1527,7 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_LABEL_DETACH,
     HANGAR_ISSUE_CRITERION_SET,
     HANGAR_COMMENT_ADD,
+    HANGAR_COMMENT_MENTION_PREVIEW,
     HANGAR_AGENT_UPDATE,
     HANGAR_AGENT_ARCHIVE,
     HANGAR_MEMBERS_LIST,
@@ -1906,6 +1924,7 @@ mod tests {
             HANGAR_ISSUE_METADATA_GET,
             HANGAR_ISSUE_METADATA_SET,
             HANGAR_ISSUE_METADATA_DELETE,
+            HANGAR_COMMENT_MENTION_PREVIEW,
         ];
         for m in declared {
             assert!(

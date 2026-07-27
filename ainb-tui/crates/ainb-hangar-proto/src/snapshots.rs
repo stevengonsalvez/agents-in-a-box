@@ -1666,6 +1666,100 @@ pub struct CommentAddParams {
     pub author: String,
     /// The comment body text.
     pub body: String,
+    /// The comment this one REPLIES to (`comment.id`), or `None` for a
+    /// top-level comment (migration 0067, multica parity #2-rest).
+    ///
+    /// **Append-only**: `#[serde(default)]` means a pre-2-rest client that omits
+    /// the key still decodes, and the field is skipped on the wire when unset so
+    /// the serialized shape is byte-identical to what old clients send today.
+    /// The mention router walks it for the reply-to-parent-author fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// One routed `@mention` target and what the router DID about it
+/// (multica `CommentTriggerOutcome`, MUL-4525 §2; parity #2-rest).
+///
+/// Rides the `comment_add` RPC **result** and the
+/// [`crate::methods::HANGAR_COMMENT_MENTION_PREVIEW`] result only — deliberately
+/// NOT on [`crate::events::CommentRow`]. `CommentRow` is the `CommentAdded`
+/// event payload broadcast to every workspace subscriber, and broadcasting
+/// per-target refusal reasons there would leak the invocation gate's decisions
+/// to people who were not the ones asking. The outcomes go back to the caller
+/// that wrote the comment, and nobody else.
+///
+/// Every optional field is `#[serde(default)]` + skipped when empty, so this row
+/// stays append-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MentionOutcomeRow {
+    /// `agent` | `member` | `squad` | `issue` | `all`.
+    pub target_type: String,
+    /// The resolved id, `""` when nothing resolved.
+    pub target_id: String,
+    /// The token exactly as typed.
+    pub handle: String,
+    /// `queued` | `coalesced` | `deferred` | `blocked` | `notified` | `ignored`
+    /// (`ainb_hangar_core::mention::MentionOutcome`).
+    pub outcome: String,
+    /// The `DispatchReason` token, `""` when the outcome carries none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// The task written or coalesced into, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Free-form human detail. Never an existence oracle.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// `explicit` | `reply_parent` | `thread_root` | `assignee`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+}
+
+/// The result of [`crate::methods::HANGAR_COMMENT_ADD`] (parity #2-rest).
+///
+/// `#[serde(flatten)]` over the comment keeps the wire **byte-compatible** with
+/// the bare [`crate::events::CommentRow`] every existing client parses: with no
+/// mentions the payload is exactly what it was before this item, and a client
+/// that only knows about `CommentRow` decodes the richer payload unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentAddResult {
+    /// The comment that was written.
+    #[serde(flatten)]
+    pub comment: crate::events::CommentRow,
+    /// One row per addressed target. Empty — and omitted from the wire — when
+    /// the comment mentioned nobody.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mention_outcomes: Vec<MentionOutcomeRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_COMMENT_MENTION_PREVIEW`].
+///
+/// The same inputs `comment_add` takes, minus the write. `parent_id` matters:
+/// the fallback chain and the parent-mention inheritance both key off it, so a
+/// preview that omitted it would preview a different comment than the one the
+/// user is about to send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CommentMentionPreviewParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue the comment would be posted on.
+    pub issue_id: String,
+    /// The prospective author in canonical `member:<id>` / `agent:<id>` form.
+    pub author: String,
+    /// The draft comment body.
+    pub body: String,
+    /// The comment this draft would reply to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// The result of [`crate::methods::HANGAR_COMMENT_MENTION_PREVIEW`]: exactly the
+/// rows the real write would produce, with nothing written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CommentMentionPreviewResult {
+    /// One row per addressed target, in the same order `comment_add` returns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mention_outcomes: Vec<MentionOutcomeRow>,
 }
 
 /// One workspace member for the settings Members pane
@@ -3987,12 +4081,93 @@ mod tests {
             issue_id: "issue-1".into(),
             author: "member:alice".into(),
             body: "looks good to me".into(),
+            parent_id: None,
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
             serde_json::from_str::<CommentAddParams>(&s).unwrap(),
             params
         );
+    }
+
+    /// **2-rest** — `parent_id` is APPEND-ONLY: a pre-2-rest client's payload
+    /// (no `parent_id` key at all) still decodes, and an unset `parent_id` is
+    /// OMITTED from the wire so the serialized shape an old daemon sees is
+    /// byte-identical to today's.
+    #[test]
+    fn comment_add_params_parent_id_is_append_only() {
+        let legacy = r#"{"workspace_id":"ws-1","issue_id":"i-1","author":"member:a","body":"hi"}"#;
+        let decoded: CommentAddParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.parent_id, None, "an absent key decodes to None");
+        assert_eq!(
+            serde_json::to_string(&decoded).unwrap(),
+            legacy,
+            "an unset parent_id is omitted, so the wire shape is unchanged"
+        );
+
+        let reply = CommentAddParams {
+            parent_id: Some("c-1".into()),
+            ..decoded
+        };
+        let encoded = serde_json::to_string(&reply).unwrap();
+        assert!(encoded.contains(r#""parent_id":"c-1""#), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<CommentAddParams>(&encoded).unwrap(),
+            reply
+        );
+    }
+
+    /// **2-rest** — `CommentAddResult` is `#[serde(flatten)]`ed over
+    /// `CommentRow`, so a pre-2-rest client that parses the result as a bare
+    /// `CommentRow` still succeeds, and a result with no outcomes is
+    /// BYTE-IDENTICAL to the bare row it used to be.
+    #[test]
+    fn comment_add_result_stays_wire_compatible_with_a_bare_comment_row() {
+        use crate::events::CommentRow;
+        use ainb_hangar_core::ids::{CommentId, IssueId};
+
+        let comment = CommentRow {
+            id: CommentId::from_str("c-1".to_string()).unwrap(),
+            issue_id: IssueId::from_str("i-1").unwrap(),
+            author: "member:alice".into(),
+            body: "ship it".into(),
+            created_at: 7,
+            parent_id: None,
+        };
+        let bare = serde_json::to_string(&comment).unwrap();
+        let empty = CommentAddResult {
+            comment: comment.clone(),
+            mention_outcomes: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            bare,
+            "no outcomes ⇒ the exact bytes an old client already parses"
+        );
+
+        let with_outcomes = CommentAddResult {
+            comment,
+            mention_outcomes: vec![MentionOutcomeRow {
+                target_type: "agent".into(),
+                target_id: "a-1".into(),
+                handle: "builder".into(),
+                outcome: "queued".into(),
+                reason: "queued".into(),
+                task_id: Some("t-1".into()),
+                detail: String::new(),
+                source: "explicit".into(),
+            }],
+        };
+        let encoded = serde_json::to_string(&with_outcomes).unwrap();
+        // An OLD client still gets its comment out of the richer payload.
+        let as_row: CommentRow = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(as_row.body, "ship it");
+        assert_eq!(
+            serde_json::from_str::<CommentAddResult>(&encoded).unwrap(),
+            with_outcomes
+        );
+        // Empty optional fields never hit the wire.
+        assert!(!encoded.contains("\"detail\""), "{encoded}");
     }
 
     /// `AgentUpdateParams` round-trips, and the three-state nullable wrapper keeps

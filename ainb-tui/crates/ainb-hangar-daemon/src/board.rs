@@ -542,6 +542,7 @@ pub async fn deliver_cascade(
                 ),
                 body: cascade.comment_body.clone(),
                 created_at: now_ms,
+                parent_id: None,
             }),
         );
     }

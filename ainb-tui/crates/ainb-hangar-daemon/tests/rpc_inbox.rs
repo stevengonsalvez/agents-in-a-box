@@ -262,6 +262,7 @@ fn comment_event() -> HangarEvent {
         author: "member:user-1".into(),
         body: "lgtm".into(),
         created_at: 2_000,
+        parent_id: None,
     })
 }
 
@@ -456,6 +457,7 @@ fn comment_on_i1(id: &str, author: &str) -> HangarEvent {
         author: author.into(),
         body: "over to you".into(),
         created_at: 2_000,
+        parent_id: None,
     })
 }
 

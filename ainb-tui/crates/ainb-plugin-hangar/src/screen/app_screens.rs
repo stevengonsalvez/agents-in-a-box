@@ -1264,6 +1264,15 @@ impl ScreenStates {
             td.set_pr_status(status);
         }
     }
+
+    /// Fold a system transcript line into the OPEN task-detail screen, if one is
+    /// open. A no-op otherwise — the mention outcomes are informational and must
+    /// never resurrect a closed screen.
+    pub fn push_task_detail_system_line(&mut self, body: String) {
+        if let Some(td) = self.task_detail.as_mut() {
+            td.push_system_line(body);
+        }
+    }
 }
 
 /// A cross-screen navigation the key router surfaces to the plugin glue, which
