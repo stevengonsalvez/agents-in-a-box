@@ -1351,6 +1351,23 @@ pub enum IssueCommand {
     /// Explain why an issue did (or did not) dispatch — its admission history.
     #[command(alias = "dispatch-log")]
     Why(IssueWhyArgs),
+    /// Show one issue's activity timeline: state changes, assignments, comments.
+    #[command(alias = "activity")]
+    Timeline(IssueTimelineArgs),
+}
+
+/// Arguments for `hangar issue timeline` (multica parity #13).
+#[derive(Args, Debug)]
+pub struct IssueTimelineArgs {
+    /// Issue id (ULID) whose narrative to print.
+    pub id: String,
+    /// How many entries to show — the newest window, printed oldest-first.
+    #[arg(long, default_value_t = 200)]
+    pub limit: i64,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar issue why` (multica parity #12).
@@ -4170,6 +4187,7 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
         IssueCommand::Link(cmd) => run_issue_link(&store, cmd).await,
         IssueCommand::Why(args) => run_issue_why(&store, args, format).await,
+        IssueCommand::Timeline(args) => run_issue_timeline(&store, args, format).await,
     }
 }
 
@@ -4607,6 +4625,14 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         None
     };
 
+    // multica parity #13: the FULL pre-edit row, so the post-edit diff can write
+    // one activity row per changed field. Deliberately separate from
+    // `prev_state` above, which only carries the state token for the cascade.
+    let before_issue = IssueRepo::get_by_id(store.pool(), &args.id)
+        .await
+        .with_context(|| format!("read issue {} before update", args.id))?
+        .filter(|i| i.workspace_id == workspace_id);
+
     let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
         .await
         .with_context(|| format!("update issue {}", args.id))?;
@@ -4614,6 +4640,30 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         anyhow::bail!("no issue with id {} in this workspace", args.id);
     }
     println!("updated issue {}", args.id);
+
+    // multica parity #13: diff the pre-edit row against the committed one and
+    // record one activity row per changed field. The CLI shares the daemon's
+    // diff service so the two writers cannot drift. Best-effort throughout.
+    if let Some(before) = before_issue.as_ref() {
+        if let Ok(Some(after)) = IssueRepo::get_by_id(store.pool(), &args.id).await {
+            let owner = ainb_hangar_store::bootstrap::default_owner_id(store.pool())
+                .await
+                .ok()
+                .flatten();
+            let actor =
+                ainb_hangar_core::activity::ActivityActor::member_or_system(owner.as_deref());
+            ainb_hangar_store::service::activity::ActivityService::record_issue_diff(
+                store.pool(),
+                &SystemIdGen,
+                &SystemClock,
+                &workspace_id,
+                &actor,
+                before,
+                &after,
+            )
+            .await;
+        }
+    }
 
     // 0046: a CLI-driven completion also posts the parent roll-up comment, so
     // CLI and TUI behaviour stay aligned (the CLI has no daemon, so there is no
@@ -4870,6 +4920,9 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     let id = idgen.new_ulid();
     let creator = ActorRef::new(ActorKind::Member, DEFAULT_CREATOR_ID)
         .expect("default creator id is non-empty");
+    // A second handle for the parity-#13 `created` activity row: `creator` is
+    // moved into `NewIssue` below, and the audit write happens after the insert.
+    let activity_creator = creator.clone();
 
     // Resolve the assignee (if any). The token is polymorphic: an AGENT
     // (`agent:<id>` or a bare id) must exist in the workspace and its runtime is
@@ -4958,6 +5011,19 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
         stage: None,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
+    // multica parity #13: open the card's narrative. Best-effort — an audit
+    // failure never fails the create.
+    ainb_hangar_store::service::activity::ActivityService::record(
+        pool,
+        &idgen,
+        &clock,
+        &workspace_id,
+        &id,
+        &ainb_hangar_core::activity::ActivityActor::Actor(activity_creator),
+        ainb_hangar_core::activity::ActivityAction::Created,
+        serde_json::json!({}),
+    )
+    .await;
     // 0056: stamp the resolved provenance post-insert, the same pattern the
     // daemon's create uses, so a CLI-created and a TUI-created issue read back
     // identically.
@@ -5287,6 +5353,191 @@ async fn run_issue_why(store: &Store, args: IssueWhyArgs, format: OutputFormat) 
         }
     }
     Ok(())
+}
+
+/// `hangar issue timeline <id>` (multica parity #13): the card's NARRATIVE,
+/// oldest first — creation, state moves, re-assignments, priority/title/due-date
+/// edits, task outcomes, and the comments merged in by timestamp.
+///
+/// Reads the store directly (like `issue why`), so the whole activity-log proof
+/// is runnable against nothing but sqlite with no daemon. `--format json` emits
+/// the `TimelineEntryRow` wire shape verbatim, so the CLI and
+/// `hangar/issue_timeline` agree.
+async fn run_issue_timeline(
+    store: &Store,
+    args: IssueTimelineArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    // Resolve the workspace so a typo'd `--workspace` is an error, not a silently
+    // empty timeline.
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let entries = read_issue_timeline(store, &workspace_id, &args.id, args.limit.max(1)).await?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("kind,actor,action,detail,created_at");
+            for e in &entries {
+                println!(
+                    "{},{},{},{},{}",
+                    e.kind,
+                    timeline_actor(e),
+                    e.action.as_deref().unwrap_or_default(),
+                    csv_field(&timeline_detail(e)),
+                    e.created_at
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| when | who | what | detail |");
+            println!("|---|---|---|---|");
+            for e in &entries {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    fmt_epoch_ms_utc(e.created_at),
+                    timeline_actor(e),
+                    e.action.as_deref().unwrap_or("comment"),
+                    timeline_detail(e)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if entries.is_empty() {
+                println!("no activity recorded for {}", args.id);
+            } else {
+                for e in &entries {
+                    println!(
+                        "{}  {:<18} {:<17} {}",
+                        fmt_epoch_ms_utc(e.created_at),
+                        timeline_actor(e),
+                        e.action.as_deref().unwrap_or("comment"),
+                        timeline_detail(e)
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Merge the card's activity rows with its comments into the wire
+/// [`TimelineEntryRow`] shape, oldest first — the store-side twin of the
+/// daemon's `snapshots::issue_timeline` (parity #13).
+async fn read_issue_timeline(
+    store: &Store,
+    workspace_id: &str,
+    issue_id: &str,
+    limit: i64,
+) -> Result<Vec<ainb_hangar_proto::snapshots::TimelineEntryRow>> {
+    use ainb_hangar_proto::snapshots::{
+        TIMELINE_KIND_ACTIVITY, TIMELINE_KIND_COMMENT, TimelineEntryRow,
+    };
+    use ainb_hangar_store::repo::activity::ActivityRepo;
+    use ainb_hangar_store::repo::comment::CommentRepo;
+
+    let activities = ActivityRepo::list_for_issue(store.pool(), issue_id, limit)
+        .await
+        .context("read issue activity")?;
+    let comments = CommentRepo::list_by_issue(store.pool(), workspace_id, issue_id)
+        .await
+        .context("read issue comments")?;
+
+    let mut entries: Vec<TimelineEntryRow> = Vec::with_capacity(activities.len() + comments.len());
+    for a in activities {
+        if a.workspace_id != workspace_id {
+            continue;
+        }
+        let details = a.details_json();
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_ACTIVITY.to_string(),
+            id: a.id,
+            actor_type: a.actor_type,
+            actor_id: a.actor_id,
+            created_at: a.created_at,
+            action: Some(a.action),
+            details: (!details.as_object().is_some_and(serde_json::Map::is_empty))
+                .then_some(details),
+            body: None,
+        });
+    }
+    for c in comments {
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_COMMENT.to_string(),
+            id: c.id,
+            actor_type: Some(c.author.kind().as_str().to_string()),
+            actor_id: Some(c.author.id().to_string()),
+            created_at: c.created_at,
+            action: None,
+            details: None,
+            body: Some(c.body),
+        });
+    }
+    entries.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    let cap = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+    if entries.len() > cap {
+        entries.drain(..entries.len() - cap);
+    }
+    Ok(entries)
+}
+
+/// `member:<id>` / `agent:<id>` / `system` for one timeline entry.
+fn timeline_actor(e: &ainb_hangar_proto::snapshots::TimelineEntryRow) -> String {
+    match (e.actor_type.as_deref(), e.actor_id.as_deref()) {
+        (Some("system") | None, _) => "system".to_string(),
+        (Some(kind), Some(id)) => format!("{kind}:{id}"),
+        (Some(kind), None) => kind.to_string(),
+    }
+}
+
+/// The human-readable right-hand column: the comment body, or the change the
+/// activity's details describe (`open → in_progress`).
+fn timeline_detail(e: &ainb_hangar_proto::snapshots::TimelineEntryRow) -> String {
+    if let Some(body) = e.body.as_deref() {
+        return body.replace('\n', " ");
+    }
+    let Some(details) = e.details.as_ref() else {
+        return String::new();
+    };
+    let render = |v: Option<&serde_json::Value>| -> String {
+        match v {
+            None | Some(serde_json::Value::Null) => "—".to_string(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        }
+    };
+    // The assignee shape carries `*_type` + `*_id` halves, each side omitted when
+    // absent; every other shape is a plain `from`/`to` pair.
+    if details.get("from_type").is_some() || details.get("to_type").is_some() {
+        let side = |t: &str, i: &str| match (details.get(t), details.get(i)) {
+            (Some(serde_json::Value::String(t)), Some(serde_json::Value::String(i))) => {
+                format!("{t}:{i}")
+            }
+            _ => "—".to_string(),
+        };
+        return format!(
+            "{} → {}",
+            side("from_type", "from_id"),
+            side("to_type", "to_id")
+        );
+    }
+    if details.get("from").is_some() || details.get("to").is_some() {
+        let via = details
+            .get("via")
+            .and_then(serde_json::Value::as_str)
+            .map(|v| format!(" (via {v})"))
+            .unwrap_or_default();
+        return format!(
+            "{} → {}{via}",
+            render(details.get("from")),
+            render(details.get("to"))
+        );
+    }
+    details.to_string()
 }
 
 /// One dispatch attempt as the `DispatchAttemptRow` wire shape, so
