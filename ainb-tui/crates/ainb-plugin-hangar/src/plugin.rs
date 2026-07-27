@@ -3622,7 +3622,7 @@ impl HangarPlugin {
                 self.app = Some(next);
             }
         }
-        self.screens.set_workspaces(rows);
+        self.screens.set_workspaces(rows, list.creation_disabled);
     }
 
     /// Compose the full render frame into a fresh [`WireBuffer`] (the pure,

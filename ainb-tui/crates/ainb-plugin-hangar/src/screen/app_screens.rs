@@ -696,6 +696,10 @@ pub struct ScreenStates {
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
+    /// Cached `creation_disabled` hint from the same `host/workspace_list` reply.
+    /// Held beside the rows so a `set_health` rebuild cannot silently un-hide the
+    /// new-workspace affordance on a locked-down instance.
+    pub workspace_creation_disabled: bool,
     /// Cached member roster from `hangar/members_list` (e38.11). Seeds the
     /// Settings Members pane regardless of which snapshot arrives first.
     pub member_rows: Vec<MemberWireRow>,
@@ -1027,6 +1031,7 @@ impl ScreenStates {
             self.workspace_rows.clone()
         };
         let mut state = SettingsState::new(health, providers, keys, workspaces);
+        state.set_workspace_creation_disabled(self.workspace_creation_disabled);
         // Carry any cached member roster into the rebuilt state so the Members
         // pane survives a `set_health` rebuild (mirrors workspace_rows).
         state.set_members(self.member_rows.clone());
@@ -1043,10 +1048,12 @@ impl ScreenStates {
     /// Refresh the Settings Workspace pane from a `host/workspace_list` result
     /// (P5.5). Caches the rows so a later `set_health` rebuild keeps them, and
     /// overlays the live settings state when it already exists.
-    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
+    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>, creation_disabled: bool) {
         self.workspace_rows.clone_from(&workspaces);
+        self.workspace_creation_disabled = creation_disabled;
         if let Some(s) = self.settings.as_mut() {
             s.set_workspaces(workspaces);
+            s.set_workspace_creation_disabled(creation_disabled);
         }
     }
 
