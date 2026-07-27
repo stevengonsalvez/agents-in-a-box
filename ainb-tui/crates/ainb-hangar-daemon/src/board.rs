@@ -339,7 +339,19 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
     // Board-agnostic (the auto-run seam does not know which board); the F4 board
     // tier is skipped, the cascade still resolves the agent. Headless run.
     match crate::rpc::run_card(
-        pool, ws, None, &issue, "headless", None, None, None, None, None,
+        pool,
+        ws,
+        None,
+        &issue,
+        "headless",
+        None,
+        None,
+        None,
+        None,
+        None,
+        // multica parity #12: the dependency cascade is an AUTO_RUN trigger
+        // surface. Its refusals used to be a `debug!` line and nothing else.
+        ainb_hangar_core::dispatch_reason::DispatchSource::AutoRun,
     )
     .await
     {
@@ -479,6 +491,8 @@ pub async fn maybe_cascade_child_done(
         None,
         Some(assignee),
         None,
+        // multica parity #12: the child-done cascade is an AUTO_RUN surface too.
+        ainb_hangar_core::dispatch_reason::DispatchSource::AutoRun,
     )
     .await
     {

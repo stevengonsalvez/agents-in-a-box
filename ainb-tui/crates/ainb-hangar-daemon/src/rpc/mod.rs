@@ -46,6 +46,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_core::dispatch_reason::{DispatchReason, DispatchSource};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_proto::methods;
@@ -811,6 +812,7 @@ async fn handle(
         methods::HANGAR_ISSUE_LINK_ADD => handle_issue_link(pool, req, true).await,
         methods::HANGAR_ISSUE_LINK_REMOVE => handle_issue_link(pool, req, false).await,
         methods::HANGAR_ISSUE_LINKS => handle_issue_links(pool, req).await,
+        methods::HANGAR_DISPATCH_ATTEMPTS_LIST => handle_dispatch_attempts_list(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
@@ -3588,6 +3590,9 @@ async fn handle_issue_update(
                     None,
                     Some(actor),
                     None, // owner-invoked recovery re-dispatch
+                    // multica parity #12: setting an assignee re-dispatches; its
+                    // refusals used to be an `info!` line and nothing else.
+                    DispatchSource::Assign,
                 )
                 .await
                 {
@@ -5234,33 +5239,46 @@ async fn handle_board_card_run(
         // does. Omitted (`None`) defaults to the workspace owner inside `run_card` —
         // the ordinary single-operator TUI Run, which the gate always admits.
         params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        DispatchSource::Manual,
     )
     .await
     .map_err(card_run_err)?;
 
+    // multica parity #12: the handler serializes the SAME code the service
+    // decided — `queued`, or `runtime_offline` when the task was keyed to a
+    // runtime that is not `online` (which is still enqueued; see divergence D1).
+    let reason = if outcome.runtime_status().is_some() {
+        DispatchReason::RuntimeOffline
+    } else {
+        DispatchReason::Queued
+    };
     let result = match outcome {
         CardRunOutcome::Single {
             task_id,
             agent_id,
             runtime_id,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id,
             agent_id,
             runtime_id,
             mode: mode.to_string(),
             member_task_ids: Vec::new(),
+            reason: Some(reason.as_db_str().to_string()),
         },
         CardRunOutcome::Squad {
             leader_task_id,
             leader_agent_id,
             leader_runtime_id,
             member_task_ids,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id: leader_task_id,
             agent_id: leader_agent_id,
             runtime_id: leader_runtime_id,
             mode: mode.to_string(),
             member_task_ids,
+            reason: Some(reason.as_db_str().to_string()),
         },
     };
     to_value(&result)
@@ -5361,33 +5379,46 @@ async fn handle_issue_run(
         source_override,
         assignee_override.as_ref(),
         invoker,
+        DispatchSource::Manual,
     )
     .await
     .map_err(card_run_err)?;
 
+    // multica parity #12: the handler serializes the SAME code the service
+    // decided — `queued`, or `runtime_offline` when the task was keyed to a
+    // runtime that is not `online` (which is still enqueued; see divergence D1).
+    let reason = if outcome.runtime_status().is_some() {
+        DispatchReason::RuntimeOffline
+    } else {
+        DispatchReason::Queued
+    };
     let result = match outcome {
         CardRunOutcome::Single {
             task_id,
             agent_id,
             runtime_id,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id,
             agent_id,
             runtime_id,
             mode: mode.to_string(),
             member_task_ids: Vec::new(),
+            reason: Some(reason.as_db_str().to_string()),
         },
         CardRunOutcome::Squad {
             leader_task_id,
             leader_agent_id,
             leader_runtime_id,
             member_task_ids,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id: leader_task_id,
             agent_id: leader_agent_id,
             runtime_id: leader_runtime_id,
             mode: mode.to_string(),
             member_task_ids,
+            reason: Some(reason.as_db_str().to_string()),
         },
     };
     to_value(&result)
@@ -5401,13 +5432,60 @@ pub(crate) enum CardRunOutcome {
         task_id: String,
         agent_id: String,
         runtime_id: String,
+        /// The resolved runtime's status when it is NOT `online` (multica parity
+        /// #12): `Some("offline")` / `Some("unstable")`, else `None`. Carried out
+        /// of [`run_card_inner`] so the [`run_card`] wrapper can record
+        /// [`DispatchReason::RuntimeOffline`] — see divergence D1 there.
+        runtime_status: Option<String>,
     },
     Squad {
         leader_task_id: String,
         leader_agent_id: String,
         leader_runtime_id: String,
         member_task_ids: Vec<String>,
+        /// The LEADER runtime's status when it is not `online`; see
+        /// [`CardRunOutcome::Single::runtime_status`].
+        runtime_status: Option<String>,
     },
+}
+
+impl CardRunOutcome {
+    /// The task id a caller reports (the leader's, for a squad).
+    fn primary_task_id(&self) -> &str {
+        match self {
+            Self::Single { task_id, .. } => task_id,
+            Self::Squad { leader_task_id, .. } => leader_task_id,
+        }
+    }
+
+    /// The agent the run routed to (the leader, for a squad).
+    fn primary_agent_id(&self) -> &str {
+        match self {
+            Self::Single { agent_id, .. } => agent_id,
+            Self::Squad {
+                leader_agent_id, ..
+            } => leader_agent_id,
+        }
+    }
+
+    /// The runtime the task was keyed to (the leader's, for a squad).
+    fn primary_runtime_id(&self) -> &str {
+        match self {
+            Self::Single { runtime_id, .. } => runtime_id,
+            Self::Squad {
+                leader_runtime_id, ..
+            } => leader_runtime_id,
+        }
+    }
+
+    /// The non-`online` runtime status, when there is one.
+    fn runtime_status(&self) -> Option<&str> {
+        match self {
+            Self::Single { runtime_status, .. } | Self::Squad { runtime_status, .. } => {
+                runtime_status.as_deref()
+            }
+        }
+    }
 }
 
 /// Why a card could not be launched. The RPC handler maps each to an
@@ -5446,7 +5524,29 @@ pub(crate) enum CardRunError {
 }
 
 /// Map a [`CardRunError`] onto an RPC error for the `board_card_run` handler.
+///
+/// multica parity #12: the reply also carries the STABLE admission code in
+/// `error.data.reason`, alongside today's human message — so a client can branch
+/// on the machine vocabulary instead of string-matching prose, and the code it
+/// sees is the same one the audit row persisted. Clients that ignore `data` are
+/// unaffected (the field is `skip_serializing_if = "Option::is_none"` and was
+/// simply absent before).
 fn card_run_err(e: CardRunError) -> RpcError {
+    // Compute the code from the SAME classifier the audit recorder uses, so the
+    // code a client sees on the wire can never disagree with the code persisted
+    // for the very same refusal.
+    let outcome: Result<CardRunOutcome, CardRunError> = Err(e);
+    let (reason, _detail) = classify_dispatch(&outcome);
+    let Err(e) = outcome else {
+        unreachable!("constructed as Err just above")
+    };
+    let mut err = card_run_message(e);
+    err.data = Some(serde_json::json!({ "reason": reason.as_db_str() }));
+    err
+}
+
+/// The human-readable half of [`card_run_err`].
+fn card_run_message(e: CardRunError) -> RpcError {
     match e {
         CardRunError::Blocked(refs) => invalid_params(&format!(
             "this card is blocked by unfinished cards ({}); finish them (or remove the dependency) first",
@@ -5516,6 +5616,202 @@ impl Drop for CardLaunchSlot {
     }
 }
 
+/// THE ONE RECORDING SEAM for admission decisions (multica parity #12).
+///
+/// A thin wrapper over [`run_card_inner`] (the historical `run_card` body) that
+/// records exactly one `dispatch_attempt` row per invocation, so all five launch
+/// paths — `handle_issue_run`, `handle_board_card_run`, the `issue_update`
+/// assignee re-dispatch, `board::auto_run_dependent` and the child-done cascade —
+/// are covered without sprinkling recorders through them. Before this, every one
+/// of those five threw the refusal away: two turned it into an ephemeral RPC
+/// error string, three logged it at debug/info and returned.
+///
+/// # The normative mapping — `run_card` result → [`DispatchReason`]
+///
+/// | result | code | `detail` |
+/// |---|---|---|
+/// | `Ok(..)` with an `online` runtime | `queued` | `"task <id>"` / `"leader <id> + <n> members"` |
+/// | `Ok(..)` with a non-`online` runtime | `runtime_offline` | `"task <id> queued; runtime <rt> is <status>"` |
+/// | `Err(Blocked(refs))` | `deferred` | `"blocked by HGR-3, HGR-7"` |
+/// | `Err(ActiveRun(status))` | `already_active` | `"a run is already active (<status>)"` |
+/// | `Err(NoAgent)` / `Err(NoRepo)` / `Err(NotDispatchable)` | `target_unavailable` | the specific cause |
+/// | `Err(Squad(..))` | `target_unavailable`, or `invocation_not_allowed` for its permission variant | the `SquadAssignError` display |
+/// | `Err(NotInvocable)` / `Err(Cancelled)` / `Err(InteractiveSquad)` | `invocation_not_allowed` | the specific cause |
+/// | `Err(Db(e))` | `internal_error` | the sqlx error string |
+///
+/// The coarseness is deliberate and copied from the reference: `NoAgent` /
+/// `NoRepo` / `NotDispatchable` all collapse to `target_unavailable`, and
+/// `Cancelled` / `NotInvocable` / `InteractiveSquad` all collapse to
+/// `invocation_not_allowed` — so the code can never be used as an existence
+/// oracle. The specifics live in the free-text `detail`.
+///
+/// # Divergence D1 — `runtime_offline` records, it does not refuse
+///
+/// multica DECLINES a dispatch whose runtime is offline. hangar still ENQUEUES
+/// and records `runtime_offline` with the `task_id` set. hangar's runtime rows
+/// are per-`(daemon_id, provider)`, so a codex runtime can be stale while the
+/// deciding daemon is very much alive, and the presence sweeper flips a row to
+/// `offline` on a grace timer — refusing would turn a transient heartbeat gap
+/// into a hard user-visible failure and regress the "queue it, the claim loop
+/// will take it" model. Recording buys the observability multica gets (the user
+/// is finally told WHY nothing is happening) without changing dispatch
+/// behaviour. `unstable` records the code too; the detail names the real status.
+///
+/// # Divergence D2 — `Blocked` is `deferred`, not a refusal code
+///
+/// hangar genuinely promotes a blocked card later: `board::auto_run_dependent`
+/// fires the run when the last blocker finishes, the direct analogue of the
+/// reference's `PromoteDueDeferredTasksForRuntime`.
+///
+/// Recording is BEST-EFFORT: a record fault is logged and never changes the run
+/// outcome — the audit must not be able to fail a dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_card(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    board_id: Option<&str>,
+    issue: &ainb_hangar_store::repo::issue::Issue,
+    mode: &str,
+    repo_override: Option<&str>,
+    agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
+    source_branch_override: Option<&str>,
+    assignee_override: Option<&ainb_hangar_core::actor::ActorRef>,
+    invoker_user_id: Option<&str>,
+    source: DispatchSource,
+) -> Result<CardRunOutcome, CardRunError> {
+    let outcome = run_card_inner(
+        pool,
+        ws,
+        board_id,
+        issue,
+        mode,
+        repo_override,
+        agent_override,
+        source_branch_override,
+        assignee_override,
+        invoker_user_id,
+    )
+    .await;
+    record_dispatch_attempt(pool, ws, issue.id.as_str(), source, &outcome).await;
+    outcome
+}
+
+/// Classify a [`run_card_inner`] result into the stable admission vocabulary +
+/// its free-text detail. Pure, so the mapping table above is unit-testable
+/// without a database.
+fn classify_dispatch(
+    outcome: &Result<CardRunOutcome, CardRunError>,
+) -> (DispatchReason, Option<String>) {
+    use ainb_hangar_store::service::squad_assign::SquadAssignError;
+    match outcome {
+        Ok(out) => {
+            let base = match out {
+                CardRunOutcome::Single { task_id, .. } => format!("task {task_id}"),
+                CardRunOutcome::Squad {
+                    leader_task_id,
+                    member_task_ids,
+                    ..
+                } => format!(
+                    "leader {leader_task_id} + {} members",
+                    member_task_ids.len()
+                ),
+            };
+            out.runtime_status().map_or_else(
+                || (DispatchReason::Queued, Some(base.clone())),
+                |status| {
+                    (
+                        DispatchReason::RuntimeOffline,
+                        Some(format!(
+                            "{base} queued; runtime {} is {status}",
+                            out.primary_runtime_id()
+                        )),
+                    )
+                },
+            )
+        }
+        Err(CardRunError::Blocked(refs)) => (
+            DispatchReason::Deferred,
+            Some(format!("blocked by {}", refs.join(", "))),
+        ),
+        Err(CardRunError::ActiveRun(status)) => (
+            DispatchReason::AlreadyActive,
+            Some(format!("a run is already active ({status})")),
+        ),
+        Err(CardRunError::NoAgent) => (
+            DispatchReason::TargetUnavailable,
+            Some("no agent in this workspace to run on".to_string()),
+        ),
+        Err(CardRunError::NoRepo) => (
+            DispatchReason::TargetUnavailable,
+            Some("no repo pinned on this card".to_string()),
+        ),
+        Err(CardRunError::NotDispatchable(kind)) => (
+            DispatchReason::TargetUnavailable,
+            Some(format!("provider {kind} is not wired for dispatch")),
+        ),
+        // The squad PERMISSION variant is an invocation refusal like
+        // `NotInvocable`; every other squad fault is "there is nothing coherent to
+        // dispatch to".
+        Err(CardRunError::Squad(se @ SquadAssignError::NotInvocable { .. })) => {
+            (DispatchReason::InvocationNotAllowed, Some(se.to_string()))
+        }
+        Err(CardRunError::Squad(se)) => (DispatchReason::TargetUnavailable, Some(se.to_string())),
+        Err(CardRunError::NotInvocable { agent_id, .. }) => (
+            DispatchReason::InvocationNotAllowed,
+            Some(format!(
+                "agent {agent_id} is private or you are not on its allow-list"
+            )),
+        ),
+        Err(CardRunError::Cancelled) => (
+            DispatchReason::InvocationNotAllowed,
+            Some("issue is cancelled".to_string()),
+        ),
+        Err(CardRunError::InteractiveSquad) => (
+            DispatchReason::InvocationNotAllowed,
+            Some("interactive mode is not supported for a squad".to_string()),
+        ),
+        Err(CardRunError::Db(e)) => (DispatchReason::InternalError, Some(e.to_string())),
+    }
+}
+
+/// Persist one `dispatch_attempt` row for a [`run_card`] invocation.
+///
+/// Best-effort by contract: any store fault is logged at `warn` and swallowed,
+/// because an audit write must never be able to fail a dispatch that otherwise
+/// succeeded.
+async fn record_dispatch_attempt(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    issue_id: &str,
+    source: DispatchSource,
+    outcome: &Result<CardRunOutcome, CardRunError>,
+) {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::dispatch_attempt::{DispatchAttemptRepo, NewDispatchAttempt};
+
+    let (reason, detail) = classify_dispatch(outcome);
+    let ok = outcome.as_ref().ok();
+    let record = NewDispatchAttempt {
+        workspace_id: ws.as_str(),
+        issue_id: Some(issue_id),
+        agent_id: ok.map(CardRunOutcome::primary_agent_id),
+        runtime_id: ok.map(CardRunOutcome::primary_runtime_id),
+        task_id: ok.map(CardRunOutcome::primary_task_id),
+        reason,
+        detail: detail.as_deref(),
+        source,
+        created_at: SystemClock.now_ms(),
+    };
+    if let Err(e) = DispatchAttemptRepo::record(pool, &SystemIdGen.new_ulid(), &record).await {
+        tracing::warn!(
+            error = %e,
+            issue_id,
+            reason = reason.as_db_str(),
+            "dispatch attempt record failed (audit only; the run outcome is unchanged)"
+        );
+    }
+}
+
 /// Launch a card's issue NOW — the shared core behind the `board_card_run` RPC and
 /// the F7 auto-run seam (tcp T4).
 ///
@@ -5540,7 +5836,7 @@ impl Drop for CardLaunchSlot {
 /// provisions its OWN worktree; otherwise it enqueues ONE task on the card's
 /// assignee agent (the pre-T4 single-agent path). `board_id` scopes the F4 board
 /// tier (pass `None` from the auto-run seam, which is board-agnostic).
-pub(crate) async fn run_card(
+async fn run_card_inner(
     pool: &SqlitePool,
     ws: &WorkspaceId,
     board_id: Option<&str>,
@@ -5685,11 +5981,18 @@ pub(crate) async fn run_card(
         )
         .await
         .map_err(CardRunError::Squad)?;
+        // multica parity #12: a run keyed to a runtime that is not `online` is
+        // still enqueued (divergence D1 on `run_card`) but the status is carried
+        // out so the wrapper records `runtime_offline` — otherwise the card just
+        // sits `queued` until the 2h TTL relabels it `timeout`, with nothing
+        // anywhere saying why.
+        let runtime_status = non_online_runtime_status(pool, &fanout.leader.runtime_id).await;
         return Ok(CardRunOutcome::Squad {
             leader_task_id: fanout.leader.task_id,
             leader_agent_id: fanout.leader.leader_agent_id,
             leader_runtime_id: fanout.leader.runtime_id,
             member_task_ids: fanout.members.into_iter().map(|m| m.task_id).collect(),
+            runtime_status,
         });
     }
 
@@ -5756,11 +6059,31 @@ pub(crate) async fn run_card(
         .map_err(CardRunError::Db)?;
     tx.commit().await.map_err(CardRunError::Db)?;
 
+    // multica parity #12 (divergence D1): record, do not refuse. See `run_card`.
+    let runtime_status = non_online_runtime_status(pool, &agent.runtime_id).await;
     Ok(CardRunOutcome::Single {
         task_id,
         agent_id: agent.id,
         runtime_id: agent.runtime_id,
+        runtime_status,
     })
+}
+
+/// The runtime's status when it is NOT `online` (`offline` / `unstable` / any
+/// future token), else `None`.
+///
+/// Best-effort: a read fault or a missing row reports `None` rather than
+/// inventing a decline — the audit must never manufacture a problem the dispatch
+/// did not have.
+async fn non_online_runtime_status(pool: &SqlitePool, runtime_id: &str) -> Option<String> {
+    match ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo::get(pool, runtime_id).await {
+        Ok(Some(rt)) if rt.status != "online" => Some(rt.status),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, runtime_id, "runtime status pre-flight failed");
+            None
+        }
+    }
 }
 
 /// Resolve the agent a card run routes to (the issue's assignee agent when it names
@@ -5974,6 +6297,57 @@ async fn issue_links_value(
         serde_json::to_value(ainb_hangar_proto::snapshots::IssueLinksResult { links })
             .unwrap_or(serde_json::Value::Null),
     )
+}
+
+/// `hangar/dispatch_attempts_list` (multica parity #12): the admission-decision
+/// audit feed, newest first.
+///
+/// Workspace-scoped through the same `resolve_wire_or_reject` tenant guard every
+/// other list method uses, so a sibling tenant's attempts are never returned.
+/// `limit` defaults to 50 and is hard-capped at 200; passing `issue_id` narrows
+/// to one card's history ("why is THIS not running").
+async fn handle_dispatch_attempts_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo;
+
+    /// Default page size when the caller does not ask for one.
+    const DEFAULT_LIMIT: u32 = 50;
+    /// Hard ceiling, so one call can never drag the whole table over the socket.
+    const MAX_LIMIT: u32 = 200;
+
+    let params: ainb_hangar_proto::snapshots::DispatchAttemptsListParams =
+        parse_params(req, "{ workspace_id, issue_id?, limit? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let limit = i64::from(params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
+
+    let rows = match params.issue_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(issue_id) => DispatchAttemptRepo::list_for_issue(pool, issue_id, limit).await,
+        None => DispatchAttemptRepo::list_by_workspace(pool, ws.as_str(), limit).await,
+    }
+    .map_err(|e| store_err(&e))?;
+
+    // A per-issue query is keyed on the issue id, which carries no workspace
+    // column on the audit row — so re-assert the tenant here rather than trusting
+    // the caller's issue id to belong to the workspace it named.
+    let attempts = rows
+        .into_iter()
+        .filter(|r| r.workspace_id == ws.as_str())
+        .map(|r| ainb_hangar_proto::snapshots::DispatchAttemptRow {
+            id: r.id,
+            issue_id: r.issue_id,
+            agent_id: r.agent_id,
+            runtime_id: r.runtime_id,
+            task_id: r.task_id,
+            reason: r.reason,
+            detail: r.detail,
+            source: r.source,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    to_value(&ainb_hangar_proto::snapshots::DispatchAttemptsListResult { attempts })
 }
 
 /// `hangar/board_card_set_auto_run` (tcp T4 / F7): flip a card's auto-run flag.
@@ -9619,6 +9993,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
 
@@ -9704,6 +10079,7 @@ mod tests {
             None,
             Some(&override_ref),
             None,
+            DispatchSource::Manual,
         )
         .await;
 
@@ -9785,6 +10161,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
 
@@ -9996,6 +10373,7 @@ mod tests {
             None,
             None,
             Some(&bob.user_id),
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -10020,6 +10398,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -10057,6 +10436,7 @@ mod tests {
             None,
             None,
             Some(&bob.user_id),
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -10180,6 +10560,7 @@ mod tests {
             None,
             None,
             Some(&bob.user_id),
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -10203,6 +10584,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
         assert!(owner_run.is_ok(), "the owner's squad run must fan out");

@@ -50,8 +50,8 @@ use serde::{Deserialize, Serialize};
 /// Serializes to the `snake_case` tokens the reference's `dispatch.ReasonCode`
 /// uses, which is also the exact token persisted to `dispatch_attempt.reason`.
 ///
-/// The set is **append-only by design** and there is deliberately no SQLite
-/// `CHECK` constraint on the column (SQLite cannot widen a `CHECK` without a
+/// The set is **append-only by design** and there is deliberately no `SQLite`
+/// `CHECK` constraint on the column (`SQLite` cannot widen a `CHECK` without a
 /// full table rebuild). The domain is enforced in Rust instead: [`Self::as_db_str`]
 /// is the only writer, and [`Self::parse`] is the tolerant reader (an unknown
 /// token decodes to `None` and renders as raw text rather than poisoning a read).

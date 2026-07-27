@@ -126,9 +126,12 @@ pub async fn issues_list(
             // task-detail card.
             let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
-                last_dispatch_reason: None,
-                last_dispatch_detail: None,
-                last_dispatch_at: None,
+                // multica parity #12: WHY this card is not running, from the newest
+                // dispatch_attempt when that attempt was a decline. All `None` on a
+                // healthy card, so the row grows by zero keys.
+                last_dispatch_reason: extras.last_dispatch_reason,
+                last_dispatch_detail: extras.last_dispatch_detail,
+                last_dispatch_at: extras.last_dispatch_at,
                 // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
                 // row a snapshot carries and the row an event pushes agree.
                 origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -194,6 +197,13 @@ struct IssueCardExtras {
     /// children. Drives the parent card's `⊟ done/total` badge.
     child_done: u32,
     child_total: u32,
+    /// WHY this card is not running (multica parity #12): the stable code +
+    /// detail + timestamp of the newest `dispatch_attempt`, filled ONLY when that
+    /// attempt was a DECLINE. All `None` on a healthy card, so the wire row grows
+    /// by zero keys for one that is running fine.
+    last_dispatch_reason: Option<String>,
+    last_dispatch_detail: Option<String>,
+    last_dispatch_at: Option<i64>,
 }
 
 /// Read the task-detail card extras for one issue (63d): the `repo_ref` / `agent`
@@ -238,6 +248,16 @@ async fn issue_card_fields(
             .await?
             .flatten();
     let (child_done, child_total) = IssueRepo::child_progress(pool, issue_id).await?;
+    // multica parity #12: the newest admission decision, surfaced ONLY when it
+    // was a decline — the field means "why this is not running", so a healthy card
+    // carries no extra bytes. `runtime_offline` counts as a decline even though a
+    // task row exists: that is exactly the invisible-but-queued case.
+    let latest_attempt =
+        ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo::latest_for_issue(
+            pool, issue_id,
+        )
+        .await?
+        .filter(|a| !a.is_dispatched());
     Ok(IssueCardExtras {
         repo_ref,
         agent: agent.map(|a| a.as_str().to_string()),
@@ -249,6 +269,9 @@ async fn issue_card_fields(
         parent_id,
         child_done: u32::try_from(child_done).unwrap_or(u32::MAX),
         child_total: u32::try_from(child_total).unwrap_or(u32::MAX),
+        last_dispatch_reason: latest_attempt.as_ref().map(|a| a.reason.clone()),
+        last_dispatch_detail: latest_attempt.as_ref().and_then(|a| a.detail.clone()),
+        last_dispatch_at: latest_attempt.as_ref().map(|a| a.created_at),
     })
 }
 
@@ -305,9 +328,12 @@ pub async fn issues_search(
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
-            last_dispatch_reason: None,
-            last_dispatch_detail: None,
-            last_dispatch_at: None,
+            // multica parity #12: WHY this card is not running, from the newest
+            // dispatch_attempt when that attempt was a decline. All `None` on a
+            // healthy card, so the row grows by zero keys.
+            last_dispatch_reason: extras.last_dispatch_reason,
+            last_dispatch_detail: extras.last_dispatch_detail,
+            last_dispatch_at: extras.last_dispatch_at,
             // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
             // row a snapshot carries and the row an event pushes agree.
             origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -1895,9 +1921,12 @@ pub async fn issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
-        last_dispatch_reason: None,
-        last_dispatch_detail: None,
-        last_dispatch_at: None,
+        // multica parity #12: WHY this card is not running, from the newest
+        // dispatch_attempt when that attempt was a decline. All `None` on a
+        // healthy card, so the row grows by zero keys.
+        last_dispatch_reason: extras.last_dispatch_reason,
+        last_dispatch_detail: extras.last_dispatch_detail,
+        last_dispatch_at: extras.last_dispatch_at,
         // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
         // row a snapshot carries and the row an event pushes agree.
         origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
@@ -2101,9 +2130,12 @@ async fn read_issue_row(
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
     Ok(Some(IssueRow {
-        last_dispatch_reason: None,
-        last_dispatch_detail: None,
-        last_dispatch_at: None,
+        // multica parity #12: WHY this card is not running, from the newest
+        // dispatch_attempt when that attempt was a decline. All `None` on a
+        // healthy card, so the row grows by zero keys.
+        last_dispatch_reason: extras.last_dispatch_reason,
+        last_dispatch_detail: extras.last_dispatch_detail,
+        last_dispatch_at: extras.last_dispatch_at,
         // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
         // row a snapshot carries and the row an event pushes agree.
         origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
