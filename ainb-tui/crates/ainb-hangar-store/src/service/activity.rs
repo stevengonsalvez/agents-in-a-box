@@ -18,6 +18,15 @@
 //! `state → assignee → priority → title → due_date` — so a timeline rendered
 //! from a single update call reads deterministically.
 //!
+//! That order has to survive the READ, and the timeline sorts by
+//! `(created_at, id)`. A whole diff runs well inside one millisecond, and
+//! `ulid::Ulid::new()` is NOT monotonic within a millisecond (its low bits are
+//! random, not a counter), so a shared `created_at` would let the id tiebreak
+//! shuffle the fields arbitrarily. [`ActivityService::record_issue_diff`]
+//! therefore reads the clock ONCE and stamps row `i` at `base + i` ms: the
+//! written order is the read order, deterministically, at the cost of a few
+//! milliseconds of skew on a multi-field edit.
+//!
 //! # multica DEVIATIONS (deliberate)
 //!
 //! * `priority_changed` details carry NUMBERS (`{"from":1,"to":3}`). hangar's
@@ -52,6 +61,7 @@ impl ActivityService {
     /// Returns how many rows were written (`0` for a no-op edit). Best-effort:
     /// a per-row store fault is logged and the remaining fields are still
     /// attempted.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record_issue_diff(
         pool: &SqlitePool,
         idgen: &dyn IdGen,
@@ -61,17 +71,21 @@ impl ActivityService {
         before: &Issue,
         after: &Issue,
     ) -> usize {
+        let base = clock.now_ms();
         let mut written = 0usize;
-        for (action, details) in issue_diff(before, after) {
-            if Self::record(
+        for (i, (action, details)) in issue_diff(before, after).into_iter().enumerate() {
+            // `base + i` ms: see the module docs — a shared timestamp would let
+            // the non-monotonic ULID tiebreak shuffle the field order on read.
+            let at = base.saturating_add(i64::try_from(i).unwrap_or(0));
+            if Self::record_at(
                 pool,
                 idgen,
-                clock,
                 workspace_id,
                 &after.id,
                 actor,
                 action,
                 details,
+                at,
             )
             .await
             {
@@ -83,6 +97,7 @@ impl ActivityService {
 
     /// Record one activity row. Returns `false` (after logging) when the write
     /// failed — the caller carries on regardless.
+    #[allow(clippy::too_many_arguments)]
     pub async fn record(
         pool: &SqlitePool,
         idgen: &dyn IdGen,
@@ -93,13 +108,39 @@ impl ActivityService {
         action: ActivityAction,
         details: Value,
     ) -> bool {
+        Self::record_at(
+            pool,
+            idgen,
+            workspace_id,
+            issue_id,
+            actor,
+            action,
+            details,
+            clock.now_ms(),
+        )
+        .await
+    }
+
+    /// [`Self::record`] with an explicit `created_at`, so a diff can stamp its
+    /// rows at increasing timestamps inside one clock read.
+    #[allow(clippy::too_many_arguments)]
+    async fn record_at(
+        pool: &SqlitePool,
+        idgen: &dyn IdGen,
+        workspace_id: &str,
+        issue_id: &str,
+        actor: &ActivityActor,
+        action: ActivityAction,
+        details: Value,
+        created_at: i64,
+    ) -> bool {
         let new = NewActivity {
             workspace_id,
             issue_id: Some(issue_id),
             actor,
             action,
             details,
-            created_at: clock.now_ms(),
+            created_at,
         };
         match ActivityRepo::record(pool, &idgen.new_ulid(), &new).await {
             Ok(()) => true,

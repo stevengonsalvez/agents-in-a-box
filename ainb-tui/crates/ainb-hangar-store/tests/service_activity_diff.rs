@@ -282,3 +282,66 @@ async fn a_title_edit_records_both_sides() {
         serde_json::json!({"from": "Wire the timeline", "to": "Wire the timeline modal"})
     );
 }
+
+/// REGRESSION: a whole diff runs inside one millisecond, and `ulid::Ulid::new()`
+/// is not monotonic within a millisecond — so a shared `created_at` let the
+/// timeline's `(created_at, id)` sort shuffle the fields arbitrarily. The
+/// service stamps row `i` at `base + i`, which is what makes the written field
+/// order the read order.
+#[tokio::test]
+async fn a_frozen_clock_still_preserves_field_order_on_read() {
+    struct FrozenClock;
+    impl HangarClock for FrozenClock {
+        fn now_ms(&self) -> i64 {
+            1_700_000_000_000
+        }
+    }
+
+    let (_dir, store) = open().await;
+    seed_issue(&store).await;
+
+    let before = IssueRepo::get_by_id(store.pool(), "iss-1")
+        .await
+        .expect("get before")
+        .expect("issue");
+    IssueRepo::update_fields(
+        store.pool(),
+        "ws-1",
+        "iss-1",
+        &IssueFieldUpdate {
+            state: Some("in_progress".into()),
+            priority: Some(3),
+            title: Some("Renamed".into()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("update");
+    let after = IssueRepo::get_by_id(store.pool(), "iss-1")
+        .await
+        .expect("get after")
+        .expect("issue");
+
+    // Random ULIDs, one frozen clock reading: only the per-row stamp can keep
+    // the order stable.
+    let written = ActivityService::record_issue_diff(
+        store.pool(),
+        &ainb_hangar_core::idgen::SystemIdGen,
+        &FrozenClock,
+        "ws-1",
+        &member("u1"),
+        &before,
+        &after,
+    )
+    .await;
+    assert_eq!(written, 3);
+
+    let mut rows = ActivityRepo::list_for_issue(store.pool(), "iss-1", 100).await.expect("list");
+    rows.reverse();
+    let actions: Vec<&str> = rows.iter().map(|r| r.action.as_str()).collect();
+    assert_eq!(
+        actions,
+        ["status_changed", "priority_changed", "title_changed"],
+        "field order must survive a same-millisecond write"
+    );
+}

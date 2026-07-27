@@ -24,6 +24,7 @@ async fn open() -> (tempfile::TempDir, Store) {
     (dir, store)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn record(
     store: &Store,
     id: &str,
