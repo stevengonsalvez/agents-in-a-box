@@ -536,6 +536,105 @@ pub struct AutopilotUpdateResult {
     pub version: Option<i64>,
 }
 
+/// Params for every #27 autopilot actor-set method
+/// ([`crate::methods::HANGAR_AUTOPILOT_COLLABORATOR_ADD`] /
+/// `_REMOVE` / [`crate::methods::HANGAR_AUTOPILOT_COLLABORATORS`], and the
+/// three subscriber twins).
+///
+/// One shape for add / remove / list because the tuple they address is the
+/// same; the list reads ignore `actor` and `role`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotActorParams {
+    /// The subscribed workspace the autopilot must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The autopilot whose actor set is addressed.
+    pub autopilot_id: String,
+    /// The target actor in canonical `member:<id>` / `agent:<id>` form. Omitted
+    /// ⇒ the LOCAL HUMAN (`member:me`), mirroring `IssueSubscribeParams`.
+    /// Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Collaborator ADD only: `"editor"` (the default when omitted) or
+    /// `"viewer"`. A `viewer` grant is visibility, NOT write access.
+    /// Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The ACTING human, in canonical actor form — both the restricted-mode
+    /// write gate's subject and the `created_by` attribution. Omitted ⇒ an
+    /// unattributed local caller, which the gate admits (the daemon's own /
+    /// legacy path). Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_user_id: Option<String>,
+}
+
+/// One write-grant on an autopilot rule (multica parity #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotCollaboratorEntry {
+    /// The granted actor in canonical `member:<id>` / `agent:<id>` form.
+    pub actor: String,
+    /// A human-readable label for that actor (the daemon does the `user` join —
+    /// the plugin owns zero domain data), or `None` when unresolvable.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The raw stored role token. Kept as a `String` so a token from a newer
+    /// daemon renders instead of failing the decode.
+    pub role: String,
+    /// Who granted it (canonical actor form), or `None` when unattributed.
+    #[serde(default)]
+    pub created_by: Option<String>,
+    /// When the grant was created (epoch millis).
+    pub created_at: i64,
+}
+
+/// One standing subscriber on an autopilot rule (multica parity #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSubscriberEntry {
+    /// The subscribing actor in canonical form.
+    pub actor: String,
+    /// A human-readable label, resolved daemon-side.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Who added them, or `None` when unattributed.
+    #[serde(default)]
+    pub created_by: Option<String>,
+    /// When the subscription was created (epoch millis).
+    pub created_at: i64,
+}
+
+/// Result of every #27 collaborator method: the rule's REFRESHED grant set, so
+/// a mutator needs no read-after-write round trip.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotCollaboratorsResult {
+    /// Every grant, oldest first. Empty ⇒ nobody holds an explicit grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborators: Vec<AutopilotCollaboratorEntry>,
+}
+
+/// Result of every #27 subscriber method: the rule's REFRESHED standing list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSubscribersResult {
+    /// Every subscriber, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscribers: Vec<AutopilotSubscriberEntry>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_ACCESS_MODE`]
+/// (multica parity #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetAccessModeParams {
+    /// The subscribed workspace the autopilot must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The autopilot to open or restrict.
+    pub autopilot_id: String,
+    /// `"open"` | `"restricted"`. Anything else is rejected with
+    /// `INVALID_PARAMS` rather than silently coerced — a typo must never
+    /// quietly leave a rule world-writable.
+    pub access_mode: String,
+    /// The acting human (gate subject + rule-version attribution). Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_user_id: Option<String>,
+}
+
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_VERSIONS`]: the workspace
 /// (tenant guard), the autopilot, and a row cap.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
@@ -3453,6 +3552,89 @@ mod tests {
             "an omitted accountable_actor is an honest unknown, not a guess"
         );
         assert_eq!(legacy_run.attribution, None);
+    }
+
+    /// The #27 autopilot collaborator / subscriber envelopes round-trip, and a
+    /// PRE-0064 payload still decodes with the permissive defaults.
+    #[test]
+    fn autopilot_actor_set_envelopes_roundtrip_and_are_append_only() {
+        let params = AutopilotActorParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            actor: Some("member:bob".into()),
+            role: Some("editor".into()),
+            actor_user_id: Some("member:amy".into()),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotActorParams>(&s).unwrap(),
+            params
+        );
+
+        let collaborators = AutopilotCollaboratorsResult {
+            collaborators: vec![AutopilotCollaboratorEntry {
+                actor: "member:bob".into(),
+                label: Some("bob@example.com".into()),
+                role: "editor".into(),
+                created_by: Some("member:amy".into()),
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&collaborators).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotCollaboratorsResult>(&s).unwrap(),
+            collaborators
+        );
+
+        let subscribers = AutopilotSubscribersResult {
+            subscribers: vec![AutopilotSubscriberEntry {
+                actor: "member:bob".into(),
+                label: None,
+                created_by: None,
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&subscribers).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSubscribersResult>(&s).unwrap(),
+            subscribers
+        );
+
+        let mode = AutopilotSetAccessModeParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            access_mode: "restricted".into(),
+            actor_user_id: Some("member:amy".into()),
+        };
+        let s = serde_json::to_string(&mode).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSetAccessModeParams>(&s).unwrap(),
+            mode
+        );
+
+        // APPEND-ONLY: a pre-0064 AutopilotRow payload, carrying none of the
+        // three new fields, still decodes — and decodes PERMISSIVELY. An
+        // omitted access_mode must never render as a lock on a rule nobody
+        // restricted.
+        let legacy: AutopilotRow = serde_json::from_str(
+            r#"{"id":"ap-1","workspace_id":"ws-1","agent_id":"a","name":"n",
+                 "cron_expr":"* * * * *","next_tick_at":null,"enabled":true,
+                 "last_run_status":null,"last_run_at":null}"#,
+        )
+        .expect("a pre-0064 AutopilotRow must still deserialise");
+        assert_eq!(legacy.collaborator_count, 0);
+        assert_eq!(legacy.subscriber_count, 0);
+        assert_eq!(
+            legacy.access_mode, None,
+            "an omitted access_mode is open, never a fabricated restriction"
+        );
+
+        // Minimal params, as an older caller would send them.
+        let legacy_params: AutopilotActorParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","autopilot_id":"ap-1"}"#).unwrap();
+        assert_eq!(legacy_params.actor, None);
+        assert_eq!(legacy_params.role, None);
+        assert_eq!(legacy_params.actor_user_id, None);
     }
 
     /// The P8.4 Kanban task envelopes round-trip through JSON.

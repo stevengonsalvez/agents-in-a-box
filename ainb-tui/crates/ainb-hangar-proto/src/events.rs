@@ -833,6 +833,20 @@ pub struct AutopilotRow {
     /// plugin owns zero domain data, so the daemon does the `user` join.
     #[serde(default)]
     pub last_published_by: Option<String>,
+    /// Count of explicit write-grant rows on this rule (migration 0064,
+    /// multica parity #27). Append-only + `serde(default)`: a pre-0064
+    /// daemon's payload omits it and reads `0`.
+    #[serde(default)]
+    pub collaborator_count: u32,
+    /// Count of standing subscribers auto-subscribed to every issue this rule
+    /// SPAWNS. Append-only + `serde(default)`.
+    #[serde(default)]
+    pub subscriber_count: u32,
+    /// `"open"` | `"restricted"` (migration 0064). An OMITTED field reads as
+    /// `None`, which renders as open — the permissive legacy meaning, never an
+    /// accidental lock glyph on a rule nobody restricted.
+    #[serde(default)]
+    pub access_mode: Option<String>,
 }
 
 /// A wire-side autopilot run row for the history pane (`hangar/autopilot_runs`).
