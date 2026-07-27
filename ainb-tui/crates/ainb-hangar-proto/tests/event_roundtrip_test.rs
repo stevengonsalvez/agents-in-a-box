@@ -80,8 +80,8 @@ fn sample_comment() -> CommentRow {
         author: "member:alice".to_string(),
         body: "looks good".to_string(),
         created_at: 1_700_000_001_000,
-    },
-    parent_id: None,
+        parent_id: None,
+    }
 }
 
 fn all_variants() -> Vec<HangarEvent> {

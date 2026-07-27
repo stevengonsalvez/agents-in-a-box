@@ -247,10 +247,7 @@ pub fn parse(body: &str) -> Vec<ParsedMention> {
     // were overwritten with ASCII spaces.
     let residue = String::from_utf8(residue).unwrap_or_else(|_| body.to_string());
     for handle in parse_handles(&residue) {
-        if !out
-            .iter()
-            .any(|m| m.form == MentionForm::Bare && m.token == handle)
-        {
+        if !out.iter().any(|m| m.form == MentionForm::Bare && m.token == handle) {
             out.push(ParsedMention {
                 kind: None,
                 label: handle.clone(),
@@ -316,7 +313,7 @@ pub fn parse_handles(body: &str) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse, parse_handles, MentionForm, MentionOutcome, MentionTargetKind};
+    use super::{MentionForm, MentionOutcome, MentionTargetKind, parse, parse_handles};
 
     // --- bare grammar: the 9 regression tests moved verbatim from the daemon ---
 

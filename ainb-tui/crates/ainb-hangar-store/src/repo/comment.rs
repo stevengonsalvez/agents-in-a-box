@@ -426,18 +426,13 @@ mod tests {
         let c3 = CommentRepo::get(store.pool(), "ws-a", "c3").await.unwrap().unwrap();
         assert_eq!(c3.parent_id.as_deref(), Some("c2"), "parent_id round-trips");
 
-        let root = CommentRepo::thread_root(store.pool(), "ws-a", "c3")
-            .await
-            .unwrap()
-            .unwrap();
+        let root = CommentRepo::thread_root(store.pool(), "ws-a", "c3").await.unwrap().unwrap();
         assert_eq!(root.id, "c1", "the walk reaches the parentless root");
         assert!(root.parent_id.is_none());
 
         // A top-level comment is its own root.
-        let self_root = CommentRepo::thread_root(store.pool(), "ws-a", "c1")
-            .await
-            .unwrap()
-            .unwrap();
+        let self_root =
+            CommentRepo::thread_root(store.pool(), "ws-a", "c1").await.unwrap().unwrap();
         assert_eq!(self_root.id, "c1");
     }
 
@@ -474,10 +469,11 @@ mod tests {
             .execute(store.pool())
             .await
             .unwrap();
-        let root = CommentRepo::thread_root(store.pool(), "ws-a", "c1")
-            .await
-            .unwrap();
-        assert!(root.is_some(), "the walk returns rather than spinning forever");
+        let root = CommentRepo::thread_root(store.pool(), "ws-a", "c1").await.unwrap();
+        assert!(
+            root.is_some(),
+            "the walk returns rather than spinning forever"
+        );
     }
 
     /// Deleting a parent DETACHES its reply (0067 `ON DELETE SET NULL`) rather

@@ -248,7 +248,9 @@ pub async fn route(
                     );
                 }
                 Resolved::Member(user_id) => {
-                    rows.push(notify_member(pool, idgen, req, &user_id, &m.token, now, dry_run).await);
+                    rows.push(
+                        notify_member(pool, idgen, req, &user_id, &m.token, now, dry_run).await,
+                    );
                 }
                 Resolved::Row(row) => rows.push(row),
             }
@@ -384,7 +386,8 @@ async fn fallback_target(
     if let Some(parent_id) = req.parent_comment_id {
         if let Some(parent) = CommentRepo::get(pool, req.workspace_id, parent_id).await? {
             if parent.author.kind() == ActorKind::Agent {
-                if let Some(agent) = agent_in_workspace(pool, req.workspace_id, parent.author.id()).await?
+                if let Some(agent) =
+                    agent_in_workspace(pool, req.workspace_id, parent.author.id()).await?
                 {
                     return Ok(Some((agent, MentionSource::ReplyParent)));
                 }
@@ -392,7 +395,8 @@ async fn fallback_target(
         }
         if let Some(root) = CommentRepo::thread_root(pool, req.workspace_id, parent_id).await? {
             if root.author.kind() == ActorKind::Agent {
-                if let Some(agent) = agent_in_workspace(pool, req.workspace_id, root.author.id()).await?
+                if let Some(agent) =
+                    agent_in_workspace(pool, req.workspace_id, root.author.id()).await?
                 {
                     return Ok(Some((agent, MentionSource::ThreadRoot)));
                 }
@@ -422,9 +426,7 @@ async fn agent_in_workspace(
     workspace_id: &str,
     agent_id: &str,
 ) -> Result<Option<Agent>, sqlx::Error> {
-    Ok(AgentRepo::get(pool, agent_id)
-        .await?
-        .filter(|a| a.workspace_id == workspace_id))
+    Ok(AgentRepo::get(pool, agent_id).await?.filter(|a| a.workspace_id == workspace_id))
 }
 
 /// Gate and (unless dry) act on ONE agent target, always producing exactly one
