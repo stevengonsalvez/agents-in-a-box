@@ -575,6 +575,20 @@ pub struct IssueRow {
     /// card byte-identical.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub reactions: Vec<ReactionRow>,
+    /// This issue's resolved CUSTOM PROPERTIES (multica parity #17), driving the
+    /// task-detail card's `Props:` block, in catalog `position` order.
+    ///
+    /// DETAIL PATH ONLY — a list snapshot leaves it empty on purpose, exactly
+    /// like [`Self::dependencies`] and [`Self::subscriber_count`], because
+    /// filling it needs a catalog join per row. Do not "fix" that.
+    /// Append-only: empty ⇒ the key is not sent, so a pre-#17 daemon leaves the
+    /// row byte-identical and a pre-#17 client ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<IssuePropertyRow>,
+    /// This issue's AGENT METADATA scratch bag (multica parity #17), key-sorted.
+    /// Same DETAIL-ONLY + append-only contract as [`Self::properties`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<IssueMetadataRow>,
 }
 
 /// One custom-property DEFINITION from a workspace's catalog (multica parity

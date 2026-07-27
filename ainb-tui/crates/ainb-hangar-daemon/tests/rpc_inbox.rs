@@ -216,6 +216,8 @@ fn issue_event() -> HangarEvent {
         subscriber_count: 0,
         subscribed: false,
         reactions: Vec::new(),
+        properties: Vec::new(),
+        metadata: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,

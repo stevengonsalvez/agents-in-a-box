@@ -141,6 +141,8 @@ pub async fn issues_list(
                 subscriber_count: 0,
                 subscribed: false,
                 reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
                 // multica parity #12: WHY this card is not running, from the newest
                 // dispatch_attempt when that attempt was a decline. All `None` on a
                 // healthy card, so the row grows by zero keys.
@@ -346,6 +348,8 @@ pub async fn issues_search(
             subscriber_count: 0,
             subscribed: false,
             reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
             // multica parity #12: WHY this card is not running, from the newest
             // dispatch_attempt when that attempt was a decline. All `None` on a
             // healthy card, so the row grows by zero keys.
@@ -2154,6 +2158,8 @@ pub async fn issue_row(
         subscriber_count,
         subscribed,
         reactions,
+        properties: Vec::new(),
+        metadata: Vec::new(),
         // multica parity #12: WHY this card is not running, from the newest
         // dispatch_attempt when that attempt was a decline. All `None` on a
         // healthy card, so the row grows by zero keys.
@@ -2474,6 +2480,8 @@ async fn read_issue_row(
         subscriber_count,
         subscribed,
         reactions,
+        properties: Vec::new(),
+        metadata: Vec::new(),
         // multica parity #12: WHY this card is not running, from the newest
         // dispatch_attempt when that attempt was a decline. All `None` on a
         // healthy card, so the row grows by zero keys.
@@ -2766,6 +2774,8 @@ pub async fn issue_create(
         subscriber_count: 0,
         subscribed: false,
         reactions: Vec::new(),
+        properties: Vec::new(),
+        metadata: Vec::new(),
         last_dispatch_reason: None,
         last_dispatch_detail: None,
         last_dispatch_at: None,
