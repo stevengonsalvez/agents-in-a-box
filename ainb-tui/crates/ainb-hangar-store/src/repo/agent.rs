@@ -25,6 +25,7 @@
 //! provider EXEC consumption of these knobs is a separate bead (e38.16).
 
 use ainb_hangar_core::actor::ActorRef;
+use ainb_hangar_core::agent_env::AgentEnv;
 use ainb_hangar_core::skill::SkillName;
 use sqlx::SqlitePool;
 
@@ -91,7 +92,12 @@ pub struct Agent {
     pub thinking: Option<String>,
     /// Per-agent environment variables (stored as a JSON-object `agent_env`
     /// column), kept as an ordered key-value list for deterministic encoding.
-    pub agent_env: Vec<(String, String)>,
+    ///
+    /// Typed [`AgentEnv`], not a bare `Vec`, so the VALUES are redacted on every
+    /// egress — including this struct's derived `Debug` (multica parity #30).
+    /// The exec seam reaches the plaintext via
+    /// [`AgentEnv::expose_for_child_env`], and nothing else may.
+    pub agent_env: AgentEnv,
     /// Optional per-agent provider override (`"claude"`/`"codex"`/`"copilot"`),
     /// recorded at create time (migration 0041); `None` = fall back to the
     /// runtime's advertised provider. Honoured at dispatch: the agent binds the
@@ -156,7 +162,7 @@ impl Default for Agent {
             cli_args: Vec::new(),
             mcp_config: None,
             thinking: None,
-            agent_env: Vec::new(),
+            agent_env: AgentEnv::default(),
             provider: None,
             token_budget: None,
             description: String::new(),
@@ -224,9 +230,9 @@ pub struct AgentConfigUpdate {
     /// New thinking level: `None` leaves it, `Some(None)` clears it,
     /// `Some(Some(_))` sets it.
     pub thinking: Option<Option<String>>,
-    /// New per-agent env map, or `None` to leave it unchanged (an empty `Vec` is
+    /// New per-agent env map, or `None` to leave it unchanged (an empty map is
     /// a valid "no env" value, distinct from leaving it).
-    pub agent_env: Option<Vec<(String, String)>>,
+    pub agent_env: Option<AgentEnv>,
     /// New token budget: `None` leaves it, `Some(None)` clears it (back to
     /// unlimited), `Some(Some(_))` sets it.
     pub token_budget: Option<Option<i64>>,
@@ -337,7 +343,7 @@ impl AgentRepo {
         .bind(cli_args_to_json(&agent.cli_args))
         .bind(agent.mcp_config.clone().unwrap_or_else(|| "{}".to_string()))
         .bind(&agent.thinking)
-        .bind(env_to_json(&agent.agent_env))
+        .bind(agent.agent_env.to_db_json())
         .bind(&agent.provider)
         .bind(agent.token_budget)
         .bind(&agent.description)
@@ -553,7 +559,7 @@ impl AgentRepo {
             query = query.bind(thinking);
         }
         if let Some(agent_env) = &update.agent_env {
-            query = query.bind(env_to_json(agent_env));
+            query = query.bind(agent_env.to_db_json());
         }
         if let Some(token_budget) = &update.token_budget {
             query = query.bind(token_budget);
@@ -957,32 +963,16 @@ fn disabled_runtime_skills_from_json(raw: &str) -> Vec<String> {
     serde_json::from_str(raw).unwrap_or_default()
 }
 
-/// Serialize a per-agent env map into the JSON-object text the `agent_env`
-/// column stores. The ordered key-value list encodes as a JSON object; an empty
-/// list yields `"{}"` (the column default).
-fn env_to_json(env: &[(String, String)]) -> String {
-    let map: serde_json::Map<String, serde_json::Value> = env
-        .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
-        .collect();
-    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
-}
-
 /// Re-assemble a per-agent env map from the `agent_env` column's JSON-object
 /// text, preserving the stored object's key order.
-fn env_from_json(raw: &str) -> Result<Vec<(String, String)>, sqlx::Error> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| decode_err("agent_env", &e.to_string()))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| decode_err("agent_env", "stored env is not a JSON object"))?;
-    obj.iter()
-        .map(|(k, v)| {
-            v.as_str()
-                .map(|s| (k.clone(), s.to_string()))
-                .ok_or_else(|| decode_err("agent_env", "env value is not a string"))
-        })
-        .collect()
+///
+/// The codec itself lives on [`AgentEnv`] (encode via
+/// [`AgentEnv::to_db_json`]) so the redaction contract and the storage bytes
+/// are defined in one place. The decode error is deliberately VALUE-FREE — a
+/// `serde_json` message quotes the offending scalar, which for this column is
+/// the secret.
+fn env_from_json(raw: &str) -> Result<AgentEnv, sqlx::Error> {
+    AgentEnv::try_from_db_json(raw).map_err(|reason| decode_err("agent_env", reason))
 }
 
 /// Map the empty-object MCP-config default `'{}'` back to `None` so a config-less

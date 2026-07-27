@@ -903,6 +903,13 @@ async fn agent_actor_row_with_counts(
         // it did before.
         archived_at: agent.archived_at,
         archived_by: agent.archived_by.as_ref().map(ToString::to_string).unwrap_or_default(),
+        // Parity #30. This is the ONLY place a per-agent env reaches the wire,
+        // and it carries KEY NAMES + a count — never a value. All three are
+        // omitted when the agent has no env, so an env-less agent serialises
+        // exactly as it did pre-#30.
+        agent_env_key_count: u32::try_from(agent.agent_env.len()).unwrap_or(u32::MAX),
+        agent_env_keys: agent.agent_env.keys().map(ToString::to_string).collect(),
+        agent_env_redacted: !agent.agent_env.is_empty(),
     })
 }
 

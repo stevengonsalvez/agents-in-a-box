@@ -413,7 +413,7 @@ pub async fn create_agent_from(
         cli_args: Vec::new(),
         mcp_config: None,
         thinking: None,
-        agent_env: Vec::new(),
+        agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         provider: Some(provider),
         token_budget: None,
         description: draft.description.trim().to_string(),

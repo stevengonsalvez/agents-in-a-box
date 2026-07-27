@@ -14,6 +14,10 @@
 pub mod acceptance;
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
+/// Per-agent environment variables with a redact-by-construction contract
+/// (multica parity #30): plaintext inside, masked on every egress except the
+/// single named exec seam ([`agent_env::AgentEnv::expose_for_child_env`]).
+pub mod agent_env;
 /// The card provider-agent kind (`claude`/`codex`/`copilot`) + the task-create
 /// default cascade (spec F4).
 pub mod agent_kind;

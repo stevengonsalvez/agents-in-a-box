@@ -463,6 +463,23 @@ pub enum AgentCommand {
     Allow(AgentAllowArgs),
     /// Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`).
     CanInvoke(AgentCanInvokeArgs),
+    /// Show an agent's per-agent env: variable NAMES only, values masked.
+    Env(AgentEnvArgs),
+}
+
+/// Arguments for `hangar agent env` — the REDACTED read of one agent's env.
+///
+/// Deliberately has no `--reveal` (parity #30 deviation D-1): hangar masks
+/// unconditionally, so there is exactly one plaintext egress (the provider
+/// child's environment at exec) and no CLI affordance that re-opens the hole.
+#[derive(Args, Debug)]
+pub struct AgentEnvArgs {
+    /// Agent id (ULID) to inspect.
+    pub id: String,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar agent permission`.
@@ -630,10 +647,19 @@ pub struct AgentEditArgs {
     /// Clear the thinking level; omitted leaves it.
     #[arg(long = "clear-thinking")]
     pub clear_thinking: bool,
-    /// A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is
-    /// given the whole env map is REPLACED with the values.
-    #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append)]
+    // NOTE: each of the three env flags keeps a SINGLE-paragraph doc comment on
+    // purpose — a second paragraph flips clap's whole `agent edit` help into the
+    // long-help layout, which churns the generated `docs/tui/cli.md` reference.
+    /// A `KEY=VALUE` env var for the agent (repeatable; ANY `--env` REPLACES the whole map). Visible in `ps` / shell history — prefer `--env-stdin` / `--env-file` for secrets.
+    #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append,
+          conflicts_with_all = ["env_stdin", "env_file"])]
     pub env: Vec<(String, String)>,
+    /// Read the whole env map from STDIN as a JSON object of string→string, keeping secrets off argv; `{}` clears it and empty input is an ERROR, not a clear
+    #[arg(long = "env-stdin", conflicts_with_all = ["env", "env_file"])]
+    pub env_stdin: bool,
+    /// Read the whole env map from a FILE as a JSON object of string→string (same contract as `--env-stdin`)
+    #[arg(long = "env-file", conflicts_with_all = ["env", "env_stdin"])]
+    pub env_file: Option<std::path::PathBuf>,
     /// New token budget (rtk/headroom, migration 0042); omitted leaves it.
     /// Mutually exclusive with `--clear-token-budget`.
     #[arg(long = "token-budget", conflicts_with = "clear_token_budget")]
@@ -964,14 +990,46 @@ pub struct SquadAssignArgs {
 ///
 /// # Errors
 ///
-/// Returns a human-readable message if the input has no `=` or an empty key.
+/// Returns a CONTENT-FREE message if the input has no `=` or an empty key.
+/// The message deliberately never echoes `raw` (parity #30, multica
+/// `cmd_agent.go:757-759`): the whole point of `--env` is that the argument
+/// carries a secret, and clap prints a `value_parser` error to stderr, which
+/// lands in shell logs and CI transcripts.
 fn parse_env_kv(raw: &str) -> Result<(String, String), String> {
     let (key, value) =
-        raw.split_once('=').ok_or_else(|| format!("expected KEY=VALUE, got {raw:?}"))?;
+        raw.split_once('=').ok_or_else(|| "--env: expected KEY=VALUE".to_string())?;
     if key.is_empty() {
-        return Err(format!("env var name must not be empty in {raw:?}"));
+        return Err("--env: env var name must not be empty".to_string());
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+/// Decode a JSON-object-of-strings env payload from `--env-file` / `--env-stdin`.
+///
+/// Ported shape-for-shape from multica's `resolveCustomEnv`
+/// (`server/cmd/multica/cmd_agent.go:788-852`):
+///
+/// * empty / whitespace-only input is an **error**, never a clear — an empty
+///   read almost always means a broken upstream pipe, and treating it as a clear
+///   would silently wipe the agent's secrets;
+/// * the explicit `{}` is the only clear;
+/// * a parse failure is CONTENT-FREE — `serde_json`'s message quotes fragments
+///   of the input, which here IS the secret.
+///
+/// # Errors
+///
+/// Returns a value-free message when the payload is blank or is not a JSON
+/// object of string keys to string values.
+fn parse_env_json(raw: &str, flag: &str) -> Result<Vec<(String, String)>, String> {
+    if raw.trim().is_empty() {
+        return Err(format!("{flag}: empty input; pass '{{}}' to clear the env"));
+    }
+    let shape = format!("{flag} must be a valid JSON object of string keys and string values");
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| shape.clone())?;
+    let obj = value.as_object().ok_or_else(|| shape.clone())?;
+    obj.iter()
+        .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| shape.clone()))
+        .collect()
 }
 
 /// `hangar templates <verb>`.
@@ -2382,6 +2440,7 @@ async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
         AgentCommand::Permission(args) => run_agent_permission(&store, args).await,
         AgentCommand::Allow(args) => run_agent_allow(&store, args).await,
         AgentCommand::CanInvoke(args) => run_agent_can_invoke(&store, args).await,
+        AgentCommand::Env(args) => run_agent_env(&store, args, format).await,
     }
 }
 
@@ -2645,6 +2704,92 @@ async fn run_agent_list(store: &Store, args: AgentListArgs, format: OutputFormat
     Ok(())
 }
 
+/// Resolve which of the three mutually-exclusive env write channels was used,
+/// returning `None` when none was (leave the map unchanged).
+///
+/// `--env` is the argv channel (convenient, but the value lands in `ps` and
+/// shell history); `--env-stdin` / `--env-file` are the SECRET channels multica
+/// added for exactly that reason (`cmd_agent.go:788-852`). Clap already bars
+/// combining them, so at most one arm can fire.
+///
+/// # Errors
+///
+/// Returns a value-free error when the JSON payload is blank or malformed, or
+/// when the file cannot be read.
+fn resolve_agent_env_write(args: &AgentEditArgs) -> Result<Option<Vec<(String, String)>>> {
+    if !args.env.is_empty() {
+        return Ok(Some(args.env.clone()));
+    }
+    if args.env_stdin {
+        use std::io::Read as _;
+        let mut raw = String::new();
+        std::io::stdin().read_to_string(&mut raw).context("read --env-stdin")?;
+        return parse_env_json(&raw, "--env-stdin").map(Some).map_err(|e| anyhow::anyhow!(e));
+    }
+    if let Some(path) = args.env_file.as_deref() {
+        // The read error names the PATH, never the contents.
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("read --env-file {}", path.display()))?;
+        return parse_env_json(&raw, "--env-file").map(Some).map_err(|e| anyhow::anyhow!(e));
+    }
+    Ok(None)
+}
+
+/// `hangar agent env <id>`: print one agent's env with every VALUE masked.
+///
+/// The redacted-GET parity (multica `ListAgents`/`GetAgent` + `redactEnv`).
+/// There is no plaintext mode — see [`AgentEnvArgs`].
+///
+/// # Errors
+///
+/// Returns an error when the workspace cannot be resolved, the store read
+/// fails, or no agent with that id exists in the workspace.
+async fn run_agent_env(store: &Store, args: AgentEnvArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let agent = AgentRepo::get(store.pool(), &args.id)
+        .await
+        .context("read agent")?
+        .filter(|a| a.workspace_id == workspace_id)
+        .ok_or_else(|| anyhow::anyhow!("no agent {} in this workspace", args.id))?;
+
+    let redacted = agent.agent_env.redacted_pairs();
+    match format {
+        OutputFormat::Json => {
+            let body = redacted
+                .iter()
+                .map(|(k, mask)| format!("{}:{}", json_string(k), json_string(mask)))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "{{\"env\":{{{body}}},\"env_key_count\":{},\"env_redacted\":{}}}",
+                redacted.len(),
+                !redacted.is_empty()
+            );
+        }
+        OutputFormat::Csv => {
+            println!("key,value");
+            for (k, mask) in &redacted {
+                println!("{k},{mask}");
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| key | value |\n| --- | --- |");
+            for (k, mask) in &redacted {
+                println!("| {} | {mask} |", md_cell(k));
+            }
+        }
+        OutputFormat::Text => {
+            for (k, mask) in &redacted {
+                println!("{k}={mask}");
+            }
+            println!("{} keys (values hidden)", redacted.len());
+        }
+    }
+    Ok(())
+}
+
 /// `hangar agent edit`: map the present flags onto an [`AgentConfigUpdate`] and
 /// drive the workspace-scoped edit. An empty edit (no field flag) is rejected;
 /// an agent id outside the workspace is reported as a not-found error.
@@ -2653,6 +2798,11 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
 
+    // `--env` / `--env-stdin` / `--env-file` are mutually exclusive at the clap
+    // layer; whichever is present REPLACES the whole map (parity #30). Resolved
+    // FIRST because it borrows `args` whole (the reads below move out of it).
+    let agent_env =
+        resolve_agent_env_write(&args)?.map(ainb_hangar_core::agent_env::AgentEnv::from_pairs);
     // Each nullable text field uses its clear-flag to distinguish "clear to none"
     // from "leave unchanged" (a clap conflict already bars setting both).
     let instructions = clear_or_set(args.clear_instructions, args.instructions);
@@ -2662,7 +2812,6 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
     // `--arg` / `--env` REPLACE the list when any value is given (an empty Vec
     // means "no flag passed" → leave unchanged).
     let cli_args = (!args.args.is_empty()).then_some(args.args);
-    let agent_env = (!args.env.is_empty()).then_some(args.env);
 
     let token_budget = clear_or_set(args.clear_token_budget, args.token_budget);
     // Migration 0050: `description` is NOT NULL so it has no clear-flag (`""` IS
@@ -2689,7 +2838,8 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
         anyhow::bail!(
             "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
              / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
-             / --env / --token-budget / --clear-token-budget / --description / --avatar / \
+             / --env / --env-stdin / --env-file / --token-budget / --clear-token-budget / \
+             --description / --avatar / \
              --clear-avatar / --service-tier / --clear-service-tier"
         );
     }
@@ -6453,14 +6603,18 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         |actor| json_string(&actor.to_string()),
     );
     let args = json_string_array(a.cli_args.iter().map(String::as_str));
+    // Parity #30 / multica `redactEnv` (`agent.go:552-562`): KEYS are preserved,
+    // every VALUE becomes the `****` mask, and `env_redacted` says so. This used
+    // to print `"env":{"SECRET_TOKEN":"sk-live-…"}` — full plaintext on stdout.
     let env = a
         .agent_env
-        .iter()
-        .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+        .redacted_pairs()
+        .into_iter()
+        .map(|(k, mask)| format!("{}:{}", json_string(k), json_string(mask)))
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"id\":{},\"name\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"description\":{}}}",
+        "{{\"id\":{},\"name\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"env_key_count\":{},\"env_redacted\":{},\"description\":{}}}",
         json_string(a.id.as_str()),
         json_string(a.name.as_str()),
         a.archived,
@@ -6470,6 +6624,8 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         thinking,
         args,
         env,
+        a.agent_env.len(),
+        !a.agent_env.is_empty(),
         json_string(a.description.as_str()),
     )
 }
@@ -7018,6 +7174,133 @@ mod tests {
         let (name, sub) = matches.subcommand().expect("subcommand present");
         assert_eq!(name, "hangar", "expected hangar subcommand for {argv:?}");
         HangarCommand::from_arg_matches(sub).expect("extract HangarCommand")
+    }
+
+    // ──────────────────────────────────────────────────────────────────
+    // Parity #30 — the per-agent env redaction contract at the CLI boundary.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The canary. Any appearance of this literal in rendered output is a leak.
+    const ENV_SECRET: &str = "sk-live-DEADBEEF01";
+
+    /// An agent row carrying one secret env var.
+    fn agent_with_secret_env() -> ainb_hangar_store::repo::agent::Agent {
+        ainb_hangar_store::repo::agent::Agent {
+            id: "agent-1".to_string(),
+            name: "secretive".to_string(),
+            agent_env: vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())].into(),
+            ..ainb_hangar_store::repo::agent::Agent::default()
+        }
+    }
+
+    /// `hangar agent list --format json` used to print `"env":{"K":"<plaintext>"}`.
+    /// Multica's contract is keep-keys / mask-values plus a `redacted` flag.
+    #[test]
+    fn agent_json_masks_env_values() {
+        let out = agent_to_json(&agent_with_secret_env());
+        assert!(
+            !out.contains(ENV_SECRET),
+            "agent JSON leaked the env value: {out}"
+        );
+        assert!(out.contains(r#""SECRET_TOKEN":"****""#), "{out}");
+        assert!(out.contains(r#""env_key_count":1"#), "{out}");
+        assert!(out.contains(r#""env_redacted":true"#), "{out}");
+    }
+
+    /// An env-less agent reports the honest zero/false, not a redacted-looking
+    /// empty map with `env_redacted: true`.
+    #[test]
+    fn agent_json_env_less_agent_is_not_marked_redacted() {
+        let out = agent_to_json(&ainb_hangar_store::repo::agent::Agent::default());
+        assert!(out.contains(r#""env_key_count":0"#), "{out}");
+        assert!(out.contains(r#""env_redacted":false"#), "{out}");
+    }
+
+    /// A malformed `--env` used to echo the WHOLE raw argument (the secret) into
+    /// stderr via clap's `value_parser` error.
+    #[test]
+    fn parse_env_kv_error_never_echoes_the_value() {
+        let no_eq = parse_env_kv(ENV_SECRET).expect_err("missing '=' must error");
+        assert!(
+            !no_eq.contains(ENV_SECRET),
+            "error echoed the value: {no_eq}"
+        );
+        let empty_key = parse_env_kv(&format!("={ENV_SECRET}")).expect_err("empty key must error");
+        assert!(
+            !empty_key.contains("sk-live-"),
+            "error echoed the value: {empty_key}"
+        );
+    }
+
+    /// Clap must refuse any two of the three env write channels together, so a
+    /// secret-bearing file can never be silently overridden by an argv value.
+    #[test]
+    fn env_file_and_env_stdin_and_env_are_mutually_exclusive() {
+        let registry = CommandRegistry::built_ins();
+        for extra in [
+            vec!["--env", "A=b", "--env-stdin"],
+            vec!["--env", "A=b", "--env-file", "/tmp/e.json"],
+            vec!["--env-stdin", "--env-file", "/tmp/e.json"],
+        ] {
+            let mut argv = vec!["ainb", "hangar", "agent", "edit", "agent-1"];
+            argv.extend(extra.iter().copied());
+            let app = registry.build_clap(crate::cli::root_clap_command());
+            assert!(
+                app.try_get_matches_from(&argv).is_err(),
+                "clap accepted mutually exclusive env channels: {argv:?}"
+            );
+        }
+    }
+
+    /// Multica's empty-input rule (`cmd_agent.go:750-762`): a blank payload is an
+    /// ERROR (it almost always means a broken upstream pipe, and treating it as a
+    /// clear silently wipes secrets); only the explicit `{}` clears.
+    #[test]
+    fn env_file_empty_is_an_error_but_brace_brace_clears() {
+        let err = parse_env_json("   \n ", "--env-file").expect_err("blank input must error");
+        assert!(err.contains("pass '{}' to clear"), "{err}");
+        assert_eq!(
+            parse_env_json("{}", "--env-file").expect("{} clears"),
+            Vec::new()
+        );
+        assert_eq!(
+            parse_env_json(
+                &format!(r#"{{"SECRET_TOKEN":"{ENV_SECRET}"}}"#),
+                "--env-file"
+            )
+            .expect("valid object"),
+            vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())]
+        );
+    }
+
+    /// A JSON parse failure must not reflect the payload back — `serde_json`
+    /// messages quote the offending scalar, which here IS the secret.
+    #[test]
+    fn env_json_parse_error_never_echoes_the_payload() {
+        let err = parse_env_json(&format!(r#"{{"K":"{ENV_SECRET}"#), "--env-stdin")
+            .expect_err("truncated JSON must error");
+        assert!(!err.contains("sk-live-"), "{err}");
+        let err = parse_env_json(r#"{"K":31337}"#, "--env-stdin")
+            .expect_err("non-string value must error");
+        assert!(!err.contains("31337"), "{err}");
+    }
+
+    /// The redacted read verb parses, and carries NO `--reveal` (deviation D-1).
+    #[test]
+    fn parses_agent_env_verb_and_has_no_reveal_flag() {
+        let cmd = parse_hangar(&["ainb", "hangar", "agent", "env", "agent-1"]);
+        let HangarCommand::Agent(AgentCommand::Env(args)) = cmd else {
+            panic!("expected agent env, got {cmd:?}");
+        };
+        assert_eq!(args.id, "agent-1");
+
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        assert!(
+            app.try_get_matches_from(["ainb", "hangar", "agent", "env", "agent-1", "--reveal"])
+                .is_err(),
+            "there must be no plaintext escape hatch on the CLI"
+        );
     }
 
     #[test]
