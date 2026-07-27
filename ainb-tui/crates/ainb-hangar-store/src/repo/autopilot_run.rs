@@ -46,6 +46,7 @@ use sqlx::{Row, SqlitePool};
 
 use super::autopilot::{Autopilot, ConcurrencyPolicy, ExecutionMode};
 use super::autopilot_rule_version::AutopilotRuleVersionRepo;
+use super::issue_subscriber::SubscribeReason;
 use super::task::{NewTask, TaskRepo};
 
 /// HOW a run's accountable human is resolved — multica's attribution fork
@@ -353,6 +354,44 @@ pub async fn fire_autopilot_tick_with_attribution(
             .bind(&autopilot.id)
             .execute(&mut *tx)
             .await?;
+
+            // multica parity #27: the rule's standing subscriber list
+            // auto-subscribes every issue the rule SPAWNS. In-transaction,
+            // because a spawned issue that commits without its subscribers is
+            // the notification bug the table exists to fix.
+            //
+            // The agent creator is subscribed FIRST (first-reason-wins, so an
+            // agent that is both creator and subscriber keeps `creator`). The
+            // raw INSERT above bypasses `IssueRepo::insert`, so its
+            // `auto_subscribe_on_create` never runs on this path — without this
+            // statement a spawned issue has an EMPTY subscriber set.
+            sqlx::query(
+                "INSERT OR IGNORE INTO issue_subscriber \
+                 (issue_id, actor_type, actor_id, reason, created_at) \
+                 VALUES (?, 'agent', ?, ?, ?)",
+            )
+            .bind(&issue_id)
+            .bind(&autopilot.agent_id)
+            .bind(SubscribeReason::Creator.as_db_str())
+            .bind(now)
+            .execute(&mut *tx)
+            .await?;
+
+            // Then the standing list, in ONE statement — no N+1, no round-trip
+            // per subscriber.
+            sqlx::query(
+                "INSERT OR IGNORE INTO issue_subscriber \
+                 (issue_id, actor_type, actor_id, reason, created_at) \
+                 SELECT ?, actor_type, actor_id, ?, ? \
+                 FROM autopilot_subscriber WHERE autopilot_id = ?",
+            )
+            .bind(&issue_id)
+            .bind(SubscribeReason::Autopilot.as_db_str())
+            .bind(now)
+            .bind(&autopilot.id)
+            .execute(&mut *tx)
+            .await?;
+
             Some(issue_id)
         }
     };
