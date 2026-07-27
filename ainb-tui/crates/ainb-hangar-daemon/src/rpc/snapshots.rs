@@ -42,7 +42,7 @@ use ainb_hangar_proto::events::{
     CommentRow, InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
 use ainb_hangar_proto::snapshots::{
-    AgentSkillsListResult, SkillDetail, SkillsSyncResult, TimelineEntryRow,
+    AgentSkillsListResult, MentionOutcomeRow, SkillDetail, SkillsSyncResult, TimelineEntryRow,
 };
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
@@ -2945,6 +2945,17 @@ pub async fn auto_subscribe(
     }
 }
 
+/// Write one comment on an issue, workspace-scoped, and return its wire row.
+///
+/// Returns `None` when `(issue_id, workspace_id)` matched no issue — an unknown
+/// id or a foreign tenant's — so the caller can reject rather than ack a write
+/// that never happened. `parent_id` threads the comment under an existing one
+/// (migration 0067); a malformed id is dropped from the WIRE row rather than
+/// failing the write.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
 pub async fn comment_add(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
@@ -3007,47 +3018,76 @@ pub async fn comment_add(
     }))
 }
 
-/// Resolve the `@handle` mentions in a just-committed comment to agents in
-/// `workspace_id`, and enqueue an issue task for each that matches (e38.7).
+/// Route the `@`-mentions of a just-committed comment and return one wire row
+/// per addressed target (multica parity #2-rest).
 ///
-/// This is the comment-triggered task-spawn path: the `comment_add` handler
-/// calls it AFTER the comment commits, so a user `@`-mentioning an agent in a
-/// comment spawns that agent's task on the comment's issue. The trigger fires
-/// after the write so a spawn-side failure can never roll back (or lose) the
-/// comment — matching the bead's "fires from inside `comment_add` after the
-/// comment commits" contract and side-stepping the reference's mid-write expansion race.
-///
-/// Every resolved target is GATED (gap #8, multica
-/// `resolveMentionedAgentCommentTriggers`): the comment's `author` is mapped to an
-/// effective invoker ([`effective_mention_invoker`]) and an agent that invoker may
-/// not invoke is skipped exactly like an unresolvable handle — no task row, and no
-/// error. The gate runs BEFORE any other per-agent state is consulted, so a caller
-/// who cannot invoke an agent learns nothing about it from the trigger; and it is a
-/// per-target skip, so a denied `@handle` never suppresses the others in the same
-/// comment.
-///
-/// Resolution is by agent **name**, **workspace-scoped**: the candidate set is
-/// [`AgentRepo::list_by_workspace`] for the comment's workspace, so a foreign
-/// tenant's agent sharing the handle never gets a task. An unknown handle resolves
-/// to no agent and is silently ignored — never an error. Each matched agent is
-/// enqueued through the ordinary [`TaskRepo::insert`] path (no claim/dispatch
-/// logic is duplicated), bound to the comment's `issue_id` with the agent's
-/// `runtime_id` (`NOT NULL` + FK-enforced, so a resolved agent always has one).
-/// A duplicate enqueue while the agent still holds a *pending* (`queued` /
-/// `dispatched`) task on this issue — the per-`(issue, agent)` unique index — is
-/// coalesced, not an error, so re-mentioning is idempotent. Once that task has
-/// advanced to `running` the index no longer guards it, so a fresh mention
-/// enqueues a new task (intended: a follow-up mention after work started is a
-/// new request).
-///
-/// Returns the agent ids that actually got a task enqueued (for the caller's
-/// logging / future event push), empty when no mention resolved.
+/// A thin adapter: every decision lives in
+/// [`ainb_hangar_store::service::mention::route`], which is also what the
+/// `comment_mention_preview` dry run drives, so a preview can never disagree
+/// with the write it previews.
 ///
 /// # Errors
 ///
-/// Returns a [`sqlx::Error`] only on an unexpected store fault — the expected
-/// duplicate-pending-task case is coalesced inline by the unique index, not
-/// surfaced, so a single repeated mention never poisons the whole comment.
+/// Returns a [`sqlx::Error`] only on a store fault that is not attributable to
+/// one target — a per-target fault is reported as that target's
+/// `blocked` / `internal_error` row and the other targets still route.
+pub async fn route_comment_mentions(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+    issue_id: &str,
+    comment_id: Option<&str>,
+    parent_comment_id: Option<&str>,
+    author: &ainb_hangar_core::actor::ActorRef,
+    body: &str,
+    dry_run: bool,
+) -> Result<Vec<MentionOutcomeRow>, sqlx::Error> {
+    use ainb_hangar_store::service::mention::{MentionRouteRequest, route};
+
+    let rows = route(
+        pool,
+        idgen,
+        clock,
+        &MentionRouteRequest {
+            workspace_id,
+            issue_id,
+            comment_id,
+            parent_comment_id,
+            author,
+            body,
+            dry_run,
+        },
+    )
+    .await?;
+    Ok(rows.into_iter().map(to_wire).collect())
+}
+
+/// Map one store routing row onto the wire row.
+fn to_wire(row: ainb_hangar_store::service::mention::MentionRouteRow) -> MentionOutcomeRow {
+    MentionOutcomeRow {
+        target_type: row.target_type,
+        target_id: row.target_id,
+        handle: row.handle,
+        outcome: row.outcome.as_str().to_string(),
+        reason: row.reason.map(|r| r.as_db_str().to_string()).unwrap_or_default(),
+        task_id: row.task_id,
+        detail: row.detail.unwrap_or_default(),
+        source: row.source.as_str().to_string(),
+    }
+}
+
+/// The agent ids a comment's mentions actually ENQUEUED a task for (e38.7).
+///
+/// Kept as the historical name + shape over
+/// [`route_comment_mentions`] so the existing call sites and the in-source
+/// regression tests below — which are the mention tests the `--lib` job runs —
+/// keep exercising the same contract they always did. New callers that need the
+/// per-target outcome codes should use [`route_comment_mentions`] directly.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on an unexpected store fault.
 pub async fn spawn_mention_tasks(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
@@ -3058,153 +3098,24 @@ pub async fn spawn_mention_tasks(
     author: &ainb_hangar_core::actor::ActorRef,
     body: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
-    use crate::mentions::parse_mentions;
-    use ainb_hangar_store::repo::agent::AgentRepo;
-    use ainb_hangar_store::repo::task::NewTask;
-
-    let handles = parse_mentions(body);
-    if handles.is_empty() {
-        return Ok(Vec::new());
-    }
-    // gap #8 — the EFFECTIVE invoker the invocation gate judges each mention target
-    // by (multica `resolveMentionedAgentCommentTriggers`, `comment.go:2323`/`:2365`).
-    let (invoker_kind, invoker_id) = effective_mention_invoker(pool, workspace_id, author).await?;
-    // The workspace's agents are the only resolution candidates: a foreign
-    // tenant's agent sharing a handle is never in this list, so it cannot be
-    // mention-triggered here.
-    let agents = AgentRepo::list_by_workspace(pool, workspace_id).await?;
-    let now = clock.now_ms();
-    // One mention event is one run GENERATION (migration 0039, tcp 8ln): every agent
-    // fanned out from this comment shares it, and it scopes the card-state folds to
-    // this run so a prior run's terminal rows on the issue do not poison it. Minted
-    // once, before the fan-out loop, exactly like the squad fan-out.
-    let generation = TaskRepo::next_generation_for_issue(pool, issue_id).await?;
-    // 0056 ORIGIN PROVENANCE: every task this comment spawns is stamped
-    // `('comment_mention', <comment.id>)` — hangar's structural analogue of
-    // multica's `quick_create` provenance. The dispatcher hands it to the agent
-    // child, so an issue the agent creates mid-run is attributable back to the
-    // comment that asked for it.
-    let mention_origin = IssueOrigin::comment_mention(comment_id).map_err(|e| {
-        sqlx::Error::Protocol(format!(
-            "comment {comment_id} is unusable as an origin id: {e}"
-        ))
-    })?;
-    let mut spawned = Vec::new();
-    for handle in &handles {
-        // Resolve by name; an unknown handle simply matches no agent (ignored).
-        let Some(agent) = agents.iter().find(|a| &a.name == handle) else {
-            continue;
-        };
-        // gap #8 — the invocation gate, FIRST: multica checks invocability before
-        // any other per-agent state is read, so a caller who cannot invoke an agent
-        // never learns its archived / runtime state from the trigger's behaviour
-        // (`comment.go:2364`, enumeration-safety). A refusal is a per-target
-        // `continue`, never an early return: one denied `@handle` must not suppress
-        // the other mentions in the same comment. Denied ⇒ NO task row.
-        if !AgentRepo::can_invoke(pool, agent, invoker_kind, invoker_id.as_deref()).await? {
-            tracing::debug!(
-                agent = %agent.id,
-                handle = %handle,
-                "mention dispatch refused: invocation not allowed"
-            );
-            continue;
-        }
-        let task = NewTask {
-            id: idgen.new_ulid(),
-            workspace_id: workspace_id.to_string(),
-            runtime_id: agent.runtime_id.clone(),
-            agent_id: agent.id.clone(),
-            issue_id: Some(issue_id.to_string()),
-            work_dir: None,
-            // A mention is a direct, user-initiated ask: default urgency (P3),
-            // drained FIFO among equals — the same default the autopilot path uses.
-            priority: 0,
-            created_at: now,
-            autopilot_run_id: None,
-            generation,
-        };
-        match TaskRepo::insert(pool, &task).await {
-            Ok(_) => {
-                // Stamped per spawned task, INSIDE the per-handle loop and AFTER
-                // the invocation gate: a refused mention writes no row and
-                // therefore no provenance.
-                TaskRepo::set_origin(pool, &task.id, &mention_origin).await?;
-                // multica parity #22: being @-mentioned subscribes you.
-                if let Ok(actor) =
-                    ainb_hangar_core::actor::ActorRef::new(ActorKind::Agent, agent.id.clone())
-                {
-                    auto_subscribe(
-                        pool,
-                        workspace_id,
-                        issue_id,
-                        &actor,
-                        SubscribeReason::Mentioned,
-                        now,
-                    )
-                    .await;
-                }
-                spawned.push(agent.id.clone());
-            }
-            // The agent already has a pending task on this issue (the per-(issue,
-            // agent) unique index): coalesce, don't error. The trigger is
-            // idempotent — re-mentioning an already-queued agent is a no-op.
-            Err(e) if is_unique_violation(&e) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(spawned)
-}
-
-/// The actor id the local TUI stamps on everything it authors (`member:me`).
-///
-/// It is a PLACEHOLDER, not a `user.id`: the plugin has no identity of its own and
-/// the daemon socket is the local operator's. `handle_issue_create` mints the same
-/// ref for wizard-created issues.
-pub(crate) const LOCAL_OPERATOR_MEMBER_ID: &str = "me";
-
-/// Resolve a comment author to the EFFECTIVE invoking identity the gap #8
-/// invocation gate judges its `@`-mention targets by.
-///
-/// - a `member` author naming a REAL user id → that user (the multi-user case the
-///   allow-list exists for);
-/// - the local-operator placeholder [`LOCAL_OPERATOR_MEMBER_ID`] → the workspace
-///   OWNER, exactly like `run_card`'s "no explicit invoker ⇒ owner" default. The
-///   local TUI stamps `member:me` on every comment it composes, so without this the
-///   gate would deny the single operator access to their own private agents — a
-///   regression with no security gain, since that socket IS the operator's. An
-///   owner-less workspace resolves to `""`, which matches no `owner_id` and fails
-///   closed, the same shape `run_card` has;
-/// - an `agent` author → `(Agent, None)`: hangar has no `originator_user_id`
-///   column (multica 184/185 is a separate gap), so an agent-authored mention is
-///   the UNATTRIBUTED A2A case — it fails closed for `private` and `member`-target
-///   agents and admits only a `public_to workspace` target (`workspaceBroad`).
-async fn effective_mention_invoker(
-    pool: &SqlitePool,
-    workspace_id: &str,
-    author: &ainb_hangar_core::actor::ActorRef,
-) -> Result<(ainb_hangar_core::actor::ActorKind, Option<String>), sqlx::Error> {
-    use ainb_hangar_core::actor::ActorKind;
-    use ainb_hangar_core::ids::WorkspaceId;
-
-    if author.kind() != ActorKind::Member {
-        return Ok((ActorKind::Agent, None));
-    }
-    if author.id() != LOCAL_OPERATOR_MEMBER_ID {
-        return Ok((ActorKind::Member, Some(author.id().to_string())));
-    }
-    let owner = match WorkspaceId::from_str(workspace_id.to_string()) {
-        Ok(ws) => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, &ws)
-            .await?
-            .unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-    Ok((ActorKind::Member, Some(owner)))
-}
-
-/// Whether a `sqlx` error is a UNIQUE-constraint violation (the per-`(issue,
-/// agent)` pending-task index coalescing a duplicate mention enqueue).
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+    let rows = route_comment_mentions(
+        pool,
+        idgen,
+        clock,
+        workspace_id,
+        issue_id,
+        Some(comment_id),
+        None,
+        author,
+        body,
+        false,
+    )
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.target_type == "agent" && r.outcome == "queued")
+        .map(|r| r.target_id)
+        .collect())
 }
 
 /// Snapshot the registered runtimes of `workspace` for the daemon-health pane.
@@ -3297,7 +3208,7 @@ mod issue_states_contract_tests {
 
 #[cfg(test)]
 mod mention_spawn_tests {
-    use super::spawn_mention_tasks;
+    use super::{route_comment_mentions, spawn_mention_tasks};
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
     use ainb_hangar_core::clock::SystemClock;
     use ainb_hangar_core::idgen::SystemIdGen;
@@ -3663,7 +3574,11 @@ mod mention_spawn_tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
 
-        let me = ActorRef::new(ActorKind::Member, super::LOCAL_OPERATOR_MEMBER_ID).unwrap();
+        let me = ActorRef::new(
+            ActorKind::Member,
+            ainb_hangar_store::service::mention::LOCAL_OPERATOR_MEMBER_ID,
+        )
+        .unwrap();
         let spawned = spawn_mention_tasks(
             store.pool(),
             &SystemIdGen,
@@ -3679,6 +3594,372 @@ mod mention_spawn_tests {
 
         assert_eq!(spawned, vec!["agent-1".to_string()]);
         assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// Route helper with the defaults the daemon's `comment_add` uses.
+    async fn route_for(
+        store: &Store,
+        author: &ActorRef,
+        body: &str,
+    ) -> Vec<ainb_hangar_proto::snapshots::MentionOutcomeRow> {
+        route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            Some("c-1"),
+            None,
+            author,
+            body,
+            false,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// **2-rest** — the router reports a per-target OUTCOME, not just the ids it
+    /// spawned. A plain resolved mention is `queued`.
+    #[tokio::test]
+    async fn a_resolved_mention_reports_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(&store, &owner(), "@claude-agent please do X").await;
+        assert_eq!(rows.len(), 1, "one row per target: {rows:?}");
+        assert_eq!(rows[0].outcome, "queued");
+        assert_eq!(rows[0].reason, "queued");
+        assert_eq!(rows[0].target_type, "agent");
+        assert_eq!(rows[0].target_id, "agent-1");
+        assert_eq!(rows[0].source, "explicit");
+        assert!(rows[0].task_id.is_some(), "the queued row names its task");
+    }
+
+    /// **2-rest** — a REPEAT mention against a still-pending task is reported as
+    /// `coalesced` instead of vanishing into a swallowed unique violation, and
+    /// the pending task is re-pointed at the NEWER comment.
+    #[tokio::test]
+    async fn a_repeat_mention_reports_coalesced_and_repoints_the_trigger() {
+        use ainb_hangar_store::repo::task::TaskRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let first = route_for(&store, &owner(), "@claude-agent do X").await;
+        assert_eq!(first[0].outcome, "queued");
+        let task_id = first[0].task_id.clone().unwrap();
+        assert_eq!(
+            TaskRepo::trigger_comment_id(store.pool(), &task_id).await.unwrap(),
+            Some("c-1".to_string()),
+            "the queued task records the comment that summoned it"
+        );
+
+        let second = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            Some("c-2"),
+            None,
+            &owner(),
+            "@claude-agent again",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert_eq!(second[0].outcome, "coalesced");
+        assert_eq!(second[0].reason, "coalesced");
+        assert_eq!(count_for_issue3(&store).await, 1, "still one task");
+        assert_eq!(
+            TaskRepo::trigger_comment_id(store.pool(), &task_id).await.unwrap(),
+            Some("c-2".to_string()),
+            "merge-into-pending re-points the task at the NEWER comment"
+        );
+    }
+
+    /// **2-rest** — a refusal now carries a CODE. Before this item the same call
+    /// returned an empty spawn list with no way to tell "denied" from "nobody
+    /// was mentioned".
+    #[tokio::test]
+    async fn a_refused_mention_reports_blocked_invocation_not_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let rows = route_for(&store, &bob, "@claude-agent please do X").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "blocked");
+        assert_eq!(rows[0].reason, "invocation_not_allowed");
+        assert_eq!(count_for_issue3(&store).await, 0, "no task row is written");
+    }
+
+    /// **2-rest** — an agent's own comment never re-triggers itself
+    /// (multica's self-loop guard), and says so.
+    #[tokio::test]
+    async fn an_agent_mentioning_itself_is_suppressed_with_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let itself = ActorRef::new(ActorKind::Agent, "agent-1").unwrap();
+        let rows = route_for(&store, &itself, "@claude-agent keep going").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "blocked");
+        assert_eq!(rows[0].reason, "self_trigger_suppressed");
+        assert_eq!(count_for_issue3(&store).await, 0);
+    }
+
+    /// **2-rest** — one denied handle produces its OWN row rather than
+    /// suppressing the allowed one: two rows, one task.
+    #[tokio::test]
+    async fn one_denied_handle_never_suppresses_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+        seed_second_agent(&store, "agent-priv", "private-bot").await;
+        allow_member(&store, "agent-1", "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let rows = route_for(&store, &bob, "@private-bot and @claude-agent do X").await;
+        assert_eq!(rows.len(), 2, "one row per target: {rows:?}");
+        assert_eq!(rows[0].outcome, "blocked", "{rows:?}");
+        assert_eq!(rows[0].reason, "invocation_not_allowed");
+        assert_eq!(rows[1].outcome, "queued", "{rows:?}");
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// **2-rest** — the LINK form addresses the same agent by id and produces the
+    /// same task the bare form does.
+    #[tokio::test]
+    async fn the_link_form_spawns_the_same_task_the_bare_form_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(
+            &store,
+            &owner(),
+            "[@Claude](mention://agent/agent-1) ship it",
+        )
+        .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "queued");
+        assert_eq!(rows[0].target_id, "agent-1");
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// **2-rest** — mentioning a HUMAN routes to that human: zero tasks, one
+    /// inbox entry addressed to them, and a `notified` outcome. This is the leg
+    /// that did not exist at all before this item.
+    #[tokio::test]
+    async fn mentioning_a_human_notifies_them_and_spawns_no_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        // A member who is NOT the issue creator, so the subscription reason this
+        // asserts on is the mention's own and not a pre-existing `creator` row
+        // (the subscriber repo is first-reason-wins).
+        seed_plain_member(&store, "bob").await;
+
+        let rows = route_for(
+            &store,
+            &owner(),
+            "[@Bob](mention://member/bob) can you look?",
+        )
+        .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "notified");
+        assert_eq!(rows[0].target_type, "member");
+        assert_eq!(rows[0].target_id, "bob");
+        assert_eq!(
+            count_for_issue3(&store).await,
+            0,
+            "a human mention is not a run"
+        );
+
+        let inbox: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inbox_entry \
+             WHERE recipient_type = 'member' AND recipient_id = 'bob' \
+               AND event = 'mention' AND subject_id = 'issue-3'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(inbox, 1, "the mention landed in that human's inbox");
+
+        let subscribed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM issue_subscriber \
+             WHERE issue_id = 'issue-3' AND actor_type = 'member' \
+               AND actor_id = 'bob' AND reason = 'mentioned'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(subscribed, 1, "being @-mentioned subscribes you");
+    }
+
+    /// **2-rest** — the bare-handle form finds the human too (`@alice` is the
+    /// email local part), since hangar has no `handle` column.
+    #[tokio::test]
+    async fn a_bare_handle_resolves_to_a_human_when_no_agent_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(&store, &owner(), "@alice thoughts?").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "notified");
+        assert_eq!(rows[0].target_id, "user-1");
+    }
+
+    /// **2-rest** — an `issue` cross-reference is understood and reported as
+    /// `ignored`, never treated as a trigger.
+    #[tokio::test]
+    async fn an_issue_cross_reference_is_ignored_not_triggered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(&store, &owner(), "see [#1](mention://issue/issue-1)").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "ignored");
+        assert_eq!(rows[0].target_type, "issue");
+        assert_eq!(count_for_issue3(&store).await, 0);
+    }
+
+    /// **2-rest** — a mention-less comment on an AGENT-ASSIGNED issue falls back
+    /// to the assignee (multica's implicit chain), tagged `assignee`.
+    #[tokio::test]
+    async fn a_mentionless_comment_falls_back_to_the_agent_assignee() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        // issue-1 is the fixture's agent-assigned card; issue-3 is unassigned.
+        let rows = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-1",
+            Some("c-1"),
+            None,
+            &owner(),
+            "any update?",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].source, "assignee");
+        assert_eq!(rows[0].target_id, "agent-1");
+
+        // The unassigned issue has nowhere to fall back to: zero rows.
+        let none = route_for(&store, &owner(), "any update?").await;
+        assert!(
+            none.is_empty(),
+            "no parent, no assignee ⇒ nothing: {none:?}"
+        );
+    }
+
+    /// **2-rest** — the DRY RUN reports the identical outcome codes the write
+    /// then produces, and writes nothing at all.
+    #[tokio::test]
+    async fn a_dry_run_matches_the_write_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        async fn counts(store: &Store) -> (i64, i64, i64) {
+            let t: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            let i: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_entry")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            let s: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_subscriber")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            (t, i, s)
+        }
+
+        let body = "[@Alice](mention://member/user-1) and @claude-agent go";
+        let before = counts(&store).await;
+        let preview = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            None,
+            None,
+            &owner(),
+            body,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(counts(&store).await, before, "a preview writes NOTHING");
+
+        let written = route_for(&store, &owner(), body).await;
+        let codes = |rows: &[ainb_hangar_proto::snapshots::MentionOutcomeRow]| {
+            rows.iter()
+                .map(|r| {
+                    (
+                        r.target_type.clone(),
+                        r.target_id.clone(),
+                        r.outcome.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            codes(&preview),
+            codes(&written),
+            "the preview must report exactly what the write then does"
+        );
+        assert_ne!(counts(&store).await, before, "the write DOES write");
+    }
+
+    /// **2-rest** — the private-agent gate is IDENTICAL on the preview path, so
+    /// a preview can never leak an agent's readiness to someone who may not
+    /// invoke it.
+    #[tokio::test]
+    async fn the_preview_applies_the_private_gate_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let preview = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            None,
+            None,
+            &bob,
+            "@claude-agent go",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.len(), 1, "{preview:?}");
+        assert_eq!(preview[0].outcome, "blocked");
+        assert_eq!(preview[0].reason, "invocation_not_allowed");
     }
 }
 

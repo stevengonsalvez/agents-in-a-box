@@ -804,6 +804,7 @@ async fn handle(
             handle_issue_metadata(pool, req, events, MetaOp::Delete).await
         }
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
+        methods::HANGAR_COMMENT_MENTION_PREVIEW => handle_comment_mention_preview(pool, req).await,
         methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
         methods::HANGAR_AGENT_DELETE => handle_agent_delete(pool, req).await,
         methods::HANGAR_AGENT_UPDATE => handle_agent_update(pool, req).await,
@@ -4111,7 +4112,10 @@ async fn handle_comment_add(
             params.issue_id
         )));
     };
-    // A committed insert announces the new comment to subscribers.
+    // A committed insert announces the new comment to subscribers. The event
+    // carries the COMMENT only: the per-target mention outcomes ride the RPC
+    // result back to the caller that wrote it, never the broadcast, so the
+    // invocation gate's refusals are not fanned out to the whole workspace.
     events.emit(ws.as_str(), HangarEvent::CommentAdded(row.clone()));
     // e38.7 — the collaboration trigger: now that the comment has committed,
     // parse its @-mentions and enqueue a task for every agent that resolves in
@@ -4121,7 +4125,7 @@ async fn handle_comment_add(
     // failed trigger must not turn a successful comment into an RPC error. The
     // AUTHOR rides through as the gap #8 effective invoker: a mention of an agent
     // the author may not invoke spawns nothing (the comment still lands).
-    if let Err(e) = snapshots::spawn_mention_tasks(
+    let mention_outcomes = match snapshots::route_comment_mentions(
         pool,
         &SystemIdGen,
         &SystemClock,
@@ -4129,15 +4133,88 @@ async fn handle_comment_add(
         row.issue_id.as_str(),
         // 0056: the COMMITTED comment's id is this run's provenance
         // (`('comment_mention', <comment.id>)`).
-        row.id.as_str(),
+        Some(row.id.as_str()),
+        params.parent_id.as_deref(),
         &author,
         &params.body,
+        false,
     )
     .await
     {
-        tracing::warn!(error = %e, "comment mention task spawn failed");
+        Ok(rows) => rows,
+        // The comment already committed, so a routing fault must not turn a
+        // successful comment into an RPC error. It is no longer SILENT either:
+        // the caller gets one `blocked` / `internal_error` row, so "nothing
+        // happened" and "the router fell over" are distinguishable.
+        Err(e) => {
+            tracing::warn!(error = %e, "comment mention routing failed");
+            vec![ainb_hangar_proto::snapshots::MentionOutcomeRow {
+                target_type: "agent".to_string(),
+                target_id: String::new(),
+                handle: String::new(),
+                outcome: "blocked".to_string(),
+                reason: ainb_hangar_core::dispatch_reason::DispatchReason::InternalError
+                    .as_db_str()
+                    .to_string(),
+                task_id: None,
+                detail: "mention routing failed".to_string(),
+                source: String::new(),
+            }]
+        }
+    };
+    to_value(&ainb_hangar_proto::snapshots::CommentAddResult {
+        comment: row,
+        mention_outcomes,
+    })
+}
+
+/// Dispatch `hangar/comment_mention_preview` (multica parity #2-rest): report
+/// what the mention router WOULD do for a draft comment, writing nothing.
+///
+/// Drives the SAME `service::mention::route` the write drives, with `dry_run`
+/// set — that shared path is the contract. It therefore applies the identical
+/// visibility / invocation gate, so a preview can never leak a private agent's
+/// readiness, and can never disagree with the write it previews.
+///
+/// Read-only, but workspace-scoped like the mutating handlers: a mistyped
+/// workspace is `INVALID_PARAMS`, never a silently empty preview that a caller
+/// would read as "this mentions nobody".
+async fn handle_comment_mention_preview(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::CommentMentionPreviewParams =
+        parse_params(req, "{ workspace_id, issue_id, author, body, parent_id? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.body.trim().is_empty() {
+        return Err(invalid_params("comment body must not be empty"));
     }
-    to_value(&row)
+    let author = ActorRef::from_str(&params.author).map_err(|e| {
+        invalid_params(&format!(
+            "author must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let mention_outcomes = snapshots::route_comment_mentions(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        ws.as_str(),
+        &params.issue_id,
+        // No comment exists yet, which is also the interlock that makes the run
+        // unconditionally dry inside the router.
+        None,
+        params.parent_id.as_deref(),
+        &author,
+        &params.body,
+        true,
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::CommentMentionPreviewResult { mention_outcomes })
 }
 
 /// Dispatch `hangar/agent_update` (e38.15): edit one agent's config knobs and
