@@ -878,6 +878,12 @@ pub struct InboxEntryRow {
     pub subject_id: String,
     /// A short pre-rendered human line for the list row.
     pub summary: String,
+    /// The actor this entry is addressed to, as `"member:<id>"` / `"agent:<id>"`
+    /// (store migration 0060, multica parity #1). Every entry targets exactly one
+    /// actor and only that actor's reads return it. Append-only: defaults to the
+    /// empty string when an older daemon omits the field.
+    #[serde(default)]
+    pub recipient: String,
     /// Creation timestamp (epoch milliseconds) — drives ordering + age.
     pub created_at: i64,
     /// When the entry was marked read (epoch milliseconds), or `None` when UNREAD.

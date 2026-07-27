@@ -33,6 +33,25 @@ pub struct WorkspaceScopedParams {
     pub workspace_id: String,
 }
 
+/// Params for [`crate::methods::HANGAR_INBOX_LIST`] and
+/// [`crate::methods::HANGAR_INBOX_MARK_READ`]: the workspace plus the actor
+/// whose inbox is being read / swept (store migration 0060, multica parity #1).
+///
+/// `recipient` is the canonical `"member:<id>"` / `"agent:<id>"` actor form. It
+/// is append-only-optional: a surface written before 0060 omits it and gets the
+/// LOCAL HUMAN's inbox (`member:me`) — never another actor's, and never the
+/// union of everyone's, which would defeat the per-actor scoping. A malformed
+/// value is rejected with `INVALID_PARAMS` rather than silently defaulted, so a
+/// typo can never read someone else's inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxScopedParams {
+    /// The workspace whose inbox to read / sweep.
+    pub workspace_id: String,
+    /// The actor whose inbox this is; `None` means the local human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
+}
+
 /// Params for [`crate::methods::WORKSPACE_SUBSCRIBE`] — the workspace to stream,
 /// plus an optional resume cursor (T1 event-bus catch-up).
 ///
@@ -3976,5 +3995,49 @@ mod tests {
         // An empty result decodes from an absent `entries` key.
         let empty: IssueTimelineResult = serde_json::from_str("{}").unwrap();
         assert!(empty.entries.is_empty());
+    }
+
+    /// The inbox params are append-only: a pre-0060 caller that sends only
+    /// `workspace_id` still decodes (recipient absent = the local human), and a
+    /// `None` recipient is omitted from the encoded frame entirely.
+    #[test]
+    fn inbox_scoped_params_recipient_is_append_only_optional() {
+        let legacy: InboxScopedParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1"}"#).unwrap();
+        assert_eq!(legacy.recipient, None, "an omitted recipient is absent");
+
+        let scoped: InboxScopedParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","recipient":"agent:a1"}"#).unwrap();
+        assert_eq!(scoped.recipient.as_deref(), Some("agent:a1"));
+
+        let encoded = serde_json::to_string(&legacy).unwrap();
+        assert!(
+            !encoded.contains("recipient"),
+            "a None recipient is skipped on the wire: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<InboxScopedParams>(&encoded).unwrap(),
+            legacy
+        );
+    }
+
+    /// `InboxEntryRow.recipient` is append-only too: an older daemon's frame
+    /// without the field still decodes, and a fresh one round-trips it.
+    #[test]
+    fn inbox_entry_row_recipient_round_trips_and_defaults() {
+        let legacy: crate::events::InboxEntryRow = serde_json::from_str(
+            r#"{"id":"ie-1","kind":"issue","event":"issue_created","subject_id":"i1","summary":"s","created_at":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.recipient, "", "an older daemon omits the recipient");
+
+        let mut fresh = legacy.clone();
+        fresh.recipient = "member:me".into();
+        let encoded = serde_json::to_string(&fresh).unwrap();
+        assert!(encoded.contains("\"recipient\":\"member:me\""), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<crate::events::InboxEntryRow>(&encoded).unwrap(),
+            fresh
+        );
     }
 }
