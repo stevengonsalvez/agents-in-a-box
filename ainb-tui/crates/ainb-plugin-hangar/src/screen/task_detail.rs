@@ -45,9 +45,7 @@
 
 use ainb_hangar_core::acceptance::{AcceptanceCriterion, checked_count, legacy_placeholder_id};
 use ainb_hangar_core::ids::TaskId;
-use ainb_hangar_proto::events::{
-    HangarEvent, IssueLinkRow, IssueRow, MessageKind, ReactionRow, TaskResult,
-};
+use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -1538,6 +1536,8 @@ pub const fn color_for(kind: MessageKind) -> ainb_plugin_sdk::Color {
 
 #[cfg(test)]
 mod card_tests {
+    use ainb_hangar_proto::events::{IssueLinkRow, ReactionRow};
+
     use super::*;
     use ainb_hangar_core::ids::{IssueId, TaskId};
     use ainb_plugin_sdk::WireBuffer;
