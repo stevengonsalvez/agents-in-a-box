@@ -835,6 +835,67 @@ pub enum MemberCommand {
     SetRole(MemberSetRoleArgs),
     /// Remove a member from the workspace (the user row survives).
     Remove(MemberRemoveArgs),
+    /// Invite an email to join (pending until accepted — parity #18).
+    Invite(MemberInviteArgs),
+    /// List the workspace's live pending invitations.
+    Invites(MemberInvitesArgs),
+    /// Accept an invitation addressed to you (this is what adds the member).
+    Accept(MemberInviteActArgs),
+    /// Decline an invitation addressed to you (no member is created).
+    Decline(MemberInviteActArgs),
+    /// Withdraw a still-pending invitation (admin-side).
+    Revoke(MemberInviteRevokeArgs),
+}
+
+/// Arguments for `hangar member invite` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInviteArgs {
+    /// The invitee's email. Normalised (trimmed + lowercased) by the store.
+    #[arg(long)]
+    pub email: String,
+    /// The role the invitee will hold on accept: `admin` or `member` (default
+    /// `member`). `owner` parses but is rejected — ownership is transferred,
+    /// never invited.
+    #[arg(long, value_enum, default_value_t = MemberRoleArg::Member)]
+    pub role: MemberRoleArg,
+    /// Email of the inviting member. Defaults to the bootstrapped workspace
+    /// owner. Must already be a member of the workspace.
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Workspace slug to invite into. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member invites` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInvitesArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member accept` / `hangar member decline` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInviteActArgs {
+    /// The invitation id to act on.
+    pub invitation_id: String,
+    /// The acting human's email. REQUIRED, not defaulted: hangar has no session,
+    /// so the identity must be explicit or the ownership gate is theatre.
+    #[arg(long = "as")]
+    pub acting_as: String,
+}
+
+/// Arguments for `hangar member revoke` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInviteRevokeArgs {
+    /// The invitation id to withdraw.
+    pub invitation_id: String,
+    /// Workspace slug the invitation belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar member add`.
@@ -3298,6 +3359,176 @@ async fn dispatch_member(cmd: MemberCommand, format: OutputFormat) -> Result<()>
         MemberCommand::List(args) => run_member_list(&store, args, format).await,
         MemberCommand::SetRole(args) => run_member_set_role(&store, args).await,
         MemberCommand::Remove(args) => run_member_remove(&store, args).await,
+        MemberCommand::Invite(args) => run_member_invite(&store, args).await,
+        MemberCommand::Invites(args) => run_member_invites(&store, args, format).await,
+        MemberCommand::Accept(args) => run_member_invite_accept(&store, args).await,
+        MemberCommand::Decline(args) => run_member_invite_decline(&store, args).await,
+        MemberCommand::Revoke(args) => run_member_invite_revoke(&store, args).await,
+    }
+}
+
+/// `hangar member invite`: issue a PENDING invitation (parity #18).
+///
+/// Unlike [`run_member_add`] (the instant join) this writes no member — the
+/// membership only appears when the invitee runs `member accept`. `--from`
+/// resolves the inviter's email to a `user.id`; an unknown address is an error
+/// naming it, so a typo never silently invites "from" nobody.
+async fn run_member_invite(store: &Store, args: MemberInviteArgs) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let inviter_email = args
+        .from
+        .unwrap_or_else(|| ainb_hangar_store::bootstrap::DEFAULT_OWNER_EMAIL.to_string());
+    let inviter_id = user_id_for_email(store, &inviter_email).await?;
+
+    let inv = InvitationRepo::create(
+        store.pool(),
+        &SystemClock,
+        &ws,
+        &inviter_id,
+        &args.email,
+        args.role.to_repo(),
+    )
+    .await
+    .map_err(invitation_cli_err)?;
+    println!(
+        "invited {} as {} (invitation {}, expires {})",
+        inv.invitee_email,
+        inv.role,
+        inv.id,
+        fmt_epoch_ms_utc(inv.expires_at)
+    );
+    Ok(())
+}
+
+/// `hangar member invites`: list the workspace's LIVE pending invitations.
+///
+/// Sweeps past-due rows to `expired` first, so what prints is what can still be
+/// accepted. A missing / unknown workspace lists as empty, mirroring
+/// [`run_member_list`].
+async fn run_member_invites(
+    store: &Store,
+    args: MemberInvitesArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(store.pool())
+            .await
+            .context("look up workspace by slug")?,
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_invitation_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    InvitationRepo::expire_stale(store.pool(), &SystemClock, &ws)
+        .await
+        .context("expire stale invitations")?;
+    let invites = InvitationRepo::list_pending(store.pool(), &SystemClock, &ws)
+        .await
+        .context("list pending invitations")?;
+    render_invitation_list(&invites, format);
+    Ok(())
+}
+
+/// `hangar member accept`: the invitee joins. This is the verb that adds the
+/// member row (the invitation and the membership land in one transaction).
+async fn run_member_invite_accept(store: &Store, args: MemberInviteActArgs) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let member = InvitationRepo::accept(
+        store.pool(),
+        &SystemClock,
+        &args.invitation_id,
+        &args.acting_as,
+    )
+    .await
+    .map_err(invitation_cli_err)?;
+    println!(
+        "{} joined as {} (user {})",
+        member.email, member.role, member.user_id
+    );
+    Ok(())
+}
+
+/// `hangar member decline`: the invitee refuses. No member is created.
+async fn run_member_invite_decline(store: &Store, args: MemberInviteActArgs) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    InvitationRepo::decline(
+        store.pool(),
+        &SystemClock,
+        &args.invitation_id,
+        &args.acting_as,
+    )
+    .await
+    .map_err(invitation_cli_err)?;
+    println!(
+        "declined invitation {} for {}",
+        args.invitation_id, args.acting_as
+    );
+    Ok(())
+}
+
+/// `hangar member revoke`: withdraw a still-pending invitation, workspace-scoped
+/// (another tenant's invitation matches no row and is a not-found error).
+async fn run_member_invite_revoke(store: &Store, args: MemberInviteRevokeArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    InvitationRepo::revoke(store.pool(), &ws, &args.invitation_id)
+        .await
+        .map_err(invitation_cli_err)?;
+    println!("revoked invitation {}", args.invitation_id);
+    Ok(())
+}
+
+/// Resolve an email to its `user.id`, erroring with the address when unknown.
+async fn user_id_for_email(store: &Store, email: &str) -> Result<String> {
+    let normalized = ainb_hangar_store::repo::invitation::normalize_email(email);
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+        .bind(&normalized)
+        .fetch_optional(store.pool())
+        .await
+        .context("look up user by email")?;
+    id.ok_or_else(|| anyhow::anyhow!("no user with email {normalized}"))
+}
+
+/// Map an [`InvitationRepoError`] onto a human CLI error, keeping multica's
+/// wording so the CLI, the RPC, and the reference all say the same thing.
+///
+/// [`InvitationRepoError`]: ainb_hangar_store::repo::invitation::InvitationRepoError
+fn invitation_cli_err(
+    e: ainb_hangar_store::repo::invitation::InvitationRepoError,
+) -> anyhow::Error {
+    use ainb_hangar_store::repo::invitation::InvitationRepoError as E;
+    match e {
+        E::EmptyEmail => anyhow::anyhow!("email must not be empty"),
+        E::InvalidRole => anyhow::anyhow!("role must be one of admin/member"),
+        E::CannotInviteOwner => anyhow::anyhow!("cannot invite as owner"),
+        E::InviterNotMember => anyhow::anyhow!("only a workspace member can invite"),
+        E::AlreadyMember => anyhow::anyhow!("user is already a member"),
+        E::AlreadyPending => anyhow::anyhow!("invitation already pending for this email"),
+        E::NotFound => anyhow::anyhow!("invitation not found"),
+        E::NotYours => anyhow::anyhow!("invitation does not belong to you"),
+        E::NotPending => anyhow::anyhow!("invitation is not pending"),
+        E::Expired => anyhow::anyhow!("invitation has expired"),
+        other => anyhow::Error::new(other).context("invitation mutation failed"),
     }
 }
 
@@ -7851,6 +8082,94 @@ fn member_to_json(m: &ainb_hangar_store::repo::member::Member) -> String {
     )
 }
 
+// ──────────────────────────────────────────────────────────────────────────
+// Invitation render helpers (pure, over the store's Invitation row — #18).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a slice of pending invitations in the chosen format.
+fn render_invitation_list(
+    invites: &[ainb_hangar_store::repo::invitation::Invitation],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = invites.iter().map(invitation_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", invitation_csv_header());
+            for i in invites {
+                println!("{}", invitation_csv_row(i));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", invitation_md_header());
+            for i in invites {
+                println!("{}", invitation_md_row(i));
+            }
+        }
+        OutputFormat::Text => {
+            if invites.is_empty() {
+                println!("no pending invitations");
+            } else {
+                for i in invites {
+                    println!("{}", invitation_line(i));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of an invitation (id, email, role, status, expiry).
+fn invitation_line(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "{}  {}  role={}  {}  expires {}",
+        i.id,
+        i.invitee_email,
+        i.role,
+        i.status,
+        fmt_epoch_ms_utc(i.expires_at)
+    )
+}
+const fn invitation_csv_header() -> &'static str {
+    "id,invitee_email,role,status,expires_at"
+}
+fn invitation_csv_row(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "{},{},{},{},{}",
+        csv_field(&i.id),
+        csv_field(&i.invitee_email),
+        csv_field(&i.role),
+        csv_field(&i.status),
+        i.expires_at,
+    )
+}
+const fn invitation_md_header() -> &'static str {
+    "| id | invitee_email | role | status | expires_at |\n| --- | --- | --- | --- | --- |\n"
+}
+fn invitation_md_row(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "| {} | {} | {} | {} | {} |",
+        md_cell(&i.id),
+        md_cell(&i.invitee_email),
+        md_cell(&i.role),
+        md_cell(&i.status),
+        fmt_epoch_ms_utc(i.expires_at),
+    )
+}
+/// Minimal stable JSON object for one invitation.
+fn invitation_to_json(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "{{\"id\":{},\"invitee_email\":{},\"role\":{},\"status\":{},\"created_at\":{},\"expires_at\":{}}}",
+        json_string(&i.id),
+        json_string(&i.invitee_email),
+        json_string(&i.role),
+        json_string(&i.status),
+        i.created_at,
+        i.expires_at,
+    )
+}
+
 /// Render the squad status view in the chosen format (e38.17). Each row carries
 /// the squad's id, name, leader actor-ref, and its members (joined with `,` in the
 /// flat text/csv/markdown surfaces, a JSON array in the JSON surface).
@@ -8861,6 +9180,162 @@ mod tests {
         assert!(
             issue_line(&issue).contains(&format!("assignee=member:{}", member.user_id)),
             "text line surfaces the member actor-ref"
+        );
+    }
+
+    /// `hangar member invite` then `hangar member accept` drives the whole
+    /// parity-#18 lifecycle through the REAL clap surface: the member count goes
+    /// 1 → 2, and only on accept.
+    ///
+    /// This mutation-tests the ARGV SHAPE, not just the repo — a repo-only test
+    /// would stay green while the clap wiring (`--email`, `--role`, the
+    /// positional invitation id, `--as`) was wrong or missing.
+    #[tokio::test]
+    async fn member_invite_then_accept_adds_member_via_cli() {
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::invitation::InvitationRepo;
+        use ainb_hangar_store::repo::member::MemberRepo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws_id = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        let ws = WorkspaceId::from_str(ws_id).unwrap();
+        assert_eq!(
+            MemberRepo::list(store.pool(), &ws).await.unwrap().len(),
+            1,
+            "bootstrap starts with the sole owner"
+        );
+
+        let HangarCommand::Member(MemberCommand::Invite(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "invite",
+            "--email",
+            "Dana@Example.com",
+            "--role",
+            "member",
+        ]) else {
+            panic!("expected member invite");
+        };
+        run_member_invite(&store, args).await.expect("invite");
+
+        // An invite adds NO member — it only creates the pending row.
+        assert_eq!(
+            MemberRepo::list(store.pool(), &ws).await.unwrap().len(),
+            1,
+            "an invite is not a membership"
+        );
+        let pending = InvitationRepo::list_pending(store.pool(), &SystemClock, &ws)
+            .await
+            .expect("list pending");
+        assert_eq!(pending.len(), 1, "one pending invitation");
+        assert_eq!(
+            pending[0].invitee_email, "dana@example.com",
+            "the CLI email is normalised"
+        );
+        let invitation_id = pending[0].id.clone();
+
+        // Accepting is what joins the member.
+        let HangarCommand::Member(MemberCommand::Accept(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "accept",
+            &invitation_id,
+            "--as",
+            "dana@example.com",
+        ]) else {
+            panic!("expected member accept");
+        };
+        run_member_invite_accept(&store, args).await.expect("accept");
+
+        let members = MemberRepo::list(store.pool(), &ws).await.unwrap();
+        assert_eq!(members.len(), 2, "accept added the member");
+        let dana = members.iter().find(|m| m.email == "dana@example.com").expect("dana joined");
+        assert_eq!(dana.role, "member");
+        assert!(
+            InvitationRepo::list_pending(store.pool(), &SystemClock, &ws)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the accepted invite is no longer pending"
+        );
+    }
+
+    /// `--as` is REQUIRED on accept / decline: without an explicit identity the
+    /// ownership gate would be theatre, so clap must refuse the argv outright.
+    #[test]
+    fn member_accept_requires_an_explicit_actor_email() {
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let err = app
+            .try_get_matches_from(["ainb", "hangar", "member", "accept", "inv-1"])
+            .expect_err("accept without --as must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "got {err}"
+        );
+    }
+
+    /// A foreign accept never creates a member, and the CLI says so in multica's
+    /// wording.
+    #[tokio::test]
+    async fn member_accept_by_a_stranger_is_rejected_via_cli() {
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::invitation::InvitationRepo;
+        use ainb_hangar_store::repo::member::MemberRepo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws_id = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        let ws = WorkspaceId::from_str(ws_id).unwrap();
+
+        let HangarCommand::Member(MemberCommand::Invite(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "invite",
+            "--email",
+            "dana@example.com",
+        ]) else {
+            panic!("expected member invite");
+        };
+        run_member_invite(&store, args).await.expect("invite");
+        let invitation_id =
+            InvitationRepo::list_pending(store.pool(), &SystemClock, &ws).await.unwrap()[0]
+                .id
+                .clone();
+
+        let HangarCommand::Member(MemberCommand::Accept(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "accept",
+            &invitation_id,
+            "--as",
+            "eve@example.com",
+        ]) else {
+            panic!("expected member accept");
+        };
+        let err = run_member_invite_accept(&store, args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("does not belong to you"),
+            "got {err}"
+        );
+        assert_eq!(
+            MemberRepo::list(store.pool(), &ws).await.unwrap().len(),
+            1,
+            "no member created by a stranger's accept"
         );
     }
 
