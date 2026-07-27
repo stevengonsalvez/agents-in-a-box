@@ -499,7 +499,10 @@ mod tests {
         );
         // A third actor with no entries has an empty inbox, not everyone's.
         assert!(
-            InboxRepo::list(store.pool(), "ws-a", &agent("a2"), 100).await.unwrap().is_empty()
+            InboxRepo::list(store.pool(), "ws-a", &agent("a2"), 100)
+                .await
+                .unwrap()
+                .is_empty()
         );
     }
 

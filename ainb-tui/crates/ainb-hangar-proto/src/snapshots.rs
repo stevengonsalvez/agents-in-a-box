@@ -4002,8 +4002,7 @@ mod tests {
     /// `None` recipient is omitted from the encoded frame entirely.
     #[test]
     fn inbox_scoped_params_recipient_is_append_only_optional() {
-        let legacy: InboxScopedParams =
-            serde_json::from_str(r#"{"workspace_id":"ws-1"}"#).unwrap();
+        let legacy: InboxScopedParams = serde_json::from_str(r#"{"workspace_id":"ws-1"}"#).unwrap();
         assert_eq!(legacy.recipient, None, "an omitted recipient is absent");
 
         let scoped: InboxScopedParams =

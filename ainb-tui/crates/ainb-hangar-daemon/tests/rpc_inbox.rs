@@ -372,7 +372,10 @@ async fn mark_read_clears_unread_count() {
         )
         .await;
     assert!(resp["error"].is_null(), "mark_read must ack: {resp}");
-    assert_eq!(resp["result"]["marked"], 1, "the owner's entry flipped: {resp}");
+    assert_eq!(
+        resp["result"]["marked"], 1,
+        "the owner's entry flipped: {resp}"
+    );
     assert_eq!(resp["result"]["unread"], 0, "unread drops to 0: {resp}");
 
     // After: list reports zero unread, and every entry now carries a read_at.
@@ -485,7 +488,11 @@ async fn inbox_entries_are_visible_only_to_their_recipient() {
 
     // 5. The agent sees exactly the HUMAN's comment.
     let (theirs, theirs_unread) = c.inbox_list(WS_SLUG, "agent:a1").await;
-    assert_eq!(theirs.len(), 1, "the agent sees exactly one entry: {theirs:?}");
+    assert_eq!(
+        theirs.len(),
+        1,
+        "the agent sees exactly one entry: {theirs:?}"
+    );
     assert_eq!(
         theirs[0]["subject_id"], "c-human",
         "the agent is notified of the human's comment: {theirs:?}"
@@ -501,7 +508,10 @@ async fn inbox_entries_are_visible_only_to_their_recipient() {
         )
         .await;
     assert!(resp["error"].is_null(), "mark_read must ack: {resp}");
-    assert_eq!(resp["result"]["marked"], 1, "only the human's row flips: {resp}");
+    assert_eq!(
+        resp["result"]["marked"], 1,
+        "only the human's row flips: {resp}"
+    );
     assert_eq!(resp["result"]["unread"], 0, "{resp}");
 
     let (_, mine_after) = c.inbox_list(WS_SLUG, LOCAL_HUMAN).await;
@@ -561,7 +571,10 @@ async fn inbox_list_without_recipient_defaults_to_the_local_human() {
             serde_json::json!({ "workspace_id": WS_SLUG }),
         )
         .await;
-    assert!(resp["error"].is_null(), "an omitted recipient must ack: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "an omitted recipient must ack: {resp}"
+    );
     let entries = resp["result"]["entries"].as_array().cloned().unwrap_or_default();
     assert_eq!(
         entries.len(),

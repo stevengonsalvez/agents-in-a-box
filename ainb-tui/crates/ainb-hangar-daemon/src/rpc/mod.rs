@@ -7207,9 +7207,7 @@ fn inbox_recipient(param: Option<&str>) -> Result<ActorRef, RpcError> {
 }
 
 /// Parse the `{ workspace_id, recipient? }` params both inbox methods take.
-fn inbox_params(
-    req: &RpcRequest,
-) -> Result<(String, ActorRef), RpcError> {
+fn inbox_params(req: &RpcRequest) -> Result<(String, ActorRef), RpcError> {
     let params: ainb_hangar_proto::snapshots::InboxScopedParams =
         parse_params(req, "{ workspace_id, recipient? }")?;
     let recipient = inbox_recipient(params.recipient.as_deref())?;
@@ -7229,9 +7227,9 @@ async fn handle_inbox_list(
     let (wire, recipient) = inbox_params(req)?;
     let resolved = resolve_workspace_id(pool, &wire).await.map_err(|e| store_err(&e))?;
     let (entries, unread) = match resolved {
-        Some(ws) => snapshots::inbox_list(pool, &ws, &recipient)
-            .await
-            .map_err(|e| store_err(&e))?,
+        Some(ws) => {
+            snapshots::inbox_list(pool, &ws, &recipient).await.map_err(|e| store_err(&e))?
+        }
         None => (Vec::new(), 0),
     };
     to_value(&ainb_hangar_proto::snapshots::InboxListResult { entries, unread })

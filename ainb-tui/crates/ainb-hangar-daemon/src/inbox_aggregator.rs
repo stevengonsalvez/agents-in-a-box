@@ -459,7 +459,9 @@ mod tests {
     /// Aggregate one event and return every `(recipient, subject_id)` that landed.
     async fn aggregate(store: &Store, event: HangarEvent) -> Vec<(String, String)> {
         let idgen = SystemIdGen;
-        aggregate_one(store.pool(), &idgen, 1_000, &scoped(event)).await.expect("aggregate");
+        aggregate_one(store.pool(), &idgen, 1_000, &scoped(event))
+            .await
+            .expect("aggregate");
         let mut out = Vec::new();
         for recipient in [
             ActorRef::new(ActorKind::Member, "user-1").unwrap(),
