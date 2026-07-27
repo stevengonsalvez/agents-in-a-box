@@ -4108,6 +4108,11 @@ Commands:
   list      List the workspace's members (email + role)
   set-role  Change a member's role (`owner` / `admin` / `member`)
   remove    Remove a member from the workspace (the user row survives)
+  invite    Invite an email to join (pending until accepted — parity #18)
+  invites   List the workspace's live pending invitations
+  accept    Accept an invitation addressed to you (this is what adds the member)
+  decline   Decline an invitation addressed to you (no member is created)
+  revoke    Withdraw a still-pending invitation (admin-side)
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -4220,6 +4225,119 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the member belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar member invite`
+
+Invite an email to join (pending until accepted — parity #18)
+
+```console
+$ ainb hangar member invite --help
+Invite an email to join (pending until accepted — parity #18)
+
+Usage: ainb hangar member invite [OPTIONS] --email <EMAIL>
+
+Options:
+      --email <EMAIL>
+          The invitee's email. Normalised (trimmed + lowercased) by the store
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --role <ROLE>
+          The role the invitee will hold on accept: `admin` or `member` (default `member`). `owner` parses but is rejected — ownership is transferred, never invited
+
+          Possible values:
+          - owner:  Full administrative control; a workspace must always keep one
+          - admin:  Elevated management, short of ownership
+          - member: A regular member
+          
+          [default: member]
+
+      --from <FROM>
+          Email of the inviting member. Defaults to the bootstrapped workspace owner. Must already be a member of the workspace
+
+      --workspace <WORKSPACE>
+          Workspace slug to invite into. Defaults to the bootstrapped `default` workspace
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar member invites`
+
+List the workspace's live pending invitations
+
+```console
+$ ainb hangar member invites --help
+List the workspace's live pending invitations
+
+Usage: ainb hangar member invites [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar member accept`
+
+Accept an invitation addressed to you (this is what adds the member)
+
+```console
+$ ainb hangar member accept --help
+Accept an invitation addressed to you (this is what adds the member)
+
+Usage: ainb hangar member accept [OPTIONS] --as <ACTING_AS> <INVITATION_ID>
+
+Arguments:
+  <INVITATION_ID>  The invitation id to act on
+
+Options:
+      --as <ACTING_AS>   The acting human's email. REQUIRED, not defaulted: hangar has no session, so the identity must be explicit or the ownership gate is theatre
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar member decline`
+
+Decline an invitation addressed to you (no member is created)
+
+```console
+$ ainb hangar member decline --help
+Decline an invitation addressed to you (no member is created)
+
+Usage: ainb hangar member decline [OPTIONS] --as <ACTING_AS> <INVITATION_ID>
+
+Arguments:
+  <INVITATION_ID>  The invitation id to act on
+
+Options:
+      --as <ACTING_AS>   The acting human's email. REQUIRED, not defaulted: hangar has no session, so the identity must be explicit or the ownership gate is theatre
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar member revoke`
+
+Withdraw a still-pending invitation (admin-side)
+
+```console
+$ ainb hangar member revoke --help
+Withdraw a still-pending invitation (admin-side)
+
+Usage: ainb hangar member revoke [OPTIONS] <INVITATION_ID>
+
+Arguments:
+  <INVITATION_ID>  The invitation id to withdraw
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the invitation belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 

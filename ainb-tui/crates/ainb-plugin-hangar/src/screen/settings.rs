@@ -15,7 +15,11 @@
 //! 5. **Members** (e38.11) — a render-only `email · role` list (the `owner` role
 //!    in `SELECTION_GREEN`). The mutation surface is CLI-first
 //!    (`ainb hangar member set-role|remove`); the pane lets the operator see who
-//!    holds which role from the `hangar/members_list` snapshot.
+//!    holds which role from the `hangar/members_list` snapshot. Under the member
+//!    rows the same snapshot's LIVE pending invitations (parity #18) paint behind
+//!    a `Pending invites` sub-header — `email · role · expires in Nd` — so an
+//!    invited-but-not-yet-joined human is visible. Nothing paints when there are
+//!    none.
 //!
 //! The reducer ([`reduce_settings`]) is **pure**. The crucial security property
 //! (P4.7 risk register, "keychain write leaks key into log"): entered key
@@ -26,7 +30,7 @@
 
 use ainb_hangar_core::daemon_config::{ConfigKind, DAEMON_CONFIG_REGISTRY, parse_bool_token};
 use ainb_hangar_proto::settings::{HealthSnapshot, KeyRow, ProviderRow, WorkspaceRow};
-use ainb_hangar_proto::snapshots::{MemberWireRow, NotifyRuleWireRow};
+use ainb_hangar_proto::snapshots::{InvitationWireRow, MemberWireRow, NotifyRuleWireRow};
 use ainb_hangar_proto::{Channel, ChannelSet};
 use ainb_plugin_sdk::WireBuffer;
 
@@ -214,6 +218,10 @@ pub struct SettingsState {
     workspaces: Vec<WorkspaceRow>,
     /// The current workspace's members (render-only; e38.11).
     members: Vec<MemberWireRow>,
+    /// The current workspace's LIVE pending invitations (render-only; parity
+    /// #18). Painted under the member rows so the operator sees who has been
+    /// invited but has not joined yet.
+    pending_invites: Vec<InvitationWireRow>,
     /// The notification routing grid rows, one per attention kind (tcp T5).
     notify_rules: Vec<NotifyRuleWireRow>,
     /// The selected kind row in the Notifications grid.
@@ -303,6 +311,7 @@ impl SettingsState {
             keys,
             workspaces,
             members: Vec::new(),
+            pending_invites: Vec::new(),
             notify_rules: Vec::new(),
             notify_kind_sel: 0,
             notify_channel_sel: 0,
@@ -429,6 +438,18 @@ impl SettingsState {
     #[must_use]
     pub fn members(&self) -> &[MemberWireRow] {
         &self.members
+    }
+
+    /// Replace the pending-invitation rows (they ride on the same
+    /// `hangar/members_list` result — parity #18). Render-only, like the members.
+    pub fn set_pending_invites(&mut self, invites: Vec<InvitationWireRow>) {
+        self.pending_invites = invites;
+    }
+
+    /// The pending-invitation rows currently rendered (for the glue / tests).
+    #[must_use]
+    pub fn pending_invites(&self) -> &[InvitationWireRow] {
+        &self.pending_invites
     }
 
     /// Replace the notification routing grid (after a `hangar/notify_rules_list`
@@ -1078,7 +1099,7 @@ fn move_list(state: &SettingsState, delta: i32) -> SettingsReduction {
         SettingsSection::Workspaces => next.workspaces.len(),
         SettingsSection::Keys => next.keys.len(),
         SettingsSection::Providers => next.providers.len(),
-        SettingsSection::Members => next.members.len(),
+        SettingsSection::Members => members_section_len(&next),
         // Notifications owns its own 2D cursor (see `reduce_notify_key`); the
         // generic list mover is never reached for it.
         SettingsSection::Daemon | SettingsSection::Notifications => 0,
@@ -1145,10 +1166,21 @@ fn render_member_rows(
     mut row: u16,
     bottom: u16,
     members: &[MemberWireRow],
+    pending_invites: &[InvitationWireRow],
 ) -> u16 {
     use ainb_plugin_sdk::{Cell, Color, Coord};
     const TEXT: Color = Color::rgb(220, 220, 230);
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+    const GOLD: Color = Color::rgb(255, 215, 0);
+    const MUTED_GRAY: Color = Color::rgb(120, 120, 140);
+
+    let paint = |buf: &mut WireBuffer, row: u16, line: &str, color: Color| {
+        for (ch, cx) in line.chars().zip(4..area_w) {
+            let mut cell = Cell::new(ch.to_string());
+            cell.fg = Some(color);
+            buf.push(Coord::new(cx, row), cell);
+        }
+    };
 
     for m in members {
         if row >= bottom {
@@ -1159,15 +1191,71 @@ fn render_member_rows(
         } else {
             TEXT
         };
-        let line = format!("{} · {}", m.email, m.role);
-        for (ch, cx) in line.chars().zip(4..area_w) {
-            let mut cell = Cell::new(ch.to_string());
-            cell.fg = Some(color);
-            buf.push(Coord::new(cx, row), cell);
+        paint(buf, row, &format!("{} · {}", m.email, m.role), color);
+        row += 1;
+    }
+
+    // Pending invites (parity #18) sit UNDER the members, behind their own
+    // sub-header. An empty list paints nothing at all — no header, no rows —
+    // so the common "nobody invited" pane is unchanged.
+    if pending_invites.is_empty() {
+        return row;
+    }
+    if row < bottom {
+        paint(buf, row, PENDING_INVITES_HEADER, GOLD);
+        row += 1;
+    }
+    for i in pending_invites {
+        if row >= bottom {
+            break;
         }
+        let line = format!(
+            "{} · {} · expires in {}",
+            i.invitee_email,
+            i.role,
+            humanize_expiry(i.expires_at)
+        );
+        paint(buf, row, &line, MUTED_GRAY);
         row += 1;
     }
     row
+}
+
+/// The sub-header painted above the pending-invitation rows (parity #18).
+pub const PENDING_INVITES_HEADER: &str = "Pending invites";
+
+/// How long until `expires_at`, as the coarse `Nd` / `Nh` / `<1h` label the
+/// Members pane paints. Relative to the render-time wall clock.
+fn humanize_expiry(expires_at: i64) -> String {
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX));
+    humanize_remaining(expires_at.saturating_sub(now))
+}
+
+/// The pure half of [`humanize_expiry`]: `Nd` above a day, `Nh` above an hour,
+/// `<1h` otherwise. A non-positive remainder clamps to `<1h` rather than
+/// rendering a negative number, so a row that has just tipped past its window
+/// still reads sensibly until the next sweep drops it.
+fn humanize_remaining(remaining_ms: i64) -> String {
+    let hours = remaining_ms.max(0) / 3_600_000;
+    if hours >= 24 {
+        format!("{}d", hours / 24)
+    } else if hours >= 1 {
+        format!("{hours}h")
+    } else {
+        "<1h".to_string()
+    }
+}
+
+/// How many rows the Members section's list cursor may address: one per member,
+/// plus the pending-invite header and one row per invite when any are live.
+fn members_section_len(state: &SettingsState) -> usize {
+    if state.pending_invites.is_empty() {
+        state.members.len()
+    } else {
+        state.members.len() + 1 + state.pending_invites.len()
+    }
 }
 
 /// Paint the Daemon section body and return `(next free row, cursor row)`.
@@ -1603,7 +1691,14 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
                 }
             }
             SettingsSection::Members => {
-                row = render_member_rows(buf, area_w, row, bottom, &state.members);
+                row = render_member_rows(
+                    buf,
+                    area_w,
+                    row,
+                    bottom,
+                    &state.members,
+                    &state.pending_invites,
+                );
             }
             SettingsSection::Notifications => {
                 let selected = state.section == SettingsSection::Notifications;

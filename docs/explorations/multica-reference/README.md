@@ -106,7 +106,7 @@ CI job executes.
 |---|---|---|---|---|
 | Issue | ~35% | **~60%** | #3 sub-issues (full mechanic + roll-up), #10 faceted filtering, #11 acceptance/context, plus the pre-existing narrow #2 the original assessment missed | #17 custom properties, #19 blocked/cancelled, #20 typed deps, #21 provenance, #22 subscribers/reactions, #28 wizard fields all unstarted; #2's routing/outcome/preview facets missing |
 | Squad | ~40% | **~65%** | #5 task `squad_id` (mutation-verified) + #7 leader briefing injected at claim, now carrying `## Squad Instructions` + per-member role AND materialisable skills (#25, 7‑rest) | #16 selective routing undecided; delegation still cannot go leader→member by mention link (gap #2); **F1 (`7‑cwd`)** — the briefing is written into the TASK tree while a card run's provider `cwd` is its worktree, so a cwd-relative reader would not see it |
-| Workspace / membership | ~40% | **~60%** | #4 create/delete/switch with slug validation; #1's human-member mint path | No invite lifecycle (#18); the inbox is still workspace-wide with no actor recipient, so "human member" stops short of a symmetric collaboration surface (4-rest’s creation-lockdown flag landed) |
+| Workspace / membership | ~40% | **~75%** | #4 create/delete/switch with slug validation; #1's human-member mint path; #18 invite → accept/decline/expire (`workspace_invitation`, 7-day window, one-pending-per-email, stale sweep) | Invite delivery is out of band (no email/notification channel — an invite id is handed over by hand); the zero-workspace onboarding redirect and the `invitation:*` event stream stay multica-web concerns (4-rest’s creation-lockdown flag landed) |
 | Agent | ~55% | **~70%** | #8 permission model + gate (in-source-tested), #9 guided create wizard, #6's workload dimension | Availability is still binary — `unstable` unreachable, no grace window; #9's LLM turn absent; #26 archive audit, #30 `custom_env` redaction unstarted (#23 metadata and #24 skill toggle now landed); the invoke gate covers one of three dispatch paths |
 | Autopilot | ~75% | **~95%** | #15 `api` trigger + `skipped` run status, #14 rule versioning + human attribution (append-only ledger, cosmetic-vs-substantive classifier, `rule_owner`/`direct_human` run fork, and the `edit` surface that did not previously exist) | #27 subscribers/collaborators (deferred while solo) |
 | Task + dispatch flow | ~80% | **~80%** | untouched by the campaign | #12 dispatch reason codes, #13 activity log |
@@ -151,7 +151,7 @@ the inbox** — remain open.
 | 17 | Custom properties + metadata scratch | M–L | promote to P1 if agent pipeline state is needed |
 | 22 | Issue subscribers + reactions | M | |
 | 27 | Autopilot subscriber / collaborator | S–M | defer while solo |
-| 18 | Membership invite lifecycle | M | depends on #4 (landed) — now actionable |
+| 18 | Membership invite lifecycle | M | **landed** — migration 0063 + `InvitationRepo` + 4 RPCs + `member invite/invites/accept/decline/revoke` |
 
 **P0 for the platform, not for parity:** repair the `hangar-e2e (ubuntu-latest)`
 gate. Three pre-existing tripwire failures are masking the *entire* framed-socket
@@ -194,7 +194,7 @@ user-visible impact, then effort. Effort: **S** ≈ days, **M** ≈ 1–2 weeks,
 | **15** | Autopilot | **`api` trigger kind + `skipped` run status** | 3rd trigger kind (bare programmatic fire); `skipped` a first-class run row | schedule + webhook only; policy-skip is a log event, not a queryable row | CI/other-tool fire without minting a webhook secret; reporting can tell "skipped" from "never happened" | S |
 | **16** | Squad | **Selective leader routing vs spray fan-out** | Leader reads issue, picks the *fit* member(s) by skill/role, delegates via @mention; others get no task | `assign_fanout` sprays to *every* agent member concurrently, no selection | Product decision, not a pure gap: mediated routing vs parallel-worker fan-out. Depends on #2 + #7. Decide before "fixing" | L |
 | **17** | Issue | **Custom properties + metadata scratch** | `issue_property` typed catalog (select/multi_select, archivable) + flat `metadata` KV bag for agent pipeline state | Neither | User-defined fields (Linear/Notion-style) + a place for agents to stash pipeline state (PR#, status) | M–L |
-| **18** | Workspace | **Membership lifecycle (invite → accept/expire)** | `workspace_invitation` (7-day expiry, one-pending-per-email, stale sweep), auto-stub user, role-at-invite | `MemberRepo` list/set-role/remove + last-owner guard, but nothing *creates* a 2nd member | Add a second human. Repo primitives already exist; needs invite table + accept flow. Depends on #4 | M |
+| **18** | Workspace | **Membership lifecycle (invite → accept/expire)** | `workspace_invitation` (7-day expiry, one-pending-per-email, stale sweep), auto-stub user, role-at-invite | **LANDED** — migration 0063 `workspace_invitation` + `InvitationRepo` create/accept/decline/revoke/list/sweep, `hangar/invite_*` RPCs with `pending_invites` on `members_list`, `ainb hangar member invite\|invites\|accept\|decline\|revoke`, Members-pane render | Add a second human: accepting an invite is what creates the membership | M |
 | 19 | Issue | **`blocked` + `cancelled` states** | 7-state lifecycle with DB CHECK | 5 states, no `blocked`/`cancelled`, no CHECK (free text) | Represent blocked/cancelled as first-class states | S |
 | 20 | Issue | **Typed dependency graph** | `issue_dependency` `blocks`/`blocked_by`/`related` | `card_dependency` single untyped blocks-edge (cycle-checked, auto-run) — core mechanic already parity | "related"/reverse edges + a browsable graph | S–M |
 | 21 | Issue | **Origin provenance** | `origin_type`/`origin_id` (autopilot/quick_create/lark/slack/agent_create) | None | Trace who/what caused an agent-created issue | S–M |
@@ -247,7 +247,7 @@ Grouped by tier. Within a tier, items are roughly dependency-ordered.
 | 1 | Polymorphic actors + human members (member\|agent everywhere) | L | #2, #8, #18, #25-human, autopilot attribution |
 | 5 | Task-level `squad_id` + claim-time briefing hook | S | #7 (leader briefing) |
 | 3 | Subtasks: `parent_issue_id` + stage barriers + child-done cascade | L | roll-up progress, staged completion |
-| 4 | Multi-workspace (create/switch) | L | #18 invites, per-workspace config, slug validation |
+| 4 | Multi-workspace (create/switch) | L | #18 invites (landed), per-workspace config, slug validation |
 
 Cheapest P0 to land first: **#5** (one column + a claim hook) makes the squad
 leader briefing (#7) possible and is nearly free.
@@ -285,7 +285,7 @@ leader briefing (#7) possible and is nearly free.
 | 17 | Custom properties + metadata scratch | M–L | larger; promote to P1 if agent-pipeline-state is needed |
 | 22 | Issue subscribers + reactions | M | |
 | 27 | Autopilot subscriber/collaborator | S–M | depends on #1; defer while solo |
-| 18 | Membership invite lifecycle | M | depends on #4; defer while single-workspace |
+| 18 | Membership invite lifecycle | M | **landed** (was: depends on #4; deferred while single-workspace) |
 
 **Cheap-wins where the schema already has it and only the UI is missing:**
 issue **priority / due_date / labels** (columns since mig 0014, wizard omits

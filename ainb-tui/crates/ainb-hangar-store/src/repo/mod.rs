@@ -25,6 +25,7 @@ pub mod dispatch_attempt;
 pub mod event_log;
 pub mod fleet;
 pub mod inbox;
+pub mod invitation;
 pub mod issue;
 pub mod issue_reaction;
 pub mod issue_subscriber;

@@ -1183,13 +1183,16 @@ impl HangarPlugin {
     }
 
     /// Populate the settings Members pane from a `hangar/members_list` result
-    /// (e38.11). The pane is render-only, so the rows are simply cached.
+    /// (e38.11) — members AND the live pending invitations that ride on the same
+    /// envelope (parity #18). The pane is render-only, so the rows are simply
+    /// cached.
     fn apply_members(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::MembersListResult>(
                 result.clone(),
             ) {
                 self.screens.set_members(r.members);
+                self.screens.set_pending_invites(r.pending_invites);
             }
         }
     }

@@ -709,6 +709,10 @@ pub struct ScreenStates {
     /// Cached member roster from `hangar/members_list` (e38.11). Seeds the
     /// Settings Members pane regardless of which snapshot arrives first.
     pub member_rows: Vec<MemberWireRow>,
+    /// Cached pending invitations from the same `hangar/members_list` envelope
+    /// (parity #18). Held beside the roster so a `set_health` rebuild cannot drop
+    /// the `Pending invites` block.
+    pub pending_invite_rows: Vec<ainb_hangar_proto::snapshots::InvitationWireRow>,
     /// Cached notification routing grid from `hangar/notify_rules_list` (tcp T5).
     /// Seeds the Settings Notifications pane regardless of arrival order.
     pub notify_rule_rows: Vec<ainb_hangar_proto::snapshots::NotifyRuleWireRow>,
@@ -1042,6 +1046,7 @@ impl ScreenStates {
         // Carry any cached member roster into the rebuilt state so the Members
         // pane survives a `set_health` rebuild (mirrors workspace_rows).
         state.set_members(self.member_rows.clone());
+        state.set_pending_invites(self.pending_invite_rows.clone());
         // Carry any cached notification grid too (tcp T5), same rebuild survival.
         state.set_notify_rules(self.notify_rule_rows.clone());
         // Replay the cached daemon-config values so a `set_health` rebuild keeps
@@ -1071,6 +1076,19 @@ impl ScreenStates {
         self.member_rows.clone_from(&members);
         if let Some(s) = self.settings.as_mut() {
             s.set_members(members);
+        }
+    }
+
+    /// Refresh the Settings pane's pending invitations from the same
+    /// `hangar/members_list` result (parity #18), with the same cache-then-overlay
+    /// shape as [`set_members`](Self::set_members).
+    pub fn set_pending_invites(
+        &mut self,
+        invites: Vec<ainb_hangar_proto::snapshots::InvitationWireRow>,
+    ) {
+        self.pending_invite_rows.clone_from(&invites);
+        if let Some(s) = self.settings.as_mut() {
+            s.set_pending_invites(invites);
         }
     }
 

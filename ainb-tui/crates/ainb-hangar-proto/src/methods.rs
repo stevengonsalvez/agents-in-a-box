@@ -538,6 +538,56 @@ pub const HANGAR_MEMBER_SET_ROLE: &str = "hangar/member_set_role";
 /// owner is rejected so a workspace always keeps an owner.
 pub const HANGAR_MEMBER_REMOVE: &str = "hangar/member_remove";
 
+/// `hangar/invite_create` — invite an email into a workspace (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteCreateParams`]
+/// (`{ workspace_id, inviter_user_id, invitee_email, role }`). Result: the
+/// refreshed [`crate::snapshots::MembersListResult`] for the workspace (its
+/// `pending_invites` now carries the new row), or an error.
+///
+/// The pending state between "someone was invited" and "someone is a member":
+/// an invite adds NO member until it is accepted. `role` is `admin` or `member`
+/// — `owner` is rejected with `INVALID_PARAMS` ("cannot invite as owner").
+/// Mutating + workspace-scoped like [`HANGAR_MEMBER_SET_ROLE`]: the daemon
+/// resolves the workspace and **rejects** a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op). A live pending invite for the same
+/// (workspace, email), or an email that already belongs to a member, is
+/// rejected; a past-due pending row is swept to `expired` first so a re-invite
+/// after expiry always fits the partial unique index.
+pub const HANGAR_INVITE_CREATE: &str = "hangar/invite_create";
+
+/// `hangar/invite_accept` — accept a pending invitation (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteActParams`]
+/// (`{ workspace_id, invitation_id, actor_email }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`] — the accepting human is now a
+/// member and the invite has left `pending_invites`.
+///
+/// The status flip and the membership insert are ONE transaction. `actor_email`
+/// must match the invitee (hangar has no session, so the acting identity is
+/// explicit); a foreign accept, a non-pending invitation, or one past its
+/// 7-day window is rejected with `INVALID_PARAMS`.
+pub const HANGAR_INVITE_ACCEPT: &str = "hangar/invite_accept";
+
+/// `hangar/invite_decline` — decline a pending invitation (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteActParams`]
+/// (`{ workspace_id, invitation_id, actor_email }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`]. No member is created; the row
+/// becomes `declined` and stops blocking a future invite to the same email.
+/// Same ownership + pending gates as [`HANGAR_INVITE_ACCEPT`].
+pub const HANGAR_INVITE_DECLINE: &str = "hangar/invite_decline";
+
+/// `hangar/invite_revoke` — withdraw a pending invitation (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteRevokeParams`]
+/// (`{ workspace_id, invitation_id }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`]. The admin-side counterpart of
+/// decline: the pending row is DELETED. Workspace-scoped in SQL, so another
+/// tenant's invitation matches no row and is reported as `INVALID_PARAMS`,
+/// never deleted.
+pub const HANGAR_INVITE_REVOKE: &str = "hangar/invite_revoke";
+
 /// `hangar/squads_list` — snapshot the squads of a workspace (e38.17).
 ///
 /// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
@@ -1289,6 +1339,10 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_MEMBERS_LIST,
     HANGAR_MEMBER_SET_ROLE,
     HANGAR_MEMBER_REMOVE,
+    HANGAR_INVITE_CREATE,
+    HANGAR_INVITE_ACCEPT,
+    HANGAR_INVITE_DECLINE,
+    HANGAR_INVITE_REVOKE,
     HANGAR_SQUADS_LIST,
     HANGAR_SQUAD_CREATE,
     HANGAR_SQUAD_MEMBER_ADD,
@@ -1484,6 +1538,10 @@ mod tests {
             HANGAR_MEMBERS_LIST,
             HANGAR_MEMBER_SET_ROLE,
             HANGAR_MEMBER_REMOVE,
+            HANGAR_INVITE_CREATE,
+            HANGAR_INVITE_ACCEPT,
+            HANGAR_INVITE_DECLINE,
+            HANGAR_INVITE_REVOKE,
             HANGAR_SQUADS_LIST,
             HANGAR_SQUAD_CREATE,
             HANGAR_SQUAD_MEMBER_ADD,
@@ -1562,6 +1620,10 @@ mod tests {
             HANGAR_MEMBERS_LIST,
             HANGAR_MEMBER_SET_ROLE,
             HANGAR_MEMBER_REMOVE,
+            HANGAR_INVITE_CREATE,
+            HANGAR_INVITE_ACCEPT,
+            HANGAR_INVITE_DECLINE,
+            HANGAR_INVITE_REVOKE,
             HANGAR_SQUADS_LIST,
             HANGAR_SQUAD_CREATE,
             HANGAR_SQUAD_MEMBER_ADD,

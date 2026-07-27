@@ -780,6 +780,10 @@ async fn handle(
         methods::HANGAR_MEMBERS_LIST => handle_members_list(pool, req).await,
         methods::HANGAR_MEMBER_SET_ROLE => handle_member_set_role(pool, req).await,
         methods::HANGAR_MEMBER_REMOVE => handle_member_remove(pool, req).await,
+        methods::HANGAR_INVITE_CREATE => handle_invite_create(pool, req).await,
+        methods::HANGAR_INVITE_ACCEPT => handle_invite_accept(pool, req).await,
+        methods::HANGAR_INVITE_DECLINE => handle_invite_decline(pool, req).await,
+        methods::HANGAR_INVITE_REVOKE => handle_invite_revoke(pool, req).await,
         methods::HANGAR_SQUADS_LIST => handle_squads_list(pool, req).await,
         methods::HANGAR_SQUAD_CREATE => handle_squad_create(pool, req).await,
         methods::HANGAR_SQUAD_MEMBER_ADD => handle_squad_member(pool, req, true).await,
@@ -4280,11 +4284,17 @@ async fn handle_members_list(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let members = match resolve(pool, req).await? {
-        Some(ws) => snapshots::members_list(pool, &ws).await.map_err(|e| store_err(&e))?,
-        None => Vec::new(),
+    let (members, pending_invites) = match resolve(pool, req).await? {
+        Some(ws) => (
+            snapshots::members_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+            snapshots::pending_invites(pool, &ws).await.map_err(|e| store_err(&e))?,
+        ),
+        None => (Vec::new(), Vec::new()),
     };
-    to_value(&ainb_hangar_proto::snapshots::MembersListResult { members })
+    to_value(&ainb_hangar_proto::snapshots::MembersListResult {
+        members,
+        pending_invites,
+    })
 }
 
 /// Dispatch `hangar/member_set_role` (e38.11): change one member's role and
@@ -4338,16 +4348,176 @@ async fn handle_member_remove(
     members_list_value(pool, &ws).await
 }
 
-/// Re-read `ws`'s members and serialize them as a
-/// [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult) wire
-/// value. Shared by the two member mutations so each answers with the same
+/// Re-read `ws`'s members AND its live pending invitations, and serialize them as
+/// a [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult) wire
+/// value. Shared by every member and invite mutation so each answers with the same
 /// refreshed view the settings pane renders.
 async fn members_list_value(
     pool: &SqlitePool,
     ws: &WorkspaceId,
 ) -> Result<serde_json::Value, RpcError> {
     let members = snapshots::members_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
-    to_value(&ainb_hangar_proto::snapshots::MembersListResult { members })
+    let pending_invites =
+        snapshots::pending_invites(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::MembersListResult {
+        members,
+        pending_invites,
+    })
+}
+
+/// Dispatch `hangar/invite_create` (parity #18): invite an email into the
+/// workspace and answer with the refreshed
+/// [`MembersListResult`](ainb_hangar_proto::snapshots::MembersListResult).
+///
+/// Mirrors [`handle_member_set_role`]'s contract: resolve + **reject** a mistyped
+/// workspace with `INVALID_PARAMS` (never a silent no-op), validate the role
+/// token, then drive the store. An invite adds NO member — the membership only
+/// appears when the invitee accepts. `owner` is refused at the repo boundary.
+async fn handle_invite_create(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+    use ainb_hangar_store::repo::member::MemberRole;
+
+    let params: ainb_hangar_proto::snapshots::InviteCreateParams = parse_params(
+        req,
+        "{ workspace_id, inviter_user_id, invitee_email, role }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let role = MemberRole::parse(&params.role)
+        .ok_or_else(|| invalid_params("role must be one of admin/member"))?;
+    InvitationRepo::create(
+        pool,
+        &SystemClock,
+        &ws,
+        &params.inviter_user_id,
+        &params.invitee_email,
+        role,
+    )
+    .await
+    .map_err(|e| invitation_repo_err(&e))?;
+    members_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/invite_accept` (parity #18): the invitee joins, and the
+/// response already shows them as a member with the invite gone from
+/// `pending_invites`.
+///
+/// `actor_email` is the acting identity (hangar has no session); a foreign
+/// accept, a non-pending invitation, or one past its 7-day window is
+/// `INVALID_PARAMS`.
+async fn handle_invite_accept(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let params: ainb_hangar_proto::snapshots::InviteActParams =
+        parse_params(req, "{ workspace_id, invitation_id, actor_email }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    require_invitation_in_workspace(pool, &ws, &params.invitation_id).await?;
+    InvitationRepo::accept(
+        pool,
+        &SystemClock,
+        &params.invitation_id,
+        &params.actor_email,
+    )
+    .await
+    .map_err(|e| invitation_repo_err(&e))?;
+    members_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/invite_decline` (parity #18): the invitee refuses. No member
+/// is created; the row becomes `declined` and stops blocking a re-invite.
+async fn handle_invite_decline(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let params: ainb_hangar_proto::snapshots::InviteActParams =
+        parse_params(req, "{ workspace_id, invitation_id, actor_email }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    require_invitation_in_workspace(pool, &ws, &params.invitation_id).await?;
+    InvitationRepo::decline(
+        pool,
+        &SystemClock,
+        &params.invitation_id,
+        &params.actor_email,
+    )
+    .await
+    .map_err(|e| invitation_repo_err(&e))?;
+    members_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/invite_revoke` (parity #18): an admin withdraws a pending
+/// invitation. Workspace-scoped in SQL, so another tenant's invitation matches no
+/// row and is rejected rather than deleted.
+async fn handle_invite_revoke(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let params: ainb_hangar_proto::snapshots::InviteRevokeParams =
+        parse_params(req, "{ workspace_id, invitation_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    InvitationRepo::revoke(pool, &ws, &params.invitation_id)
+        .await
+        .map_err(|e| invitation_repo_err(&e))?;
+    members_list_value(pool, &ws).await
+}
+
+/// Reject an accept / decline whose invitation does not belong to the workspace
+/// the caller claimed.
+///
+/// `InvitationRepo::accept` / `decline` are keyed on the invitation id alone (the
+/// invitee acts on an id, and the row already carries its own workspace), so the
+/// `workspace_id` on the wire would otherwise be decorative: a request naming
+/// workspace A could act on workspace B's invitation and then be answered with
+/// A's member list — a breached tenant contract and a wrong refreshed view. This
+/// makes the claimed tenant real, mirroring how
+/// [`handle_invite_revoke`]'s `DELETE` is workspace-scoped in SQL. A mismatch is
+/// reported exactly like an unknown id, so it leaks nothing about another
+/// tenant's invitations.
+async fn require_invitation_in_workspace(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    invitation_id: &str,
+) -> Result<(), RpcError> {
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let found = InvitationRepo::get(pool, invitation_id).await.map_err(|e| store_err(&e))?;
+    match found {
+        Some(inv) if inv.workspace_id == ws.as_str() => Ok(()),
+        _ => Err(invalid_params("invitation not found")),
+    }
+}
+
+/// Map an [`InvitationRepoError`] onto an RPC error: every semantic rejection is a
+/// client error (`INVALID_PARAMS`) carrying multica's wording, every store fault an
+/// internal error. Mirrors [`member_repo_err`].
+///
+/// [`InvitationRepoError`]: ainb_hangar_store::repo::invitation::InvitationRepoError
+fn invitation_repo_err(e: &ainb_hangar_store::repo::invitation::InvitationRepoError) -> RpcError {
+    use ainb_hangar_store::repo::invitation::InvitationRepoError as E;
+    match e {
+        E::EmptyEmail => invalid_params("email must not be empty"),
+        E::InvalidRole => invalid_params("role must be one of admin/member"),
+        E::CannotInviteOwner => invalid_params("cannot invite as owner"),
+        E::InviterNotMember => invalid_params("only a workspace member can invite"),
+        E::AlreadyMember => invalid_params("user is already a member"),
+        E::AlreadyPending => invalid_params("invitation already pending for this email"),
+        E::NotFound => invalid_params("invitation not found"),
+        E::NotYours => invalid_params("invitation does not belong to you"),
+        E::NotPending => invalid_params("invitation is not pending"),
+        E::Expired => invalid_params("invitation has expired"),
+        E::Db(db) => store_err(db),
+    }
 }
 
 /// Map a [`MemberRepoError`] onto an RPC error: a not-found / last-owner /

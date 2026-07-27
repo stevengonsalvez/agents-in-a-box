@@ -600,6 +600,48 @@ pub async fn members_list(
         .collect())
 }
 
+/// Snapshot the LIVE pending invitations of `workspace_id` as wire
+/// [`InvitationWireRow`](ainb_hangar_proto::snapshots::InvitationWireRow)s
+/// (multica parity #18).
+///
+/// Sweeps past-due `pending` rows to `expired` FIRST, so status converges even
+/// when nobody creates a new invite (the pane is re-pull, not event-driven), then
+/// lists what is still live. Workspace-scoped with the same guard as
+/// [`members_list`]: a malformed workspace id yields an empty vec, never an
+/// error.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the sweep or the list query fails.
+pub async fn pending_invites(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::InvitationWireRow>, sqlx::Error> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    // A malformed (empty) workspace id resolves to no invites, not an error.
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(Vec::new());
+    };
+    InvitationRepo::expire_stale(pool, &SystemClock, &ws).await?;
+    let invites = InvitationRepo::list_pending(pool, &SystemClock, &ws).await?;
+    Ok(invites
+        .into_iter()
+        .map(|i| ainb_hangar_proto::snapshots::InvitationWireRow {
+            id: i.id,
+            invitee_email: i.invitee_email,
+            role: i.role,
+            status: i.status,
+            inviter_id: i.inviter_id,
+            invitee_user_id: i.invitee_user_id,
+            created_at: i.created_at,
+            expires_at: i.expires_at,
+        })
+        .collect())
+}
+
 /// Snapshot the squads of `workspace_id` as wire
 /// [`SquadWireRow`](ainb_hangar_proto::snapshots::SquadWireRow)s for the
 /// `ainb hangar squad list` status view (`hangar/squads_list`, e38.17).
