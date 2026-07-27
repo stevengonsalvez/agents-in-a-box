@@ -53,6 +53,10 @@ pub enum RuleChangeKind {
     /// into columns on `autopilot`, so multica's per-trigger publisher
     /// (migration 189) folds into the per-RULE version chain here.
     Trigger,
+    /// The rule's WRITE-ACCESS mode changed (`open` <-> `restricted`, migration
+    /// 0064). Opening a rule up to more writers is exactly the kind of publish
+    /// this accountability ledger exists to record.
+    Access,
 }
 
 impl RuleChangeKind {
@@ -68,6 +72,7 @@ impl RuleChangeKind {
             Self::Paused => "paused",
             Self::Resumed => "resumed",
             Self::Trigger => "trigger",
+            Self::Access => "access",
         }
     }
 
@@ -88,6 +93,7 @@ impl RuleChangeKind {
             "paused" => Self::Paused,
             "resumed" => Self::Resumed,
             "trigger" => Self::Trigger,
+            "access" => Self::Access,
             _ => return None,
         })
     }
@@ -126,6 +132,14 @@ pub struct AutopilotConfigSnapshot {
     pub enabled: bool,
     /// Whether the bare programmatic `api` trigger is armed.
     pub api_trigger_enabled: bool,
+    /// Who may WRITE the rule (`open` / `restricted`, migration 0064). Stringly
+    /// typed for the same reason as the two modes above: the typed enum lives
+    /// in the store crate, and the ledger only compares and serialises it.
+    ///
+    /// `Default` is the empty string, which every pre-0064 snapshot carries —
+    /// two empty strings compare equal, so an old ledger row never looks like
+    /// an access change.
+    pub access_mode: String,
 }
 
 impl AutopilotConfigSnapshot {
@@ -147,6 +161,7 @@ impl AutopilotConfigSnapshot {
             "concurrency_policy": self.concurrency_policy,
             "enabled": self.enabled,
             "api_trigger_enabled": self.api_trigger_enabled,
+            "access_mode": self.access_mode,
             "changed": changed,
         })
     }
@@ -189,6 +204,9 @@ pub fn changed_fields(
     if before.api_trigger_enabled != after.api_trigger_enabled {
         out.push("api_trigger_enabled");
     }
+    if before.access_mode != after.access_mode {
+        out.push("access_mode");
+    }
     out
 }
 
@@ -224,6 +242,9 @@ pub fn classify(
     }
     if before.api_trigger_enabled != after.api_trigger_enabled {
         return Some(RuleChangeKind::Trigger);
+    }
+    if before.access_mode != after.access_mode {
+        return Some(RuleChangeKind::Access);
     }
     if before.agent_id != after.agent_id {
         return Some(RuleChangeKind::Target);

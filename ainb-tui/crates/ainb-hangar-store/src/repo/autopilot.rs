@@ -152,6 +152,49 @@ impl ConcurrencyPolicy {
     }
 }
 
+/// Who may WRITE this rule (the `access_mode` column, migration 0064, multica
+/// parity #27).
+///
+/// Orthogonal to [`ExecutionMode`] and [`ConcurrencyPolicy`]: this decides who
+/// may change the rule, not what it does. The predicate itself lives in
+/// [`super::autopilot_access::can_write`] — this enum is only the stored token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum AccessMode {
+    /// Any actor in the workspace may write the rule. The pre-0064 behaviour,
+    /// the column DEFAULT, and what every existing row upgrades to — a
+    /// deny-by-default upgrade would silently lock an install out of its own
+    /// automations (migration 0064 decision 4).
+    #[default]
+    Open,
+    /// Only the rule's owner, a workspace owner/admin, or an explicit `editor`
+    /// collaborator may write the rule.
+    Restricted,
+}
+
+impl AccessMode {
+    /// The literal stored in the `access_mode` column.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Open => "open",
+            Self::Restricted => "restricted",
+        }
+    }
+
+    /// Parse a stored `access_mode` value. An unrecognised string falls back to
+    /// [`Open`](Self::Open) — the same forward-compatibility guard
+    /// [`ExecutionMode`] and [`ConcurrencyPolicy`] use, and the safe direction:
+    /// a token this build cannot read must never become an unexplained lockout.
+    /// The column `CHECK` already rejects junk on write.
+    #[must_use]
+    pub fn from_db_str(s: &str) -> Self {
+        match s {
+            "restricted" => Self::Restricted,
+            _ => Self::Open,
+        }
+    }
+}
+
 /// A stored, cron-scheduled autopilot (one `autopilot` row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Autopilot {
@@ -185,6 +228,8 @@ pub struct Autopilot {
     /// directly. Defaults to `false`, mirroring `webhook_enabled`: a
     /// half-configured autopilot is never firable.
     pub api_trigger_enabled: bool,
+    /// Who may WRITE this rule (migration 0064). `Open` for every pre-0064 row.
+    pub access_mode: AccessMode,
     /// Creation time (epoch-ms).
     pub created_at: i64,
 }
@@ -278,6 +323,10 @@ pub struct AutopilotEdit {
     pub execution_mode: Option<ExecutionMode>,
     /// New concurrency policy (`Policy`).
     pub concurrency_policy: Option<ConcurrencyPolicy>,
+    /// New write-access mode (`Access`, migration 0064). Opening a rule up to
+    /// more writers is exactly the kind of publish the accountability ledger
+    /// exists to record, so this is SUBSTANTIVE, never cosmetic.
+    pub access_mode: Option<AccessMode>,
 }
 
 impl AutopilotEdit {
@@ -291,6 +340,7 @@ impl AutopilotEdit {
             && self.max_concurrent_runs.is_none()
             && self.execution_mode.is_none()
             && self.concurrency_policy.is_none()
+            && self.access_mode.is_none()
     }
 }
 
@@ -322,13 +372,14 @@ fn snapshot_of(ap: &Autopilot) -> AutopilotConfigSnapshot {
         concurrency_policy: ap.concurrency_policy.as_str().to_string(),
         enabled: ap.enabled,
         api_trigger_enabled: ap.api_trigger_enabled,
+        access_mode: ap.access_mode.as_str().to_string(),
     }
 }
 
 /// The `SELECT` column list shared by every autopilot read.
 const AUTOPILOT_COLUMNS: &str = "id, workspace_id, agent_id, name, instructions, cron_expr, \
      max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
-     api_trigger_enabled, created_at";
+     api_trigger_enabled, access_mode, created_at";
 
 /// Stateless typed wrapper over the autopilot tables.
 pub struct AutopilotRepo;
@@ -417,6 +468,9 @@ impl AutopilotRepo {
             concurrency_policy: req.concurrency_policy.as_str().to_string(),
             enabled: true,
             api_trigger_enabled: req.api_trigger_enabled,
+            // A rule is always born 'open' (the column default); restricting it
+            // is a deliberate, separately-ledgered publish.
+            access_mode: AccessMode::Open.as_str().to_string(),
         };
         AutopilotRuleVersionRepo::publish_in_tx(
             &mut tx,
@@ -508,6 +562,9 @@ impl AutopilotRepo {
         if let Some(policy) = edit.concurrency_policy {
             after.concurrency_policy = policy;
         }
+        if let Some(mode) = edit.access_mode {
+            after.access_mode = mode;
+        }
 
         // Cron revalidation BEFORE any write: a malformed expression must leave
         // the row and the ledger untouched.
@@ -518,7 +575,7 @@ impl AutopilotRepo {
         sqlx::query(
             "UPDATE autopilot SET name = ?, agent_id = ?, instructions = ?, cron_expr = ?, \
                     max_concurrent_runs = ?, execution_mode = ?, concurrency_policy = ?, \
-                    next_tick_at = ? \
+                    next_tick_at = ?, access_mode = ? \
              WHERE id = ? AND workspace_id = ?",
         )
         .bind(&after.name)
@@ -529,6 +586,7 @@ impl AutopilotRepo {
         .bind(after.execution_mode.as_str())
         .bind(after.concurrency_policy.as_str())
         .bind(after.next_tick_at)
+        .bind(after.access_mode.as_str())
         .bind(id.as_str())
         .bind(workspace.as_str())
         .execute(&mut *tx)
@@ -570,12 +628,9 @@ impl AutopilotRepo {
         pool: &SqlitePool,
         workspace: &WorkspaceId,
     ) -> Result<Vec<Autopilot>, AutopilotRepoError> {
-        let rows = sqlx::query_as::<_, Autopilot>(
-            "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
-                    api_trigger_enabled, created_at \
-             FROM autopilot WHERE workspace_id = ? ORDER BY name",
-        )
+        let rows = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE workspace_id = ? ORDER BY name"
+        ))
         .bind(workspace.as_str())
         .fetch_all(pool)
         .await?;
@@ -592,12 +647,9 @@ impl AutopilotRepo {
         workspace: &WorkspaceId,
         id: &AutopilotId,
     ) -> Result<Option<Autopilot>, AutopilotRepoError> {
-        let row = sqlx::query_as::<_, Autopilot>(
-            "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
-                    api_trigger_enabled, created_at \
-             FROM autopilot WHERE id = ? AND workspace_id = ?",
-        )
+        let row = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE id = ? AND workspace_id = ?"
+        ))
         .bind(id.as_str())
         .bind(workspace.as_str())
         .fetch_optional(pool)
@@ -619,12 +671,9 @@ impl AutopilotRepo {
         pool: &SqlitePool,
         id: &AutopilotId,
     ) -> Result<Option<Autopilot>, AutopilotRepoError> {
-        let row = sqlx::query_as::<_, Autopilot>(
-            "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
-                    api_trigger_enabled, created_at \
-             FROM autopilot WHERE id = ?",
-        )
+        let row = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE id = ?"
+        ))
         .bind(id.as_str())
         .fetch_optional(pool)
         .await?;
@@ -978,6 +1027,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Autopilot {
             // SQLite stores the boolean as INTEGER 0/1.
             enabled: row.try_get::<i64, _>("enabled")? != 0,
             api_trigger_enabled: row.try_get::<i64, _>("api_trigger_enabled")? != 0,
+            access_mode: AccessMode::from_db_str(&row.try_get::<String, _>("access_mode")?),
             created_at: row.try_get("created_at")?,
         })
     }
