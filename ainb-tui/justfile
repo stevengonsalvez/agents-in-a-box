@@ -137,10 +137,21 @@ lint:
 lint-fix:
     cargo clippy --fix --allow-dirty --allow-staged
 
+# Regenerate docs/tui/cli.md from the ainb binary (source of truth)
+gen-cli-ref:
+    cargo build -p ainb
+    AINB_BIN=target/debug/ainb bash scripts/gen-cli-reference.sh
+
+# Fail if docs/tui/cli.md has drifted from the binary
+# (docs/tui/ lives at the repo root, one level up from this justfile)
+check-cli-ref: gen-cli-ref
+    git diff --exit-code -- ../docs/tui/cli.md
+
 # Check everything (format, lint, test)
 check:
     just fmt-check
     just lint
+    just check-cli-ref
     just test
 
 # Fix formatting and linting issues
