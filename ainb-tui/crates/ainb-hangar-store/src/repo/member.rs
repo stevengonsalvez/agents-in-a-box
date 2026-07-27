@@ -121,12 +121,38 @@ impl MemberRepo {
         email: &str,
         role: MemberRole,
     ) -> Result<Member, MemberRepoError> {
+        let mut tx = pool.begin().await?;
+        let member = Self::add_in_tx(&mut tx, workspace, email, role).await?;
+        tx.commit().await?;
+        Ok(member)
+    }
+
+    /// The body of [`add`](MemberRepo::add), running inside a caller-owned
+    /// transaction so a join can be made ATOMIC with another write.
+    ///
+    /// [`InvitationRepo::accept`](crate::repo::invitation::InvitationRepo::accept)
+    /// (parity #18) must flip the invitation to `accepted` *and* create the
+    /// membership in ONE transaction — multica does exactly this with a `qtx`.
+    /// `add` is now a thin `begin → add_in_tx → commit`, so this extraction is a
+    /// pure refactor: the public verb's behaviour is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemberRepoError::EmptyEmail`] when `email` is blank,
+    /// [`MemberRepoError::AlreadyMember`] when the pair already exists, or
+    /// [`MemberRepoError::Db`] on a store failure. On any error the caller's
+    /// transaction is left un-committed (i.e. rolled back on drop).
+    pub(crate) async fn add_in_tx(
+        tx: &mut sqlx::SqliteConnection,
+        workspace: &WorkspaceId,
+        email: &str,
+        role: MemberRole,
+    ) -> Result<Member, MemberRepoError> {
         let email = email.trim();
         if email.is_empty() {
             return Err(MemberRepoError::EmptyEmail);
         }
 
-        let mut tx = pool.begin().await?;
         // Find-or-create the user by email (`user.email` is NOT NULL UNIQUE).
         let existing: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
             .bind(email)
@@ -164,7 +190,6 @@ impl MemberRepo {
             }
             return Err(MemberRepoError::Db(e));
         }
-        tx.commit().await?;
         Ok(Member {
             user_id,
             email: email.to_string(),
@@ -316,7 +341,7 @@ impl MemberRepo {
 /// Read one member's current role within `workspace`, scoped by the composite PK,
 /// inside the mutation's transaction. `None` when no such member exists (an
 /// unknown user, or a foreign-tenant pair).
-async fn member_role_in_tx(
+pub(crate) async fn member_role_in_tx(
     tx: &mut sqlx::SqliteConnection,
     workspace: &WorkspaceId,
     user_id: &str,
