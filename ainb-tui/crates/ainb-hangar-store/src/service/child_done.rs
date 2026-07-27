@@ -1080,6 +1080,8 @@ mod tests {
                 parent_issue_id: Some("parent".into()),
                 stage,
                 origin: None,
+                properties: std::collections::BTreeMap::new(),
+                metadata: std::collections::BTreeMap::new(),
             }
         }
         fn keys(children: &[Issue]) -> Vec<String> {
