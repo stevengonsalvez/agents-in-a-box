@@ -4199,8 +4199,11 @@ async fn run_issue_delete(store: &Store, args: IssueDeleteArgs) -> Result<()> {
         // DRY RUN: report what a real delete would remove and exit untouched.
         println!("would delete issue {} \"{}\"", args.id, preview.title);
         println!(
-            "  removes: {} comment(s), {} task(s), {} board placement(s), plus label links, dependency edges, and usage rows",
-            preview.summary.comments, preview.summary.tasks, preview.summary.placements
+            "  removes: {} comment(s), {} task(s), {} board placement(s), {} activity row(s), plus label links, dependency edges, and usage rows",
+            preview.summary.comments,
+            preview.summary.tasks,
+            preview.summary.placements,
+            preview.summary.activities
         );
         if preview.active_tasks > 0 {
             println!(
@@ -4216,8 +4219,13 @@ async fn run_issue_delete(store: &Store, args: IssueDeleteArgs) -> Result<()> {
     match IssueRepo::delete_cascade(store.pool(), &workspace_id, &args.id).await {
         Ok(summary) => {
             println!(
-                "deleted issue {} \"{}\" ({} comment(s), {} task(s), {} placement(s))",
-                args.id, preview.title, summary.comments, summary.tasks, summary.placements
+                "deleted issue {} \"{}\" ({} comment(s), {} task(s), {} placement(s), {} activity row(s))",
+                args.id,
+                preview.title,
+                summary.comments,
+                summary.tasks,
+                summary.placements,
+                summary.activities
             );
             Ok(())
         }

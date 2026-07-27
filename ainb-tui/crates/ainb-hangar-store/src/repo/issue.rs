@@ -177,6 +177,9 @@ pub struct IssueDeleteSummary {
     pub tasks: i64,
     /// Board placements (cards) referencing the issue.
     pub placements: i64,
+    /// Activity-log rows recording the issue's narrative (migration 0059). The
+    /// table carries no FK on `issue_id`, so the cascade reaps these explicitly.
+    pub activities: i64,
 }
 
 /// A dry-run preview of an issue delete: the human title, the dependent counts,
@@ -254,10 +257,16 @@ async fn count_dependents(
         .bind(issue_id)
         .fetch_one(&mut *conn)
         .await?;
+    let activities: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM activity_log WHERE issue_id = ?")
+            .bind(issue_id)
+            .fetch_one(&mut *conn)
+            .await?;
     Ok(IssueDeleteSummary {
         comments,
         tasks,
         placements,
+        activities,
     })
 }
 
@@ -887,6 +896,11 @@ impl IssueRepo {
         //     same shape as the `agent_task_queue` delete above.
         crate::repo::dispatch_attempt::DispatchAttemptRepo::delete_for_issue(&mut tx, issue_id)
             .await?;
+
+        // 4c. The card's activity-log narrative (migration 0059). Same shape and
+        //     same rationale as 4b: no FK on `issue_id` by design, so the reap is
+        //     explicit. The narrative is scoped to the card, so it dies with it.
+        crate::repo::activity::ActivityRepo::delete_for_issue(&mut tx, issue_id).await?;
 
         // 5. The issue's directly-linked rows. First orphan any sub-issues: the
         //    `parent_issue_id` self-FK is `ON DELETE SET NULL` (migration 0046),
