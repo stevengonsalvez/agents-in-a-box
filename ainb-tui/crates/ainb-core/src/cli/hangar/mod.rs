@@ -2393,6 +2393,9 @@ async fn run_autopilot_edit(store: &Store, args: AutopilotEditArgs) -> Result<()
         max_concurrent_runs: args.max_concurrent_runs,
         execution_mode: args.execution_mode.map(Into::into),
         concurrency_policy: args.concurrency_policy.map(Into::into),
+        // `ainb hangar autopilot access` is the one door onto the write-access
+        // mode, so the generic edit patch deliberately leaves it alone.
+        access_mode: None,
     };
     anyhow::ensure!(
         !edit.is_empty(),
@@ -10247,6 +10250,7 @@ mod tests {
             next_tick_at: Some(1_767_258_000_000),
             enabled,
             api_trigger_enabled: false,
+            access_mode: ainb_hangar_store::repo::autopilot::AccessMode::Open,
             created_at: 0,
         }
     }

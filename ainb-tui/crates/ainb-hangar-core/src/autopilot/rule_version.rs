@@ -280,6 +280,7 @@ mod tests {
             concurrency_policy: "skip".into(),
             enabled: true,
             api_trigger_enabled: false,
+            access_mode: "open".into(),
         }
     }
 
