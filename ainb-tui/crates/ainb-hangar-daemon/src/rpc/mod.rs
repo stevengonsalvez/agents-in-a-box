@@ -758,7 +758,9 @@ async fn handle(
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
         | methods::HANGAR_AUTOPILOT_SET_ENABLED
         | methods::HANGAR_AUTOPILOT_TRIGGER_API
-        | methods::HANGAR_AUTOPILOT_SET_API_TRIGGER => handle_autopilot(pool, req, events).await,
+        | methods::HANGAR_AUTOPILOT_SET_API_TRIGGER
+        | methods::HANGAR_AUTOPILOT_UPDATE
+        | methods::HANGAR_AUTOPILOT_VERSIONS => handle_autopilot(pool, req, events).await,
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_TASK_RETRY => handle_task_retry(pool, req, events).await,
@@ -7043,7 +7045,8 @@ async fn handle_autopilot(
                 parse_params(req, "{ workspace_id, autopilot_id }")?;
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
-            let fired = snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id)
+            let actor = member_actor(params.actor_user_id.as_deref());
+            let fired = snapshots::autopilot_fire_now(pool, &SystemClock, &ws, &id, actor.as_ref())
                 .await
                 .map_err(|e| internal(&format!("autopilot fire: {e}")))?;
             // A foreign autopilot id fires nothing — announce only real runs.
@@ -7063,9 +7066,17 @@ async fn handle_autopilot(
                 parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
-            snapshots::autopilot_set_enabled(pool, &SystemClock, &ws, &id, params.enabled)
-                .await
-                .map_err(|e| autopilot_repo_err(&e))?;
+            let actor = member_actor(params.actor_user_id.as_deref());
+            snapshots::autopilot_set_enabled(
+                pool,
+                &SystemClock,
+                &ws,
+                &id,
+                params.enabled,
+                actor.as_ref(),
+            )
+            .await
+            .map_err(|e| autopilot_repo_err(&e))?;
             // Push the refreshed row so the manager table updates in place
             // (the AutopilotUpdated contract carries the full wire row).
             // Best-effort: a re-read fault only skips the push — the toggle
@@ -7146,9 +7157,17 @@ async fn handle_autopilot(
                 parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
             let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
             let id = autopilot_id(&params.autopilot_id)?;
-            let updated = snapshots::autopilot_set_api_trigger(pool, &ws, &id, params.enabled)
-                .await
-                .map_err(|e| autopilot_repo_err(&e))?;
+            let actor = member_actor(params.actor_user_id.as_deref());
+            let updated = snapshots::autopilot_set_api_trigger(
+                pool,
+                &SystemClock,
+                &ws,
+                &id,
+                params.enabled,
+                actor.as_ref(),
+            )
+            .await
+            .map_err(|e| autopilot_repo_err(&e))?;
             // Push the refreshed row so the manager table shows the armed badge
             // in place — the same best-effort shape as `set_enabled`.
             if updated {
@@ -7163,12 +7182,119 @@ async fn handle_autopilot(
             }
             to_value(&ainb_hangar_proto::snapshots::AutopilotSetApiTriggerResult { updated })
         }
+        methods::HANGAR_AUTOPILOT_UPDATE => {
+            let params: ainb_hangar_proto::snapshots::AutopilotUpdateParams =
+                parse_params(req, "{ workspace_id, autopilot_id, ...editable fields }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            let actor = member_actor(params.actor_user_id.as_deref());
+
+            // `clear_instructions` is the explicit "set to NULL" signal: JSON
+            // cannot distinguish an omitted key from an explicit null in an
+            // all-optional patch, so the flag carries that intent.
+            let instructions = if params.clear_instructions {
+                Some(None)
+            } else {
+                params.instructions.clone().map(Some)
+            };
+            let edit = ainb_hangar_store::repo::autopilot::AutopilotEdit {
+                name: params.name.clone(),
+                agent_id: match params.agent_id.as_deref() {
+                    Some(a) => Some(agent_id(a)?),
+                    None => None,
+                },
+                instructions,
+                cron_expr: params.cron_expr.clone(),
+                max_concurrent_runs: params.max_concurrent_runs,
+                execution_mode: params
+                    .execution_mode
+                    .as_deref()
+                    .map(ainb_hangar_store::repo::autopilot::ExecutionMode::from_db_str),
+                concurrency_policy: params
+                    .concurrency_policy
+                    .as_deref()
+                    .map(ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::from_db_str),
+            };
+
+            let result = match snapshots::autopilot_update(
+                pool,
+                &SystemClock,
+                &ws,
+                &id,
+                &edit,
+                actor.as_ref(),
+            )
+            .await
+            {
+                Ok(ainb_hangar_store::repo::autopilot::UpdateOutcome::NotFound) => {
+                    ainb_hangar_proto::snapshots::AutopilotUpdateResult {
+                        outcome: "not_found".to_string(),
+                        version: None,
+                    }
+                }
+                Ok(ainb_hangar_store::repo::autopilot::UpdateOutcome::Updated { version }) => {
+                    // Push the refreshed row so the manager table shows the new
+                    // version badge in place — the same best-effort shape
+                    // `set_enabled` uses.
+                    if let Ok(rows) = snapshots::autopilots_list(pool, &ws).await {
+                        if let Some(row) = rows.into_iter().find(|r| r.id == id.as_str()) {
+                            events.emit(
+                                ws.as_str(),
+                                ainb_hangar_proto::events::HangarEvent::AutopilotUpdated(row),
+                            );
+                        }
+                    }
+                    ainb_hangar_proto::snapshots::AutopilotUpdateResult {
+                        outcome: "updated".to_string(),
+                        // `None` here is the wire-visible proof of the rename
+                        // rule: a cosmetic edit landed but minted no version.
+                        version,
+                    }
+                }
+                // A malformed cron is a CALLER error with nothing written, not a
+                // daemon fault — report it as an outcome, not an RPC error.
+                Err(ainb_hangar_store::repo::autopilot::AutopilotRepoError::Cron(_)) => {
+                    ainb_hangar_proto::snapshots::AutopilotUpdateResult {
+                        outcome: "invalid_cron".to_string(),
+                        version: None,
+                    }
+                }
+                Err(e) => return Err(autopilot_repo_err(&e)),
+            };
+            to_value(&result)
+        }
+        methods::HANGAR_AUTOPILOT_VERSIONS => {
+            let params: ainb_hangar_proto::snapshots::AutopilotVersionsParams =
+                parse_params(req, "{ workspace_id, autopilot_id, limit }")?;
+            let versions = match resolve_wire(pool, &params.workspace_id).await? {
+                Some(ws) => {
+                    let id = autopilot_id(&params.autopilot_id)?;
+                    snapshots::autopilot_versions(pool, &ws, &id, params.limit)
+                        .await
+                        .map_err(|e| autopilot_repo_err(&e))?
+                }
+                None => Vec::new(),
+            };
+            to_value(&ainb_hangar_proto::snapshots::AutopilotVersionsResult { versions })
+        }
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown autopilot method: {other}"),
             data: None,
         }),
     }
+}
+
+/// Render an optional bare `user.id` from the wire into a canonical
+/// `member:<id>` [`ActorRef`] (multica parity #14).
+///
+/// Trims and empty-filters exactly like the `invoker_user_id` handling, so a
+/// caller sending `""` is treated as "no actor" rather than minting a bogus
+/// ref. `None` means UNATTRIBUTED — an honest unknown, never a fabricated human.
+fn member_actor(user_id: Option<&str>) -> Option<ainb_hangar_core::actor::ActorRef> {
+    user_id.map(str::trim).filter(|s| !s.is_empty()).and_then(|id| {
+        ainb_hangar_core::actor::ActorRef::new(ainb_hangar_core::actor::ActorKind::Member, id).ok()
+    })
 }
 
 /// Dispatch `hangar/daemon_health` (P8.5).
