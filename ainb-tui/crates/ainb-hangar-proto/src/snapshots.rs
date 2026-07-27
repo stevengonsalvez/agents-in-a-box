@@ -17,8 +17,8 @@ use ainb_hangar_core::channel::ChannelSet;
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
-    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow,
-    IssueRow, SkillFile, SkillRow, TaskCardRow,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, AutopilotVersionRow,
+    InboxEntryRow, IssueRow, SkillFile, SkillRow, TaskCardRow,
 };
 
 /// `serde(default)` helper — an absent `is_answer` defaults to `true`.
@@ -370,17 +370,24 @@ pub struct AutopilotRunsResult {
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_FIRE_NOW`]: the workspace
 /// (tenant guard) plus the autopilot to fire immediately (P7.5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotFireNowParams {
     /// The subscribed workspace the autopilot must belong to.
     pub workspace_id: String,
     /// The autopilot to fire now (bypassing the schedule).
     pub autopilot_id: String,
+    /// The bare `user.id` of the human clicking "run now" — the daemon renders
+    /// it to `member:<id>` and attributes the run `direct_human` (multica
+    /// parity #14). Omitted / empty ⇒ the run falls back to the rule owner.
+    ///
+    /// Append-only + `serde(default)`: a pre-0061 caller's payload omits it.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_ENABLED`]: the workspace
 /// (tenant guard), the autopilot, and the target enabled flag (P7.5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotSetEnabledParams {
     /// The subscribed workspace the autopilot must belong to.
     pub workspace_id: String,
@@ -388,16 +395,27 @@ pub struct AutopilotSetEnabledParams {
     pub autopilot_id: String,
     /// `true` enables (recompute next-tick from now); `false` disables.
     pub enabled: bool,
+    /// The bare `user.id` of the human toggling it. Pausing / resuming is a
+    /// SUBSTANTIVE publish, so this becomes the rule version's accountable
+    /// human. Omitted ⇒ the version is minted unattributed.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`]: the workspace
 /// (tenant guard) plus the autopilot to fire through its `api` trigger.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotTriggerApiParams {
     /// The subscribed workspace the autopilot must belong to.
     pub workspace_id: String,
     /// The autopilot to fire.
     pub autopilot_id: String,
+    /// The bare `user.id` of the caller, when there is one. An `api` trigger is
+    /// an UNATTENDED fire, so this does NOT change the run's attribution
+    /// (multica keeps `originator` NULL for unattended dispatch); it is carried
+    /// for symmetry and future auditing.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`].
@@ -429,7 +447,7 @@ pub struct AutopilotTriggerApiResult {
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: the
 /// workspace (tenant guard), the autopilot, and the target armed flag.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotSetApiTriggerParams {
     /// The subscribed workspace the autopilot must belong to.
     pub workspace_id: String,
@@ -437,6 +455,11 @@ pub struct AutopilotSetApiTriggerParams {
     pub autopilot_id: String,
     /// `true` arms the `api` trigger; `false` disarms it.
     pub enabled: bool,
+    /// The bare `user.id` of the human arming / disarming it. Arming a trigger
+    /// is a SUBSTANTIVE publish on the rule, so this becomes the version's
+    /// accountable human.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
 }
 
 /// Result of [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: whether a row
@@ -445,6 +468,93 @@ pub struct AutopilotSetApiTriggerParams {
 pub struct AutopilotSetApiTriggerResult {
     /// `true` when the autopilot existed in this workspace and was updated.
     pub updated: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_UPDATE`] (multica parity #14):
+/// an all-optional patch over one autopilot's editable config.
+///
+/// Every field is `Option<_>` + `#[serde(default)]`: omitted means "leave
+/// alone", so a caller sends only what it is changing and a pre-0061 payload
+/// still parses. `name` is the one COSMETIC field — changing only it lands the
+/// rename but mints no rule version.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotUpdateParams {
+    /// The subscribed workspace the autopilot must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The autopilot to edit.
+    pub autopilot_id: String,
+    /// New display name (cosmetic on its own).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Re-target the rule at a different agent.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// New instructions. Ignored when
+    /// [`clear_instructions`](Self::clear_instructions) is `true`.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// CLEAR the instructions. A separate flag because JSON cannot distinguish
+    /// "set to null" from "omitted" in an all-optional patch.
+    #[serde(default)]
+    pub clear_instructions: bool,
+    /// New cron expression. Revalidated before any write: a malformed
+    /// expression yields `invalid_cron` with nothing written.
+    #[serde(default)]
+    pub cron_expr: Option<String>,
+    /// New in-flight ceiling.
+    #[serde(default)]
+    pub max_concurrent_runs: Option<i64>,
+    /// New execution mode (`run_only` | `create_issue`).
+    #[serde(default)]
+    pub execution_mode: Option<String>,
+    /// New concurrency policy (`skip` | `queue` | `replace`).
+    #[serde(default)]
+    pub concurrency_policy: Option<String>,
+    /// The bare `user.id` of the editing human — the accountable human recorded
+    /// on the minted rule version. Omitted ⇒ unattributed.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_UPDATE`].
+///
+/// Three outcomes, discriminated by [`outcome`](Self::outcome):
+///
+/// - `updated` — the row was written. [`version`](Self::version) is the minted
+///   rule version, or `null` when the edit was COSMETIC (a rename / no-op).
+///   That `null` is the wire-visible proof of multica's rename rule.
+/// - `not_found` — no such autopilot in this workspace; nothing written.
+/// - `invalid_cron` — the supplied `cron_expr` failed to parse; nothing
+///   written and no version minted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotUpdateResult {
+    /// `updated` | `not_found` | `invalid_cron`.
+    pub outcome: String,
+    /// The minted rule version; `None` on a cosmetic-only edit, and on every
+    /// non-`updated` outcome.
+    #[serde(default)]
+    pub version: Option<i64>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_VERSIONS`]: the workspace
+/// (tenant guard), the autopilot, and a row cap.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotVersionsParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot whose version ledger to read.
+    pub autopilot_id: String,
+    /// Maximum number of versions to return (newest-first).
+    pub limit: u32,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_VERSIONS`]: one autopilot's
+/// rule-version ledger, newest-first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotVersionsResult {
+    /// The ledger rows, newest-first, capped at the requested limit. Empty for
+    /// an unversioned (pre-0061, never-edited) rule.
+    pub versions: Vec<AutopilotVersionRow>,
 }
 
 /// Result of [`crate::methods::HANGAR_TASKS_LIST`]: every task in the workspace
@@ -2954,6 +3064,7 @@ mod tests {
                 last_run_status: Some("completed".into()),
                 last_run_at: Some(1_699_000_000_000),
                 api_trigger_enabled: true,
+                ..Default::default()
             }],
         };
         let s = serde_json::to_string(&list).unwrap();
@@ -2982,6 +3093,7 @@ mod tests {
                 status: "completed".into(),
                 source: "api".into(),
                 failure_reason: None,
+                ..Default::default()
             }],
         };
         let s = serde_json::to_string(&runs).unwrap();
@@ -2993,6 +3105,7 @@ mod tests {
         let fire = AutopilotFireNowParams {
             workspace_id: "ws-1".into(),
             autopilot_id: "ap-1".into(),
+            ..Default::default()
         };
         let s = serde_json::to_string(&fire).unwrap();
         assert_eq!(
@@ -3004,6 +3117,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             autopilot_id: "ap-1".into(),
             enabled: false,
+            ..Default::default()
         };
         let s = serde_json::to_string(&toggle).unwrap();
         assert_eq!(
@@ -3021,6 +3135,7 @@ mod tests {
         let params = AutopilotTriggerApiParams {
             workspace_id: "ws-1".into(),
             autopilot_id: "ap-1".into(),
+            ..Default::default()
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
@@ -3059,6 +3174,7 @@ mod tests {
             workspace_id: "ws-1".into(),
             autopilot_id: "ap-1".into(),
             enabled: true,
+            ..Default::default()
         };
         let s = serde_json::to_string(&arm).unwrap();
         assert_eq!(
@@ -3093,6 +3209,88 @@ mod tests {
             "an omitted source is empty, not a guessed provenance"
         );
         assert_eq!(legacy_run.failure_reason, None);
+    }
+
+    /// The parity-#14 rule-version envelopes round-trip, and every field the
+    /// item added is APPEND-ONLY: a pre-0061 daemon's payload (no
+    /// `actor_user_id`, no `rule_version`, no `accountable_actor`) still
+    /// deserialises, and a cosmetic edit's `version: null` survives the wire.
+    #[test]
+    fn autopilot_rule_version_envelopes_roundtrip_and_are_append_only() {
+        let params = AutopilotUpdateParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            instructions: Some("v2 instructions".into()),
+            actor_user_id: Some("u-bob".into()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotUpdateParams>(&s).unwrap(),
+            params
+        );
+
+        // A COSMETIC edit reports `version: null` — the wire-visible proof of
+        // multica's rename rule.
+        let cosmetic: AutopilotUpdateResult =
+            serde_json::from_str(r#"{"outcome":"updated","version":null}"#).unwrap();
+        assert_eq!(cosmetic.outcome, "updated");
+        assert_eq!(cosmetic.version, None);
+        let substantive: AutopilotUpdateResult =
+            serde_json::from_str(r#"{"outcome":"updated","version":2}"#).unwrap();
+        assert_eq!(substantive.version, Some(2));
+
+        let versions = AutopilotVersionsResult {
+            versions: vec![AutopilotVersionRow {
+                id: "v-1".into(),
+                autopilot_id: "ap-1".into(),
+                version: 2,
+                change_kind: "instructions".into(),
+                published_by: Some("member:u-bob".into()),
+                published_by_label: Some("bob@example.com".into()),
+                config_summary: r#"{"changed":["instructions"]}"#.into(),
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&versions).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotVersionsResult>(&s).unwrap(),
+            versions
+        );
+
+        // APPEND-ONLY: pre-0061 payloads, verbatim.
+        let legacy_update: AutopilotUpdateParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","autopilot_id":"ap-1"}"#)
+                .expect("a pre-0061 AutopilotUpdateParams must still deserialise");
+        assert_eq!(legacy_update.actor_user_id, None);
+
+        let legacy_fire: AutopilotFireNowParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","autopilot_id":"ap-1"}"#)
+                .expect("a pre-0061 AutopilotFireNowParams must still deserialise");
+        assert_eq!(legacy_fire.actor_user_id, None);
+
+        let legacy_ap: AutopilotRow = serde_json::from_str(
+            r#"{"id":"ap-1","workspace_id":"ws-1","agent_id":"a","name":"n",
+                 "cron_expr":"* * * * *","next_tick_at":null,"enabled":true,
+                 "last_run_status":null,"last_run_at":null}"#,
+        )
+        .expect("a pre-0061 AutopilotRow must still deserialise");
+        assert_eq!(
+            legacy_ap.rule_version, None,
+            "an omitted rule_version is unversioned, not a fabricated v1"
+        );
+        assert_eq!(legacy_ap.last_published_by, None);
+
+        let legacy_run: AutopilotRunRow = serde_json::from_str(
+            r#"{"id":"r-1","autopilot_id":"ap-1","started_at":1,"completed_at":null,
+                 "status":"running"}"#,
+        )
+        .expect("a pre-0061 AutopilotRunRow must still deserialise");
+        assert_eq!(
+            legacy_run.accountable_actor, None,
+            "an omitted accountable_actor is an honest unknown, not a guess"
+        );
+        assert_eq!(legacy_run.attribution, None);
     }
 
     /// The P8.4 Kanban task envelopes round-trip through JSON.

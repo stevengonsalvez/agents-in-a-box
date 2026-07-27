@@ -184,6 +184,30 @@ pub const HANGAR_AUTOPILOT_TRIGGER_API: &str = "hangar/autopilot_trigger_api";
 /// explicit operator action, never implicitly at create time. Workspace-scoped.
 pub const HANGAR_AUTOPILOT_SET_API_TRIGGER: &str = "hangar/autopilot_set_api_trigger";
 
+/// `hangar/autopilot_update` — EDIT one autopilot's config (multica parity #14).
+///
+/// Params: a [`crate::snapshots::AutopilotUpdateParams`] (every editable field
+/// optional; `None` leaves it alone). Result: a
+/// [`crate::snapshots::AutopilotUpdateResult`].
+///
+/// Before this method there was no edit surface at all — an autopilot's cron,
+/// instructions, agent or policy could not be changed without hand-editing
+/// sqlite. A SUBSTANTIVE edit appends a row to the `autopilot_rule_version`
+/// accountability ledger naming `actor_user_id` as the accountable human; a
+/// COSMETIC edit (a rename) lands the change but mints NO version, which the
+/// result reports as `version: null`. Workspace-scoped: a foreign id reports
+/// `not_found` and writes nothing.
+pub const HANGAR_AUTOPILOT_UPDATE: &str = "hangar/autopilot_update";
+
+/// `hangar/autopilot_versions` — read one autopilot's rule-version ledger.
+///
+/// Params: a [`crate::snapshots::AutopilotVersionsParams`]. Result: a
+/// [`crate::snapshots::AutopilotVersionsResult`] (newest-first, capped at
+/// `limit`). The append-only audit trail of who published what, and the source
+/// of the accountable human for every unattended run. Workspace-scoped: a
+/// foreign autopilot id yields an empty set.
+pub const HANGAR_AUTOPILOT_VERSIONS: &str = "hangar/autopilot_versions";
+
 /// `hangar/tasks_list` — snapshot the task queue of a workspace for the Kanban
 /// board (P8.4).
 ///
@@ -1196,6 +1220,8 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_SET_ENABLED,
     HANGAR_AUTOPILOT_TRIGGER_API,
     HANGAR_AUTOPILOT_SET_API_TRIGGER,
+    HANGAR_AUTOPILOT_UPDATE,
+    HANGAR_AUTOPILOT_VERSIONS,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_TASK_RETRY,
@@ -1384,6 +1410,8 @@ mod tests {
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_AUTOPILOT_TRIGGER_API,
             HANGAR_AUTOPILOT_SET_API_TRIGGER,
+            HANGAR_AUTOPILOT_UPDATE,
+            HANGAR_AUTOPILOT_VERSIONS,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
@@ -1460,6 +1488,8 @@ mod tests {
             HANGAR_AUTOPILOT_SET_ENABLED,
             HANGAR_AUTOPILOT_TRIGGER_API,
             HANGAR_AUTOPILOT_SET_API_TRIGGER,
+            HANGAR_AUTOPILOT_UPDATE,
+            HANGAR_AUTOPILOT_VERSIONS,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
