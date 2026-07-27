@@ -118,6 +118,74 @@ pub enum HangarCommand {
     /// Define and archive a workspace's custom issue properties.
     #[command(subcommand)]
     Property(PropertyCommand),
+    /// Post issue comments and preview their `@`-mention routing.
+    #[command(subcommand)]
+    Comment(CommentCommand),
+    /// Read an actor's notification inbox.
+    #[command(subcommand)]
+    Inbox(InboxCommand),
+}
+
+/// `hangar comment <verb>` — post a comment and see EXACTLY where its
+/// `@`-mentions went (multica parity #2-rest).
+///
+/// Store-direct, like `issue timeline`: no daemon required, which is what makes
+/// the routing behaviour provable against a bare SQLite file.
+#[derive(Subcommand, Debug)]
+pub enum CommentCommand {
+    /// Post a comment on an issue and print one row per routed `@`-mention.
+    Add(CommentAddArgs),
+    /// DRY-RUN the mention router over a draft body: identical resolution and
+    /// identical gates, zero writes.
+    Preview(CommentAddArgs),
+}
+
+/// `hangar inbox <verb>` — the read surface that proves a mention of a human
+/// actually landed on that human.
+#[derive(Subcommand, Debug)]
+pub enum InboxCommand {
+    /// List one actor's inbox entries, newest first.
+    List(InboxListArgs),
+}
+
+/// Arguments shared by `hangar comment add` and `hangar comment preview`.
+#[derive(Args, Debug)]
+pub struct CommentAddArgs {
+    /// Issue id (ULID) to comment on.
+    #[arg(long)]
+    pub issue: String,
+    /// The comment body. `@handle` and `[@Label](mention://type/id)` both route.
+    #[arg(long)]
+    pub body: String,
+    /// The author as a canonical actor-ref. `member:me` is the local operator,
+    /// which the invocation gate resolves to the workspace owner.
+    #[arg(long, default_value = "member:me")]
+    pub author: String,
+    /// The comment this one replies to — drives the reply-parent fallback and
+    /// multica's parent-mention inheritance.
+    #[arg(long)]
+    pub parent: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar inbox list`.
+#[derive(Args, Debug)]
+pub struct InboxListArgs {
+    /// Whose inbox to read, as `member:<user-id>` / `agent:<agent-id>`.
+    #[arg(long, default_value = "member:me")]
+    pub recipient: String,
+    /// Show only UNREAD entries.
+    #[arg(long)]
+    pub unread: bool,
+    /// How many entries to show, newest first.
+    #[arg(long, default_value_t = 50)]
+    pub limit: i64,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar property <verb>` — the per-workspace CUSTOM PROPERTY catalog
@@ -2411,7 +2479,264 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Workspace(c) => dispatch_workspace(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
         HangarCommand::Property(c) => dispatch_property(c, format).await,
+        HangarCommand::Comment(c) => dispatch_comment(c, format).await,
+        HangarCommand::Inbox(InboxCommand::List(args)) => run_inbox_list(args, format).await,
     }
+}
+
+/// `hangar comment add|preview`: post a comment (or dry-run one) and report
+/// where every `@`-mention went (multica parity #2-rest).
+///
+/// Both verbs drive the SAME `service::mention::route` the daemon drives, with
+/// `dry_run` flipped — the shared path is the contract, so the preview applies
+/// the identical invocation gate and can never disagree with the write.
+async fn dispatch_comment(cmd: CommentCommand, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::idgen::{IdGen as _, SystemIdGen};
+    use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
+    use ainb_hangar_store::service::mention::{MentionRouteRequest, route};
+    use std::str::FromStr as _;
+
+    let (args, dry_run) = match cmd {
+        CommentCommand::Add(a) => (a, false),
+        CommentCommand::Preview(a) => (a, true),
+    };
+    if args.body.trim().is_empty() {
+        anyhow::bail!("comment body must not be empty");
+    }
+    let author = ActorRef::from_str(&args.author)
+        .map_err(|e| anyhow::anyhow!("author must be `agent:<id>` or `member:<id>`: {e}"))?;
+
+    let store = Store::open_default().await.context("open hangar database")?;
+    // A typo'd workspace is an ERROR, never a silently empty routing report.
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+
+    // The write happens FIRST and separately, exactly as the daemon does it: a
+    // routing fault can then never lose the comment.
+    let comment_id = if dry_run {
+        None
+    } else {
+        let id = SystemIdGen.new_ulid();
+        let landed = CommentRepo::insert(
+            store.pool(),
+            &workspace_id,
+            &NewComment {
+                id: id.clone(),
+                issue_id: args.issue.clone(),
+                author: author.clone(),
+                body: args.body.clone(),
+                created_at: SystemClock.now_ms(),
+                parent_id: args.parent.clone(),
+            },
+        )
+        .await
+        .context("write comment")?;
+        anyhow::ensure!(
+            landed,
+            "no issue `{}` in this workspace (nothing was written)",
+            args.issue
+        );
+        Some(id)
+    };
+
+    let rows = route(
+        store.pool(),
+        &SystemIdGen,
+        &SystemClock,
+        &MentionRouteRequest {
+            workspace_id: &workspace_id,
+            issue_id: &args.issue,
+            comment_id: comment_id.as_deref(),
+            parent_comment_id: args.parent.as_deref(),
+            author: &author,
+            body: &args.body,
+            dry_run,
+        },
+    )
+    .await
+    .context("route comment mentions")?;
+
+    print_mention_rows(&rows, format, dry_run);
+    Ok(())
+}
+
+/// Render the routing rows in the requested output format.
+fn print_mention_rows(
+    rows: &[ainb_hangar_store::service::mention::MentionRouteRow],
+    format: OutputFormat,
+    dry_run: bool,
+) {
+    let reason = |r: &ainb_hangar_store::service::mention::MentionRouteRow| {
+        r.reason.map(|d| d.as_db_str()).unwrap_or_default()
+    };
+    match format {
+        OutputFormat::Json => {
+            let wire: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "target_type": r.target_type,
+                        "target_id": r.target_id,
+                        "handle": r.handle,
+                        "outcome": r.outcome.as_str(),
+                        "reason": reason(r),
+                        "task_id": r.task_id,
+                        "source": r.source.as_str(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string(&wire).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("target_type,target_id,handle,outcome,reason,source,task_id");
+            for r in rows {
+                println!(
+                    "{},{},{},{},{},{},{}",
+                    r.target_type,
+                    csv_field(&r.target_id),
+                    csv_field(&r.handle),
+                    r.outcome.as_str(),
+                    reason(r),
+                    r.source.as_str(),
+                    r.task_id.as_deref().unwrap_or_default()
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| target | handle | outcome | reason | source |");
+            println!("|---|---|---|---|---|");
+            for r in rows {
+                println!(
+                    "| {}:{} | @{} | {} | {} | {} |",
+                    r.target_type,
+                    r.target_id,
+                    r.handle,
+                    r.outcome.as_str(),
+                    reason(r),
+                    r.source.as_str()
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no mentions routed");
+                return;
+            }
+            for r in rows {
+                let why = if reason(r).is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", reason(r))
+                };
+                println!(
+                    "{:<8} @{:<20} {}{}  [{}]",
+                    r.target_type,
+                    r.handle,
+                    r.outcome.as_str(),
+                    why,
+                    r.source.as_str()
+                );
+            }
+            if dry_run {
+                println!("(preview — nothing was written)");
+            }
+        }
+    }
+}
+
+/// `hangar inbox list`: one actor's notification entries, newest first.
+///
+/// The read surface that proves an `@`-mention of a HUMAN actually landed on
+/// that human (migration 0060 made `inbox_entry` actor-polymorphic).
+async fn run_inbox_list(args: InboxListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_store::repo::inbox::InboxRepo;
+    use std::str::FromStr as _;
+
+    let recipient = ActorRef::from_str(&args.recipient)
+        .map_err(|e| anyhow::anyhow!("recipient must be `agent:<id>` or `member:<id>`: {e}"))?;
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+    let mut entries = InboxRepo::list(store.pool(), &workspace_id, &recipient, args.limit.max(1))
+        .await
+        .context("read inbox")?;
+    // `--unread` filters HERE rather than in SQL: the repo's list is the shared
+    // read the TUI also drives, and the unread model is a single nullable
+    // column, so a post-filter cannot drift from `unread_count`'s definition.
+    if args.unread {
+        entries.retain(|e| e.read_at.is_none());
+    }
+
+    match format {
+        OutputFormat::Json => {
+            let wire: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "kind": e.kind.as_str(),
+                        "event": e.event,
+                        "subject_id": e.subject_id,
+                        "summary": e.summary,
+                        "created_at": e.created_at,
+                        "read_at": e.read_at,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string(&wire).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("kind,event,subject_id,summary,created_at,read");
+            for e in &entries {
+                println!(
+                    "{},{},{},{},{},{}",
+                    e.kind.as_str(),
+                    csv_field(&e.event),
+                    csv_field(&e.subject_id),
+                    csv_field(&e.summary),
+                    e.created_at,
+                    e.read_at.is_some()
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| when | event | subject | summary |");
+            println!("|---|---|---|---|");
+            for e in &entries {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    fmt_epoch_ms_utc(e.created_at),
+                    e.event,
+                    e.subject_id,
+                    md_cell(&e.summary)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if entries.is_empty() {
+                println!("inbox empty for {}", args.recipient);
+                return Ok(());
+            }
+            for e in &entries {
+                println!(
+                    "{}  {}  {:<14} {:<28} {}",
+                    fmt_epoch_ms_utc(e.created_at),
+                    if e.read_at.is_some() { " " } else { "*" },
+                    e.event,
+                    e.subject_id,
+                    e.summary
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `hangar logs tail`: pretty-print the daemon's structured-log events.
