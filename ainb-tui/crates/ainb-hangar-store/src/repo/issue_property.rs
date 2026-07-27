@@ -36,9 +36,11 @@ use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::properties::{
     MAX_ACTIVE_PROPERTIES, MAX_PROPERTY_BYTES, PropertyError, PropertyKind, PropertyValue,
-    properties_from_json, validate_definition, validate_value,
+    properties_from_json, property_value_json, validate_definition, validate_value,
 };
 use sqlx::{Row, SqlitePool};
+
+use crate::repo::issue_metadata::json_path;
 
 /// One catalogued custom-property definition (the `issue_property` table).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -323,8 +325,7 @@ impl IssuePropertyRepo {
         key: &str,
         value: &PropertyValue,
     ) -> Result<(), PropertyRepoError> {
-        let mut tx = pool.begin().await?;
-        ensure_issue_in_workspace(&mut tx, workspace, issue_id).await?;
+        ensure_issue_in_workspace(pool, workspace, issue_id).await?;
 
         let row = sqlx::query(
             "SELECT id, workspace_id, key, name, kind, options, position, archived_at, created_at \
@@ -333,32 +334,38 @@ impl IssuePropertyRepo {
         )
         .bind(workspace.as_str())
         .bind(key.trim())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(pool)
         .await?;
         let Some(def) = row.as_ref().map(property_from_row).transpose()? else {
             return Err(PropertyRepoError::PropertyNotFound);
         };
         validate_value(&def.kind, &def.options, value)?;
 
-        // Single-key atomic write: `json_set` of exactly this definition id,
-        // never a whole-blob overwrite, so a concurrent write to a DIFFERENT
-        // property on the same issue cannot be clobbered.
+        // The size cap is decided from the CURRENT bag, but the write is a
+        // single-statement `json_set` of exactly this definition id — never a
+        // whole-blob overwrite — so a concurrent write to a DIFFERENT property
+        // on the same issue cannot be clobbered even by a stale snapshot.
         let raw: String = sqlx::query_scalar("SELECT properties FROM issue WHERE id = ?")
             .bind(issue_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(pool)
             .await?;
         let mut bag = properties_from_json(&raw);
         bag.insert(def.id.clone(), value.clone());
-        let encoded = ainb_hangar_core::properties::properties_to_json(&bag);
-        if encoded.len() > MAX_PROPERTY_BYTES {
+        if ainb_hangar_core::properties::properties_to_json(&bag).len() > MAX_PROPERTY_BYTES {
             return Err(PropertyRepoError::Value(PropertyError::TooLarge));
         }
-        sqlx::query("UPDATE issue SET properties = ? WHERE id = ?")
-            .bind(&encoded)
-            .bind(issue_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+        sqlx::query(
+            "UPDATE issue \
+             SET properties = json_set(\
+                 CASE WHEN json_valid(properties) THEN properties ELSE '{}' END, ?, json(?)) \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(json_path(&def.id))
+        .bind(property_value_json(value))
+        .bind(issue_id)
+        .bind(workspace.as_str())
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -376,33 +383,36 @@ impl IssuePropertyRepo {
         issue_id: &str,
         key: &str,
     ) -> Result<bool, PropertyRepoError> {
-        let mut tx = pool.begin().await?;
-        ensure_issue_in_workspace(&mut tx, workspace, issue_id).await?;
+        ensure_issue_in_workspace(pool, workspace, issue_id).await?;
         let def_id: Option<String> = sqlx::query_scalar(
             "SELECT id FROM issue_property WHERE workspace_id = ? AND key = ? \
              AND archived_at IS NULL",
         )
         .bind(workspace.as_str())
         .bind(key.trim())
-        .fetch_optional(&mut *tx)
+        .fetch_optional(pool)
         .await?;
         let Some(def_id) = def_id else {
             return Err(PropertyRepoError::PropertyNotFound);
         };
         let raw: String = sqlx::query_scalar("SELECT properties FROM issue WHERE id = ?")
             .bind(issue_id)
-            .fetch_one(&mut *tx)
+            .fetch_one(pool)
             .await?;
-        let mut bag = properties_from_json(&raw);
-        let removed = bag.remove(&def_id).is_some();
+        let removed = properties_from_json(&raw).contains_key(&def_id);
         if removed {
-            sqlx::query("UPDATE issue SET properties = ? WHERE id = ?")
-                .bind(ainb_hangar_core::properties::properties_to_json(&bag))
-                .bind(issue_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE issue \
+                 SET properties = json_remove(\
+                     CASE WHEN json_valid(properties) THEN properties ELSE '{}' END, ?) \
+                 WHERE id = ? AND workspace_id = ?",
+            )
+            .bind(json_path(&def_id))
+            .bind(issue_id)
+            .bind(workspace.as_str())
+            .execute(pool)
+            .await?;
         }
-        tx.commit().await?;
         Ok(removed)
     }
 
@@ -446,7 +456,7 @@ impl IssuePropertyRepo {
 /// transaction so the check and the write are atomic — this is what makes a
 /// foreign-tenant issue id a rejection rather than a cross-tenant write.
 async fn ensure_issue_in_workspace(
-    tx: &mut sqlx::SqliteConnection,
+    pool: &SqlitePool,
     workspace: &WorkspaceId,
     issue_id: &str,
 ) -> Result<(), PropertyRepoError> {
@@ -454,7 +464,7 @@ async fn ensure_issue_in_workspace(
         sqlx::query_scalar("SELECT id FROM issue WHERE id = ? AND workspace_id = ?")
             .bind(issue_id)
             .bind(workspace.as_str())
-            .fetch_optional(&mut *tx)
+            .fetch_optional(pool)
             .await?;
     if found.is_none() {
         return Err(PropertyRepoError::IssueNotFound);

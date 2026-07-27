@@ -21,7 +21,7 @@
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_core::properties::{
     MAX_METADATA_BYTES, MAX_METADATA_KEYS, MetadataValue, PropertyError, metadata_from_json,
-    metadata_to_json, validate_metadata_key,
+    metadata_to_json, metadata_value_json, validate_metadata_key,
 };
 use sqlx::SqlitePool;
 use std::collections::BTreeMap;
@@ -70,12 +70,16 @@ impl IssueMetadataRepo {
     ) -> Result<(), PropertyRepoError> {
         validate_metadata_key(key)?;
 
-        let mut tx = pool.begin().await?;
+        // Tenant guard + caps are decided from the CURRENT row, but the write
+        // below is a single-statement `json_set` of exactly this key. So even
+        // if this snapshot is stale by the time the UPDATE lands, a concurrent
+        // write to a DIFFERENT key is never clobbered — which is the whole
+        // point of the reference's single-key-atomic rule.
         let raw: Option<String> =
             sqlx::query_scalar("SELECT metadata FROM issue WHERE id = ? AND workspace_id = ?")
                 .bind(issue_id)
                 .bind(workspace.as_str())
-                .fetch_optional(&mut *tx)
+                .fetch_optional(pool)
                 .await?;
         let Some(raw) = raw else {
             return Err(PropertyRepoError::IssueNotFound);
@@ -87,16 +91,21 @@ impl IssueMetadataRepo {
             return Err(PropertyRepoError::Value(PropertyError::TooManyKeys));
         }
         bag.insert(key.to_string(), value.clone());
-        let encoded = metadata_to_json(&bag);
-        if encoded.len() > MAX_METADATA_BYTES {
+        if metadata_to_json(&bag).len() > MAX_METADATA_BYTES {
             return Err(PropertyRepoError::Value(PropertyError::TooLarge));
         }
-        sqlx::query("UPDATE issue SET metadata = ? WHERE id = ?")
-            .bind(&encoded)
-            .bind(issue_id)
-            .execute(&mut *tx)
-            .await?;
-        tx.commit().await?;
+        sqlx::query(
+            "UPDATE issue \
+             SET metadata = json_set(\
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, ?, json(?)) \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(json_path(key))
+        .bind(metadata_value_json(value))
+        .bind(issue_id)
+        .bind(workspace.as_str())
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -111,26 +120,39 @@ impl IssueMetadataRepo {
         issue_id: &str,
         key: &str,
     ) -> Result<bool, PropertyRepoError> {
-        let mut tx = pool.begin().await?;
         let raw: Option<String> =
             sqlx::query_scalar("SELECT metadata FROM issue WHERE id = ? AND workspace_id = ?")
                 .bind(issue_id)
                 .bind(workspace.as_str())
-                .fetch_optional(&mut *tx)
+                .fetch_optional(pool)
                 .await?;
         let Some(raw) = raw else {
             return Err(PropertyRepoError::IssueNotFound);
         };
-        let mut bag = metadata_from_json(&raw);
-        let removed = bag.remove(key).is_some();
+        let removed = metadata_from_json(&raw).contains_key(key);
         if removed {
-            sqlx::query("UPDATE issue SET metadata = ? WHERE id = ?")
-                .bind(metadata_to_json(&bag))
-                .bind(issue_id)
-                .execute(&mut *tx)
-                .await?;
+            sqlx::query(
+                "UPDATE issue \
+                 SET metadata = json_remove(\
+                     CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, ?) \
+                 WHERE id = ? AND workspace_id = ?",
+            )
+            .bind(json_path(key))
+            .bind(issue_id)
+            .bind(workspace.as_str())
+            .execute(pool)
+            .await?;
         }
-        tx.commit().await?;
         Ok(removed)
     }
+}
+
+/// The SQLite JSON path addressing exactly one top-level key.
+///
+/// The label is QUOTED, so a key containing `.` (legal per
+/// [`validate_metadata_key`]) addresses one key rather than a nested path. Both
+/// callers' keys are already constrained to `[A-Za-z0-9_.-]`, so no quote or
+/// backslash can reach the path.
+pub(crate) fn json_path(key: &str) -> String {
+    format!("$.\"{}\"", key.replace('"', ""))
 }

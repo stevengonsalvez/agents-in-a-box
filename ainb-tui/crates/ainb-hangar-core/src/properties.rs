@@ -284,6 +284,16 @@ pub fn properties_to_json(map: &BTreeMap<String, PropertyValue>) -> String {
     serde_json::to_string(&serde_json::Value::Object(obj)).unwrap_or_else(|_| "{}".to_string())
 }
 
+/// The canonical JSON TEXT of ONE property value (`"S2"`, `42`, `true`,
+/// `["a","b"]`).
+///
+/// This is what the store binds into its single-key `json_set` write, so a
+/// mutation never round-trips the whole bag through Rust.
+#[must_use]
+pub fn property_value_json(v: &PropertyValue) -> String {
+    value_to_json(v).to_string()
+}
+
 /// Whether a definition's `kind` + `options` pair is coherent at DEFINE time.
 ///
 /// # Errors
