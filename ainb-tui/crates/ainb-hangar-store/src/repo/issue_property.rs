@@ -189,9 +189,7 @@ impl IssuePropertyRepo {
         };
         tx.commit().await?;
 
-        Self::get_by_id(pool, &id)
-            .await?
-            .ok_or(PropertyRepoError::PropertyNotFound)
+        Self::get_by_id(pool, &id).await?.ok_or(PropertyRepoError::PropertyNotFound)
     }
 
     /// List the workspace's catalog in `position, key` render order.
@@ -214,10 +212,7 @@ impl IssuePropertyRepo {
              FROM issue_property WHERE workspace_id = ? AND archived_at IS NULL \
              ORDER BY position, key"
         };
-        let rows = sqlx::query(sql)
-            .bind(workspace.as_str())
-            .fetch_all(pool)
-            .await?;
+        let rows = sqlx::query(sql).bind(workspace.as_str()).fetch_all(pool).await?;
         rows.iter().map(property_from_row).collect()
     }
 

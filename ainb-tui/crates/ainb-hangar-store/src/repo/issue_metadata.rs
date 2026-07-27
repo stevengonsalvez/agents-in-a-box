@@ -51,8 +51,7 @@ impl IssueMetadataRepo {
                 .bind(workspace.as_str())
                 .fetch_optional(pool)
                 .await?;
-        raw.map(|r| metadata_from_json(&r))
-            .ok_or(PropertyRepoError::IssueNotFound)
+        raw.map(|r| metadata_from_json(&r)).ok_or(PropertyRepoError::IssueNotFound)
     }
 
     /// Set ONE metadata key atomically.
