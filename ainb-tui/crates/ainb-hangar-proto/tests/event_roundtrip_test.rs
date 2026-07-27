@@ -31,6 +31,9 @@ fn comment_id(s: &str) -> CommentId {
 
 fn sample_issue() -> IssueRow {
     IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
         origin_type: None,
         origin_id: None,
         id: issue_id("issue-1"),

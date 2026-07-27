@@ -2872,6 +2872,7 @@ Commands:
   label     Attach or detach a label on an issue
   criteria  Inspect or tick off an issue's acceptance criteria
   link      Add, remove, or list an issue's typed links to other issues
+  why       Explain why an issue did (or did not) dispatch — its admission history
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3150,6 +3151,26 @@ Commands:
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
   -h, --help             Print help
+```
+
+#### `ainb hangar issue why`
+
+Explain why an issue did (or did not) dispatch — its admission history
+
+```console
+$ ainb hangar issue why --help
+Explain why an issue did (or did not) dispatch — its admission history
+
+Usage: ainb hangar issue why [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) whose dispatch history to explain
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          How many attempts to show, newest first [default: 20]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
 ```
 
 ### `ainb hangar task`

@@ -4316,6 +4316,9 @@ impl HangarPlugin {
         // renders the task's title + status; the streaming transcript folds events
         // addressed to this task id, exactly as the issue board's open does.
         let issue = ainb_hangar_proto::events::IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str(format!("task-{task_id}")).unwrap_or_else(
@@ -5755,6 +5758,9 @@ mod tests {
         p.conn.on_dialed("s1");
         p.conn.on_subscribe_ack();
         p.screens.set_issues(vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
@@ -5913,6 +5919,9 @@ mod tests {
         // more than one column (the press must resolve the RIGHT card).
         p.screens.set_issues(vec![
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
@@ -5946,6 +5955,9 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
@@ -6140,6 +6152,9 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
@@ -6233,6 +6248,9 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
@@ -6318,6 +6336,9 @@ mod tests {
         // Several Todo cards so a scroll offset is observable.
         let rows: Vec<IssueRow> = (0..4)
             .map(|i| IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str(format!("t{i}")).unwrap(),
@@ -6407,6 +6428,9 @@ mod tests {
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-a").unwrap(),
@@ -6440,6 +6464,9 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
@@ -7188,6 +7215,9 @@ mod tests {
 
         // Open the task detail for a fresh issue.
         let issue = IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),

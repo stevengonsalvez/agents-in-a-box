@@ -22,6 +22,9 @@ fn task() -> TaskId {
 
 fn issue_row() -> IssueRow {
     IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
         origin_type: None,
         origin_id: None,
         id: IssueId::from_str("i1").unwrap(),

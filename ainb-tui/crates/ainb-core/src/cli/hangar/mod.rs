@@ -1348,6 +1348,23 @@ pub enum IssueCommand {
     /// Add, remove, or list an issue's typed links to other issues.
     #[command(subcommand)]
     Link(IssueLinkCommand),
+    /// Explain why an issue did (or did not) dispatch — its admission history.
+    #[command(alias = "dispatch-log")]
+    Why(IssueWhyArgs),
+}
+
+/// Arguments for `hangar issue why` (multica parity #12).
+#[derive(Args, Debug)]
+pub struct IssueWhyArgs {
+    /// Issue id (ULID) whose dispatch history to explain.
+    pub id: String,
+    /// How many attempts to show, newest first.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar issue link <verb>` (multica parity #20).
@@ -4152,6 +4169,7 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
         IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
         IssueCommand::Link(cmd) => run_issue_link(&store, cmd).await,
+        IssueCommand::Why(args) => run_issue_why(&store, args, format).await,
     }
 }
 
@@ -4669,16 +4687,29 @@ async fn enqueue_assigned_task(
     issue_id: &str,
     agent_id: &str,
 ) -> Result<Option<String>> {
+    use ainb_hangar_core::dispatch_reason::DispatchReason;
     use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::task::NewTask;
 
     // One active run per card: an in-flight (queued/dispatched/running) task keeps
     // the issue; recovery only re-dispatches once the prior run is terminal.
-    if TaskRepo::active_task_for_issue(pool, workspace_id, issue_id)
+    if let Some(active) = TaskRepo::active_task_for_issue(pool, workspace_id, issue_id)
         .await
         .context("check for an active run before re-dispatch")?
-        .is_some()
     {
+        // multica parity #12: this used to be a bare `Ok(None)` — no record, no
+        // message, no way for the user to learn why assigning an agent did not
+        // start anything. Record it.
+        record_cli_dispatch_attempt(
+            pool,
+            workspace_id,
+            issue_id,
+            Some(agent_id),
+            None,
+            DispatchReason::AlreadyActive,
+            Some(&format!("a run is already active ({})", active.status)),
+        )
+        .await;
         return Ok(None);
     }
 
@@ -4694,6 +4725,17 @@ async fn enqueue_assigned_task(
         .context("read issue repo/agent for re-dispatch")?
         .unwrap_or((None, None));
     let Some(repo_ref) = card_repo else {
+        // multica parity #12: the other silent `Ok(None)`.
+        record_cli_dispatch_attempt(
+            pool,
+            workspace_id,
+            issue_id,
+            Some(agent_id),
+            None,
+            DispatchReason::TargetUnavailable,
+            Some("no repo pinned on this card"),
+        )
+        .await;
         return Ok(None);
     };
     let source_branch = CardParityRepo::get_issue_branches(pool, issue_id)
@@ -4752,7 +4794,58 @@ async fn enqueue_assigned_task(
         .await
         .context("persist re-dispatched task source branch")?;
     tx.commit().await.context("commit re-dispatch tx")?;
+    record_cli_dispatch_attempt(
+        pool,
+        workspace_id,
+        issue_id,
+        Some(agent_id),
+        Some(&task_id),
+        DispatchReason::Queued,
+        Some(&format!("task {task_id}")),
+    )
+    .await;
     Ok(Some(task_id))
+}
+
+/// Record one `dispatch_attempt` row from a CLI path (multica parity #12).
+///
+/// The CLI talks to the store DIRECTLY (no daemon), so it cannot ride the
+/// daemon's `run_card` recording seam — this is its equivalent. Best-effort by
+/// the same contract: a record fault warns and never changes the caller's
+/// outcome, because an audit write must not be able to break an assignment that
+/// otherwise succeeded.
+///
+/// `source` is always [`DispatchSource::Assign`]: every CLI producer today is the
+/// assignee re-dispatch.
+async fn record_cli_dispatch_attempt(
+    pool: &sqlx::SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    agent_id: Option<&str>,
+    task_id: Option<&str>,
+    reason: ainb_hangar_core::dispatch_reason::DispatchReason,
+    detail: Option<&str>,
+) {
+    use ainb_hangar_store::repo::dispatch_attempt::{DispatchAttemptRepo, NewDispatchAttempt};
+
+    let record = NewDispatchAttempt {
+        workspace_id,
+        issue_id: Some(issue_id),
+        agent_id,
+        runtime_id: None,
+        task_id,
+        reason,
+        detail,
+        source: ainb_hangar_core::dispatch_reason::DispatchSource::Assign,
+        created_at: ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock),
+    };
+    if let Err(e) = DispatchAttemptRepo::record(pool, &SystemIdGen.new_ulid(), &record).await {
+        tracing::warn!(
+            error = %e,
+            issue_id,
+            "dispatch attempt record failed (audit only; the assignment is unchanged)"
+        );
+    }
 }
 
 /// `hangar issue create`: bootstrap a workspace if absent, then insert.
@@ -5102,9 +5195,125 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
                 println!("Links:");
                 print_issue_links(store, &issue.workspace_id, &issue.id).await?;
             }
+            // multica parity #12: WHY this card is not running, when its newest
+            // admission decision was a decline. Silent on a healthy card, so
+            // existing output is unchanged. `issue why` shows the full history.
+            if let Some((code, detail)) = latest_dispatch_decline(store, &issue.id).await? {
+                match detail {
+                    Some(d) => println!("Not dispatched: {code} — {d}"),
+                    None => println!("Not dispatched: {code}"),
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// `hangar issue why <id>` (multica parity #12): the card's ADMISSION history,
+/// newest first — the persisted answer to "why is this not running".
+///
+/// Reads the store directly (like `issue criteria` / `issue link`), so it needs
+/// no daemon: the whole dispatch-reason proof is runnable against nothing but
+/// sqlite. Honours the shared `--format json`, which emits the
+/// `DispatchAttemptRow` wire shape verbatim.
+async fn run_issue_why(store: &Store, args: IssueWhyArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo;
+
+    // Resolve the workspace so a typo'd `--workspace` is an error, not a silently
+    // empty list; the attempts themselves are keyed on the issue id.
+    let _workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let attempts = DispatchAttemptRepo::list_for_issue(store.pool(), &args.id, args.limit.max(1))
+        .await
+        .context("read dispatch attempts")?;
+
+    match format {
+        OutputFormat::Json => {
+            let rows: Vec<serde_json::Value> = attempts.iter().map(dispatch_attempt_json).collect();
+            println!(
+                "{}",
+                serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("id,reason,detail,source,task_id,created_at");
+            for a in &attempts {
+                println!(
+                    "{},{},{},{},{},{}",
+                    a.id,
+                    a.reason,
+                    csv_field(a.detail.as_deref().unwrap_or_default()),
+                    a.source,
+                    a.task_id.as_deref().unwrap_or_default(),
+                    a.created_at
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| reason | detail | source | when |");
+            println!("|---|---|---|---|");
+            for a in &attempts {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    a.reason,
+                    a.detail.as_deref().unwrap_or("—"),
+                    a.source,
+                    fmt_epoch_ms_utc(a.created_at)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if attempts.is_empty() {
+                println!("no dispatch attempts recorded for {}", args.id);
+            } else {
+                println!("{:<22} {:<8} {:<22} detail", "reason", "source", "when");
+                for a in &attempts {
+                    println!(
+                        "{:<22} {:<8} {:<22} {}",
+                        a.reason,
+                        a.source,
+                        fmt_epoch_ms_utc(a.created_at),
+                        a.detail.as_deref().unwrap_or("—")
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// One dispatch attempt as the `DispatchAttemptRow` wire shape, so
+/// `issue why --format json` and `hangar/dispatch_attempts_list` agree.
+fn dispatch_attempt_json(
+    a: &ainb_hangar_store::repo::dispatch_attempt::DispatchAttempt,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": a.id,
+        "issue_id": a.issue_id,
+        "agent_id": a.agent_id,
+        "runtime_id": a.runtime_id,
+        "task_id": a.task_id,
+        "reason": a.reason,
+        "detail": a.detail,
+        "source": a.source,
+        "created_at": a.created_at,
+    })
+}
+
+/// The newest DECLINED dispatch attempt for an issue, as
+/// `(code, detail)` — what `issue show` prints as its `Not dispatched:` line.
+/// `None` when the card never tried to dispatch, or its newest attempt succeeded.
+async fn latest_dispatch_decline(
+    store: &Store,
+    issue_id: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    use ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo;
+    Ok(
+        DispatchAttemptRepo::latest_for_issue(store.pool(), issue_id)
+            .await
+            .context("read latest dispatch attempt")?
+            .filter(|a| !a.is_dispatched())
+            .map(|a| (a.reason, a.detail)),
+    )
 }
 
 /// Whether an issue carries ANY typed link (multica parity #20) — so

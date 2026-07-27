@@ -2136,6 +2136,17 @@ pub struct BoardCardRunResult {
     /// pre-T4 single-agent run serializes byte-identically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_task_ids: Vec<String>,
+    /// The admission code the daemon RECORDED for this dispatch (multica parity
+    /// #12): `queued` on the healthy path, `runtime_offline` when the task was
+    /// written against a runtime that is not `online`.
+    ///
+    /// This is the reference's stated invariant made concrete — the handler
+    /// serializes the SAME vocabulary the service decided
+    /// (`DispatchReason::as_db_str`), so decider and serializer cannot drift.
+    /// Append-only: omitted when `None`, so a pre-#12 result decodes and a
+    /// pre-#12 client ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_CANCEL`] (tcp T3 / F6): cancel
@@ -2496,6 +2507,65 @@ pub struct DaemonConfigListResult {
     pub entries: Vec<DaemonConfigEntry>,
 }
 
+/// Params for [`crate::methods::HANGAR_DISPATCH_ATTEMPTS_LIST`] (multica parity
+/// #12): read the admission-decision audit, workspace-scoped and optionally
+/// narrowed to one card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DispatchAttemptsListParams {
+    /// The subscribed workspace (tenant guard).
+    pub workspace_id: String,
+    /// Narrow to one card's history. Omit for the whole workspace feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// How many rows to return, newest first. Defaults to 50, hard-capped at 200
+    /// by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Result of [`crate::methods::HANGAR_DISPATCH_ATTEMPTS_LIST`]: the attempts,
+/// **newest first**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DispatchAttemptsListResult {
+    /// The matching attempts, newest first.
+    pub attempts: Vec<DispatchAttemptRow>,
+}
+
+/// One `dispatch_attempt` row on the wire (multica parity #12, migration 0058).
+///
+/// [`Self::reason`] and [`Self::source`] are carried as raw strings, not typed
+/// enums, so a token minted by a newer daemon renders as raw text instead of
+/// failing the decode — the append-only vocabulary contract. Decode with
+/// `DispatchReason::parse` / `DispatchSource::parse`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DispatchAttemptRow {
+    /// ULID primary key.
+    pub id: String,
+    /// The card the attempt was for; `None` for an issue-less trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// The resolved target agent, when one resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The target agent's runtime, when one resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    /// Set iff a task row was actually written. Present on `queued` AND on
+    /// `runtime_offline` (hangar enqueues then records — see the daemon's
+    /// divergence note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The stable admission code (`DispatchReason::as_db_str`).
+    pub reason: String,
+    /// Free-text specifics the deliberately-generic code omits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Which trigger surface made the attempt (`DispatchSource::as_db_str`).
+    pub source: String,
+    /// When it was recorded (epoch millis).
+    pub created_at: i64,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2545,6 +2615,9 @@ mod tests {
 
         let issues = IssuesListResult {
             issues: vec![IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
                 origin_type: None,
                 origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("i1").unwrap(),
@@ -3644,6 +3717,7 @@ mod tests {
             runtime_id: "rt-lead".into(),
             mode: "headless".into(),
             member_task_ids: vec!["t-m1".into(), "t-m2".into()],
+            reason: None,
         };
         let s = serde_json::to_string(&run).unwrap();
         assert_eq!(serde_json::from_str::<BoardCardRunResult>(&s).unwrap(), run);

@@ -19,6 +19,7 @@ pub mod card_dependency;
 pub mod card_parity;
 pub mod comment;
 pub mod daemon_config;
+pub mod dispatch_attempt;
 pub mod event_log;
 pub mod fleet;
 pub mod inbox;

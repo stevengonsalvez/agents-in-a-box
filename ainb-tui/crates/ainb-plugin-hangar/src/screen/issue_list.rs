@@ -1487,6 +1487,13 @@ impl IssueListState {
                             // `⊟ done/total` badge that flips to gold `1/1` when its
                             // last child completes. `None` for a childless issue.
                             subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
+                            // multica parity #12: the card wears a ⚠ when its
+                            // newest dispatch attempt was declined, so "not
+                            // running, and why" is discoverable from the board.
+                            not_dispatched: r
+                                .last_dispatch_reason
+                                .as_deref()
+                                .is_some_and(|c| !c.trim().is_empty()),
                         })
                         .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
@@ -3669,6 +3676,9 @@ mod tests {
 
     fn row(id: &str, state: &str, assignee: Option<&str>) -> IssueRow {
         IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
             origin_type: None,
             origin_id: None,
             id: IssueId::from_str(id).unwrap(),

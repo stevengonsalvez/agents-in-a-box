@@ -881,6 +881,13 @@ impl IssueRepo {
             .execute(&mut *tx)
             .await?;
 
+        // 4b. The card's dispatch-attempt audit rows (migration 0058). The table
+        //     carries no FK on `issue_id` on purpose (an audit row must survive a
+        //     race with a concurrent delete), so the reap is explicit here — the
+        //     same shape as the `agent_task_queue` delete above.
+        crate::repo::dispatch_attempt::DispatchAttemptRepo::delete_for_issue(&mut tx, issue_id)
+            .await?;
+
         // 5. The issue's directly-linked rows. First orphan any sub-issues: the
         //    `parent_issue_id` self-FK is `ON DELETE SET NULL` (migration 0046),
         //    so children are NULLed automatically at the final DELETE, but FK

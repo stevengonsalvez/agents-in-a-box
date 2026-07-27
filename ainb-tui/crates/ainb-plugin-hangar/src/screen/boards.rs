@@ -2723,6 +2723,7 @@ fn card_view_to_board_card(c: &CardView) -> BoardCard {
         "#"
     };
     BoardCard {
+        not_dispatched: false,
         issue_id: c.issue_id.clone(),
         display_id: format!("{marker}{}", c.display_id),
         title: card_title_with_t4_badges(c),

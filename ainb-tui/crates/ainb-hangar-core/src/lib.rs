@@ -34,6 +34,12 @@ pub mod clock;
 /// typed descriptor registry both the TUI Settings pane and the
 /// `ainb hangar daemon config` CLI iterate (keys, kinds, defaults, validation).
 pub mod daemon_config;
+/// ADMISSION-TIME dispatch reason codes (multica parity #12): the stable
+/// `queued | deferred | already_active | target_unavailable | …` vocabulary
+/// shared by the service layer that decides and the handler layer that
+/// serializes it, so the two cannot drift. Distinct from the post-hoc run
+/// `FailureReason` by design.
+pub mod dispatch_reason;
 /// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded
 /// deny family that always overrides. Pure + IO-free; the TOML loader and
 /// daemon wiring live in `ainb-hangar-daemon`.

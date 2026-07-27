@@ -306,6 +306,22 @@ pub const FLEET_BROADCAST: &str = "fleet/broadcast";
 /// caller cares about the enqueued task, not the surface it launched from).
 pub const HANGAR_ISSUE_RUN: &str = "hangar/issue_run";
 
+/// `hangar/dispatch_attempts_list` — the ADMISSION-DECISION audit feed (multica
+/// parity #12, migration 0058).
+///
+/// Every dispatch attempt — the ones that queued a run and the ones that were
+/// declined — is persisted with a stable [`ainb_hangar_core::dispatch_reason::DispatchReason`]
+/// code, a free-text detail, and the trigger surface that made it. This method is
+/// the read side: "why is this card not running", answerable after the fact
+/// rather than only in the RPC error that scrolled past.
+///
+/// Params: [`crate::snapshots::DispatchAttemptsListParams`]
+/// (`{ workspace_id, issue_id?, limit? }`); result:
+/// [`crate::snapshots::DispatchAttemptsListResult`] — newest first, default
+/// `limit` 50, hard cap 200. Workspace-scoped through the same tenant guard as
+/// every other list method, so a sibling tenant's attempts are never returned.
+pub const HANGAR_DISPATCH_ATTEMPTS_LIST: &str = "hangar/dispatch_attempts_list";
+
 /// `hangar/issue_label_attach` — attach a label to one issue (e38.10).
 ///
 /// Params: [`crate::snapshots::IssueLabelParams`]
@@ -1257,6 +1273,9 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_SUBSCRIBE,
     FLEET_ACTION,
     FLEET_BROADCAST,
+    // Dispatch reason codes (multica parity #12) — APPENDED at the catalogue
+    // tail, append-only wire.
+    HANGAR_DISPATCH_ATTEMPTS_LIST,
 ];
 
 #[cfg(test)]
@@ -1483,6 +1502,7 @@ mod tests {
             FLEET_SUBSCRIBE,
             FLEET_ACTION,
             FLEET_BROADCAST,
+            HANGAR_DISPATCH_ATTEMPTS_LIST,
         ];
         for m in declared {
             assert!(
