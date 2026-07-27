@@ -19,3 +19,4 @@
 | 1-rest | #498 | 763c4fe79a36d24f0312885056b3ae7c2adb5ffc | 2026-07-27 | gate green both OSes |
 | 14 | #499 | 742a71d5a814ab546055c76081e7ef0114fe051e | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit before merge) |
 | 22 | #501 | 79ccdaa0f7620fb2ed745ea590a8b1d56998a065 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit; hangar-e2e ubuntu tripwire_workspace_switch_e2e transient failure confirmed non-reproducing on fresh full-matrix rerun) |
+| 18 | #503 | 8fe91c3967a466b6547f7fe07f67b14ad5dae3e0 | 2026-07-27 | gate green both OSes (first hangar-e2e ubuntu attempt hit the known tripwire_workspace_switch_e2e transient; green on rerun and on the CodeRabbit follow-up run. CodeRabbit Major finding fixed in-PR: accept/decline now reject an invitation belonging to another workspace) |
