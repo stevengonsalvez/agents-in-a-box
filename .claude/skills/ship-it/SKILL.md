@@ -36,7 +36,7 @@ The only expensive part, heavy review fan-out, runs as a dynamic Workflow.
 |------|-------|
 | Conductor, commit/PR/merge mechanics | session model |
 | Review agents (both tiers) | **Opus, always** (Fable only if Stevie says so in chat) |
-| Codex peer (heavy only) | Codex, **high reasoning effort** (`-c model_reasoning_effort="high"`, tell the rescue agent explicitly) |
+| Codex peer (heavy only) | Codex, **high reasoning effort** (put the literal `--effort high` in the peer prompt, see Step 3) |
 | Applying mechanical fixes | Sonnet (`fast-worker`) for well-specified edits; main loop for judgment calls |
 
 Review is the safety net: never route review to Sonnet or Haiku. lite's
@@ -55,7 +55,9 @@ If the working tree is already clean and the branch is pushed, skip ahead.
 ```bash
 BRANCH=$(git branch --show-current)
 git fetch origin
-git merge origin/main                            # sync stale branch: MERGE, never rebase a pushed PR branch
+# Sync against the PR's OWN base, not a hardcoded main (stacked PRs exist).
+BASE=$(gh pr view --json baseRefName --jq .baseRefName 2>/dev/null || echo main)
+git merge "origin/$BASE"                         # MERGE, never rebase a pushed PR branch
 gh pr list --head "$BRANCH" --state open --json number,url   # reuse existing PR if open
 gh pr create --fill                              # otherwise create
 ```
@@ -84,9 +86,13 @@ Spin up a dynamic Workflow (Workflow tool). Template:
   StructuredOutput failures and abort the run).
 - Codex peer: one `agent()` using `agentType: 'codex:codex-rescue'`,
   independent, not shown the personas' output. `agentType` alone does NOT set
-  reasoning effort: the conductor must write the requirement into
-  `codexPrompt` itself, e.g. "run codex exec with
-  `-c model_reasoning_effort=\"high\"` when reviewing this diff".
+  reasoning effort. `codex-rescue` is a thin forwarder to
+  `codex-companion.mjs task`, which takes `--effort <none|minimal|low|medium
+  |high|xhigh>`; it leaves effort unset unless the prompt explicitly asks,
+  and it strips `--effort <value>` out of the task text as a routing control.
+  So `codexPrompt` must contain the literal token `--effort high` (NOT
+  `codex exec -c model_reasoning_effort=...`, which this agent never runs and
+  would pass through as prose).
 - Synthesis: conductor (not another agent) merges persona + Codex findings,
   dedupes by file:line, tags P0-P3, promotes confidence when two reviewers
   agree, discards unverifiable style noise.
@@ -147,20 +153,26 @@ Pre-merge, verify independently (do not collapse to one signal):
 
 ```bash
 gh pr checks <N>                 # CI per-job
-gh pr view <N> --json mergeable,reviewDecision
+gh pr view <N> --json mergeable,mergeStateStatus,reviewDecision
 ```
 
 - CI red from THIS PR's code: go back to Step 4.
 - CI red that is pre-existing drift: prove it (git history + clean local
   test run on base), then present merge options honestly, do not force a
   cleanup commit into this PR.
+- `mergeable` is `UNKNOWN`: GitHub is still recomputing after the last push.
+  This is NOT green. Poll (a few seconds apart, ~5 tries) until it resolves;
+  merge only on a literal `MERGEABLE`.
 - `mergeable` is `CONFLICTING` (or `mergeStateStatus` is `DIRTY`): re-run the
-  Step 2 sync (merge base branch, resolve, push) and re-check; never merge a
-  conflicting PR.
-- `reviewDecision` is `CHANGES_REQUESTED` or `REVIEW_REQUIRED`: treat the
-  requested changes as findings (back to Step 4) or obtain the required
-  approval; do not merge past a review gate.
-- All gates green (CI + mergeable + review decision) + zero findings:
+  Step 2 sync against the PR's own base branch, resolve, push, re-check;
+  never merge a conflicting PR.
+- `reviewDecision` is `CHANGES_REQUESTED`: treat the requested changes as
+  findings, back to Step 4.
+- `reviewDecision` is `REVIEW_REQUIRED`: a human approval the conductor
+  cannot self-grant. Stop and escalate to Stevie; do not merge past it.
+  (Empty string means no review gate is configured, which IS green.)
+- All gates green (CI + `mergeable == MERGEABLE` + review decision) and zero
+  findings:
 
 ```bash
 gh pr merge <N> --merge     # merge commit, NEVER squash
