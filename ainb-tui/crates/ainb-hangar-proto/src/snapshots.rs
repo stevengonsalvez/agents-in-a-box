@@ -1540,6 +1540,106 @@ pub struct MemberWireRow {
 pub struct MembersListResult {
     /// The member rows.
     pub members: Vec<MemberWireRow>,
+    /// The workspace's LIVE pending invitations (multica parity #18).
+    ///
+    /// Append-only: `#[serde(default)]` means a pre-#18 daemon's response (which
+    /// omits the field entirely) still deserializes, and
+    /// `skip_serializing_if = "Vec::is_empty"` keeps the common empty case off
+    /// the wire, so an old consumer parses the envelope unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_invites: Vec<InvitationWireRow>,
+}
+
+/// One LIVE pending invitation for the settings Members pane
+/// ([`crate::methods::HANGAR_INVITE_CREATE`], multica parity #18).
+///
+/// A pure wire row: the pane paints `email · role · expires in Nd` under the
+/// member rows, and the accept / decline / revoke RPCs key off `id`.
+/// `invitee_user_id` is present only when the invitee already has an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InvitationWireRow {
+    /// The invitation id — what accept / decline / revoke key off.
+    #[serde(default)]
+    pub id: String,
+    /// The invitee's email, normalised (trimmed + lowercased).
+    #[serde(default)]
+    pub invitee_email: String,
+    /// The role the invitee will hold on accept (`admin` / `member`).
+    #[serde(default)]
+    pub role: String,
+    /// The invitation status — always `pending` on this list.
+    #[serde(default)]
+    pub status: String,
+    /// `user.id` of whoever issued the invite.
+    #[serde(default)]
+    pub inviter_id: String,
+    /// `user.id` of the invitee, when one already exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitee_user_id: Option<String>,
+    /// Epoch-ms the invite was issued.
+    #[serde(default)]
+    pub created_at: i64,
+    /// Epoch-ms the invite stops being acceptable (issue + 7 days).
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// Params for [`crate::methods::HANGAR_INVITE_CREATE`] (parity #18): invite an
+/// email into a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard. `inviter_user_id` must already
+/// be a member of it. `role` is `admin` or `member` — `owner` is rejected
+/// ("cannot invite as owner"). The email is normalised (trim + lowercase) by the
+/// store, so casing never forks an identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InviteCreateParams {
+    /// The workspace being invited into (tenant guard).
+    #[serde(default)]
+    pub workspace_id: String,
+    /// The inviting member (`user.id`); must be a member of `workspace_id`.
+    #[serde(default)]
+    pub inviter_user_id: String,
+    /// The invitee's email.
+    #[serde(default)]
+    pub invitee_email: String,
+    /// The role the invitee will hold on accept (`admin` / `member`).
+    #[serde(default)]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_INVITE_ACCEPT`] and
+/// [`crate::methods::HANGAR_INVITE_DECLINE`] (parity #18): the invitee acts on
+/// their own invitation.
+///
+/// `actor_email` is the acting identity: hangar has no session, so the invitee
+/// must be named explicitly or the ownership gate is theatre. It is compared
+/// against the invitation's normalised `invitee_email`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InviteActParams {
+    /// The workspace the invitation belongs to (tenant guard).
+    #[serde(default)]
+    pub workspace_id: String,
+    /// The invitation being accepted / declined.
+    #[serde(default)]
+    pub invitation_id: String,
+    /// The acting human's email; must match the invitee.
+    #[serde(default)]
+    pub actor_email: String,
+}
+
+/// Params for [`crate::methods::HANGAR_INVITE_REVOKE`] (parity #18): an admin
+/// withdraws a still-pending invitation.
+///
+/// Workspace-scoped in SQL, so another tenant's invitation matches no row and is
+/// rejected rather than deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InviteRevokeParams {
+    /// The workspace the invitation must belong to (tenant guard).
+    #[serde(default)]
+    pub workspace_id: String,
+    /// The invitation being withdrawn.
+    #[serde(default)]
+    pub invitation_id: String,
 }
 
 /// Params for [`crate::methods::HANGAR_MEMBER_SET_ROLE`] (e38.11): change one
@@ -3793,6 +3893,7 @@ mod tests {
                     role: "admin".into(),
                 },
             ],
+            pending_invites: Vec::new(),
         };
         let s = serde_json::to_string(&list).unwrap();
         assert_eq!(serde_json::from_str::<MembersListResult>(&s).unwrap(), list);
@@ -3816,6 +3917,90 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MemberRemoveParams>(&s).unwrap(),
             remove
+        );
+    }
+
+    /// The parity-#18 invite envelopes round-trip, and `pending_invites` is
+    /// APPEND-ONLY: a pre-#18 daemon's `members_list` payload (no such field)
+    /// still deserializes, and the field stays off the wire when empty.
+    #[test]
+    fn invite_envelopes_roundtrip_and_members_list_stays_append_only() {
+        // (a) A pre-#18 response parses unchanged, with an empty invite list.
+        let legacy = r#"{"members":[{"user_id":"u-amy","email":"amy@x.io","role":"owner"}]}"#;
+        let parsed: MembersListResult = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.members.len(), 1);
+        assert!(
+            parsed.pending_invites.is_empty(),
+            "absent pending_invites defaults to empty, never an error"
+        );
+        // (b) …and an empty invite list serialises back to the legacy shape.
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), legacy);
+
+        // (c) A populated invite row round-trips.
+        let with_invite = MembersListResult {
+            members: Vec::new(),
+            pending_invites: vec![InvitationWireRow {
+                id: "inv-1".into(),
+                invitee_email: "dana@example.com".into(),
+                role: "member".into(),
+                status: "pending".into(),
+                inviter_id: "u-amy".into(),
+                invitee_user_id: None,
+                created_at: 1_000,
+                expires_at: 605_800_000,
+            }],
+        };
+        let s = serde_json::to_string(&with_invite).unwrap();
+        assert!(
+            !s.contains("invitee_user_id"),
+            "a None invitee_user_id stays off the wire: {s}"
+        );
+        assert_eq!(
+            serde_json::from_str::<MembersListResult>(&s).unwrap(),
+            with_invite
+        );
+
+        // (d) …and serialises the id when it IS known.
+        let known = InvitationWireRow {
+            invitee_user_id: Some("u-dana".into()),
+            ..with_invite.pending_invites[0].clone()
+        };
+        let s = serde_json::to_string(&known).unwrap();
+        assert!(s.contains(r#""invitee_user_id":"u-dana""#), "{s}");
+        assert_eq!(
+            serde_json::from_str::<InvitationWireRow>(&s).unwrap(),
+            known
+        );
+
+        // (e) The three param envelopes round-trip.
+        let create = InviteCreateParams {
+            workspace_id: "ws-1".into(),
+            inviter_user_id: "u-amy".into(),
+            invitee_email: "dana@example.com".into(),
+            role: "member".into(),
+        };
+        let s = serde_json::to_string(&create).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InviteCreateParams>(&s).unwrap(),
+            create
+        );
+
+        let act = InviteActParams {
+            workspace_id: "ws-1".into(),
+            invitation_id: "inv-1".into(),
+            actor_email: "dana@example.com".into(),
+        };
+        let s = serde_json::to_string(&act).unwrap();
+        assert_eq!(serde_json::from_str::<InviteActParams>(&s).unwrap(), act);
+
+        let revoke = InviteRevokeParams {
+            workspace_id: "ws-1".into(),
+            invitation_id: "inv-1".into(),
+        };
+        let s = serde_json::to_string(&revoke).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InviteRevokeParams>(&s).unwrap(),
+            revoke
         );
     }
 
