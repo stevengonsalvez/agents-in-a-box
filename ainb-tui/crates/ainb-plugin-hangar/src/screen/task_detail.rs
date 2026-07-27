@@ -330,6 +330,24 @@ impl TaskDetailState {
         self.pr_status = status;
     }
 
+    /// Append a SYSTEM line to the transcript in the tool-result lane
+    /// (`is_comment: false`, so it is not styled as somebody's comment).
+    ///
+    /// Used to surface the `@`-mention routing outcomes the daemon returns from
+    /// `comment_add` (multica parity #2-rest). Before this, the reply was
+    /// dropped on the floor, so a mention that was refused or coalesced looked
+    /// exactly like one that ran.
+    pub fn push_system_line(&mut self, body: String) {
+        push_entry(
+            self,
+            TranscriptEntry {
+                kind: MessageKind::ToolResult,
+                body,
+                is_comment: false,
+            },
+        );
+    }
+
     /// The current lifecycle.
     #[must_use]
     pub const fn lifecycle(&self) -> TaskLifecycle {
