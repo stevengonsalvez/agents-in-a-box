@@ -14,7 +14,7 @@ description: >
 Conductor skill. Runs in the main loop (interactive steps stay interactive).
 The only expensive part, heavy review fan-out, runs as a dynamic Workflow.
 
-```
+```text
 /commit ──▶ gh pr create ──▶ REVIEW (lite|heavy) ──▶ fix ALL ──▶ re-REVIEW
                                                         ▲            │
                                                         └── loop ────┘ until 0
@@ -82,9 +82,11 @@ Spin up a dynamic Workflow (Workflow tool). Template:
 - Each persona = one `agent()` on Opus (`model: 'opus'`), **schemaless**
   (returns markdown findings text; schemas on advisory agents trip
   StructuredOutput failures and abort the run).
-- Codex peer: one `agent()` using `agentType: 'codex:codex-rescue'`, prompted
-  to review the same diff at high reasoning effort, independent, not shown
-  the personas' output.
+- Codex peer: one `agent()` using `agentType: 'codex:codex-rescue'`,
+  independent, not shown the personas' output. `agentType` alone does NOT set
+  reasoning effort: the conductor must write the requirement into
+  `codexPrompt` itself, e.g. "run codex exec with
+  `-c model_reasoning_effort=\"high\"` when reviewing this diff".
 - Synthesis: conductor (not another agent) merges persona + Codex findings,
   dedupes by file:line, tags P0-P3, promotes confidence when two reviewers
   agree, discards unverifiable style noise.
@@ -152,7 +154,13 @@ gh pr view <N> --json mergeable,reviewDecision
 - CI red that is pre-existing drift: prove it (git history + clean local
   test run on base), then present merge options honestly, do not force a
   cleanup commit into this PR.
-- All green + zero findings:
+- `mergeable` is `CONFLICTING` (or `mergeStateStatus` is `DIRTY`): re-run the
+  Step 2 sync (merge base branch, resolve, push) and re-check; never merge a
+  conflicting PR.
+- `reviewDecision` is `CHANGES_REQUESTED` or `REVIEW_REQUIRED`: treat the
+  requested changes as findings (back to Step 4) or obtain the required
+  approval; do not merge past a review gate.
+- All gates green (CI + mergeable + review decision) + zero findings:
 
 ```bash
 gh pr merge <N> --merge     # merge commit, NEVER squash
