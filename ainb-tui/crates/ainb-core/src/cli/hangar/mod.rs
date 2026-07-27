@@ -9188,6 +9188,7 @@ mod tests {
             status: "skipped".into(),
             source: "api".into(),
             failure_reason: Some("concurrency limit: 1/1 in flight".into()),
+            ..Default::default()
         };
         let json = autopilot_run_to_json(&run);
         assert!(json.contains("\"status\":\"skipped\""), "{json}");

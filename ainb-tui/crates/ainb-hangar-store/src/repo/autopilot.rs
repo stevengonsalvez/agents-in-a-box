@@ -190,7 +190,11 @@ pub struct Autopilot {
 }
 
 /// A single firing of an [`Autopilot`] (one `autopilot_run` row).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is derived so test fixtures can spread `..Default::default()` and
+/// stay green when the row grows a column (as migration 0061's attribution pair
+/// did) instead of drifting into a compile error per call site.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutopilotRun {
     /// Primary key (ULID string).
     pub id: String,
@@ -211,6 +215,16 @@ pub struct AutopilotRun {
     /// Why a `skipped` run was declined (the admission reason); `None` for every
     /// other status.
     pub failure_reason: Option<String>,
+    /// The ACCOUNTABLE HUMAN for this run as a canonical actor ref (migration
+    /// 0061). For an unattended fire this is the newest rule version's
+    /// `published_by`; for a manual fire it is the human who clicked. `None`
+    /// when neither is resolvable — an honest unknown (every pre-0061 run row
+    /// reads `None`), never a fabricated actor.
+    pub accountable_actor: Option<String>,
+    /// HOW [`accountable_actor`](Self::accountable_actor) was resolved:
+    /// `rule_owner` | `direct_human`. `None` exactly when
+    /// `accountable_actor` is `None`.
+    pub attribution: Option<String>,
 }
 
 /// The inputs to [`AutopilotRepo::create`]. `cron_expr` is validated by `create`.
@@ -788,7 +802,7 @@ impl AutopilotRepo {
     ) -> Result<Vec<AutopilotRun>, AutopilotRepoError> {
         let rows = sqlx::query_as::<_, AutopilotRun>(
             "SELECT r.id, r.autopilot_id, r.started_at, r.completed_at, r.status, \
-                    r.source, r.failure_reason \
+                    r.source, r.failure_reason, r.accountable_actor, r.attribution \
              FROM autopilot_run r \
              JOIN autopilot a ON a.id = r.autopilot_id \
              WHERE r.autopilot_id = ? AND a.workspace_id = ? \
@@ -980,6 +994,8 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for AutopilotRun {
             status: row.try_get("status")?,
             source: row.try_get("source")?,
             failure_reason: row.try_get("failure_reason")?,
+            accountable_actor: row.try_get("accountable_actor")?,
+            attribution: row.try_get("attribution")?,
         })
     }
 }
