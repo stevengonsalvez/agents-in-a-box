@@ -45,7 +45,9 @@
 
 use ainb_hangar_core::acceptance::{AcceptanceCriterion, checked_count, legacy_placeholder_id};
 use ainb_hangar_core::ids::TaskId;
-use ainb_hangar_proto::events::{HangarEvent, IssueLinkRow, IssueRow, MessageKind, TaskResult};
+use ainb_hangar_proto::events::{
+    HangarEvent, IssueLinkRow, IssueRow, MessageKind, ReactionRow, TaskResult,
+};
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -1245,6 +1247,34 @@ fn render_detail_card(
         }
     }
 
+    // --- Subscribers + reactions (multica parity #22). Both are DETAIL-ONLY
+    //     wire fields, so a list snapshot (and any pre-#22 daemon) leaves them
+    //     at their default and the card renders byte-identically to today. ---
+    if issue.subscriber_count > 0 {
+        let count = format!("{}", issue.subscriber_count);
+        let mut cells: Vec<(&str, Color)> = vec![("Subs:  ", CARD_LABEL), (&count, CARD_VALUE)];
+        if issue.subscribed {
+            cells.push(("  ✓ you", SELECTION_GREEN));
+        }
+        card_field_row(buf, card_w, row, &cells);
+        row = row.saturating_add(1);
+    }
+    if !issue.reactions.is_empty() {
+        let buckets: Vec<String> =
+            issue.reactions.iter().map(|r| format!("{} {}  ", r.emoji, r.count)).collect();
+        let mut cells: Vec<(&str, Color)> = vec![("React: ", CARD_LABEL)];
+        for (bucket, reaction) in buckets.iter().zip(&issue.reactions) {
+            // A bucket the local human is in gets the same accent the acceptance
+            // markers use, so "mine" reads at a glance.
+            cells.push((
+                bucket.as_str(),
+                if reaction.mine { SELECTION_GREEN } else { CARD_VALUE },
+            ));
+        }
+        card_field_row(buf, card_w, row, &cells);
+        row = row.saturating_add(1);
+    }
+
     // --- divider ---
     draw_card_divider(buf, row, card_w);
     row = row.saturating_add(1);
@@ -1880,6 +1910,64 @@ mod card_tests {
         );
     }
 
+    /// multica parity #22: the watcher count (with the `✓ you` marker) and the
+    /// aggregated reaction buckets both render on the detail card.
+    #[test]
+    fn detail_card_renders_a_subs_and_react_block() {
+        let mut issue = full_issue();
+        issue.subscriber_count = 3;
+        issue.subscribed = true;
+        issue.reactions = vec![
+            ReactionRow {
+                emoji: "👍".into(),
+                count: 3,
+                mine: true,
+            },
+            ReactionRow {
+                emoji: "🎉".into(),
+                count: 1,
+                mine: false,
+            },
+        ];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(squashed.contains("Subs: 3"), "the count: {squashed}");
+        assert!(squashed.contains("✓ you"), "the you-marker: {squashed}");
+        assert!(squashed.contains("React: 👍 3"), "the mine bucket: {squashed}");
+        assert!(squashed.contains("🎉 1"), "the other bucket: {squashed}");
+    }
+
+    /// A pre-#22 daemon sends neither field, so the card renders exactly as it
+    /// does today — no `Subs:` line and no `React:` line.
+    #[test]
+    fn detail_card_omits_subs_and_react_when_empty() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(!text.contains("Subs:"), "no subscribers ⇒ no line: {text}");
+        assert!(!text.contains("React:"), "no reactions ⇒ no line: {text}");
+    }
+
+    /// A subscriber count with the LOCAL HUMAN absent renders the count but no
+    /// `✓ you` marker.
+    #[test]
+    fn detail_card_omits_the_you_marker_when_not_subscribed() {
+        let mut issue = full_issue();
+        issue.subscriber_count = 2;
+        issue.subscribed = false;
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squashed.contains("Subs: 2"), "the count: {squashed}");
+        assert!(!squashed.contains("✓ you"), "not subscribed: {squashed}");
+    }
+
+    /// A fresh unchecked criterion with a deterministic id.
     /// A fresh unchecked criterion with a deterministic id.
     fn crit(id: &str, text: &str) -> AcceptanceCriterion {
         AcceptanceCriterion::with_id(id, text).expect("criterion")
