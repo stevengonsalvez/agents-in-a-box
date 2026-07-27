@@ -134,7 +134,10 @@ impl IssueReactionRepo {
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the query fails.
-    pub async fn list(pool: &SqlitePool, issue_id: &str) -> Result<Vec<IssueReaction>, sqlx::Error> {
+    pub async fn list(
+        pool: &SqlitePool,
+        issue_id: &str,
+    ) -> Result<Vec<IssueReaction>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT id, issue_id, actor_type, actor_id, emoji, created_at \
              FROM issue_reaction WHERE issue_id = ? \

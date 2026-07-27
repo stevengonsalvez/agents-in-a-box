@@ -45,10 +45,14 @@ async fn reacting_twice_is_one_row() {
     let (_dir, store) = setup().await;
     let me = member("me");
     assert!(
-        IssueReactionRepo::add(store.pool(), "ws-a", "iss-1", &me, "👍", "r1", 1).await.unwrap()
+        IssueReactionRepo::add(store.pool(), "ws-a", "iss-1", &me, "👍", "r1", 1)
+            .await
+            .unwrap()
     );
     assert!(
-        !IssueReactionRepo::add(store.pool(), "ws-a", "iss-1", &me, "👍", "r2", 2).await.unwrap(),
+        !IssueReactionRepo::add(store.pool(), "ws-a", "iss-1", &me, "👍", "r2", 2)
+            .await
+            .unwrap(),
         "the UNIQUE triple makes a repeat a no-op, not an error"
     );
     let tallies = IssueReactionRepo::tallies(store.pool(), "iss-1").await.unwrap();
@@ -78,9 +82,19 @@ async fn two_actors_same_emoji_tally_to_two() {
 async fn remove_reaction_is_idempotent() {
     let (_dir, store) = setup().await;
     let me = member("me");
-    IssueReactionRepo::add(store.pool(), "ws-a", "iss-1", &me, "🚀", "r1", 1).await.unwrap();
-    assert!(IssueReactionRepo::remove(store.pool(), "ws-a", "iss-1", &me, "🚀").await.unwrap());
-    assert!(!IssueReactionRepo::remove(store.pool(), "ws-a", "iss-1", &me, "🚀").await.unwrap());
+    IssueReactionRepo::add(store.pool(), "ws-a", "iss-1", &me, "🚀", "r1", 1)
+        .await
+        .unwrap();
+    assert!(
+        IssueReactionRepo::remove(store.pool(), "ws-a", "iss-1", &me, "🚀")
+            .await
+            .unwrap()
+    );
+    assert!(
+        !IssueReactionRepo::remove(store.pool(), "ws-a", "iss-1", &me, "🚀")
+            .await
+            .unwrap()
+    );
     assert!(IssueReactionRepo::tallies(store.pool(), "iss-1").await.unwrap().is_empty());
 }
 

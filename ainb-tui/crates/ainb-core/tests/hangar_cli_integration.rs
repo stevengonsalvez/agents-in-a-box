@@ -2524,18 +2524,17 @@ fn issue_subscribe_persists_to_sqlite_and_survives_a_new_process() {
         .expect("read issue_subscriber")
     });
     assert!(
-        rows.contains(&(
-            "member".to_string(),
-            "me".to_string(),
-            "manual".to_string()
-        )),
+        rows.contains(&("member".to_string(), "me".to_string(), "manual".to_string())),
         "the manual subscription is at rest in sqlite: {rows:?}"
     );
 
     // A SECOND process still sees it — the persistence half, not asserted but run.
     let (ok, out) = run(tmp.path(), &["hangar", "issue", "subscribers", &id]);
     assert!(ok, "issue subscribers should exit 0; out={out}");
-    assert!(out.contains("member:me"), "still listed after a restart:\n{out}");
+    assert!(
+        out.contains("member:me"),
+        "still listed after a restart:\n{out}"
+    );
 
     // `issue show` surfaces it too, so the read needs neither daemon nor TUI.
     let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &id]);

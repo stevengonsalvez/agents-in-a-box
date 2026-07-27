@@ -30,7 +30,11 @@ fn member(id: &str) -> ActorRef {
 
 /// Boot a seeded store with the REAL aggregator draining a shared broker — the
 /// same wiring `boot()` uses — and hand back the emit sink.
-async fn boot() -> (tempfile::TempDir, Store, ainb_hangar_daemon::events::EventSink) {
+async fn boot() -> (
+    tempfile::TempDir,
+    Store,
+    ainb_hangar_daemon::events::EventSink,
+) {
     let dir = tempfile::tempdir().unwrap();
     let store = Store::open_in(dir.path()).await.unwrap();
     seed::seed_p4_fixture(store.pool()).await.unwrap();
@@ -119,16 +123,9 @@ async fn a_manual_subscriber_who_is_neither_creator_nor_assignee_gets_the_commen
         ("bob", SubscribeReason::Assignee),
         ("watcher", SubscribeReason::Manual),
     ] {
-        IssueSubscriberRepo::add(
-            store.pool(),
-            WS_ID,
-            "fanout-1",
-            &member(actor),
-            reason,
-            0,
-        )
-        .await
-        .unwrap();
+        IssueSubscriberRepo::add(store.pool(), WS_ID, "fanout-1", &member(actor), reason, 0)
+            .await
+            .unwrap();
     }
     sqlx::query(
         "INSERT INTO comment (id, issue_id, author_type, author_id, body, created_at) \

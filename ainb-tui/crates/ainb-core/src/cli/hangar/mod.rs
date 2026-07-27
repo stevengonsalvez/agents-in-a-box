@@ -4790,15 +4790,9 @@ async fn run_issue_react(store: &Store, cmd: IssueReactCommand) -> Result<()> {
         }
         IssueReactCommand::Remove(args) => {
             let actor = parse_actor_arg(args.actor.as_deref())?;
-            IssueReactionRepo::remove(
-                store.pool(),
-                &workspace_id,
-                &args.id,
-                &actor,
-                &args.emoji,
-            )
-            .await
-            .map_err(map)?;
+            IssueReactionRepo::remove(store.pool(), &workspace_id, &args.id, &actor, &args.emoji)
+                .await
+                .map_err(map)?;
         }
         IssueReactCommand::List(_) => {}
     }
@@ -4834,16 +4828,13 @@ async fn require_issue_in_workspace(
 
 /// Print one issue's subscriber set, one `<actor>  (<reason>)` row each.
 /// No subscribers ⇒ `no subscribers`.
-async fn print_issue_subscribers(
-    store: &Store,
-    workspace_id: &str,
-    issue_id: &str,
-) -> Result<()> {
+async fn print_issue_subscribers(store: &Store, workspace_id: &str, issue_id: &str) -> Result<()> {
     use ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo;
 
     require_issue_in_workspace(store, workspace_id, issue_id).await?;
-    let subs =
-        IssueSubscriberRepo::list(store.pool(), issue_id).await.context("read subscribers")?;
+    let subs = IssueSubscriberRepo::list(store.pool(), issue_id)
+        .await
+        .context("read subscribers")?;
     if subs.is_empty() {
         println!("no subscribers");
         return Ok(());
@@ -4859,8 +4850,9 @@ async fn print_issue_subscribers(
 async fn print_issue_reactions(store: &Store, issue_id: &str) -> Result<()> {
     use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
 
-    let tallies =
-        IssueReactionRepo::tallies(store.pool(), issue_id).await.context("read reactions")?;
+    let tallies = IssueReactionRepo::tallies(store.pool(), issue_id)
+        .await
+        .context("read reactions")?;
     if tallies.is_empty() {
         println!("no reactions");
         return Ok(());

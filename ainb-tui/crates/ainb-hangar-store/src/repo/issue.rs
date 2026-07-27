@@ -297,15 +297,8 @@ async fn auto_subscribe_on_create(pool: &SqlitePool, issue: &NewIssue) {
     ];
     for (actor, reason) in pairs {
         let Some(actor) = actor else { continue };
-        if let Err(e) = IssueSubscriberRepo::add(
-            pool,
-            &issue.workspace_id,
-            &issue.id,
-            actor,
-            reason,
-            now,
-        )
-        .await
+        if let Err(e) =
+            IssueSubscriberRepo::add(pool, &issue.workspace_id, &issue.id, actor, reason, now).await
         {
             tracing::warn!(error = %e, issue_id = %issue.id, "create auto-subscribe failed");
         }

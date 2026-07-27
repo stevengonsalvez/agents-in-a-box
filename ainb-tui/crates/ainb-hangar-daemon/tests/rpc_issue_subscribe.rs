@@ -119,7 +119,9 @@ impl Client {
 async fn start_server(dir: &std::path::Path) -> (std::path::PathBuf, Store) {
     let store = Store::open_in(dir).await.unwrap();
     seed::seed_p4_fixture(store.pool()).await.unwrap();
-    rpc::auth::ensure_socket_token(store.pool(), dir).await.expect("ensure socket token");
+    rpc::auth::ensure_socket_token(store.pool(), dir)
+        .await
+        .expect("ensure socket token");
     let socket_path = rpc::socket_path_in(dir);
     let listener = rpc::bind(&socket_path).expect("bind socket");
     let health = DaemonHealth {
@@ -229,7 +231,10 @@ async fn re_subscribing_keeps_the_original_reason() {
             serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "sub-2" }),
         )
         .await;
-    assert!(resp["error"].is_null(), "a redundant subscribe still acks: {resp}");
+    assert!(
+        resp["error"].is_null(),
+        "a redundant subscribe still acks: {resp}"
+    );
     assert_eq!(
         pairs(&resp),
         vec![("member:me".to_string(), "creator".to_string())],
@@ -251,7 +256,10 @@ async fn subscribe_rejects_an_unknown_issue_and_a_malformed_actor() {
             serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "no-such-issue" }),
         )
         .await;
-    assert!(!resp["error"].is_null(), "an unknown issue must fail: {resp}");
+    assert!(
+        !resp["error"].is_null(),
+        "an unknown issue must fail: {resp}"
+    );
 
     let resp = c
         .call(
@@ -263,7 +271,10 @@ async fn subscribe_rejects_an_unknown_issue_and_a_malformed_actor() {
             }),
         )
         .await;
-    assert!(!resp["error"].is_null(), "a malformed actor must fail: {resp}");
+    assert!(
+        !resp["error"].is_null(),
+        "a malformed actor must fail: {resp}"
+    );
 }
 
 /// The reference's `403`: a target that is not in this workspace is rejected.
@@ -339,7 +350,10 @@ async fn reaction_add_remove_round_trip_and_the_emoji_guard() {
         .await;
     assert!(!resp["error"].is_null(), "a blank emoji must fail: {resp}");
     assert!(
-        resp["error"]["message"].as_str().unwrap_or_default().contains("emoji is required"),
+        resp["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("emoji is required"),
         "the reference's own guard text: {resp}"
     );
 }

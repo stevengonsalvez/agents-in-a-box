@@ -86,9 +86,16 @@ async fn first_reason_wins_on_repeat_subscribe() {
     let (_dir, store) = setup().await;
     let me = member("me");
     assert!(
-        IssueSubscriberRepo::add(store.pool(), "ws-a", "iss-1", &me, SubscribeReason::Creator, 1)
-            .await
-            .unwrap()
+        IssueSubscriberRepo::add(
+            store.pool(),
+            "ws-a",
+            "iss-1",
+            &me,
+            SubscribeReason::Creator,
+            1
+        )
+        .await
+        .unwrap()
     );
     assert!(
         !IssueSubscriberRepo::add(
@@ -113,9 +120,16 @@ async fn first_reason_wins_on_repeat_subscribe() {
 async fn unsubscribe_removes_and_is_idempotent() {
     let (_dir, store) = setup().await;
     let me = member("me");
-    IssueSubscriberRepo::add(store.pool(), "ws-a", "iss-1", &me, SubscribeReason::Manual, 1)
-        .await
-        .unwrap();
+    IssueSubscriberRepo::add(
+        store.pool(),
+        "ws-a",
+        "iss-1",
+        &me,
+        SubscribeReason::Manual,
+        1,
+    )
+    .await
+    .unwrap();
 
     assert!(IssueSubscriberRepo::remove(store.pool(), "ws-a", "iss-1", &me).await.unwrap());
     assert!(!IssueSubscriberRepo::is_subscribed(store.pool(), "iss-1", &me).await.unwrap());
@@ -144,7 +158,10 @@ async fn foreign_workspace_writes_nothing() {
         .await
         .unwrap()
     );
-    assert_eq!(IssueSubscriberRepo::count(store.pool(), "iss-1").await.unwrap(), 0);
+    assert_eq!(
+        IssueSubscriberRepo::count(store.pool(), "iss-1").await.unwrap(),
+        0
+    );
 }
 
 #[tokio::test]
@@ -162,7 +179,10 @@ async fn delete_cascade_reaps_subscribers() {
     .unwrap();
 
     IssueRepo::delete_cascade(store.pool(), "ws-a", "iss-1").await.unwrap();
-    assert_eq!(IssueSubscriberRepo::count(store.pool(), "iss-1").await.unwrap(), 0);
+    assert_eq!(
+        IssueSubscriberRepo::count(store.pool(), "iss-1").await.unwrap(),
+        0
+    );
 }
 
 /// A member and an agent are DISTINCT subscribers even with the same id half.
@@ -170,11 +190,21 @@ async fn delete_cascade_reaps_subscribers() {
 async fn distinct_actors_accumulate() {
     let (_dir, store) = setup().await;
     for a in [member("x"), agent("x")] {
-        IssueSubscriberRepo::add(store.pool(), "ws-a", "iss-1", &a, SubscribeReason::Manual, 1)
-            .await
-            .unwrap();
+        IssueSubscriberRepo::add(
+            store.pool(),
+            "ws-a",
+            "iss-1",
+            &a,
+            SubscribeReason::Manual,
+            1,
+        )
+        .await
+        .unwrap();
     }
-    assert_eq!(IssueSubscriberRepo::count(store.pool(), "iss-1").await.unwrap(), 2);
+    assert_eq!(
+        IssueSubscriberRepo::count(store.pool(), "iss-1").await.unwrap(),
+        2
+    );
     let actors = IssueSubscriberRepo::actors(store.pool(), "iss-1").await.unwrap();
     assert!(actors.contains(&member("x")));
     assert!(actors.contains(&agent("x")));

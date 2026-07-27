@@ -6438,8 +6438,9 @@ async fn handle_issue_subscribe(
     let actor = resolve_actor_param(params.actor.as_deref())?;
     reject_actor_outside_workspace(pool, &ws, &actor).await?;
 
-    let already =
-        IssueSubscriberRepo::is_subscribed(pool, &params.issue_id, &actor).await.map_err(|e| store_err(&e))?;
+    let already = IssueSubscriberRepo::is_subscribed(pool, &params.issue_id, &actor)
+        .await
+        .map_err(|e| store_err(&e))?;
     let changed = if add {
         IssueSubscriberRepo::add(
             pool,
@@ -6521,8 +6522,7 @@ async fn handle_issue_reaction(
         )
         .await
     } else {
-        IssueReactionRepo::remove(pool, ws.as_str(), &params.issue_id, &actor, &params.emoji)
-            .await
+        IssueReactionRepo::remove(pool, ws.as_str(), &params.issue_id, &actor, &params.emoji).await
     };
     match outcome {
         Ok(_) => {}
@@ -6539,13 +6539,12 @@ async fn issue_in_workspace(
     workspace_id: &str,
     issue_id: &str,
 ) -> Result<bool, RpcError> {
-    let n: i64 =
-        sqlx::query_scalar("SELECT COUNT(*) FROM issue WHERE id = ? AND workspace_id = ?")
-            .bind(issue_id)
-            .bind(workspace_id)
-            .fetch_one(pool)
-            .await
-            .map_err(|e| store_err(&e))?;
+    let n: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue WHERE id = ? AND workspace_id = ?")
+        .bind(issue_id)
+        .bind(workspace_id)
+        .fetch_one(pool)
+        .await
+        .map_err(|e| store_err(&e))?;
     Ok(n > 0)
 }
 
@@ -6557,10 +6556,10 @@ async fn issue_subscribers_value(
     let subscribers = crate::rpc::snapshots::issue_subscriber_rows(pool, issue_id)
         .await
         .map_err(|e| store_err(&e))?;
-    Ok(serde_json::to_value(
-        ainb_hangar_proto::snapshots::IssueSubscribersResult { subscribers },
+    Ok(
+        serde_json::to_value(ainb_hangar_proto::snapshots::IssueSubscribersResult { subscribers })
+            .unwrap_or(serde_json::Value::Null),
     )
-    .unwrap_or(serde_json::Value::Null))
 }
 
 /// Build the `IssueReactionsResult` payload for one issue, as seen by `viewer`

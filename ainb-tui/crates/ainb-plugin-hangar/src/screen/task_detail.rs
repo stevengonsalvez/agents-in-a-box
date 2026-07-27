@@ -1268,7 +1268,11 @@ fn render_detail_card(
             // markers use, so "mine" reads at a glance.
             cells.push((
                 bucket.as_str(),
-                if reaction.mine { SELECTION_GREEN } else { CARD_VALUE },
+                if reaction.mine {
+                    SELECTION_GREEN
+                } else {
+                    CARD_VALUE
+                },
             ));
         }
         card_field_row(buf, card_w, row, &cells);
@@ -1936,7 +1940,10 @@ mod card_tests {
 
         assert!(squashed.contains("Subs: 3"), "the count: {squashed}");
         assert!(squashed.contains("✓ you"), "the you-marker: {squashed}");
-        assert!(squashed.contains("React: 👍 3"), "the mine bucket: {squashed}");
+        assert!(
+            squashed.contains("React: 👍 3"),
+            "the mine bucket: {squashed}"
+        );
         assert!(squashed.contains("🎉 1"), "the other bucket: {squashed}");
     }
 

@@ -90,25 +90,24 @@ async fn index_exists(pool: &SqlitePool, name: &str) -> bool {
 
 /// `(actor_type:actor_id, reason)` for one issue, sorted for a stable compare.
 async fn subs(pool: &SqlitePool, issue_id: &str) -> Vec<(String, String)> {
-    let mut v: Vec<(String, String)> = sqlx::query(
-        "SELECT actor_type, actor_id, reason FROM issue_subscriber WHERE issue_id = ?",
-    )
-    .bind(issue_id)
-    .fetch_all(pool)
-    .await
-    .expect("read subscribers")
-    .iter()
-    .map(|r| {
-        (
-            format!(
-                "{}:{}",
-                r.get::<String, _>("actor_type"),
-                r.get::<String, _>("actor_id")
-            ),
-            r.get::<String, _>("reason"),
-        )
-    })
-    .collect();
+    let mut v: Vec<(String, String)> =
+        sqlx::query("SELECT actor_type, actor_id, reason FROM issue_subscriber WHERE issue_id = ?")
+            .bind(issue_id)
+            .fetch_all(pool)
+            .await
+            .expect("read subscribers")
+            .iter()
+            .map(|r| {
+                (
+                    format!(
+                        "{}:{}",
+                        r.get::<String, _>("actor_type"),
+                        r.get::<String, _>("actor_id")
+                    ),
+                    r.get::<String, _>("reason"),
+                )
+            })
+            .collect();
     v.sort();
     v
 }
@@ -162,7 +161,10 @@ async fn migration_0062_backfills_subscribers_first_reason_wins() {
     )
     .execute(&pool)
     .await;
-    assert!(dup.is_err(), "the (issue, actor) primary key rejects a duplicate");
+    assert!(
+        dup.is_err(),
+        "the (issue, actor) primary key rejects a duplicate"
+    );
 
     // (d) Re-applying is a ledgered no-op — the backfill does not double up.
     apply_migrations(&pool).await.expect("second apply is a no-op");
