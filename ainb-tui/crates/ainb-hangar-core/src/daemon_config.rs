@@ -112,9 +112,7 @@ pub fn workspace_creation_disabled(stored: Option<&str>, env: Option<&str>) -> b
     if env.and_then(parse_bool_token) == Some(true) {
         return true;
     }
-    stored
-        .and_then(parse_bool_token)
-        .unwrap_or(DEFAULT_WORKSPACE_CREATION_DISABLED)
+    stored.and_then(parse_bool_token).unwrap_or(DEFAULT_WORKSPACE_CREATION_DISABLED)
 }
 
 /// The minimum legal per-session cooldown, in minutes.
