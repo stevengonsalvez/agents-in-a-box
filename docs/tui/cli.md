@@ -4605,9 +4605,44 @@ View + set per-workspace config (context prompt, issue prefix, repo whitelist)
 Usage: ainb hangar workspace [OPTIONS] <COMMAND>
 
 Commands:
+  create  Create a new workspace (slug + display name)
+  list    List every workspace on this instance
   config  Set one or more of the workspace's config knobs
   show    Show the workspace's current config
   help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar workspace create`
+
+Create a new workspace (slug + display name)
+
+```console
+$ ainb hangar workspace create --help
+Create a new workspace (slug + display name)
+
+Usage: ainb hangar workspace create [OPTIONS] --slug <SLUG> --name <NAME>
+
+Options:
+      --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
+      --slug <SLUG>                  Short handle for the workspace (`^[a-z0-9]+(-[a-z0-9]+)*$`), unique host-wide
+      --name <NAME>                  Human-readable display name
+      --issue-prefix <ISSUE_PREFIX>  Optional prefix prepended to a newly-created issue's title in this workspace (e.g. `OPS`). Omitted leaves titles verbatim
+  -h, --help                         Print help
+```
+
+#### `ainb hangar workspace list`
+
+List every workspace on this instance
+
+```console
+$ ainb hangar workspace list --help
+List every workspace on this instance
+
+Usage: ainb hangar workspace list [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
