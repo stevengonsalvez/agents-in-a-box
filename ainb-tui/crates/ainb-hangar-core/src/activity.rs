@@ -120,7 +120,7 @@ pub enum ActivityActor {
 impl ActivityActor {
     /// The `'member' | 'agent' | 'system'` token stored in `actor_type`.
     #[must_use]
-    pub fn type_str(&self) -> &'static str {
+    pub const fn type_str(&self) -> &'static str {
         match self {
             Self::Actor(a) => a.kind().as_str(),
             Self::System => "system",
