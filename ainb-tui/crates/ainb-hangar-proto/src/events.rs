@@ -777,6 +777,17 @@ pub struct AutopilotRow {
     /// deserialises as `false`, and an older plugin ignores it.
     #[serde(default)]
     pub api_trigger_enabled: bool,
+    /// The rule's newest published version number (migration 0061), or `None`
+    /// for an UNVERSIONED rule — one created before 0061 and never edited
+    /// since. Deliberately not backfilled: a fabricated v1 would be a false
+    /// audit record.
+    #[serde(default)]
+    pub rule_version: Option<i64>,
+    /// A human-readable label for whoever published that newest version
+    /// (resolved daemon-side), or `None` when unversioned / unattributed. The
+    /// plugin owns zero domain data, so the daemon does the `user` join.
+    #[serde(default)]
+    pub last_published_by: Option<String>,
 }
 
 /// A wire-side autopilot run row for the history pane (`hangar/autopilot_runs`).
@@ -805,6 +816,49 @@ pub struct AutopilotRunRow {
     /// other status, and for pre-0057 payloads.
     #[serde(default)]
     pub failure_reason: Option<String>,
+    /// The ACCOUNTABLE HUMAN for this run (migration 0061), as a canonical actor
+    /// ref. `None` for every pre-0061 run and for an unattended fire of an
+    /// unversioned rule — an honest unknown, never a fabricated actor.
+    #[serde(default)]
+    pub accountable_actor: Option<String>,
+    /// HOW that actor was resolved: `rule_owner` (unattended — the rule's
+    /// publisher) or `direct_human` (a named human clicked "run now"). `None`
+    /// exactly when [`accountable_actor`](Self::accountable_actor) is `None`.
+    #[serde(default)]
+    pub attribution: Option<String>,
+}
+
+/// A wire-side rule-version row for the autopilot audit trail
+/// (`hangar/autopilot_versions`, multica parity #14).
+///
+/// One append-only entry in the `autopilot_rule_version` accountability ledger:
+/// who published this rule, when, and what the rule looked like as published.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotVersionRow {
+    /// The ledger row id (ULID string).
+    pub id: String,
+    /// The autopilot this version describes.
+    pub autopilot_id: String,
+    /// 1-based, monotonic per autopilot.
+    pub version: i64,
+    /// Why it was published: `created` | `instructions` | `schedule` |
+    /// `target` | `policy` | `paused` | `resumed` | `trigger`. Carried RAW so a
+    /// token written by a newer daemon renders as text rather than erroring.
+    pub change_kind: String,
+    /// The accountable actor ref (`member:<id>` / `agent:<id>`); `None` when the
+    /// mutation carried no actor.
+    #[serde(default)]
+    pub published_by: Option<String>,
+    /// The resolved human-readable name/email for
+    /// [`published_by`](Self::published_by), joined daemon-side. An unresolvable
+    /// ref renders the raw actor ref, never a fabricated name.
+    #[serde(default)]
+    pub published_by_label: Option<String>,
+    /// The rule as published: a serialised JSON object, including `changed`
+    /// (every field this publish touched).
+    pub config_summary: String,
+    /// Publish instant (epoch-ms).
+    pub created_at: i64,
 }
 
 /// A wire-side task card row for the Kanban board (`hangar/tasks_list`, P8.4).

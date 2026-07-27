@@ -30,6 +30,7 @@ fn autopilot(id: &str, name: &str, cron: &str, enabled: bool, last: Option<&str>
         last_run_status: last.map(str::to_string),
         last_run_at: last.map(|_| 1_699_000_000_000),
         api_trigger_enabled: false,
+        ..Default::default()
     }
 }
 
@@ -198,6 +199,7 @@ fn render_run_history_below_selection() {
                     status: "completed".into(),
                     source: "schedule".into(),
                     failure_reason: None,
+                    ..Default::default()
                 },
                 AutopilotRunRow {
                     id: "run-2".into(),
@@ -207,6 +209,7 @@ fn render_run_history_below_selection() {
                     status: "completed".into(),
                     source: "schedule".into(),
                     failure_reason: None,
+                    ..Default::default()
                 },
             ],
         },
@@ -252,6 +255,7 @@ fn render_skipped_run_marked() {
                 status: "skipped".into(),
                 source: "schedule".into(),
                 failure_reason: None,
+                ..Default::default()
             }],
         },
     )
@@ -297,6 +301,7 @@ fn render_skipped_run_shows_source_and_reason() {
                 status: "skipped".into(),
                 source: "api".into(),
                 failure_reason: Some("concurrency limit: 1/1 in flight".into()),
+                ..Default::default()
             }],
         },
     )

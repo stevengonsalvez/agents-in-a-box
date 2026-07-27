@@ -33,7 +33,7 @@ citations, and `file:line` references.
 | [squad.md](squad.md) | Squad | ~40% | Leader gets no briefing — "leader" is nominal |
 | [workspace.md](workspace.md) | Workspace / membership | ~40% | Single singleton workspace; no human members |
 | [agent.md](agent.md) | Agent | ~55% | No 2-dim presence; no agent builder |
-| [autopilot.md](autopilot.md) | Autopilot | ~75% | No rule-versioning/attribution; no `api` trigger |
+| [autopilot.md](autopilot.md) | Autopilot | ~95% | #27 subscribers/collaborators (deferred while solo) |
 | [task-flow.md](task-flow.md) | Task + dispatch flow | ~80% | No dispatch reason codes; no activity log |
 
 Parity % is a rough eyeball, not a measured metric — it exists to signal where
@@ -108,7 +108,7 @@ CI job executes.
 | Squad | ~40% | **~65%** | #5 task `squad_id` (mutation-verified) + #7 leader briefing injected at claim, now carrying `## Squad Instructions` + per-member role AND materialisable skills (#25, 7‑rest) | #16 selective routing undecided; delegation still cannot go leader→member by mention link (gap #2); **F1 (`7‑cwd`)** — the briefing is written into the TASK tree while a card run's provider `cwd` is its worktree, so a cwd-relative reader would not see it |
 | Workspace / membership | ~40% | **~60%** | #4 create/delete/switch with slug validation; #1's human-member mint path | No invite lifecycle (#18); the inbox is still workspace-wide with no actor recipient, so "human member" stops short of a symmetric collaboration surface (4-rest’s creation-lockdown flag landed) |
 | Agent | ~55% | **~70%** | #8 permission model + gate (in-source-tested), #9 guided create wizard, #6's workload dimension | Availability is still binary — `unstable` unreachable, no grace window; #9's LLM turn absent; #26 archive audit, #30 `custom_env` redaction unstarted (#23 metadata and #24 skill toggle now landed); the invoke gate covers one of three dispatch paths |
-| Autopilot | ~75% | **~75%** | untouched by the campaign | #14 rule versioning/attribution, #15 `api` trigger + `skipped` status, #27 subscribers |
+| Autopilot | ~75% | **~95%** | #15 `api` trigger + `skipped` run status, #14 rule versioning + human attribution (append-only ledger, cosmetic-vs-substantive classifier, `rule_owner`/`direct_human` run fork, and the `edit` surface that did not previously exist) | #27 subscribers/collaborators (deferred while solo) |
 | Task + dispatch flow | ~80% | **~80%** | untouched by the campaign | #12 dispatch reason codes, #13 activity log |
 
 Rough overall movement: **~55% → ~68%**. The campaign closed the two cheapest
@@ -132,7 +132,6 @@ the inbox** — remain open.
 | 8‑rest | Apply `can_invoke` on the squad fan-out and mention-dispatch paths | S | gate exists; two call sites missing |
 | 16 | Squad selective routing vs spray fan-out | L | **product decision first**; depends on 2‑rest |
 | 9‑rest | The LLM turn behind the agent builder (needs `kind`/`system_key` from #23) | L | |
-| 14 | Autopilot rule versioning + human attribution | M | |
 | 7‑cwd (F1) | The briefing is written into the TASK tree while a card run's provider `cwd` is its worktree | S–M | issue #485 — delivery mechanism, not briefing content |
 
 **P2 — polish / cheap wins.**

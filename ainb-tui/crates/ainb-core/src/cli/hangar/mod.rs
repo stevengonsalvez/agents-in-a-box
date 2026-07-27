@@ -43,6 +43,7 @@ use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::autopilot::Autopilot;
+use ainb_hangar_store::repo::autopilot_rule_version::AutopilotRuleVersionRepo;
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::repo::token::{PatRecord, PatRepo, mint_daemon_token, mint_pat};
@@ -258,6 +259,12 @@ pub enum AutopilotCommand {
     Disable(AutopilotIdArgs),
     /// Re-enable an autopilot, recomputing its next tick from now.
     Enable(AutopilotIdArgs),
+    /// Edit an autopilot's config (cron / agent / instructions / policy).
+    /// A substantive edit appends a rule version naming the accountable human;
+    /// a rename alone is cosmetic and mints none.
+    Edit(AutopilotEditArgs),
+    /// Show the autopilot's rule-version ledger (who published what, when).
+    Versions(AutopilotVersionsArgs),
     /// Fire one tick immediately, bypassing the schedule (`--source` picks the
     /// trigger recorded on the run: `manual` by default, or `api`).
     Run(AutopilotRunNowArgs),
@@ -348,6 +355,12 @@ pub struct AutopilotCreateArgs {
     /// in-flight one), or `replace` (supersede the in-flight run and fire fresh).
     #[arg(long = "concurrency-policy", value_enum, default_value_t = ConcurrencyPolicyArg::Skip)]
     pub concurrency_policy: ConcurrencyPolicyArg,
+    /// The ACCOUNTABLE HUMAN for this rule (`user.id` or email). Recorded on
+    /// rule-version v1, which creation writes in the same transaction. Omitted
+    /// defaults to the local human (`member:me`) — a CLI create always has a
+    /// human at the keyboard.
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
     /// Workspace slug to create in. Defaults to the bootstrapped `default`.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -416,6 +429,11 @@ pub struct AutopilotIdArgs {
     /// Turn the trigger OFF instead of on (`api-trigger` only).
     #[arg(long)]
     pub disable: bool,
+    /// The accountable human for this publish (`user.id` or email). Pausing,
+    /// resuming and arming a trigger are all SUBSTANTIVE publishes, so each
+    /// stamps a rule version. Defaults to the local human (`member:me`).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
     /// Workspace slug the autopilot belongs to. Defaults to `default`.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -445,6 +463,68 @@ pub struct AutopilotRunNowArgs {
     /// Which trigger to record on the run (`manual` | `api`).
     #[arg(long, value_enum, default_value_t = RunSourceArg::Manual)]
     pub source: RunSourceArg,
+    /// The human firing it (`user.id` or email). A `manual` run attributes to
+    /// this human (`direct_human`) — them, not the rule's owner. An `api` run
+    /// stays UNATTENDED (`rule_owner`), matching multica. Defaults to the local
+    /// human (`member:me`).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot edit <id>` (multica parity #14).
+///
+/// An all-optional patch: an omitted flag leaves the field alone. `--name` is
+/// COSMETIC — changing only it lands the rename but mints no rule version, so a
+/// title tweak never re-assigns blame for an unattended run.
+#[derive(Args, Debug)]
+pub struct AutopilotEditArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// New display name (cosmetic on its own).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New cron expression (UTC, 5-field) — revalidated before any write.
+    #[arg(long)]
+    pub cron: Option<String>,
+    /// Re-target the rule at a different agent (`agent.id`).
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// New instructions handed to the agent on every tick.
+    #[arg(long, conflicts_with = "clear_instructions")]
+    pub instructions: Option<String>,
+    /// Clear the instructions entirely.
+    #[arg(long = "clear-instructions")]
+    pub clear_instructions: bool,
+    /// New maximum simultaneous in-flight runs.
+    #[arg(long = "max-concurrent-runs")]
+    pub max_concurrent_runs: Option<i64>,
+    /// New execution mode (`run-only` | `create-issue`).
+    #[arg(long = "execution-mode", value_enum)]
+    pub execution_mode: Option<ExecutionModeArg>,
+    /// New concurrency policy (`skip` | `queue` | `replace`).
+    #[arg(long = "concurrency-policy", value_enum)]
+    pub concurrency_policy: Option<ConcurrencyPolicyArg>,
+    /// The ACCOUNTABLE HUMAN for this edit (`user.id` or email) — the name
+    /// recorded on the minted rule version. Defaults to the local human
+    /// (`member:me`).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot versions <id>` (the rule-version ledger).
+#[derive(Args, Debug)]
+pub struct AutopilotVersionsArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Maximum number of versions to show (newest-first).
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
     /// Workspace slug the autopilot belongs to. Defaults to `default`.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -2092,6 +2172,8 @@ async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Resu
         AutopilotCommand::ApiTrigger(args) => run_autopilot_api_trigger(&store, args).await,
         AutopilotCommand::Runs(args) => run_autopilot_runs(&store, args, format).await,
         AutopilotCommand::Webhook(args) => run_autopilot_webhook(&store, args).await,
+        AutopilotCommand::Edit(args) => run_autopilot_edit(&store, args).await,
+        AutopilotCommand::Versions(args) => run_autopilot_versions(&store, args, format).await,
         AutopilotCommand::Deliveries(args) => run_autopilot_deliveries(&store, args, format).await,
     }
 }
@@ -2118,13 +2200,123 @@ async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Resul
         api_trigger_enabled: false,
     };
 
-    let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
+    // The accountable human for rule-version v1, written in the SAME
+    // transaction as the insert (multica parity #14).
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    let id = AutopilotRepo::create_as(store.pool(), &SystemClock, &req, Some(&actor))
         .await
         .with_context(|| format!("create autopilot `{}` (cron `{}`)", args.name, args.cron))?;
     println!(
-        "created autopilot {id} `{}` (cron `{}`)",
+        "created autopilot {id} `{}` (cron `{}`) (v1 created by {actor})",
         args.name, args.cron
     );
+    Ok(())
+}
+
+/// Resolve `--as-user` to the canonical `member:<user.id>` actor ref.
+///
+/// An omitted flag defaults to [`local_member`](ainb_hangar_core::actor::local_member)
+/// (`member:me`), the same honest local-human default migration 0060 established
+/// for inbox recipients — deliberately NOT `None`: a CLI mutation always has a
+/// human at the keyboard, and recording "unattributed" would be less true than
+/// recording "the local human".
+async fn resolve_publisher(
+    store: &Store,
+    as_user: Option<&str>,
+) -> Result<ainb_hangar_core::actor::ActorRef> {
+    use ainb_hangar_core::actor::{ActorKind, ActorRef, local_member};
+    match as_user {
+        Some(token) => {
+            let user_id = resolve_user_id(store, token).await?;
+            ActorRef::new(ActorKind::Member, user_id).context("--as-user resolved to an empty id")
+        }
+        None => Ok(local_member()),
+    }
+}
+
+/// `hangar autopilot edit <id>`: patch an autopilot's config (multica parity
+/// #14).
+///
+/// Prints the minted rule version, or announces the COSMETIC case explicitly —
+/// a rename lands but mints no version, and silently printing "updated" would
+/// hide that distinction from the operator.
+async fn run_autopilot_edit(store: &Store, args: AutopilotEditArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AgentId, AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::{AutopilotEdit, AutopilotRepo, UpdateOutcome};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+
+    let edit = AutopilotEdit {
+        name: args.name.clone(),
+        agent_id: match args.agent.clone() {
+            Some(a) => Some(AgentId::from_str(a).context("agent id was empty")?),
+            None => None,
+        },
+        instructions: if args.clear_instructions {
+            Some(None)
+        } else {
+            args.instructions.clone().map(Some)
+        },
+        cron_expr: args.cron.clone(),
+        max_concurrent_runs: args.max_concurrent_runs,
+        execution_mode: args.execution_mode.map(Into::into),
+        concurrency_policy: args.concurrency_policy.map(Into::into),
+    };
+    anyhow::ensure!(
+        !edit.is_empty(),
+        "nothing to edit — pass at least one of --name/--cron/--agent/--instructions/\
+         --clear-instructions/--max-concurrent-runs/--execution-mode/--concurrency-policy"
+    );
+
+    match AutopilotRepo::update_as(store.pool(), &SystemClock, &ws, &id, &edit, Some(&actor))
+        .await
+        .with_context(|| format!("edit autopilot `{}`", args.id))?
+    {
+        UpdateOutcome::NotFound => {
+            anyhow::bail!("no autopilot `{}` in this workspace", args.id)
+        }
+        UpdateOutcome::Updated {
+            version: Some(version),
+        } => {
+            let kind = AutopilotRuleVersionRepo::latest(store.pool(), &ws, &id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| "updated".to_string(), |v| v.change_kind);
+            println!(
+                "autopilot {} updated (v{version} {kind} by {actor})",
+                args.id
+            );
+        }
+        UpdateOutcome::Updated { version: None } => {
+            println!("autopilot {} updated (no new version — cosmetic)", args.id);
+        }
+    }
+    Ok(())
+}
+
+/// `hangar autopilot versions <id>`: the append-only rule-version ledger —
+/// who published this rule, when, and why. Workspace-scoped: a foreign id
+/// yields an empty set. An UNVERSIONED (pre-0061, never-edited) rule also yields
+/// an empty set: the ledger was deliberately not backfilled.
+async fn run_autopilot_versions(
+    store: &Store,
+    args: AutopilotVersionsArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let versions = AutopilotRuleVersionRepo::list(store.pool(), &ws, &id, args.limit)
+        .await
+        .context("list autopilot rule versions")?;
+    render_autopilot_versions(&versions, format);
     Ok(())
 }
 
@@ -2189,16 +2381,19 @@ async fn run_autopilot_set_enabled(
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
     let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
 
+    // Pausing / resuming is a SUBSTANTIVE publish: it changes whether the rule
+    // fires unattended, so it re-stamps who is accountable (multica parity #14).
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
     if enabled {
-        AutopilotRepo::enable(store.pool(), &SystemClock, &ws, &id)
+        AutopilotRepo::enable_as(store.pool(), &SystemClock, &ws, &id, Some(&actor))
             .await
             .with_context(|| format!("enable autopilot `{}`", args.id))?;
-        println!("enabled autopilot {}", args.id);
+        println!("enabled autopilot {} (resumed by {actor})", args.id);
     } else {
-        AutopilotRepo::disable(store.pool(), &ws, &id)
+        AutopilotRepo::disable_as(store.pool(), &SystemClock, &ws, &id, Some(&actor))
             .await
             .with_context(|| format!("disable autopilot `{}`", args.id))?;
-        println!("disabled autopilot {}", args.id);
+        println!("disabled autopilot {} (paused by {actor})", args.id);
     }
     Ok(())
 }
@@ -2219,7 +2414,7 @@ async fn run_autopilot_run_now(store: &Store, args: AutopilotRunNowArgs) -> Resu
     use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
     use ainb_hangar_store::repo::autopilot::AutopilotRepo;
     use ainb_hangar_store::repo::autopilot_run::{
-        DispatchOutcome, RunSource, dispatch_with_admission,
+        DispatchOutcome, RunAttribution, RunSource, dispatch_with_admission_as,
     };
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
@@ -2244,7 +2439,17 @@ async fn run_autopilot_run_now(store: &Store, args: AutopilotRunNowArgs) -> Resu
         }
     };
 
-    match dispatch_with_admission(store.pool(), &SystemClock, &autopilot, source)
+    // THE ATTRIBUTION FORK (multica parity #14): a MANUAL fire is attributed to
+    // the human at the keyboard (`direct_human`); an `api` fire is UNATTENDED,
+    // so it resolves the rule owner from the version chain instead.
+    let attribution = match source {
+        RunSource::Manual => {
+            RunAttribution::DirectHuman(resolve_publisher(store, args.as_user.as_deref()).await?)
+        }
+        _ => RunAttribution::RuleOwner,
+    };
+
+    match dispatch_with_admission_as(store.pool(), &SystemClock, &autopilot, source, &attribution)
         .await
         .with_context(|| format!("fire autopilot `{}`", args.id))?
     {
@@ -2269,9 +2474,17 @@ async fn run_autopilot_api_trigger(store: &Store, args: AutopilotIdArgs) -> Resu
     let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
     let enabled = !args.disable;
 
-    let updated = AutopilotRepo::set_api_trigger_enabled(store.pool(), &ws, &id, enabled)
-        .await
-        .with_context(|| format!("set api trigger for autopilot `{}`", args.id))?;
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    let updated = AutopilotRepo::set_api_trigger_enabled_as(
+        store.pool(),
+        &SystemClock,
+        &ws,
+        &id,
+        enabled,
+        Some(&actor),
+    )
+    .await
+    .with_context(|| format!("set api trigger for autopilot `{}`", args.id))?;
     anyhow::ensure!(updated, "no autopilot `{}` in this workspace", args.id);
 
     if enabled {
@@ -6701,30 +6914,33 @@ fn render_autopilot_runs(
             println!("[{body}]");
         }
         OutputFormat::Csv => {
-            println!("id,status,source,started_at,completed_at,failure_reason");
+            println!("id,status,source,started_at,completed_at,failure_reason,by,attribution");
             for r in rows {
                 println!(
-                    "{},{},{},{},{},{}",
+                    "{},{},{},{},{},{},{},{}",
                     csv_field(&r.id),
                     csv_field(&r.status),
                     csv_field(&r.source),
                     r.started_at,
                     r.completed_at.map_or_else(String::new, |v| v.to_string()),
                     csv_field(r.failure_reason.as_deref().unwrap_or("")),
+                    csv_field(r.accountable_actor.as_deref().unwrap_or("")),
+                    csv_field(r.attribution.as_deref().unwrap_or("")),
                 );
             }
         }
         OutputFormat::Markdown => {
-            println!("| run id | status | source | started | reason |");
-            println!("| --- | --- | --- | --- | --- |");
+            println!("| run id | status | source | started | reason | by |");
+            println!("| --- | --- | --- | --- | --- | --- |");
             for r in rows {
                 println!(
-                    "| {} | {} | {} | {} | {} |",
+                    "| {} | {} | {} | {} | {} | {} |",
                     md_cell(&r.id),
                     md_cell(&r.status),
                     md_cell(&r.source),
                     r.started_at,
                     md_cell(r.failure_reason.as_deref().unwrap_or("-")),
+                    md_cell(&run_attribution_cell(r)),
                 );
             }
         }
@@ -6734,17 +6950,104 @@ fn render_autopilot_runs(
             } else {
                 for r in rows {
                     println!(
-                        "{}  {}  source={}  started={}  reason={}",
+                        "{}  {}  source={}  started={}  reason={}  by={}",
                         r.id,
                         r.status,
                         r.source,
                         r.started_at,
                         r.failure_reason.as_deref().unwrap_or("-"),
+                        run_attribution_cell(r),
                     );
                 }
             }
         }
     }
+}
+
+/// The `BY` cell for one run: the accountable human plus HOW it was resolved
+/// (multica parity #14).
+///
+/// `-` for an unattributed run — a pre-0061 row, or an unattended fire of an
+/// unversioned rule. An honest unknown, never a fabricated actor.
+fn run_attribution_cell(r: &ainb_hangar_store::repo::autopilot::AutopilotRun) -> String {
+    match (r.accountable_actor.as_deref(), r.attribution.as_deref()) {
+        (Some(actor), Some(how)) => format!("{actor} ({how})"),
+        (Some(actor), None) => actor.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+/// Render an autopilot's rule-version ledger (`hangar autopilot versions <id>`).
+///
+/// Newest-first. An empty ledger means the rule is UNVERSIONED — created before
+/// migration 0061 and never edited since; the ledger was deliberately not
+/// backfilled rather than fabricating a v1.
+fn render_autopilot_versions(
+    rows: &[ainb_hangar_store::repo::autopilot_rule_version::RuleVersion],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows.iter().map(rule_version_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("version,change_kind,published_by,created_at");
+            for v in rows {
+                println!(
+                    "{},{},{},{}",
+                    v.version,
+                    csv_field(&v.change_kind),
+                    csv_field(v.published_by.as_deref().unwrap_or("")),
+                    v.created_at,
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| version | change | published by | at |");
+            println!("| --- | --- | --- | --- |");
+            for v in rows {
+                println!(
+                    "| v{} | {} | {} | {} |",
+                    v.version,
+                    md_cell(&v.change_kind),
+                    md_cell(v.published_by.as_deref().unwrap_or("-")),
+                    v.created_at,
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no rule versions (unversioned autopilot)");
+            } else {
+                for v in rows {
+                    println!(
+                        "v{}  {}  by={}  at={}",
+                        v.version,
+                        v.change_kind,
+                        v.published_by.as_deref().unwrap_or("-"),
+                        v.created_at,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One rule-version ledger row as a JSON object (the `--format json` surface).
+fn rule_version_to_json(
+    v: &ainb_hangar_store::repo::autopilot_rule_version::RuleVersion,
+) -> String {
+    serde_json::json!({
+        "id": v.id,
+        "autopilot_id": v.autopilot_id,
+        "version": v.version,
+        "change_kind": v.change_kind,
+        "published_by": v.published_by,
+        "config_summary": v.config_summary,
+        "created_at": v.created_at,
+    })
+    .to_string()
 }
 
 /// One autopilot run as a JSON object (for the `--format json` surface).
@@ -6757,6 +7060,8 @@ fn autopilot_run_to_json(r: &ainb_hangar_store::repo::autopilot::AutopilotRun) -
         "started_at": r.started_at,
         "completed_at": r.completed_at,
         "failure_reason": r.failure_reason,
+        "accountable_actor": r.accountable_actor,
+        "attribution": r.attribution,
     })
     .to_string()
 }
@@ -9188,6 +9493,7 @@ mod tests {
             status: "skipped".into(),
             source: "api".into(),
             failure_reason: Some("concurrency limit: 1/1 in flight".into()),
+            ..Default::default()
         };
         let json = autopilot_run_to_json(&run);
         assert!(json.contains("\"status\":\"skipped\""), "{json}");

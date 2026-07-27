@@ -37,6 +37,7 @@
 //! cancelled`). That fires on the *real* complete / fail / cancel path, not a
 //! separate caller-driven update.
 
+use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AutopilotRunId, IdError, TaskId};
@@ -44,7 +45,63 @@ use ainb_hangar_core::origin::IssueOrigin;
 use sqlx::{Row, SqlitePool};
 
 use super::autopilot::{Autopilot, ConcurrencyPolicy, ExecutionMode};
+use super::autopilot_rule_version::AutopilotRuleVersionRepo;
 use super::task::{NewTask, TaskRepo};
+
+/// HOW a run's accountable human is resolved — multica's attribution fork
+/// (migration 0061, parity #14).
+///
+/// *"The attribution model forks on how dispatch was invoked, not just who
+/// created the rule."* multica keeps its `originator_user_id` NULL for
+/// unattended fires on purpose; the accountable human is a separate question,
+/// answered by the rule-version chain.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum RunAttribution {
+    /// UNATTENDED (schedule / webhook / api): the accountable human is the
+    /// newest rule version's `published_by`, stamped `rule_owner`. `NULL` for an
+    /// unversioned (pre-0061, never-edited) rule — an honest unknown, never a
+    /// fabricated actor.
+    #[default]
+    RuleOwner,
+    /// A named human fired it by hand ("run now"), stamped `direct_human`. This
+    /// is the human at the keyboard, NOT the rule's owner — the whole point of
+    /// the fork.
+    DirectHuman(ActorRef),
+}
+
+impl RunAttribution {
+    /// The literal stored in the `attribution` column.
+    #[must_use]
+    pub const fn as_db_str(&self) -> &'static str {
+        match self {
+            Self::RuleOwner => "rule_owner",
+            Self::DirectHuman(_) => "direct_human",
+        }
+    }
+
+    /// Resolve `(accountable_actor, attribution)` for this run, INSIDE the
+    /// caller's transaction so the pair can never disagree with the ledger the
+    /// same commit observes.
+    ///
+    /// Both halves are `None` together: an unversioned rule fired unattended has
+    /// no accountable human, and saying so honestly beats inventing one.
+    async fn resolve_in_tx(
+        &self,
+        tx: &mut sqlx::SqliteConnection,
+        autopilot_id: &str,
+    ) -> Result<(Option<String>, Option<&'static str>), sqlx::Error> {
+        let actor = match self {
+            Self::RuleOwner => {
+                AutopilotRuleVersionRepo::latest_publisher_in_tx(tx, autopilot_id).await?
+            }
+            Self::DirectHuman(a) => Some(a.to_string()),
+        };
+        Ok(match actor {
+            Some(a) => (Some(a), Some(self.as_db_str())),
+            None => (None, None),
+        })
+    }
+}
 
 /// Which trigger fired an [`Autopilot`] — the `autopilot_run.source` column
 /// (migration 0057).
@@ -178,16 +235,50 @@ pub async fn fire_autopilot_tick(
 /// # Errors
 ///
 /// Same surface as [`fire_autopilot_tick`].
-#[tracing::instrument(
-    name = "autopilot.tick",
-    skip(pool, clock, autopilot),
-    fields(autopilot_id = %autopilot.id, cron_expr = %autopilot.cron_expr, source = source.as_db_str())
-)]
 pub async fn fire_autopilot_tick_with_source(
     pool: &SqlitePool,
     clock: &dyn HangarClock,
     autopilot: &Autopilot,
     source: RunSource,
+) -> Result<(AutopilotRunId, TaskId), FireError> {
+    fire_autopilot_tick_with_attribution(pool, clock, autopilot, source, &RunAttribution::RuleOwner)
+        .await
+}
+
+/// Fire one autopilot tick, stamping both WHICH trigger fired it
+/// (`autopilot_run.source`) and WHO is accountable for it
+/// (`autopilot_run.accountable_actor` / `attribution`, migration 0061).
+///
+/// This holds the real fire body;
+/// [`fire_autopilot_tick_with_source`] is the delegate that attributes every
+/// unattended fire to [`RunAttribution::RuleOwner`], and
+/// [`fire_autopilot_tick`] is the legacy `schedule`-sourced delegate on top of
+/// that.
+///
+/// The accountable actor is resolved INSIDE the fire transaction (from the
+/// newest rule version for `RuleOwner`, from the supplied ref for
+/// `DirectHuman`), so a run can never disagree with the ledger its own commit
+/// observed.
+///
+/// # Errors
+///
+/// Same surface as [`fire_autopilot_tick`].
+#[tracing::instrument(
+    name = "autopilot.tick",
+    skip(pool, clock, autopilot, attribution),
+    fields(
+        autopilot_id = %autopilot.id,
+        cron_expr = %autopilot.cron_expr,
+        source = source.as_db_str(),
+        attribution = attribution.as_db_str(),
+    )
+)]
+pub async fn fire_autopilot_tick_with_attribution(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    autopilot: &Autopilot,
+    source: RunSource,
+    attribution: &RunAttribution,
 ) -> Result<(AutopilotRunId, TaskId), FireError> {
     let now = clock.now_ms();
     let run_id = SystemIdGen.new_ulid();
@@ -195,15 +286,22 @@ pub async fn fire_autopilot_tick_with_source(
 
     let mut tx = pool.begin().await?;
 
+    // 0. Who is accountable for THIS run, resolved in the same transaction.
+    let (accountable_actor, attribution_token) =
+        attribution.resolve_in_tx(&mut tx, &autopilot.id).await?;
+
     // 1. The run row, in-flight.
     sqlx::query(
-        "INSERT INTO autopilot_run (id, autopilot_id, started_at, status, source) \
-         VALUES (?, ?, ?, 'running', ?)",
+        "INSERT INTO autopilot_run \
+         (id, autopilot_id, started_at, status, source, accountable_actor, attribution) \
+         VALUES (?, ?, ?, 'running', ?, ?, ?)",
     )
     .bind(&run_id)
     .bind(&autopilot.id)
     .bind(now)
     .bind(source.as_db_str())
+    .bind(&accountable_actor)
+    .bind(attribution_token)
     .execute(&mut *tx)
     .await?;
 
@@ -417,12 +515,47 @@ pub async fn record_skipped_run(
     source: RunSource,
     reason: &str,
 ) -> Result<AutopilotRunId, FireError> {
+    record_skipped_run_with_attribution(
+        pool,
+        clock,
+        autopilot,
+        source,
+        reason,
+        &RunAttribution::RuleOwner,
+    )
+    .await
+}
+
+/// Record a declined dispatch, attributed to its accountable human
+/// (migration 0061).
+///
+/// A **skipped** run is still an accountable event — a dispatch someone's rule
+/// asked for and the gate declined — so it carries the identical
+/// `accountable_actor` / `attribution` pair a fired run would.
+/// [`record_skipped_run`] is the delegate that attributes to
+/// [`RunAttribution::RuleOwner`].
+///
+/// # Errors
+///
+/// Same surface as [`record_skipped_run`].
+pub async fn record_skipped_run_with_attribution(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    autopilot: &Autopilot,
+    source: RunSource,
+    reason: &str,
+    attribution: &RunAttribution,
+) -> Result<AutopilotRunId, FireError> {
     let now = clock.now_ms();
     let run_id = SystemIdGen.new_ulid();
+    let mut tx = pool.begin().await?;
+    let (accountable_actor, attribution_token) =
+        attribution.resolve_in_tx(&mut tx, &autopilot.id).await?;
     sqlx::query(
         "INSERT INTO autopilot_run \
-         (id, autopilot_id, started_at, completed_at, status, source, failure_reason) \
-         VALUES (?, ?, ?, ?, 'skipped', ?, ?)",
+         (id, autopilot_id, started_at, completed_at, status, source, failure_reason, \
+          accountable_actor, attribution) \
+         VALUES (?, ?, ?, ?, 'skipped', ?, ?, ?, ?)",
     )
     .bind(&run_id)
     .bind(&autopilot.id)
@@ -430,8 +563,11 @@ pub async fn record_skipped_run(
     .bind(now)
     .bind(source.as_db_str())
     .bind(reason)
-    .execute(pool)
+    .bind(&accountable_actor)
+    .bind(attribution_token)
+    .execute(&mut *tx)
     .await?;
+    tx.commit().await?;
     Ok(AutopilotRunId::from_str(run_id)?)
 }
 
@@ -471,6 +607,31 @@ pub async fn dispatch_with_admission(
     autopilot: &Autopilot,
     source: RunSource,
 ) -> Result<DispatchOutcome, FireError> {
+    dispatch_with_admission_as(pool, clock, autopilot, source, &RunAttribution::RuleOwner).await
+}
+
+/// The shared admission gate, carrying the run's accountable human
+/// (migration 0061).
+///
+/// Holds the real body; [`dispatch_with_admission`] is the delegate that
+/// attributes every dispatch to [`RunAttribution::RuleOwner`] — which is what
+/// the scheduler, the webhook ingress and the `api` trigger all want, since
+/// those are unattended fires. Only a human-driven "run now" passes
+/// [`RunAttribution::DirectHuman`].
+///
+/// BOTH branches attribute identically: a `skipped` run is an accountable event
+/// too, not a fire-only concern.
+///
+/// # Errors
+///
+/// Same surface as [`dispatch_with_admission`].
+pub async fn dispatch_with_admission_as(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    autopilot: &Autopilot,
+    source: RunSource,
+    attribution: &RunAttribution,
+) -> Result<DispatchOutcome, FireError> {
     let in_flight = count_in_flight(pool, &autopilot.id).await?;
     let at_limit = in_flight >= autopilot.max_concurrent_runs;
 
@@ -483,7 +644,15 @@ pub async fn dispatch_with_admission(
                 "concurrency limit: {in_flight}/{} in flight",
                 autopilot.max_concurrent_runs
             );
-            let run_id = record_skipped_run(pool, clock, autopilot, source, &reason).await?;
+            let run_id = record_skipped_run_with_attribution(
+                pool,
+                clock,
+                autopilot,
+                source,
+                &reason,
+                attribution,
+            )
+            .await?;
             return Ok(DispatchOutcome::Skipped {
                 run_id,
                 reason,
@@ -495,7 +664,8 @@ pub async fn dispatch_with_admission(
         }
     };
 
-    let (run_id, task_id) = fire_autopilot_tick_with_source(pool, clock, autopilot, source).await?;
+    let (run_id, task_id) =
+        fire_autopilot_tick_with_attribution(pool, clock, autopilot, source, attribution).await?;
     Ok(DispatchOutcome::Fired {
         run_id,
         task_id,

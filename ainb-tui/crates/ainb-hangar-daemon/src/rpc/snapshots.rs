@@ -38,8 +38,8 @@ use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, W
 use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
-    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow,
-    InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, AutopilotVersionRow,
+    CommentRow, InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
 use ainb_hangar_proto::snapshots::{
     AgentSkillsListResult, SkillDetail, SkillsSyncResult, TimelineEntryRow,
@@ -47,9 +47,13 @@ use ainb_hangar_proto::snapshots::{
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::attention::AttentionRepo;
-use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
+use ainb_hangar_store::repo::autopilot::{
+    AutopilotEdit, AutopilotRepo, AutopilotRepoError, UpdateOutcome,
+};
+use ainb_hangar_store::repo::autopilot_rule_version::AutopilotRuleVersionRepo;
 use ainb_hangar_store::repo::autopilot_run::{
-    DispatchOutcome, FireError, RunSource, dispatch_with_admission, fire_autopilot_tick_with_source,
+    DispatchOutcome, FireError, RunAttribution, RunSource, dispatch_with_admission,
+    fire_autopilot_tick_with_attribution,
 };
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
@@ -1293,9 +1297,23 @@ pub async fn autopilots_list(
     workspace: &WorkspaceId,
 ) -> Result<Vec<AutopilotRow>, AutopilotRepoError> {
     let autopilots = AutopilotRepo::list(pool, workspace).await?;
+    // ONE query for the whole workspace's newest rule versions (multica parity
+    // #14) — deliberately not N+1 per autopilot. Labels are resolved from the
+    // same actor-label cache the version pane uses.
+    let latest_versions = AutopilotRuleVersionRepo::latest_by_autopilot(pool, workspace).await?;
+    let mut publisher_labels = ActorLabelCache::default();
+    let mut versions: HashMap<String, (i64, Option<String>)> = HashMap::new();
+    for (autopilot_id, version, published_by) in latest_versions {
+        let label = match published_by.as_deref() {
+            Some(actor) => Some(publisher_labels.label(pool, actor).await),
+            None => None,
+        };
+        versions.insert(autopilot_id, (version, label));
+    }
     let mut out = Vec::with_capacity(autopilots.len());
     for ap in autopilots {
         let id = AutopilotId::from_str(ap.id.clone()).map_err(|_| AutopilotRepoError::EmptyId)?;
+        let id_str = ap.id.clone();
         let last = AutopilotRepo::list_runs(pool, workspace, &id, LAST_RUN_LOOKBACK)
             .await?
             .into_iter()
@@ -1311,9 +1329,52 @@ pub async fn autopilots_list(
             last_run_status: last.as_ref().map(|r| r.status.clone()),
             last_run_at: last.as_ref().map(|r| r.started_at),
             api_trigger_enabled: ap.api_trigger_enabled,
+            // `None` for an UNVERSIONED rule (pre-0061, never edited): the
+            // ledger was deliberately not backfilled, so there is nothing
+            // honest to report.
+            rule_version: versions.get(&id_str).map(|(v, _)| *v),
+            last_published_by: versions.get(&id_str).and_then(|(_, l)| l.clone()),
         });
     }
     Ok(out)
+}
+
+/// A tiny per-call cache resolving an actor ref (`member:<user.id>`) to a
+/// human-readable label.
+///
+/// The plugin owns zero domain data, so the daemon does the `user` join. An
+/// unresolvable ref renders the RAW actor ref — never a fabricated name.
+#[derive(Default)]
+struct ActorLabelCache {
+    seen: HashMap<String, String>,
+}
+
+impl ActorLabelCache {
+    async fn label(&mut self, pool: &SqlitePool, actor: &str) -> String {
+        if let Some(hit) = self.seen.get(actor) {
+            return hit.clone();
+        }
+        let resolved = match actor.parse::<ActorRef>() {
+            Ok(a) if a.kind() == ActorKind::Member => {
+                sqlx::query_scalar::<_, String>("SELECT email FROM user WHERE id = ?")
+                    .bind(a.id())
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            Ok(a) => sqlx::query_scalar::<_, String>("SELECT name FROM agent WHERE id = ?")
+                .bind(a.id())
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| actor.to_string());
+        self.seen.insert(actor.to_string(), resolved.clone());
+        resolved
+    }
 }
 
 /// Snapshot one autopilot's recent runs, latest-first (`hangar/autopilot_runs`,
@@ -1342,6 +1403,8 @@ pub async fn autopilot_runs(
             status: r.status,
             source: r.source,
             failure_reason: r.failure_reason,
+            accountable_actor: r.accountable_actor,
+            attribution: r.attribution,
         })
         .collect())
 }
@@ -1364,14 +1427,88 @@ pub async fn autopilot_fire_now(
     clock: &dyn HangarClock,
     workspace: &WorkspaceId,
     autopilot_id: &AutopilotId,
+    actor: Option<&ActorRef>,
 ) -> Result<bool, AutopilotFireError> {
     let Some(autopilot) = AutopilotRepo::get(pool, workspace, autopilot_id).await? else {
         return Ok(false);
     };
     // A MANUAL fire: the operator's explicit override, stamped as such on the
     // run so the history can tell it from a scheduled or api-triggered tick.
-    fire_autopilot_tick_with_source(pool, clock, &autopilot, RunSource::Manual).await?;
+    //
+    // ATTRIBUTION FORK (multica parity #14): a NAMED human clicking "run now" is
+    // `direct_human` — them, not the rule's owner. Without a named human it
+    // falls back to `rule_owner`, exactly like an unattended fire.
+    let attribution = match actor {
+        Some(a) => RunAttribution::DirectHuman(a.clone()),
+        None => RunAttribution::RuleOwner,
+    };
+    fire_autopilot_tick_with_attribution(pool, clock, &autopilot, RunSource::Manual, &attribution)
+        .await?;
     Ok(true)
+}
+
+/// EDIT one autopilot's config (`hangar/autopilot_update`, multica parity #14),
+/// scoped to `workspace`.
+///
+/// Thin pass-through to [`AutopilotRepo::update_as`], which does the real work:
+/// revalidate a new cron before any write, apply the patch, then publish a rule
+/// version IFF the edit was substantive. A rename lands but mints no version.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] — [`AutopilotRepoError::Cron`] for a
+/// malformed `cron_expr` (nothing written), otherwise a store failure.
+pub async fn autopilot_update(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    edit: &AutopilotEdit,
+    actor: Option<&ActorRef>,
+) -> Result<UpdateOutcome, AutopilotRepoError> {
+    AutopilotRepo::update_as(pool, clock, workspace, autopilot_id, edit, actor).await
+}
+
+/// Read one autopilot's rule-version ledger, newest-first
+/// (`hangar/autopilot_versions`, multica parity #14), scoped to `workspace`.
+///
+/// Each row carries both the raw `published_by` actor ref AND a
+/// `published_by_label` resolved daemon-side (the `user` join), so the plugin
+/// owns zero domain data. An unresolvable ref renders the raw actor ref, never a
+/// fabricated name.
+///
+/// An unversioned (pre-0061, never-edited) rule yields an empty list — the
+/// ledger was deliberately not backfilled.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure.
+pub async fn autopilot_versions(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    limit: u32,
+) -> Result<Vec<AutopilotVersionRow>, AutopilotRepoError> {
+    let rows = AutopilotRuleVersionRepo::list(pool, workspace, autopilot_id, limit).await?;
+    let mut labels = ActorLabelCache::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let published_by_label = match r.published_by.as_deref() {
+            Some(actor) => Some(labels.label(pool, actor).await),
+            None => None,
+        };
+        out.push(AutopilotVersionRow {
+            id: r.id,
+            autopilot_id: r.autopilot_id,
+            version: r.version,
+            change_kind: r.change_kind,
+            published_by: r.published_by,
+            published_by_label,
+            config_summary: r.config_summary,
+            created_at: r.created_at,
+        });
+    }
+    Ok(out)
 }
 
 /// What [`autopilot_trigger_api`] did.
@@ -1464,11 +1601,14 @@ pub async fn autopilot_trigger_api(
 /// Returns an [`AutopilotRepoError`] on a store failure.
 pub async fn autopilot_set_api_trigger(
     pool: &SqlitePool,
+    clock: &dyn HangarClock,
     workspace: &WorkspaceId,
     autopilot_id: &AutopilotId,
     enabled: bool,
+    actor: Option<&ActorRef>,
 ) -> Result<bool, AutopilotRepoError> {
-    AutopilotRepo::set_api_trigger_enabled(pool, workspace, autopilot_id, enabled).await
+    AutopilotRepo::set_api_trigger_enabled_as(pool, clock, workspace, autopilot_id, enabled, actor)
+        .await
 }
 
 /// Enable or disable one autopilot (`hangar/autopilot_set_enabled`, P7.5),
@@ -1488,11 +1628,15 @@ pub async fn autopilot_set_enabled(
     workspace: &WorkspaceId,
     autopilot_id: &AutopilotId,
     enabled: bool,
+    actor: Option<&ActorRef>,
 ) -> Result<(), AutopilotRepoError> {
+    // Pausing / resuming is a SUBSTANTIVE publish on the rule (multica parity
+    // #14): it changes whether the rule fires unattended, so it re-stamps who is
+    // accountable for its runs.
     if enabled {
-        AutopilotRepo::enable(pool, clock, workspace, autopilot_id).await
+        AutopilotRepo::enable_as(pool, clock, workspace, autopilot_id, actor).await
     } else {
-        AutopilotRepo::disable(pool, workspace, autopilot_id).await
+        AutopilotRepo::disable_as(pool, clock, workspace, autopilot_id, actor).await
     }
 }
 

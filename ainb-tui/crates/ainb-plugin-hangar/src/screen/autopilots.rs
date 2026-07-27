@@ -117,11 +117,16 @@ impl AutopilotsState {
                 } else {
                     ""
                 };
+                // The rule VERSION (multica parity #14): `v3` for a versioned
+                // rule, `v—` for one created before migration 0061 and never
+                // edited since. The ledger was deliberately not backfilled, so
+                // the dash is an honest "unversioned", not a missing value.
+                let ver = ap.rule_version.map_or_else(|| "v—".to_string(), |v| format!("v{v}"));
                 BoardCard {
                     not_dispatched: false,
                     issue_id: ap.id.clone(),
                     display_id: ap.name.clone(),
-                    title: format!("{} · {state}{api} · last {last}", ap.cron_expr),
+                    title: format!("{} · {ver} · {state}{api} · last {last}", ap.cron_expr),
                     priority: PriorityChip::from_priority(0),
                     assignee_initial: ap.name.chars().next(),
                     linked: false,
@@ -413,9 +418,15 @@ pub fn render_autopilots(
 
     // Divider + run-history pane.
     let divider_row = board_bottom;
-    let label = state
-        .selected_autopilot()
-        .map_or_else(String::new, |ap| format!("─ Recent runs ({}) ", ap.name));
+    // The selected rule's PUBLISHER (multica parity #14) rides on the divider
+    // label, so the accountable human for its unattended runs is visible right
+    // above the run history that names them.
+    let label = state.selected_autopilot().map_or_else(String::new, |ap| {
+        match ap.last_published_by.as_deref().filter(|s| !s.is_empty()) {
+            Some(by) => format!("─ Recent runs ({}) — published by {by} ", ap.name),
+            None => format!("─ Recent runs ({}) ", ap.name),
+        }
+    });
     let divider = format!(
         "{label}{}",
         "─".repeat((area_w as usize).saturating_sub(label.chars().count()))
@@ -464,6 +475,15 @@ fn render_run(buf: &mut WireBuffer, row: u16, area_w: u16, run: &AutopilotRunRow
     if !run.source.is_empty() {
         line.push_str(&format!("  ·{}", run.source));
     }
+    // WHO is accountable for this run, and HOW that was resolved (migration
+    // 0061). Absent for a pre-0061 run or an unattended fire of an unversioned
+    // rule — rendered as nothing rather than a fabricated actor.
+    if let Some(actor) = run.accountable_actor.as_deref().filter(|a| !a.is_empty()) {
+        match run.attribution.as_deref().filter(|a| !a.is_empty()) {
+            Some(how) => line.push_str(&format!("  · by {actor} ({how})")),
+            None => line.push_str(&format!("  · by {actor}")),
+        }
+    }
     if let Some(reason) = run.failure_reason.as_deref().filter(|r| !r.is_empty()) {
         line.push_str(&format!(" — {reason}"));
     }
@@ -502,6 +522,7 @@ mod tests {
             last_run_status: Some("completed".into()),
             last_run_at: Some(1),
             api_trigger_enabled: false,
+            ..Default::default()
         }
     }
 
@@ -577,5 +598,71 @@ mod tests {
         assert_eq!(state.selected_index(), 1);
         state.select_by_id("ghost");
         assert_eq!(state.selected_index(), 1, "an unknown id is a no-op");
+    }
+
+    /// The card carries the rule VERSION badge (multica parity #14), and an
+    /// UNVERSIONED rule renders an honest dash rather than a fabricated `v1`.
+    #[test]
+    fn card_title_carries_the_rule_version_badge() {
+        let mut versioned = autopilot("ap-1", "daily", true);
+        versioned.rule_version = Some(3);
+        let unversioned = autopilot("ap-2", "legacy", true);
+        assert_eq!(unversioned.rule_version, None);
+
+        let state = AutopilotsState::new(vec![versioned, unversioned]);
+        let cols = state.board_columns();
+        assert!(
+            cols[0].cards[0].title.contains("v3"),
+            "a versioned rule shows its version: {:?}",
+            cols[0].cards[0].title
+        );
+        assert!(
+            cols[0].cards[1].title.contains("v\u{2014}"),
+            "an unversioned rule shows a dash, not a fabricated v1: {:?}",
+            cols[0].cards[1].title
+        );
+    }
+
+    /// The run line renders the accountable human and HOW it was resolved, and
+    /// renders NEITHER for an unattributed run.
+    #[test]
+    fn run_line_carries_the_attribution_when_there_is_one() {
+        let mut buf = WireBuffer::new(200, 10);
+        let attributed = AutopilotRunRow {
+            id: "r-1".into(),
+            autopilot_id: "ap-1".into(),
+            started_at: 1,
+            status: "completed".into(),
+            source: "manual".into(),
+            accountable_actor: Some("member:bob".into()),
+            attribution: Some("direct_human".into()),
+            ..Default::default()
+        };
+        render_run(&mut buf, 0, 200, &attributed);
+        let line: String = buf.cells.iter().map(|(_, cell)| cell.symbol.clone()).collect();
+        assert!(
+            line.contains("member:bob"),
+            "the accountable human must be visible: {line}"
+        );
+        assert!(
+            line.contains("direct_human"),
+            "how it was resolved must be visible: {line}"
+        );
+
+        let mut buf2 = WireBuffer::new(200, 10);
+        let unattributed = AutopilotRunRow {
+            id: "r-2".into(),
+            autopilot_id: "ap-1".into(),
+            started_at: 1,
+            status: "completed".into(),
+            source: "schedule".into(),
+            ..Default::default()
+        };
+        render_run(&mut buf2, 0, 200, &unattributed);
+        let line2: String = buf2.cells.iter().map(|(_, cell)| cell.symbol.clone()).collect();
+        assert!(
+            !line2.contains("by "),
+            "an unattributed run must name nobody: {line2}"
+        );
     }
 }

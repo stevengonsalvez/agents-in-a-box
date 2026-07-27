@@ -32,14 +32,38 @@
 //! clock instant before flipping `enabled = 1`, so a long-disabled autopilot
 //! fires once going forward rather than replaying every missed tick.
 //! [`AutopilotRepo::disable`] leaves `next_tick_at` untouched.
+//!
+//! # Every mutation mints a rule version (multica parity #14)
+//!
+//! Migration 0061 added the append-only `autopilot_rule_version` accountability
+//! ledger. Each mutating method has an actor-carrying `_as` twin
+//! ([`AutopilotRepo::create_as`], [`AutopilotRepo::update_as`],
+//! [`AutopilotRepo::enable_as`], [`AutopilotRepo::disable_as`],
+//! [`AutopilotRepo::set_api_trigger_enabled_as`]) that runs the mutation and the
+//! ledger write in ONE transaction. The original names are one-line delegates
+//! passing `actor = None`, so **the invariant has no hole**: every mutation
+//! mints a version, legacy callers simply mint an unattributed one.
+//!
+//! [`AutopilotRepo::update_as`] is the edit surface that did not exist before —
+//! prior to it an autopilot's cron, instructions, agent or policy could not be
+//! changed at all without hand-editing sqlite. It is the one place where a
+//! mutation may mint NO version: a rename is COSMETIC
+//! ([`ainb_hangar_core::autopilot::rule_version::classify`] returns `None`), and
+//! a cosmetic edit must not re-assign blame for an unattended run.
 
+use ainb_hangar_core::actor::ActorRef;
 use ainb_hangar_core::autopilot::cron::{
     CronError, millis_to_utc, next_tick_after, parse_cron, utc_to_millis,
 };
-use ainb_hangar_core::clock::HangarClock;
+use ainb_hangar_core::autopilot::rule_version::{
+    AutopilotConfigSnapshot, RuleChangeKind, classify,
+};
+use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, AutopilotRunId, WorkspaceId};
 use sqlx::SqlitePool;
+
+use super::autopilot_rule_version::AutopilotRuleVersionRepo;
 
 /// What the FIRE path materialises for each autopilot tick (the `execution_mode`
 /// column, migration 0019).
@@ -166,7 +190,11 @@ pub struct Autopilot {
 }
 
 /// A single firing of an [`Autopilot`] (one `autopilot_run` row).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Default` is derived so test fixtures can spread `..Default::default()` and
+/// stay green when the row grows a column (as migration 0061's attribution pair
+/// did) instead of drifting into a compile error per call site.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AutopilotRun {
     /// Primary key (ULID string).
     pub id: String,
@@ -187,6 +215,16 @@ pub struct AutopilotRun {
     /// Why a `skipped` run was declined (the admission reason); `None` for every
     /// other status.
     pub failure_reason: Option<String>,
+    /// The ACCOUNTABLE HUMAN for this run as a canonical actor ref (migration
+    /// 0061). For an unattended fire this is the newest rule version's
+    /// `published_by`; for a manual fire it is the human who clicked. `None`
+    /// when neither is resolvable — an honest unknown (every pre-0061 run row
+    /// reads `None`), never a fabricated actor.
+    pub accountable_actor: Option<String>,
+    /// HOW [`accountable_actor`](Self::accountable_actor) was resolved:
+    /// `rule_owner` | `direct_human`. `None` exactly when
+    /// `accountable_actor` is `None`.
+    pub attribution: Option<String>,
 }
 
 /// The inputs to [`AutopilotRepo::create`]. `cron_expr` is validated by `create`.
@@ -214,6 +252,84 @@ pub struct NewAutopilot {
     pub api_trigger_enabled: bool,
 }
 
+/// An all-optional patch over an [`Autopilot`]'s editable fields
+/// ([`AutopilotRepo::update_as`], multica parity #14).
+///
+/// `None` means "leave alone". Before this existed there was **no edit surface
+/// at all**: an autopilot's cron, instructions, agent or policy could not be
+/// changed without hand-editing sqlite.
+///
+/// [`name`](Self::name) is the only COSMETIC field — changing it alone mints no
+/// rule version (see [`classify`]).
+#[derive(Debug, Clone, Default)]
+pub struct AutopilotEdit {
+    /// New display name. **Cosmetic on its own.**
+    pub name: Option<String>,
+    /// Re-target the rule at a different agent (`Target`).
+    pub agent_id: Option<AgentId>,
+    /// New instructions; `Some(None)` CLEARS them (`Instructions`).
+    pub instructions: Option<Option<String>>,
+    /// New cron expression (`Schedule`). Revalidated before any write, and
+    /// `next_tick_at` is recomputed strictly after the clock's now.
+    pub cron_expr: Option<String>,
+    /// New in-flight ceiling (`Policy`).
+    pub max_concurrent_runs: Option<i64>,
+    /// New execution mode (`Policy`).
+    pub execution_mode: Option<ExecutionMode>,
+    /// New concurrency policy (`Policy`).
+    pub concurrency_policy: Option<ConcurrencyPolicy>,
+}
+
+impl AutopilotEdit {
+    /// Whether the patch names at least one field.
+    #[must_use]
+    pub const fn is_empty(&self) -> bool {
+        self.name.is_none()
+            && self.agent_id.is_none()
+            && self.instructions.is_none()
+            && self.cron_expr.is_none()
+            && self.max_concurrent_runs.is_none()
+            && self.execution_mode.is_none()
+            && self.concurrency_policy.is_none()
+    }
+}
+
+/// What [`AutopilotRepo::update_as`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum UpdateOutcome {
+    /// No such autopilot in this workspace. Nothing was touched (tenant
+    /// scoping: a foreign id never leaks, and never writes).
+    NotFound,
+    /// The row was updated.
+    Updated {
+        /// The minted rule version, or `None` when the edit was **cosmetic**
+        /// (a rename / no-op). `None` is the wire-visible proof of multica's
+        /// "cosmetic edits don't count" rule: the name change still LANDED,
+        /// it simply is not an accountability event.
+        version: Option<i64>,
+    },
+}
+
+/// The published snapshot of a stored autopilot row.
+fn snapshot_of(ap: &Autopilot) -> AutopilotConfigSnapshot {
+    AutopilotConfigSnapshot {
+        name: ap.name.clone(),
+        agent_id: ap.agent_id.clone(),
+        instructions: ap.instructions.clone(),
+        cron_expr: ap.cron_expr.clone(),
+        max_concurrent_runs: ap.max_concurrent_runs,
+        execution_mode: ap.execution_mode.as_str().to_string(),
+        concurrency_policy: ap.concurrency_policy.as_str().to_string(),
+        enabled: ap.enabled,
+        api_trigger_enabled: ap.api_trigger_enabled,
+    }
+}
+
+/// The `SELECT` column list shared by every autopilot read.
+const AUTOPILOT_COLUMNS: &str = "id, workspace_id, agent_id, name, instructions, cron_expr, \
+     max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
+     api_trigger_enabled, created_at";
+
 /// Stateless typed wrapper over the autopilot tables.
 pub struct AutopilotRepo;
 
@@ -237,10 +353,36 @@ impl AutopilotRepo {
         clock: &dyn HangarClock,
         req: &NewAutopilot,
     ) -> Result<AutopilotId, AutopilotRepoError> {
+        Self::create_as(pool, clock, req, None).await
+    }
+
+    /// Create an autopilot AND publish rule-version **v1** naming `actor` as the
+    /// accountable human — in ONE transaction (multica parity #14).
+    ///
+    /// The transactionality is the invariant, not an optimisation: *"creation
+    /// itself is a transaction that also writes rule-version v1"*, so there is
+    /// **no window in which an autopilot exists with no accountable human**.
+    /// A `None` actor still mints v1, with `published_by` NULL — an honest
+    /// unattributed record rather than a hole in the ledger. [`create`] is the
+    /// legacy delegate that passes `None`.
+    ///
+    /// # Errors
+    ///
+    /// Same surface as [`create`](Self::create): [`AutopilotRepoError::Cron`]
+    /// before any write on a malformed expression, otherwise
+    /// [`AutopilotRepoError::Db`].
+    pub async fn create_as(
+        pool: &SqlitePool,
+        clock: &dyn HangarClock,
+        req: &NewAutopilot,
+        actor: Option<&ActorRef>,
+    ) -> Result<AutopilotId, AutopilotRepoError> {
         let now_ms = clock.now_ms();
         // Validate (and reject) before touching the database.
         let next_tick_at = compute_next_tick(&req.cron_expr, now_ms)?;
         let id = SystemIdGen.new_ulid();
+
+        let mut tx = pool.begin().await?;
 
         sqlx::query(
             "INSERT INTO autopilot \
@@ -261,10 +403,159 @@ impl AutopilotRepo {
         .bind(next_tick_at)
         .bind(i64::from(req.api_trigger_enabled))
         .bind(now_ms)
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
 
-        AutopilotId::from_str(id).map_err(|_| AutopilotRepoError::EmptyId)
+        let autopilot_id = AutopilotId::from_str(id).map_err(|_| AutopilotRepoError::EmptyId)?;
+        let published = AutopilotConfigSnapshot {
+            name: req.name.clone(),
+            agent_id: req.agent_id.as_str().to_string(),
+            instructions: req.instructions.clone(),
+            cron_expr: req.cron_expr.clone(),
+            max_concurrent_runs: req.max_concurrent_runs,
+            execution_mode: req.execution_mode.as_str().to_string(),
+            concurrency_policy: req.concurrency_policy.as_str().to_string(),
+            enabled: true,
+            api_trigger_enabled: req.api_trigger_enabled,
+        };
+        AutopilotRuleVersionRepo::publish_in_tx(
+            &mut tx,
+            clock,
+            &req.workspace_id,
+            &autopilot_id,
+            RuleChangeKind::Created,
+            actor,
+            &published.to_config_summary(None),
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(autopilot_id)
+    }
+
+    /// Edit an autopilot's config, publishing a rule version when — and only
+    /// when — the edit is SUBSTANTIVE (multica parity #14).
+    ///
+    /// The contract, in order:
+    ///
+    /// 1. resolve the row `WHERE id = ? AND workspace_id = ?`; a foreign /
+    ///    absent id returns [`UpdateOutcome::NotFound`] and touches nothing;
+    /// 2. if `cron_expr` is being changed, **parse it first** and return
+    ///    [`AutopilotRepoError::Cron`] with **no row written and no version
+    ///    row** — the same guarantee [`create`](Self::create) gives. On success
+    ///    `next_tick_at` is recomputed strictly after `clock.now_ms()`;
+    /// 3. `UPDATE` the supplied fields;
+    /// 4. [`classify`] before-vs-after: `Some(kind)` publishes a version and
+    ///    reports `Updated { version: Some(n) }`; `None` (name-only / no-op)
+    ///    publishes NOTHING and reports `Updated { version: None }`. The name
+    ///    change lands either way — cosmetic means *unversioned*, not
+    ///    *rejected*;
+    /// 5. commit.
+    ///
+    /// Everything above runs in one transaction, so a rejected step leaves the
+    /// row byte-identical and the ledger untouched.
+    ///
+    /// # Errors
+    ///
+    /// - [`AutopilotRepoError::Cron`] when the new `cron_expr` fails to parse —
+    ///   before any write.
+    /// - [`AutopilotRepoError::Db`] on a SQL failure (a `(workspace_id, name)`
+    ///   uniqueness conflict, or an `agent_id` FK violation from a re-target).
+    pub async fn update_as(
+        pool: &SqlitePool,
+        clock: &dyn HangarClock,
+        workspace: &WorkspaceId,
+        id: &AutopilotId,
+        edit: &AutopilotEdit,
+        actor: Option<&ActorRef>,
+    ) -> Result<UpdateOutcome, AutopilotRepoError> {
+        let mut tx = pool.begin().await?;
+
+        let before = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE id = ? AND workspace_id = ?"
+        ))
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .fetch_optional(&mut *tx)
+        .await?;
+        let Some(before) = before else {
+            // Dropping `tx` rolls back nothing (we only read) and, crucially,
+            // no version row was minted for a foreign id.
+            return Ok(UpdateOutcome::NotFound);
+        };
+
+        // Apply the patch to an in-memory copy so `classify` sees the real
+        // before/after pair.
+        let mut after = before.clone();
+        if let Some(name) = &edit.name {
+            after.name = name.clone();
+        }
+        if let Some(agent_id) = &edit.agent_id {
+            after.agent_id = agent_id.as_str().to_string();
+        }
+        if let Some(instructions) = &edit.instructions {
+            after.instructions = instructions.clone();
+        }
+        if let Some(cron_expr) = &edit.cron_expr {
+            after.cron_expr = cron_expr.clone();
+        }
+        if let Some(n) = edit.max_concurrent_runs {
+            after.max_concurrent_runs = n;
+        }
+        if let Some(mode) = edit.execution_mode {
+            after.execution_mode = mode;
+        }
+        if let Some(policy) = edit.concurrency_policy {
+            after.concurrency_policy = policy;
+        }
+
+        // Cron revalidation BEFORE any write: a malformed expression must leave
+        // the row and the ledger untouched.
+        if after.cron_expr != before.cron_expr {
+            after.next_tick_at = compute_next_tick(&after.cron_expr, clock.now_ms())?;
+        }
+
+        sqlx::query(
+            "UPDATE autopilot SET name = ?, agent_id = ?, instructions = ?, cron_expr = ?, \
+                    max_concurrent_runs = ?, execution_mode = ?, concurrency_policy = ?, \
+                    next_tick_at = ? \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(&after.name)
+        .bind(&after.agent_id)
+        .bind(&after.instructions)
+        .bind(&after.cron_expr)
+        .bind(after.max_concurrent_runs)
+        .bind(after.execution_mode.as_str())
+        .bind(after.concurrency_policy.as_str())
+        .bind(after.next_tick_at)
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .execute(&mut *tx)
+        .await?;
+
+        let before_snapshot = snapshot_of(&before);
+        let after_snapshot = snapshot_of(&after);
+        let version = match classify(&before_snapshot, &after_snapshot) {
+            Some(kind) => Some(
+                AutopilotRuleVersionRepo::publish_in_tx(
+                    &mut tx,
+                    clock,
+                    workspace,
+                    id,
+                    kind,
+                    actor,
+                    &after_snapshot.to_config_summary(Some(&before_snapshot)),
+                )
+                .await?,
+            ),
+            // Cosmetic (a rename) or a literal no-op: the ledger is an
+            // accountability record, not a change log.
+            None => None,
+        };
+
+        tx.commit().await?;
+        Ok(UpdateOutcome::Updated { version })
     }
 
     /// List every autopilot in a workspace, ordered by name.
@@ -352,11 +643,62 @@ impl AutopilotRepo {
         workspace: &WorkspaceId,
         id: &AutopilotId,
     ) -> Result<(), AutopilotRepoError> {
+        Self::disable_as(pool, &SystemClock, workspace, id, None).await
+    }
+
+    /// Disable an autopilot AND publish a `paused` rule version naming `actor`,
+    /// in one transaction (multica parity #14).
+    ///
+    /// Pausing is a SUBSTANTIVE publish: it changes whether the rule fires
+    /// unattended, so it re-stamps who is accountable. A foreign / absent id
+    /// touches no row and mints no version. [`disable`](Self::disable) is the
+    /// legacy delegate; it passes `None` and a
+    /// [`SystemClock`](ainb_hangar_core::clock::SystemClock) for the ledger's
+    /// `created_at` (its signature carries no clock).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AutopilotRepoError::Db`] on a SQL failure.
+    pub async fn disable_as(
+        pool: &SqlitePool,
+        clock: &dyn HangarClock,
+        workspace: &WorkspaceId,
+        id: &AutopilotId,
+        actor: Option<&ActorRef>,
+    ) -> Result<(), AutopilotRepoError> {
+        let mut tx = pool.begin().await?;
+        let Some(before) = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE id = ? AND workspace_id = ?"
+        ))
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(());
+        };
+
         sqlx::query("UPDATE autopilot SET enabled = 0 WHERE id = ? AND workspace_id = ?")
             .bind(id.as_str())
             .bind(workspace.as_str())
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
+
+        let before_snapshot = snapshot_of(&before);
+        let mut after_snapshot = before_snapshot.clone();
+        after_snapshot.enabled = false;
+        AutopilotRuleVersionRepo::publish_in_tx(
+            &mut tx,
+            clock,
+            workspace,
+            id,
+            RuleChangeKind::Paused,
+            actor,
+            &after_snapshot.to_config_summary(Some(&before_snapshot)),
+        )
+        .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -379,18 +721,43 @@ impl AutopilotRepo {
         workspace: &WorkspaceId,
         id: &AutopilotId,
     ) -> Result<(), AutopilotRepoError> {
-        // Read the stored cron, scoped to the workspace.
-        let cron_expr: Option<String> =
-            sqlx::query_scalar("SELECT cron_expr FROM autopilot WHERE id = ? AND workspace_id = ?")
-                .bind(id.as_str())
-                .bind(workspace.as_str())
-                .fetch_optional(pool)
-                .await?;
-        let Some(cron_expr) = cron_expr else {
+        Self::enable_as(pool, clock, workspace, id, None).await
+    }
+
+    /// Enable an autopilot AND publish a `resumed` rule version naming `actor`,
+    /// in one transaction (multica parity #14).
+    ///
+    /// Resuming is a SUBSTANTIVE publish in multica's model — putting a rule
+    /// back into unattended service re-stamps who is accountable for its runs.
+    /// [`enable`](Self::enable) is the legacy delegate that passes `None`.
+    ///
+    /// # Errors
+    ///
+    /// - [`AutopilotRepoError::Cron`] if the stored `cron_expr` no longer parses
+    ///   (a corrupt-row guard); nothing is written and no version is minted.
+    /// - [`AutopilotRepoError::Db`] on a SQL failure.
+    pub async fn enable_as(
+        pool: &SqlitePool,
+        clock: &dyn HangarClock,
+        workspace: &WorkspaceId,
+        id: &AutopilotId,
+        actor: Option<&ActorRef>,
+    ) -> Result<(), AutopilotRepoError> {
+        let mut tx = pool.begin().await?;
+        // Read the stored row, scoped to the workspace.
+        let Some(before) = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE id = ? AND workspace_id = ?"
+        ))
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
             // Foreign / absent id: no-op.
             return Ok(());
         };
-        let next_tick_at = compute_next_tick(&cron_expr, clock.now_ms())?;
+
+        let next_tick_at = compute_next_tick(&before.cron_expr, clock.now_ms())?;
         sqlx::query(
             "UPDATE autopilot SET enabled = 1, next_tick_at = ? \
              WHERE id = ? AND workspace_id = ?",
@@ -398,8 +765,24 @@ impl AutopilotRepo {
         .bind(next_tick_at)
         .bind(id.as_str())
         .bind(workspace.as_str())
-        .execute(pool)
+        .execute(&mut *tx)
         .await?;
+
+        let before_snapshot = snapshot_of(&before);
+        let mut after_snapshot = before_snapshot.clone();
+        after_snapshot.enabled = true;
+        AutopilotRuleVersionRepo::publish_in_tx(
+            &mut tx,
+            clock,
+            workspace,
+            id,
+            RuleChangeKind::Resumed,
+            actor,
+            &after_snapshot.to_config_summary(Some(&before_snapshot)),
+        )
+        .await?;
+
+        tx.commit().await?;
         Ok(())
     }
 
@@ -419,7 +802,7 @@ impl AutopilotRepo {
     ) -> Result<Vec<AutopilotRun>, AutopilotRepoError> {
         let rows = sqlx::query_as::<_, AutopilotRun>(
             "SELECT r.id, r.autopilot_id, r.started_at, r.completed_at, r.status, \
-                    r.source, r.failure_reason \
+                    r.source, r.failure_reason, r.accountable_actor, r.attribution \
              FROM autopilot_run r \
              JOIN autopilot a ON a.id = r.autopilot_id \
              WHERE r.autopilot_id = ? AND a.workspace_id = ? \
@@ -450,16 +833,66 @@ impl AutopilotRepo {
         id: &AutopilotId,
         enabled: bool,
     ) -> Result<bool, AutopilotRepoError> {
-        let affected = sqlx::query(
+        Self::set_api_trigger_enabled_as(pool, &SystemClock, workspace, id, enabled, None).await
+    }
+
+    /// Arm / disarm the `api` trigger AND publish a `trigger` rule version
+    /// naming `actor`, in one transaction (multica parity #14).
+    ///
+    /// hangar collapses trigger config into columns on `autopilot`, so multica's
+    /// PER-TRIGGER publisher (migration 189) folds into the PER-RULE version
+    /// chain: arming or disarming a trigger is a substantive publish on the
+    /// rule. [`set_api_trigger_enabled`](Self::set_api_trigger_enabled) is the
+    /// legacy delegate (`None` actor, [`SystemClock`](ainb_hangar_core::clock::SystemClock)).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AutopilotRepoError::Db`] on a SQL failure.
+    pub async fn set_api_trigger_enabled_as(
+        pool: &SqlitePool,
+        clock: &dyn HangarClock,
+        workspace: &WorkspaceId,
+        id: &AutopilotId,
+        enabled: bool,
+        actor: Option<&ActorRef>,
+    ) -> Result<bool, AutopilotRepoError> {
+        let mut tx = pool.begin().await?;
+        let Some(before) = sqlx::query_as::<_, Autopilot>(&format!(
+            "SELECT {AUTOPILOT_COLUMNS} FROM autopilot WHERE id = ? AND workspace_id = ?"
+        ))
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .fetch_optional(&mut *tx)
+        .await?
+        else {
+            return Ok(false);
+        };
+
+        sqlx::query(
             "UPDATE autopilot SET api_trigger_enabled = ? WHERE id = ? AND workspace_id = ?",
         )
         .bind(i64::from(enabled))
         .bind(id.as_str())
         .bind(workspace.as_str())
-        .execute(pool)
-        .await?
-        .rows_affected();
-        Ok(affected > 0)
+        .execute(&mut *tx)
+        .await?;
+
+        let before_snapshot = snapshot_of(&before);
+        let mut after_snapshot = before_snapshot.clone();
+        after_snapshot.api_trigger_enabled = enabled;
+        AutopilotRuleVersionRepo::publish_in_tx(
+            &mut tx,
+            clock,
+            workspace,
+            id,
+            RuleChangeKind::Trigger,
+            actor,
+            &after_snapshot.to_config_summary(Some(&before_snapshot)),
+        )
+        .await?;
+
+        tx.commit().await?;
+        Ok(true)
     }
 
     /// Insert one `autopilot_run` row (test/seed helper for run-history reads).
@@ -561,6 +994,8 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for AutopilotRun {
             status: row.try_get("status")?,
             source: row.try_get("source")?,
             failure_reason: row.try_get("failure_reason")?,
+            accountable_actor: row.try_get("accountable_actor")?,
+            attribution: row.try_get("attribution")?,
         })
     }
 }

@@ -22,6 +22,7 @@ fn autopilot(id: &str, name: &str, enabled: bool) -> AutopilotRow {
         last_run_status: Some("completed".into()),
         last_run_at: Some(1_699_000_000_000),
         api_trigger_enabled: false,
+        ..Default::default()
     }
 }
 
