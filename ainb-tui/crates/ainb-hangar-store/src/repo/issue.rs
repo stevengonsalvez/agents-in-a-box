@@ -593,6 +593,54 @@ impl IssueRepo {
         Ok(touched)
     }
 
+    /// Apply ONE lifecycle `state` to many issues in a SINGLE transaction,
+    /// returning `(id, prev_state)` for every id that actually changed
+    /// (multica parity #3-rest).
+    ///
+    /// The transaction is the point: the child-done cascade that runs after this
+    /// must observe the batch's FINAL state, never a half-applied prefix. Ids are
+    /// processed in caller order; an unknown or foreign-tenant id is skipped (it
+    /// resolves no row), and an id already in `state` is skipped too so a no-op
+    /// re-save cannot manufacture a transition.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if any statement fails; the whole batch then
+    /// rolls back.
+    pub async fn set_state_batch(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        ids: &[String],
+        state: &str,
+    ) -> Result<Vec<(String, String)>, sqlx::Error> {
+        let mut tx = pool.begin().await?;
+        let mut changed = Vec::new();
+        for id in ids {
+            let prev: Option<String> = sqlx::query_scalar(
+                "SELECT state FROM issue WHERE id = ? AND workspace_id = ?",
+            )
+            .bind(id)
+            .bind(workspace_id)
+            .fetch_optional(&mut *tx)
+            .await?;
+            let Some(prev) = prev else { continue };
+            if prev == state {
+                continue;
+            }
+            let res = sqlx::query("UPDATE issue SET state = ? WHERE id = ? AND workspace_id = ?")
+                .bind(state)
+                .bind(id)
+                .bind(workspace_id)
+                .execute(&mut *tx)
+                .await?;
+            if res.rows_affected() == 1 {
+                changed.push((id.clone(), prev));
+            }
+        }
+        tx.commit().await?;
+        Ok(changed)
+    }
+
     /// List issues in a workspace filtered by `state`, ordered by `created_at`.
     ///
     /// Backed by the `idx_issue_workspace_state` index.
