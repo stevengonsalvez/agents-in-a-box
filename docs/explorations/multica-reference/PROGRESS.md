@@ -18,3 +18,4 @@
 | 13 | #497 | 056c618404a9742dd58d7a15867aafc87149b321 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit; Test ubuntu known beads-lock flake rerun once to green) |
 | 1-rest | #498 | 763c4fe79a36d24f0312885056b3ae7c2adb5ffc | 2026-07-27 | gate green both OSes |
 | 14 | #499 | 742a71d5a814ab546055c76081e7ef0114fe051e | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit before merge) |
+| 22 | #501 | 79ccdaa0f7620fb2ed745ea590a8b1d56998a065 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit; hangar-e2e ubuntu tripwire_workspace_switch_e2e transient failure confirmed non-reproducing on fresh full-matrix rerun) |
