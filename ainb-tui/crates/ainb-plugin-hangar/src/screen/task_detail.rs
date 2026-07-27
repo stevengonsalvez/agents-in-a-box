@@ -1542,6 +1542,9 @@ mod card_tests {
     /// A fully-populated issue row for the card render assertions (63d).
     fn full_issue() -> IssueRow {
         IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,

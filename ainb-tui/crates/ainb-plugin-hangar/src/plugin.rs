@@ -4381,6 +4381,9 @@ impl HangarPlugin {
         // renders the task's title + status; the streaming transcript folds events
         // addressed to this task id, exactly as the issue board's open does.
         let issue = ainb_hangar_proto::events::IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,
@@ -5876,6 +5879,9 @@ mod tests {
         p.conn.on_dialed("s1");
         p.conn.on_subscribe_ack();
         p.screens.set_issues(vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,
@@ -6037,6 +6043,9 @@ mod tests {
         // more than one column (the press must resolve the RIGHT card).
         p.screens.set_issues(vec![
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 last_dispatch_reason: None,
                 last_dispatch_detail: None,
                 last_dispatch_at: None,
@@ -6073,6 +6082,9 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 last_dispatch_reason: None,
                 last_dispatch_detail: None,
                 last_dispatch_at: None,
@@ -6270,6 +6282,9 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,
@@ -6366,6 +6381,9 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,
@@ -6454,6 +6472,9 @@ mod tests {
         // Several Todo cards so a scroll offset is observable.
         let rows: Vec<IssueRow> = (0..4)
             .map(|i| IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 last_dispatch_reason: None,
                 last_dispatch_detail: None,
                 last_dispatch_at: None,
@@ -6546,6 +6567,9 @@ mod tests {
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 last_dispatch_reason: None,
                 last_dispatch_detail: None,
                 last_dispatch_at: None,
@@ -6582,6 +6606,9 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
                 last_dispatch_reason: None,
                 last_dispatch_detail: None,
                 last_dispatch_at: None,
@@ -7333,6 +7360,9 @@ mod tests {
 
         // Open the task detail for a fresh issue.
         let issue = IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
             last_dispatch_reason: None,
             last_dispatch_detail: None,
             last_dispatch_at: None,
