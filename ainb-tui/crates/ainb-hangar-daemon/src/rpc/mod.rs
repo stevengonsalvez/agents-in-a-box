@@ -3147,7 +3147,7 @@ async fn handle_issue_create(
 
     let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
         req,
-        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels?, origin_type?, origin_id? }",
+        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels?, origin_type?, origin_id?, parent_issue_id?, stage? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -3189,6 +3189,12 @@ async fn handle_issue_create(
     let priority = params.priority.unwrap_or(0);
     if !(0..=3).contains(&priority) {
         return Err(invalid_params("issue priority must be 0..3 (P3..P0)"));
+    }
+    // 0046 stage: 1-based, so 0 / negative is a client error rather than an
+    // opaque sqlite CHECK fault surfacing as an internal store error. Same
+    // reject-never-clamp contract as `priority`.
+    if params.stage.is_some_and(|s| s < 1) {
+        return Err(invalid_params("issue stage must be >= 1"));
     }
     // 0014 due date: the wire carries epoch ms at UTC midnight (the client parses
     // the `YYYY-MM-DD` calendar day with `proto::dates::parse_calendar_date_ms`),
@@ -3237,6 +3243,7 @@ async fn handle_issue_create(
             creator: &creator,
             external_ref,
             parent_issue_id,
+            stage: params.stage,
             acceptance_criteria: &acceptance_criteria,
             context_refs: &context_refs,
             priority,
