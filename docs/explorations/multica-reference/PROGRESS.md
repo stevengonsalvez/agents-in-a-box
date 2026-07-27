@@ -22,3 +22,4 @@
 | 18 | #503 | 8fe91c3967a466b6547f7fe07f67b14ad5dae3e0 | 2026-07-27 | gate green both OSes (first hangar-e2e ubuntu attempt hit the known tripwire_workspace_switch_e2e transient; green on rerun and on the CodeRabbit follow-up run. CodeRabbit Major finding fixed in-PR: accept/decline now reject an invitation belonging to another workspace) |
 | 27 | #505 | 23dbee05453909356934a38aef5af636d7f45697 | 2026-07-27 | gate green both OSes |
 | 3-rest | #506 | 8d00d0424e2499da515b22b3b2278e0b73181374 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit before merge for the new `--stage`/`batch-state` help text) |
+| 17 | #507 | edeee909db40699ffe382ff7615fa161907fec34 | 2026-07-27 | gate green both OSes |
