@@ -40,16 +40,17 @@ pub mod auth;
 pub mod snapshots;
 
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 use std::sync::Arc;
 #[cfg(any(test, feature = "test-support"))]
 use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
 use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
-use ainb_hangar_core::actor::{ActorRef, local_member};
+use ainb_hangar_core::actor::{ActorKind, ActorRef, local_member};
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::dispatch_reason::{DispatchReason, DispatchSource};
-use ainb_hangar_core::idgen::SystemIdGen;
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_proto::methods;
@@ -818,6 +819,11 @@ async fn handle(
         methods::HANGAR_ISSUE_LINK_ADD => handle_issue_link(pool, req, true).await,
         methods::HANGAR_ISSUE_LINK_REMOVE => handle_issue_link(pool, req, false).await,
         methods::HANGAR_ISSUE_LINKS => handle_issue_links(pool, req).await,
+        methods::HANGAR_ISSUE_SUBSCRIBE => handle_issue_subscribe(pool, req, true).await,
+        methods::HANGAR_ISSUE_UNSUBSCRIBE => handle_issue_subscribe(pool, req, false).await,
+        methods::HANGAR_ISSUE_SUBSCRIBERS => handle_issue_subscribers(pool, req).await,
+        methods::HANGAR_ISSUE_REACTION_ADD => handle_issue_reaction(pool, req, true).await,
+        methods::HANGAR_ISSUE_REACTION_REMOVE => handle_issue_reaction(pool, req, false).await,
         methods::HANGAR_DISPATCH_ATTEMPTS_LIST => handle_dispatch_attempts_list(pool, req).await,
         methods::HANGAR_ISSUE_TIMELINE => handle_issue_timeline(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
@@ -6351,6 +6357,224 @@ async fn issue_links_value(
         .map_err(|e| store_err(&e))?;
     Ok(
         serde_json::to_value(ainb_hangar_proto::snapshots::IssueLinksResult { links })
+            .unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// Resolve a wire actor token for the #22 subscriber / reaction methods.
+///
+/// An omitted token means the LOCAL HUMAN, mirroring the reference's "the target
+/// defaults to the caller" (`internal/handler/subscriber.go`) — an agent caller
+/// subscribes ITSELF, never the human behind it. A malformed token is
+/// `INVALID_PARAMS` rather than a silent fallback, so a typo is never mistaken
+/// for "me".
+fn resolve_actor_param(raw: Option<&str>) -> Result<ActorRef, RpcError> {
+    match raw {
+        None => Ok(ainb_hangar_core::actor::local_member()),
+        Some(token) => ActorRef::from_str(token)
+            .map_err(|e| invalid_params(&format!("bad actor `{token}`: {e}"))),
+    }
+}
+
+/// The reference's `isWorkspaceEntity` gate (its `403`): the target must belong
+/// to this workspace.
+///
+/// **One documented exemption:** the LOCAL HUMAN (`member:me`) is hangar's
+/// synthetic single-user identity (see [`ainb_hangar_core::actor::local_member`])
+/// and has no `member` row until a real signed-in identity lands — gating it
+/// would reject the default, and therefore the entire single-user flow.
+async fn reject_actor_outside_workspace(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    actor: &ActorRef,
+) -> Result<(), RpcError> {
+    if *actor == ainb_hangar_core::actor::local_member() {
+        return Ok(());
+    }
+    let known = match actor.kind() {
+        ActorKind::Member => {
+            ainb_hangar_store::repo::member::MemberRepo::role(pool, ws, actor.id())
+                .await
+                .map_err(|e| store_err(&e))?
+                .is_some()
+        }
+        ActorKind::Agent => {
+            ainb_hangar_store::repo::agent::AgentRepo::list_by_workspace(pool, ws.as_str())
+                .await
+                .map_err(|e| store_err(&e))?
+                .iter()
+                .any(|a| a.id.as_str() == actor.id())
+        }
+    };
+    if known {
+        Ok(())
+    } else {
+        Err(invalid_params(&format!(
+            "target actor `{actor}` is not in this workspace"
+        )))
+    }
+}
+
+/// `hangar/issue_subscribe` (`add = true`) / `hangar/issue_unsubscribe`
+/// (`add = false`) (multica parity #22).
+///
+/// Same skeleton as [`handle_issue_link`]: tenant guard, then the repo seam,
+/// then the REFRESHED collection as the answer. The write is idempotent and
+/// first-reason-wins, so re-subscribing an existing `creator` still answers
+/// "subscribed" — the caller's intent is already satisfied. A repo `Ok(false)`
+/// on a NON-subscribed actor means the issue does not exist in this workspace,
+/// which is rejected with `handle_comment_add`'s phrasing rather than silently
+/// no-op'd.
+async fn handle_issue_subscribe(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
+
+    let params: ainb_hangar_proto::snapshots::IssueSubscribeParams =
+        parse_params(req, "{ workspace_id, issue_id, actor? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let actor = resolve_actor_param(params.actor.as_deref())?;
+    reject_actor_outside_workspace(pool, &ws, &actor).await?;
+
+    let already =
+        IssueSubscriberRepo::is_subscribed(pool, &params.issue_id, &actor).await.map_err(|e| store_err(&e))?;
+    let changed = if add {
+        IssueSubscriberRepo::add(
+            pool,
+            ws.as_str(),
+            &params.issue_id,
+            &actor,
+            SubscribeReason::Manual,
+            SystemClock.now_ms(),
+        )
+        .await
+        .map_err(|e| store_err(&e))?
+    } else {
+        IssueSubscriberRepo::remove(pool, ws.as_str(), &params.issue_id, &actor)
+            .await
+            .map_err(|e| store_err(&e))?
+    };
+    // Nothing changed AND the actor's state did not already match the intent ⇒
+    // the issue is unknown here (the repo's tenant join matched nothing).
+    if !changed && already != add {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    }
+    issue_subscribers_value(pool, &params.issue_id).await
+}
+
+/// `hangar/issue_subscribers` (multica parity #22): read-only, tenant-guarded.
+async fn handle_issue_subscribers(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::IssueSubscribersParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if !issue_in_workspace(pool, ws.as_str(), &params.issue_id).await? {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    }
+    issue_subscribers_value(pool, &params.issue_id).await
+}
+
+/// `hangar/issue_reaction_add` (`add = true`) / `hangar/issue_reaction_remove`
+/// (`add = false`) (multica parity #22).
+///
+/// A blank emoji is rejected at the repo boundary and surfaced here as
+/// `INVALID_PARAMS` carrying the reference's own text ("emoji is required",
+/// its `400`).
+async fn handle_issue_reaction(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::issue_reaction::{IssueReactionError, IssueReactionRepo};
+
+    let params: ainb_hangar_proto::snapshots::IssueReactionParams =
+        parse_params(req, "{ workspace_id, issue_id, emoji, actor? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let actor = resolve_actor_param(params.actor.as_deref())?;
+    reject_actor_outside_workspace(pool, &ws, &actor).await?;
+    if !issue_in_workspace(pool, ws.as_str(), &params.issue_id).await? {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    }
+
+    let outcome = if add {
+        IssueReactionRepo::add(
+            pool,
+            ws.as_str(),
+            &params.issue_id,
+            &actor,
+            &params.emoji,
+            &SystemIdGen.new_ulid(),
+            SystemClock.now_ms(),
+        )
+        .await
+    } else {
+        IssueReactionRepo::remove(pool, ws.as_str(), &params.issue_id, &actor, &params.emoji)
+            .await
+    };
+    match outcome {
+        Ok(_) => {}
+        Err(IssueReactionError::EmptyEmoji) => return Err(invalid_params("emoji is required")),
+        Err(IssueReactionError::Db(e)) => return Err(store_err(&e)),
+    }
+    issue_reactions_value(pool, &params.issue_id, &actor).await
+}
+
+/// Whether `issue_id` resolves inside `workspace_id` — the read-side twin of the
+/// repos' tenant join.
+async fn issue_in_workspace(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<bool, RpcError> {
+    let n: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM issue WHERE id = ? AND workspace_id = ?")
+            .bind(issue_id)
+            .bind(workspace_id)
+            .fetch_one(pool)
+            .await
+            .map_err(|e| store_err(&e))?;
+    Ok(n > 0)
+}
+
+/// Build the `IssueSubscribersResult` payload for one issue.
+async fn issue_subscribers_value(
+    pool: &SqlitePool,
+    issue_id: &str,
+) -> Result<serde_json::Value, RpcError> {
+    let subscribers = crate::rpc::snapshots::issue_subscriber_rows(pool, issue_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(serde_json::to_value(
+        ainb_hangar_proto::snapshots::IssueSubscribersResult { subscribers },
+    )
+    .unwrap_or(serde_json::Value::Null))
+}
+
+/// Build the `IssueReactionsResult` payload for one issue, as seen by `viewer`
+/// (whose buckets carry `mine = true`).
+async fn issue_reactions_value(
+    pool: &SqlitePool,
+    issue_id: &str,
+    viewer: &ActorRef,
+) -> Result<serde_json::Value, RpcError> {
+    let reactions = crate::rpc::snapshots::issue_reaction_rows(pool, issue_id, viewer)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(
+        serde_json::to_value(ainb_hangar_proto::snapshots::IssueReactionsResult { reactions })
             .unwrap_or(serde_json::Value::Null),
     )
 }
