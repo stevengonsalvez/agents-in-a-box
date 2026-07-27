@@ -1636,14 +1636,15 @@ fn task_pr_url(result_json: Option<&str>) -> Option<String> {
 /// for the screen, and the bound keeps a long-lived workspace's snapshot small.
 const INBOX_LIST_LIMIT: i64 = 200;
 
-/// Snapshot a workspace's aggregated inbox + its unread count
-/// (`hangar/inbox_list`, e38.14).
+/// Snapshot ONE ACTOR's aggregated inbox + their unread count in a workspace
+/// (`hangar/inbox_list`, e38.14; per-recipient since store migration 0060).
 ///
 /// Reads the durable `inbox_entry` rows the daemon's aggregator folds live
-/// issue / comment / task events into, newest-first and capped at
-/// [`INBOX_LIST_LIMIT`], plus the count of unread (`read_at IS NULL`) entries.
-/// Workspace-scoped: a foreign / unknown workspace yields an empty list + zero
-/// unread.
+/// issue / comment / task events into and ADDRESSES to a single actor,
+/// newest-first and capped at [`INBOX_LIST_LIMIT`], plus that recipient's count
+/// of unread (`read_at IS NULL`) entries. Scoped on both axes: a foreign /
+/// unknown workspace yields an empty list + zero unread, and another actor's
+/// entries are never returned.
 ///
 /// # Errors
 ///
@@ -1651,9 +1652,10 @@ const INBOX_LIST_LIMIT: i64 = 200;
 pub async fn inbox_list(
     pool: &SqlitePool,
     workspace_id: &str,
+    recipient: &ActorRef,
 ) -> Result<(Vec<InboxEntryRow>, i64), sqlx::Error> {
-    let entries = InboxRepo::list(pool, workspace_id, INBOX_LIST_LIMIT).await?;
-    let unread = InboxRepo::unread_count(pool, workspace_id).await?;
+    let entries = InboxRepo::list(pool, workspace_id, recipient, INBOX_LIST_LIMIT).await?;
+    let unread = InboxRepo::unread_count(pool, workspace_id, recipient).await?;
     let rows = entries
         .into_iter()
         .map(|e| InboxEntryRow {
@@ -1662,6 +1664,7 @@ pub async fn inbox_list(
             event: e.event,
             subject_id: e.subject_id,
             summary: e.summary,
+            recipient: e.recipient.to_string(),
             created_at: e.created_at,
             read_at: e.read_at,
         })
@@ -1812,14 +1815,16 @@ pub async fn run_history(
     })
 }
 
-/// Mark every currently-unread inbox entry in `workspace` as read, returning
-/// `(marked, unread_after)` (`hangar/inbox_mark_read`, e38.14).
+/// Mark every currently-unread inbox entry ADDRESSED TO `recipient` in
+/// `workspace` as read, returning `(marked, unread_after)`
+/// (`hangar/inbox_mark_read`, e38.14; per-recipient since store migration 0060).
 ///
-/// `marked` is how many rows the sweep flipped (the unread count before);
-/// `unread_after` is the unread count once the sweep commits, which is `0` for
-/// this whole-workspace sweep. Idempotent — a re-sweep flips nothing. The daemon
-/// resolves + rejects a mistyped workspace before this call, so a missing
-/// workspace never reaches here.
+/// `marked` is how many of that recipient's rows the sweep flipped (their unread
+/// count before); `unread_after` is THEIR unread count once the sweep commits,
+/// which is `0`. A sibling actor's unread rows are neither swept nor counted.
+/// Idempotent — a re-sweep flips nothing. The daemon resolves + rejects a
+/// mistyped workspace before this call, so a missing workspace never reaches
+/// here.
 ///
 /// # Errors
 ///
@@ -1828,9 +1833,10 @@ pub async fn inbox_mark_read(
     pool: &SqlitePool,
     clock: &dyn HangarClock,
     workspace_id: &str,
+    recipient: &ActorRef,
 ) -> Result<(i64, i64), sqlx::Error> {
-    let marked = InboxRepo::mark_all_read(pool, workspace_id, clock.now_ms()).await?;
-    let unread = InboxRepo::unread_count(pool, workspace_id).await?;
+    let marked = InboxRepo::mark_all_read(pool, workspace_id, recipient, clock.now_ms()).await?;
+    let unread = InboxRepo::unread_count(pool, workspace_id, recipient).await?;
     Ok((i64::try_from(marked).unwrap_or(i64::MAX), unread))
 }
 

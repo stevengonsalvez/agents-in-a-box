@@ -46,6 +46,7 @@ use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
 use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
+use ainb_hangar_core::actor::{ActorRef, local_member};
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
 use ainb_hangar_core::dispatch_reason::{DispatchReason, DispatchSource};
 use ainb_hangar_core::idgen::SystemIdGen;
@@ -7187,16 +7188,50 @@ async fn handle_daemon_health(
     to_value(&snapshot)
 }
 
-/// Dispatch `hangar/inbox_list` (e38.14): snapshot the workspace's aggregated
-/// inbox + unread count. A read like `hangar/issues_list`: an unknown workspace
-/// yields an empty list + zero unread (no `INVALID_PARAMS` rejection). Split out
-/// of [`handle`] to keep that dispatcher within the line cap.
+/// Resolve the inbox recipient a request addresses (store migration 0060).
+///
+/// The parsed `recipient` param, or the LOCAL HUMAN when omitted — the
+/// append-only wire default that keeps a pre-0060 surface reading exactly one
+/// actor's inbox rather than the union of everyone's. A MALFORMED ref is
+/// `INVALID_PARAMS`, mirroring the `creator` / `assignee` parse rejections: a
+/// typo must never silently fall back to someone else's inbox.
+fn inbox_recipient(param: Option<&str>) -> Result<ActorRef, RpcError> {
+    match param {
+        None => Ok(local_member()),
+        Some(raw) => raw.parse::<ActorRef>().map_err(|e| {
+            invalid_params(&format!(
+                "recipient must be 'member:<id>' or 'agent:<id>': {e}"
+            ))
+        }),
+    }
+}
+
+/// Parse the `{ workspace_id, recipient? }` params both inbox methods take.
+fn inbox_params(
+    req: &RpcRequest,
+) -> Result<(String, ActorRef), RpcError> {
+    let params: ainb_hangar_proto::snapshots::InboxScopedParams =
+        parse_params(req, "{ workspace_id, recipient? }")?;
+    let recipient = inbox_recipient(params.recipient.as_deref())?;
+    Ok((params.workspace_id, recipient))
+}
+
+/// Dispatch `hangar/inbox_list` (e38.14): snapshot ONE ACTOR's aggregated inbox
+/// + their unread count. A read like `hangar/issues_list`: an unknown workspace
+/// yields an empty list + zero unread (no `INVALID_PARAMS` rejection), but a
+/// malformed `recipient` IS rejected (a typo must not read another inbox). An
+/// omitted recipient is the local human. Split out of [`handle`] to keep that
+/// dispatcher within the line cap.
 async fn handle_inbox_list(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let (entries, unread) = match resolve(pool, req).await? {
-        Some(ws) => snapshots::inbox_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+    let (wire, recipient) = inbox_params(req)?;
+    let resolved = resolve_workspace_id(pool, &wire).await.map_err(|e| store_err(&e))?;
+    let (entries, unread) = match resolved {
+        Some(ws) => snapshots::inbox_list(pool, &ws, &recipient)
+            .await
+            .map_err(|e| store_err(&e))?,
         None => (Vec::new(), 0),
     };
     to_value(&ainb_hangar_proto::snapshots::InboxListResult { entries, unread })
@@ -7209,14 +7244,15 @@ async fn handle_inbox_list(
 /// A mutating handler: it resolves the workspace and **rejects** a mistyped one
 /// with `INVALID_PARAMS` (never a silent no-op, mirroring [`handle_comment_add`]),
 /// so a typo'd workspace can never quietly "succeed" while marking nothing. The
-/// sweep is workspace-scoped, so a sibling tenant's inbox is never touched.
+/// sweep is scoped to the workspace AND to the calling actor's own entries, so
+/// neither a sibling tenant's nor a sibling actor's inbox is ever touched.
 async fn handle_inbox_mark_read(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let wire = workspace_id(req)?;
+    let (wire, recipient) = inbox_params(req)?;
     let ws = resolve_wire_or_reject(pool, &wire).await?;
-    let (marked, unread) = snapshots::inbox_mark_read(pool, &SystemClock, ws.as_str())
+    let (marked, unread) = snapshots::inbox_mark_read(pool, &SystemClock, ws.as_str(), &recipient)
         .await
         .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::InboxMarkReadResult { marked, unread })
