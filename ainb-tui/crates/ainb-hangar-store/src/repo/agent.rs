@@ -24,6 +24,9 @@
 //! are nullable TEXT carried as `Option<String>`. **Persistence only** — the
 //! provider EXEC consumption of these knobs is a separate bead (e38.16).
 
+use ainb_hangar_core::actor::ActorRef;
+use ainb_hangar_core::agent_env::AgentEnv;
+use ainb_hangar_core::skill::SkillName;
 use sqlx::SqlitePool;
 
 /// An agent: a named, instruction-carrying actor bound to a runtime.
@@ -63,8 +66,19 @@ pub struct Agent {
     /// Owning user (`user.id`).
     pub owner_id: String,
     /// `true` when the agent is archived (hidden from the active picker). The
-    /// schema stores this as a 0/1 INTEGER (migration 0015).
+    /// schema stores this as a 0/1 INTEGER (migration 0015). This flag — NOT
+    /// [`archived_at`](Self::archived_at) — is the authoritative discriminant.
     pub archived: bool,
+    /// When the agent was archived (epoch ms, migration 0052), or `None` when the
+    /// agent is active — or when it was archived BEFORE 0052 existed. That second
+    /// case is an honest unknown; a historical archive is never given a
+    /// fabricated timestamp.
+    pub archived_at: Option<i64>,
+    /// Who archived the agent, as a canonical actor-ref (migration 0052), or
+    /// `None` when the agent is active / the archive predates 0052 / the archive
+    /// was unattributed. A malformed stored value decodes to `None` rather than
+    /// failing the whole read.
+    pub archived_by: Option<ActorRef>,
     /// Optional provider model override (e.g. `claude-opus-4`); `None` = the
     /// runtime's provider default.
     pub model: Option<String>,
@@ -78,7 +92,12 @@ pub struct Agent {
     pub thinking: Option<String>,
     /// Per-agent environment variables (stored as a JSON-object `agent_env`
     /// column), kept as an ordered key-value list for deterministic encoding.
-    pub agent_env: Vec<(String, String)>,
+    ///
+    /// Typed [`AgentEnv`], not a bare `Vec`, so the VALUES are redacted on every
+    /// egress — including this struct's derived `Debug` (multica parity #30).
+    /// The exec seam reaches the plaintext via
+    /// [`AgentEnv::expose_for_child_env`], and nothing else may.
+    pub agent_env: AgentEnv,
     /// Optional per-agent provider override (`"claude"`/`"codex"`/`"copilot"`),
     /// recorded at create time (migration 0041); `None` = fall back to the
     /// runtime's advertised provider. Honoured at dispatch: the agent binds the
@@ -90,6 +109,95 @@ pub struct Agent {
     /// unlimited (migration 0042). Stored + surfaced only in this milestone —
     /// dispatch-time enforcement is a later feature.
     pub token_budget: Option<i64>,
+    /// Short blurb rendered next to the agent in rosters/pickers; `""` when unset.
+    /// Capped at 255 characters by the schema (migration 0050, multica 060).
+    pub description: String,
+    /// Optional avatar token; hangar mints `"emoji:🦊"`-style values at create so an
+    /// agent is never avatar-less (multica `newAgentAvatar`). `None` only for rows
+    /// created before migration 0050.
+    pub avatar_url: Option<String>,
+    /// `"user"` (an ordinary agent) or `"system"` (a hidden carrier agent, e.g. the
+    /// agent-builder). Roster/picker reads filter to `"user"` (migration 0050).
+    pub kind: String,
+    /// Identity key for a system agent (e.g. `"agent_builder:<flow>"`); `None` for user
+    /// agents. Unique per `(workspace, owner, runtime)` where not null (migration 0050).
+    pub system_key: Option<String>,
+    /// Optional per-agent Codex service-tier override (runtime-native catalog id such as
+    /// `"priority"`); `None` = inherit the local Codex config. Stored + surfaced only in
+    /// this milestone — dispatch-time consumption is a later feature (as `token_budget` was).
+    pub service_tier: Option<String>,
+    /// Skill NAMES this agent must never receive at runtime, independent of the
+    /// `agent_skill` junction (migration 0051, multica 206). Empty by default.
+    ///
+    /// Distinct from attach/detach and from `agent_skill.enabled`: this is a
+    /// by-name suppression list, so it can pre-emptively name a skill the agent
+    /// is not (yet) attached to. Honoured at dispatch-time materialisation
+    /// (hangar has no live tool registry to gate — deviation D1), so a named
+    /// skill's directory is never written into the agent's task tree.
+    ///
+    /// Stored as a JSON-array TEXT column; a corrupt cell degrades to empty
+    /// rather than failing the read.
+    pub disabled_runtime_skills: Vec<String>,
+}
+
+impl Default for Agent {
+    /// The neutral, never-inserted-as-is shape: an ordinary `"user"`-kind,
+    /// `"private"` agent with no metadata. Fixture sites spread this
+    /// (`Agent { name: …, ..Default::default() }`) so a later schema add is one
+    /// struct edit, not another brittle-fixture sweep.
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            workspace_id: String::new(),
+            name: String::new(),
+            runtime_id: String::new(),
+            instructions: None,
+            visibility: "private".to_string(),
+            permission_mode: "private".to_string(),
+            owner_id: String::new(),
+            archived: false,
+            archived_at: None,
+            archived_by: None,
+            model: None,
+            cli_args: Vec::new(),
+            mcp_config: None,
+            thinking: None,
+            agent_env: AgentEnv::default(),
+            provider: None,
+            token_budget: None,
+            description: String::new(),
+            avatar_url: None,
+            kind: AGENT_KIND_USER.to_string(),
+            system_key: None,
+            service_tier: None,
+            disabled_runtime_skills: Vec::new(),
+        }
+    }
+}
+
+/// The ordinary agent kind — the only one rosters, pickers and search surface.
+pub const AGENT_KIND_USER: &str = "user";
+/// The hidden carrier kind (e.g. the agent-builder). Never in a roster; reached
+/// only by [`AgentRepo::find_system`].
+pub const AGENT_KIND_SYSTEM: &str = "system";
+
+/// Maximum `description` length in CHARACTERS (code points), matching multica's
+/// `utf8.RuneCountInString` cap and the schema `CHECK (length(description) <= 255)`.
+/// Callers validate against this so the user sees a clear message; the schema
+/// CHECK is the last line of defence.
+pub const MAX_DESCRIPTION_CHARS: usize = 255;
+
+/// Whether a `sqlx` error is the `(workspace_id, name)` uniqueness violation from
+/// migration 0050 — i.e. "an agent by that name already exists here" rather than
+/// any other store fault. Callers map it to multica's 409-equivalent refusal.
+///
+/// SQLite's message is `UNIQUE constraint failed: agent.workspace_id, agent.name`;
+/// the `agent.name` substring separates it from the `system_key` index and from an
+/// id PK collision.
+#[must_use]
+pub fn is_duplicate_name(e: &sqlx::Error) -> bool {
+    e.as_database_error()
+        .is_some_and(|db| db.is_unique_violation() && db.message().contains("agent.name"))
 }
 
 /// A partial-edit instruction for one agent's mutable config (e38.15).
@@ -122,12 +230,21 @@ pub struct AgentConfigUpdate {
     /// New thinking level: `None` leaves it, `Some(None)` clears it,
     /// `Some(Some(_))` sets it.
     pub thinking: Option<Option<String>>,
-    /// New per-agent env map, or `None` to leave it unchanged (an empty `Vec` is
+    /// New per-agent env map, or `None` to leave it unchanged (an empty map is
     /// a valid "no env" value, distinct from leaving it).
-    pub agent_env: Option<Vec<(String, String)>>,
+    pub agent_env: Option<AgentEnv>,
     /// New token budget: `None` leaves it, `Some(None)` clears it (back to
     /// unlimited), `Some(Some(_))` sets it.
     pub token_budget: Option<Option<i64>>,
+    /// New description, or `None` to leave it unchanged. The column is NOT NULL
+    /// (its "cleared" state is `""`), so this is a single `Option` like `name`.
+    pub description: Option<String>,
+    /// New avatar token: `None` leaves it, `Some(None)` clears it,
+    /// `Some(Some(_))` sets it (migration 0050).
+    pub avatar_url: Option<Option<String>>,
+    /// New Codex service tier: `None` leaves it, `Some(None)` clears it (back to
+    /// inheriting the local Codex config), `Some(Some(_))` sets it (migration 0050).
+    pub service_tier: Option<Option<String>>,
 }
 
 impl AgentConfigUpdate {
@@ -143,6 +260,9 @@ impl AgentConfigUpdate {
             && self.thinking.is_none()
             && self.agent_env.is_none()
             && self.token_budget.is_none()
+            && self.description.is_none()
+            && self.avatar_url.is_none()
+            && self.service_tier.is_none()
     }
 }
 
@@ -206,8 +326,9 @@ impl AgentRepo {
             "INSERT INTO agent \
              (id, workspace_id, name, runtime_id, instructions, visibility, permission_mode, \
               owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, provider, \
-              token_budget) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+              token_budget, description, avatar_url, kind, system_key, service_tier, \
+              disabled_runtime_skills) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         )
         .bind(&agent.id)
         .bind(&agent.workspace_id)
@@ -222,15 +343,28 @@ impl AgentRepo {
         .bind(cli_args_to_json(&agent.cli_args))
         .bind(agent.mcp_config.clone().unwrap_or_else(|| "{}".to_string()))
         .bind(&agent.thinking)
-        .bind(env_to_json(&agent.agent_env))
+        .bind(agent.agent_env.to_db_json())
         .bind(&agent.provider)
         .bind(agent.token_budget)
+        .bind(&agent.description)
+        .bind(&agent.avatar_url)
+        .bind(&agent.kind)
+        .bind(&agent.system_key)
+        .bind(&agent.service_tier)
+        .bind(disabled_runtime_skills_to_json(
+            &agent.disabled_runtime_skills,
+        ))
         .execute(pool)
         .await?;
         Ok(())
     }
 
     /// Fetch one [`Agent`] by primary key, or `None` if absent.
+    ///
+    /// Deliberately **kind-blind** (migration 0050): this is the internal by-id
+    /// lookup every dispatch/edit path uses, so a `"system"` agent resolved by an
+    /// id it already holds must still read back. Multica's `GetAgent` is likewise
+    /// unfiltered — only the roster/picker LISTS filter to `kind = 'user'`.
     ///
     /// # Errors
     ///
@@ -259,7 +393,7 @@ impl AgentRepo {
         workspace_id: &str,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as::<_, Agent>(&format!(
-            "{SELECT_COLS} WHERE workspace_id = ? AND archived = 0 ORDER BY name"
+            "{SELECT_COLS} WHERE workspace_id = ? AND archived = 0 AND kind = 'user' ORDER BY name"
         ))
         .bind(workspace_id)
         .fetch_all(pool)
@@ -277,10 +411,58 @@ impl AgentRepo {
         workspace_id: &str,
     ) -> Result<Vec<Agent>, sqlx::Error> {
         sqlx::query_as::<_, Agent>(&format!(
-            "{SELECT_COLS} WHERE workspace_id = ? ORDER BY name"
+            "{SELECT_COLS} WHERE workspace_id = ? AND kind = 'user' ORDER BY name"
         ))
         .bind(workspace_id)
         .fetch_all(pool)
+        .await
+    }
+
+    /// List the ids of every ACTIVE agent bound to one runtime, ordered by
+    /// `name`.
+    ///
+    /// The presence sweeper's event fan-out is the caller: when a runtime's
+    /// liveness flips, every agent backed by it changed availability, and only
+    /// the ids are needed to address the event. Archived agents are excluded —
+    /// they are absent from the picker, so no surface would render their dot.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn list_ids_by_runtime(
+        pool: &SqlitePool,
+        runtime_id: &str,
+    ) -> Result<Vec<String>, sqlx::Error> {
+        sqlx::query_scalar::<_, String>(
+            "SELECT id FROM agent WHERE runtime_id = ? AND archived = 0 AND kind = 'user' \
+             ORDER BY name",
+        )
+        .bind(runtime_id)
+        .fetch_all(pool)
+        .await
+    }
+
+    /// Look up a hidden `"system"` agent by its identity key within a workspace
+    /// (migration 0050, multica `chat.sql:433` — the agent-builder carrier lookup).
+    ///
+    /// This is the ONLY read that returns a system agent by search: every roster,
+    /// picker and search query filters to `kind = 'user'`, so a carrier agent is
+    /// invisible everywhere else.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails (a missing row is `Ok(None)`).
+    pub async fn find_system(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        system_key: &str,
+    ) -> Result<Option<Agent>, sqlx::Error> {
+        sqlx::query_as::<_, Agent>(&format!(
+            "{SELECT_COLS} WHERE workspace_id = ? AND system_key = ? AND kind = 'system'"
+        ))
+        .bind(workspace_id)
+        .bind(system_key)
+        .fetch_optional(pool)
         .await
     }
 
@@ -299,7 +481,9 @@ impl AgentRepo {
     ///
     /// # Errors
     ///
-    /// Returns a [`sqlx::Error`] if the update fails.
+    /// Returns a [`sqlx::Error`] if the update fails — including a RENAME onto a
+    /// name another agent in the same workspace already holds, for which
+    /// [`is_duplicate_name`] is `true` (migration 0050).
     pub async fn update_config(
         pool: &SqlitePool,
         workspace_id: &str,
@@ -339,6 +523,15 @@ impl AgentRepo {
         if update.token_budget.is_some() {
             sets.push("token_budget = ?");
         }
+        if update.description.is_some() {
+            sets.push("description = ?");
+        }
+        if update.avatar_url.is_some() {
+            sets.push("avatar_url = ?");
+        }
+        if update.service_tier.is_some() {
+            sets.push("service_tier = ?");
+        }
         let sql = format!(
             "UPDATE agent SET {} WHERE id = ? AND workspace_id = ?",
             sets.join(", ")
@@ -366,17 +559,36 @@ impl AgentRepo {
             query = query.bind(thinking);
         }
         if let Some(agent_env) = &update.agent_env {
-            query = query.bind(env_to_json(agent_env));
+            query = query.bind(agent_env.to_db_json());
         }
         if let Some(token_budget) = &update.token_budget {
             query = query.bind(token_budget);
+        }
+        if let Some(description) = &update.description {
+            query = query.bind(description);
+        }
+        if let Some(avatar_url) = &update.avatar_url {
+            query = query.bind(avatar_url);
+        }
+        if let Some(service_tier) = &update.service_tier {
+            query = query.bind(service_tier);
         }
         let res = query.bind(id).bind(workspace_id).execute(pool).await?;
         Ok(res.rows_affected() == 1)
     }
 
-    /// Set (or clear) one agent's `archived` flag, scoped to a workspace
-    /// (e38.15).
+    /// Set (or clear) one agent's `archived` flag **and its audit trail**, scoped
+    /// to a workspace (e38.15; audit trail = migration 0052, multica gap #26).
+    ///
+    /// There is deliberately no audit-less archive path: `by` (the archiving
+    /// actor, `None` = unattributed) and `now_ms` are required parameters, so a
+    /// caller cannot flip the flag without deciding what to record.
+    ///
+    /// - archiving (`archived = true`) STAMPS `archived_at = now_ms` and
+    ///   `archived_by = by`. Re-archiving RE-stamps: last archiver wins, which is
+    ///   still an honest record of the most recent archive action.
+    /// - un-archiving (`archived = false`) CLEARS both audit columns (multica
+    ///   `RestoreAgent` parity) — a restored agent carries no stale stamp.
     ///
     /// Workspace-scoped at the SQL boundary: an agent id from another tenant
     /// matches no row and flips nothing. Returns `true` when exactly one row was
@@ -393,13 +605,20 @@ impl AgentRepo {
         workspace_id: &str,
         id: &str,
         archived: bool,
+        by: Option<&ActorRef>,
+        now_ms: i64,
     ) -> Result<bool, sqlx::Error> {
-        let res = sqlx::query("UPDATE agent SET archived = ? WHERE id = ? AND workspace_id = ?")
-            .bind(i64::from(archived))
-            .bind(id)
-            .bind(workspace_id)
-            .execute(pool)
-            .await?;
+        let res = sqlx::query(
+            "UPDATE agent SET archived = ?, archived_at = ?, archived_by = ? \
+             WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(i64::from(archived))
+        .bind(archived.then_some(now_ms))
+        .bind(archived.then(|| by.map(ToString::to_string)).flatten())
+        .bind(id)
+        .bind(workspace_id)
+        .execute(pool)
+        .await?;
         Ok(res.rows_affected() == 1)
     }
 
@@ -445,6 +664,37 @@ impl AgentRepo {
             .await?;
         tx.commit().await?;
         Ok(true)
+    }
+
+    /// Replace an agent's runtime skill-suppression list (migration 0051,
+    /// multica 206).
+    ///
+    /// The supplied names are normalised (kebab-cased, de-duplicated, sorted)
+    /// before storage, so `["Commit", "commit"]` collapses to `["commit"]` and
+    /// the stored cell is canonical. A name that normalises to empty is dropped.
+    /// Pass an empty slice to clear the list.
+    ///
+    /// Suppression is by NAME and independent of the `agent_skill` junction: a
+    /// name here can pre-date the attachment. Honoured at dispatch-time
+    /// materialisation (deviation D1).
+    ///
+    /// Returns `true` when the agent existed and was updated, `false` when `id`
+    /// matched no agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the write fails.
+    pub async fn set_disabled_runtime_skills(
+        pool: &SqlitePool,
+        id: &str,
+        names: &[String],
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent SET disabled_runtime_skills = ? WHERE id = ?")
+            .bind(disabled_runtime_skills_to_json(names))
+            .bind(id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() > 0)
     }
 
     /// Re-derive the legacy [`visibility`](Agent::visibility) label from an agent's
@@ -673,7 +923,8 @@ fn is_foreign_key_violation(e: &sqlx::Error) -> bool {
 /// single constant keeps the read queries in lockstep with the `FromRow` impl.
 const SELECT_COLS: &str = "SELECT id, workspace_id, name, runtime_id, instructions, visibility, \
      permission_mode, owner_id, archived, model, cli_args, mcp_config, thinking, agent_env, \
-     provider, token_budget FROM agent";
+     provider, token_budget, description, avatar_url, kind, system_key, service_tier, \
+     disabled_runtime_skills, archived_at, archived_by FROM agent";
 
 /// Serialize a CLI-args list into the JSON-array text the `cli_args` column
 /// stores. An empty list yields `"[]"` (the column default).
@@ -686,32 +937,42 @@ fn cli_args_from_json(raw: &str) -> Result<Vec<String>, sqlx::Error> {
     serde_json::from_str(raw).map_err(|e| decode_err("cli_args", &e.to_string()))
 }
 
-/// Serialize a per-agent env map into the JSON-object text the `agent_env`
-/// column stores. The ordered key-value list encodes as a JSON object; an empty
-/// list yields `"{}"` (the column default).
-fn env_to_json(env: &[(String, String)]) -> String {
-    let map: serde_json::Map<String, serde_json::Value> = env
+/// Normalise a runtime-skill suppression list for storage: kebab-cased (via the
+/// same [`SkillName`] rules the skill rows use), de-duplicated, sorted, then
+/// encoded as a JSON array. Sorting + dedup make the stored cell canonical, so
+/// re-writing the same set is a byte-identical no-op.
+///
+/// [`SkillName`]: ainb_hangar_core::skill::SkillName
+fn disabled_runtime_skills_to_json(names: &[String]) -> String {
+    let mut normalised: Vec<String> = names
         .iter()
-        .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+        .filter_map(|n| SkillName::new(n).ok())
+        .map(|n| n.as_str().to_string())
         .collect();
-    serde_json::to_string(&serde_json::Value::Object(map)).unwrap_or_else(|_| "{}".to_string())
+    normalised.sort();
+    normalised.dedup();
+    serde_json::to_string(&normalised).unwrap_or_else(|_| "[]".to_string())
+}
+
+/// Decode the `disabled_runtime_skills` JSON-array cell.
+///
+/// Deliberately tolerant (`unwrap_or_default`, like `issue.labels`): a corrupt
+/// cell degrades to "nothing suppressed" instead of failing the agent read and
+/// taking the daemon's dispatch path down with it.
+fn disabled_runtime_skills_from_json(raw: &str) -> Vec<String> {
+    serde_json::from_str(raw).unwrap_or_default()
 }
 
 /// Re-assemble a per-agent env map from the `agent_env` column's JSON-object
 /// text, preserving the stored object's key order.
-fn env_from_json(raw: &str) -> Result<Vec<(String, String)>, sqlx::Error> {
-    let value: serde_json::Value =
-        serde_json::from_str(raw).map_err(|e| decode_err("agent_env", &e.to_string()))?;
-    let obj = value
-        .as_object()
-        .ok_or_else(|| decode_err("agent_env", "stored env is not a JSON object"))?;
-    obj.iter()
-        .map(|(k, v)| {
-            v.as_str()
-                .map(|s| (k.clone(), s.to_string()))
-                .ok_or_else(|| decode_err("agent_env", "env value is not a string"))
-        })
-        .collect()
+///
+/// The codec itself lives on [`AgentEnv`] (encode via
+/// [`AgentEnv::to_db_json`]) so the redaction contract and the storage bytes
+/// are defined in one place. The decode error is deliberately VALUE-FREE — a
+/// `serde_json` message quotes the offending scalar, which for this column is
+/// the secret.
+fn env_from_json(raw: &str) -> Result<AgentEnv, sqlx::Error> {
+    AgentEnv::try_from_db_json(raw).map_err(|reason| decode_err("agent_env", reason))
 }
 
 /// Map the empty-object MCP-config default `'{}'` back to `None` so a config-less
@@ -853,6 +1114,18 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Agent {
             agent_env: env_from_json(&row.try_get::<String, _>("agent_env")?)?,
             provider: row.try_get("provider")?,
             token_budget: row.try_get("token_budget")?,
+            description: row.try_get("description")?,
+            avatar_url: row.try_get("avatar_url")?,
+            kind: row.try_get("kind")?,
+            system_key: row.try_get("system_key")?,
+            service_tier: row.try_get("service_tier")?,
+            disabled_runtime_skills: disabled_runtime_skills_from_json(
+                &row.try_get::<String, _>("disabled_runtime_skills")?,
+            ),
+            archived_at: row.try_get("archived_at")?,
+            archived_by: row
+                .try_get::<Option<String>, _>("archived_by")?
+                .and_then(|s| s.parse::<ActorRef>().ok()),
         })
     }
 }

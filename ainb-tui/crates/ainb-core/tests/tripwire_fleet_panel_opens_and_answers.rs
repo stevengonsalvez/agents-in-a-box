@@ -1,6 +1,7 @@
 //! Tripwire: the Fleet panel opens from Home, renders Hangar's authoritative
-//! Fleet snapshot, moves an ASK option, submits a versioned structured answer,
-//! and returns to Home via `Esc`.
+//! Fleet snapshot, switches across operator lenses, completes a tabbed
+//! multi-question ASK, submits one versioned structured answer batch, and
+//! returns to Home via `Esc`.
 //!
 //! This is the live-terminal sibling of the Fleet panel unit tests. It drives
 //! the real `ainb` binary in tmux with an isolated HOME seeded with:
@@ -84,6 +85,27 @@ fn send_key(session: &str, key: &str) {
     assert!(status.success(), "tmux send-keys {key:?} failed");
 }
 
+/// Optional paced mode for one continuous VHS capture. Default test runs stay
+/// immediate, while a positive value keeps each real TUI state on screen.
+fn demo_pause() {
+    demo_pause_with("AINB_FLEET_DEMO_PACING_MS");
+}
+
+fn demo_final_pause() {
+    demo_pause_with("AINB_FLEET_DEMO_FINAL_PACING_MS");
+}
+
+fn demo_pause_with(variable: &str) {
+    let Ok(milliseconds) = std::env::var(variable) else {
+        return;
+    };
+    if let Ok(milliseconds) = milliseconds.parse::<u64>() {
+        if milliseconds > 0 {
+            thread::sleep(Duration::from_millis(milliseconds));
+        }
+    }
+}
+
 fn open_fleet_screen(session: &str) -> Option<String> {
     let deadline = Instant::now() + Duration::from_secs(15);
     while Instant::now() < deadline {
@@ -131,15 +153,36 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             "payload": {
                 "tool_use_id": "ask-tool-1",
                 "tool_input": {
-                    "questions": [{
-                        "id": "release-gate",
-                        "question": "Deploy patched fleet bridge?",
-                        "header": "Release gate",
-                        "options": [
-                            {"label": "Yes", "description": "ship verified fix"},
-                            {"label": "Continue", "description": "keep watching"}
-                        ]
-                    }]
+                    "questions": [
+                        {
+                            "id": "scope",
+                            "question": "What release scope should Fleet use?",
+                            "header": "Scope",
+                            "options": [
+                                {"label": "Focused", "description": "ship only verified Fleet work"},
+                                {"label": "Broad", "description": "include adjacent changes"}
+                            ]
+                        },
+                        {
+                            "id": "validation",
+                            "question": "Which proof should gate launch?",
+                            "header": "Validation",
+                            "multiSelect": true,
+                            "options": [
+                                {"label": "Tests", "description": "run targeted Rust coverage"},
+                                {"label": "Tripwire", "description": "capture live terminal truth"}
+                            ]
+                        },
+                        {
+                            "id": "rollout",
+                            "question": "When should the release launch?",
+                            "header": "Rollout",
+                            "options": [
+                                {"label": "Now", "description": "start after proof completes"},
+                                {"label": "Later", "description": "hold for a manual window"}
+                            ]
+                        }
+                    ]
                 }
             }
         }),
@@ -155,6 +198,38 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
             "message": "allow cargo test?"
         }),
         4_000_000_000_200,
+    );
+    hangar.apply_hook(
+        "fleet-panel-running-start",
+        "fleet-panel-running-1",
+        &home_tmp.path().join("running-project"),
+        "SessionStart",
+        serde_json::json!({ "source": "hook" }),
+        4_000_000_000_100,
+    );
+    hangar.apply_hook(
+        "fleet-panel-running-prompt",
+        "fleet-panel-running-1",
+        &home_tmp.path().join("running-project"),
+        "UserPromptSubmit",
+        serde_json::json!({ "prompt": "Run workflow validation" }),
+        4_000_000_000_101,
+    );
+    hangar.apply_hook(
+        "fleet-panel-completed-start",
+        "fleet-panel-completed-1",
+        &home_tmp.path().join("completed-project"),
+        "SessionStart",
+        serde_json::json!({ "source": "hook" }),
+        4_000_000_000_000,
+    );
+    hangar.apply_hook(
+        "fleet-panel-completed-stop",
+        "fleet-panel-completed-1",
+        &home_tmp.path().join("completed-project"),
+        "Stop",
+        serde_json::json!({ "reason": "complete" }),
+        4_000_000_000_001,
     );
     let seeded = hangar
         .session("claude:fleet-panel-ask-1")
@@ -193,25 +268,44 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
                 &sock,
                 "fleet-panel-ask-1",
                 &fingerprint,
-                &[serde_json::json!({
-                    "id": "release-gate",
-                    "question": "Deploy patched fleet bridge?",
-                    "header": "Release gate",
-                    "options": [
-                        {"label": "Yes", "description": "ship verified fix"},
-                        {"label": "Continue", "description": "keep watching"}
-                    ]
-                })],
+                &[
+                    serde_json::json!({
+                        "id": "scope",
+                        "question": "What release scope should Fleet use?",
+                        "header": "Scope",
+                        "options": [
+                            {"label": "Focused", "description": "ship only verified Fleet work"},
+                            {"label": "Broad", "description": "include adjacent changes"}
+                        ]
+                    }),
+                    serde_json::json!({
+                        "id": "validation",
+                        "question": "Which proof should gate launch?",
+                        "header": "Validation",
+                        "multiSelect": true,
+                        "options": [
+                            {"label": "Tests", "description": "run targeted Rust coverage"},
+                            {"label": "Tripwire", "description": "capture live terminal truth"}
+                        ]
+                    }),
+                    serde_json::json!({
+                        "id": "rollout",
+                        "question": "When should the release launch?",
+                        "header": "Rollout",
+                        "options": [
+                            {"label": "Now", "description": "start after proof completes"},
+                            {"label": "Later", "description": "hold for a manual window"}
+                        ]
+                    }),
+                ],
                 Duration::from_secs(60),
             )
         })
     };
 
-    let tmux = ExactTmuxSession::create(
-        format!("tripwire-fleet-panel-{}", std::process::id()),
-        "180",
-        "50",
-    );
+    let session_name = std::env::var("AINB_FLEET_TRIPWIRE_SESSION")
+        .unwrap_or_else(|_| format!("tripwire-fleet-panel-{}", std::process::id()));
+    let tmux = ExactTmuxSession::create(session_name, "180", "50");
     let session = tmux.name();
 
     let peers_db = home_tmp.path().join("peers.db");
@@ -237,7 +331,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         panic!("HomeScreen never rendered Fleet shortcut; last capture:\n---\n{last}\n---");
     };
     assert!(
-        !pre_cap.contains("Deploy patched fleet bridge?"),
+        !pre_cap.contains("What release scope should Fleet use?"),
         "pre-key capture already on Fleet panel: state leaked:\n{pre_cap}"
     );
 
@@ -249,12 +343,15 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let opened = poll_capture(&session, Instant::now() + Duration::from_secs(30), |c| {
         c.contains("Fleet")
             && c.contains("Hangar")
-            && c.contains("ASK")
-            && c.contains("Deploy patched fleet bridge?")
-            && c.contains("Yes")
-            && c.contains("Continue")
-            && c.contains("WAIT")
-            && c.contains("hangar-authoritative")
+            && c.contains("1 Needs input 2")
+            && c.contains("2 Idle 0")
+            && c.contains("3 Completed 1")
+            && c.contains("4 Running 1")
+            && c.contains("5 All 4")
+            && c.contains("NEEDS INPUT")
+            && c.contains("What release scope should Fleet use?")
+            && c.contains("CONNECTION")
+            && c.contains("REMOTE")
     });
     let Some(open_cap) = opened else {
         let last = capture_pane(&session);
@@ -263,27 +360,94 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         );
     };
     assert!(
-        open_cap.contains("Enter/a") && open_cap.contains("q/Esc"),
+        open_cap.contains("1-5 views") && open_cap.contains("q/Esc back"),
         "Fleet help bar missing answer/back controls:\n{open_cap}"
     );
     assert!(
         !open_cap.contains("current_state"),
         "Fleet must not expose or read legacy notifyd current_state:\n{open_cap}"
     );
+    demo_pause();
 
-    send_key(&session, "Tab");
-    let advanced = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
-        c.contains(">[ ] Continue")
+    send_key(&session, "4");
+    let running = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("running-project") && c.contains("RUNNING") && c.contains("1/1")
     });
-    let Some(tab_cap) = advanced else {
+    assert!(
+        running.is_some(),
+        "Running lens did not isolate active workflow:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "3");
+    let completed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("completed-project") && c.contains("COMPLETED") && c.contains("1/1")
+    });
+    assert!(
+        completed.is_some(),
+        "Completed lens did not isolate finished session:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "5");
+    let all = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("running-project")
+            && c.contains("completed-project")
+            && c.contains("fleet-tripwire-project")
+            && c.contains("waiting-project")
+            && c.contains("5 All 4")
+    });
+    assert!(
+        all.is_some(),
+        "All lens did not render complete roster:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "1");
+    let needs_input = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("What release scope should Fleet use?")
+            && c.contains("NEEDS INPUT")
+            && c.contains("1/2")
+    });
+    assert!(
+        needs_input.is_some(),
+        "Needs input lens did not restore actionable queue:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
+
+    send_key(&session, "Enter");
+    let interview = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("STRUCTURED INTERVIEW") && c.contains("Scope") && c.contains("Validation")
+    });
+    let Some(interview_cap) = interview else {
         let last = capture_pane(&session);
-        panic!("Tab did not move ASK option cursor to Continue; last capture:\n---\n{last}\n---");
+        panic!("Fleet did not open tabbed interview; last capture:\n---\n{last}\n---");
     };
     assert!(
-        tab_cap.contains("keep watching"),
-        "selected option description missing after Tab:\n{tab_cap}"
+        interview_cap.contains("ship only verified Fleet work"),
+        "first option description missing from interview:\n{interview_cap}"
     );
+    demo_pause();
 
+    send_key(&session, "Enter");
+    send_key(&session, "Space");
+    send_key(&session, "Down");
+    send_key(&session, "Space");
+    demo_pause();
+    send_key(&session, "Tab");
+    let tabbed = poll_capture(&session, Instant::now() + Duration::from_secs(10), |c| {
+        c.contains("Rollout") && c.contains("When should the release launch?")
+    });
+    assert!(
+        tabbed.is_some(),
+        "Tab did not move to Rollout:\n{}",
+        capture_pane(&session)
+    );
+    demo_pause();
     send_key(&session, "Enter");
     let answered = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
         c.contains("answered ask: Delivered") && c.contains("claude structured hook broker")
@@ -296,6 +460,7 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
         !answer_cap.contains("no live session matched"),
         "structured answer must use Hangar RPC, never legacy tmux discovery:\n{answer_cap}"
     );
+    demo_final_pause();
     let receipt = hangar
         .latest_receipt("claude:fleet-panel-ask-1")
         .expect("structured answer persisted a Fleet receipt");
@@ -309,13 +474,19 @@ fn fleet_panel_opens_renders_answers_and_returns_home() {
     let StructuredResolution::Answered { answers } = resolution else {
         panic!("structured waiter did not receive answer: {resolution:?}");
     };
-    assert_eq!(answers.len(), 1);
-    assert_eq!(answers[0].question, "Deploy patched fleet bridge?");
-    assert_eq!(answers[0].selected_options, ["Continue"]);
+    assert_eq!(answers.len(), 3);
+    assert_eq!(answers[0].question, "What release scope should Fleet use?");
+    assert_eq!(answers[0].selected_options, ["Focused"]);
+    assert_eq!(answers[1].question, "Which proof should gate launch?");
+    assert_eq!(answers[1].selected_options, ["Tests", "Tripwire"]);
+    assert_eq!(answers[2].question, "When should the release launch?");
+    assert_eq!(answers[2].selected_options, ["Now"]);
 
     send_key(&session, "Escape");
     let back = poll_capture(&session, Instant::now() + Duration::from_secs(25), |c| {
-        c.contains("Stats") && c.contains("[i]") && !c.contains("Deploy patched fleet bridge?")
+        c.contains("Stats")
+            && c.contains("[i]")
+            && !c.contains("What release scope should Fleet use?")
     });
     let final_cap = capture_pane(&session);
     assert!(

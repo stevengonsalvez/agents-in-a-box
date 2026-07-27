@@ -3252,19 +3252,39 @@ mod tests {
         assert_eq!(data.daily[0].0, day);
     }
 
+    /// A `Custom { from: day, to: day }` range includes the LAST instant of
+    /// `day` and excludes the first instant of the next day.
+    ///
+    /// Both boundary timestamps are derived from the HOST's local zone via the
+    /// same [`start_of_day`] / [`end_of_day`] helpers the range itself uses —
+    /// a `Custom` range is anchored at LOCAL midnight (`day_bounds`), and calls
+    /// are bucketed with `.with_timezone(&Local)`. The old fixture hardcoded a
+    /// `+01:00` wall clock, so "one second after midnight" was only after
+    /// midnight in a `+01:00` zone: on a UTC host `2026-04-11T00:00:00+01:00`
+    /// is 23:00 on the 10th, landed INSIDE the range, and the count came out 2
+    /// instead of 1. That made the test a statement about the developer's
+    /// timezone, and it was papered over with a `--skip` in CI.
     #[test]
     fn custom_ranges_are_inclusive() {
+        let day = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        let next_day = day.succ_opt().unwrap();
+        // Last instant of `day`, local → IN range. First instant of the next
+        // day, local → OUT of range.
+        let in_range = end_of_day(day).to_rfc3339();
+        let out_of_range = start_of_day(next_day).to_rfc3339();
+
         let temp = tempdir().unwrap();
         let claude_projects = temp.path().join(".claude/projects");
         let project_dir = claude_projects.join("proj");
         write_file(
             &project_dir.join("session.jsonl"),
-            r#"{"type":"assistant","timestamp":"2026-04-10T23:59:59+01:00","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1,"output_tokens":1}}}
-{"type":"assistant","timestamp":"2026-04-11T00:00:00+01:00","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":10}}}
-"#,
+            &format!(
+                r#"{{"type":"assistant","timestamp":"{in_range}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}
+{{"type":"assistant","timestamp":"{out_of_range}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":10,"output_tokens":10}}}}}}
+"#
+            ),
         );
 
-        let day = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
         let data = parse_usage_for_with_roots(
             UsageQuery {
                 provider_filter: UsageProviderFilter::Claude,

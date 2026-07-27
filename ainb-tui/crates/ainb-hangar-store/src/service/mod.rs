@@ -14,6 +14,11 @@
 //! [`finalize`] idempotent-transition primitive; P1.5 adds [`retry`], which
 //! spawns a `parent_task_id`-chained child row when a failed task is eligible.
 
+/// The issue-ACTIVITY diff engine (multica parity #13): one `activity_log` row
+/// per changed field, shared by the daemon and CLI issue-update writers so the
+/// two cannot drift on what counts as a change.
+pub mod activity;
+
 pub mod claim;
 
 /// The shared idempotent-finalize primitive.

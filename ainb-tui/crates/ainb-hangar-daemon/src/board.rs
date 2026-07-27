@@ -20,12 +20,17 @@
 //! committed, and an auto-move failure must never down the claim loop. A task
 //! with no matching auto-move column is a silent no-op.
 
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
+use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::task::Task;
+use ainb_hangar_store::service::activity::ActivityService;
 use sqlx::SqlitePool;
 
 use crate::events::EventSink;
@@ -99,12 +104,19 @@ pub async fn auto_move_after_transition(pool: &SqlitePool, task: &Task, new_stat
 ///
 /// # Advance-only
 ///
-/// The write is guarded to only ever move the issue FORWARD along the canonical
-/// column order ([`IssueLifecycle::order`]): a target at or behind the issue's
-/// current column is skipped. This mirrors the `if issue.state == …` guard the
-/// PR-merge snapshot uses (snapshots.rs) so a manually-set or PR-merged terminal
-/// state is never regressed — e.g. a re-run's `running` transition can never drag
-/// an already-`done` issue back to `in_progress`.
+/// The write is guarded to only ever move the issue FORWARD along the WORKFLOW
+/// PROGRESS rank ([`IssueLifecycle::advance_rank`]), and never to revive a
+/// terminal issue ([`IssueLifecycle::is_terminal`] — `done` / `cancelled`). This
+/// mirrors the `if issue.state == …` guard the PR-merge snapshot uses
+/// (snapshots.rs) so a manually-set or PR-merged terminal state is never
+/// regressed — e.g. a re-run's `running` transition can never drag an
+/// already-`done` issue back to `in_progress`.
+///
+/// The rank is deliberately NOT [`IssueLifecycle::order`]: `blocked` is APPENDED
+/// at column 5, to the right of `done`, so comparing column order would freeze a
+/// blocked issue forever (every later transition would read as "behind" it).
+/// `advance_rank` ranks `blocked` with `todo`, so unblocking and running an issue
+/// still promotes it.
 ///
 /// # Best-effort
 ///
@@ -124,6 +136,11 @@ pub async fn advance_issue_lifecycle_after_transition(
         "done" => IssueLifecycle::Done,
         // `failed` / `cancelled` / unknown carry no forward issue-lifecycle
         // meaning — leave the issue where it is.
+        //
+        // DELIBERATELY NOT WIRED: a `cancelled` TASK must not set its issue to
+        // the `cancelled` STATE. A cancelled run is normally followed by a
+        // re-run; whether the ISSUE is abandoned is a human/agent decision, not
+        // a consequence of one run being killed.
         _ => return,
     };
     let current = match IssueRepo::get_by_id(pool, issue_id).await {
@@ -135,20 +152,48 @@ pub async fn advance_issue_lifecycle_after_transition(
             return;
         }
     };
-    // Advance-only: never regress an issue that already sits at or beyond the
-    // target column (a manually-set or PR-merged terminal state, or the same
-    // state twice → idempotent no-op).
-    if target.order() <= IssueLifecycle::for_state(&current.state).order() {
+    let current_status = IssueLifecycle::for_state(&current.state);
+    // A TERMINAL issue (done / cancelled) is never revived by a run transition:
+    // a re-run's `running` must not drag a merged issue back to `in_progress`,
+    // and an abandoned issue stays abandoned until a human moves it.
+    if current_status.is_terminal() {
+        return;
+    }
+    // Advance-only, by WORKFLOW PROGRESS rather than board column order:
+    // `blocked` paints at column 5 (right of `done`) but ranks with `todo`, so
+    // comparing `order()` here would freeze a blocked issue forever. Same-rank
+    // targets are an idempotent no-op.
+    if target.advance_rank() <= current_status.advance_rank() {
         return;
     }
     match IssueRepo::update_state(pool, issue_id, target.as_str()).await {
-        Ok(()) => tracing::info!(
-            task_id = %task.id,
-            issue_id = %issue_id,
-            from = %current.state,
-            to = target.as_str(),
-            "issue lifecycle advanced"
-        ),
+        Ok(()) => {
+            // multica parity #13: a daemon-driven move is a `system` activity row
+            // carrying `via:"board"`, so the narrative distinguishes it from an
+            // owner edit. Best-effort — never fails the advance.
+            ActivityService::record(
+                pool,
+                &SystemIdGen,
+                &SystemClock,
+                &current.workspace_id,
+                issue_id,
+                &ActivityActor::System,
+                ActivityAction::StatusChanged,
+                serde_json::json!({
+                    "from": current.state,
+                    "to": target.as_str(),
+                    "via": "board",
+                }),
+            )
+            .await;
+            tracing::info!(
+                task_id = %task.id,
+                issue_id = %issue_id,
+                from = %current.state,
+                to = target.as_str(),
+                "issue lifecycle advanced"
+            );
+        }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle advance failed; proceeding");
         }
@@ -319,7 +364,19 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
     // Board-agnostic (the auto-run seam does not know which board); the F4 board
     // tier is skipped, the cascade still resolves the agent. Headless run.
     match crate::rpc::run_card(
-        pool, ws, None, &issue, "headless", None, None, None, None, None,
+        pool,
+        ws,
+        None,
+        &issue,
+        "headless",
+        None,
+        None,
+        None,
+        None,
+        None,
+        // multica parity #12: the dependency cascade is an AUTO_RUN trigger
+        // surface. Its refusals used to be a `debug!` line and nothing else.
+        ainb_hangar_core::dispatch_reason::DispatchSource::AutoRun,
     )
     .await
     {
@@ -331,6 +388,40 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
             tracing::warn!(issue = %issue_id, "auto-run refused (no repo/agent or store fault)")
         }
     }
+}
+
+/// Record a task's terminal OUTCOME on its issue's narrative (multica parity
+/// #13, write sites 8 + 9).
+///
+/// Attributed to `agent:<agent_id>` — the run's own agent, matching multica's
+/// listeners, which force the actor for `task:completed` / `task:failed`
+/// regardless of who triggered the run. `details` carries the task id (additive
+/// over multica's `{}`; the column is free-form).
+///
+/// Best-effort and no-op for a chat task with no issue: the task's terminal
+/// state has already committed and an audit write must never down the run loop.
+pub async fn record_task_outcome(pool: &SqlitePool, task: &Task, completed: bool) {
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    let actor = ActorRef::new(ActorKind::Agent, task.agent_id.clone())
+        .map_or(ActivityActor::System, ActivityActor::Actor);
+    let action = if completed {
+        ActivityAction::TaskCompleted
+    } else {
+        ActivityAction::TaskFailed
+    };
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        &task.workspace_id,
+        issue_id,
+        &actor,
+        action,
+        serde_json::json!({ "task_id": task.id }),
+    )
+    .await;
 }
 
 /// Advance the issue lifecycle, then cascade a completed sub-issue to its parent.
@@ -459,6 +550,8 @@ pub async fn maybe_cascade_child_done(
         None,
         Some(assignee),
         None,
+        // multica parity #12: the child-done cascade is an AUTO_RUN surface too.
+        ainb_hangar_core::dispatch_reason::DispatchSource::AutoRun,
     )
     .await
     {

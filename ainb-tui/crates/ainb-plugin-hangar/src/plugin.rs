@@ -254,6 +254,19 @@ const FLEET_SUBSCRIBE_REQ_ID: i64 = 58;
 const FLEET_ACTION_REQ_ID: i64 = 59;
 /// Explicit-recipient Fleet broadcast.
 const FLEET_BROADCAST_REQ_ID: i64 = 60;
+/// JSON-RPC id for a `hangar/skill_set_enabled` request (parity #24).
+const SKILL_SET_ENABLED_REQ_ID: i64 = 61;
+/// JSON-RPC id for a `hangar/agent_skills_list` request (parity #24). Fired
+/// after every attach / detach / toggle so the ` (disabled)` marker is fresh.
+const AGENT_SKILLS_LIST_REQ_ID: i64 = 62;
+/// JSON-RPC id for a `hangar/issue_criterion_set` request (multica parity
+/// #11-rest). Fired by the task-detail `t` key; the reply is an `IssueRow` and
+/// the daemon's `IssueUpdated` push re-renders the card.
+const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
+
+/// `hangar/issue_timeline` — the per-issue activity + comment narrative behind
+/// the `y` modal (multica parity #13).
+const ISSUE_TIMELINE_REQ_ID: i64 = 64;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -262,6 +275,17 @@ const FLEET_BROADCAST_REQ_ID: i64 = 60;
 /// `comment.author_type` CHECK), so this is accepted as-is; swapping in the real
 /// signed-in member is a drop-in change once identity lands.
 const SELF_AUTHOR_REF: &str = "member:me";
+
+/// Params for the two inbox RPCs: the workspace plus WHOSE inbox this is.
+///
+/// Every inbox entry is addressed to exactly one actor (store migration 0060),
+/// so the Inbox screen is THE LOCAL HUMAN's inbox, not a workspace-wide feed:
+/// the request names [`SELF_AUTHOR_REF`] as the recipient, and the daemon
+/// returns / sweeps only that actor's rows. When a real signed-in identity
+/// lands, only that constant changes.
+fn inbox_params(ws: &str) -> serde_json::Value {
+    serde_json::json!({ "workspace_id": ws, "recipient": SELF_AUTHOR_REF })
+}
 /// How many trailing log lines the logs pane reads from the newest `daemon.*`
 /// file on each refresh (P8.6). Bounded so a huge log file never blows up the
 /// pane; the daily rotation keeps a single day's file the practical ceiling.
@@ -299,6 +323,10 @@ pub struct HangarPlugin {
     /// detail reply can be folded onto the right skill. `None` when no detail
     /// request is pending.
     pending_detail_slug: Option<String>,
+    /// Armed after any attach / detach / toggle reply: the next `render` pass
+    /// fires `hangar/agent_skills_list` so the skill rows' ` (disabled)` markers
+    /// never go stale (parity #24).
+    refresh_agent_skill_links: bool,
     /// The id of the autopilot a `hangar/autopilot_runs` is in flight for (P7.5),
     /// so the reply folds onto the right row. `None` when none pending.
     pending_runs_autopilot: Option<String>,
@@ -544,6 +572,7 @@ impl Default for HangarPlugin {
             first_run: FirstRunModal::default(),
             first_run_ack_pending: false,
             pending_detail_slug: None,
+            refresh_agent_skill_links: false,
             pending_runs_autopilot: None,
             opener: crate::shell::default_opener(),
             daemon_starter: crate::shell::default_daemon_starter(),
@@ -988,6 +1017,11 @@ impl HangarPlugin {
                 self.apply_agents(resp);
                 if let Some(e) = &resp.error {
                     self.screens.squads.note_err(format!("agent create failed: {}", e.message));
+                    // The create can be raised from EITHER pane, so the refusal
+                    // (e.g. migration 0050's duplicate name) must also land on the
+                    // Agents screen — otherwise the wizard closes and nothing at
+                    // all is said about why no agent appeared.
+                    self.screens.agents.note_err(e.message.clone());
                 } else {
                     self.screens.squads.note_ok("agent created");
                 }
@@ -1011,6 +1045,7 @@ impl HangarPlugin {
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
             RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
+            RpcId::Number(ISSUE_TIMELINE_REQ_ID) => self.apply_issue_timeline(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // tcp T5: the notification routing grid snapshot.
             RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
@@ -1094,6 +1129,11 @@ impl HangarPlugin {
             // the changed row or `{}`; we re-fetch the relevant lists to refresh
             // derived columns (`used`, next-tick, enabled, last-run, task status
             // buckets, issue assignee, inbox unread count).
+            // Parity #24: the link listing feeds the ` (disabled)` marker.
+            RpcId::Number(AGENT_SKILLS_LIST_REQ_ID) => self.apply_agent_skill_links(resp),
+            // Parity #24: a toggle changes only the per-agent link, so refresh
+            // the link map rather than the whole snapshot batch.
+            RpcId::Number(SKILL_SET_ENABLED_REQ_ID) => self.refresh_agent_skill_links = true,
             RpcId::Number(
                 SKILLS_SYNC_REQ_ID
                 | SKILL_ATTACH_REQ_ID
@@ -1110,6 +1150,9 @@ impl HangarPlugin {
                 | PROFILE_UPSERT_REQ_ID,
             ) => {
                 self.fetch_pending = true;
+                // Attach / detach change the link SET for the selected agent, so
+                // the enablement map must be re-read too (parity #24).
+                self.refresh_agent_skill_links = true;
                 self.conn.on_event();
             }
             // Any other response/event keeps the link alive.
@@ -1267,7 +1310,9 @@ impl HangarPlugin {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::InboxListResult>(
                 result.clone(),
             ) {
-                self.screens.set_inbox(r.entries, r.unread);
+                // The snapshot was requested for the local human, so the screen
+                // is tagged with the actor it belongs to.
+                self.screens.set_inbox(r.entries, r.unread, SELF_AUTHOR_REF.to_string());
             }
         }
     }
@@ -1693,7 +1738,8 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let params = serde_json::json!({ "workspace_id": ws });
+        // The sweep names the local human: it must never clear an agent's rows.
+        let params = inbox_params(&ws);
         let Ok(body) = encode_request(
             INBOX_MARK_READ_REQ_ID,
             daemon_methods::HANGAR_INBOX_MARK_READ,
@@ -1871,6 +1917,53 @@ impl HangarPlugin {
         }
     }
 
+    /// Fold a `hangar/agent_skills_list` result onto the skill-manager screen
+    /// (parity #24): the selected agent's links plus their per-agent enablement.
+    fn apply_agent_skill_links(&mut self, resp: &RpcResponse) {
+        let Some(result) = &resp.result else {
+            return;
+        };
+        let Ok(listing) = serde_json::from_value::<
+            ainb_hangar_proto::snapshots::AgentSkillsListResult,
+        >(result.clone()) else {
+            return;
+        };
+        let out = crate::screen::skill_manager::reduce_skill_manager(
+            &self.screens.skill_manager,
+            crate::screen::skill_manager::SkillManagerEvent::LinksLoaded(listing.links),
+        );
+        self.screens.skill_manager = out.state;
+    }
+
+    /// Fire `hangar/agent_skills_list` for the currently-targeted agent when a
+    /// preceding attach / detach / toggle armed the refresh (parity #24).
+    ///
+    /// A no-op when nothing armed it, when the socket is down, or when the
+    /// workspace has no agent — exactly the guards the mutations themselves use.
+    async fn drain_agent_skill_links_refresh(&mut self, host: &HostClient) {
+        if !self.refresh_agent_skill_links {
+            return;
+        }
+        self.refresh_agent_skill_links = false;
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let Some(agent) = self.first_agent_ref() else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let Ok(body) = encode_request(
+            AGENT_SKILLS_LIST_REQ_ID,
+            daemon_methods::HANGAR_AGENT_SKILLS_LIST,
+            serde_json::json!({ "workspace_id": ws, "agent_id": agent }),
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: agent_skills_list send failed: {e}")).await;
+        }
+    }
+
     /// Build the settings cache from an `hangar/health` result.
     fn apply_health(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
@@ -2024,7 +2117,7 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let scoped = serde_json::json!({ "workspace_id": ws });
+        let scoped = serde_json::json!({ "workspace_id": ws.clone() });
         let requests = [
             (
                 ISSUES_REQ_ID,
@@ -2087,10 +2180,14 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_DAEMON_CONFIG_LIST,
                 serde_json::json!({}),
             ),
+            // The Inbox screen is THE LOCAL HUMAN's inbox, not the workspace's:
+            // every entry is addressed to one actor (store migration 0060), so
+            // the request names whose inbox this is. When a real signed-in
+            // identity lands, only `SELF_AUTHOR_REF` changes.
             (
                 INBOX_LIST_REQ_ID,
                 daemon_methods::HANGAR_INBOX_LIST,
-                scoped.clone(),
+                inbox_params(&ws),
             ),
             // The control-center board is FLEET-WIDE (every workspace + the
             // no-workspace host sessions), so its feed is unscoped by design.
@@ -2372,6 +2469,26 @@ impl HangarPlugin {
                     serde_json::json!({ "workspace_id": ws, "agent_id": agent, "skill_id": slug }),
                 )
             }
+            SkillAction::ToggleEnabled(slug) => {
+                let Some(agent) = self.first_agent_ref() else {
+                    let _ = host.log_info("hangar: no agent to toggle skill for").await;
+                    return;
+                };
+                // A link the daemon has not reported on is treated as ENABLED
+                // (the column default), so the first `t` on it disables it —
+                // matching what the row renders.
+                let enabled = !self.screens.skill_manager.link_disabled(&slug);
+                (
+                    SKILL_SET_ENABLED_REQ_ID,
+                    daemon_methods::HANGAR_SKILL_SET_ENABLED,
+                    serde_json::json!({
+                        "workspace_id": ws,
+                        "agent_id": agent,
+                        "skill_id": slug,
+                        "enabled": !enabled,
+                    }),
+                )
+            }
         };
         let Ok(body) = encode_request(id, method, params) else {
             return;
@@ -2608,10 +2725,11 @@ impl HangarPlugin {
                 board_id,
                 dependent_issue_id,
                 blocker_issue_id,
+                link_type,
             } => (
                 BOARDS_REQ_ID,
                 daemon_methods::HANGAR_BOARD_CARD_DEP_ADD,
-                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id }),
+                serde_json::json!({ "workspace_id": ws, "board_id": board_id, "dependent_issue_id": dependent_issue_id, "blocker_issue_id": blocker_issue_id, "link_type": link_type }),
             ),
             BoardsAction::CardSetAutoRun {
                 board_id,
@@ -2732,6 +2850,32 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_SQUAD_MEMBER_REMOVE,
                 serde_json::json!({ "workspace_id": ws, "squad_id": squad_id, "member": member_ref }),
             ),
+            SquadAction::SetMemberRole {
+                squad_id,
+                member_ref,
+                role,
+            } => (
+                SQUADS_LIST_REQ_ID,
+                daemon_methods::HANGAR_SQUAD_MEMBER_ROLE_SET,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "squad_id": squad_id,
+                    "member": member_ref,
+                    "role": role,
+                }),
+            ),
+            SquadAction::SetInstructions {
+                squad_id,
+                instructions,
+            } => (
+                SQUADS_LIST_REQ_ID,
+                daemon_methods::HANGAR_SQUAD_INSTRUCTIONS_SET,
+                serde_json::json!({
+                    "workspace_id": ws,
+                    "squad_id": squad_id,
+                    "instructions": instructions,
+                }),
+            ),
             SquadAction::Assign { squad_id } => {
                 let Some(issue_id) = self.first_assignable_issue() else {
                     self.screens.squads.note_err("no issue available to assign");
@@ -2773,21 +2917,23 @@ impl HangarPlugin {
         let (id, method, params) = match action {
             AgentsAction::Create {
                 name,
+                description,
                 provider,
                 model,
                 instructions,
             } => (
                 AGENT_CREATE_REQ_ID,
                 daemon_methods::HANGAR_AGENT_CREATE,
-                // `model` / `instructions` are `Option`s; the proto's
-                // `skip_serializing_if` drops them when absent so the wire stays
-                // clean and the daemon leaves those columns at their defaults.
+                // `model` / `instructions` / `description` are `Option`s; the
+                // proto's `skip_serializing_if` drops them when absent so the wire
+                // stays clean and the daemon leaves those columns at their defaults.
                 serde_json::json!({
                     "workspace_id": ws,
                     "name": name,
                     "provider": provider,
                     "model": model,
                     "instructions": instructions,
+                    "description": description,
                 }),
             ),
             AgentsAction::Delete { actor_ref } => {
@@ -3007,6 +3153,87 @@ impl HangarPlugin {
         }
     }
 
+    /// Fire a deferred acceptance-criterion tick raised by the task-detail `t`
+    /// key (multica parity #11-rest).
+    ///
+    /// Maps the [`IssueCriterionAction`] to `hangar/issue_criterion_set`,
+    /// addressing the criterion by its STABLE id and attributing the tick to the
+    /// current member. The daemon's `IssueUpdated` push re-renders the card
+    /// (mirroring [`Self::apply_comment_action`] — this fires the RPC only, no
+    /// separate re-pull). A send failure is logged but non-fatal — the criterion
+    /// simply stays as it was.
+    ///
+    /// [`IssueCriterionAction`]: crate::screen::IssueCriterionAction
+    async fn apply_criterion_action(
+        &mut self,
+        host: &HostClient,
+        action: crate::screen::IssueCriterionAction,
+    ) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({
+            "workspace_id": ws,
+            "issue_id": action.issue_id,
+            "criterion": action.criterion_id,
+            "checked": action.checked,
+            "actor": SELF_AUTHOR_REF,
+        });
+        let Ok(body) = encode_request(
+            ISSUE_CRITERION_SET_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_CRITERION_SET,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: criterion set send failed: {e}")).await;
+        }
+    }
+
+    /// Fold a `hangar/issue_timeline` reply into the open activity modal
+    /// (multica parity #13).
+    ///
+    /// A no-op when the modal has since closed (a stale reply for a dismissed
+    /// overlay), and an error leaves the modal in its loading state rather than
+    /// showing a fabricated empty narrative.
+    fn apply_issue_timeline(&mut self, resp: &ainb_hangar_proto::RpcResponse) {
+        let Some(result) = resp.result.as_ref() else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_value::<ainb_hangar_proto::snapshots::IssueTimelineResult>(
+            result.clone(),
+        ) else {
+            return;
+        };
+        if let Some(activity) = self.screens.activity.as_mut() {
+            activity.apply_entries(parsed.entries);
+        }
+        self.conn.on_event();
+    }
+
+    /// Fire a deferred `hangar/issue_timeline` fetch for the open activity modal
+    /// (multica parity #13). A send failure is logged but non-fatal — the modal
+    /// keeps its loading state and `r` retries.
+    async fn fire_issue_timeline(&mut self, host: &HostClient, issue_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
+        let Ok(body) = encode_request(
+            ISSUE_TIMELINE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_TIMELINE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: issue timeline send failed: {e}")).await;
+        }
+    }
+
     /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
     /// task-detail's issue (e38.34).
     ///
@@ -3068,6 +3295,9 @@ impl HangarPlugin {
             external_ref,
             acceptance_criteria,
             context_refs,
+            priority,
+            due_date,
+            labels,
             repo_ref,
             source_branch,
             target_branch,
@@ -3110,6 +3340,18 @@ impl HangarPlugin {
         }
         if !context_refs.is_empty() {
             params["context_refs"] = serde_json::json!(context_refs);
+        }
+        // 0014/0016: the wizard's Priority / Due / Labels rows. Each key is added
+        // ONLY when the author moved it off its default, so an unadorned create's
+        // wire shape stays byte-identical to pre-parity-28 (append-only).
+        if priority != 0 {
+            params["priority"] = serde_json::json!(priority);
+        }
+        if let Some(due) = due_date {
+            params["due_date"] = serde_json::json!(due);
+        }
+        if !labels.is_empty() {
+            params["labels"] = serde_json::json!(labels);
         }
         let Ok(body) = encode_request(
             ISSUE_CREATE_REQ_ID,
@@ -3445,7 +3687,7 @@ impl HangarPlugin {
                 self.app = Some(next);
             }
         }
-        self.screens.set_workspaces(rows);
+        self.screens.set_workspaces(rows, list.creation_disabled);
     }
 
     /// Compose the full render frame into a fresh [`WireBuffer`] (the pure,
@@ -3590,10 +3832,12 @@ impl HangarPlugin {
         if matches!(app.screen, Screen::IssueList) && self.screens.issue_list.is_capturing_text() {
             if matches!(key.code, KeyCode::Esc) {
                 // Esc drops whichever capture surface is open in one press — the
-                // create wizard OR the `x` delete-confirm overlay (both no-op when
-                // not in their mode), never trapping the user (63d).
+                // create wizard, the `x` delete-confirm overlay, OR the `f` facet
+                // panel (multica-gap #10; all no-op when not in their mode), never
+                // trapping the user (63d).
                 self.screens.issue_list.abort_create();
                 self.screens.issue_list.abort_confirm_delete();
+                self.screens.issue_list.abort_filter_panel();
                 return;
             }
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
@@ -3647,7 +3891,7 @@ impl HangarPlugin {
         // typed text, not a nav key. Route straight to the screen reducer (which
         // owns Esc-to-cancel), mirroring the issue-list capture guard so typing a
         // squad name like `qa` inserts instead of quitting / switching tabs.
-        if matches!(app.screen, Screen::Squads) && self.screens.squads.is_creating() {
+        if matches!(app.screen, Screen::Squads) && self.screens.squads.is_capturing() {
             if let Some(nav) = route_key(&app, &mut self.screens, key) {
                 self.apply_nav(&app, nav);
             }
@@ -4137,6 +4381,11 @@ impl HangarPlugin {
         // renders the task's title + status; the streaming transcript folds events
         // addressed to this task id, exactly as the issue board's open does.
         let issue = ainb_hangar_proto::events::IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str(format!("task-{task_id}")).unwrap_or_else(
                 |_| ainb_hangar_core::ids::IssueId::from_str("task").expect("non-empty"),
             ),
@@ -4174,7 +4423,9 @@ impl HangarPlugin {
             // The Kanban-synthesized header carries no acceptance / context lists of
             // its own (the daemon owns those on the real issue row).
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         };
         // Seed the run's branch (tcp T2, agents-in-a-box-ch3) from the clicked
         // card so the detail view surfaces `ainb/<slug>` exactly as the card does.
@@ -4500,6 +4751,24 @@ impl HangarPlugin {
                 let reduction = crate::screen::reduce(app, AppEvent::OpenAgentPicker(issue_id));
                 self.app = Some(reduction.state);
             }
+            // multica parity #13: open the card's activity timeline AND arm the
+            // fetch — the modal opens immediately in its loading state and the
+            // `render` pass fires `hangar/issue_timeline`.
+            NavIntent::OpenActivityTimeline(issue_id) => {
+                let title = self
+                    .screens
+                    .issue_list
+                    .visible_rows()
+                    .find(|r| r.id == issue_id)
+                    .map_or_else(|| issue_id.as_str().to_string(), |r| r.title.clone());
+                self.screens.activity = Some(crate::screen::activity::ActivityState::loading(
+                    &issue_id, title,
+                ));
+                self.screens.pending_activity_fetch = Some(issue_id.as_str().to_string());
+                let reduction =
+                    crate::screen::reduce(app, AppEvent::OpenActivityTimeline(issue_id));
+                self.app = Some(reduction.state);
+            }
             NavIntent::OpenTaskForIssue(issue_id) => {
                 // Open task detail bound to the issue's row + the running task.
                 let issue =
@@ -4659,16 +4928,17 @@ const fn is_ctrl_p(key: &ainb_plugin_sdk::KeyEvent) -> bool {
 /// On a modal screen Esc closes the modal (handled by the screen router); on a
 /// non-modal screen the per-screen reducer may want Esc, so it falls through.
 const fn routing_event(key: &ainb_plugin_sdk::KeyEvent, app: &AppState) -> Option<AppEvent> {
+    // A CTRL/ALT chord is never a tab switch: `Ctrl+K` / `Alt+D` belong to the
+    // active screen (or to the host), so the routing layer must not steal them.
+    // SHIFT is untouched — the claimed chars are already uppercase.
+    let chorded = key.mods & (ainb_plugin_sdk::KEY_MOD_CTRL | ainb_plugin_sdk::KEY_MOD_ALT) != 0;
     match &key.code {
-        KeyCode::Char { ch }
-            // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
-            // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
-            // numbered tabs are now contiguous `1`→`4`.
-            if matches!(
-                *ch,
-                '1' | '2' | '3' | '4' | 'B' | 'K' | 'D' | 'U' | 'L' | 'I' | 'C' | 'F' | 'S' | 'P' | 'A' | ',' | '?' | 'q'
-            ) =>
-        {
+        // `3`/`4` are the renumbered Skills/Autopilots tab keys after the old
+        // `[3]Agents` tab folded into the issue-list filter chip (e38.38); the
+        // numbered tabs are now contiguous `1`→`4`. The claimed set lives once,
+        // in `screen::router::ROUTER_KEYS`, so screens can assert against it
+        // (`no_screen_binds_a_reserved_key`, #450).
+        KeyCode::Char { ch } if !chorded && crate::screen::router::is_router_key(*ch) => {
             Some(AppEvent::Key(*ch))
         }
         // Esc routes through the router to close most modals (agent picker, help).
@@ -4830,7 +5100,7 @@ impl Plugin for HangarPlugin {
                     || s.config_input_buffer().is_some()
                     || s.workspace_name_input().is_some()
             }),
-            Screen::Squads => self.screens.squads.is_creating(),
+            Screen::Squads => self.screens.squads.is_capturing(),
             // Every open Boards overlay (create-title / profile-pick / column
             // rename / `Run ▾`) consumes all keys as input, per its routing guard.
             Screen::Boards => self.screens.boards.overlay().is_some(),
@@ -4891,6 +5161,9 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_skill_action() {
             self.apply_skill_action(host, action).await;
         }
+        // Parity #24: after any attach / detach / toggle reply, re-read the
+        // selected agent's links so the ` (disabled)` markers stay honest.
+        self.drain_agent_skill_links_refresh(host).await;
         // P7.5: drain any deferred autopilot RPC (load-runs / fire-now /
         // set-enabled) raised by the autopilot-manager screen.
         if let Some(action) = self.screens.take_pending_autopilot_action() {
@@ -4938,6 +5211,11 @@ impl Plugin for HangarPlugin {
         if let Some(action) = self.screens.take_pending_comment_action() {
             self.apply_comment_action(host, action).await;
         }
+        // #11-rest: drain a deferred acceptance-criterion tick (`t` on the
+        // task-detail card) and fire `hangar/issue_criterion_set`.
+        if let Some(action) = self.screens.take_pending_criterion_action() {
+            self.apply_criterion_action(host, action).await;
+        }
         // Phase 5: drain a deferred wizard create (Enter on the Agent stage) and
         // fire `hangar/issue_create` over the daemon socket; the reply arms the
         // follow-up dispatch below.
@@ -4976,6 +5254,12 @@ impl Plugin for HangarPlugin {
         // auto-moved to Done daemon-side (announced via `IssueUpdated`).
         if let Some(issue_id) = self.pending_pr_status_refresh.take() {
             self.fire_pr_status_refresh(host, issue_id).await;
+        }
+        // multica parity #13: drain a deferred activity-timeline fetch (armed by
+        // `y` opening the modal, or `r` inside it) and fire
+        // `hangar/issue_timeline`. The reply folds the merged narrative in.
+        if let Some(issue_id) = self.screens.pending_activity_fetch.take() {
+            self.fire_issue_timeline(host, issue_id).await;
         }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active
@@ -5091,6 +5375,35 @@ impl Plugin for HangarPlugin {
 mod tests {
     use super::*;
     use ainb_plugin_protocol::manifest::{CapabilityGrant, Manifest};
+
+    /// Both inbox RPCs must carry the local human as the `recipient`, or the
+    /// daemon silently answers with `member:me`'s inbox by default while the
+    /// screen claims to be someone else's.
+    ///
+    /// MUTATION GUARD: dropping `recipient` from [`inbox_params`] fails this,
+    /// and both `hangar/inbox_list` and `hangar/inbox_mark_read` are encoded
+    /// from it, so the wire shape is pinned end to end.
+    #[test]
+    fn inbox_requests_name_the_local_human_as_recipient() {
+        let params = inbox_params("default");
+        assert_eq!(params["workspace_id"], "default");
+        assert_eq!(
+            params["recipient"], SELF_AUTHOR_REF,
+            "the inbox request must name whose inbox it reads: {params}"
+        );
+
+        for method in [
+            daemon_methods::HANGAR_INBOX_LIST,
+            daemon_methods::HANGAR_INBOX_MARK_READ,
+        ] {
+            let frame = encode_request(29, method, inbox_params("default")).expect("encode");
+            let body = String::from_utf8(frame).expect("utf8 frame");
+            assert!(
+                body.contains("\"recipient\":\"member:me\""),
+                "{method} must carry the recipient on the wire: {body}"
+            );
+        }
+    }
 
     #[test]
     fn manifest_returns_canonical_toml() {
@@ -5563,6 +5876,11 @@ mod tests {
         p.conn.on_dialed("s1");
         p.conn.on_subscribe_ack();
         p.screens.set_issues(vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),
@@ -5589,7 +5907,9 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }]);
         p
     }
@@ -5717,6 +6037,11 @@ mod tests {
         // more than one column (the press must resolve the RIGHT card).
         p.screens.set_issues(vec![
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
                 display_id: Some("HGR-1".into()),
                 workspace_id: "default".into(),
@@ -5743,9 +6068,16 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
                 display_id: Some("HGR-2".into()),
                 workspace_id: "default".into(),
@@ -5772,7 +6104,9 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
         ]);
 
@@ -5936,6 +6270,11 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "default".into(),
@@ -5962,7 +6301,9 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }]);
         p.rebuild_hit_map(120, 24);
 
@@ -6025,6 +6366,11 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "default".into(),
@@ -6051,7 +6397,9 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         }]);
         // The card starts in Backlog.
         assert_eq!(p.screens.issue_list.column_count(IssueColumn::Backlog), 1);
@@ -6106,6 +6454,11 @@ mod tests {
         // Several Todo cards so a scroll offset is observable.
         let rows: Vec<IssueRow> = (0..4)
             .map(|i| IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str(format!("t{i}")).unwrap(),
                 display_id: Some(format!("HGR-{i}")),
                 workspace_id: "default".into(),
@@ -6132,7 +6485,9 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             })
             .collect();
         p.screens.set_issues(rows);
@@ -6191,6 +6546,11 @@ mod tests {
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-a").unwrap(),
                 display_id: Some("HGR-1".into()),
                 workspace_id: "default".into(),
@@ -6217,9 +6577,16 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
             IssueRow {
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
                 display_id: Some("HGR-2".into()),
                 workspace_id: "default".into(),
@@ -6246,7 +6613,9 @@ mod tests {
                 child_total: 0,
                 child_done: 0,
                 acceptance_criteria: Vec::new(),
+                acceptance: Vec::new(),
                 context_refs: Vec::new(),
+                dependencies: Vec::new(),
             },
         ]);
         p.screens.set_actors(vec![ActorRow {
@@ -6257,6 +6626,7 @@ mod tests {
             workload: ainb_hangar_proto::events::Workload::Idle,
             is_agent: false,
             recent_rank: Some(0),
+            ..ActorRow::default()
         }]);
         p
     }
@@ -6635,6 +7005,322 @@ mod tests {
         );
     }
 
+    // ----- #450: advertised screen keys must survive the global router -----
+
+    /// Seed a connected plugin parked on Boards with one board, one `Todo`
+    /// column, and one focused card, plus a one-squad roster. Drives the REAL
+    /// production key seam (`on_key`) in the tests below.
+    fn plugin_on_seeded_board() -> HangarPlugin {
+        use ainb_hangar_proto::snapshots::{
+            BoardCardWireRow, BoardColumnWireRow, BoardWireRow, BoardsListResult, SquadWireRow,
+            SquadsListResult,
+        };
+        let mut p = connected_plugin_with_issue();
+        p.screens.set_boards(&BoardsListResult {
+            boards: vec![BoardWireRow {
+                id: "b1".into(),
+                name: "Delivery".into(),
+                auto_move: true,
+                columns: vec![
+                    BoardColumnWireRow {
+                        id: "c-todo".into(),
+                        name: "Todo".into(),
+                        ord: 0,
+                        fsm_state: None,
+                        auto_move: false,
+                        cards: vec![
+                            BoardCardWireRow {
+                                issue_id: "issue-1".into(),
+                                title: "Refactor API".into(),
+                                display_id: "1".into(),
+                                state: None,
+                                session_name: None,
+                                repo_ref: None,
+                                agent: None,
+                                squad_id: None,
+                                member_states: Vec::new(),
+                                blocked_by: Vec::new(),
+                                auto_run: false,
+                                blocks: Vec::new(),
+                                related: Vec::new(),
+                            },
+                            BoardCardWireRow {
+                                issue_id: "issue-2".into(),
+                                title: "Ship docs".into(),
+                                display_id: "2".into(),
+                                state: None,
+                                session_name: None,
+                                repo_ref: None,
+                                agent: None,
+                                squad_id: None,
+                                member_states: Vec::new(),
+                                blocked_by: Vec::new(),
+                                auto_run: false,
+                                blocks: Vec::new(),
+                                related: Vec::new(),
+                            },
+                        ],
+                    },
+                    BoardColumnWireRow {
+                        id: "c-done".into(),
+                        name: "Done".into(),
+                        ord: 1,
+                        fsm_state: None,
+                        auto_move: false,
+                        cards: Vec::new(),
+                    },
+                ],
+                unmapped: Vec::new(),
+            }],
+        });
+        p.screens.set_squads(&SquadsListResult {
+            squads: vec![SquadWireRow {
+                id: "squad-1".into(),
+                name: "Platform".into(),
+                leader: "agent:a1".into(),
+                members: vec!["agent:a1".into()],
+                ..SquadWireRow::default()
+            }],
+        });
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Boards;
+        p.app = Some(app);
+        p
+    }
+
+    /// THE #450 ACCEPTANCE PROOF: the advertised squad key opens the assign-squad
+    /// picker on the focused card and commits an assignment — driven through the
+    /// production `on_key` seam, not the pure reducer.
+    ///
+    /// Fails on `main`: the key was `q`, which the global router claims as quit,
+    /// so the press armed `close_request_pending` and popped the whole panel
+    /// instead. `BoardsEvent::AssignSquad` was unreachable from a real keypress.
+    #[test]
+    fn boards_squad_key_opens_the_picker_instead_of_quitting() {
+        use crate::screen::boards::BoardsOverlay;
+        let mut p = plugin_on_seeded_board();
+
+        p.on_key(&char_press('s'));
+
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::SquadPick { issue_id, .. }) if issue_id == "issue-1"
+            ),
+            "the squad key must open the SquadPick picker on the focused card, got {:?}",
+            p.screens.boards.overlay()
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Boards),
+            "the squad key must not leave the Boards screen, got {:?}",
+            p.app_state().screen
+        );
+        assert!(
+            !p.close_request_pending,
+            "the squad key must NOT arm a ui.close_request (that is the #450 bug)"
+        );
+
+        // Down onto the roster's first squad (row 0 is the "clear" row), Enter commits.
+        p.on_key(&key_press(KeyCode::Down));
+        p.on_key(&key_press(KeyCode::Enter));
+        assert_eq!(
+            p.screens.take_pending_boards_action(),
+            Some(crate::screen::app_screens::BoardsAction::CardAssignSquad {
+                board_id: "b1".into(),
+                issue_id: "issue-1".into(),
+                squad_id: Some("squad-1".into()),
+            }),
+            "Enter on a roster row must commit the squad assignment RPC"
+        );
+    }
+
+    /// The escape hatch survives the rebind: bare `q` on Boards (no overlay) is
+    /// still the global quit, arming a `ui.close_request` so the user is never
+    /// trapped on a screen whose Esc is a no-op.
+    #[test]
+    fn boards_q_still_quits() {
+        let mut p = plugin_on_seeded_board();
+        p.on_key(&char_press('q'));
+        assert!(
+            p.close_request_pending,
+            "`q` on Boards must still arm the ui.close_request escape hatch"
+        );
+        assert!(
+            p.screens.boards.overlay().is_none(),
+            "`q` must not open a boards overlay, got {:?}",
+            p.screens.boards.overlay()
+        );
+    }
+
+    /// The other two rebound Boards verbs are live through the real key seam:
+    /// `w` opens the depends-on picker, `>` / `<` reorder the focused column.
+    ///
+    /// Fails on `main`: `D` switched to the daemon-health tab and `L`/`H` to the
+    /// logs tab / host help toggle.
+    #[test]
+    fn boards_depends_on_and_reorder_keys_are_live() {
+        use crate::screen::boards::BoardsOverlay;
+        let mut p = plugin_on_seeded_board();
+
+        p.on_key(&char_press('w'));
+        assert!(
+            matches!(
+                p.screens.boards.overlay(),
+                Some(BoardsOverlay::DepPick { dependent_issue_id, .. })
+                    if dependent_issue_id == "issue-1"
+            ),
+            "`w` must open the depends-on picker, got {:?}",
+            p.screens.boards.overlay()
+        );
+        assert!(matches!(p.app_state().screen, Screen::Boards));
+        p.on_key(&key_press(KeyCode::Esc));
+        let _ = p.screens.take_pending_boards_action();
+
+        p.on_key(&char_press('>'));
+        assert_eq!(
+            p.screens.take_pending_boards_action(),
+            Some(crate::screen::app_screens::BoardsAction::ColumnReorder {
+                board_id: "b1".into(),
+                column_ids: vec!["c-done".into(), "c-todo".into()],
+            }),
+            "`>` must lift a column-reorder RPC"
+        );
+        p.on_key(&char_press('<'));
+        // Focus followed the dragged column to index 1, so `<` drags it back.
+        // Assert the SHAPE (a reorder for this board over both columns), not a
+        // frozen id order — the local board is not re-sorted until the daemon
+        // answers, so the emitted order is the same swap either way.
+        assert!(
+            matches!(
+                p.screens.take_pending_boards_action(),
+                Some(crate::screen::app_screens::BoardsAction::ColumnReorder {
+                    board_id,
+                    column_ids,
+                }) if board_id == "b1" && column_ids.len() == 2
+            ),
+            "`<` must lift a column-reorder RPC"
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Boards) && !p.close_request_pending,
+            "the reorder keys must not navigate away or close the panel"
+        );
+    }
+
+    /// THE GENERAL GUARD: every single-char key the Boards hint band ADVERTISES
+    /// must actually reach the boards screen — pressing it may never switch tabs
+    /// or close the panel.
+    ///
+    /// Fails on `main` for `q` (quit) and `D` (daemon health): the band was
+    /// advertising keys the router ate first.
+    #[test]
+    fn every_boards_hint_band_key_is_reachable() {
+        for (key, desc) in crate::screen::boards::BOARDS_HINTS {
+            let mut chars = key.chars();
+            let (Some(ch), None) = (chars.next(), chars.next()) else {
+                continue; // compound / glyph hint (`↵`, `⇧←→`) — not a bare char
+            };
+            if !ch.is_ascii() {
+                continue;
+            }
+            let mut p = plugin_on_seeded_board();
+            p.on_key(&char_press(ch));
+            assert!(
+                matches!(p.app_state().screen, Screen::Boards),
+                "Boards advertises `{ch}:{desc}` but pressing it left the screen \
+                 (went to {:?}) — the router stole it",
+                p.app_state().screen
+            );
+            assert!(
+                !p.close_request_pending,
+                "Boards advertises `{ch}:{desc}` but pressing it closed the panel — \
+                 the router stole it as quit"
+            );
+        }
+    }
+
+    /// #450 (Fleet row): `a` on the Fleet pane raises the takeover-attach intent
+    /// and stays on Fleet. It was `A` — which the router claims as the Agents tab,
+    /// so the advertised `→/A:attach` navigated away instead of attaching.
+    #[test]
+    fn fleet_lowercase_a_attaches() {
+        use crate::screen::fleet::{FleetCapabilities, FleetIntent, FleetSessionRow};
+        let mut p = connected_plugin_with_issue();
+        p.screens.fleet.set_sessions(vec![FleetSessionRow {
+            session_key: "claude:ask".into(),
+            provider: "claude".into(),
+            provider_session_id: Some("provider-claude:ask".into()),
+            current_request_fingerprint: None,
+            current_request: None,
+            lifecycle_state: "IDLE".into(),
+            attention_state: "ASK".into(),
+            management_state: "managed".into(),
+            provenance: "hangar-authoritative".into(),
+            confidence: "authoritative".into(),
+            transport_health: "healthy".into(),
+            capabilities: FleetCapabilities::List(vec!["tmux_attach".to_string()]),
+            version: 7,
+            cwd: "/work/claude".into(),
+            tmux_target: Some("claude:ask:0.0".into()),
+            display_name: Some("claude:ask".into()),
+            repository_name: Some("claude".into()),
+            branch_name: Some("main".into()),
+            discovered_at: 1_000,
+            last_observed_at: 9_000,
+            metadata_updated_at: 9_000,
+            lifecycle_updated_at: 9_000,
+            attention_updated_at: 9_000,
+            transport_updated_at: 9_000,
+        }]);
+        let mut app = p.app_state().clone();
+        app.screen = Screen::Fleet;
+        p.app = Some(app);
+
+        p.on_key(&char_press('a'));
+
+        assert!(
+            matches!(p.app_state().screen, Screen::Fleet),
+            "`a` must stay on Fleet, got {:?}",
+            p.app_state().screen
+        );
+        assert_eq!(
+            p.screens.take_pending_fleet_intent(),
+            Some(FleetIntent::AttachFullscreen {
+                session_key: "claude:ask".into(),
+                tmux_target: "claude:ask:0.0".into(),
+            }),
+            "`a` on Fleet must raise the takeover-attach intent"
+        );
+    }
+
+    /// #450 (Settings row): `]` / `[` move the in-section list selection. They
+    /// were `J` / `K`, and bare `K` is the router's Kanban tab key — so the
+    /// advertised in-section navigation half-worked at best.
+    #[test]
+    fn settings_bracket_keys_move_the_in_section_list() {
+        let mut p = plugin_on_workspaces_settings();
+        let start = p.screens.settings.as_ref().expect("settings seeded").list_selected();
+
+        p.on_key(&char_press(']'));
+        let moved = p.screens.settings.as_ref().expect("settings seeded").list_selected();
+        assert_ne!(moved, start, "`]` must move the workspace-row selection");
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings),
+            "`]` must not leave the Settings screen, got {:?}",
+            p.app_state().screen
+        );
+
+        p.on_key(&char_press('['));
+        assert_eq!(
+            p.screens.settings.as_ref().expect("settings seeded").list_selected(),
+            start,
+            "`[` must move the workspace-row selection back"
+        );
+        assert!(
+            matches!(p.app_state().screen, Screen::Settings) && !p.close_request_pending,
+            "`[` must not navigate away or close the panel"
+        );
+    }
+
     /// REGRESSION (P2 tab hotkeys): while the task-detail comment-compose modal
     /// is open, an uppercase `C` (common in prose / identifiers) must be TYPED
     /// into the draft, not routed to the control-center tab-switch. Before the
@@ -6647,6 +7333,11 @@ mod tests {
 
         // Open the task detail for a fresh issue.
         let issue = IssueRow {
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),
@@ -6673,7 +7364,9 @@ mod tests {
             child_total: 0,
             child_done: 0,
             acceptance_criteria: Vec::new(),
+            acceptance: Vec::new(),
             context_refs: Vec::new(),
+            dependencies: Vec::new(),
         };
         let tid = ainb_hangar_core::ids::TaskId::from_str("task-1").unwrap();
         p.screens.open_task_detail(tid.clone(), issue, None);
@@ -7206,7 +7899,7 @@ mod tests {
     #[test]
     fn fleet_broadcast_rpc_error_restores_confirmation_for_retry() {
         use crate::screen::fleet::{
-            FleetEvent, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
+            FleetEvent, FleetFilter, FleetIntent, FleetKey, FleetSessionRow, reduce_fleet,
         };
 
         let mut plugin = HangarPlugin::new();
@@ -7224,6 +7917,11 @@ mod tests {
         .expect("Fleet row");
         plugin.screens.fleet =
             reduce_fleet(&plugin.screens.fleet, FleetEvent::Snapshot(vec![row])).state;
+        plugin.screens.fleet = reduce_fleet(
+            &plugin.screens.fleet,
+            FleetEvent::SetFilter(FleetFilter::All),
+        )
+        .state;
         for event in [
             FleetEvent::Key(FleetKey::Char('b')),
             FleetEvent::Key(FleetKey::Char('x')),

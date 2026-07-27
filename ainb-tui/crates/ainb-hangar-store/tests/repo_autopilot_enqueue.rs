@@ -92,6 +92,7 @@ async fn seed_autopilot(store: &Store) -> ainb_hangar_store::repo::autopilot::Au
             max_concurrent_runs: 1,
             execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
             concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(),
+            api_trigger_enabled: false,
         },
     )
     .await
@@ -581,4 +582,101 @@ async fn count_runs_in_flight(store: &Store) -> i64 {
         .fetch_one(store.pool())
         .await
         .expect("count in-flight runs")
+}
+
+// ---- ORIGIN PROVENANCE (migration 0056, multica parity #21) -----------------
+
+/// **Acceptance leg A.** An issue created by an autopilot records its origin in
+/// sqlite: `SELECT origin_type, origin_id FROM issue` reads
+/// `('autopilot', <autopilot.id>)` — the RULE id, not the run id (multica
+/// `service/autopilot.go:145` binds `ap.ID`). The task fired alongside it
+/// carries the same pair, written INSIDE the fire transaction so the claim loop
+/// can never see a task without its provenance.
+#[tokio::test]
+async fn autopilot_create_issue_stamps_origin() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let mut autopilot = seed_autopilot(&store).await;
+    autopilot.execution_mode = ainb_hangar_store::repo::autopilot::ExecutionMode::CreateIssue;
+    let clock = FixedClock(T0);
+
+    let (run_id, task_id) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &clock,
+        &autopilot,
+    )
+    .await
+    .expect("fire tick");
+
+    let issue_row = sqlx::query("SELECT origin_type, origin_id FROM issue LIMIT 1")
+        .fetch_one(store.pool())
+        .await
+        .expect("read created issue");
+    assert_eq!(
+        issue_row.get::<String, _>("origin_type"),
+        "autopilot",
+        "the autopilot-fired issue records its provenance kind"
+    );
+    assert_eq!(
+        issue_row.get::<String, _>("origin_id"),
+        autopilot.id,
+        "origin_id is the AUTOPILOT id, not the run id"
+    );
+    assert_ne!(
+        issue_row.get::<String, _>("origin_id"),
+        run_id.to_string(),
+        "guards the rule-vs-run confusion multica's CreateIssueWithOrigin avoids"
+    );
+
+    let task_row = sqlx::query("SELECT origin_type, origin_id FROM agent_task_queue WHERE id = ?")
+        .bind(task_id.as_str())
+        .fetch_one(store.pool())
+        .await
+        .expect("read fired task");
+    assert_eq!(task_row.get::<String, _>("origin_type"), "autopilot");
+    assert_eq!(task_row.get::<String, _>("origin_id"), autopilot.id);
+
+    // And the typed read model re-assembles the pair.
+    let task = TaskRepo::get_by_id(store.pool(), task_id.as_str())
+        .await
+        .expect("get task")
+        .expect("task present");
+    let origin = task.origin.expect("task carries provenance");
+    assert_eq!(origin.kind_db_str(), "autopilot");
+    assert_eq!(origin.id(), Some(autopilot.id.as_str()));
+}
+
+/// The `run_only` sibling: no issue is created, but the fired task still
+/// carries its autopilot provenance (the dispatcher hands it to the child, so
+/// issues that run creates are attributable).
+#[tokio::test]
+async fn run_only_fire_stamps_the_task_and_creates_no_issue() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    seed_graph(&store).await;
+    let autopilot = seed_autopilot(&store).await;
+    let clock = FixedClock(T0);
+
+    let (_run_id, task_id) = ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick(
+        store.pool(),
+        &clock,
+        &autopilot,
+    )
+    .await
+    .expect("fire tick");
+
+    let issue_count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+        .fetch_one(store.pool())
+        .await
+        .expect("count issues");
+    assert_eq!(issue_count, 0);
+
+    let task_row = sqlx::query("SELECT origin_type, origin_id FROM agent_task_queue WHERE id = ?")
+        .bind(task_id.as_str())
+        .fetch_one(store.pool())
+        .await
+        .expect("read fired task");
+    assert_eq!(task_row.get::<String, _>("origin_type"), "autopilot");
+    assert_eq!(task_row.get::<String, _>("origin_id"), autopilot.id);
 }

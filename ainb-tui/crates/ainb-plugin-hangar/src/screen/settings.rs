@@ -79,7 +79,7 @@ pub enum SettingsSection {
     /// member with their role so the operator can see who can do what.
     Members,
     /// Per-attention-kind notification routing rules (tcp T5): a grid of kind ×
-    /// channel toggles. `J`/`K` move the kind row, `h`/`l` move the channel column,
+    /// channel toggles. `]`/`[` move the kind row, `h`/`l` move the channel column,
     /// `space` toggles the selected cell (emitting a `SetNotifyRule` intent →
     /// `hangar/notify_rule_set`), and `g` flips the edit scope between the
     /// host-wide GLOBAL rule and the active workspace override
@@ -246,6 +246,15 @@ pub struct SettingsState {
     /// [`SettingsIntent::CreateWorkspace`], Esc cancels. `None` when closed
     /// (P-multica#4).
     workspace_name_input: Option<String>,
+    /// Whether this instance refuses new workspaces
+    /// (`daemon_config: workspace.creation_disabled`), read off the
+    /// `host/workspace_list` reply.
+    ///
+    /// ADVISORY: it only suppresses the "new workspace" affordance (multica hides
+    /// every Create-workspace CTA off the same `/api/config` field). The
+    /// authoritative refusal lives store-side, so a stale `false` here costs at
+    /// most one rejected RPC, never a workspace created under lockdown.
+    workspace_creation_disabled: bool,
 }
 
 /// The in-flight numeric-input overlay for editing an `Int` daemon-config knob.
@@ -306,6 +315,7 @@ impl SettingsState {
             config_sel: 0,
             config_input: None,
             workspace_name_input: None,
+            workspace_creation_disabled: false,
         }
     }
 
@@ -362,6 +372,15 @@ impl SettingsState {
         self.config_input.as_ref().and_then(|c| c.error.as_deref())
     }
 
+    /// The in-section list cursor (workspaces / keys / providers / members).
+    ///
+    /// Exposed for the #450 reserved-key tests, which prove the rebound `]` / `[`
+    /// bindings actually move it through the real key path.
+    #[must_use]
+    pub const fn list_selected(&self) -> usize {
+        self.list_selected
+    }
+
     /// The active section.
     #[must_use]
     pub const fn section(&self) -> SettingsSection {
@@ -383,6 +402,21 @@ impl SettingsState {
     #[must_use]
     pub fn workspaces(&self) -> &[WorkspaceRow] {
         &self.workspaces
+    }
+
+    /// Record whether the host instance refuses new workspaces (from the
+    /// `host/workspace_list` reply's `creation_disabled` hint).
+    ///
+    /// Held separately from [`Self::set_workspaces`] so a caller that only has
+    /// rows cannot accidentally clear the flag.
+    pub const fn set_workspace_creation_disabled(&mut self, disabled: bool) {
+        self.workspace_creation_disabled = disabled;
+    }
+
+    /// Whether the new-workspace affordance is suppressed (for render / tests).
+    #[must_use]
+    pub const fn workspace_creation_disabled(&self) -> bool {
+        self.workspace_creation_disabled
     }
 
     /// Replace the member rows (after a `hangar/members_list` fetch). The pane is
@@ -566,7 +600,7 @@ pub fn reduce_settings(state: &SettingsState, ev: SettingsEvent) -> SettingsRedu
 /// selection. A cursor key is inert while a modal owns the keyboard — the
 /// key-entry modal and the numeric overlay both capture the arrows rather than
 /// let them scroll the pane underneath. The Notifications grid keeps its own
-/// 2D cursor keys (`J`/`K` × `h`/`l`) and is left alone here.
+/// 2D cursor keys (`]`/`[` × `h`/`l`) and is left alone here.
 fn reduce_cursor(state: &SettingsState, delta: i32) -> SettingsReduction {
     if state.key_entry.is_some()
         || state.config_input.is_some()
@@ -599,17 +633,19 @@ fn reduce_key(state: &SettingsState, c: char) -> SettingsReduction {
     if state.section == SettingsSection::Notifications {
         return reduce_notify_key(state, c);
     }
-    // The Daemon section is a cursor over the config knobs (J/K move, Enter/Space
-    // edit) plus the `a` auto-standup shortcut; `j`/`k` still leave the section.
+    // The Daemon section is a cursor over the config knobs (Enter/Space edit)
+    // plus the `a` auto-standup shortcut; `j`/`k` still leave the section.
     if state.section == SettingsSection::Daemon {
         return reduce_daemon_key(state, c);
     }
     match c {
         'j' => move_section(state, SettingsSection::next),
         'k' => move_section(state, SettingsSection::prev),
-        // J/K move the in-section list selection (workspaces / keys).
-        'J' => move_list(state, 1),
-        'K' => move_list(state, -1),
+        // `]`/`[` move the in-section list selection (workspaces / keys). They
+        // were `J`/`K` until #450 — the hangar router claims bare `K` as the
+        // Kanban tab, so `K` never reached this reducer.
+        ']' => move_list(state, 1),
+        '[' => move_list(state, -1),
         'n' if state.section == SettingsSection::Keys => open_key_entry(state),
         // Workspace pane controls (P5.5): s set-active, d toggle-default,
         // n new, r rename. All scoped to the Workspaces section.
@@ -660,7 +696,16 @@ fn workspace_delete_intent(state: &SettingsState) -> SettingsReduction {
 }
 
 /// Open the new-workspace name modal with an empty buffer (P-multica#4).
+///
+/// Inert under the instance lockdown: the modal is the ONLY way to reach
+/// [`SettingsIntent::CreateWorkspace`], so refusing to open it means the intent
+/// can never be emitted — matching multica's follow-up fix, which derived the
+/// create-intent state from the config flag so a late-arriving config could not
+/// leave a live create CTA behind.
 fn open_workspace_name_entry(state: &SettingsState) -> SettingsReduction {
+    if state.workspace_creation_disabled {
+        return unchanged(state);
+    }
     let mut next = state.clone();
     next.workspace_name_input = Some(String::new());
     no_intent(next)
@@ -887,14 +932,17 @@ fn reduce_config_input_key(state: &SettingsState, c: char) -> SettingsReduction 
 }
 
 /// Handle a key on the Notifications grid (tcp T5): `j`/`k` leave to the adjacent
-/// section, `J`/`K` move the kind row, `h`/`l` move the channel column, and
+/// section, `]`/`[` move the kind row, `h`/`l` move the channel column, and
 /// `space`/`t` toggle the selected cell (emitting a `SetNotifyRule` intent).
+///
+/// The kind-row pair was `J`/`K` until #450 — bare `K` is the router's Kanban tab
+/// key and never reached this reducer, so the advertised `J/K kind` hint lied.
 fn reduce_notify_key(state: &SettingsState, c: char) -> SettingsReduction {
     match c {
         'j' => move_section(state, SettingsSection::next),
         'k' => move_section(state, SettingsSection::prev),
-        'J' => move_notify_kind(state, 1),
-        'K' => move_notify_kind(state, -1),
+        ']' => move_notify_kind(state, 1),
+        '[' => move_notify_kind(state, -1),
         'h' => move_notify_channel(state, -1),
         'l' => move_notify_channel(state, 1),
         ' ' | 't' => toggle_notify_cell(state),
@@ -1363,7 +1411,7 @@ fn render_notify_grid(
             buf,
             KIND_COL,
             row,
-            "J/K kind · h/l channel · space toggle",
+            "] [ kind · h/l channel · space toggle",
             DIM,
         );
         row += 1;
@@ -1463,6 +1511,8 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
     const TEXT: Color = Color::rgb(220, 220, 230);
     // Active-workspace indicator colour (TUI palette SELECTION_GREEN).
     const SELECTION_GREEN: Color = Color::rgb(100, 200, 100);
+    // Muted grey for the advisory lockdown marker (TUI palette MUTED_GRAY).
+    const MUTED: Color = Color::rgb(120, 120, 140);
 
     let top = 0;
     let bottom = u16::MAX;
@@ -1525,6 +1575,14 @@ fn paint_sections(buf: &mut WireBuffer, area_w: u16, state: &SettingsState) -> S
                 }
             }
             SettingsSection::Workspaces => {
+                // Multica hides every "Create workspace" affordance when the
+                // instance is locked down; the hangar analogue is swapping the
+                // `n new` hint for a muted marker, so the key that no longer does
+                // anything is not advertised as if it did.
+                if state.workspace_creation_disabled && row < bottom {
+                    put(buf, 4, row, "creation locked · ask for an invite", MUTED);
+                    row += 1;
+                }
                 for (i, w) in state.workspaces.iter().enumerate() {
                     if row >= bottom {
                         break;

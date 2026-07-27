@@ -12,11 +12,16 @@ use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 use serde::{Deserialize, Serialize};
 
 const BROADCAST_MAX_PARALLEL: usize = 8;
-const FG: Color = Color::rgb(220, 220, 230);
-const MUTED: Color = Color::rgb(120, 120, 140);
-const GOLD: Color = Color::rgb(255, 215, 0);
-const BLUE: Color = Color::rgb(100, 149, 237);
-const GREEN: Color = Color::rgb(100, 200, 100);
+const FG: Color = Color::rgb(226, 232, 240);
+const MUTED: Color = Color::rgb(148, 163, 184);
+const GOLD: Color = Color::rgb(251, 191, 36);
+const BLUE: Color = Color::rgb(96, 165, 250);
+const GREEN: Color = Color::rgb(94, 234, 212);
+const ALERT: Color = Color::rgb(251, 113, 133);
+const SURFACE: Color = Color::rgb(15, 23, 42);
+const ACTIVE_CHIP: Color = Color::rgb(30, 64, 175);
+const SELECTED_ROW: Color = Color::rgb(30, 41, 59);
+const BOLD: u16 = 1;
 
 /// Capability wire shape accepted from current and planned daemon snapshots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -118,6 +123,12 @@ pub struct FleetSessionRow {
     pub tmux_target: Option<String>,
     #[serde(default)]
     pub display_name: Option<String>,
+    /// Best-effort repository label enriched by the host from `cwd`.
+    #[serde(default)]
+    pub repository_name: Option<String>,
+    /// Best-effort branch label enriched by the host from `cwd`.
+    #[serde(default)]
+    pub branch_name: Option<String>,
     #[serde(default)]
     pub discovered_at: i64,
     #[serde(default)]
@@ -133,10 +144,6 @@ pub struct FleetSessionRow {
 }
 
 impl FleetSessionRow {
-    fn is_running(&self) -> bool {
-        self.lifecycle_state.eq_ignore_ascii_case("RUNNING")
-    }
-
     fn is_actionable(&self) -> bool {
         !self.attention_state.eq_ignore_ascii_case("NONE")
     }
@@ -154,6 +161,61 @@ impl FleetSessionRow {
                 .unwrap_or(&self.session_key)
                 .to_string()
         })
+    }
+
+    fn repository_label(&self) -> String {
+        self.repository_name
+            .clone()
+            .or_else(|| {
+                std::path::Path::new(&self.cwd)
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .filter(|name| !name.is_empty())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| self.session_name())
+    }
+
+    fn branch_label(&self) -> String {
+        self.branch_name
+            .clone()
+            .filter(|branch| !branch.is_empty())
+            .unwrap_or_else(|| "branch unknown".into())
+    }
+
+    /// Operator-facing attachment transport.
+    pub fn attachment_label(&self) -> &'static str {
+        if self.capabilities.contains("tmux_attach") && self.tmux_target.is_some() {
+            "TMUX"
+        } else if self.is_managed()
+            && self
+                .capabilities
+                .labels()
+                .iter()
+                .any(|capability| capability != "tmux_attach" && capability != "tmux_text")
+        {
+            "REMOTE"
+        } else {
+            "NONE"
+        }
+    }
+
+    fn operator_state(&self) -> &'static str {
+        if self.is_actionable() {
+            "NEEDS INPUT"
+        } else if self.lifecycle_state.eq_ignore_ascii_case("STARTING")
+            || self.lifecycle_state.eq_ignore_ascii_case("RUNNING")
+        {
+            "RUNNING"
+        } else if self.lifecycle_state.eq_ignore_ascii_case("IDLE") {
+            "IDLE"
+        } else if self.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
+            || self.lifecycle_state.eq_ignore_ascii_case("EXITED")
+        {
+            "COMPLETED"
+        } else {
+            "UNKNOWN"
+        }
     }
 }
 
@@ -237,6 +299,8 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
             cwd: session.cwd,
             tmux_target: session.tmux_target,
             display_name: session.display_name,
+            repository_name: None,
+            branch_name: None,
             discovered_at: session.discovered_at,
             last_observed_at: session.last_observed_at,
             metadata_updated_at: session.last_observed_at,
@@ -251,39 +315,59 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum FleetFilter {
     #[default]
-    Focus,
-    Actionable,
-    Managed,
-    Degraded,
-    Claude,
-    Codex,
+    NeedsInput,
+    Idle,
+    Completed,
+    Running,
     All,
 }
 
 impl FleetFilter {
     fn matches(self, row: &FleetSessionRow) -> bool {
         match self {
-            Self::Focus => !row.is_running(),
-            Self::Actionable => row.is_actionable(),
-            Self::Managed => row.is_managed(),
-            Self::Degraded => !row.is_managed(),
-            Self::Claude => row.provider.eq_ignore_ascii_case("claude"),
-            Self::Codex => row.provider.eq_ignore_ascii_case("codex"),
+            Self::NeedsInput => row.is_actionable(),
+            Self::Idle => !row.is_actionable() && row.lifecycle_state.eq_ignore_ascii_case("IDLE"),
+            Self::Completed => {
+                !row.is_actionable()
+                    && (row.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
+                        || row.lifecycle_state.eq_ignore_ascii_case("EXITED"))
+            }
+            Self::Running => {
+                !row.is_actionable()
+                    && (row.lifecycle_state.eq_ignore_ascii_case("STARTING")
+                        || row.lifecycle_state.eq_ignore_ascii_case("RUNNING"))
+            }
             Self::All => true,
         }
     }
 
     const fn label(self) -> &'static str {
         match self {
-            Self::Focus => "Focus",
-            Self::Actionable => "Actionable",
-            Self::Managed => "Managed",
-            Self::Degraded => "Degraded",
-            Self::Claude => "Claude",
-            Self::Codex => "Codex",
+            Self::NeedsInput => "Needs input",
+            Self::Idle => "Idle",
+            Self::Completed => "Completed",
+            Self::Running => "Running",
             Self::All => "All",
         }
     }
+
+    const fn key(self) -> char {
+        match self {
+            Self::NeedsInput => '1',
+            Self::Idle => '2',
+            Self::Completed => '3',
+            Self::Running => '4',
+            Self::All => '5',
+        }
+    }
+
+    const ALL: [Self; 5] = [
+        Self::NeedsInput,
+        Self::Idle,
+        Self::Completed,
+        Self::Running,
+        Self::All,
+    ];
 }
 
 /// Keyboard event understood by the standalone reducer.
@@ -291,6 +375,8 @@ impl FleetFilter {
 pub enum FleetKey {
     Char(char),
     Enter,
+    Tab,
+    BackTab,
     Esc,
     Backspace,
     Up,
@@ -507,10 +593,17 @@ enum FleetMode {
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
+struct AnswerOption {
+    label: String,
+    description: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
 struct AnswerQuestion {
     id: String,
+    header: String,
     text: String,
-    options: Vec<String>,
+    options: Vec<AnswerOption>,
     multi_select: bool,
 }
 
@@ -558,7 +651,7 @@ impl Default for FleetPaneState {
     fn default() -> Self {
         Self {
             roster: Vec::new(),
-            filter: FleetFilter::Focus,
+            filter: FleetFilter::NeedsInput,
             selected_key: None,
             mode: FleetMode::Browse,
             feedback: None,
@@ -604,6 +697,7 @@ impl FleetPaneState {
 
     pub fn set_sessions(&mut self, roster: Vec<FleetSessionRow>) {
         self.roster = roster;
+        self.discard_stale_answer();
         self.preserve_or_reset_selection();
     }
 
@@ -629,6 +723,14 @@ impl FleetPaneState {
         self.roster.len()
     }
 
+    /// Sessions requiring operator review, independent from active lens.
+    pub fn attention_count(&self) -> usize {
+        self.roster
+            .iter()
+            .filter(|session| !session.attention_state.eq_ignore_ascii_case("NONE"))
+            .count()
+    }
+
     pub fn feedback(&self) -> Option<&str> {
         self.feedback.as_deref()
     }
@@ -645,6 +747,25 @@ impl FleetPaneState {
                 .iter()
                 .find(|row| self.filter.matches(row))
                 .map(|row| row.session_key.clone());
+        }
+    }
+
+    fn discard_stale_answer(&mut self) {
+        let FleetMode::Answer(answer) = &self.mode else {
+            return;
+        };
+        let fresh = self
+            .roster
+            .iter()
+            .find(|row| row.session_key == answer.session_key)
+            .is_some_and(|row| {
+                row.version == answer.expected_version
+                    && row.current_request_fingerprint.as_deref()
+                        == Some(answer.request_fingerprint.as_str())
+            });
+        if !fresh {
+            self.mode = FleetMode::Browse;
+            self.feedback = Some("interview closed: authoritative request changed".into());
         }
     }
 }
@@ -719,7 +840,7 @@ pub fn reduce_fleet(state: &FleetPaneState, event: FleetEvent) -> FleetReduction
         FleetEvent::RequestAction(action) => request_action(&mut next, action),
         FleetEvent::ActionSucceeded { session_key } => {
             next.feedback = Some(format!("action succeeded: {session_key}"));
-            select_next_focus(&mut next, &session_key);
+            select_next_needs_input(&mut next, &session_key);
             None
         }
         FleetEvent::ActionFailed {
@@ -772,12 +893,19 @@ fn reduce_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> 
     }
 }
 
-fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
+/// Fold one key into the Fleet pane's BROWSE mode (no modal open).
+///
+/// Crate-visible so `reserved_key_invariant_tests` can prove none of the
+/// reserved router/host chars is bound here (#450).
+pub(crate) fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetIntent> {
     match key {
         FleetKey::Down | FleetKey::Char('j') => move_selection(state, 1),
         FleetKey::Up | FleetKey::Char('k') => move_selection(state, -1),
         FleetKey::Right => return attach_intent(state, false),
-        FleetKey::Char('A') => return attach_intent(state, true),
+        // `a` attaches with takeover. It was `A` until #450 — the hangar router
+        // claims bare `A` as the Agents tab, so the advertised `→/A:attach` hint
+        // navigated away instead of attaching.
+        FleetKey::Char('a') => return attach_intent(state, true),
         FleetKey::Enter => begin_structured_answer(state),
         FleetKey::Char('t') => {
             state.mode = FleetMode::Start(StartState {
@@ -792,7 +920,9 @@ fn reduce_browse_key(state: &mut FleetPaneState, key: FleetKey) -> Option<FleetI
                 text: String::new(),
             }
         }
-        FleetKey::Char('b' | 'B') => state.mode = FleetMode::Broadcast(BroadcastState::default()),
+        // Broadcast is `b` only: the uppercase alias was dead (the hangar router
+        // claims bare `B` as the Boards tab) (#450).
+        FleetKey::Char('b') => state.mode = FleetMode::Broadcast(BroadcastState::default()),
         _ => {}
     }
     None
@@ -855,6 +985,10 @@ fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
                 .get("id")
                 .and_then(serde_json::Value::as_str)
                 .map_or_else(|| index.to_string(), str::to_string),
+            header: question
+                .get("header")
+                .and_then(serde_json::Value::as_str)
+                .map_or_else(|| format!("Question {}", index + 1), str::to_string),
             text: question
                 .get("question")
                 .or_else(|| question.get("text"))
@@ -867,10 +1001,26 @@ fn answer_questions(request: &serde_json::Value) -> Vec<AnswerQuestion> {
                 .into_iter()
                 .flatten()
                 .filter_map(|option| {
-                    option
-                        .as_str()
-                        .or_else(|| option.get("label").and_then(serde_json::Value::as_str))
-                        .map(str::to_string)
+                    option.as_str().map_or_else(
+                        || {
+                            option.get("label").and_then(serde_json::Value::as_str).map(|label| {
+                                AnswerOption {
+                                    label: label.to_string(),
+                                    description: option
+                                        .get("description")
+                                        .and_then(serde_json::Value::as_str)
+                                        .unwrap_or_default()
+                                        .to_string(),
+                                }
+                            })
+                        },
+                        |label| {
+                            Some(AnswerOption {
+                                label: label.to_string(),
+                                description: String::new(),
+                            })
+                        },
+                    )
                 })
                 .collect(),
             multi_select: question
@@ -923,6 +1073,26 @@ fn reduce_answer_key(
         state.feedback = Some("structured question changed before answer".into());
         return None;
     };
+    match key {
+        FleetKey::Tab => {
+            answer.question_index = (answer.question_index + 1) % answer.questions.len();
+            answer.option_cursor = 0;
+            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+            state.mode = FleetMode::Answer(answer);
+            return None;
+        }
+        FleetKey::BackTab => {
+            answer.question_index = answer
+                .question_index
+                .checked_sub(1)
+                .unwrap_or(answer.questions.len().saturating_sub(1));
+            answer.option_cursor = 0;
+            answer.editing_text = answer.questions[answer.question_index].options.is_empty();
+            state.mode = FleetMode::Answer(answer);
+            return None;
+        }
+        _ => {}
+    }
     if answer.editing_text {
         match key {
             FleetKey::Backspace => {
@@ -965,7 +1135,7 @@ fn reduce_answer_key(
             let selected_other = answer.selections[answer.question_index]
                 .iter()
                 .filter_map(|index| question.options.get(*index))
-                .any(|option| option.eq_ignore_ascii_case("other"));
+                .any(|option| option.label.eq_ignore_ascii_case("other"));
             if selected_other && answer.texts[answer.question_index].trim().is_empty() {
                 answer.editing_text = true;
             } else {
@@ -989,6 +1159,16 @@ fn advance_or_submit_answer(
         state.mode = FleetMode::Answer(answer);
         return None;
     }
+    if let Some(index) = answer.questions.iter().enumerate().find_map(|(index, question)| {
+        (!answer_question_complete(&answer, index, question)).then_some(index)
+    }) {
+        answer.question_index = index;
+        answer.option_cursor = 0;
+        answer.editing_text = answer.questions[index].options.is_empty();
+        state.feedback = Some("complete every interview question before submit".into());
+        state.mode = FleetMode::Answer(answer);
+        return None;
+    }
     let answers = answer
         .questions
         .iter()
@@ -999,13 +1179,14 @@ fn advance_or_submit_answer(
             let selected_other = selected
                 .iter()
                 .filter_map(|index| question.options.get(*index))
-                .any(|option| option.eq_ignore_ascii_case("other"));
+                .any(|option| option.label.eq_ignore_ascii_case("other"));
             let selected_options = if !question.multi_select && selected_other && text.is_some() {
                 Vec::new()
             } else {
                 selected
                     .iter()
-                    .filter_map(|index| question.options.get(*index).cloned())
+                    .filter_map(|index| question.options.get(*index))
+                    .map(|option| option.label.clone())
                     .collect()
             };
             ainb_hangar_proto::fleet::FleetQuestionAnswer {
@@ -1294,12 +1475,12 @@ fn execute_confirmed(
     Some(intent)
 }
 
-fn select_next_focus(state: &mut FleetPaneState, completed_key: &str) {
-    state.filter = FleetFilter::Focus;
+fn select_next_needs_input(state: &mut FleetPaneState, completed_key: &str) {
+    state.filter = FleetFilter::NeedsInput;
     let keys: Vec<String> = state
         .roster
         .iter()
-        .filter(|row| FleetFilter::Focus.matches(row))
+        .filter(|row| FleetFilter::NeedsInput.matches(row))
         .map(|row| row.session_key.clone())
         .collect();
     state.selected_key = match keys.iter().position(|key| key == completed_key) {
@@ -1519,7 +1700,7 @@ fn apply_broadcast_failure(state: &mut FleetPaneState, detail: String) {
     state.mode = FleetMode::Broadcast(broadcast);
 }
 
-/// Render dense Fleet table, selected-session detail, and active modal.
+/// Render the attention-first Fleet roster, selected-session detail, and active modal.
 pub fn render_fleet(
     buffer: &mut WireBuffer,
     area_width: u16,
@@ -1530,50 +1711,51 @@ pub fn render_fleet(
     if area_width == 0 || bottom <= top {
         return;
     }
-    let list_width = (area_width * 2 / 3).max(48).min(area_width);
-    put_str(
-        buffer,
-        1,
-        top,
-        &format!(
-            "Fleet  [{}]  {}/{} sessions",
-            state.filter.label(),
-            state.visible_sessions().len(),
-            state.roster.len()
-        ),
-        GOLD,
-        list_width,
-    );
-    if top + 1 < bottom {
+    fill_background(buffer, 0, top, area_width, bottom, SURFACE);
+    let list_width = if area_width >= 96 {
+        (area_width * 2 / 3).max(58).min(area_width)
+    } else {
+        area_width
+    };
+    render_lenses(buffer, 1, top, list_width, state);
+    let visible = state.visible_sessions();
+    let header_y = top.saturating_add(2);
+    let rows_top = header_y.saturating_add(1);
+    let capacity = usize::from(bottom.saturating_sub(rows_top));
+    let selected_index = state
+        .selected_key
+        .as_ref()
+        .and_then(|key| visible.iter().position(|row| &row.session_key == key));
+    let window_start = selected_window_start(selected_index, visible.len(), capacity);
+    if header_y < bottom {
+        let position = selected_index.map_or_else(
+            || format!("0/{}", visible.len()),
+            |index| format!("{}/{}", index + 1, visible.len()),
+        );
+        let identity_width = table_identity_width(list_width);
+        let header = format!(
+            "  {:<identity_width$} {:<8} {:<13} {:<7} AGE",
+            "REPOSITORY / BRANCH", "PROVIDER", "STATE", "CONNECT"
+        );
+        put_str(buffer, 0, header_y, &header, MUTED, list_width);
+        let position_width = position.chars().count() as u16;
         put_str(
             buffer,
-            1,
-            top + 1,
-            "SESSION         PRV LIFE   ATTN AGE   MODE CONF NET",
+            list_width.saturating_sub(position_width),
+            header_y,
+            &position,
             MUTED,
             list_width,
         );
     }
-
-    let visible = state.visible_sessions();
-    let mut row_y = top.saturating_add(2);
-    for session in visible {
-        if row_y >= bottom {
-            break;
-        }
+    let mut row_y = rows_top;
+    for session in visible.iter().skip(window_start).take(capacity) {
         let selected = state.selected_key.as_deref() == Some(session.session_key.as_str());
         render_table_row(buffer, row_y, list_width, session, selected, state.now_ms);
         row_y = row_y.saturating_add(1);
     }
-    if row_y == top.saturating_add(2) && row_y < bottom {
-        put_str(
-            buffer,
-            2,
-            row_y,
-            "No sessions match filter",
-            MUTED,
-            list_width,
-        );
+    if visible.is_empty() && rows_top < bottom {
+        render_empty_lens(buffer, 2, rows_top.saturating_add(1), list_width, state);
     }
 
     if list_width < area_width {
@@ -1588,6 +1770,84 @@ pub fn render_fleet(
         );
     }
     render_mode(buffer, area_width, top, bottom, state);
+}
+
+fn render_lenses(buffer: &mut WireBuffer, left: u16, row: u16, right: u16, state: &FleetPaneState) {
+    let mut x = left;
+    for filter in FleetFilter::ALL {
+        let count = state.roster.iter().filter(|session| filter.matches(session)).count();
+        let label = format!(" {} {} {} ", filter.key(), filter.label(), count);
+        if x.saturating_add(label.chars().count() as u16) >= right {
+            break;
+        }
+        if filter == state.filter {
+            put_str_styled(buffer, x, row, &label, FG, Some(ACTIVE_CHIP), BOLD, right);
+        } else {
+            put_str(buffer, x, row, &label, MUTED, right);
+        }
+        x = x.saturating_add(label.chars().count() as u16 + 1);
+    }
+}
+
+fn render_empty_lens(
+    buffer: &mut WireBuffer,
+    left: u16,
+    row: u16,
+    right: u16,
+    state: &FleetPaneState,
+) {
+    if state.roster.is_empty() {
+        put_str(buffer, left, row, "No Fleet sessions yet", FG, right);
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(2),
+            "Press t to start a managed Codex session.",
+            MUTED,
+            right,
+        );
+    } else if state.filter == FleetFilter::NeedsInput {
+        put_str(buffer, left, row, "✓ Nothing needs you", GREEN, right);
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(2),
+            "Sessions are running, idle, or complete. Press 5 for All.",
+            MUTED,
+            right,
+        );
+    } else {
+        put_str(
+            buffer,
+            left,
+            row,
+            &format!("No {} sessions", state.filter.label().to_lowercase()),
+            FG,
+            right,
+        );
+        put_str(
+            buffer,
+            left,
+            row.saturating_add(2),
+            "Press 5 for All.",
+            MUTED,
+            right,
+        );
+    }
+}
+
+fn selected_window_start(
+    selected_index: Option<usize>,
+    visible_len: usize,
+    capacity: usize,
+) -> usize {
+    if capacity == 0 || visible_len <= capacity {
+        return 0;
+    }
+    selected_index
+        .unwrap_or(0)
+        .saturating_sub(capacity / 2)
+        .min(visible_len - capacity)
 }
 
 /// Overlay a compact degraded banner without hiding the cached Fleet roster.
@@ -1610,26 +1870,69 @@ fn render_table_row(
     selected: bool,
     now_ms: i64,
 ) {
-    let marker = if selected { '>' } else { ' ' };
-    let name = truncate(&session.session_name(), 15);
-    let provider = truncate(&session.provider, 3).to_uppercase();
-    let lifecycle = truncate(&session.lifecycle_state, 6).to_uppercase();
-    let attention = truncate(&session.attention_state, 4).to_uppercase();
-    let mode = if session.is_managed() { "MNG" } else { "DEG" };
-    let confidence = truncate(&session.confidence, 4).to_uppercase();
-    let health = truncate(&session.transport_health, 3).to_uppercase();
+    let marker = if selected { "▸" } else { " " };
+    let identity_width = table_identity_width(right);
+    let identity = format!(
+        "{} / {}",
+        session.repository_label(),
+        session.branch_label()
+    );
+    let identity = truncate_ellipsis(&identity, identity_width);
+    let provider = provider_label(&session.provider);
+    let operator_state = session.operator_state();
+    let attachment = session.attachment_label();
     let age = format_age(now_ms, session.last_observed_at);
     let text = format!(
-        "{marker}{name:<15} {provider:<3} {lifecycle:<6} {attention:<4} {age:<5} {mode:<3} {confidence:<4} {health:<3}"
+        "{marker} {identity:<identity_width$} {provider:<8} {operator_state:<13} {attachment:<7} {age:>4}"
     );
-    put_str(
+    put_str_styled(
         buffer,
         0,
         row_y,
         &text,
-        if selected { GREEN } else { FG },
+        if selected {
+            FG
+        } else {
+            operator_state_color(session)
+        },
+        selected.then_some(SELECTED_ROW),
+        if selected { BOLD } else { 0 },
         right,
     );
+}
+
+fn table_identity_width(right: u16) -> usize {
+    usize::from(right).saturating_sub(46).max(12)
+}
+
+fn provider_label(provider: &str) -> &'static str {
+    if provider.eq_ignore_ascii_case("claude") {
+        "CLAUDE"
+    } else if provider.eq_ignore_ascii_case("codex") {
+        "CODEX"
+    } else {
+        "UNKNOWN"
+    }
+}
+
+fn operator_state_color(session: &FleetSessionRow) -> Color {
+    match session.operator_state() {
+        "NEEDS INPUT" => attention_color(&session.attention_state),
+        "RUNNING" => GREEN,
+        "COMPLETED" => MUTED,
+        "UNKNOWN" => MUTED,
+        _ => FG,
+    }
+}
+
+fn attention_color(attention: &str) -> Color {
+    if attention.eq_ignore_ascii_case("ASK") || attention.eq_ignore_ascii_case("WAITING") {
+        GOLD
+    } else if attention.eq_ignore_ascii_case("ERROR") {
+        ALERT
+    } else {
+        FG
+    }
 }
 
 fn render_divider(buffer: &mut WireBuffer, x: u16, top: u16, bottom: u16) {
@@ -1650,64 +1953,219 @@ fn render_detail(
         put_str(buffer, left, top, "No selection", MUTED, right);
         return;
     };
-    let mut lines = vec![
-        ("Session", session.session_name()),
-        ("Key", session.session_key.clone()),
-        ("Provider", session.provider.clone()),
-        (
-            "State",
-            format!("{} / {}", session.lifecycle_state, session.attention_state),
-        ),
-    ];
-    if let Some(request) = &session.current_request {
-        lines.extend(request_detail_lines(request));
-    }
-    if session.attention_state.eq_ignore_ascii_case("ASK") {
-        lines.push(("Action", "Enter answer".into()));
-    } else if session.attention_state.eq_ignore_ascii_case("APPROVAL") {
-        lines.push(("Action", "y approve, n deny".into()));
-    }
-    lines.push((
-        "Keys",
-        "p prompt, t start, i interrupt, s stop, r restart, A attach".into(),
-    ));
-    lines.extend([
-        ("Mode", session.management_state.clone()),
-        ("Source", session.provenance.clone()),
-        ("Transport", session.transport_health.clone()),
-        ("Confidence", session.confidence.clone()),
-        ("Version", session.version.to_string()),
-        ("Cwd", session.cwd.clone()),
-        (
-            "Tmux",
-            session.tmux_target.clone().unwrap_or_else(|| "none".into()),
-        ),
-        ("Capabilities", session.capabilities.labels().join(", ")),
-    ]);
     let mut y = top;
     let detail_width = usize::from(right.saturating_sub(left).saturating_sub(1)).max(1);
-    for (label, value) in lines {
-        let prefix = format!("{label}: ");
-        let continuation = " ".repeat(prefix.chars().count());
-        for (index, part) in wrap_text(&value, detail_width.saturating_sub(prefix.len()).max(1))
-            .into_iter()
-            .enumerate()
+    put_str_styled(
+        buffer,
+        left,
+        y,
+        &truncate_ellipsis(&session.repository_label(), detail_width),
+        FG,
+        None,
+        BOLD,
+        right,
+    );
+    y = y.saturating_add(1);
+    put_str(
+        buffer,
+        left,
+        y,
+        &truncate_ellipsis(&session.branch_label(), detail_width),
+        BLUE,
+        right,
+    );
+    y = y.saturating_add(2);
+
+    let age = format_age(state.now_ms, session.last_observed_at);
+    put_str(
+        buffer,
+        left,
+        y,
+        &format!(
+            "{}  ·  {}  ·  {age}",
+            session.operator_state(),
+            provider_label(&session.provider)
+        ),
+        operator_state_color(session),
+        right,
+    );
+    y = y.saturating_add(2);
+
+    if session.is_actionable() {
+        put_str(buffer, left, y, "NEEDS YOUR INPUT", GOLD, right);
+        y = y.saturating_add(1);
+        if let Some(question) = session
+            .current_request
+            .as_ref()
+            .and_then(|request| answer_questions(request).into_iter().next())
         {
-            if y >= bottom {
-                break;
-            }
-            let line_prefix = if index == 0 { &prefix } else { &continuation };
-            put_str(buffer, left, y, &format!("{line_prefix}{part}"), FG, right);
+            y = render_wrapped_value(buffer, left, y, right, &question.text, FG);
+        } else {
+            let summary = session
+                .current_request
+                .as_ref()
+                .and_then(|request| attention_request_summary(request, &session.attention_state))
+                .unwrap_or_else(|| attention_summary(&session.attention_state));
+            put_str(buffer, left, y, &summary, FG, right);
             y = y.saturating_add(1);
         }
+        y = y.saturating_add(1);
     }
+
+    put_str(buffer, left, y, "CONNECTION", MUTED, right);
+    y = y.saturating_add(1);
+    let connection = connection_summary(session);
+    y = render_wrapped_value(buffer, left, y, right, &connection, FG);
+    y = y.saturating_add(1);
+
+    put_str(buffer, left, y, "NEXT", MUTED, right);
+    y = y.saturating_add(1);
+    y = render_wrapped_value(buffer, left, y, right, &next_action(session), FG);
+    y = y.saturating_add(1);
+
+    let actions = available_action_labels(session);
+    if !actions.is_empty() && y < bottom {
+        put_str(buffer, left, y, "ACTIONS", MUTED, right);
+        y = y.saturating_add(1);
+        let action_line = actions.join("   ");
+        let _ = render_wrapped_value(buffer, left, y, right, &action_line, GREEN);
+    }
+
     if let Some(feedback) = &state.feedback {
         if bottom > top {
-            put_str(buffer, left, bottom - 1, feedback, GOLD, right);
+            put_str(
+                buffer,
+                left,
+                bottom - 1,
+                feedback,
+                attention_color("ASK"),
+                right,
+            );
         }
     }
 }
 
+fn render_wrapped_value(
+    buffer: &mut WireBuffer,
+    left: u16,
+    mut row: u16,
+    right: u16,
+    value: &str,
+    color: Color,
+) -> u16 {
+    let width = usize::from(right.saturating_sub(left).saturating_sub(1)).max(1);
+    for part in wrap_text(value, width) {
+        put_str(buffer, left, row, &part, color, right);
+        row = row.saturating_add(1);
+    }
+    row
+}
+
+fn attention_summary(attention: &str) -> String {
+    if attention.eq_ignore_ascii_case("APPROVAL") {
+        "Approve or deny the pending request.".into()
+    } else if attention.eq_ignore_ascii_case("ERROR") {
+        "This session reported an error that needs review.".into()
+    } else if attention.eq_ignore_ascii_case("WAITING") {
+        "This session is waiting for an operator decision.".into()
+    } else {
+        "Answer the pending structured question.".into()
+    }
+}
+
+fn attention_request_summary(request: &serde_json::Value, attention: &str) -> Option<String> {
+    let string_at = |pointers: &[&str]| {
+        pointers
+            .iter()
+            .find_map(|pointer| request.pointer(pointer).and_then(serde_json::Value::as_str))
+            .filter(|value| !value.trim().is_empty())
+    };
+    if attention.eq_ignore_ascii_case("APPROVAL") {
+        return string_at(&["/tool", "/payload/tool", "/tool_name", "/payload/tool_name"])
+            .map(|tool| format!("Approval required for {tool}."));
+    }
+    if attention.eq_ignore_ascii_case("ERROR") {
+        return string_at(&[
+            "/message",
+            "/payload/message",
+            "/error_type",
+            "/payload/error_type",
+            "/error",
+            "/payload/error",
+        ])
+        .map(|detail| format!("Error: {detail}"));
+    }
+    if attention.eq_ignore_ascii_case("WAITING") {
+        return string_at(&["/message", "/payload/message"]).map(str::to_string).or_else(|| {
+            string_at(&["/reason", "/payload/reason"]).map(|reason| format!("Waiting: {reason}"))
+        });
+    }
+    None
+}
+
+fn connection_summary(session: &FleetSessionRow) -> String {
+    match session.attachment_label() {
+        "TMUX" => "TMUX · ready to open or attach full screen".into(),
+        "REMOTE" => "REMOTE · controllable without a terminal attachment".into(),
+        _ if session.tmux_target.is_none() => "NONE · no tmux target is available".into(),
+        _ => "NONE · this session does not allow tmux attachment".into(),
+    }
+}
+
+fn next_action(session: &FleetSessionRow) -> String {
+    if session.attention_state.eq_ignore_ascii_case("ASK") {
+        "Answer the structured question.".into()
+    } else if session.attention_state.eq_ignore_ascii_case("APPROVAL") {
+        "Approve or deny the request.".into()
+    } else if session.attention_state.eq_ignore_ascii_case("ERROR") {
+        "Review the error, then open the session if attachment is available.".into()
+    } else if session.attention_state.eq_ignore_ascii_case("WAITING") {
+        "Review why the session is waiting.".into()
+    } else {
+        match session.operator_state() {
+            "RUNNING" => "Monitor progress; interrupt only if necessary.".into(),
+            "COMPLETED" => "Review the result or archive the session.".into(),
+            "IDLE" => "Send a prompt or open the session.".into(),
+            _ => "Inspect the session before taking action.".into(),
+        }
+    }
+}
+
+fn available_action_labels(session: &FleetSessionRow) -> Vec<&'static str> {
+    let mut actions = Vec::new();
+    if session.attention_state.eq_ignore_ascii_case("ASK")
+        && session.is_managed()
+        && session.capabilities.contains("structured_answer")
+    {
+        actions.push("Enter Answer");
+    }
+    if session.attention_state.eq_ignore_ascii_case("APPROVAL")
+        && session.capabilities.contains("approvals")
+    {
+        actions.extend(["y Approve", "n Deny"]);
+    }
+    if session.capabilities.contains("tmux_attach") && session.tmux_target.is_some() {
+        actions.extend(["→ Open", "a Full screen"]);
+    }
+    if session.capabilities.contains("send_prompt") {
+        actions.push("p Send prompt");
+    }
+    if session.capabilities.contains("start") {
+        actions.push("t Start");
+    }
+    if session.capabilities.contains("interrupt") {
+        actions.push("i Interrupt");
+    }
+    if session.capabilities.contains("stop") {
+        actions.push("s Stop");
+    }
+    if session.capabilities.contains("restart") {
+        actions.push("r Restart");
+    }
+    actions
+}
+
+#[cfg(test)]
 fn request_detail_lines(request: &serde_json::Value) -> Vec<(&'static str, String)> {
     let questions = request
         .pointer("/payload/questions")
@@ -1765,8 +2223,38 @@ fn wrap_text(value: &str, width: usize) -> Vec<String> {
     if value.is_empty() {
         return vec![String::new()];
     }
-    let characters: Vec<char> = value.chars().collect();
-    characters.chunks(width).map(|chunk| chunk.iter().collect()).collect()
+    let width = width.max(1);
+    let mut lines = Vec::new();
+    let mut current = String::new();
+    for word in value.split_whitespace() {
+        let word_len = word.chars().count();
+        if word_len > width {
+            if !current.is_empty() {
+                lines.push(std::mem::take(&mut current));
+            }
+            let characters: Vec<char> = word.chars().collect();
+            for chunk in characters.chunks(width) {
+                lines.push(chunk.iter().collect());
+            }
+            continue;
+        }
+        let separator = usize::from(!current.is_empty());
+        if current.chars().count() + separator + word_len > width {
+            lines.push(std::mem::take(&mut current));
+        }
+        if !current.is_empty() {
+            current.push(' ');
+        }
+        current.push_str(word);
+    }
+    if !current.is_empty() {
+        lines.push(current);
+    }
+    if lines.is_empty() {
+        vec![String::new()]
+    } else {
+        lines
+    }
 }
 
 fn render_mode(
@@ -1778,42 +2266,7 @@ fn render_mode(
 ) {
     match &state.mode {
         FleetMode::Browse => {}
-        FleetMode::Answer(answer) => {
-            let question = &answer.questions[answer.question_index];
-            let mut lines = vec![
-                format!(
-                    "Question {}/{}: {}",
-                    answer.question_index + 1,
-                    answer.questions.len(),
-                    question.text
-                ),
-                if answer.editing_text {
-                    "Type answer, Enter advances".into()
-                } else if question.multi_select {
-                    "Space toggles, Enter advances".into()
-                } else {
-                    "Up/Down selects, Enter advances, o enters Other text".into()
-                },
-            ];
-            if answer.editing_text {
-                lines.push(format!("> {}", answer.texts[answer.question_index]));
-            } else {
-                for (index, option) in question.options.iter().enumerate() {
-                    let cursor = if index == answer.option_cursor {
-                        '>'
-                    } else {
-                        ' '
-                    };
-                    let mark = if answer.selections[answer.question_index].contains(&index) {
-                        'x'
-                    } else {
-                        ' '
-                    };
-                    lines.push(format!("{cursor}[{mark}] {option}"));
-                }
-            }
-            render_modal(buffer, area_width, top, bottom, "Structured answer", &lines);
-        }
+        FleetMode::Answer(answer) => render_interview(buffer, area_width, top, bottom, answer),
         FleetMode::Start(start) => render_modal(
             buffer,
             area_width,
@@ -1883,6 +2336,168 @@ fn render_mode(
             render_broadcast_modal(buffer, area_width, top, bottom, state, broadcast)
         }
     }
+}
+
+fn render_interview(
+    buffer: &mut WireBuffer,
+    area_width: u16,
+    top: u16,
+    bottom: u16,
+    answer: &AnswerState,
+) {
+    if area_width < 28 || bottom.saturating_sub(top) < 8 {
+        return;
+    }
+    fill_background(buffer, 0, top, area_width, bottom, SURFACE);
+    let left = 2;
+    let right = area_width.saturating_sub(2);
+    let title_y = top.saturating_add(1);
+    put_str(buffer, left, title_y, "STRUCTURED INTERVIEW", GOLD, right);
+    let answered = answer
+        .questions
+        .iter()
+        .enumerate()
+        .filter(|(index, question)| answer_question_complete(answer, *index, question))
+        .count();
+    put_str(
+        buffer,
+        left,
+        title_y.saturating_add(1),
+        &format!(
+            "{}  /  {} answered     session: {}",
+            answered,
+            answer.questions.len(),
+            truncate(&answer.session_key, 28)
+        ),
+        MUTED,
+        right,
+    );
+    let mut tab_x = left;
+    let tab_y = title_y.saturating_add(3);
+    for (index, question) in answer.questions.iter().enumerate() {
+        let active = index == answer.question_index;
+        let done = answer_question_complete(answer, index, question);
+        let marker = if done { "●" } else { "○" };
+        let tab = format!(
+            " {} {} {} ",
+            index + 1,
+            marker,
+            truncate(&question.header, 14)
+        );
+        if tab_x.saturating_add(tab.len() as u16) >= right {
+            break;
+        }
+        put_str(
+            buffer,
+            tab_x,
+            tab_y,
+            &tab,
+            if active { GREEN } else { MUTED },
+            right,
+        );
+        tab_x = tab_x.saturating_add(tab.len() as u16 + 1);
+    }
+    for x in left..right {
+        put_char(buffer, x, tab_y.saturating_add(1), '─', BLUE);
+    }
+    let question = &answer.questions[answer.question_index];
+    let content_top = tab_y.saturating_add(3);
+    put_str(
+        buffer,
+        left,
+        content_top,
+        &format!("{} / {}", answer.question_index + 1, question.header),
+        BLUE,
+        right,
+    );
+    let mut y = content_top.saturating_add(2);
+    for part in wrap_text(
+        &question.text,
+        usize::from(right.saturating_sub(left)).saturating_sub(2),
+    ) {
+        if y >= bottom.saturating_sub(3) {
+            break;
+        }
+        put_str(buffer, left, y, &part, FG, right);
+        y = y.saturating_add(1);
+    }
+    y = y.saturating_add(1);
+    if answer.editing_text {
+        put_str(
+            buffer,
+            left,
+            y,
+            &format!("> {}", answer.texts[answer.question_index]),
+            GREEN,
+            right,
+        );
+    } else {
+        for (index, option) in question.options.iter().enumerate() {
+            if y >= bottom.saturating_sub(4) {
+                break;
+            }
+            let cursor = if index == answer.option_cursor {
+                '▸'
+            } else {
+                ' '
+            };
+            let selected = answer.selections[answer.question_index].contains(&index);
+            let mark = if question.multi_select {
+                if selected { "[x]" } else { "[ ]" }
+            } else if selected {
+                "(●)"
+            } else {
+                "( )"
+            };
+            put_str(
+                buffer,
+                left,
+                y,
+                &format!("{cursor} {mark} {}", option.label),
+                if index == answer.option_cursor {
+                    GREEN
+                } else {
+                    FG
+                },
+                right,
+            );
+            y = y.saturating_add(1);
+            if !option.description.is_empty() && y < bottom.saturating_sub(4) {
+                put_str(
+                    buffer,
+                    left.saturating_add(6),
+                    y,
+                    &option.description,
+                    MUTED,
+                    right,
+                );
+                y = y.saturating_add(1);
+            }
+        }
+    }
+    for x in left..right {
+        put_char(buffer, x, bottom.saturating_sub(2), '─', BLUE);
+    }
+    let help = if answer.editing_text {
+        "Type answer  Enter next  Tab question  Esc cancel"
+    } else if question.multi_select {
+        "Up/Down move  Space toggle  Enter next  Tab question  Esc cancel"
+    } else {
+        "Up/Down move  Enter next  o Other text  Tab question  Esc cancel"
+    };
+    put_str(buffer, left, bottom.saturating_sub(1), help, MUTED, right);
+}
+
+fn answer_question_complete(answer: &AnswerState, index: usize, question: &AnswerQuestion) -> bool {
+    if question.options.is_empty() {
+        return !answer.texts[index].trim().is_empty();
+    }
+    let selected_other = answer.selections[index]
+        .iter()
+        .filter_map(|option_index| question.options.get(*option_index))
+        .any(|option| option.label.eq_ignore_ascii_case("other"));
+    !answer.selections[index].is_empty()
+        && (!selected_other || !answer.texts[index].trim().is_empty())
 }
 
 fn render_broadcast_modal(
@@ -1986,6 +2601,19 @@ fn truncate(value: &str, max_chars: usize) -> String {
     value.chars().take(max_chars).collect()
 }
 
+fn truncate_ellipsis(value: &str, max_chars: usize) -> String {
+    if value.chars().count() <= max_chars {
+        return value.to_string();
+    }
+    if max_chars <= 1 {
+        return "…".chars().take(max_chars).collect();
+    }
+    format!(
+        "{}…",
+        value.chars().take(max_chars.saturating_sub(1)).collect::<String>()
+    )
+}
+
 fn format_age(now_ms: i64, observed_ms: i64) -> String {
     if now_ms <= 0 || observed_ms <= 0 || observed_ms > now_ms {
         return "?".into();
@@ -2001,6 +2629,19 @@ fn format_age(now_ms: i64, observed_ms: i64) -> String {
 }
 
 fn put_str(buffer: &mut WireBuffer, x: u16, row: u16, value: &str, color: Color, right: u16) {
+    put_str_styled(buffer, x, row, value, color, None, 0, right);
+}
+
+fn put_str_styled(
+    buffer: &mut WireBuffer,
+    x: u16,
+    row: u16,
+    value: &str,
+    color: Color,
+    background: Option<Color>,
+    modifier: u16,
+    right: u16,
+) {
     let mut column = x;
     for raw_character in value.chars() {
         if column >= right {
@@ -2013,8 +2654,27 @@ fn put_str(buffer: &mut WireBuffer, x: u16, row: u16, value: &str, color: Color,
         };
         let mut cell = Cell::new(character.to_string());
         cell.fg = Some(color);
+        cell.bg = background;
+        cell.modifier = modifier;
         buffer.push(Coord::new(column, row), cell);
         column = column.saturating_add(1);
+    }
+}
+
+fn fill_background(
+    buffer: &mut WireBuffer,
+    left: u16,
+    top: u16,
+    right: u16,
+    bottom: u16,
+    color: Color,
+) {
+    for row in top..bottom {
+        for column in left..right {
+            let mut cell = Cell::new(" ");
+            cell.bg = Some(color);
+            buffer.push(Coord::new(column, row), cell);
+        }
     }
 }
 
@@ -2071,6 +2731,8 @@ mod tests {
             cwd: format!("/work/{key}"),
             tmux_target: Some(format!("{key}:0.0")),
             display_name: Some(key.into()),
+            repository_name: Some("agents-in-a-box".into()),
+            branch_name: Some(key.replace(':', "/")),
             discovered_at: 1_000,
             last_observed_at: 9_000,
             metadata_updated_at: 9_000,
@@ -2111,6 +2773,7 @@ mod tests {
             let character = buffer
                 .cells
                 .iter()
+                .rev()
                 .find(|(coord, _)| coord.x == x && coord.y == row)
                 .map_or(' ', |(_, cell)| cell.symbol.chars().next().unwrap_or(' '));
             output.push(character);
@@ -2119,11 +2782,11 @@ mod tests {
     }
 
     #[test]
-    fn focus_is_default_and_excludes_running() {
+    fn needs_input_is_default_and_excludes_non_actionable_rows() {
         let state = state_with_roster();
         let keys: Vec<_> =
             state.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
-        assert_eq!(state.filter(), FleetFilter::Focus);
+        assert_eq!(state.filter(), FleetFilter::NeedsInput);
         assert_eq!(keys, ["claude:ask", "legacy:wait"]);
     }
 
@@ -2143,11 +2806,10 @@ mod tests {
     fn every_filter_selects_expected_rows() {
         let state = state_with_roster();
         let cases = [
-            (FleetFilter::Actionable, vec!["claude:ask", "legacy:wait"]),
-            (FleetFilter::Managed, vec!["claude:ask", "codex:run"]),
-            (FleetFilter::Degraded, vec!["legacy:wait"]),
-            (FleetFilter::Claude, vec!["claude:ask", "legacy:wait"]),
-            (FleetFilter::Codex, vec!["codex:run"]),
+            (FleetFilter::NeedsInput, vec!["claude:ask", "legacy:wait"]),
+            (FleetFilter::Idle, vec![]),
+            (FleetFilter::Completed, vec![]),
+            (FleetFilter::Running, vec!["codex:run"]),
             (
                 FleetFilter::All,
                 vec!["claude:ask", "codex:run", "legacy:wait"],
@@ -2162,7 +2824,48 @@ mod tests {
     }
 
     #[test]
-    fn successful_action_advances_to_next_focus_row() {
+    fn operator_lenses_partition_lifecycle_with_attention_precedence() {
+        let mut rows = vec![
+            session("ask", "claude", "IDLE", "ASK", "managed"),
+            session("error-done", "codex", "TURN_COMPLETE", "ERROR", "managed"),
+            session("idle", "claude", "IDLE", "NONE", "managed"),
+            session("turn-done", "codex", "TURN_COMPLETE", "NONE", "managed"),
+            session("exited", "claude", "EXITED", "NONE", "degraded"),
+            session("starting", "codex", "STARTING", "NONE", "managed"),
+            session("running", "claude", "RUNNING", "NONE", "managed"),
+            session("unknown", "unknown", "UNKNOWN", "NONE", "degraded"),
+        ];
+        let mut state = FleetPaneState::default();
+        state.set_sessions(std::mem::take(&mut rows));
+        let cases = [
+            (FleetFilter::NeedsInput, vec!["ask", "error-done"]),
+            (FleetFilter::Idle, vec!["idle"]),
+            (FleetFilter::Completed, vec!["turn-done", "exited"]),
+            (FleetFilter::Running, vec!["starting", "running"]),
+            (
+                FleetFilter::All,
+                vec![
+                    "ask",
+                    "error-done",
+                    "idle",
+                    "turn-done",
+                    "exited",
+                    "starting",
+                    "running",
+                    "unknown",
+                ],
+            ),
+        ];
+        for (filter, expected) in cases {
+            let filtered = apply(&state, FleetEvent::SetFilter(filter)).state;
+            let actual: Vec<_> =
+                filtered.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
+            assert_eq!(actual, expected, "filter {filter:?}");
+        }
+    }
+
+    #[test]
+    fn successful_action_advances_to_next_needs_input_row() {
         let state = state_with_roster();
         assert_eq!(state.selected_key(), Some("claude:ask"));
         let state = apply(
@@ -2172,12 +2875,12 @@ mod tests {
             },
         )
         .state;
-        assert_eq!(state.filter(), FleetFilter::Focus);
+        assert_eq!(state.filter(), FleetFilter::NeedsInput);
         assert_eq!(state.selected_key(), Some("legacy:wait"));
     }
 
     #[test]
-    fn right_and_uppercase_a_emit_exact_attach_intents() {
+    fn right_and_lowercase_a_emit_exact_attach_intents() {
         let state = state_with_roster();
         assert_eq!(
             apply(&state, FleetEvent::Key(FleetKey::Right)).intent,
@@ -2187,7 +2890,7 @@ mod tests {
             })
         );
         assert_eq!(
-            apply(&state, FleetEvent::Key(FleetKey::Char('A'))).intent,
+            apply(&state, FleetEvent::Key(FleetKey::Char('a'))).intent,
             Some(FleetIntent::AttachFullscreen {
                 session_key: "claude:ask".into(),
                 tmux_target: "claude:ask:0.0".into(),
@@ -2305,6 +3008,77 @@ mod tests {
         assert_eq!(answers[0].selected_options, ["rg", "ast-grep"]);
         assert_eq!(answers[1].question_id, "ship");
         assert_eq!(answers[1].selected_options, ["Yes"]);
+    }
+
+    #[test]
+    fn interview_tabs_preserve_answers_and_refuse_incomplete_batch() {
+        let mut row = session("claude:interview", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("interview-fingerprint".into());
+        row.current_request = Some(serde_json::json!({
+            "tool_use_id": "interview-tool",
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "Choose scope",
+                    "options": [{"label": "Focused", "description": "one worktree"}]
+                },
+                {
+                    "id": "validation",
+                    "header": "Validation",
+                    "question": "Choose checks",
+                    "multiSelect": true,
+                    "options": [{"label": "Tests"}, {"label": "Tripwire"}]
+                }
+            ]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Tab)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Space)).state;
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(matches!(state.mode, FleetMode::Answer(_)));
+        assert_eq!(
+            state.feedback(),
+            Some("complete every interview question before submit")
+        );
+
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let submitted = apply(&state, FleetEvent::Key(FleetKey::Enter));
+        let Some(FleetIntent::Execute {
+            action: FleetAction::StructuredAnswer { answers, .. },
+            ..
+        }) = submitted.intent
+        else {
+            panic!("complete tabbed interview must submit one structured action");
+        };
+        assert_eq!(answers.len(), 2);
+        assert_eq!(answers[0].selected_options, ["Focused"]);
+        assert_eq!(answers[1].selected_options, ["Tests"]);
+    }
+
+    #[test]
+    fn authoritative_request_change_discards_interview_draft() {
+        let mut row = session("claude:stale", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("before".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [{"id": "q", "question": "Continue?", "options": ["Yes"]}]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row.clone()]);
+        state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        assert!(matches!(state.mode, FleetMode::Answer(_)));
+
+        row.version += 1;
+        row.current_request_fingerprint = Some("after".into());
+        state.set_sessions(vec![row]);
+        assert!(matches!(state.mode, FleetMode::Browse));
+        assert_eq!(
+            state.feedback(),
+            Some("interview closed: authoritative request changed")
+        );
     }
 
     #[test]
@@ -2758,18 +3532,132 @@ mod tests {
     }
 
     #[test]
-    fn dense_render_contains_table_and_selected_detail() {
+    fn attention_first_render_contains_lenses_identity_connection_and_actions() {
         let state = apply(&state_with_roster(), FleetEvent::Tick(10_000)).state;
         let mut buffer = WireBuffer::new(120, 24);
         render_fleet(&mut buffer, 120, 0, 20, &state);
-        assert!(row_text(&buffer, 0, 120).contains("Fleet  [Focus]"));
-        assert!(row_text(&buffer, 1, 80).contains("SESSION"));
-        assert!(row_text(&buffer, 2, 80).contains("CLA"));
+        assert!(row_text(&buffer, 0, 120).contains("1 Needs input 2"));
+        assert!(row_text(&buffer, 0, 120).contains("5 All 3"));
+        let header = row_text(&buffer, 2, 90);
+        let first_row = row_text(&buffer, 3, 90);
+        assert!(header.contains("REPOSITORY / BRANCH"));
+        assert!(first_row.contains("agents-in-a-box / claude/ask"));
+        assert!(first_row.contains("TMUX"));
+        assert_eq!(
+            header.find("PROVIDER").map(|index| header[..index].chars().count()),
+            first_row.find("CLAUDE").map(|index| first_row[..index].chars().count()),
+            "table header and row columns must stay aligned"
+        );
         let rendered: String =
             (0..20).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
-        assert!(rendered.contains("Key: claude:ask"));
-        assert!(rendered.contains("State: IDLE / ASK"));
-        assert!(rendered.contains("Capabilities:"));
+        assert!(rendered.contains("NEEDS YOUR INPUT"));
+        assert!(rendered.contains("CONNECTION"));
+        assert!(rendered.contains("Enter Answer"));
+        assert!(!rendered.contains("Identity:"));
+        assert!(!rendered.contains("Capabilities:"));
+    }
+
+    #[test]
+    fn render_keeps_selected_row_visible_beyond_first_viewport() {
+        let rows: Vec<_> = (0..20)
+            .map(|index| {
+                session(
+                    &format!("session-{index:02}"),
+                    "codex",
+                    "RUNNING",
+                    "NONE",
+                    "managed",
+                )
+            })
+            .collect();
+        let mut state = FleetPaneState::default();
+        state.set_sessions(rows);
+        state = apply(&state, FleetEvent::SetFilter(FleetFilter::Running)).state;
+        for _ in 0..17 {
+            state = apply(&state, FleetEvent::Key(FleetKey::Down)).state;
+        }
+        let mut buffer = WireBuffer::new(100, 10);
+        render_fleet(&mut buffer, 100, 0, 9, &state);
+        let rendered = (0..9).map(|row| row_text(&buffer, row, 100)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("session-17"));
+        assert!(rendered.contains("▸"));
+        assert!(!rendered.contains("session-00"));
+    }
+
+    #[test]
+    fn render_exposes_lens_empty_success_state_and_escape() {
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![session(
+            "running", "codex", "RUNNING", "NONE", "managed",
+        )]);
+        let mut buffer = WireBuffer::new(100, 16);
+        render_fleet(&mut buffer, 100, 0, 15, &state);
+        let rendered =
+            (0..15).map(|row| row_text(&buffer, row, 100)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("1 Needs input 0"));
+        assert!(rendered.contains("✓ Nothing needs you"));
+        assert!(rendered.contains("Press 5 for All."));
+    }
+
+    #[test]
+    fn renderer_uses_explicit_attachment_labels_and_word_wrapping() {
+        let mut remote = session("remote", "codex", "IDLE", "NONE", "managed");
+        remote.tmux_target = None;
+        remote.branch_name = None;
+        let mut none = session("none", "unknown", "UNKNOWN", "NONE", "degraded");
+        none.tmux_target = None;
+        none.capabilities = FleetCapabilities::default();
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![remote, none]);
+        state = apply(&state, FleetEvent::SetFilter(FleetFilter::All)).state;
+        let mut buffer = WireBuffer::new(120, 18);
+        render_fleet(&mut buffer, 120, 0, 17, &state);
+        let rendered =
+            (0..17).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("REMOTE"));
+        assert!(rendered.contains("NONE"));
+        assert!(rendered.contains("branch unknown"));
+        assert!(rendered.contains("REMOTE · controllable"));
+        assert!(rendered.contains("terminal attachment"));
+        assert_eq!(
+            wrap_text("Controls should never split ordinary words", 18),
+            vec!["Controls should", "never split", "ordinary words"]
+        );
+    }
+
+    #[test]
+    fn interview_renderer_exposes_tabs_progress_and_option_descriptions() {
+        let mut row = session("claude:render", "claude", "IDLE", "ASK", "managed");
+        row.current_request_fingerprint = Some("render-fingerprint".into());
+        row.current_request = Some(serde_json::json!({
+            "questions": [
+                {
+                    "id": "scope",
+                    "header": "Scope",
+                    "question": "What scope should ship?",
+                    "options": [{"label": "Focused", "description": "verified Fleet work only"}]
+                },
+                {
+                    "id": "checks",
+                    "header": "Checks",
+                    "question": "What proof runs?",
+                    "multiSelect": true,
+                    "options": [{"label": "Tripwire", "description": "live terminal proof"}]
+                }
+            ]
+        }));
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![row]);
+        let state = apply(&state, FleetEvent::Key(FleetKey::Enter)).state;
+        let mut buffer = WireBuffer::new(120, 30);
+        render_fleet(&mut buffer, 120, 0, 28, &state);
+        let rendered: String =
+            (0..28).map(|row| row_text(&buffer, row, 120)).collect::<Vec<_>>().join("\n");
+        assert!(rendered.contains("STRUCTURED INTERVIEW"));
+        assert!(rendered.contains("Scope"));
+        assert!(rendered.contains("Checks"));
+        assert!(rendered.contains("0  /  2 answered"));
+        assert!(rendered.contains("verified Fleet work only"));
     }
 
     #[test]

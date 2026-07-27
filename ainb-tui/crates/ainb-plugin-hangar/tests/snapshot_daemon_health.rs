@@ -92,6 +92,17 @@ fn glyph_map(buf: &WireBuffer, cols: u16) -> String {
         .to_string()
 }
 
+/// Replace THIS build's crate version with a stable token before snapshotting.
+///
+/// The pane prints `daemon: <version>` from `CARGO_PKG_VERSION`, so a frozen
+/// golden would re-break on every workspace version bump (it did: the golden
+/// said `1.15.0` long after the workspace reached `1.16.1`, and nothing in CI
+/// compiled this target to notice). The version line is asserted explicitly and
+/// non-vacuously by the test itself; the golden pins the *layout*.
+fn redact_version(s: &str) -> String {
+    s.replace(env!("CARGO_PKG_VERSION"), "<VERSION>")
+}
+
 /// The full daemon-health pane renders the runtime row, the claim-cache bar, the
 /// concurrency count, and the throughput sparkline header.
 #[test]
@@ -102,6 +113,10 @@ fn render_full_health_pane_snapshot() {
     let full = glyph_map(&buf, 80);
 
     assert!(full.contains("Daemon health"), "title:\n{full}");
+    assert!(
+        full.contains(&format!("daemon: {}", env!("CARGO_PKG_VERSION"))),
+        "daemon version line:\n{full}"
+    );
     assert!(full.contains("runtime: claude"), "runtime row:\n{full}");
     assert!(full.contains("connected"), "runtime status:\n{full}");
     assert!(full.contains("pid 14829"), "runtime pid:\n{full}");
@@ -113,7 +128,7 @@ fn render_full_health_pane_snapshot() {
         "sparkline header:\n{full}"
     );
 
-    insta::assert_snapshot!(full);
+    insta::assert_snapshot!(redact_version(&full));
 }
 
 /// The sparkline paints exactly 60 columns (one per throughput sample).

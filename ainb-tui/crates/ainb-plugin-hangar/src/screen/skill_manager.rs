@@ -18,9 +18,9 @@
 //! `hangar/skill_get`); the plugin owns zero domain data
 //! (`project_ainb_plugin_owns_data_plane`).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
-use ainb_hangar_proto::events::{HangarEvent, SkillFile, SkillRow};
+use ainb_hangar_proto::events::{AgentSkillLinkRow, HangarEvent, SkillFile, SkillRow};
 use ainb_plugin_sdk::WireBuffer;
 
 use crate::widgets::editor_pane::render_editor_pane;
@@ -88,6 +88,12 @@ pub struct SkillManagerState {
     /// The skill slug the pointer is hovering over (63l.6), or `None` off every
     /// card. The card-board render lifts the hovered card's border.
     hovered_slug: Option<String>,
+    /// Per-agent enablement of the selected agent's skill links, keyed by slug
+    /// (parity #24). Populated by [`SkillManagerEvent::LinksLoaded`] after any
+    /// attach / detach / toggle reply, so the ` (disabled)` marker is never
+    /// stale. A slug absent from the map renders unmarked — the map only claims
+    /// to know about links the daemon reported.
+    link_enabled: BTreeMap<String, bool>,
 }
 
 /// The loaded detail of one skill: its slug (to guard stale replies) + the
@@ -116,6 +122,7 @@ impl SkillManagerState {
             detail: None,
             scroll_offset: 0,
             hovered_slug: None,
+            link_enabled: BTreeMap::new(),
         }
     }
 
@@ -155,6 +162,14 @@ impl SkillManagerState {
             .map(|d| d.body.as_str())
     }
 
+    /// Whether the link for `slug` is currently disabled for the selected agent
+    /// (parity #24). `false` for a slug the daemon has not reported on — an
+    /// unknown link is never rendered as disabled.
+    #[must_use]
+    pub fn link_disabled(&self, slug: &str) -> bool {
+        self.link_enabled.get(slug) == Some(&false)
+    }
+
     /// The skills visible under the active filter.
     #[must_use]
     pub fn visible_skills(&self) -> Vec<SkillRow> {
@@ -187,12 +202,20 @@ impl SkillManagerState {
             .visible_skills()
             .into_iter()
             .map(|s| BoardCard {
+                not_dispatched: false,
                 issue_id: s.slug.clone(),
                 display_id: s.name.clone(),
-                title: if s.used {
-                    "used".to_string()
-                } else {
-                    "unused".to_string()
+                // Attachment-based `used`/`unused` (deviation D3 — the filter
+                // chips keep their attachment meaning), suffixed with the
+                // per-agent enablement when the daemon has reported the link as
+                // disabled (parity #24).
+                title: {
+                    let base = if s.used { "used" } else { "unused" };
+                    if self.link_disabled(&s.slug) {
+                        format!("{base} (disabled)")
+                    } else {
+                        base.to_string()
+                    }
                 },
                 priority: PriorityChip::from_priority(0),
                 assignee_initial: s.name.chars().next(),
@@ -281,6 +304,10 @@ pub enum SkillManagerEvent {
     /// Mark a skill's local copy dirty (an in-progress edit; P6 wires real edits,
     /// but the dirty flag drives the P4 conflict banner already).
     MarkDirty(String),
+    /// The daemon replied to `hangar/agent_skills_list` with the selected
+    /// agent's links and their per-agent enablement (parity #24). Replaces the
+    /// cached map wholesale, so a detached link stops being reported.
+    LinksLoaded(Vec<AgentSkillLinkRow>),
     /// A host stream event (e.g. [`HangarEvent::SkillUpdated`]).
     Event(HangarEvent),
 }
@@ -307,6 +334,12 @@ pub enum SkillManagerIntent {
     /// Detach the selected skill from the selected agent (`d`) —
     /// `hangar/skill_detach` (P6.5).
     Detach(String),
+    /// Flip the selected skill's per-agent enablement (`t`) —
+    /// `hangar/skill_set_enabled` (parity #24). Carries the skill slug only; the
+    /// reducer stays pure and does not know the target agent (identical to
+    /// [`Self::Attach`] / [`Self::Detach`]), nor the target state — the glue
+    /// derives that from the cached link map.
+    ToggleEnabled(String),
 }
 
 /// The result of folding one [`SkillManagerEvent`] into a [`SkillManagerState`].
@@ -332,6 +365,7 @@ pub fn reduce_skill_manager(
             detail_loaded(state, &slug, body, files)
         }
         SkillManagerEvent::MarkDirty(slug) => mark_dirty(state, slug),
+        SkillManagerEvent::LinksLoaded(links) => links_loaded(state, links),
         SkillManagerEvent::Event(event) => fold_event(state, event),
     }
 }
@@ -340,6 +374,7 @@ pub fn reduce_skill_manager(
 /// - `j`/`k` move the list selection;
 /// - `s` runs the curated-skills sync (`hangar/skills_sync`);
 /// - `i`/`d` attach/detach the selected skill to/from the selected agent;
+/// - `t` flips the selected skill's per-agent enablement (parity #24);
 /// - `Enter` opens the detail pane (`hangar/skill_get`);
 /// - `r` refreshes / dismisses the conflict banner.
 fn reduce_key(state: &SkillManagerState, c: char) -> SkillManagerReduction {
@@ -349,6 +384,7 @@ fn reduce_key(state: &SkillManagerState, c: char) -> SkillManagerReduction {
         's' => with_intent(state.clone(), SkillManagerIntent::Sync),
         'i' => skill_intent(state, SkillManagerIntent::Attach),
         'd' => skill_intent(state, SkillManagerIntent::Detach),
+        't' => skill_intent(state, SkillManagerIntent::ToggleEnabled),
         '\n' | '\r' => enter(state),
         'r' => refresh(state),
         _ => unchanged(state),
@@ -389,6 +425,17 @@ fn enter(state: &SkillManagerState) -> SkillManagerReduction {
         Some(skill) => with_intent(state.clone(), SkillManagerIntent::LoadDetail(skill.slug)),
         None => unchanged(state),
     }
+}
+
+/// Replace the cached per-agent link enablement (parity #24).
+///
+/// Wholesale replacement, not a merge: the reply is the full truth for that
+/// agent, so a link that has been detached since the last load must disappear
+/// from the map rather than linger as a stale ` (disabled)` marker.
+fn links_loaded(state: &SkillManagerState, links: Vec<AgentSkillLinkRow>) -> SkillManagerReduction {
+    let mut next = state.clone();
+    next.link_enabled = links.into_iter().map(|l| (l.skill_id, l.enabled)).collect();
+    no_intent(next)
 }
 
 /// Apply a filter chip, clamping the selection into the narrowed list.

@@ -54,6 +54,24 @@ impl TestRepo {
             );
         }
 
+        // Never sign the fixture's commits. Signing is a GLOBAL git setting, so
+        // on a machine with `commit.gpgsign = true` this fixture inherits it and
+        // every `TestRepo::new` shells out to gpg-agent — which, with the whole
+        // behavioral binary committing in parallel, fails at random with
+        // "gpg: signing failed: Cannot allocate memory" and takes an unrelated
+        // test down with it. A throwaway repo has nothing to prove about the
+        // developer's key.
+        let output = Command::new("git")
+            .args(["config", "commit.gpgsign", "false"])
+            .current_dir(&path)
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!(
+                "git config commit.gpgsign failed: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+
         // Create initial file and commit
         std::fs::write(path.join("README.md"), "# Test Repo\n")?;
 

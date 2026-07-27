@@ -45,11 +45,17 @@ use std::sync::Arc;
 use std::sync::{OnceLock, RwLock};
 use std::time::Instant;
 
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
+use ainb_hangar_core::actor::{ActorRef, local_member};
 use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_core::dispatch_reason::{DispatchReason, DispatchSource};
+use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::{AgentId, AutopilotId, SkillId, WorkspaceId};
+use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
+use ainb_hangar_store::service::activity::ActivityService;
 use futures_util::future::join_all;
 use sqlx::SqlitePool;
 
@@ -693,7 +699,9 @@ async fn handle(
         methods::HANGAR_SEARCH => handle_search(pool, req).await,
         methods::HANGAR_AGENTS_LIST => {
             let actors = match resolve(pool, req).await? {
-                Some(ws) => snapshots::agents_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+                Some(ws) => snapshots::agents_list(pool, &ws, SystemClock.now_ms())
+                    .await
+                    .map_err(|e| store_err(&e))?,
                 None => Vec::new(),
             };
             to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
@@ -743,10 +751,14 @@ async fn handle(
         }
         methods::HANGAR_SKILL_ATTACH => attach_or_detach(pool, req, true).await,
         methods::HANGAR_SKILL_DETACH => attach_or_detach(pool, req, false).await,
+        methods::HANGAR_SKILL_SET_ENABLED => skill_set_enabled(pool, req).await,
+        methods::HANGAR_AGENT_SKILLS_LIST => agent_skills_list(pool, req).await,
         methods::HANGAR_AUTOPILOTS_LIST
         | methods::HANGAR_AUTOPILOT_RUNS
         | methods::HANGAR_AUTOPILOT_FIRE_NOW
-        | methods::HANGAR_AUTOPILOT_SET_ENABLED => handle_autopilot(pool, req, events).await,
+        | methods::HANGAR_AUTOPILOT_SET_ENABLED
+        | methods::HANGAR_AUTOPILOT_TRIGGER_API
+        | methods::HANGAR_AUTOPILOT_SET_API_TRIGGER => handle_autopilot(pool, req, events).await,
         methods::HANGAR_TASKS_LIST => handle_tasks_list(pool, req).await,
         methods::HANGAR_TASK_TRANSITION => handle_task_transition(pool, req, events).await,
         methods::HANGAR_TASK_RETRY => handle_task_retry(pool, req, events).await,
@@ -756,6 +768,7 @@ async fn handle(
         methods::HANGAR_ISSUE_UPDATE => handle_issue_update(pool, req, events).await,
         methods::HANGAR_ISSUE_LABEL_ATTACH => handle_issue_label(pool, req, events, true).await,
         methods::HANGAR_ISSUE_LABEL_DETACH => handle_issue_label(pool, req, events, false).await,
+        methods::HANGAR_ISSUE_CRITERION_SET => handle_issue_criterion_set(pool, req, events).await,
         methods::HANGAR_COMMENT_ADD => handle_comment_add(pool, req, events).await,
         methods::HANGAR_AGENT_CREATE => handle_agent_create(pool, req).await,
         methods::HANGAR_AGENT_DELETE => handle_agent_delete(pool, req).await,
@@ -769,6 +782,9 @@ async fn handle(
         methods::HANGAR_SQUAD_MEMBER_ADD => handle_squad_member(pool, req, true).await,
         methods::HANGAR_SQUAD_MEMBER_REMOVE => handle_squad_member(pool, req, false).await,
         methods::HANGAR_SQUAD_ASSIGN => handle_squad_assign(pool, req).await,
+        methods::HANGAR_SQUAD_ARCHIVE => handle_squad_archive(pool, req).await,
+        methods::HANGAR_SQUAD_MEMBER_ROLE_SET => handle_squad_member_role(pool, req).await,
+        methods::HANGAR_SQUAD_INSTRUCTIONS_SET => handle_squad_instructions(pool, req).await,
         methods::HANGAR_SQUAD_FANOUT => handle_squad_fanout(pool, req).await,
         methods::HANGAR_HEALTH => to_value(&health.snapshot(true)),
         methods::HANGAR_DAEMON_HEALTH => handle_daemon_health(pool, req, health).await,
@@ -797,6 +813,11 @@ async fn handle(
         methods::HANGAR_BOARD_CARD_ASSIGN_SQUAD => handle_board_card_assign_squad(pool, req).await,
         methods::HANGAR_BOARD_CARD_DEP_ADD => handle_board_card_dep(pool, req, true).await,
         methods::HANGAR_BOARD_CARD_DEP_REMOVE => handle_board_card_dep(pool, req, false).await,
+        methods::HANGAR_ISSUE_LINK_ADD => handle_issue_link(pool, req, true).await,
+        methods::HANGAR_ISSUE_LINK_REMOVE => handle_issue_link(pool, req, false).await,
+        methods::HANGAR_ISSUE_LINKS => handle_issue_links(pool, req).await,
+        methods::HANGAR_DISPATCH_ATTEMPTS_LIST => handle_dispatch_attempts_list(pool, req).await,
+        methods::HANGAR_ISSUE_TIMELINE => handle_issue_timeline(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
@@ -2684,6 +2705,28 @@ fn parse_params<T: serde::de::DeserializeOwned>(
     })
 }
 
+/// Deserialize a SECRET-BEARING request's `params` into `T` with a CONTENT-FREE
+/// error message.
+///
+/// Identical to [`parse_params`] except the `serde_json` error is DROPPED. That
+/// is deliberate, and it is multica's rule (`cmd_agent.go:757-759`): serde
+/// echoes the offending scalar in its message (`invalid type: integer \`31337\`,
+/// expected a string`), so a malformed `agent_env` value would be reflected
+/// straight back to the caller — and into whatever log captured the response.
+///
+/// Only the two handlers that accept `agent_env` use this; every other handler
+/// keeps [`parse_params`] and its richer diagnostics.
+fn parse_params_secret<T: serde::de::DeserializeOwned>(
+    req: &RpcRequest,
+    shape: &str,
+) -> Result<T, RpcError> {
+    serde_json::from_value(req.params.clone()).map_err(|_| RpcError {
+        code: INVALID_PARAMS,
+        message: format!("expected {shape}"),
+        data: None,
+    })
+}
+
 /// Resolve a wire workspace identifier (slug OR id) to the real row id,
 /// returning `None` when no workspace matches and mapping a store fault to an
 /// internal error. The id-bearing P6.5 handlers use this (they carry their own
@@ -3079,7 +3122,7 @@ async fn handle_issue_create(
 
     let params: ainb_hangar_proto::snapshots::IssueCreateParams = parse_params(
         req,
-        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs? }",
+        "{ workspace_id, title, description?, creator, external_ref?, acceptance_criteria?, context_refs?, priority?, due_date?, labels?, origin_type?, origin_id? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
@@ -3115,6 +3158,38 @@ async fn handle_issue_create(
         .filter(|s| !s.is_empty())
         .map(ToString::to_string)
         .collect();
+    // 0014 priority: `0..3` (P3..P0). An out-of-vocabulary value is a client
+    // error, mirroring multica's `validateIssueEnum` — NEVER silently clamped,
+    // which would persist an urgency the author did not ask for.
+    let priority = params.priority.unwrap_or(0);
+    if !(0..=3).contains(&priority) {
+        return Err(invalid_params("issue priority must be 0..3 (P3..P0)"));
+    }
+    // 0014 due date: the wire carries epoch ms at UTC midnight (the client parses
+    // the `YYYY-MM-DD` calendar day with `proto::dates::parse_calendar_date_ms`),
+    // so any i64 is accepted here — a pre-1970 deadline is legal, if odd.
+    let due_date = params.due_date;
+    // 0016 labels: trim-drop blanks like the other lists, and dedupe preserving
+    // first-seen order. `LabelRepo::attach` is idempotent so a duplicate would not
+    // corrupt the join, but the response row must not imply the repeat mattered.
+    let mut labels: Vec<String> = Vec::new();
+    for name in params.labels.iter().map(|s| s.trim()).filter(|s| !s.is_empty()) {
+        if !labels.iter().any(|seen| seen == name) {
+            labels.push(name.to_string());
+        }
+    }
+    // 0056 ORIGIN PROVENANCE (multica parity #21): validated BEFORE any write,
+    // like the parent resolve below — a bad origin must fail the call, never
+    // land a half-provenanced issue. multica's contract verbatim
+    // (`internal/handler/issue.go:1213-1231`): the two halves must arrive
+    // together and the kind must be on the allow-list, so a rogue caller cannot
+    // mint an arbitrary provenance label. An absent pair is legal and stamps
+    // `manual` downstream.
+    let origin = ainb_hangar_core::origin::IssueOrigin::from_wire(
+        params.origin_type.as_deref(),
+        params.origin_id.as_deref(),
+    )
+    .map_err(|e| invalid_params(&e.to_string()))?;
     if let Some(parent) = parent_issue_id {
         let ok = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, parent)
             .await
@@ -3130,17 +3205,38 @@ async fn handle_issue_create(
         pool,
         &SystemIdGen,
         &SystemClock,
-        ws.as_str(),
-        &params.title,
-        params.description.as_deref(),
-        &creator,
-        external_ref,
-        parent_issue_id,
-        &acceptance_criteria,
-        &context_refs,
+        &snapshots::IssueCreateInput {
+            workspace_id: ws.as_str(),
+            title: &params.title,
+            description: params.description.as_deref(),
+            creator: &creator,
+            external_ref,
+            parent_issue_id,
+            acceptance_criteria: &acceptance_criteria,
+            context_refs: &context_refs,
+            priority,
+            due_date,
+            labels: &labels,
+            origin: origin.as_ref(),
+        },
     )
     .await
     .map_err(|e| store_err(&e))?;
+    // multica parity #13: open the card's narrative. Attributed to the
+    // wire-supplied creator (hangar has no request-auth context, so that is the
+    // most honest actor available here). Best-effort — an audit failure never
+    // fails the create.
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        ws.as_str(),
+        &row.id.to_string(),
+        &ActivityActor::Actor(creator.clone()),
+        ActivityAction::Created,
+        serde_json::json!({}),
+    )
+    .await;
     // A committed insert announces the new issue to subscribers.
     events.emit(ws.as_str(), HangarEvent::IssueCreated(row.clone()));
     to_value(&row)
@@ -3393,9 +3489,36 @@ async fn handle_issue_update(
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let update = issue_field_update_from_params(&params)?;
 
+    // 0049: the RPC boundary is STRICT about the lifecycle vocabulary — a typo'd
+    // state is a clean INVALID_PARAMS here rather than a trigger ABORT surfacing
+    // as an internal store error, and no partial write happens. Deliberately
+    // stricter than the DB constraint, which must still admit the Beads bridge's
+    // legacy `open` / `closed` writes; the TUI and CLI only ever send canonical
+    // tokens.
+    if let Some(state) = params.state.as_deref() {
+        if IssueLifecycle::parse_canonical(state).is_none() {
+            return Err(invalid_params(&format!(
+                "invalid state {state:?}; valid values: {}",
+                IssueLifecycle::canonical_list()
+            )));
+        }
+    }
+
     // 0046: capture the issue's PRE-update state (only when a state edit is
     // requested) so a completion can fire the child-done → parent cascade below.
     let prev_state = issue_prev_state_for_cascade(pool, &ws, &params.issue_id, &update).await?;
+
+    // multica parity #13: the FULL pre-edit row, so the post-edit diff can write
+    // one activity row per changed field. Deliberately separate from
+    // `prev_state` above, which only carries the state token for the cascade.
+    let before_issue = if update.is_empty() {
+        None
+    } else {
+        ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+            .await
+            .map_err(|e| store_err(&e))?
+            .filter(|i| i.workspace_id == ws.as_str())
+    };
 
     // F6 card edit: the card's repo + chosen agent are persisted on the durable
     // card (the issue) exactly as `board_card_create` does — trim the repo, drop an
@@ -3458,6 +3581,28 @@ async fn handle_issue_update(
         .await?;
     }
 
+    // multica parity #13: diff the pre-edit row against the committed one and
+    // record one activity row per changed field. Best-effort throughout.
+    if let Some(before) = before_issue.as_ref() {
+        if let Some(after) =
+            ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+                .await
+                .map_err(|e| store_err(&e))?
+        {
+            let actor = acting_actor(pool).await;
+            ActivityService::record_issue_diff(
+                pool,
+                &SystemIdGen,
+                &SystemClock,
+                ws.as_str(),
+                &actor,
+                before,
+                &after,
+            )
+            .await;
+        }
+    }
+
     // A committed edit announces the refreshed row to subscribers. Re-read AFTER
     // the card-parity writes so the pushed row reflects a just-set external_ref.
     let row = if external_ref.is_some() {
@@ -3499,6 +3644,9 @@ async fn handle_issue_update(
                     None,
                     Some(actor),
                     None, // owner-invoked recovery re-dispatch
+                    // multica parity #12: setting an assignee re-dispatches; its
+                    // refusals used to be an `info!` line and nothing else.
+                    DispatchSource::Assign,
                 )
                 .await
                 {
@@ -3645,6 +3793,76 @@ async fn handle_issue_label(
     to_value(&row)
 }
 
+/// Dispatch `hangar/issue_criterion_set` (multica parity #11-rest): tick or
+/// untick ONE acceptance criterion on one issue, push the refreshed row, and
+/// answer with it.
+///
+/// Mirrors [`handle_issue_label`]'s contract: the mutating handler resolves the
+/// workspace and **rejects** a mistyped one with `INVALID_PARAMS` (never a silent
+/// no-op), validates a non-blank `criterion` selector, then drives the
+/// workspace-scoped store mutator. An `(issue_id, workspace)` pair matching no
+/// row, or a selector matching no criterion, is a client error — never a silent
+/// ack of a write that did not happen. Only a committed mutation pushes the
+/// event, reusing `IssueUpdated` so every already-subscribed screen re-renders
+/// with zero new event plumbing.
+async fn handle_issue_criterion_set(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::idgen::SystemIdGen;
+    use ainb_hangar_proto::events::HangarEvent;
+
+    let params: ainb_hangar_proto::snapshots::IssueCriterionSetParams = parse_params(
+        req,
+        "{ workspace_id, issue_id, criterion, checked, actor? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    if params.criterion.trim().is_empty() {
+        return Err(invalid_params("criterion must not be empty"));
+    }
+    let row = snapshots::issue_criterion_set(
+        pool,
+        &SystemIdGen,
+        &ws,
+        &params.issue_id,
+        params.criterion.trim(),
+        params.checked,
+        SystemClock.now_ms(),
+        params.actor.as_deref(),
+    )
+    .await
+    .map_err(|e| criterion_repo_err(&e))?;
+    let Some(row) = row else {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    };
+    events.emit(ws.as_str(), HangarEvent::IssueUpdated(row.clone()));
+    to_value(&row)
+}
+
+/// Map a [`CriterionError`] onto an RPC error: every addressing / isolation
+/// rejection is a client error (`INVALID_PARAMS`), a concurrent-write loss is a
+/// retryable client error, and a store fault is internal.
+///
+/// [`CriterionError`]: ainb_hangar_store::repo::issue::CriterionError
+fn criterion_repo_err(e: &ainb_hangar_store::repo::issue::CriterionError) -> RpcError {
+    use ainb_hangar_store::repo::issue::CriterionError;
+    match e {
+        CriterionError::IssueNotFound => invalid_params("no issue in this workspace"),
+        CriterionError::CriterionNotFound => {
+            invalid_params("no acceptance criterion matches that id or ordinal")
+        }
+        CriterionError::Conflict => {
+            invalid_params("criterion changed concurrently; re-read and retry")
+        }
+        CriterionError::Db(db) => internal(&format!("criterion store error: {db}")),
+    }
+}
+
 /// Map a [`LabelRepoError`] onto an RPC error: the issue-not-found guard is a
 /// client error (`INVALID_PARAMS`, the caller used a foreign / unknown issue id),
 /// every other fault is an internal store error.
@@ -3718,13 +3936,19 @@ async fn handle_comment_add(
     // this workspace. Firing AFTER the commit means a spawn-side fault can never
     // lose the comment; an unknown handle resolves to nothing and is ignored. A
     // store fault here is logged, not surfaced — the comment already landed and a
-    // failed trigger must not turn a successful comment into an RPC error.
+    // failed trigger must not turn a successful comment into an RPC error. The
+    // AUTHOR rides through as the gap #8 effective invoker: a mention of an agent
+    // the author may not invoke spawns nothing (the comment still lands).
     if let Err(e) = snapshots::spawn_mention_tasks(
         pool,
         &SystemIdGen,
         &SystemClock,
         ws.as_str(),
         row.issue_id.as_str(),
+        // 0056: the COMMITTED comment's id is this run's provenance
+        // (`('comment_mention', <comment.id>)`).
+        row.id.as_str(),
+        &author,
         &params.body,
     )
     .await
@@ -3762,27 +3986,39 @@ async fn handle_agent_create(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params(
+    // Content-free parse error: this params shape is adjacent to the secret
+    // `agent_env` write channel, so it uses the same rule as agent_update.
+    let params: ainb_hangar_proto::snapshots::AgentCreateParams = parse_params_secret(
         req,
-        "{ workspace_id?, name, provider?, model?, instructions? }",
+        "{ workspace_id?, name, provider?, model?, instructions?, description?, avatar_url?, \
+         service_tier? }",
     )?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("agent name must not be empty"));
     }
+    let description = validate_description(params.description.as_deref())?.unwrap_or_default();
     let provider = ainb_hangar_store::bootstrap::normalize_provider(params.provider.as_deref())
         .map_err(|e| invalid_params(&e))?;
     let wire = params.workspace_id.as_deref().unwrap_or("").trim();
     let ws = resolve_or_bootstrap_default(pool, wire).await?;
-    let created = ainb_hangar_store::bootstrap::create_agent(
+    let created = ainb_hangar_store::bootstrap::create_agent_from(
         pool,
         ws.as_str(),
-        name,
-        &provider,
-        params.instructions,
+        ainb_hangar_store::bootstrap::AgentDraft {
+            name: name.to_string(),
+            provider,
+            instructions: params.instructions,
+            description,
+            avatar_url: params.avatar_url,
+            service_tier: params.service_tier,
+            // `model` rides the create-time follow-up write below (unchanged), and
+            // `kind`/`system_key` are never client-settable — see AgentCreateParams.
+            ..ainb_hangar_store::bootstrap::AgentDraft::default()
+        },
     )
     .await
-    .map_err(|e| store_err(&e))?;
+    .map_err(|e| duplicate_name_or_store_err(&e, name))?;
     // Optional create-time model override (gap #9) + token budget (0042): applied
     // as a single follow-up config write rather than widening create_agent's
     // signature across every caller. A blank model is treated as absent (no
@@ -3805,7 +4041,9 @@ async fn handle_agent_create(
     }
     // Answer with the refreshed roster (the same shape agents_list returns) so
     // the plugin folds the new agent into its cached list and the squad gate clears.
-    let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    let actors = snapshots::agents_list(pool, ws.as_str(), SystemClock.now_ms())
+        .await
+        .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
 }
 
@@ -3854,7 +4092,9 @@ async fn handle_agent_delete(
         })?;
     // Answer with the refreshed roster (the same shape agents_list / agent_create
     // return) so the plugin folds the shrunk list into its picker cache.
-    let actors = snapshots::agents_list(pool, ws.as_str()).await.map_err(|e| store_err(&e))?;
+    let actors = snapshots::agents_list(pool, ws.as_str(), SystemClock.now_ms())
+        .await
+        .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::AgentsListResult { actors })
 }
 
@@ -3862,24 +4102,38 @@ async fn handle_agent_update(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentUpdateParams = parse_params(
+    // `agent_env` carries SECRETS, so a shape mismatch must not echo the input
+    // back (parity #30 / multica `cmd_agent.go:757-759`).
+    let params: ainb_hangar_proto::snapshots::AgentUpdateParams = parse_params_secret(
         req,
         "{ workspace_id, agent_id, name?, instructions?, model?, cli_args?, mcp_config?, \
-         thinking?, agent_env? }",
+         thinking?, agent_env?, description?, avatar_url?, service_tier? }",
     )?;
     // The mutating handler must not silently no-op on a typo'd workspace.
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    // Same 255-code-point cap as create — an over-long blurb is refused with the
+    // actionable message before it can reach the schema CHECK.
+    validate_description(params.description.as_deref())?;
     let update = agent_config_update_from_params(&params);
     // An edit with no field set is a client error: there is nothing to write.
     if update.is_empty() {
         return Err(invalid_params(
             "nothing to update: set at least one of \
-             name/instructions/model/cli_args/mcp_config/thinking/agent_env",
+             name/instructions/model/cli_args/mcp_config/thinking/agent_env/\
+             description/avatar_url/service_tier",
         ));
     }
-    let row = snapshots::agent_update(pool, ws.as_str(), &params.agent_id, &update)
-        .await
-        .map_err(|e| store_err(&e))?;
+    let row = snapshots::agent_update(
+        pool,
+        ws.as_str(),
+        &params.agent_id,
+        &update,
+        SystemClock.now_ms(),
+    )
+    .await
+    // A RENAME onto a name already taken in this workspace is the same refusal
+    // create gives (migration 0050), not an opaque store fault.
+    .map_err(|e| duplicate_name_or_store_err(&e, params.name.as_deref().unwrap_or_default()))?;
     let Some(row) = row else {
         return Err(invalid_params(&format!(
             "no agent `{}` in this workspace",
@@ -3887,6 +4141,42 @@ async fn handle_agent_update(
         )));
     };
     to_value(&row)
+}
+
+/// Validate an optional wire `description` against multica's 255-CODE-POINT cap
+/// (migration 0050 / multica 060), returning the trimmed value.
+///
+/// Counted in `chars()`, not bytes, so an emoji-heavy blurb is measured the way
+/// multica's `utf8.RuneCountInString` measures it and the way the schema's
+/// `length()` CHECK does. Rejecting here (rather than letting the CHECK fire)
+/// gives the user the actionable message instead of an opaque store fault.
+fn validate_description(desc: Option<&str>) -> Result<Option<String>, RpcError> {
+    let Some(desc) = desc else { return Ok(None) };
+    let trimmed = desc.trim();
+    if trimmed.chars().count() > ainb_hangar_store::repo::agent::MAX_DESCRIPTION_CHARS {
+        return Err(invalid_params(
+            "description must be 255 characters or fewer",
+        ));
+    }
+    Ok(Some(trimmed.to_string()))
+}
+
+/// Turn a failed agent create/rename into either the duplicate-name refusal
+/// (multica's 409-equivalent, migration 0050) or the generic store error.
+///
+/// The `data.reason` marker follows the precedent [`handle_agent_delete`] set with
+/// `active_tasks` / `has_history`, so the TUI branches on a token rather than
+/// string-matching the message.
+fn duplicate_name_or_store_err(e: &sqlx::Error, name: &str) -> RpcError {
+    if ainb_hangar_store::repo::agent::is_duplicate_name(e) {
+        RpcError {
+            code: INVALID_PARAMS,
+            message: format!("an agent named `{name}` already exists in this workspace"),
+            data: Some(serde_json::json!({ "reason": "duplicate_name" })),
+        }
+    } else {
+        store_err(e)
+    }
 }
 
 /// Map the wire [`AgentUpdateParams`] onto the store's [`AgentConfigUpdate`].
@@ -3909,7 +4199,15 @@ fn agent_config_update_from_params(
         mcp_config: field_to_nested(&params.mcp_config),
         thinking: field_to_nested(&params.thinking),
         token_budget: field_to_nested(&params.token_budget),
-        agent_env: params.agent_env.clone(),
+        agent_env: params
+            .agent_env
+            .clone()
+            .map(ainb_hangar_core::agent_env::AgentEnvInput::into_agent_env),
+        // Migration 0050. `description` is NOT NULL, so it maps straight through
+        // like `name`; the other two are nullable and use the FieldUpdate bridge.
+        description: params.description.as_deref().map(|d| d.trim().to_string()),
+        avatar_url: field_to_nested(&params.avatar_url),
+        service_tier: field_to_nested(&params.service_tier),
     }
 }
 
@@ -3940,12 +4238,21 @@ async fn handle_agent_archive(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let params: ainb_hangar_proto::snapshots::AgentArchiveParams =
-        parse_params(req, "{ workspace_id, agent_id, archived }")?;
+    let params: ainb_hangar_proto::snapshots::AgentArchiveParams = parse_params(
+        req,
+        "{ workspace_id, agent_id, archived, archived_by_user_id? }",
+    )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
-    let row = snapshots::agent_archive(pool, ws.as_str(), &params.agent_id, params.archived)
-        .await
-        .map_err(|e| store_err(&e))?;
+    let row = snapshots::agent_archive(
+        pool,
+        ws.as_str(),
+        &params.agent_id,
+        params.archived,
+        params.archived_by_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
     let Some(row) = row else {
         return Err(invalid_params(&format!(
             "no agent `{}` in this workspace",
@@ -4111,6 +4418,14 @@ async fn handle_squad_create(
     SquadRepo::create(pool, &ws, &id, &params.name, &leader, SystemClock.now_ms())
         .await
         .map_err(|e| squad_repo_err(&e))?;
+    // Optional initial routing guidance (parity #25). `create`'s signature stays
+    // unchanged — the two writes are one logical unit inside this handler, and an
+    // omitted / empty value leaves the column at its `''` default.
+    if !params.instructions.trim().is_empty() {
+        SquadRepo::set_instructions(pool, &ws, &id, &params.instructions)
+            .await
+            .map_err(|e| squad_repo_err(&e))?;
+    }
     squads_list_value(pool, &ws).await
 }
 
@@ -4142,11 +4457,114 @@ async fn handle_squad_member(
         ))
     })?;
     let outcome = if add {
-        SquadRepo::add_member(pool, &ws, &params.squad_id, &member).await
+        // An explicit role is explicit intent, so it OVERWRITES on a re-add
+        // (parity #25). An omitted / empty role keeps today's exact behavior for
+        // an old client: `DO NOTHING`, which never clears an existing role.
+        if params.role.trim().is_empty() {
+            SquadRepo::add_member(pool, &ws, &params.squad_id, &member).await
+        } else {
+            SquadRepo::add_member_with_role(pool, &ws, &params.squad_id, &member, &params.role)
+                .await
+        }
     } else {
         SquadRepo::remove_member(pool, &ws, &params.squad_id, &member).await
     };
     outcome.map_err(|e| squad_repo_err(&e))?;
+    squads_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/squad_archive` (parity #26): archive or un-archive one squad,
+/// recording WHO and WHEN, and answer with the refreshed ACTIVE squad list.
+///
+/// Mirrors [`handle_squad_member`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the tenant-scoped flip. A `(squad_id, workspace)` pair
+/// that matches no row is a not-found error, never a cross-tenant flip.
+async fn handle_squad_archive(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::SquadArchiveParams = parse_params(
+        req,
+        "{ workspace_id, squad_id, archived, archived_by_user_id? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let squads = snapshots::squad_archive(
+        pool,
+        ws.as_str(),
+        &params.squad_id,
+        params.archived,
+        params.archived_by_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        SystemClock.now_ms(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
+    let Some(squads) = squads else {
+        return Err(invalid_params(&format!(
+            "no squad `{}` in this workspace",
+            params.squad_id
+        )));
+    };
+    to_value(&ainb_hangar_proto::snapshots::SquadsListResult { squads })
+}
+
+/// Dispatch `hangar/squad_member_role_set` (parity #25): set or clear one
+/// EXISTING membership's free-text role and answer with the refreshed
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// Mirrors [`handle_squad_member`]'s contract: resolve + reject a mistyped
+/// workspace, parse the member actor-ref, then drive the tenant-scoped update.
+/// **Never a silent no-op:** an actor that is not already a member yields
+/// `INVALID_PARAMS` rather than a success answer — this handler edits an existing
+/// membership and never inserts one.
+async fn handle_squad_member_role(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_store::repo::squad::SquadRepo;
+    use std::str::FromStr as _;
+
+    let params: ainb_hangar_proto::snapshots::SquadMemberRoleParams =
+        parse_params(req, "{ workspace_id, squad_id, member, role }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let member = ActorRef::from_str(&params.member).map_err(|e| {
+        invalid_params(&format!(
+            "member must be `agent:<id>` or `member:<id>`: {e}"
+        ))
+    })?;
+    let updated = SquadRepo::set_member_role(pool, &ws, &params.squad_id, &member, &params.role)
+        .await
+        .map_err(|e| squad_repo_err(&e))?;
+    if !updated {
+        return Err(invalid_params(&format!(
+            "`{}` is not a member of squad `{}`",
+            params.member, params.squad_id
+        )));
+    }
+    squads_list_value(pool, &ws).await
+}
+
+/// Dispatch `hangar/squad_instructions_set` (parity #25): set or clear one
+/// squad's user-authored routing guidance and answer with the refreshed
+/// [`SquadsListResult`](ainb_hangar_proto::snapshots::SquadsListResult).
+///
+/// Mirrors [`handle_squad_archive`]'s contract: resolve + reject a mistyped
+/// workspace, then drive the tenant-scoped write. A `(squad_id, workspace)` pair
+/// that matches no row is rejected with `INVALID_PARAMS`, never a cross-tenant
+/// write. An empty `instructions` CLEARS the field, which makes the leader
+/// briefing omit the `## Squad Instructions` section entirely.
+async fn handle_squad_instructions(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::squad::SquadRepo;
+
+    let params: ainb_hangar_proto::snapshots::SquadInstructionsParams =
+        parse_params(req, "{ workspace_id, squad_id, instructions }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    SquadRepo::set_instructions(pool, &ws, &params.squad_id, &params.instructions)
+        .await
+        .map_err(|e| squad_repo_err(&e))?;
     squads_list_value(pool, &ws).await
 }
 
@@ -4210,15 +4628,20 @@ async fn handle_squad_assign(
 
     let params: ainb_hangar_proto::snapshots::SquadAssignParams = parse_params(
         req,
-        "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
+        "{ workspace_id, squad_id, issue_id?, work_dir?, priority?, invoker_user_id? }",
     )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let generation = squad_assign_generation(pool, params.issue_id.as_deref()).await?;
+    // gap #8: an optional invoker identity. Omitted (`None`) defaults to the
+    // workspace owner inside the service — the ordinary single-operator assign,
+    // which the gate always admits.
+    let invoker = params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let request = SquadAssignRequest {
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
         generation,
+        invoker,
         ..SquadAssignRequest::default()
     };
     let SquadAssignment {
@@ -4266,15 +4689,20 @@ async fn handle_squad_fanout(
 
     let params: ainb_hangar_proto::snapshots::SquadAssignParams = parse_params(
         req,
-        "{ workspace_id, squad_id, issue_id?, work_dir?, priority? }",
+        "{ workspace_id, squad_id, issue_id?, work_dir?, priority?, invoker_user_id? }",
     )?;
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
     let generation = squad_assign_generation(pool, params.issue_id.as_deref()).await?;
+    // gap #8: an optional invoker identity. Omitted (`None`) defaults to the
+    // workspace owner inside the service — the ordinary single-operator assign,
+    // which the gate always admits.
+    let invoker = params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty());
     let request = SquadAssignRequest {
         issue_id: params.issue_id.as_deref(),
         work_dir: params.work_dir.as_deref(),
         priority: params.priority.unwrap_or(0),
         generation,
+        invoker,
         ..SquadAssignRequest::default()
     };
     let SquadFanout { leader, members } = SquadAssignService::assign_fanout(
@@ -4321,6 +4749,17 @@ fn squad_assign_err(e: &ainb_hangar_store::service::squad_assign::SquadAssignErr
         SquadAssignError::MemberAgentMissing(id) => {
             invalid_params(&format!("squad member agent `{id}` not found"))
         }
+        // gap #8: worded identically to `CardRunError::NotInvocable`, so a board
+        // rejection and a squad rejection read the same to the operator (the board
+        // squad path reaches this arm through `CardRunError::Squad`).
+        SquadAssignError::NotInvocable { agent_id, invoker } => invalid_params(&format!(
+            "agent {agent_id} is not invocable by {invoker} — it is private or you are not on its allow-list"
+        )),
+        // parity #26: an archived squad refuses new work. A client error — the
+        // operator restores the squad and re-issues.
+        SquadAssignError::Archived(id) => invalid_params(&format!(
+            "squad `{id}` is archived — restore it before assigning work"
+        )),
         SquadAssignError::Db(db) => store_err(db),
     }
 }
@@ -4689,6 +5128,16 @@ async fn handle_board_card_create(
     )
     .await
     .map_err(|e| store_err(&e))?;
+    // 0056: a board card is authored by the TUI user, so its provenance is
+    // `manual` (stamped explicitly, never left NULL — see migration 0056).
+    IssueRepo::set_origin(
+        pool,
+        ws.as_str(),
+        &issue_id,
+        &ainb_hangar_core::origin::IssueOrigin::manual(),
+    )
+    .await
+    .map_err(|e| store_err(&e))?;
 
     BoardRepo::card_add(
         pool,
@@ -4840,34 +5289,50 @@ async fn handle_board_card_run(
         agent_override,
         params.source_branch.as_deref().map(str::trim).filter(|s| !s.is_empty()),
         None, // a board card runs under the card's own assignee (no wizard override)
-        None, // owner-invoked (the local TUI operator); the gate admits the owner
+        // gap #8: an optional invoker identity, parsed exactly as `handle_issue_run`
+        // does. Omitted (`None`) defaults to the workspace owner inside `run_card` —
+        // the ordinary single-operator TUI Run, which the gate always admits.
+        params.invoker_user_id.as_deref().map(str::trim).filter(|s| !s.is_empty()),
+        DispatchSource::Manual,
     )
     .await
     .map_err(card_run_err)?;
 
+    // multica parity #12: the handler serializes the SAME code the service
+    // decided — `queued`, or `runtime_offline` when the task was keyed to a
+    // runtime that is not `online` (which is still enqueued; see divergence D1).
+    let reason = if outcome.runtime_status().is_some() {
+        DispatchReason::RuntimeOffline
+    } else {
+        DispatchReason::Queued
+    };
     let result = match outcome {
         CardRunOutcome::Single {
             task_id,
             agent_id,
             runtime_id,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id,
             agent_id,
             runtime_id,
             mode: mode.to_string(),
             member_task_ids: Vec::new(),
+            reason: Some(reason.as_db_str().to_string()),
         },
         CardRunOutcome::Squad {
             leader_task_id,
             leader_agent_id,
             leader_runtime_id,
             member_task_ids,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id: leader_task_id,
             agent_id: leader_agent_id,
             runtime_id: leader_runtime_id,
             mode: mode.to_string(),
             member_task_ids,
+            reason: Some(reason.as_db_str().to_string()),
         },
     };
     to_value(&result)
@@ -4968,33 +5433,46 @@ async fn handle_issue_run(
         source_override,
         assignee_override.as_ref(),
         invoker,
+        DispatchSource::Manual,
     )
     .await
     .map_err(card_run_err)?;
 
+    // multica parity #12: the handler serializes the SAME code the service
+    // decided — `queued`, or `runtime_offline` when the task was keyed to a
+    // runtime that is not `online` (which is still enqueued; see divergence D1).
+    let reason = if outcome.runtime_status().is_some() {
+        DispatchReason::RuntimeOffline
+    } else {
+        DispatchReason::Queued
+    };
     let result = match outcome {
         CardRunOutcome::Single {
             task_id,
             agent_id,
             runtime_id,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id,
             agent_id,
             runtime_id,
             mode: mode.to_string(),
             member_task_ids: Vec::new(),
+            reason: Some(reason.as_db_str().to_string()),
         },
         CardRunOutcome::Squad {
             leader_task_id,
             leader_agent_id,
             leader_runtime_id,
             member_task_ids,
+            ..
         } => ainb_hangar_proto::snapshots::BoardCardRunResult {
             task_id: leader_task_id,
             agent_id: leader_agent_id,
             runtime_id: leader_runtime_id,
             mode: mode.to_string(),
             member_task_ids,
+            reason: Some(reason.as_db_str().to_string()),
         },
     };
     to_value(&result)
@@ -5008,13 +5486,60 @@ pub(crate) enum CardRunOutcome {
         task_id: String,
         agent_id: String,
         runtime_id: String,
+        /// The resolved runtime's status when it is NOT `online` (multica parity
+        /// #12): `Some("offline")` / `Some("unstable")`, else `None`. Carried out
+        /// of [`run_card_inner`] so the [`run_card`] wrapper can record
+        /// [`DispatchReason::RuntimeOffline`] — see divergence D1 there.
+        runtime_status: Option<String>,
     },
     Squad {
         leader_task_id: String,
         leader_agent_id: String,
         leader_runtime_id: String,
         member_task_ids: Vec<String>,
+        /// The LEADER runtime's status when it is not `online`; see
+        /// [`CardRunOutcome::Single::runtime_status`].
+        runtime_status: Option<String>,
     },
+}
+
+impl CardRunOutcome {
+    /// The task id a caller reports (the leader's, for a squad).
+    fn primary_task_id(&self) -> &str {
+        match self {
+            Self::Single { task_id, .. } => task_id,
+            Self::Squad { leader_task_id, .. } => leader_task_id,
+        }
+    }
+
+    /// The agent the run routed to (the leader, for a squad).
+    fn primary_agent_id(&self) -> &str {
+        match self {
+            Self::Single { agent_id, .. } => agent_id,
+            Self::Squad {
+                leader_agent_id, ..
+            } => leader_agent_id,
+        }
+    }
+
+    /// The runtime the task was keyed to (the leader's, for a squad).
+    fn primary_runtime_id(&self) -> &str {
+        match self {
+            Self::Single { runtime_id, .. } => runtime_id,
+            Self::Squad {
+                leader_runtime_id, ..
+            } => leader_runtime_id,
+        }
+    }
+
+    /// The non-`online` runtime status, when there is one.
+    fn runtime_status(&self) -> Option<&str> {
+        match self {
+            Self::Single { runtime_status, .. } | Self::Squad { runtime_status, .. } => {
+                runtime_status.as_deref()
+            }
+        }
+    }
 }
 
 /// Why a card could not be launched. The RPC handler maps each to an
@@ -5024,6 +5549,10 @@ pub(crate) enum CardRunOutcome {
 pub(crate) enum CardRunError {
     /// The card has unfinished blockers (their display ids) — F7 refuse-run.
     Blocked(Vec<String>),
+    /// The card's ISSUE sits in the terminal `cancelled` state. Distinct from
+    /// [`Self::Blocked`], which is the DEPENDENCY refusal — a user must be able
+    /// to tell "waiting on HGR-3" from "you cancelled this".
+    Cancelled,
     /// The card already has an active run (its status).
     ActiveRun(String),
     /// The card has no repo to run in (F2).
@@ -5049,12 +5578,37 @@ pub(crate) enum CardRunError {
 }
 
 /// Map a [`CardRunError`] onto an RPC error for the `board_card_run` handler.
+///
+/// multica parity #12: the reply also carries the STABLE admission code in
+/// `error.data.reason`, alongside today's human message — so a client can branch
+/// on the machine vocabulary instead of string-matching prose, and the code it
+/// sees is the same one the audit row persisted. Clients that ignore `data` are
+/// unaffected (the field is `skip_serializing_if = "Option::is_none"` and was
+/// simply absent before).
 fn card_run_err(e: CardRunError) -> RpcError {
+    // Compute the code from the SAME classifier the audit recorder uses, so the
+    // code a client sees on the wire can never disagree with the code persisted
+    // for the very same refusal.
+    let outcome: Result<CardRunOutcome, CardRunError> = Err(e);
+    let (reason, _detail) = classify_dispatch(&outcome);
+    let Err(e) = outcome else {
+        unreachable!("constructed as Err just above")
+    };
+    let mut err = card_run_message(e);
+    err.data = Some(serde_json::json!({ "reason": reason.as_db_str() }));
+    err
+}
+
+/// The human-readable half of [`card_run_err`].
+fn card_run_message(e: CardRunError) -> RpcError {
     match e {
         CardRunError::Blocked(refs) => invalid_params(&format!(
             "this card is blocked by unfinished cards ({}); finish them (or remove the dependency) first",
             refs.join(", ")
         )),
+        CardRunError::Cancelled => {
+            invalid_params("this card is cancelled; move it out of Cancelled before running it")
+        }
         CardRunError::ActiveRun(status) => invalid_params(&format!(
             "a run is already active for this card ({status}); cancel it or wait for it to finish"
         )),
@@ -5116,6 +5670,202 @@ impl Drop for CardLaunchSlot {
     }
 }
 
+/// THE ONE RECORDING SEAM for admission decisions (multica parity #12).
+///
+/// A thin wrapper over [`run_card_inner`] (the historical `run_card` body) that
+/// records exactly one `dispatch_attempt` row per invocation, so all five launch
+/// paths — `handle_issue_run`, `handle_board_card_run`, the `issue_update`
+/// assignee re-dispatch, `board::auto_run_dependent` and the child-done cascade —
+/// are covered without sprinkling recorders through them. Before this, every one
+/// of those five threw the refusal away: two turned it into an ephemeral RPC
+/// error string, three logged it at debug/info and returned.
+///
+/// # The normative mapping — `run_card` result → [`DispatchReason`]
+///
+/// | result | code | `detail` |
+/// |---|---|---|
+/// | `Ok(..)` with an `online` runtime | `queued` | `"task <id>"` / `"leader <id> + <n> members"` |
+/// | `Ok(..)` with a non-`online` runtime | `runtime_offline` | `"task <id> queued; runtime <rt> is <status>"` |
+/// | `Err(Blocked(refs))` | `deferred` | `"blocked by HGR-3, HGR-7"` |
+/// | `Err(ActiveRun(status))` | `already_active` | `"a run is already active (<status>)"` |
+/// | `Err(NoAgent)` / `Err(NoRepo)` / `Err(NotDispatchable)` | `target_unavailable` | the specific cause |
+/// | `Err(Squad(..))` | `target_unavailable`, or `invocation_not_allowed` for its permission variant | the `SquadAssignError` display |
+/// | `Err(NotInvocable)` / `Err(Cancelled)` / `Err(InteractiveSquad)` | `invocation_not_allowed` | the specific cause |
+/// | `Err(Db(e))` | `internal_error` | the sqlx error string |
+///
+/// The coarseness is deliberate and copied from the reference: `NoAgent` /
+/// `NoRepo` / `NotDispatchable` all collapse to `target_unavailable`, and
+/// `Cancelled` / `NotInvocable` / `InteractiveSquad` all collapse to
+/// `invocation_not_allowed` — so the code can never be used as an existence
+/// oracle. The specifics live in the free-text `detail`.
+///
+/// # Divergence D1 — `runtime_offline` records, it does not refuse
+///
+/// multica DECLINES a dispatch whose runtime is offline. hangar still ENQUEUES
+/// and records `runtime_offline` with the `task_id` set. hangar's runtime rows
+/// are per-`(daemon_id, provider)`, so a codex runtime can be stale while the
+/// deciding daemon is very much alive, and the presence sweeper flips a row to
+/// `offline` on a grace timer — refusing would turn a transient heartbeat gap
+/// into a hard user-visible failure and regress the "queue it, the claim loop
+/// will take it" model. Recording buys the observability multica gets (the user
+/// is finally told WHY nothing is happening) without changing dispatch
+/// behaviour. `unstable` records the code too; the detail names the real status.
+///
+/// # Divergence D2 — `Blocked` is `deferred`, not a refusal code
+///
+/// hangar genuinely promotes a blocked card later: `board::auto_run_dependent`
+/// fires the run when the last blocker finishes, the direct analogue of the
+/// reference's `PromoteDueDeferredTasksForRuntime`.
+///
+/// Recording is BEST-EFFORT: a record fault is logged and never changes the run
+/// outcome — the audit must not be able to fail a dispatch.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn run_card(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    board_id: Option<&str>,
+    issue: &ainb_hangar_store::repo::issue::Issue,
+    mode: &str,
+    repo_override: Option<&str>,
+    agent_override: Option<ainb_hangar_core::agent_kind::AgentKind>,
+    source_branch_override: Option<&str>,
+    assignee_override: Option<&ainb_hangar_core::actor::ActorRef>,
+    invoker_user_id: Option<&str>,
+    source: DispatchSource,
+) -> Result<CardRunOutcome, CardRunError> {
+    let outcome = run_card_inner(
+        pool,
+        ws,
+        board_id,
+        issue,
+        mode,
+        repo_override,
+        agent_override,
+        source_branch_override,
+        assignee_override,
+        invoker_user_id,
+    )
+    .await;
+    record_dispatch_attempt(pool, ws, issue.id.as_str(), source, &outcome).await;
+    outcome
+}
+
+/// Classify a [`run_card_inner`] result into the stable admission vocabulary +
+/// its free-text detail. Pure, so the mapping table above is unit-testable
+/// without a database.
+fn classify_dispatch(
+    outcome: &Result<CardRunOutcome, CardRunError>,
+) -> (DispatchReason, Option<String>) {
+    use ainb_hangar_store::service::squad_assign::SquadAssignError;
+    match outcome {
+        Ok(out) => {
+            let base = match out {
+                CardRunOutcome::Single { task_id, .. } => format!("task {task_id}"),
+                CardRunOutcome::Squad {
+                    leader_task_id,
+                    member_task_ids,
+                    ..
+                } => format!(
+                    "leader {leader_task_id} + {} members",
+                    member_task_ids.len()
+                ),
+            };
+            out.runtime_status().map_or_else(
+                || (DispatchReason::Queued, Some(base.clone())),
+                |status| {
+                    (
+                        DispatchReason::RuntimeOffline,
+                        Some(format!(
+                            "{base} queued; runtime {} is {status}",
+                            out.primary_runtime_id()
+                        )),
+                    )
+                },
+            )
+        }
+        Err(CardRunError::Blocked(refs)) => (
+            DispatchReason::Deferred,
+            Some(format!("blocked by {}", refs.join(", "))),
+        ),
+        Err(CardRunError::ActiveRun(status)) => (
+            DispatchReason::AlreadyActive,
+            Some(format!("a run is already active ({status})")),
+        ),
+        Err(CardRunError::NoAgent) => (
+            DispatchReason::TargetUnavailable,
+            Some("no agent in this workspace to run on".to_string()),
+        ),
+        Err(CardRunError::NoRepo) => (
+            DispatchReason::TargetUnavailable,
+            Some("no repo pinned on this card".to_string()),
+        ),
+        Err(CardRunError::NotDispatchable(kind)) => (
+            DispatchReason::TargetUnavailable,
+            Some(format!("provider {kind} is not wired for dispatch")),
+        ),
+        // The squad PERMISSION variant is an invocation refusal like
+        // `NotInvocable`; every other squad fault is "there is nothing coherent to
+        // dispatch to".
+        Err(CardRunError::Squad(se @ SquadAssignError::NotInvocable { .. })) => {
+            (DispatchReason::InvocationNotAllowed, Some(se.to_string()))
+        }
+        Err(CardRunError::Squad(se)) => (DispatchReason::TargetUnavailable, Some(se.to_string())),
+        Err(CardRunError::NotInvocable { agent_id, .. }) => (
+            DispatchReason::InvocationNotAllowed,
+            Some(format!(
+                "agent {agent_id} is private or you are not on its allow-list"
+            )),
+        ),
+        Err(CardRunError::Cancelled) => (
+            DispatchReason::InvocationNotAllowed,
+            Some("issue is cancelled".to_string()),
+        ),
+        Err(CardRunError::InteractiveSquad) => (
+            DispatchReason::InvocationNotAllowed,
+            Some("interactive mode is not supported for a squad".to_string()),
+        ),
+        Err(CardRunError::Db(e)) => (DispatchReason::InternalError, Some(e.to_string())),
+    }
+}
+
+/// Persist one `dispatch_attempt` row for a [`run_card`] invocation.
+///
+/// Best-effort by contract: any store fault is logged at `warn` and swallowed,
+/// because an audit write must never be able to fail a dispatch that otherwise
+/// succeeded.
+async fn record_dispatch_attempt(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    issue_id: &str,
+    source: DispatchSource,
+    outcome: &Result<CardRunOutcome, CardRunError>,
+) {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::dispatch_attempt::{DispatchAttemptRepo, NewDispatchAttempt};
+
+    let (reason, detail) = classify_dispatch(outcome);
+    let ok = outcome.as_ref().ok();
+    let record = NewDispatchAttempt {
+        workspace_id: ws.as_str(),
+        issue_id: Some(issue_id),
+        agent_id: ok.map(CardRunOutcome::primary_agent_id),
+        runtime_id: ok.map(CardRunOutcome::primary_runtime_id),
+        task_id: ok.map(CardRunOutcome::primary_task_id),
+        reason,
+        detail: detail.as_deref(),
+        source,
+        created_at: SystemClock.now_ms(),
+    };
+    if let Err(e) = DispatchAttemptRepo::record(pool, &SystemIdGen.new_ulid(), &record).await {
+        tracing::warn!(
+            error = %e,
+            issue_id,
+            reason = reason.as_db_str(),
+            "dispatch attempt record failed (audit only; the run outcome is unchanged)"
+        );
+    }
+}
+
 /// Launch a card's issue NOW — the shared core behind the `board_card_run` RPC and
 /// the F7 auto-run seam (tcp T4).
 ///
@@ -5127,7 +5877,12 @@ impl Drop for CardLaunchSlot {
 ///      from being double-fanned;
 ///   3. F2 repo-required — the run-time override, else the card's persisted repo,
 ///      else a refusal (never a "random" run);
-///   4. F4 agent cascade + F8 dispatchable check.
+///   4. F4 agent cascade + F8 dispatchable check;
+///   5. gap #8 invocation gate — the EFFECTIVE invoker (`invoker_user_id`, else the
+///      workspace owner) is resolved ONCE, above the fork, and every dispatch
+///      target is judged by it: the single assignee agent here, and the leader plus
+///      every member inside [`SquadAssignService::assign_fanout`]. A refusal writes
+///      no `agent_task_queue` row on either fork.
 ///
 /// Then it forks: a card with an assigned SQUAD (`issue.squad_id`, migration 0035)
 /// FANS OUT via [`SquadAssignService::assign_fanout`] — the leader brief plus one
@@ -5135,7 +5890,7 @@ impl Drop for CardLaunchSlot {
 /// provisions its OWN worktree; otherwise it enqueues ONE task on the card's
 /// assignee agent (the pre-T4 single-agent path). `board_id` scopes the F4 board
 /// tier (pass `None` from the auto-run seam, which is board-agnostic).
-pub(crate) async fn run_card(
+async fn run_card_inner(
     pool: &SqlitePool,
     ws: &WorkspaceId,
     board_id: Option<&str>,
@@ -5169,6 +5924,15 @@ pub(crate) async fn run_card(
     if !blockers.is_empty() {
         let refs = blockers.iter().map(|b| crate::rpc::snapshots::short_display_id(b)).collect();
         return Err(CardRunError::Blocked(refs));
+    }
+
+    // 1b. A CANCELLED issue never dispatches. `cancelled` is terminal (multica
+    //     excludes it from the status-change run trigger), so a Run on a
+    //     cancelled card is a user error, not a silent launch. `blocked` stays
+    //     runnable — in hangar it is a human annotation, and the real dependency
+    //     gate is step 1 above.
+    if IssueLifecycle::for_state(&issue.state) == IssueLifecycle::Cancelled {
+        return Err(CardRunError::Cancelled);
     }
 
     // 2. One active run per card (card = issue). Blocks a re-run — and a second
@@ -5222,6 +5986,21 @@ pub(crate) async fn run_card(
         tracing::warn!(error = %e, "card_run: last-used agent write failed");
     }
 
+    // gap #8 invocation gate — the EFFECTIVE invoker, resolved ONCE for BOTH forks.
+    // Defaults to the workspace owner (the ordinary single-operator TUI Run) when
+    // no explicit invoker is supplied; the owner branch of `can_invoke` always
+    // admits, so the existing Run path is unchanged and the gate only bites a
+    // non-owner member (the case the allow-list exists for). Resolved ABOVE the
+    // squad fork so the fan-out is gated by the same identity as the single-agent
+    // enqueue — the squad branch used to `return` before this ever ran.
+    let invoker_id = match invoker_user_id {
+        Some(u) => u.to_string(),
+        None => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, ws)
+            .await
+            .map_err(CardRunError::Db)?
+            .unwrap_or_default(),
+    };
+
     // Fork: a squad card FANS OUT; a single-agent card enqueues one task.
     let squad_id = CardParityRepo::get_issue_squad(pool, issue_id)
         .await
@@ -5241,6 +6020,9 @@ pub(crate) async fn run_card(
             repo_ref: Some(&repo_ref),
             agent_kind: Some(agent_kind),
             generation,
+            // gap #8: the leader AND every member are gated by this invoker inside
+            // the service's pre-flight resolve, so a denial enqueues nothing.
+            invoker: Some(&invoker_id),
             ..SquadAssignRequest::default()
         };
         let fanout = SquadAssignService::assign_fanout(
@@ -5253,11 +6035,18 @@ pub(crate) async fn run_card(
         )
         .await
         .map_err(CardRunError::Squad)?;
+        // multica parity #12: a run keyed to a runtime that is not `online` is
+        // still enqueued (divergence D1 on `run_card`) but the status is carried
+        // out so the wrapper records `runtime_offline` — otherwise the card just
+        // sits `queued` until the 2h TTL relabels it `timeout`, with nothing
+        // anywhere saying why.
+        let runtime_status = non_online_runtime_status(pool, &fanout.leader.runtime_id).await;
         return Ok(CardRunOutcome::Squad {
             leader_task_id: fanout.leader.task_id,
             leader_agent_id: fanout.leader.leader_agent_id,
             leader_runtime_id: fanout.leader.runtime_id,
             member_task_ids: fanout.members.into_iter().map(|m| m.task_id).collect(),
+            runtime_status,
         });
     }
 
@@ -5273,18 +6062,8 @@ pub(crate) async fn run_card(
         .ok_or(CardRunError::NoAgent)?;
 
     // gap #8 invocation gate: a run may only be enqueued for an agent the invoker
-    // is permitted to invoke (multica canInvokeAgent parity). The EFFECTIVE invoker
-    // defaults to the workspace owner (the ordinary single-operator TUI Run) when no
-    // explicit invoker is supplied — the owner branch always admits, so the existing
-    // Run path is unchanged; the gate only bites a non-owner member (the case the
-    // allow-list exists for). Denied here means NO task row is written.
-    let invoker_id = match invoker_user_id {
-        Some(u) => u.to_string(),
-        None => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, ws)
-            .await
-            .map_err(CardRunError::Db)?
-            .unwrap_or_default(),
-    };
+    // is permitted to invoke (multica canInvokeAgent parity), judged by the
+    // `invoker_id` resolved above the squad fork. Denied means NO task row is written.
     let invocable = ainb_hangar_store::repo::agent::AgentRepo::can_invoke(
         pool,
         &agent,
@@ -5334,11 +6113,31 @@ pub(crate) async fn run_card(
         .map_err(CardRunError::Db)?;
     tx.commit().await.map_err(CardRunError::Db)?;
 
+    // multica parity #12 (divergence D1): record, do not refuse. See `run_card`.
+    let runtime_status = non_online_runtime_status(pool, &agent.runtime_id).await;
     Ok(CardRunOutcome::Single {
         task_id,
         agent_id: agent.id,
         runtime_id: agent.runtime_id,
+        runtime_status,
     })
+}
+
+/// The runtime's status when it is NOT `online` (`offline` / `unstable` / any
+/// future token), else `None`.
+///
+/// Best-effort: a read fault or a missing row reports `None` rather than
+/// inventing a decline — the audit must never manufacture a problem the dispatch
+/// did not have.
+async fn non_online_runtime_status(pool: &SqlitePool, runtime_id: &str) -> Option<String> {
+    match ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo::get(pool, runtime_id).await {
+        Ok(Some(rt)) if rt.status != "online" => Some(rt.status),
+        Ok(_) => None,
+        Err(e) => {
+            tracing::warn!(error = %e, runtime_id, "runtime status pre-flight failed");
+            None
+        }
+    }
 }
 
 /// Resolve the agent a card run routes to (the issue's assignee agent when it names
@@ -5431,8 +6230,9 @@ async fn handle_board_card_dep(
 
     let params: ainb_hangar_proto::snapshots::BoardCardDepParams = parse_params(
         req,
-        "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id }",
+        "{ workspace_id, board_id, dependent_issue_id, blocker_issue_id, link_type? }",
     )?;
+    let kind = link_kind_of(params.link_type);
     let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
 
     // Both endpoints must be cards on this board — a dependency is a board
@@ -5444,26 +6244,217 @@ async fn handle_board_card_dep(
     }
 
     if add {
-        CardDependencyRepo::add_edge(
+        CardDependencyRepo::add_link(
             pool,
             &ws,
             &params.dependent_issue_id,
             &params.blocker_issue_id,
+            kind,
             SystemClock.now_ms(),
         )
         .await
         .map_err(|e| card_dep_err(&e))?;
     } else {
-        CardDependencyRepo::remove_edge(
+        CardDependencyRepo::remove_link(
             pool,
             &ws,
             &params.dependent_issue_id,
             &params.blocker_issue_id,
+            kind,
         )
         .await
         .map_err(|e| store_err(&e))?;
     }
     boards_list_value(pool, &ws).await
+}
+
+/// Translate the wire kind onto the store's [`LinkKind`] (multica parity #20).
+/// The wire default (`blocked_by`) is the historical gating edge, so an old client
+/// that omits the field lands here unchanged.
+///
+/// [`LinkKind`]: ainb_hangar_store::repo::card_dependency::LinkKind
+fn link_kind_of(
+    wire: ainb_hangar_proto::snapshots::LinkKindWire,
+) -> ainb_hangar_store::repo::card_dependency::LinkKind {
+    use ainb_hangar_proto::snapshots::LinkKindWire;
+    use ainb_hangar_store::repo::card_dependency::LinkKind;
+    match wire {
+        LinkKindWire::Blocks => LinkKind::Blocks,
+        LinkKindWire::BlockedBy => LinkKind::BlockedBy,
+        LinkKindWire::Related => LinkKind::Related,
+    }
+}
+
+/// `hangar/issue_link_add` (`add = true`) / `hangar/issue_link_remove`
+/// (`add = false`) (multica parity #20): author a TYPED link between two issues,
+/// independent of any board.
+///
+/// Board-free counterpart of [`handle_board_card_dep`] — the link lives on the
+/// issues, so it is authorable from the issue list / detail card / CLI with no
+/// board in the picture. Same workspace scoping and the same
+/// [`card_dep_err`] mapping. Answers with the refreshed link list.
+async fn handle_issue_link(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    add: bool,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let params: ainb_hangar_proto::snapshots::IssueLinkParams = parse_params(
+        req,
+        "{ workspace_id, issue_id, other_issue_id, link_type? }",
+    )?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let kind = link_kind_of(params.link_type);
+
+    if add {
+        CardDependencyRepo::add_link(
+            pool,
+            &ws,
+            &params.issue_id,
+            &params.other_issue_id,
+            kind,
+            SystemClock.now_ms(),
+        )
+        .await
+        .map_err(|e| card_dep_err(&e))?;
+    } else {
+        CardDependencyRepo::remove_link(pool, &ws, &params.issue_id, &params.other_issue_id, kind)
+            .await
+            .map_err(|e| store_err(&e))?;
+    }
+    issue_links_value(pool, &ws, &params.issue_id).await
+}
+
+/// `hangar/issue_links` (multica parity #20): read one issue's whole typed link
+/// graph, in render order (`blocked_by`, then `blocks`, then `related`).
+async fn handle_issue_links(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::IssueLinksParams =
+        parse_params(req, "{ workspace_id, issue_id }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    issue_links_value(pool, &ws, &params.issue_id).await
+}
+
+/// Build the `IssueLinksResult` payload for one issue.
+async fn issue_links_value(
+    pool: &SqlitePool,
+    ws: &ainb_hangar_core::ids::WorkspaceId,
+    issue_id: &str,
+) -> Result<serde_json::Value, RpcError> {
+    let links = crate::rpc::snapshots::issue_link_rows(pool, ws.as_str(), issue_id)
+        .await
+        .map_err(|e| store_err(&e))?;
+    Ok(
+        serde_json::to_value(ainb_hangar_proto::snapshots::IssueLinksResult { links })
+            .unwrap_or(serde_json::Value::Null),
+    )
+}
+
+/// `hangar/dispatch_attempts_list` (multica parity #12): the admission-decision
+/// audit feed, newest first.
+///
+/// Workspace-scoped through the same `resolve_wire_or_reject` tenant guard every
+/// other list method uses, so a sibling tenant's attempts are never returned.
+/// `limit` defaults to 50 and is hard-capped at 200; passing `issue_id` narrows
+/// to one card's history ("why is THIS not running").
+async fn handle_dispatch_attempts_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo;
+
+    /// Default page size when the caller does not ask for one.
+    const DEFAULT_LIMIT: u32 = 50;
+    /// Hard ceiling, so one call can never drag the whole table over the socket.
+    const MAX_LIMIT: u32 = 200;
+
+    let params: ainb_hangar_proto::snapshots::DispatchAttemptsListParams =
+        parse_params(req, "{ workspace_id, issue_id?, limit? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let limit = i64::from(params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
+
+    let rows = match params.issue_id.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+        Some(issue_id) => DispatchAttemptRepo::list_for_issue(pool, issue_id, limit).await,
+        None => DispatchAttemptRepo::list_by_workspace(pool, ws.as_str(), limit).await,
+    }
+    .map_err(|e| store_err(&e))?;
+
+    // A per-issue query is keyed on the issue id, which carries no workspace
+    // column on the audit row — so re-assert the tenant here rather than trusting
+    // the caller's issue id to belong to the workspace it named.
+    let attempts = rows
+        .into_iter()
+        .filter(|r| r.workspace_id == ws.as_str())
+        .map(|r| ainb_hangar_proto::snapshots::DispatchAttemptRow {
+            id: r.id,
+            issue_id: r.issue_id,
+            agent_id: r.agent_id,
+            runtime_id: r.runtime_id,
+            task_id: r.task_id,
+            reason: r.reason,
+            detail: r.detail,
+            source: r.source,
+            created_at: r.created_at,
+        })
+        .collect();
+
+    to_value(&ainb_hangar_proto::snapshots::DispatchAttemptsListResult { attempts })
+}
+
+/// Who a daemon-side owner edit is attributed to (multica parity #13).
+///
+/// hangar has no per-request auth context, so an owner-driven edit is credited
+/// to the single bootstrapped default member; when none resolves (or the lookup
+/// faults) the row is a `system` fact rather than a fabricated member. When
+/// per-request actor identity lands (parity #1's member work), swap this body —
+/// no call site changes.
+async fn acting_actor(pool: &SqlitePool) -> ainb_hangar_core::activity::ActivityActor {
+    let owner = ainb_hangar_store::bootstrap::default_owner_id(pool).await.ok().flatten();
+    ainb_hangar_core::activity::ActivityActor::member_or_system(owner.as_deref())
+}
+
+/// `hangar/issue_timeline` (multica parity #13): one card's merged activity +
+/// comment narrative, **oldest first**.
+///
+/// Read-only and workspace-scoped through the same tenant guard as
+/// [`handle_dispatch_attempts_list`]. An `(issue_id, workspace)` pair that
+/// resolves to no issue is `INVALID_PARAMS`, never a silent empty list — an
+/// empty timeline and a cross-tenant probe must not look identical.
+async fn handle_issue_timeline(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    /// Default window when the caller does not ask for one.
+    const DEFAULT_LIMIT: u32 = 200;
+    /// multica's `timelineHardCap`.
+    const MAX_LIMIT: u32 = 2000;
+
+    let params: ainb_hangar_proto::snapshots::IssueTimelineParams =
+        parse_params(req, "{ workspace_id, issue_id, limit? }")?;
+    let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+    let limit = i64::from(params.limit.unwrap_or(DEFAULT_LIMIT).clamp(1, MAX_LIMIT));
+
+    // Resolve the card inside the tenant BEFORE reading, so a foreign id is a
+    // clean rejection rather than an empty list that leaks nothing but also
+    // tells the caller nothing.
+    let known = ainb_hangar_store::repo::issue::IssueRepo::get_by_id(pool, &params.issue_id)
+        .await
+        .map_err(|e| store_err(&e))?
+        .is_some_and(|i| i.workspace_id == ws.as_str());
+    if !known {
+        return Err(invalid_params(&format!(
+            "no issue `{}` in this workspace",
+            params.issue_id
+        )));
+    }
+
+    let entries = snapshots::issue_timeline(pool, ws.as_str(), &params.issue_id, limit)
+        .await
+        .map_err(|e| store_err(&e))?;
+    to_value(&ainb_hangar_proto::snapshots::IssueTimelineResult { entries })
 }
 
 /// `hangar/board_card_set_auto_run` (tcp T4 / F7): flip a card's auto-run flag.
@@ -5502,7 +6493,7 @@ async fn handle_board_card_set_auto_run(
 fn card_dep_err(e: &ainb_hangar_store::repo::card_dependency::CardDependencyError) -> RpcError {
     use ainb_hangar_store::repo::card_dependency::CardDependencyError;
     match e {
-        CardDependencyError::SelfDependency => invalid_params("a card cannot depend on itself"),
+        CardDependencyError::SelfDependency => invalid_params("a card cannot link to itself"),
         CardDependencyError::Cycle => invalid_params("that dependency would create a cycle"),
         CardDependencyError::NotFound => invalid_params("both cards must be on this board"),
         CardDependencyError::Db(db) => store_err(db),
@@ -5965,7 +6956,54 @@ async fn attach_or_detach(
     Ok(serde_json::json!({}))
 }
 
-/// Dispatch the four P7.5 autopilot-manager RPCs. Each resolves + scopes by
+/// `hangar/skill_set_enabled` (parity #24): flip one attached skill's per-agent
+/// enablement without detaching it.
+///
+/// Answers `{ "toggled": false }` — not an error — when the pair is not
+/// attached, so an idempotent caller can distinguish the two outcomes.
+async fn skill_set_enabled(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::SkillSetEnabledParams =
+        parse_params(req, "{ workspace_id, agent_id, skill_id, enabled }")?;
+    let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+        return Err(invalid_params(&format!(
+            "unknown workspace `{}`",
+            params.workspace_id
+        )));
+    };
+    let agent = agent_id(&params.agent_id)?;
+    let skill = skill_id(&params.skill_id)?;
+    let toggled = snapshots::skill_set_enabled(pool, &ws, &agent, &skill, params.enabled)
+        .await
+        .map_err(|e| skill_repo_err(&e))?;
+    Ok(serde_json::json!({ "toggled": toggled }))
+}
+
+/// `hangar/agent_skills_list` (parity #24): one agent's attachments WITH their
+/// enablement — disabled links included, flagged.
+async fn agent_skills_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::snapshots::AgentSkillsListParams =
+        parse_params(req, "{ workspace_id, agent_id }")?;
+    let Some(ws) = resolve_wire(pool, &params.workspace_id).await? else {
+        return Err(invalid_params(&format!(
+            "unknown workspace `{}`",
+            params.workspace_id
+        )));
+    };
+    let agent = agent_id(&params.agent_id)?;
+    let result = snapshots::agent_skills_list(pool, &ws, &agent)
+        .await
+        .map_err(|e| skill_repo_err(&e))?;
+    serde_json::to_value(result).map_err(|e| internal(&format!("encode agent skills: {e}")))
+}
+
+/// Dispatch the autopilot-manager RPCs (the four P7.5 ones plus the two `api`
+/// trigger verbs of migration 0057). Each resolves + scopes by
 /// workspace (a foreign id yields an empty snapshot for the reads, fires/toggles
 /// nothing for the mutations) and drives the workspace-scoped autopilot snapshot
 /// mappers. The two mutations publish their matching [`HangarEvent`] onto
@@ -6042,6 +7080,89 @@ async fn handle_autopilot(
             }
             Ok(serde_json::json!({}))
         }
+        methods::HANGAR_AUTOPILOT_TRIGGER_API => {
+            let params: ainb_hangar_proto::snapshots::AutopilotTriggerApiParams =
+                parse_params(req, "{ workspace_id, autopilot_id }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            let outcome = snapshots::autopilot_trigger_api(pool, &SystemClock, &ws, &id)
+                .await
+                .map_err(|e| internal(&format!("autopilot api trigger: {e}")))?;
+            // Announce exactly what the scheduler path announces, so the manager
+            // pane refreshes identically whichever trigger fired. `not_found` /
+            // `disabled` wrote nothing, so they announce nothing.
+            let result = match outcome {
+                snapshots::ApiTriggerOutcome::NotFound => {
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "not_found".to_string(),
+                        run_id: None,
+                        task_id: None,
+                        reason: None,
+                    }
+                }
+                snapshots::ApiTriggerOutcome::Disabled => {
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "disabled".to_string(),
+                        run_id: None,
+                        task_id: None,
+                        reason: None,
+                    }
+                }
+                snapshots::ApiTriggerOutcome::Fired { run_id, task_id } => {
+                    events.emit(
+                        ws.as_str(),
+                        ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                            autopilot_id: id.to_string(),
+                            status: "running".to_string(),
+                        },
+                    );
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "fired".to_string(),
+                        run_id: Some(run_id),
+                        task_id: Some(task_id),
+                        reason: None,
+                    }
+                }
+                snapshots::ApiTriggerOutcome::Skipped { run_id, reason } => {
+                    events.emit(
+                        ws.as_str(),
+                        ainb_hangar_proto::events::HangarEvent::AutopilotRunChanged {
+                            autopilot_id: id.to_string(),
+                            status: "skipped".to_string(),
+                        },
+                    );
+                    ainb_hangar_proto::snapshots::AutopilotTriggerApiResult {
+                        outcome: "skipped".to_string(),
+                        run_id: Some(run_id),
+                        task_id: None,
+                        reason: Some(reason),
+                    }
+                }
+            };
+            to_value(&result)
+        }
+        methods::HANGAR_AUTOPILOT_SET_API_TRIGGER => {
+            let params: ainb_hangar_proto::snapshots::AutopilotSetApiTriggerParams =
+                parse_params(req, "{ workspace_id, autopilot_id, enabled }")?;
+            let ws = resolve_wire_or_reject(pool, &params.workspace_id).await?;
+            let id = autopilot_id(&params.autopilot_id)?;
+            let updated = snapshots::autopilot_set_api_trigger(pool, &ws, &id, params.enabled)
+                .await
+                .map_err(|e| autopilot_repo_err(&e))?;
+            // Push the refreshed row so the manager table shows the armed badge
+            // in place — the same best-effort shape as `set_enabled`.
+            if updated {
+                if let Ok(rows) = snapshots::autopilots_list(pool, &ws).await {
+                    if let Some(row) = rows.into_iter().find(|r| r.id == id.as_str()) {
+                        events.emit(
+                            ws.as_str(),
+                            ainb_hangar_proto::events::HangarEvent::AutopilotUpdated(row),
+                        );
+                    }
+                }
+            }
+            to_value(&ainb_hangar_proto::snapshots::AutopilotSetApiTriggerResult { updated })
+        }
         other => Err(RpcError {
             code: METHOD_NOT_FOUND,
             message: format!("unknown autopilot method: {other}"),
@@ -6067,16 +7188,48 @@ async fn handle_daemon_health(
     to_value(&snapshot)
 }
 
-/// Dispatch `hangar/inbox_list` (e38.14): snapshot the workspace's aggregated
-/// inbox + unread count. A read like `hangar/issues_list`: an unknown workspace
-/// yields an empty list + zero unread (no `INVALID_PARAMS` rejection). Split out
-/// of [`handle`] to keep that dispatcher within the line cap.
+/// Resolve the inbox recipient a request addresses (store migration 0060).
+///
+/// The parsed `recipient` param, or the LOCAL HUMAN when omitted — the
+/// append-only wire default that keeps a pre-0060 surface reading exactly one
+/// actor's inbox rather than the union of everyone's. A MALFORMED ref is
+/// `INVALID_PARAMS`, mirroring the `creator` / `assignee` parse rejections: a
+/// typo must never silently fall back to someone else's inbox.
+fn inbox_recipient(param: Option<&str>) -> Result<ActorRef, RpcError> {
+    match param {
+        None => Ok(local_member()),
+        Some(raw) => raw.parse::<ActorRef>().map_err(|e| {
+            invalid_params(&format!(
+                "recipient must be 'member:<id>' or 'agent:<id>': {e}"
+            ))
+        }),
+    }
+}
+
+/// Parse the `{ workspace_id, recipient? }` params both inbox methods take.
+fn inbox_params(req: &RpcRequest) -> Result<(String, ActorRef), RpcError> {
+    let params: ainb_hangar_proto::snapshots::InboxScopedParams =
+        parse_params(req, "{ workspace_id, recipient? }")?;
+    let recipient = inbox_recipient(params.recipient.as_deref())?;
+    Ok((params.workspace_id, recipient))
+}
+
+/// Dispatch `hangar/inbox_list` (e38.14): snapshot ONE ACTOR's aggregated inbox
+/// + their unread count. A read like `hangar/issues_list`: an unknown workspace
+/// yields an empty list + zero unread (no `INVALID_PARAMS` rejection), but a
+/// malformed `recipient` IS rejected (a typo must not read another inbox). An
+/// omitted recipient is the local human. Split out of [`handle`] to keep that
+/// dispatcher within the line cap.
 async fn handle_inbox_list(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let (entries, unread) = match resolve(pool, req).await? {
-        Some(ws) => snapshots::inbox_list(pool, &ws).await.map_err(|e| store_err(&e))?,
+    let (wire, recipient) = inbox_params(req)?;
+    let resolved = resolve_workspace_id(pool, &wire).await.map_err(|e| store_err(&e))?;
+    let (entries, unread) = match resolved {
+        Some(ws) => {
+            snapshots::inbox_list(pool, &ws, &recipient).await.map_err(|e| store_err(&e))?
+        }
         None => (Vec::new(), 0),
     };
     to_value(&ainb_hangar_proto::snapshots::InboxListResult { entries, unread })
@@ -6089,14 +7242,15 @@ async fn handle_inbox_list(
 /// A mutating handler: it resolves the workspace and **rejects** a mistyped one
 /// with `INVALID_PARAMS` (never a silent no-op, mirroring [`handle_comment_add`]),
 /// so a typo'd workspace can never quietly "succeed" while marking nothing. The
-/// sweep is workspace-scoped, so a sibling tenant's inbox is never touched.
+/// sweep is scoped to the workspace AND to the calling actor's own entries, so
+/// neither a sibling tenant's nor a sibling actor's inbox is ever touched.
 async fn handle_inbox_mark_read(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    let wire = workspace_id(req)?;
+    let (wire, recipient) = inbox_params(req)?;
     let ws = resolve_wire_or_reject(pool, &wire).await?;
-    let (marked, unread) = snapshots::inbox_mark_read(pool, &SystemClock, ws.as_str())
+    let (marked, unread) = snapshots::inbox_mark_read(pool, &SystemClock, ws.as_str(), &recipient)
         .await
         .map_err(|e| store_err(&e))?;
     to_value(&ainb_hangar_proto::snapshots::InboxMarkReadResult { marked, unread })
@@ -7511,6 +8665,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -7587,6 +8742,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -7646,6 +8802,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -7692,6 +8849,7 @@ mod tests {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await
@@ -8975,6 +10133,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
 
@@ -9060,6 +10219,7 @@ mod tests {
             None,
             Some(&override_ref),
             None,
+            DispatchSource::Manual,
         )
         .await;
 
@@ -9141,6 +10301,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
 
@@ -9352,6 +10513,7 @@ mod tests {
             None,
             None,
             Some(&bob.user_id),
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -9376,6 +10538,7 @@ mod tests {
             None,
             None,
             None,
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -9413,6 +10576,7 @@ mod tests {
             None,
             None,
             Some(&bob.user_id),
+            DispatchSource::Manual,
         )
         .await;
         assert!(
@@ -9427,6 +10591,144 @@ mod tests {
             count, 2,
             "the allow-listed member's run enqueued the second task"
         );
+    }
+
+    /// gap #8 SQUAD FAN-OUT guard: the invocation gate reaches the squad branch of
+    /// `run_card` too — it used to `return` above the gate, so a card assigned to a
+    /// squad dispatched the leader + every member with NO permission check at all.
+    /// A non-owner member running a squad card whose leader is private yields
+    /// `Squad(NotInvocable)` and writes NO row; the owner's identical run fans out.
+    ///
+    /// Mutation-provable: delete the `gate(...)` call from `assign_fanout` and the
+    /// DENY leg below goes red.
+    #[tokio::test]
+    async fn run_card_gates_a_squad_fanout_against_a_non_owner_member() {
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::card_parity::CardParityRepo;
+        use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
+        use ainb_hangar_store::repo::member::{MemberRepo, MemberRole};
+        use ainb_hangar_store::repo::squad::SquadRepo;
+        use ainb_hangar_store::service::squad_assign::SquadAssignError;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        // Both agents are PRIVATE (migration 0047 default) and owned by the
+        // workspace owner.
+        let leader = bootstrap::create_agent(pool, &ws, "lead-bot", "claude", None).await.unwrap();
+        let member = bootstrap::create_agent(pool, &ws, "work-bot", "claude", None).await.unwrap();
+        let ws_id = WorkspaceId::from_str(ws.clone()).unwrap();
+        let bob = MemberRepo::add(pool, &ws_id, "bob@example.com", MemberRole::Member)
+            .await
+            .unwrap();
+
+        let agent_ref = |id: &str| {
+            ainb_hangar_core::actor::ActorRef::new(ainb_hangar_core::actor::ActorKind::Agent, id)
+                .unwrap()
+        };
+        SquadRepo::create(
+            pool,
+            &ws_id,
+            "squad-1",
+            "shippers",
+            &agent_ref(&leader.id),
+            1,
+        )
+        .await
+        .unwrap();
+        SquadRepo::add_member(pool, &ws_id, "squad-1", &agent_ref(&member.id))
+            .await
+            .unwrap();
+
+        // A runnable squad card (repo = scratch, squad assigned).
+        let issue_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        IssueRepo::insert(
+            pool,
+            &NewIssue {
+                id: issue_id.clone(),
+                workspace_id: ws.clone(),
+                title: "squad card".into(),
+                description: Some("fan this out".into()),
+                state: "todo".into(),
+                creator: ainb_hangar_core::actor::ActorRef::new(
+                    ainb_hangar_core::actor::ActorKind::Member,
+                    "stevie",
+                )
+                .unwrap(),
+                created_at: 1,
+                priority: 0,
+                assignee: None,
+                due_date: None,
+                labels: Vec::new(),
+                parent_issue_id: None,
+                stage: None,
+                acceptance_criteria: Vec::new(),
+                context_refs: Vec::new(),
+            },
+        )
+        .await
+        .unwrap();
+        CardParityRepo::set_issue_repo_agent(pool, &ws, &issue_id, Some("scratch"), None)
+            .await
+            .unwrap();
+        CardParityRepo::set_issue_squad(pool, &ws_id, &issue_id, Some("squad-1"))
+            .await
+            .unwrap();
+        let load = || async { IssueRepo::get_by_id(pool, &issue_id).await.unwrap().unwrap() };
+        let queue_len = || async {
+            sqlx::query_scalar::<_, i64>("SELECT COUNT(*) FROM agent_task_queue")
+                .fetch_one(pool)
+                .await
+                .unwrap()
+        };
+
+        // (a) DENY: bob is not the leader's owner and is on no allow-list.
+        let denied = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load().await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            Some(&bob.user_id),
+            DispatchSource::Manual,
+        )
+        .await;
+        assert!(
+            matches!(
+                denied,
+                Err(CardRunError::Squad(SquadAssignError::NotInvocable { .. }))
+            ),
+            "a non-owner member must not fan a card out through a private squad",
+        );
+        assert_eq!(queue_len().await, 0, "a blocked fan-out writes NO task row");
+
+        // (b) OWNER (default `None` invoker) fans out — leader brief + one member.
+        let owner_run = run_card(
+            pool,
+            &ws_id,
+            None,
+            &load().await,
+            "headless",
+            None,
+            None,
+            None,
+            None,
+            None,
+            DispatchSource::Manual,
+        )
+        .await;
+        assert!(owner_run.is_ok(), "the owner's squad run must fan out");
+        assert_eq!(queue_len().await, 2, "leader brief + one member task");
     }
 
     /// Pattern-B handover regression: the create-wizard fires ONE `issue_update`

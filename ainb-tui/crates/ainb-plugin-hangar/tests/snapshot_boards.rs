@@ -30,6 +30,8 @@ fn card(issue: &str, title: &str, state: Option<&str>) -> BoardCardWireRow {
         member_states: Vec::new(),
         blocked_by: Vec::new(),
         auto_run: false,
+        blocks: Vec::new(),
+        related: Vec::new(),
     }
 }
 

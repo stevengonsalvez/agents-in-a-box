@@ -53,6 +53,11 @@ fn map_workspace_repo_err(e: &WorkspaceRepoError) -> RpcError {
             RpcError::invalid_params("cannot delete the last workspace")
         }
         WorkspaceRepoError::NotFound => RpcError::invalid_params("workspace not found"),
+        // MUST stay above the `other =>` catch-all: without an explicit arm the
+        // instance lockdown would surface as a `-32603` internal error, which
+        // reads to a plugin as "the host is broken" rather than "this instance
+        // refuses new workspaces".
+        WorkspaceRepoError::CreationDisabled => RpcError::workspace_creation_disabled(),
         other => RpcError::internal(format!("workspace store error: {other}")),
     }
 }
@@ -109,6 +114,24 @@ impl WorkspaceCatalogueMutator for SqliteWorkspaceMutator {
                 .map_err(|e| map_workspace_repo_err(&e))?;
             Ok(())
         })
+    }
+
+    /// Read the instance's workspace-creation lockdown for the advisory
+    /// `workspace_list` hint.
+    ///
+    /// Like `create`/`delete` this opens a fresh store on a dedicated thread per
+    /// call, which is affordable because it is only hit on a Settings-pane
+    /// refresh, not per frame. Any store error degrades to `false` (creation
+    /// allowed): a locked/missing DB must not fake a lockdown and hide the create
+    /// affordance on an instance that never set one — and if the DB really is
+    /// unreachable, `create` will fail loudly on its own.
+    fn creation_disabled(&self) -> bool {
+        block_on_store(|store| async move {
+            WorkspaceRepo::creation_disabled(store.pool())
+                .await
+                .map_err(|e| map_workspace_repo_err(&e))
+        })
+        .unwrap_or(false)
     }
 }
 

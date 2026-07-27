@@ -28,9 +28,9 @@ use std::time::{Duration, Instant};
 mod common;
 use common::{
     BOARD_RUN_BOARD, DaemonRpc, INTERACTIVE_RELEASE_SENTINEL, T4_DEP_BLOCKER_ISSUE,
-    T4_DEP_DEPENDENT_ISSUE, budget_scale, daemon_bin, git_available, latest_task_status_for_issue,
-    newest_active_task_for_issue, prepare_pipeline_dep_chain, prepare_pipeline_squad_dep_chain,
-    skip, task_count_for_issue, task_status_by_id,
+    T4_DEP_DEPENDENT_ISSUE, T4_REL_ISSUE, budget_scale, daemon_bin, git_available,
+    latest_task_status_for_issue, newest_active_task_for_issue, prepare_pipeline_dep_chain,
+    prepare_pipeline_squad_dep_chain, skip, task_count_for_issue, task_status_by_id,
 };
 
 #[test]
@@ -323,4 +323,88 @@ fn poll_until(deadline: Instant, pred: impl Fn() -> bool) -> bool {
         }
         std::thread::sleep(Duration::from_millis(150));
     }
+}
+
+/// multica parity #20 — a `related` card NEVER blocks and NEVER auto-runs.
+///
+/// The positive control lives in
+/// [`dependent_card_refuses_until_blocker_done_then_auto_runs`]: card B is
+/// `blocked_by` A, so it refuses until A is done and then auto-runs. Card R sits in
+/// the SAME pipeline, `related` to A, with the SAME `auto_run = 1` flag — so the
+/// only difference between B and R is the LINK KIND. Against the real daemon:
+///
+///   * running R while A is unfinished SUCCEEDS (it is never refused as blocked);
+///   * when A completes, R gains no ADDITIONAL task from the finalize seam.
+#[test]
+fn related_card_never_blocks_and_never_auto_runs() {
+    if daemon_bin().is_none() || !git_available() {
+        skip("tcp_card_related_link_e2e");
+        return;
+    }
+
+    let pipe = prepare_pipeline_dep_chain();
+    let scale = budget_scale();
+    let mut rpc = DaemonRpc::connect_and_auth(pipe.home());
+
+    // NOT BLOCKED: R is only `related` to the unfinished A, so its run is accepted.
+    let run_r = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        run_params(T4_REL_ISSUE),
+    );
+    assert!(
+        run_r["error"].is_null(),
+        "a related card must never be refused as blocked: {run_r}"
+    );
+    let after_manual_run = task_count_for_issue(pipe.home(), T4_REL_ISSUE);
+    assert!(
+        after_manual_run >= 1,
+        "R's own manual run enqueued a task ({after_manual_run})"
+    );
+
+    // Meanwhile B — blocked_by the same A — IS refused. Same fixture, same flag,
+    // different kind.
+    let refused_b = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        run_params(T4_DEP_DEPENDENT_ISSUE),
+    );
+    assert!(
+        !refused_b["error"].is_null(),
+        "the blocked_by card is still refused: {refused_b}"
+    );
+
+    // COMPLETE A, then release, so the finalize seam runs for real.
+    let run_a = rpc.call(
+        ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
+        run_params(T4_DEP_BLOCKER_ISSUE),
+    );
+    assert!(run_a["error"].is_null(), "blocker A must run: {run_a}");
+    let claimed = poll_until(Instant::now() + Duration::from_secs(30 * scale), || {
+        matches!(
+            latest_task_status_for_issue(pipe.home(), T4_DEP_BLOCKER_ISSUE).as_deref(),
+            Some("dispatched" | "running")
+        )
+    });
+    assert!(claimed, "the claim loop must pick up A");
+    std::fs::write(pipe.home().join(INTERACTIVE_RELEASE_SENTINEL), "go")
+        .expect("write release sentinel");
+
+    // The seam DID fire: B (blocked_by) gains its auto-run task.
+    let b_ran = poll_until(Instant::now() + Duration::from_secs(45 * scale), || {
+        task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE) >= 1
+    });
+
+    let r_after = task_count_for_issue(pipe.home(), T4_REL_ISSUE);
+
+    drop(rpc);
+    drop(pipe);
+
+    assert!(
+        b_ran,
+        "the positive control: the blocked_by card auto-ran when A completed"
+    );
+    assert_eq!(
+        r_after, after_manual_run,
+        "the related card gained NO additional task from the finalize seam \
+         (had {after_manual_run}, now {r_after})"
+    );
 }

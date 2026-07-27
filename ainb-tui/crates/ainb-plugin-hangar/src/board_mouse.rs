@@ -147,6 +147,7 @@ mod tests {
                 glyph: '○',
                 name: "queued".into(),
                 cards: vec![BoardCard {
+                    not_dispatched: false,
                     issue_id: "task-A".into(),
                     display_id: "#A".into(),
                     title: "build the thing".into(),
@@ -161,6 +162,7 @@ mod tests {
                 glyph: '◔',
                 name: "running".into(),
                 cards: vec![BoardCard {
+                    not_dispatched: false,
                     issue_id: "task-B".into(),
                     display_id: "#B".into(),
                     title: "run the thing".into(),

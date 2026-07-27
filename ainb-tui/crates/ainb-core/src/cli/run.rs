@@ -773,15 +773,76 @@ mod tests {
         );
     }
 
+    /// Serialises the tests that swap `$PATH` — `validate_provider_installed`
+    /// resolves against the live environment, and `cargo test` runs a binary's
+    /// tests as threads of ONE process.
+    static PATH_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Run `f` with `$PATH` set to `path`, restoring the original after.
+    fn with_path<T>(path: &std::path::Path, f: impl FnOnce() -> T) -> T {
+        let _guard = PATH_LOCK.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let original = std::env::var_os("PATH");
+        std::env::set_var("PATH", path);
+        let out = f();
+        match original {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+        out
+    }
+
+    /// Write an executable stub named `name` into `dir`.
+    fn stub_binary(dir: &std::path::Path, name: &str) {
+        use std::os::unix::fs::PermissionsExt as _;
+        let path = dir.join(name);
+        std::fs::write(&path, "#!/bin/sh\nexit 0\n").expect("write stub binary");
+        std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+            .expect("chmod stub binary");
+    }
+
+    /// `validate_provider_installed` accepts a provider whose CLI is resolvable
+    /// on `$PATH`.
+    ///
+    /// Driven against a stub on a controlled `$PATH` rather than a real
+    /// `claude` install: the old version asserted "Claude CLI should be
+    /// installed on this machine", which is a statement about the developer's
+    /// laptop, not about the code. It passed locally, failed on any runner
+    /// without the CLI, and was papered over with a `--skip` in CI.
     #[test]
-    fn test_validate_provider_installed_claude() {
-        // Claude CLI should be installed on this machine
-        let provider = CliProvider::Claude;
-        let result = validate_provider_installed(&provider);
+    fn validate_provider_installed_accepts_a_binary_on_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        stub_binary(dir.path(), CliProvider::Claude.command());
+
+        let result = with_path(dir.path(), || {
+            validate_provider_installed(&CliProvider::Claude)
+        });
         assert!(
             result.is_ok(),
-            "Claude CLI should be found in PATH: {:?}",
+            "a `{}` on PATH must validate: {:?}",
+            CliProvider::Claude.command(),
             result.err()
+        );
+    }
+
+    /// The NEGATIVE half: an empty `$PATH` is rejected, with an error naming the
+    /// missing binary and its install URL. Without this the positive case above
+    /// could pass on a `validate_provider_installed` that returned `Ok(())`
+    /// unconditionally.
+    #[test]
+    fn validate_provider_installed_rejects_a_binary_absent_from_path() {
+        let dir = tempfile::tempdir().expect("tempdir");
+
+        let result = with_path(dir.path(), || {
+            validate_provider_installed(&CliProvider::Claude)
+        });
+        let err = result.expect_err("an empty PATH must not validate").to_string();
+        assert!(
+            err.contains("not found in PATH"),
+            "error must name the PATH lookup, got: {err}"
+        );
+        assert!(
+            err.contains("docs.anthropic.com"),
+            "error must carry the install URL, got: {err}"
         );
     }
 

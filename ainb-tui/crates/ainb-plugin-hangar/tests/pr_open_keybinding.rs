@@ -22,6 +22,11 @@ const fn key(ch: char) -> KeyEvent {
 
 fn issue(pr_url: Option<&str>) -> IssueRow {
     IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("issue-1").unwrap(),
         display_id: None,
         workspace_id: "default".into(),
@@ -48,7 +53,9 @@ fn issue(pr_url: Option<&str>) -> IssueRow {
         child_total: 0,
         child_done: 0,
         acceptance_criteria: Vec::new(),
+        acceptance: Vec::new(),
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 

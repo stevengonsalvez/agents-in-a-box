@@ -116,6 +116,28 @@ impl FromStr for ActorRef {
     }
 }
 
+/// The id half of the local human's actor ref (`member:me`).
+pub const LOCAL_MEMBER_ID: &str = "me";
+
+/// The canonical ref for the local human ("me").
+///
+/// This is the actor the TUI authors issues and comments as (the plugin's
+/// `SELF_AUTHOR_REF`) and the default inbox recipient when a caller omits one
+/// (migration 0060). Hangar has no per-user auth layer yet; this is the single
+/// definition every layer shares, so the plugin, the daemon's wire default and
+/// the migration's backfill can never drift apart. When a real signed-in
+/// identity lands, only this function changes.
+///
+/// # Panics
+///
+/// Never: [`LOCAL_MEMBER_ID`] is a non-empty compile-time constant, the only
+/// invariant [`ActorRef::new`] enforces.
+#[must_use]
+pub fn local_member() -> ActorRef {
+    ActorRef::new(ActorKind::Member, LOCAL_MEMBER_ID)
+        .expect("LOCAL_MEMBER_ID is a non-empty constant")
+}
+
 /// Failure modes when constructing or parsing an [`ActorRef`] / [`ActorKind`].
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ActorParseError {
@@ -174,6 +196,16 @@ mod tests {
             "memberabc".parse::<ActorRef>(),
             Err(ActorParseError::MissingSeparator)
         );
+    }
+
+    #[test]
+    fn local_member_is_the_canonical_member_me_ref() {
+        let me = local_member();
+        assert_eq!(me.kind(), ActorKind::Member);
+        assert_eq!(me.id(), LOCAL_MEMBER_ID);
+        assert_eq!(me.to_string(), "member:me");
+        // Round-trips through the canonical textual form the wire carries.
+        assert_eq!("member:me".parse::<ActorRef>().unwrap(), me);
     }
 
     #[test]

@@ -121,6 +121,9 @@ pub enum SkillAction {
     Attach(String),
     /// Detach a skill from the selected agent (`d`) — `hangar/skill_detach`.
     Detach(String),
+    /// Flip a skill's per-agent enablement (`t`) — `hangar/skill_set_enabled`
+    /// (parity #24). The glue derives the target state from the cached link map.
+    ToggleEnabled(String),
 }
 
 /// A deferred daemon RPC raised by the autopilot-manager screen (P7.5).
@@ -297,7 +300,7 @@ pub enum BoardsAction {
         /// The new column name.
         name: String,
     },
-    /// Assign (or clear) a squad as a card's assignee (`q`) —
+    /// Assign (or clear) a squad as a card's assignee (`s`) —
     /// `hangar/board_card_assign_squad` (tcp T4 / F7).
     CardAssignSquad {
         /// The board the card sits on.
@@ -312,10 +315,13 @@ pub enum BoardsAction {
     CardDepAdd {
         /// The board both cards sit on.
         board_id: String,
-        /// The DEPENDENT card's issue.
+        /// The FROM card's issue (the DEPENDENT under the default kind).
         dependent_issue_id: String,
-        /// The BLOCKER card's issue.
+        /// The TO card's issue (the BLOCKER under the default kind).
         blocker_issue_id: String,
+        /// The link KIND to author (multica parity #20); `BlockedBy` reproduces
+        /// the pre-#20 gating edge.
+        link_type: ainb_hangar_proto::snapshots::LinkKindWire,
     },
     /// Flip a card's auto-run flag (`R`) — `hangar/board_card_set_auto_run`
     /// (tcp T4 / F7).
@@ -372,6 +378,24 @@ pub enum IssueCommentAction {
     },
 }
 
+/// A deferred daemon RPC raised by the task-detail acceptance keys (`a` then
+/// `t`, multica parity #11-rest).
+///
+/// Like [`IssueCommentAction`], the sync key router can't `await`; the toggle
+/// stashes the action on [`ScreenStates::pending_criterion_action`] and the
+/// plugin's `render` pass drains it and fires `hangar/issue_criterion_set` over
+/// the daemon socket cap. The daemon's `IssueUpdated` push refreshes the card, so
+/// nothing needs re-pulling here.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IssueCriterionAction {
+    /// The issue the criterion belongs to (`issue.id`).
+    pub issue_id: String,
+    /// The STABLE criterion id (`ac-…`).
+    pub criterion_id: String,
+    /// The checked state to set.
+    pub checked: bool,
+}
+
 /// A deferred daemon RPC chain raised by the issue-list create WIZARD (Phase 5).
 ///
 /// Like [`IssueCommentAction`], the sync key router can't `await`; the wizard's
@@ -402,6 +426,16 @@ pub enum IssueCreateAction {
         /// `issue.context_refs` and rendered on the detail card. Empty when the
         /// wizard's Context row was left blank.
         context_refs: Vec<String>,
+        /// The urgency picked on the wizard's Priority row (migration 0014), on
+        /// the wire scale `0..3` (P3..P0, HIGHER = MORE URGENT). `0` (P3) when the
+        /// row was left alone.
+        priority: i64,
+        /// The deadline typed on the wizard's Due row (migration 0014) as epoch ms
+        /// at UTC midnight; `None` when the row was blank.
+        due_date: Option<i64>,
+        /// The label NAMES typed on the wizard's Labels row (migration 0016),
+        /// resolve-or-created and joined to the new issue. Empty when blank.
+        labels: Vec<String>,
         /// The picked repo (REQUIRED): an absolute path, `scratch`, or a remote
         /// indicator the daemon clones.
         repo_ref: String,
@@ -461,6 +495,24 @@ pub enum SquadAction {
         /// The member actor-ref to remove.
         member_ref: String,
     },
+    /// Set (or clear) `member_ref`'s free-text role on `squad_id` (`r` on a
+    /// member row) — `hangar/squad_member_role_set` (parity #25).
+    SetMemberRole {
+        /// The squad whose membership is edited.
+        squad_id: String,
+        /// The member actor-ref whose role changes.
+        member_ref: String,
+        /// The new role; empty clears it.
+        role: String,
+    },
+    /// Set (or clear) `squad_id`'s user-authored instructions (`i`) —
+    /// `hangar/squad_instructions_set` (parity #25).
+    SetInstructions {
+        /// The squad whose instructions change.
+        squad_id: String,
+        /// The new instructions; empty clears them.
+        instructions: String,
+    },
     /// Assign the current issue to `squad_id` (`x`) — `hangar/squad_fanout`; the
     /// glue picks the issue and fans the brief to the leader + agent members.
     Assign {
@@ -486,6 +538,8 @@ pub enum AgentsAction {
     Create {
         /// The new agent's name.
         name: String,
+        /// The optional short blurb (`None` = left blank, migration 0050).
+        description: Option<String>,
         /// The chosen provider (`claude`/`codex`/`copilot`).
         provider: String,
         /// The optional per-agent model override (`None` = provider default).
@@ -579,6 +633,12 @@ pub struct ScreenStates {
     pub task_detail: Option<TaskDetailState>,
     /// Agent-picker modal cache (present only while the modal is open).
     pub agent_picker: Option<AgentPickerState>,
+    /// Activity-timeline modal cache (multica parity #13; present only while the
+    /// modal is open).
+    pub activity: Option<super::activity::ActivityState>,
+    /// An issue id whose `hangar/issue_timeline` fetch is armed, awaiting the
+    /// `render` pass to fire it over the daemon socket. `None` when idle.
+    pub pending_activity_fetch: Option<String>,
     /// Command-palette modal cache (present only while the palette is open,
     /// e38.13).
     pub command_palette: Option<CommandPaletteState>,
@@ -617,6 +677,10 @@ pub struct ScreenStates {
     /// non-empty buffer), awaiting the `render` pass to fire `hangar/comment_add`
     /// over the daemon socket (e38.5). `None` when idle.
     pub pending_comment_action: Option<IssueCommentAction>,
+    /// An acceptance-criterion tick raised by the task-detail `t` key, awaiting
+    /// the `render` pass to fire `hangar/issue_criterion_set` over the daemon
+    /// socket (multica parity #11-rest). `None` when idle.
+    pub pending_criterion_action: Option<IssueCriterionAction>,
     /// A create-and-dispatch chain raised by the issue-list create wizard (Enter
     /// on the Agent stage), awaiting the `render` pass to fire
     /// `hangar/issue_create` (then, on its reply, `issue_update` + `issue_run`)
@@ -638,6 +702,10 @@ pub struct ScreenStates {
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
+    /// Cached `creation_disabled` hint from the same `host/workspace_list` reply.
+    /// Held beside the rows so a `set_health` rebuild cannot silently un-hide the
+    /// new-workspace affordance on a locked-down instance.
+    pub workspace_creation_disabled: bool,
     /// Cached member roster from `hangar/members_list` (e38.11). Seeds the
     /// Settings Members pane regardless of which snapshot arrives first.
     pub member_rows: Vec<MemberWireRow>,
@@ -817,8 +885,9 @@ impl ScreenStates {
         &mut self,
         entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
         unread: i64,
+        recipient: String,
     ) {
-        self.inbox = InboxState::from_snapshot(entries, unread);
+        self.inbox = InboxState::from_snapshot(entries, unread, recipient);
     }
 
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
@@ -969,6 +1038,7 @@ impl ScreenStates {
             self.workspace_rows.clone()
         };
         let mut state = SettingsState::new(health, providers, keys, workspaces);
+        state.set_workspace_creation_disabled(self.workspace_creation_disabled);
         // Carry any cached member roster into the rebuilt state so the Members
         // pane survives a `set_health` rebuild (mirrors workspace_rows).
         state.set_members(self.member_rows.clone());
@@ -985,10 +1055,12 @@ impl ScreenStates {
     /// Refresh the Settings Workspace pane from a `host/workspace_list` result
     /// (P5.5). Caches the rows so a later `set_health` rebuild keeps them, and
     /// overlays the live settings state when it already exists.
-    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
+    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>, creation_disabled: bool) {
         self.workspace_rows.clone_from(&workspaces);
+        self.workspace_creation_disabled = creation_disabled;
         if let Some(s) = self.settings.as_mut() {
             s.set_workspaces(workspaces);
+            s.set_workspace_creation_disabled(creation_disabled);
         }
     }
 
@@ -1088,6 +1160,11 @@ impl ScreenStates {
         self.pending_comment_action.take()
     }
 
+    /// Take the deferred acceptance-criterion tick, leaving `None` (#11-rest).
+    pub const fn take_pending_criterion_action(&mut self) -> Option<IssueCriterionAction> {
+        self.pending_criterion_action.take()
+    }
+
     /// Take the pending issue-create RPC raised by the issue-list inline create
     /// flow, if any (e38.29).
     pub const fn take_pending_create_action(&mut self) -> Option<IssueCreateAction> {
@@ -1177,6 +1254,9 @@ impl ScreenStates {
 pub enum NavIntent {
     /// Open the agent-picker modal for an issue (raised by `a`).
     OpenAgentPicker(ainb_hangar_core::ids::IssueId),
+    /// Open the activity-timeline modal for an issue (raised by `y`, multica
+    /// parity #13).
+    OpenActivityTimeline(ainb_hangar_core::ids::IssueId),
     /// Open task detail for the issue under the selection (raised by Enter).
     OpenTaskForIssue(ainb_hangar_core::ids::IssueId),
     /// 0046 sub-issues: mark an issue Done from the keyboard (`d`). The glue moves
@@ -1290,6 +1370,16 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
                 super::agent_picker::render_agent_picker(buf, w, h, picker);
             }
         }
+        Screen::ActivityTimeline(_) => {
+            // The timeline is a modal: paint the screen it overlays first, then
+            // the modal centred over the whole area (multica parity #13).
+            if let Some(prior) = &app.prior_screen {
+                render_prior(buf, w, h, prior, states);
+            }
+            if let Some(activity) = &states.activity {
+                super::activity::render_activity(buf, w, h, activity);
+            }
+        }
         Screen::CommandPalette => {
             // The palette is a modal: paint the screen it overlays first, then
             // the palette centred over the whole area (e38.13).
@@ -1394,6 +1484,9 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
                     }
                     Some(SkillManagerIntent::Attach(slug)) => Some(SkillAction::Attach(slug)),
                     Some(SkillManagerIntent::Detach(slug)) => Some(SkillAction::Detach(slug)),
+                    Some(SkillManagerIntent::ToggleEnabled(slug)) => {
+                        Some(SkillAction::ToggleEnabled(slug))
+                    }
                     Some(SkillManagerIntent::LoadFiles(_)) | None => None,
                 };
             }
@@ -1518,6 +1611,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::TaskDetail(_) => route_task_detail(states, key),
         Screen::AgentPicker(_) => route_agent_picker(states, key),
+        Screen::ActivityTimeline(_) => route_activity(states, key),
         Screen::CommandPalette => route_command_palette(states, key),
         Screen::Logs => {
             // The logs pane owns the level-filter chips (`a`/`i`/`w`/`e`). A
@@ -1574,13 +1668,11 @@ fn route_fleet(states: &mut ScreenStates, key: &KeyEvent) {
         fleet_key(key).map(FleetEvent::Key)
     } else {
         match &key.code {
-            KeyCode::Char { ch: 'f' } => Some(FleetEvent::SetFilter(FleetFilter::Focus)),
-            KeyCode::Char { ch: 'o' } => Some(FleetEvent::SetFilter(FleetFilter::Actionable)),
-            KeyCode::Char { ch: 'm' } => Some(FleetEvent::SetFilter(FleetFilter::Managed)),
-            KeyCode::Char { ch: 'd' } => Some(FleetEvent::SetFilter(FleetFilter::Degraded)),
-            KeyCode::Char { ch: 'c' } => Some(FleetEvent::SetFilter(FleetFilter::Claude)),
-            KeyCode::Char { ch: 'x' } => Some(FleetEvent::SetFilter(FleetFilter::Codex)),
-            KeyCode::Char { ch: 'v' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
+            KeyCode::Char { ch: '1' } => Some(FleetEvent::SetFilter(FleetFilter::NeedsInput)),
+            KeyCode::Char { ch: '2' } => Some(FleetEvent::SetFilter(FleetFilter::Idle)),
+            KeyCode::Char { ch: '3' } => Some(FleetEvent::SetFilter(FleetFilter::Completed)),
+            KeyCode::Char { ch: '4' } => Some(FleetEvent::SetFilter(FleetFilter::Running)),
+            KeyCode::Char { ch: '5' } => Some(FleetEvent::SetFilter(FleetFilter::All)),
             KeyCode::Char { ch: 's' } => Some(FleetEvent::RequestAction(FleetAction::Stop)),
             KeyCode::Char { ch: 'r' } => Some(FleetEvent::RequestAction(FleetAction::Restart)),
             KeyCode::Char { ch: 'i' } => Some(FleetEvent::RequestAction(FleetAction::Interrupt)),
@@ -1656,6 +1748,33 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             _ => return None,
         };
         IssueListEvent::Wizard(k)
+    } else if states.issue_list.mode() == IssueListMode::FilterPanel {
+        // multica-gap #10: the `f` facet panel needs the STRUCTURED key
+        // vocabulary — arrows to navigate, Space/Enter to toggle — which the
+        // plain-char path can't carry. Every key is captured (the panel is modal);
+        // Esc is intercepted upstream by the capture guard (`abort_filter_panel`).
+        let k = match &key.code {
+            KeyCode::Up => super::issue_list::PanelKey::Up,
+            KeyCode::Down => super::issue_list::PanelKey::Down,
+            KeyCode::Left | KeyCode::BackTab => super::issue_list::PanelKey::Left,
+            KeyCode::Right | KeyCode::Tab => super::issue_list::PanelKey::Right,
+            KeyCode::Enter => super::issue_list::PanelKey::Toggle,
+            KeyCode::Esc => super::issue_list::PanelKey::Close,
+            KeyCode::Char { ch } => match ch {
+                ' ' => super::issue_list::PanelKey::Toggle,
+                'k' => super::issue_list::PanelKey::Up,
+                'j' => super::issue_list::PanelKey::Down,
+                'h' => super::issue_list::PanelKey::Left,
+                'l' => super::issue_list::PanelKey::Right,
+                'C' => super::issue_list::PanelKey::Clear,
+                'f' => super::issue_list::PanelKey::Close,
+                // Any other char is swallowed — the panel never leaks a key to the
+                // board underneath.
+                _ => return None,
+            },
+            _ => return None,
+        };
+        IssueListEvent::Panel(k)
     } else {
         // Normal-mode Tab / Shift+Tab cycle the filter-chip bar
         // (All → Members → Agents → Mine → All). Guarded on Normal mode so the
@@ -1675,6 +1794,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     states.issue_list = out.state;
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
+        // multica parity #13: `y` opens the card's activity timeline.
+        Some(IssueListIntent::OpenActivityTimeline(id)) => {
+            Some(NavIntent::OpenActivityTimeline(id))
+        }
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
         // 0046: `d` marks the highlighted issue Done, surfaced as a NavIntent the
         // glue lifts into the SAME optimistic-move + `hangar/issue_update{state}`
@@ -1689,6 +1812,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
             external_ref,
             acceptance_criteria,
             context_refs,
+            priority,
+            due_date,
+            labels,
             repo_ref,
             source_branch,
             target_branch,
@@ -1702,6 +1828,9 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
                 external_ref,
                 acceptance_criteria,
                 context_refs,
+                priority,
+                due_date,
+                labels,
                 repo_ref,
                 source_branch,
                 target_branch,
@@ -1770,6 +1899,20 @@ fn route_task_detail(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInt
                 body: body.clone(),
             });
         }
+        // #11-rest: `t` on the selected criterion lifts a deferred
+        // `hangar/issue_criterion_set` the `render` pass fires. The daemon's
+        // IssueUpdated push refreshes the card, so no re-pull is armed here.
+        Some(TaskDetailIntent::SetCriterionChecked {
+            issue_id,
+            criterion_id,
+            checked,
+        }) => {
+            states.pending_criterion_action = Some(IssueCriterionAction {
+                issue_id: issue_id.as_str().to_string(),
+                criterion_id: criterion_id.clone(),
+                checked: *checked,
+            });
+        }
         // The `R` retry on a terminal task lifts into a deferred `hangar/task_retry`
         // the `render` pass fires — a HUMAN override that force-requeues ANY
         // terminal reason (the daemon bypasses the auto-retry disposition gate). The
@@ -1813,8 +1956,24 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
         }
         return;
     }
+    let Some(ev) = kanban_nav_event(key) else {
+        return;
+    };
+    let out = reduce_kanban(&states.kanban, ev);
+    states.kanban = out.state;
+    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
+        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
+    }
+}
+
+/// Map a raw key to a Kanban navigation / drag event.
+///
+/// Every char bound here must be free of
+/// [`is_reserved_key`](crate::screen::router::is_reserved_key) — a reserved char
+/// never reaches this mapper (#450).
+fn kanban_nav_event(key: &KeyEvent) -> Option<KanbanEvent> {
     let shift = key.mods & ainb_plugin_sdk::KEY_MOD_SHIFT != 0;
-    let ev = match &key.code {
+    match &key.code {
         KeyCode::Left => Some(if shift {
             KanbanEvent::MoveCardLeft
         } else {
@@ -1827,25 +1986,19 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
         }),
         KeyCode::Up => Some(KanbanEvent::FocusUp),
         KeyCode::Down => Some(KanbanEvent::FocusDown),
-        // vi-style fallbacks: capital H/L drag a card, lowercase navigate.
+        // vi-style fallbacks: `<`/`>` drag a card, `h`/`j`/`k`/`l` navigate. The
+        // old `H`/`L` drag pair was dead — `H` is swallowed by the HOST help
+        // toggle and `L` by the plugin router's Logs tab (#450).
         KeyCode::Char { ch } => match ch {
             'h' => Some(KanbanEvent::FocusLeft),
             'l' => Some(KanbanEvent::FocusRight),
             'k' => Some(KanbanEvent::FocusUp),
             'j' => Some(KanbanEvent::FocusDown),
-            'H' => Some(KanbanEvent::MoveCardLeft),
-            'L' => Some(KanbanEvent::MoveCardRight),
+            '<' => Some(KanbanEvent::MoveCardLeft),
+            '>' => Some(KanbanEvent::MoveCardRight),
             _ => None,
         },
         _ => None,
-    };
-    let Some(ev) = ev else {
-        return;
-    };
-    let out = reduce_kanban(&states.kanban, ev);
-    states.kanban = out.state;
-    if let Some(KanbanIntent::MoveCard { task_id, to_status }) = out.intent {
-        states.pending_kanban_action = Some(KanbanAction::MoveCard { task_id, to_status });
     }
 }
 
@@ -1857,9 +2010,14 @@ fn route_kanban(states: &mut ScreenStates, key: &KeyEvent) {
 /// EVERY key routes to it as a [`BoardsEvent::Key`] so typed text and picker
 /// motion land in the input rather than moving the board. With no overlay open
 /// the navigation/verb map applies: `←/→/↑/↓` (and `h/j/k/l`) move focus; `[`/`]`
-/// switch boards; `⇧←/→` reorder; `x` deletes a column; `n` appends one; `m`
-/// toggles auto-move; `c` opens card-create; `r` opens column-rename; `Enter`
-/// opens the card's `Run ▾`; `a` attaches to the card's run.
+/// switch boards; `⇧←/→` (and `<`/`>`) reorder; `x` deletes a column; `n` appends
+/// one; `m` toggles auto-move; `c` opens card-create; `r` opens column-rename;
+/// `Enter` opens the card's `Run ▾`; `a` attaches to the card's run; `s` opens the
+/// squad picker; `w` opens the depends-on picker.
+///
+/// Every char bound here must be free of
+/// [`is_reserved_key`](crate::screen::router::is_reserved_key) — a reserved char
+/// never reaches this mapper (#450).
 fn route_boards(states: &mut ScreenStates, key: &KeyEvent) {
     // The timeline overlay (`t`) captures keys locally — a read-only scroll view
     // that never routes to the reducer (its content is an IO-derived side-cache).
@@ -1912,6 +2070,9 @@ fn overlay_key_event(key: &KeyEvent) -> Option<BoardsEvent> {
         KeyCode::Up => BoardsKey::Up,
         KeyCode::Down => BoardsKey::Down,
         KeyCode::Char { ch } => BoardsKey::Char(*ch),
+        // Overlay-local only: the dep picker cycles its link kind (multica parity
+        // #20). No global binding is added, so no host-reserved key is touched.
+        KeyCode::Tab => BoardsKey::Tab,
         _ => return None,
     };
     Some(BoardsEvent::Key(k))
@@ -1947,8 +2108,11 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'l' => Some(BoardsEvent::FocusRight),
             'k' => Some(BoardsEvent::FocusUp),
             'j' => Some(BoardsEvent::FocusDown),
-            'H' => Some(BoardsEvent::ReorderColumnLeft),
-            'L' => Some(BoardsEvent::ReorderColumnRight),
+            // `<`/`>` reorder the focused column (the `⇧←→` chords still work).
+            // The old `H`/`L` pair was dead: `H` is swallowed by the HOST help
+            // toggle and `L` by the plugin router's Logs tab (#450).
+            '<' => Some(BoardsEvent::ReorderColumnLeft),
+            '>' => Some(BoardsEvent::ReorderColumnRight),
             '[' => Some(BoardsEvent::PrevBoard),
             ']' => Some(BoardsEvent::NextBoard),
             'b' => Some(BoardsEvent::CreateBoard),
@@ -1970,10 +2134,14 @@ fn board_nav_event(key: &KeyEvent) -> Option<BoardsEvent> {
             'x' => Some(BoardsEvent::DeleteColumn),
             'c' => Some(BoardsEvent::AddCard),
             'm' => Some(BoardsEvent::ToggleAutoMove),
-            // `q` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a picker.
-            'q' => Some(BoardsEvent::AssignSquad),
-            // `d` (uppercase, distinct from `d` = remove) adds a depends-on blocker.
-            'D' => Some(BoardsEvent::AddDependency),
+            // `s` assigns a SQUAD to the focused card (tcp T4 / F7) — opens a
+            // picker. It was `q` until #450: bare `q` is the global quit key, so
+            // the binding was dead and the advertised `q:squad` hint popped the
+            // whole panel instead of opening the picker.
+            's' => Some(BoardsEvent::AssignSquad),
+            // `w` ("waits-on") adds a depends-on blocker. Was `D` until #450, which
+            // the router claims as the daemon-health tab.
+            'w' => Some(BoardsEvent::AddDependency),
             // `R` (uppercase, distinct from `r` = rename) toggles the auto-run flag.
             'R' => Some(BoardsEvent::ToggleAutoRun),
             _ => None,
@@ -2028,10 +2196,12 @@ fn lift_boards_intent(intent: Option<BoardsIntent>) -> Option<BoardsAction> {
             board_id,
             dependent_issue_id,
             blocker_issue_id,
+            link_type,
         } => Some(BoardsAction::CardDepAdd {
             board_id,
             dependent_issue_id,
             blocker_issue_id,
+            link_type: link_type.to_wire(),
         }),
         BoardsIntent::ToggleAutoRun {
             board_id,
@@ -2172,6 +2342,22 @@ fn route_squads(states: &mut ScreenStates, key: &KeyEvent) {
             squad_id,
             member_ref,
         }),
+        Some(SquadsIntent::SetMemberRole {
+            squad_id,
+            member_ref,
+            role,
+        }) => Some(SquadAction::SetMemberRole {
+            squad_id,
+            member_ref,
+            role,
+        }),
+        Some(SquadsIntent::SetInstructions {
+            squad_id,
+            instructions,
+        }) => Some(SquadAction::SetInstructions {
+            squad_id,
+            instructions,
+        }),
         Some(SquadsIntent::AssignIssue { squad_id }) => Some(SquadAction::Assign { squad_id }),
         None => None,
     };
@@ -2206,11 +2392,13 @@ fn route_agents(states: &mut ScreenStates, key: &KeyEvent) {
     states.pending_agents_action = match out.intent {
         Some(AgentsIntent::CreateAgent {
             name,
+            description,
             provider,
             model,
             instructions,
         }) => Some(AgentsAction::Create {
             name,
+            description,
             provider,
             model,
             instructions,
@@ -2289,6 +2477,32 @@ fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIn
     } else {
         None
     }
+}
+
+/// Activity-timeline key routing (multica parity #13): fold the key into the
+/// pure reducer, then act on the reduction.
+///
+/// `j`/`k` scroll, `r` arms a re-fetch the `render` pass fires, Esc dismisses
+/// the modal back to the screen that opened it (the host reserves only Ctrl+C,
+/// so a modal MUST offer its own way out).
+fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
+    use super::activity::{ActivityEvent, ActivityIntent, reduce_activity};
+
+    if matches!(key.code, KeyCode::Esc) {
+        states.activity = None;
+        return Some(NavIntent::CloseModal);
+    }
+    let state = states.activity.take()?;
+    let Some(c) = key_char(key) else {
+        states.activity = Some(state);
+        return None;
+    };
+    let out = reduce_activity(&state, ActivityEvent::Key(c));
+    if let Some(ActivityIntent::Refresh { issue_id }) = out.intent {
+        states.pending_activity_fetch = Some(issue_id);
+    }
+    states.activity = Some(out.state);
+    None
 }
 
 /// Command-palette key routing (e38.13): fold the key into the pure reducer, then
@@ -2452,5 +2666,241 @@ mod kanban_retry_route_tests {
             states.take_pending_task_retry_action().is_none(),
             "R on a non-terminal card must not lift a retry"
         );
+    }
+}
+
+/// #450: the general invariant that keeps a screen-local binding from silently
+/// rotting. The routing layer (tab switches / `q` quit / `?` help) and the HOST
+/// (`?`/`H` help toggle) both consume their chars BEFORE the active screen's
+/// reducer is consulted, so any screen that binds one of those chars binds a key
+/// the user can never press. Enumerating the reserved set against every pure nav
+/// mapper makes the whole class of bug non-recurring.
+#[cfg(test)]
+mod reserved_key_invariant_tests {
+    use super::*;
+    use crate::screen::fleet::{FleetKey, FleetPaneState, reduce_browse_key};
+    use crate::screen::router::{HOST_RESERVED_KEYS, ROUTER_KEYS, is_reserved_key};
+    use crate::screen::settings::{SettingsEvent, SettingsSection, SettingsState};
+    use ainb_hangar_proto::settings::HealthSnapshot;
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+
+    /// Every char no hangar screen may bind while it is not capturing text.
+    fn reserved_chars() -> Vec<char> {
+        let mut all: Vec<char> = ROUTER_KEYS.to_vec();
+        for ch in HOST_RESERVED_KEYS {
+            if !all.contains(&ch) {
+                all.push(ch);
+            }
+        }
+        all
+    }
+
+    fn press(ch: char) -> KeyEvent {
+        KeyEvent {
+            code: KeyCode::Char { ch },
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    /// A settings pane parked on `section`, navigated there through the REAL
+    /// `j` section-walk (the field is private, and `j` is not a reserved char).
+    fn settings_state(section: SettingsSection) -> SettingsState {
+        let mut state = SettingsState::new(
+            HealthSnapshot {
+                socket_path: "/tmp/x.sock".into(),
+                pid: 1,
+                uptime_secs: 0,
+                version: "test".into(),
+                connected: true,
+            },
+            Vec::new(),
+            Vec::new(),
+            Vec::new(),
+        );
+        for _ in 0..8 {
+            if state.section() == section {
+                return state;
+            }
+            state = crate::screen::settings::reduce_settings(&state, SettingsEvent::Key('j')).state;
+        }
+        assert_eq!(
+            state.section(),
+            section,
+            "could not reach {section:?} via `j`"
+        );
+        state
+    }
+
+    /// No pure screen-key mapper may claim a reserved char. Exhaustive over the
+    /// reserved set × the Boards / Kanban / Fleet / Settings nav mappers.
+    ///
+    /// Fails on `main`: Boards bound `q` (squad) and `D` (depends-on), Boards and
+    /// Kanban bound `H`/`L`, Fleet bound `A`/`B`, Settings bound `K`.
+    #[test]
+    fn no_screen_binds_a_reserved_key() {
+        for ch in reserved_chars() {
+            assert!(is_reserved_key(ch), "`{ch}` must report as reserved");
+
+            assert!(
+                board_nav_event(&press(ch)).is_none(),
+                "Boards binds reserved key `{ch}` — the router/host eats it first"
+            );
+            assert!(
+                kanban_nav_event(&press(ch)).is_none(),
+                "Kanban binds reserved key `{ch}` — the router/host eats it first"
+            );
+
+            let mut fleet = FleetPaneState::default();
+            let intent = reduce_browse_key(&mut fleet, FleetKey::Char(ch));
+            assert!(
+                intent.is_none() && !fleet.is_modal_open(),
+                "Fleet binds reserved key `{ch}` — the router eats it first"
+            );
+
+            for section in [
+                SettingsSection::Daemon,
+                SettingsSection::Providers,
+                SettingsSection::Keys,
+                SettingsSection::Workspaces,
+                SettingsSection::Members,
+                SettingsSection::Notifications,
+            ] {
+                let before = settings_state(section);
+                let after =
+                    crate::screen::settings::reduce_settings(&before, SettingsEvent::Key(ch));
+                assert!(
+                    after.state == before && after.intent.is_none(),
+                    "Settings/{section:?} binds reserved key `{ch}` — the router eats it first"
+                );
+            }
+        }
+    }
+
+    /// The rebound Boards verbs are live on their NEW chars — the other half of
+    /// the invariant, so the fix can't be "delete the binding".
+    #[test]
+    fn rebound_boards_verbs_are_bound() {
+        assert!(matches!(
+            board_nav_event(&press('s')),
+            Some(BoardsEvent::AssignSquad)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('w')),
+            Some(BoardsEvent::AddDependency)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('<')),
+            Some(BoardsEvent::ReorderColumnLeft)
+        ));
+        assert!(matches!(
+            board_nav_event(&press('>')),
+            Some(BoardsEvent::ReorderColumnRight)
+        ));
+        assert!(matches!(
+            kanban_nav_event(&press('<')),
+            Some(KanbanEvent::MoveCardLeft)
+        ));
+        assert!(matches!(
+            kanban_nav_event(&press('>')),
+            Some(KanbanEvent::MoveCardRight)
+        ));
+    }
+}
+
+#[cfg(test)]
+mod fleet_routing_tests {
+    use super::*;
+    use crate::screen::fleet::{
+        FleetAction, FleetCapabilities, FleetFilter, FleetIntent, FleetSessionRow,
+    };
+    use ainb_plugin_sdk::{KeyCode, KeyEvent, KeyKind};
+    use std::collections::BTreeMap;
+
+    fn key(code: KeyCode) -> KeyEvent {
+        KeyEvent {
+            code,
+            mods: 0,
+            kind: KeyKind::Press,
+        }
+    }
+
+    fn row(attention: &str) -> FleetSessionRow {
+        FleetSessionRow {
+            session_key: "claude:one".into(),
+            provider: "claude".into(),
+            provider_session_id: Some("one".into()),
+            current_request_fingerprint: Some("fingerprint".into()),
+            current_request: Some(serde_json::json!({
+                "tool_use_id": "request-1",
+                "questions": [{
+                    "id": "q1",
+                    "question": "Proceed?",
+                    "options": [{"label": "Yes"}, {"label": "No"}]
+                }]
+            })),
+            lifecycle_state: "IDLE".into(),
+            attention_state: attention.into(),
+            management_state: "MANAGED".into(),
+            provenance: "hangar-authoritative".into(),
+            confidence: "HIGH".into(),
+            transport_health: "HEALTHY".into(),
+            capabilities: FleetCapabilities::Flags(BTreeMap::from([
+                ("structured_answer".into(), true),
+                ("approvals".into(), true),
+                ("send_prompt".into(), true),
+                ("start".into(), true),
+            ])),
+            version: 9,
+            cwd: "/work/one".into(),
+            tmux_target: Some("one:0.0".into()),
+            display_name: Some("one".into()),
+            repository_name: Some("one".into()),
+            branch_name: Some("main".into()),
+            discovered_at: 1,
+            last_observed_at: 2,
+            metadata_updated_at: 2,
+            lifecycle_updated_at: 2,
+            attention_updated_at: 2,
+            transport_updated_at: 2,
+        }
+    }
+
+    #[test]
+    fn fleet_routes_numeric_lenses_and_preserves_modal_digit_entry() {
+        let mut states = ScreenStates::default();
+        states.fleet.set_sessions(vec![row("ASK")]);
+
+        for (digit, filter) in [
+            ('1', FleetFilter::NeedsInput),
+            ('2', FleetFilter::Idle),
+            ('3', FleetFilter::Completed),
+            ('4', FleetFilter::Running),
+            ('5', FleetFilter::All),
+        ] {
+            route_fleet(&mut states, &key(KeyCode::Char { ch: digit }));
+            assert_eq!(states.fleet.filter(), filter, "Fleet lens key {digit}");
+        }
+
+        for legacy in ['f', 'o', 'm', 'd', 'c', 'x', 'v'] {
+            route_fleet(&mut states, &key(KeyCode::Char { ch: legacy }));
+            assert_eq!(
+                states.fleet.filter(),
+                FleetFilter::All,
+                "legacy Fleet filter key {legacy:?} must not change lens"
+            );
+        }
+
+        route_fleet(&mut states, &key(KeyCode::Char { ch: 'p' }));
+        route_fleet(&mut states, &key(KeyCode::Char { ch: '1' }));
+        route_fleet(&mut states, &key(KeyCode::Enter));
+        assert!(matches!(
+            states.take_pending_fleet_intent(),
+            Some(FleetIntent::Execute {
+                action: FleetAction::SendText { text },
+                ..
+            }) if text == "1"
+        ));
+        assert_eq!(states.fleet.filter(), FleetFilter::All);
     }
 }

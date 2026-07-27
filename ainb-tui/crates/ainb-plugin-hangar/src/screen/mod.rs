@@ -13,6 +13,7 @@
 //! The shared chrome (top tab bar + footer) that wraps every screen lives in
 //! [`crate::chrome`]; this module owns only the routing state it renders from.
 
+pub mod activity;
 pub mod agent_picker;
 pub mod agents;
 pub mod app_screens;
@@ -30,7 +31,7 @@ pub mod kanban;
 pub mod list_context_menu;
 pub mod logs;
 pub mod profiles;
-mod router;
+pub mod router;
 pub mod settings;
 pub mod skill_manager;
 pub mod squads;
@@ -39,8 +40,8 @@ pub mod usage_dashboard;
 
 pub use app_screens::{
     AgentsAction, AttentionAnswerAction, AutopilotAction, BoardsAction, IssueAssignAction,
-    IssueCommentAction, IssueCreateAction, KanbanAction, NavIntent, PaletteAction, ScreenStates,
-    SkillAction, SquadAction, WorkspaceAction, render_body, route_key,
+    IssueCommentAction, IssueCreateAction, IssueCriterionAction, KanbanAction, NavIntent,
+    PaletteAction, ScreenStates, SkillAction, SquadAction, WorkspaceAction, render_body, route_key,
 };
 pub use router::reduce;
 
@@ -61,6 +62,9 @@ pub enum Screen {
     TaskDetail(TaskId),
     /// Agent-picker modal overlay opened for a specific issue (hotkey `a`).
     AgentPicker(IssueId),
+    /// Activity-timeline modal overlay opened for a specific issue (hotkey `y`,
+    /// multica parity #13) — the card's merged activity + comment narrative.
+    ActivityTimeline(IssueId),
     /// Skill manager (hotkey `3`).
     SkillManager,
     /// Autopilot manager (hotkey `4`).
@@ -122,6 +126,7 @@ impl Screen {
             Self::IssueList => "Issues",
             Self::TaskDetail(_) => "Task",
             Self::AgentPicker(_) => "Agent",
+            Self::ActivityTimeline(_) => "Activity",
             Self::SkillManager => "Skills",
             Self::Autopilots => "Autopilots",
             Self::Kanban => "Kanban",
@@ -148,7 +153,7 @@ impl Screen {
     pub const fn is_modal(&self) -> bool {
         matches!(
             self,
-            Self::AgentPicker(_) | Self::Help | Self::CommandPalette
+            Self::AgentPicker(_) | Self::ActivityTimeline(_) | Self::Help | Self::CommandPalette
         )
     }
 }
@@ -220,6 +225,9 @@ pub enum AppEvent {
     /// Open the agent-picker modal for a specific issue (raised by `a` on a
     /// selected issue-list row; carries the issue id the row addresses).
     OpenAgentPicker(IssueId),
+    /// Open the activity-timeline modal for a specific issue (raised by `y` on a
+    /// selected issue-list row, multica parity #13).
+    OpenActivityTimeline(IssueId),
     /// Open the global command-palette modal (raised by `Ctrl+P` from any
     /// screen, e38.13). Carries no payload — the palette starts empty.
     OpenCommandPalette,

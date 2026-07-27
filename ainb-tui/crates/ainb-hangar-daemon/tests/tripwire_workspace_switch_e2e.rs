@@ -4,7 +4,7 @@
 //!
 //! 1. open Settings (`,`),
 //! 2. navigate to the Workspace pane (`j` to the 4th section),
-//! 3. select the second workspace row (`J`),
+//! 3. select the second workspace row (`]`),
 //! 4. press `s` to set it active,
 //! 5. assert the pane re-renders with the second workspace marked active
 //!    (its `▶` slug indicator) and the daemon-side switch state followed.
@@ -55,6 +55,7 @@ const SECOND_WS_ISSUE: &str = "Acme Login Bug";
 /// Runs after `prepare_pipeline` seeded the P4 fixture.
 fn seed_second_workspace(home: &std::path::Path) {
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
+    use ainb_hangar_core::clock::HangarClock as _;
     use ainb_hangar_store::repo::issue::{IssueRepo, NewIssue};
 
     let hangar_dir = home.join(".agents-in-a-box");
@@ -64,13 +65,19 @@ fn seed_second_workspace(home: &std::path::Path) {
         .expect("seed runtime");
     rt.block_on(async {
         let store = ainb_hangar_store::Store::open_in(&hangar_dir).await.expect("open seed store");
+        // Stamped strictly AFTER the P4 fixture's workspace, so `acme` is always
+        // the SECOND row in the created_at-ordered workspace pane and the `]`
+        // (down) + `s` (activate) drive below lands on it deterministically. The
+        // old frozen 2023 constant tied with the (then also frozen) fixture and
+        // only worked because of insert order.
+        let created_at = ainb_hangar_core::clock::SystemClock.now_ms() + 1_000;
         // A distinct ULID-style id + the `acme` slug (id != slug, mirroring real
         // workspaces and the slug/id resolution contract).
         sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
             .bind(SECOND_WS_ID)
             .bind(SECOND_SLUG)
             .bind("Acme")
-            .bind(1_700_000_000_000_i64)
+            .bind(created_at)
             .execute(store.pool())
             .await
             .expect("insert second workspace");
@@ -91,7 +98,7 @@ fn seed_second_workspace(home: &std::path::Path) {
                 state: "open".into(),
                 assignee: None,
                 creator,
-                created_at: 1_700_000_000_000,
+                created_at,
                 priority: 0,
                 due_date: None,
                 labels: Vec::new(),
@@ -191,8 +198,32 @@ fn workspace_switch_e2e() {
         "second workspace missing:\n{listed}"
     );
 
-    // 3. Select the second workspace row.
-    sess.send_key("J");
+    // 3. Select the second workspace row. `]` moves the in-section list cursor —
+    //    it was `J` until #450 rebound the pair off `J`/`K` (the hangar router
+    //    claims bare `K` for the Kanban tab, so `K` never reached the reducer and
+    //    `J` moved with it). A single send can be dropped by tmux on a busy pane,
+    //    so re-send until the `›` row cursor sits on the `acme` row. `move_list`
+    //    clamps at the last row and the seed has exactly two workspaces with
+    //    `acme` stamped last, so extra `]` presses are idempotent.
+    let sel_deadline = Instant::now() + Duration::from_secs(20);
+    let selected_row = format!("›  {SECOND_SLUG}");
+    let on_row = loop {
+        sess.send_key("]");
+        if let Some(c) = sess.poll_capture(Instant::now() + Duration::from_millis(800), |c| {
+            c.contains(&selected_row)
+        }) {
+            break Some(c);
+        }
+        if Instant::now() >= sel_deadline {
+            break None;
+        }
+    };
+    on_row.unwrap_or_else(|| {
+        panic!(
+            "row cursor never landed on `{SECOND_SLUG}`:\n{}",
+            sess.capture()
+        )
+    });
 
     // 4. Press `s` to set the selected workspace active.
     sess.send_key("s");

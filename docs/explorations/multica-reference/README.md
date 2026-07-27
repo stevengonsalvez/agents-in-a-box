@@ -40,6 +40,133 @@ Parity % is a rough eyeball, not a measured metric — it exists to signal where
 the structural holes are (Issue/Squad/Workspace), versus where Hangar is already
 close (Task-flow, Autopilot, where it is *ahead* on some axes).
 
+> **These figures are the ORIGINAL 2026-07-23 assessment, kept as the baseline.**
+> For where Hangar stands today see [Parity status
+> (2026-07-24)](#parity-status-2026-07-24) immediately below; the master gap
+> matrix and roadmap further down are likewise the original reference, not a
+> current to-do list.
+
+## Parity status (2026-07-24)
+
+An audit of the parity-closure campaign, verified against **primary evidence on
+`main`** (migrations, repo/daemon/plugin source, CI job conclusions) rather than
+against the campaign's own PR descriptions. Where a gap was deliberately scoped
+narrower than the reference's full facet, that is stated precisely — a
+partially-closed gap is **not** counted as parity.
+
+### Verification caveat that applies to the whole campaign
+
+The authoritative end-to-end gate has been **red on `main` for the entire
+campaign**. Concretely:
+
+- `Test (ubuntu/macos)` runs `cargo nextest run --lib` — it covers only in-source
+  `#[cfg(test)]` modules. Every integration test under a crate's `tests/`
+  directory (all the `tripwire_*`, `rpc_*`, `repo_*`, `migration_*` proofs the
+  gap PRs added) is **invisible to that job**.
+- `hangar-e2e (ubuntu-latest)` runs the full 34-tripwire matrix and is marked
+  authoritative in `ci.yml`. It **failed on every one of PRs #460–#471** and
+  fails on `main` today (run 30102933962, HEAD 2849a100). The failures are
+  pre-existing and unrelated to the gap features —
+  `tripwire_board_auto_move_e2e`, `tripwire_ccc_daemon_session_reaches_attention`,
+  `tripwire_ccc_interactive_session_visible_to_fleet`.
+- Because that step fails, the **next** step —
+  `Run hangar acceptance tests (framed-socket + CLI)` — is `skipped`. So the
+  framed-socket and CLI acceptance proofs for these features have **never run in
+  CI at all**.
+- `hangar-e2e (macos-latest)` runs a launch-smoke SUBSET (`HANGAR_TRIPWIRE_SMOKE`),
+  not the full matrix. PR #464, which tried to restore the full macOS gate, was
+  closed. `Rustfmt` is red on `main` for unrelated toolchain drift.
+
+Consequence: **no gap in the table below has a green authoritative CI proof.**
+Where a row says "verified", that means either (a) an in-source test that the
+green `--lib` job genuinely ran, or (b) a local tmux/CLI run reported in the PR.
+Rows marked *CI-unproven* have tests that exist and were run locally but that no
+CI job executes.
+
+### Closed / claimed-closed gaps
+
+| # | Gap | PR | Merged | Scope actually closed vs the reference's full facet | Verified? |
+|---|---|---|---|---|---|
+| **1** | Polymorphic actors + human members | #460 | ✅ | **Partial.** The `(actor_type, actor_id)` substrate already existed pre-campaign (`hangar-core/src/actor.rs`, landed in the P0.6–P0.7 scaffold) and is used by `issue`, `comment`, `squad`, `task`. PR #460 (+497/−25, 4 files, **no migration**) added the missing piece the reference flagged: a path that actually **mints a second human** — `MemberRepo::add`, the `hangar member` CLI, an RPC handler, sidebar render. **Not closed:** `inbox_entry` (mig 0021) has no actor/recipient column at all — it is workspace-wide, so there is no per-human or per-agent inbox; and there is no activity-log actor (gap #13 unstarted). | Partial. PR states the TUI half was "verify-only" and the Part-B tmux tripwire was **descoped**. No test files in the diff. |
+| **2** | Comment @mention auto-dispatch | **not a campaign PR** — landed pre-campaign in **#250** (commits `2fde74c7`, `946de10c`, `69945d9e`) | ✅ | **Partial (~30%), and the reference's own premise was wrong.** The matrix below says "Comments are inert text — zero side effects on write"; that is **false on `main`**. `daemon/src/mentions.rs::parse_mentions` scans bare `@handle` tokens, `rpc/snapshots.rs:1983::spawn_mention_tasks` resolves them against workspace agents and enqueues one task each (sharing a run generation), coalescing duplicates on the per-`(issue,agent)` unique index; wired at `comment_add` (`rpc/mod.rs:3722`). **Missing:** the `mention://type/id` link form, **member (human) mentions**, reply-parent / thread-owner / assignee-fallback routing, surfaced per-target outcome codes (`queued\|coalesced\|deferred\|blocked` — coalescing is silent), preview, and self-loop suppression. The gap-#8 private-agent gate **is now applied on this path** (8-rest follow-up): a mention of an agent the comment's author may not invoke spawns nothing, per-target. | ✅ In-source `#[cfg(test)]` tests (`snapshots.rs:2156+`) — genuinely run by the green `--lib` job. |
+| **3** | Sub-issues: parent/child + stage barriers + child-done cascade | #463 | ✅ | **Closed as scoped.** Migration `0046` (`parent_issue_id` self-FK `ON DELETE SET NULL`, `stage INTEGER CHECK(>=1)`, `idx_issue_parent`); `store/src/service/child_done.rs::cascade_child_done`; `IssueRepo::list_children` + `IssueRepo::child_progress` roll-up; wizard carries `parent_issue_id` with a read-only `Sub-issue of …` banner. Reference facet not matched: multica's **batched multi-stage aggregation** (one wake comment aggregating several stages closing together). | *CI-unproven.* Added `tripwire_hangar_subissue_cascade.rs` + 20 other `tests/` files — none executed by any green CI job. PR reports live tmux confirmation. |
+| **4** | Multi-workspace create / delete | #465 | ✅ | **Closed as scoped.** `WorkspaceRepo::create` + `::delete` with `validate_slug` (reserved-slug validation present), CLI, TUI settings-screen switch, `workspace_multi_create_isolation.rs` proof. Reference facet **now matched (4-rest)**: the per-instance creation-lockdown flag — `daemon_config: workspace.creation_disabled` (+ the one-way `HANGAR_DISABLE_WORKSPACE_CREATION` env override), gated inside `WorkspaceRepo::create` so a locked instance writes nothing. PR itself notes live pushed events still target the old workspace after a switch until re-subscribe. | *CI-unproven* (tests in `tests/`). PR reports a tmux-verified end-to-end run after a fix cycle. |
+| **5** | Task-level `squad_id` + claim-time briefing hook | #461 | ✅ | **Closed exactly as scoped — deliberately the column + hook POINT only, not the briefing BODY** (that was gap #7). Migration `0045` adds `agent_task_queue.squad_id`; the daemon stamps and reads it at claim. | ✅ Strongest evidence in the campaign: a `run_loop` test drives the **real** `execute_claimed` and asserts the hook line carries both `task_id` and `squad_id`, **mutation-verified** (neutering the call site turns it red). |
+| **6** | Two-dimensional derived presence | #466 | ✅ | **Partial — 1 of 2 dimensions.** *Workload* is genuinely derived: `TaskRepo::live_workload_for_agent` → `Workload::derive` from live running/queued counts, batched in `agents_list`. *Availability* is **not** derived: `presence_from_status` (`snapshots.rs:767`) is a straight passthrough of `agent_runtime.status`, and **nothing anywhere in the tree ever writes `"unstable"`** — the wire variant `PresenceState::Unstable` and its amber dot are unreachable. `agent_runtime.last_seen_at` is stored but never folded, so the reference's **5-minute unstable grace window does not exist**. Availability remains the same binary online/offline the reference called out. | Workload: repo + rpc tests exist (in `tests/`, *CI-unproven*). Availability grace: nothing to verify — not implemented. |
+| **7** | Squad leader briefing (Operating Protocol + Roster + Instructions) | #467 (+ 7‑rest #486) | ✅ | **Closed as scoped, with two divergences documented in-source** (`daemon/src/squad_briefing.rs`): (a) roster rows are `name — <agent\|human> — <id>` rather than multica's `[@Name](mention://<type>/<uuid>)`, because mention-**by-link** does not exist (gap #2 only parses bare handles); (b) the roster's skills segment advertises what the member will actually MATERIALISE — both `agent_skill.enabled` (mig 0051) and `agent.disabled_runtime_skills` are applied — where multica reads one live tool registry. The briefing is now the full three sections: protocol + roster (each member's `role` and skills) + `## Squad Instructions`, each fragment blank-omitted. Injected pre-spawn at claim (`run_loop.rs:859`). | *CI-unproven.* An extended claim tripwire asserts the on-disk `CLAUDE.md` contains the protocol/roster and that a member task's prompt has none, **RED-verified against the old no-op**. No test files in the PR diff (test edits are in-crate). |
+| **8** | Agent invocation permissions | #468 (+ 8-rest) | ✅ | **Closed: the gate now wraps every enqueue.** Migration `0047`: `agent.permission_mode` (`private\|public_to`, CHECK) + `agent_invocation_target` allow-list + a lossless backfill from legacy `visibility`. `AgentRepo::can_invoke` implements the truth table (owner always admits; admin does not bypass private). Enforced on **all three dispatch paths** as of the 8-rest follow-up: the single-agent card-run enqueue, the SQUAD fan-out (`store/src/service/squad_assign.rs` gates the leader AND every member in the pre-flight resolve, before the transaction opens, so a refusal writes zero rows — the single seam that closes `run_card`, both squad RPCs and the CLI at once), and the `@`-mention dispatch (`rpc/snapshots.rs::spawn_mention_tasks`, gated FIRST per target for multica's enumeration-safety, per-target `continue` so one denied handle never suppresses the others). `SquadAssignParams` / `BoardCardRunParams` gained an append-only `invoker_user_id`. **Still not matched:** per-target outcome codes (gap #2), and originator resolution for true A2A attribution (multica 184/185) — an agent-authored mention passes `None` and fails closed except against a `public_to workspace` target. The `team` target_type passes the CHECK but no team table exists. | ✅ `can_invoke_truth_table` is an in-source test — genuinely run by the green `--lib` job. CLI surface (`hangar agent permission\|allow\|can-invoke`) reported tmux-provable. |
+| **9** | Conversational Agent Builder | #469 | ✅ | **Partial by explicit design.** Ships the guided structured-draft wizard — `CreateDraft` in `plugin-hangar/src/screen/agents.rs`, provider/model/instructions/name collected across steps, reviewed on a confirm step, Enter creates. The module docstring states it is "multica's chat → structured-draft → confirm builder, **minus the LLM turn**". The **conversational half is not built**: there is no hidden `kind='system'` builder agent proposing the draft, and the `kind`/`system_key` columns it needs (gap #23) do not exist. | Draft/step reducer covered in-crate. The LLM turn is untestable because it is absent. |
+| **10** | Structured / faceted issue filtering | #470 | ✅ | **Closed as scoped.** No migration and no new wire field — filtering is client-side over columns `IssueRow` already carries (`state`, `priority`, `labels`, `assignee`, `due_date`). `FacetFilters` (`plugin-hangar/src/screen/issue_list.rs`) mirrors multica's `issueTableQuerySpec.Filters`: multi-select per dimension, **OR within a facet, AND across facets**, with per-value drill-down counts computed with that facet's own selection removed (`without_kind`, 1:1 with multica's `issueTableQueryWithoutFacet`). **Reference facets not matched:** `Creators[]`, `ProjectIDs[]`, custom-`Properties` (blocked on gap #17), 2-level grouping, cursor pagination, `Scope{kind, Relation, Actor}` involves-filters, and the separate server-side `ListIssueTableFacets` endpoint — hangar computes facets client-side over the already-delivered `hangar/issues_list` snapshot, a deliberate architecture difference for a single-user local control plane. | ✅ **CI-gated on both OS legs.** `tripwire_issue_facets` (real plugin behind the real SDK server, one survivor among four decoys, every `DECOY` asserted ABSENT) runs in `run_all_tripwires.sh`; `rpc_issue_facets_sqlite` proves the same intersection against a REAL daemon + REAL sqlite and cross-checks the reducer's visible-row count against a raw SQL `COUNT(*)` (mutation-verified: neutering the facet toggles turns it red). The same PR closed the gate hole that let `ainb-plugin-hangar`'s ~35 non-`tripwire_*` integration targets be compiled by NOTHING in CI. |
+| **11** | Acceptance criteria + context refs | #471 | ✅ | **Closed as scoped.** Migration `0048` adds `acceptance_criteria` and `context_refs` as JSON-array TEXT columns defaulting `'[]'` (same persistence shape as `labels`, mig 0014); repeatable `--acceptance` / `--context-ref` CLI flags; wizard authoring; detail-card render. **11‑rest closed:** migration `0054` promotes the column to the reference's structured shape — each criterion carries a stable `ac-…` id and a checked bit with `checked_at`/`checked_by` provenance. `hangar issue criteria list|check|uncheck` (by id or 1-based ordinal) and the `hangar/issue_criterion_set` RPC tick one off; the detail card renders `Acceptance: n/m` with ☑/☐ and binds `a`/`t`. The decoder accepts the legacy flat array, so the upgrade needs no flag day. | *CI-unproven* (tests in `tests/`). PR reports a CLI + sqlite acceptance run. |
+| **24** | Per-agent skill enable/disable toggle | #482 | ✅ | **Closed as scoped.** Migration `0051` adds `agent_skill.enabled` (INTEGER 0/1, DEFAULT 1, partial index on the enabled links) and `agent.disabled_runtime_skills` (JSON-array TEXT, multica 206). `SkillRepo::set_enabled` / `agent_skill_links` are the new levers; `skills_for_agent` now filters `enabled = 1`, so `daemon/src/materialise.rs` — the single materialisation seam — never writes a disabled skill's directory. Wire: `hangar/skill_set_enabled` + `hangar/agent_skills_list`. Drivable from `ainb hangar skills attach\|detach\|toggle` + `skills list --agent`, and from `t` on the skill-manager screen. **Three deliberate divergences, documented in-source:** *D1* — `disabled_runtime_skills` is honoured at dispatch-time materialisation, not at a live tool registry (hangar has none); same observable outcome. *D2* — `attach` keeps `ON CONFLICT DO NOTHING` and never re-enables a disabled link, because seed/`templates use` re-attach on every re-run and would otherwise silently undo an operator's disable. *D3* — `used_skill_ids` (the `Used`/`Unused` chips) stays attachment-based, so a disabled link still reads `used`. | ✅ Mutation-verified: neutering `AND a.enabled = 1` turns three `materialise_skills_tests` cases RED. Plus a populated-DB upgrade test (a link written before the column existed backfills enabled and still materialises), a daemon RPC test asserting persistence by reading the daemon's own sqlite file, and a CLI e2e through the real binary. |
+
+### Updated parity by entity
+
+| Entity | Was | Now | What moved it | What still holds it back |
+|---|---|---|---|---|
+| Issue | ~35% | **~60%** | #3 sub-issues (full mechanic + roll-up), #10 faceted filtering, #11 acceptance/context, plus the pre-existing narrow #2 the original assessment missed | #17 custom properties, #19 blocked/cancelled, #20 typed deps, #21 provenance, #22 subscribers/reactions, #28 wizard fields all unstarted; #2's routing/outcome/preview facets missing |
+| Squad | ~40% | **~65%** | #5 task `squad_id` (mutation-verified) + #7 leader briefing injected at claim, now carrying `## Squad Instructions` + per-member role AND materialisable skills (#25, 7‑rest) | #16 selective routing undecided; delegation still cannot go leader→member by mention link (gap #2); **F1 (`7‑cwd`)** — the briefing is written into the TASK tree while a card run's provider `cwd` is its worktree, so a cwd-relative reader would not see it |
+| Workspace / membership | ~40% | **~60%** | #4 create/delete/switch with slug validation; #1's human-member mint path | No invite lifecycle (#18); the inbox is still workspace-wide with no actor recipient, so "human member" stops short of a symmetric collaboration surface (4-rest’s creation-lockdown flag landed) |
+| Agent | ~55% | **~70%** | #8 permission model + gate (in-source-tested), #9 guided create wizard, #6's workload dimension | Availability is still binary — `unstable` unreachable, no grace window; #9's LLM turn absent; #26 archive audit, #30 `custom_env` redaction unstarted (#23 metadata and #24 skill toggle now landed); the invoke gate covers one of three dispatch paths |
+| Autopilot | ~75% | **~75%** | untouched by the campaign | #14 rule versioning/attribution, #15 `api` trigger + `skipped` status, #27 subscribers |
+| Task + dispatch flow | ~80% | **~80%** | untouched by the campaign | #12 dispatch reason codes, #13 activity log |
+
+Rough overall movement: **~55% → ~68%**. The campaign closed the two cheapest
+structural prerequisites cleanly (#5, #3) and made real progress on identity
+(#1/#4/#8), but the two facets that most define multica's model —
+**conversation-driven delegation** (#2's routing layer) and **actor symmetry in
+the inbox** — remain open.
+
+### What genuinely remains
+
+**P1 — high impact.** In rough dependency order.
+
+| # | Item | Effort | Note |
+|---|---|---|---|
+| 10 | Structured / faceted issue filtering | L | PR #470 open — land it first |
+| 2‑rest | Mention routing layer: `mention://` links, member mentions, reply-parent / thread-owner / assignee fallback, outcome codes, preview, self-loop + private-agent gates | L | the single largest remaining behavioral gap; also closes the #8 gate hole on this path |
+| 1‑rest | Actor-polymorphic inbox (recipient columns on `inbox_entry`) | M | without it "human member" is a name on an assignee, not a collaborator |
+| 6‑rest | Availability derivation: fold `last_seen_at` into a 5-minute `unstable` grace and write the status | S–M | the wire variant and the amber dot already exist — only the producer is missing |
+| 13 | Generic activity log / audit trail | M | |
+| 12 | Dispatch reason codes | M | pairs naturally with the mention outcome codes |
+| 8‑rest | Apply `can_invoke` on the squad fan-out and mention-dispatch paths | S | gate exists; two call sites missing |
+| 16 | Squad selective routing vs spray fan-out | L | **product decision first**; depends on 2‑rest |
+| 9‑rest | The LLM turn behind the agent builder (needs `kind`/`system_key` from #23) | L | |
+| 14 | Autopilot rule versioning + human attribution | M | |
+| 7‑cwd (F1) | The briefing is written into the TASK tree while a card run's provider `cwd` is its worktree | S–M | issue #485 — delivery mechanism, not briefing content |
+
+**P2 — polish / cheap wins.**
+
+| # | Item | Effort | Note |
+|---|---|---|---|
+| 28 | Surface priority / due / labels in the issue create wizard | S | schema has had these since mig 0014 — UI-only |
+| 19 | `blocked` + `cancelled` issue states | S | |
+| 23 | Agent metadata (`description`/`avatar_url`/`kind`/`service_tier`/UNIQUE name) | S–M | `kind`/`system_key` unblocks 9‑rest |
+| 25 | Squad per-member `role` + `instructions` + archive | S–M | role + instructions landed; the briefing now renders both plus roster skills |
+| 26 | Archive audit trail (`archived_at`/`archived_by`, agent + squad) | S | |
+| 20 | Typed issue dependency graph (`blocked_by`/`related`) | S–M | core auto-run mechanic already parity |
+| 21 | Issue origin provenance | S–M | |
+| 15 | Autopilot `api` trigger + `skipped` run status | S | |
+| 30 | `custom_env` redaction contract | S | |
+| 3‑rest | Batched multi-stage cascade aggregation | S–M | |
+| 17 | Custom properties + metadata scratch | M–L | promote to P1 if agent pipeline state is needed |
+| 22 | Issue subscribers + reactions | M | |
+| 27 | Autopilot subscriber / collaborator | S–M | defer while solo |
+| 18 | Membership invite lifecycle | M | depends on #4 (landed) — now actionable |
+
+**P0 for the platform, not for parity:** repair the `hangar-e2e (ubuntu-latest)`
+gate. Three pre-existing tripwire failures are masking the *entire* framed-socket
++ CLI acceptance suite, which is why nine merged features have no CI proof.
+Nothing in the roadmap above should be called done until that gate is green.
+
+### Sub-gaps discovered during the campaign (not in the original 30)
+
+| Sub-gap | Evidence | Impact |
+|---|---|---|
+| **No historical comment surface in the TUI** | `TaskDetailState::new` (`plugin-hangar/src/screen/task_detail.rs:259`) starts with an empty transcript, and there is **no `hangar/comment_list` RPC** — `methods.rs` has only `HANGAR_COMMENT_ADD`. Live `CommentAdded` events *do* interleave into the transcript (`fold_event`, slate lane, `is_comment: true`), so the render path exists — but only for comments that arrive **while the screen is already open**. | Comment and cascade activity (including gap #3's parent-wake comment and gap #2's mention trigger) is invisible on reopen. A `comment_list` RPC + hydration on open is the fix; small, and it makes two shipped features observable. |
+| **Host router reserves keys from plugin screens** | The host intercepts `?` and `H` (help) and `W` (statusline wire) globally for any non-text context before plugin delivery (`ainb-core/src/app/events.rs:1483–1555`); the generic `captures_text` gate only exempts plugin **text-input** modes. Plus Ctrl+C per the host contract. | Plugin screens cannot bind these keys, which is why hangar features have had to take lowercase bindings. *Unverified:* the specific claim that uppercase `S`/`D` are also stolen — no such global handler appears in the pre-plugin block, so that one needs a live tmux check before being treated as fact. |
+| **#450 `q:squad` — FIXED** | Issue #450 was auto-closed by a cross-reference from PR #459 (2026‑07‑23T19:47:08Z, no comment, no closing commit) while still broken. Now genuinely fixed: the global router keeps bare `q` (the only keyboard escape hatch off Boards), and the squad picker moved to `s` (`board_nav_event`), depends-on to `w`, column reorder to `<`/`>`. The reserved sets live once in `screen/router.rs` (`ROUTER_KEYS` / `HOST_RESERVED_KEYS` / `is_reserved_key`) and `no_screen_binds_a_reserved_key` (`screen/app_screens.rs`) enforces disjointness in both directions. | Resolved. Same sweep also un-stole Kanban `H`/`L`, Fleet `A`/`B`, Settings `K` — see `every_boards_hint_band_key_is_reachable` and `footer_hint_keys_never_collide_with_reserved_router_keys`. |
+
 ## Master gap matrix
 
 One ranked table across all entities. Overlapping gaps (the polymorphic-actor
@@ -54,7 +181,7 @@ user-visible impact, then effort. Effort: **S** ≈ days, **M** ≈ 1–2 weeks,
 | **1** | Cross-cutting | **Polymorphic actors + human members** | `actor_type (member\|agent)` on assignee/creator/comment/inbox/activity; humans are first-class collaborators | Agent-centric; no human assignee/commenter/inbox concept; `user`+`member` tables exist but nothing mints a 2nd human | The whole "agents are team members" identity. Every collaboration surface (assign, comment, mention, inbox) becomes symmetric. Foundation the mention-dispatch and squad-human-members gaps sit on | L |
 | **2** | Issue / Squad | **Comment @mention auto-dispatch** | `[@x](mention://type/id)` parsed → routes to explicit-mention / reply-parent / thread-owner / assignee-fallback; per-target `queued\|coalesced\|deferred\|blocked` outcomes; preview; self-loop + private-agent gates; merge-into-pending dedup | Comments are inert text — zero side effects on write | Hand off work by *conversation*. This is the single biggest behavioral feature Hangar lacks — it is also the mechanism squad leader→member delegation and re-trigger loops are built on | L |
 | **3** | Issue | **Subtasks: parent/child + stage barriers + child-done cascade** | `parent_issue_id` self-FK; `stage` barrier groups; child terminal→parent wake comment; batched multi-stage aggregation | No parent/child of any kind; only an untyped `card_dependency` blocks-edge | Decompose an issue into tracked sub-issues with roll-up progress and automatic parent wake when a stage closes | L |
-| **4** | Workspace | **Multi-workspace (create / switch / delete)** | `CreateWorkspace` API + `/{slug}/…` nav, reserved-slug validation, per-instance creation lockdown flag | Exactly one bootstrapped singleton (`default`); no create path at any layer | More than one project/tenant at all. Everything below (invites, roles, per-workspace config) is moot with one workspace | L |
+| **4** | Workspace | **Multi-workspace (create / switch / delete)** | `CreateWorkspace` API + `/{slug}/…` nav, reserved-slug validation, per-instance creation lockdown flag | Create/delete/switch landed (#465); the creation-lockdown flag landed (4-rest) | More than one project/tenant at all. Everything below (invites, roles, per-workspace config) is moot with one workspace | L |
 | **5** | Squad | **Task-level `squad_id` + claim-time leader briefing hook** | `agent_task_queue.squad_id` (mig 127) so the daemon injects briefing at claim | Task rows carry no `squad_id`; issue has `squad_id` but the task doesn't — no claim-time hook to key briefing off | Structural prerequisite for a real squad leader (gap #7). Cheap column, but unlocks the whole leader-coordination model | S |
 | **6** | Agent | **Two-dimensional derived presence** | `Availability` (online/unstable/offline/archived, 5-min "unstable" grace) × `Workload` (working/queued/idle from live task counts) — pure derivation | `agent.archived` bool + `agent_runtime.status` binary online/offline; no grace window, no workload signal | Every list/card dot. Users can tell "runtime blipped" from "dead", and "queued/stuck" from "idle" — the signal Multica's whole list UI is built on | M |
 | **7** | Squad | **Leader briefing (Operating Protocol + Roster + Instructions)** | System-prompt injection at claim: coordinator role + 6 responsibilities, ready-to-paste mention roster with skill names, user-authored routing instructions | Nothing — a fanned-out leader runs like a solo agent, no idea it's a leader | Makes "squad leader" a real role instead of nominal. Depends on #5 (task `squad_id`) + #2 (mention dispatch for delegation) | L |
@@ -74,12 +201,12 @@ user-visible impact, then effort. Effort: **S** ≈ days, **M** ≈ 1–2 weeks,
 | 21 | Issue | **Origin provenance** | `origin_type`/`origin_id` (autopilot/quick_create/lark/slack/agent_create) | None | Trace who/what caused an agent-created issue | S–M |
 | 22 | Issue | **Subscribers + reactions** | `issue_subscriber` (reason-tagged) + `issue_reaction` | Neither | Notification subscriptions + emoji reactions | M |
 | 23 | Agent | **Metadata columns** | `description` (255-cap), `avatar_url`, `kind`(user/system), `service_tier`, `UNIQUE(workspace,name)` | None of these | Blurb/avatar in lists; no silent duplicate names; Codex service-tier control. `kind`/`system_key` also unblocks #9 | S–M |
-| 24 | Agent | **Per-agent skill enable/disable** | `agent_skill.enabled` + `disabled_runtime_skills` | Attach/detach only, no toggle | Temporarily disable a skill for one agent without detaching | S |
+| 24 | Agent | ~~**Per-agent skill enable/disable**~~ **DONE** | `agent_skill.enabled` + `disabled_runtime_skills` | ~~Attach/detach only, no toggle~~ — closed by migration 0051 | Temporarily disable a skill for one agent without detaching | S |
 | 25 | Squad | **Per-member `role` + `instructions` + archive** | Free-text `role` (leader routes by fit), `squad.instructions`, `archived_at`/`archived_by` w/ transfer-on-archive | None of these columns | Route by stated specialty; per-squad routing guidance; safe squad retirement | S–M |
 | 26 | Agent / Squad | **Archive audit trail** | `archived_at` + `archived_by` (who/when) | `archived` boolean only (agent); no archive at all (squad) | Accountability for who retired an agent/squad and when | S |
 | 27 | Autopilot | **Subscriber / collaborator model** | `autopilot_subscriber` (auto-subscribe to spawned issues) + `autopilot_collaborator` write-grants | Single-owner only | Team-shared autopilots. Depends on #1. Fine to defer while solo | S–M |
 | 28 | Issue | **Surface existing priority/due/labels in create wizard** | `CreateIssueRequest` accepts priority/status/labels/dates directly | Schema has priority/due/labels since mig 0014 — **wizard never surfaces them** | Cheapest real win: three more wizard rows, columns already exist | S |
-| 29 | Squad | **#450: Boards `q:squad` hotkey unreachable** | (n/a) | Global router steals bare `q` as quit before Boards' `q → AssignSquad`; card fan-out unreachable by keyboard | Unblocks the *existing* fan-out feature. Add a Boards-no-overlay guard, same pattern as existing screen guards | S |
+| 29 | Squad | ~~**#450: Boards `q:squad` hotkey unreachable**~~ **DONE** | (n/a) | ~~Global router steals bare `q` as quit before Boards' `q → AssignSquad`~~ — fixed: the squad picker is `s`, depends-on `w`, reorder `<`/`>`; `q` stays the global escape hatch | Rejected the Boards-no-overlay guard (it traps the user: Boards has no Esc and `?`/`H` are host-eaten). Instead: one reserved key set in `screen/router.rs`, screens rebound off it, disjointness enforced by `no_screen_binds_a_reserved_key` | S |
 | 30 | Agent | **`custom_env` redaction contract** | Never serialized; `has_custom_env`/key-count only; audited GET/PUT endpoint | Stored/returned plain JSON | Secrets hygiene if Hangar ever grows multi-user/remote | S |
 
 ## Deliberately NOT chasing
@@ -147,10 +274,9 @@ leader briefing (#7) possible and is nearly free.
 | # | Item | Effort | Note |
 |---|---|---|---|
 | 28 | Surface priority/due/labels in issue create wizard | S | **schema already has these (mig 0014)** — UI-only |
-| 29 | Fix #450 Boards `q:squad` hotkey | S | unblocks existing fan-out feature |
+| 29 | ~~Fix #450 Boards `q:squad` hotkey~~ **DONE** | S | squad picker rebound to `s`; reserved-key invariant now enforced by test |
 | 19 | `blocked` + `cancelled` issue states | S | |
 | 23 | Agent metadata columns (description/avatar/kind/service_tier/unique-name) | S–M | `kind`/`system_key` also unblocks #9 |
-| 24 | Per-agent skill enable/disable toggle | S | |
 | 26 | Archive audit trail (agent + squad `archived_at`/`archived_by`) | S | |
 | 25 | Squad per-member `role` + `instructions` + archive | S–M | `instructions` feeds #7 briefing |
 | 20 | Typed issue dependency graph (`blocked_by`/`related`) | S–M | core auto-run mechanic already parity |

@@ -33,6 +33,18 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 
+/// The workspace OWNER the P4 fixture seeds (`member` role `owner`, user-1).
+/// Events whose participants cannot be derived fall back to this actor, so it is
+/// the recipient the fixture's issue / comment / task events land on.
+const OWNER: &str = "member:user-1";
+
+/// The local human — the recipient an omitted `recipient` param defaults to.
+const LOCAL_HUMAN: &str = "member:me";
+
+/// The agent the P4 fixture assigns `issue-1` to. A comment BY the owner on that
+/// issue is routed to this actor (its other participant).
+const FIXTURE_AGENT: &str = "agent:agent-1";
+
 /// One test client connection: a persistent buffered reader + writer half.
 struct Client {
     reader: BufReader<OwnedReadHalf>,
@@ -122,12 +134,12 @@ impl Client {
         assert!(resp["error"].is_null(), "auth/hello must ack: {resp}");
     }
 
-    /// List the inbox via RPC, returning `(entries, unread)`.
-    async fn inbox_list(&mut self, ws: &str) -> (Vec<serde_json::Value>, i64) {
+    /// List ONE ACTOR's inbox via RPC, returning `(entries, unread)`.
+    async fn inbox_list(&mut self, ws: &str, recipient: &str) -> (Vec<serde_json::Value>, i64) {
         let resp = self
             .call(
                 methods::HANGAR_INBOX_LIST,
-                serde_json::json!({ "workspace_id": ws }),
+                serde_json::json!({ "workspace_id": ws, "recipient": recipient }),
             )
             .await;
         assert!(resp["error"].is_null(), "inbox_list must ack: {resp}");
@@ -201,6 +213,11 @@ async fn wait_for_inbox_count(store: &Store, ws_id: &str, want: i64) {
 
 fn issue_event() -> HangarEvent {
     HangarEvent::IssueCreated(IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("issue-1").unwrap(),
         display_id: None,
         workspace_id: WS_ID.into(),
@@ -227,7 +244,9 @@ fn issue_event() -> HangarEvent {
         child_total: 0,
         child_done: 0,
         acceptance_criteria: Vec::new(),
+        acceptance: Vec::new(),
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     })
 }
 
@@ -267,28 +286,57 @@ async fn events_aggregate_into_inbox_with_unread_count() {
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
 
-    let (entries, unread) = c.inbox_list(WS_SLUG).await;
+    // The owner is notified of the issue they created and of the task on it; the
+    // comment they wrote goes to the issue's OTHER participant, the assigned
+    // agent (you are never notified of your own action). Assert per recipient
+    // rather than on one flat workspace list.
+    let (mine, mine_unread) = c.inbox_list(WS_SLUG, OWNER).await;
+    let (theirs, theirs_unread) = c.inbox_list(WS_SLUG, FIXTURE_AGENT).await;
     assert_eq!(
-        entries.len(),
-        3,
-        "all three families aggregated: {entries:?}"
+        mine_unread,
+        i64::try_from(mine.len()).unwrap(),
+        "every fresh entry is unread: {mine:?}"
     );
-    assert_eq!(unread, 3, "every fresh entry is unread");
+    assert_eq!(
+        theirs_unread,
+        i64::try_from(theirs.len()).unwrap(),
+        "every fresh entry is unread: {theirs:?}"
+    );
+    assert_eq!(
+        mine_unread + theirs_unread,
+        3,
+        "all three events aggregated across the two recipients"
+    );
 
-    // The kinds cover all three families.
+    // The kinds cover all three families across the two inboxes, and every entry
+    // names the actor it is addressed to.
+    let all: Vec<&serde_json::Value> = mine.iter().chain(theirs.iter()).collect();
     let kinds: std::collections::HashSet<&str> =
-        entries.iter().filter_map(|e| e["kind"].as_str()).collect();
+        all.iter().filter_map(|e| e["kind"].as_str()).collect();
     assert!(kinds.contains("issue"), "an issue entry landed: {kinds:?}");
     assert!(
         kinds.contains("comment"),
         "a comment entry landed: {kinds:?}"
     );
     assert!(kinds.contains("task"), "a task entry landed: {kinds:?}");
+    assert!(
+        mine.iter().all(|e| e["recipient"] == OWNER),
+        "the owner's list carries only their own entries: {mine:?}"
+    );
+    assert!(
+        theirs.iter().all(|e| e["recipient"] == FIXTURE_AGENT),
+        "the agent's list carries only its own entries: {theirs:?}"
+    );
+    assert_eq!(
+        theirs.iter().filter(|e| e["kind"] == "comment").count(),
+        1,
+        "the owner's comment is routed to the assigned agent: {theirs:?}"
+    );
 
     // Every fresh entry is unread (no read_at key on the wire).
     assert!(
-        entries.iter().all(|e| e.get("read_at").is_none()),
-        "fresh entries carry no read_at: {entries:?}"
+        all.iter().all(|e| e.get("read_at").is_none()),
+        "fresh entries carry no read_at: {all:?}"
     );
 }
 
@@ -309,38 +357,52 @@ async fn mark_read_clears_unread_count() {
     let mut c = Client::connect(&socket_path).await;
     c.auth_from_file(dir.path()).await;
 
-    // Before: two unread.
-    let (_, unread_before) = c.inbox_list(WS_SLUG).await;
-    assert_eq!(unread_before, 2, "two unread before the sweep");
+    // Before: the owner has the issue entry unread (their comment went to the
+    // issue's other participant, the assigned agent).
+    let (_, unread_before) = c.inbox_list(WS_SLUG, OWNER).await;
+    assert_eq!(unread_before, 1, "the owner's own entry is unread");
+    let (_, agent_before) = c.inbox_list(WS_SLUG, FIXTURE_AGENT).await;
+    assert_eq!(agent_before, 1, "the agent's entry is unread");
 
     // Mark read: the response reports both flipped and zero unread after.
     let resp = c
         .call(
             methods::HANGAR_INBOX_MARK_READ,
-            serde_json::json!({ "workspace_id": WS_SLUG }),
+            serde_json::json!({ "workspace_id": WS_SLUG, "recipient": OWNER }),
         )
         .await;
     assert!(resp["error"].is_null(), "mark_read must ack: {resp}");
-    assert_eq!(resp["result"]["marked"], 2, "both entries flipped: {resp}");
+    assert_eq!(
+        resp["result"]["marked"], 1,
+        "the owner's entry flipped: {resp}"
+    );
     assert_eq!(resp["result"]["unread"], 0, "unread drops to 0: {resp}");
 
     // After: list reports zero unread, and every entry now carries a read_at.
-    let (entries, unread_after) = c.inbox_list(WS_SLUG).await;
+    let (entries, unread_after) = c.inbox_list(WS_SLUG, OWNER).await;
     assert_eq!(unread_after, 0, "unread count is 0 after the sweep");
     assert!(
         entries.iter().all(|e| e["read_at"].is_i64()),
         "every entry has a read_at stamp after mark-read: {entries:?}"
     );
 
-    // The read_at is persisted in the store (not just the wire).
+    // The read_at is persisted in the store (not just the wire) for the swept
+    // recipient, and only for them.
     let null_count: i64 = sqlx::query_scalar(
-        "SELECT COUNT(*) FROM inbox_entry WHERE workspace_id = ? AND read_at IS NULL",
+        "SELECT COUNT(*) FROM inbox_entry \
+         WHERE workspace_id = ? AND recipient_type = 'member' AND recipient_id = 'user-1' \
+         AND read_at IS NULL",
     )
     .bind(WS_ID)
     .fetch_one(store.pool())
     .await
     .unwrap();
-    assert_eq!(null_count, 0, "no unread rows remain in the store");
+    assert_eq!(null_count, 0, "no unread rows remain for the swept actor");
+    let (_, agent_after) = c.inbox_list(WS_SLUG, FIXTURE_AGENT).await;
+    assert_eq!(
+        agent_after, 1,
+        "the agent's unread survives another actor's sweep"
+    );
 }
 
 /// `hangar/inbox_mark_read` rejects an unknown workspace (never a silent no-op).
@@ -362,4 +424,163 @@ async fn mark_read_rejects_unknown_workspace() {
         !resp["error"].is_null(),
         "an unknown workspace must be rejected, not a silent no-op: {resp}"
     );
+}
+
+/// Seed an issue created by the LOCAL HUMAN and assigned to `agent:a1`, so a
+/// comment on it has two distinct participants to route between.
+///
+/// Written with raw SQL rather than the repo so the fixture states exactly the
+/// `(creator, assignee)` pair the routing depends on. The recipient columns are
+/// FK-less by design, so no `agent` row is required.
+async fn seed_two_party_issue(store: &Store) {
+    sqlx::query(
+        "INSERT INTO issue (id, workspace_id, title, state, creator_type, creator_id, \
+         assignee_type, assignee_id, created_at) \
+         VALUES ('i1', ?, 'Two-party issue', 'open', 'member', 'me', 'agent', 'a1', 1000)",
+    )
+    .bind(WS_ID)
+    .execute(store.pool())
+    .await
+    .expect("seed two-party issue");
+}
+
+fn comment_on_i1(id: &str, author: &str) -> HangarEvent {
+    HangarEvent::CommentAdded(CommentRow {
+        id: CommentId::from_str(id).unwrap(),
+        issue_id: IssueId::from_str("i1").unwrap(),
+        author: author.into(),
+        body: "over to you".into(),
+        created_at: 2_000,
+    })
+}
+
+/// THE ACCEPTANCE PROOF (multica parity #1): an inbox entry targets a specific
+/// actor and only that actor sees it — over the real socket, through the real
+/// aggregator.
+///
+/// MUTATION GUARD: dropping the recipient predicate from the store's `list` /
+/// `mark_all_read` makes each actor see BOTH comments and makes the human's
+/// sweep clear the agent's unread, failing steps 4-6.
+#[tokio::test]
+async fn inbox_entries_are_visible_only_to_their_recipient() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store, sink) = start_server_with_aggregator(dir.path()).await;
+    seed_two_party_issue(&store).await;
+
+    // The agent comments (the human hears about it), then the human comments
+    // (the agent hears about it). Neither is notified of their own comment.
+    sink.emit(WS_ID, comment_on_i1("c-agent", "agent:a1"));
+    sink.emit(WS_ID, comment_on_i1("c-human", "member:me"));
+    wait_for_inbox_count(&store, WS_ID, 2).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    // 4. The human sees exactly the AGENT's comment.
+    let (mine, mine_unread) = c.inbox_list(WS_SLUG, LOCAL_HUMAN).await;
+    assert_eq!(mine.len(), 1, "the human sees exactly one entry: {mine:?}");
+    assert_eq!(
+        mine[0]["subject_id"], "c-agent",
+        "the human is notified of the agent's comment, not their own: {mine:?}"
+    );
+    assert_eq!(mine[0]["recipient"], LOCAL_HUMAN, "{mine:?}");
+    assert_eq!(mine_unread, 1);
+
+    // 5. The agent sees exactly the HUMAN's comment.
+    let (theirs, theirs_unread) = c.inbox_list(WS_SLUG, "agent:a1").await;
+    assert_eq!(
+        theirs.len(),
+        1,
+        "the agent sees exactly one entry: {theirs:?}"
+    );
+    assert_eq!(
+        theirs[0]["subject_id"], "c-human",
+        "the agent is notified of the human's comment: {theirs:?}"
+    );
+    assert_eq!(theirs[0]["recipient"], "agent:a1", "{theirs:?}");
+    assert_eq!(theirs_unread, 1);
+
+    // 6. The human's mark-read sweep does not cross actors.
+    let resp = c
+        .call(
+            methods::HANGAR_INBOX_MARK_READ,
+            serde_json::json!({ "workspace_id": WS_SLUG, "recipient": LOCAL_HUMAN }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "mark_read must ack: {resp}");
+    assert_eq!(
+        resp["result"]["marked"], 1,
+        "only the human's row flips: {resp}"
+    );
+    assert_eq!(resp["result"]["unread"], 0, "{resp}");
+
+    let (_, mine_after) = c.inbox_list(WS_SLUG, LOCAL_HUMAN).await;
+    assert_eq!(mine_after, 0, "the human's inbox is clear");
+    let (theirs_after, theirs_unread_after) = c.inbox_list(WS_SLUG, "agent:a1").await;
+    assert_eq!(
+        theirs_unread_after, 1,
+        "the agent's unread survives another actor's sweep"
+    );
+    assert!(
+        theirs_after.iter().all(|e| e.get("read_at").is_none()),
+        "the agent's entry is still unread: {theirs_after:?}"
+    );
+}
+
+/// A malformed `recipient` is `INVALID_PARAMS` — a typo must never silently
+/// fall back to reading someone else's inbox.
+#[tokio::test]
+async fn inbox_list_rejects_a_malformed_recipient() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store, _sink) = start_server_with_aggregator(dir.path()).await;
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    for bad in ["not-an-actor", "frog:a1", "member:"] {
+        let resp = c
+            .call(
+                methods::HANGAR_INBOX_LIST,
+                serde_json::json!({ "workspace_id": WS_SLUG, "recipient": bad }),
+            )
+            .await;
+        assert!(
+            !resp["error"].is_null(),
+            "a malformed recipient {bad:?} must be rejected: {resp}"
+        );
+    }
+}
+
+/// Wire back-compat: a caller that omits `recipient` (a pre-0060 surface) reads
+/// the LOCAL HUMAN's inbox — not the union of every actor's entries.
+#[tokio::test]
+async fn inbox_list_without_recipient_defaults_to_the_local_human() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store, sink) = start_server_with_aggregator(dir.path()).await;
+    seed_two_party_issue(&store).await;
+
+    sink.emit(WS_ID, comment_on_i1("c-agent", "agent:a1"));
+    sink.emit(WS_ID, comment_on_i1("c-human", "member:me"));
+    wait_for_inbox_count(&store, WS_ID, 2).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_INBOX_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    assert!(
+        resp["error"].is_null(),
+        "an omitted recipient must ack: {resp}"
+    );
+    let entries = resp["result"]["entries"].as_array().cloned().unwrap_or_default();
+    assert_eq!(
+        entries.len(),
+        1,
+        "an omitted recipient reads ONE actor's inbox, not everyone's: {entries:?}"
+    );
+    assert_eq!(entries[0]["recipient"], LOCAL_HUMAN, "{entries:?}");
+    assert_eq!(resp["result"]["unread"], 1, "{resp}");
 }

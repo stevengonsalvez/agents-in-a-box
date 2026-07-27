@@ -22,6 +22,7 @@
 //! | `HANGAR_DAEMON_POLL_MS` | claim-poll interval | `1000` |
 //! | `HANGAR_SWEEP_INTERVAL_MS` | sweep-pass interval | `60000` |
 //! | `HANGAR_GC_INTERVAL_MS` | workspace-GC pass interval (on-disk orphan reclaim) | `3600000` |
+//! | `HANGAR_PRESENCE_SWEEP_MS` | runtime-presence pass interval (heartbeat + availability decay) | `30000` |
 //! | `HANGAR_PROVIDER_MAX_RUNTIME_MS` | provider runtime deadline override (tests) | reference running TTL (2.5h) |
 //! | `HANGAR_SPAWN_SETUP_TIMEOUT_MS` | running→spawn setup-phase umbrella override (tests) | `60000` |
 //! | `HANGAR_SWEEP_DISPATCHED_TTL_MS` | dispatch TTL override (tests) | reference default |
@@ -60,8 +61,8 @@ use crate::health_stats::HealthStats;
 use crate::progress_comment;
 use crate::runner::{Backend, Mode, ProviderInvocation, RunOutcome, Runner, RunnerConfig};
 use crate::sweeper::{
-    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_stale_dispatched,
-    sweep_stale_running,
+    SweeperConfig, reclaim_orphaned_on_startup, sweep_expired_queued, sweep_runtime_presence,
+    sweep_stale_dispatched, sweep_stale_running,
 };
 
 /// Default claim-poll interval when `HANGAR_DAEMON_POLL_MS` is unset.
@@ -209,6 +210,12 @@ impl DaemonConfig {
         // tighten it to drive a reclaim within a bounded budget.
         if let Some(ms) = env_u64_opt("HANGAR_GC_INTERVAL_MS") {
             sweeper.gc_interval = Duration::from_millis(ms);
+        }
+        // The runtime-presence cadence is independently tunable so a tripwire can
+        // observe an availability decay inside a bounded budget rather than
+        // waiting out the 30s production tick.
+        if let Some(ms) = env_u64_opt("HANGAR_PRESENCE_SWEEP_MS") {
+            sweeper.presence_interval = Duration::from_millis(ms);
         }
         if let Some(ms) = env_u64_opt("HANGAR_SWEEP_DISPATCHED_TTL_MS") {
             sweeper.dispatched_ttl = Duration::from_millis(ms);
@@ -446,6 +453,18 @@ pub async fn run(
         hangar_home(),
         cfg.sweeper.gc_interval,
         Arc::new(SystemClock),
+    );
+
+    // Runtime presence (multica gap #6): heartbeat our own runtime and decay
+    // every stale one, pushing an `AgentPresence` event per moved agent.
+    // Deliberately spawned BEFORE the `disable_claim` early-return: that mode is
+    // "sweepers only" by its own log line, and presence is a sweeper.
+    let _presence = spawn_runtime_presence(
+        pool.clone(),
+        cfg.runtime_id.clone(),
+        cfg.sweeper.presence_interval,
+        Arc::new(SystemClock),
+        events.clone(),
     );
 
     let Some(runtime_id) = cfg.runtime_id.clone().filter(|_| !cfg.disable_claim) else {
@@ -698,6 +717,88 @@ pub fn spawn_gc_sweeper(
     })
 }
 
+/// Schedule the runtime-presence pass: beat for our own runtime, decay everyone
+/// else's by heartbeat age, and push an `AgentPresence` event per agent whose
+/// availability moved (multica gap #6, the availability half).
+///
+/// This is the WRITER half of the presence derivation. The snapshot read folds
+/// the heartbeat age itself, so the Agents screen is correct without a live
+/// daemon; this loop makes the persisted `agent_runtime.status` truthful for
+/// every other reader and — via the event — makes an attached TUI re-render
+/// without polling (the plugin arms `fetch_snapshots` on any non-`TaskMessage`
+/// event, so it needs no change). The reference publishes
+/// `EventDaemonRegister{stale_sweep}` on its own bus for exactly this reason.
+///
+/// `runtime_id` is this daemon's own runtime, beaten first each pass so the
+/// daemon can never sweep itself; `None` for a daemon that advertises none.
+/// A failed pass is logged and the loop continues — presence is observability,
+/// never a reason to down the daemon. Returns the [`JoinHandle`] so a caller can
+/// stop it; the production daemon drops it and relies on process exit, mirroring
+/// [`spawn_gc_sweeper`].
+///
+/// [`JoinHandle`]: tokio::task::JoinHandle
+#[must_use]
+pub fn spawn_runtime_presence(
+    pool: SqlitePool,
+    runtime_id: Option<String>,
+    interval: Duration,
+    clock: Arc<dyn HangarClock>,
+    events: EventSink,
+) -> tokio::task::JoinHandle<()> {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(interval);
+        loop {
+            tick.tick().await;
+            match sweep_runtime_presence(&pool, clock.as_ref(), runtime_id.as_deref()).await {
+                Ok(sweep) => emit_presence_events(&pool, &events, &sweep).await,
+                Err(e) => tracing::error!(error = %e, kind = "presence", "sweeper pass failed"),
+            }
+        }
+    })
+}
+
+/// Fan an `AgentPresence` event out for every agent backed by a runtime the
+/// presence sweep just moved.
+///
+/// One event per AGENT (not per runtime): the plugin renders agents, and a
+/// runtime typically backs several. A lookup fault is logged and skipped — a
+/// missing notification must never abort the remaining fan-out or the loop.
+async fn emit_presence_events(
+    pool: &SqlitePool,
+    events: &EventSink,
+    sweep: &ainb_hangar_store::repo::agent_runtime::PresenceSweep,
+) {
+    use ainb_hangar_proto::events::{HangarEvent, PresenceState};
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    for (runtimes, state) in [
+        (&sweep.to_unstable, PresenceState::Unstable),
+        (&sweep.to_offline, PresenceState::Offline),
+    ] {
+        for rt in runtimes {
+            match AgentRepo::list_ids_by_runtime(pool, &rt.id).await {
+                Ok(agent_ids) => {
+                    for agent_id in agent_ids {
+                        // A stored PK is non-empty by construction; a malformed
+                        // row is skipped rather than panicking the loop.
+                        let Ok(agent_id) = ainb_hangar_core::ids::AgentId::from_str(agent_id)
+                        else {
+                            continue;
+                        };
+                        events.emit(
+                            &rt.workspace_id,
+                            HangarEvent::AgentPresence { agent_id, state },
+                        );
+                    }
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, runtime_id = %rt.id, "presence fan-out failed");
+                }
+            }
+        }
+    }
+}
+
 /// Resolve the claude credential env for `backend`, bounded and off the async
 /// worker.
 ///
@@ -801,6 +902,24 @@ async fn prepare_spawn_inputs(
         ainb_fleet_core::session_registry::PARENT_ENV.to_string(),
         HANGAR_PARENT_SESSION.to_string(),
     );
+
+    // 0056 / multica parity #21: hand the child its ORIGIN PROVENANCE, the seam
+    // that lets a mention-spawned (or autopilot-fired) run stamp the issues it
+    // creates — multica does the same by injecting the quick-create task id into
+    // the agent's environment (`internal/daemon/daemon.go:1742`). The runner
+    // allowlists both keys; set AFTER `build_task_env` so the daemon's value
+    // always beats an ambient one. A provenance-less task sets NEITHER key, so
+    // an agent's create falls back to `manual` rather than inheriting a stale
+    // pair from the operator's shell.
+    if let Some(origin) = task.origin.as_ref() {
+        task_env.insert(
+            crate::runner::ORIGIN_TYPE_ENV.to_string(),
+            origin.kind_db_str().to_string(),
+        );
+        if let Some(id) = origin.id() {
+            task_env.insert(crate::runner::ORIGIN_ID_ENV.to_string(), id.to_string());
+        }
+    }
 
     // P6.4: materialise the agent's attached skills into the provider's layout,
     // forwarding the `*_HOME` pointer via `task_env`. Non-fatal — a task must
@@ -1193,7 +1312,8 @@ async fn execute_claimed(
                     .run_codex_in(
                         &env,
                         task_env,
-                        dispatch.agent_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
                         &dispatch.invocation,
                         &location,
                     )
@@ -1203,7 +1323,8 @@ async fn execute_claimed(
                     .run_copilot_in(
                         &env,
                         task_env,
-                        dispatch.agent_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
                         &dispatch.invocation,
                         &location,
                     )
@@ -1345,7 +1466,8 @@ async fn run_interactive(
     // agent's `agent_env`; the claude path layers nothing (parity with
     // `execute_claimed`).
     let extra_env = match dispatch.backend {
-        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone(),
+        // The ONE permitted plaintext escape: the child env.
+        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone().expose_for_child_env(),
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
@@ -1549,6 +1671,9 @@ async fn finalize_success(
     // card does not slide to `done` while its leader / other members still run.
     // Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative,
+    // attributed to the agent that ran it. Best-effort.
+    crate::board::record_task_outcome(pool, task, true).await;
     // Twin the durable-card move on the issue's own `state` (the default board
     // buckets by it): an aggregate-`done` set promotes the issue to `done`;
     // failed/cancelled sets leave it untouched. Advance-only + best-effort.
@@ -1748,6 +1873,8 @@ async fn finalize_failure(
     // and one failed sibling lands the whole card in the `failed` column (aggregate
     // precedence). Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative.
+    crate::board::record_task_outcome(pool, task, false).await;
     // Twin on `issue.state`: the aggregate is `failed`/`cancelled` here (this
     // task's own failure is in the set), so this no-ops — but it keeps the
     // lifecycle seam symmetric with the board seam. Advance-only + best-effort.
@@ -1872,6 +1999,8 @@ async fn finalize_setup_failure(
         clock,
     );
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative.
+    crate::board::record_task_outcome(pool, task, false).await;
     // Twin on `issue.state`; no-ops on the failed aggregate, kept for symmetry
     // with the board seam. Advance-only + best-effort.
     crate::board::advance_and_cascade_child(pool, task, events).await;
@@ -2162,7 +2291,12 @@ struct ResolvedDispatch {
     invocation: ProviderInvocation,
     /// The agent's per-agent env (`agent_env`), layered onto the child env
     /// after the deny-by-default ambient allowlist.
-    agent_env: Vec<(String, String)>,
+    ///
+    /// Typed [`AgentEnv`](ainb_hangar_core::agent_env::AgentEnv), so this
+    /// struct's derived `Debug` (a `tracing::debug!(?dispatch)`, an `anyhow`
+    /// context, a panic message) masks the VALUES (parity #30). The plaintext
+    /// is reached only at the compose seam, via `expose_for_child_env`.
+    agent_env: ainb_hangar_core::agent_env::AgentEnv,
 }
 
 /// The `tasks.mode` column value that asks for an attachable session (ccc / D6,
@@ -2209,7 +2343,7 @@ impl ResolvedDispatch {
                 model: None,
                 cli_args: Vec::new(),
             },
-            agent_env: Vec::new(),
+            agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         }
     }
 }
@@ -3265,14 +3399,44 @@ mod tests {
         )
         .await
         .unwrap();
-        SquadRepo::add_member(
+        SquadRepo::add_member_with_role(
             pool,
             &ws_id,
             "squad-alpha",
             &ActorRef::new(ActorKind::Agent, scout.id.clone()).unwrap(),
+            "owns the migrations",
         )
         .await
         .unwrap();
+        let instructions =
+            "Route schema work to the DB owner.\nEscalate to the reporter on a red CI.";
+        SquadRepo::set_instructions(pool, &ws_id, "squad-alpha", instructions)
+            .await
+            .unwrap();
+        // scout's skills, exercising BOTH suppression levers through the real
+        // claim seam: `alpha` + `gamma` materialise, `beta` is link-disabled and
+        // `delta` is suppressed by name on the agent row — neither may be
+        // advertised on the roster the leader actually receives.
+        {
+            use ainb_hangar_core::ids::AgentId;
+            use ainb_hangar_store::repo::agent::AgentRepo;
+            use ainb_hangar_store::repo::skill::SkillRepo;
+
+            let scout_id = AgentId::from_str(scout.id.clone()).unwrap();
+            let mut skill_ids = Vec::new();
+            for name in ["alpha", "beta", "gamma", "delta"] {
+                let id = SkillRepo::create(pool, &ws_id, name, None, Some("# body"), vec![])
+                    .await
+                    .unwrap();
+                SkillRepo::attach_to_agent(pool, &ws_id, &scout_id, &id).await.unwrap();
+                skill_ids.push((name, id));
+            }
+            let beta = &skill_ids.iter().find(|(n, _)| *n == "beta").unwrap().1;
+            SkillRepo::set_enabled(pool, &ws_id, &scout_id, beta, false).await.unwrap();
+            AgentRepo::set_disabled_runtime_skills(pool, &scout.id, &["delta".to_string()])
+                .await
+                .unwrap();
+        }
 
         let task_id =
             ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
@@ -3417,12 +3581,47 @@ mod tests {
             leader_prompt.contains("scout"),
             "leader briefing missing the member name in the roster:\n{leader_prompt}"
         );
+        // Parity #25 + `7-rest` acceptance, through the REAL claim → materialise
+        // seam: the member's WHOLE row, carrying role AND the skills it will
+        // actually have on disk. A whole-line assertion, never a bare substring —
+        // a half-rendered row must not pass.
+        assert!(
+            leader_prompt.contains(&format!(
+                "- scout — agent — {} — role: owns the migrations — skills: alpha, gamma\n",
+                scout.id
+            )),
+            "the materialised roster row must carry the role and the live skills:\n{leader_prompt}"
+        );
+        assert!(
+            !leader_prompt.contains("beta"),
+            "a link-disabled skill must never reach the leader's prompt:\n{leader_prompt}"
+        );
+        assert!(
+            !leader_prompt.contains("delta"),
+            "a disabled_runtime_skills name must never reach the leader's prompt:\n\
+             {leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains("## Squad Instructions"),
+            "the materialised briefing must carry the instructions section:\n{leader_prompt}"
+        );
+        assert!(
+            leader_prompt.contains(instructions),
+            "the instructions must be materialised VERBATIM (embedded newline \
+             preserved):\n{leader_prompt}"
+        );
 
-        // The MEMBER task gets no roster (no file at all, since no workspace ctx).
+        // The MEMBER task gets no roster and no instructions (no file at all,
+        // since no workspace ctx).
         assert!(
             !member_md.exists()
                 || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Roster"),
             "a member task must NOT receive the leader briefing"
+        );
+        assert!(
+            !member_md.exists()
+                || !std::fs::read_to_string(&member_md).unwrap().contains("## Squad Instructions"),
+            "a member task must NOT receive the squad instructions"
         );
 
         let events: Vec<Ev> = log.lock().expect("event log").clone();
@@ -3849,7 +4048,7 @@ mod tests {
             backend,
             mode: dispatch_mode("interactive"),
             invocation: inv.clone(),
-            agent_env: Vec::new(),
+            agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         };
 
         // The argv an INTERACTIVE task row actually gets, through the same
@@ -3933,7 +4132,7 @@ mod tests {
                 backend: Backend::Codex,
                 mode: dispatch_mode("interactive"),
                 invocation: inv.clone(),
-                agent_env: Vec::new(),
+                agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
             },
         );
         assert!(
@@ -4042,14 +4241,7 @@ mod tests {
             visibility: "workspace".into(),
             permission_mode: "private".into(),
             owner_id: owner,
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         };
         AgentRepo::insert(pool, &bare).await.unwrap();
         let disp = resolve_dispatch(pool, "bare-agent", None, Mode::Headless).await.unwrap();
@@ -4058,5 +4250,134 @@ mod tests {
             Backend::Claude,
             "no per-agent override falls back to the runtime's advertised provider"
         );
+    }
+
+    // ---- ORIGIN PROVENANCE env seam (0056, multica parity #21) -------------
+
+    /// A secret backend that holds nothing — the preamble's credential read is
+    /// irrelevant to the env-key assertions below.
+    struct NoSecretsBackend;
+    impl ainb_hangar_secrets::SecretBackend for NoSecretsBackend {
+        fn get(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<Option<ainb_hangar_secrets::SecretBytes>> {
+            Ok(None)
+        }
+        fn put(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+            _: &[u8],
+        ) -> ainb_hangar_secrets::Result<()> {
+            Ok(())
+        }
+        fn delete(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Build a real queued task, optionally stamped with `origin`, and run the
+    /// dispatch preamble over it. Returns the child `task_env`.
+    async fn task_env_for_origin(
+        origin: Option<&ainb_hangar_core::origin::IssueOrigin>,
+    ) -> std::collections::HashMap<String, String> {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: bootstrap::default_runtime_id(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        if let Some(origin) = origin {
+            TaskRepo::set_origin(pool, &task_id, origin).await.unwrap();
+        }
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+        // Codex backend + a zero cred timeout: the claude-only credential read is
+        // skipped, so the preamble is just the env build we are asserting on.
+        let (task_env, _cred) = prepare_spawn_inputs(
+            pool,
+            &task,
+            &env,
+            Backend::Codex,
+            Arc::new(NoSecretsBackend),
+            Duration::from_millis(1),
+        )
+        .await;
+        task_env
+    }
+
+    /// A mention-spawned task hands its child BOTH provenance keys — the seam
+    /// that lets the agent's `ainb hangar issue create` stamp the issue it
+    /// creates with the comment that asked for it.
+    #[tokio::test]
+    async fn a_mention_task_carries_its_origin_into_the_child_env() {
+        let origin = ainb_hangar_core::origin::IssueOrigin::comment_mention("c-77").unwrap();
+        let env = task_env_for_origin(Some(&origin)).await;
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_TYPE_ENV).map(String::as_str),
+            Some("comment_mention")
+        );
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_ID_ENV).map(String::as_str),
+            Some("c-77")
+        );
+    }
+
+    /// A provenance-less task sets NEITHER key, so the agent's create falls back
+    /// to `manual` instead of inheriting a stale pair.
+    #[tokio::test]
+    async fn a_task_without_origin_sets_neither_env_key() {
+        let env = task_env_for_origin(None).await;
+        assert!(!env.contains_key(crate::runner::ORIGIN_TYPE_ENV));
+        assert!(!env.contains_key(crate::runner::ORIGIN_ID_ENV));
+    }
+
+    /// `manual` carries no id: the kind key is set, the id key is not.
+    #[tokio::test]
+    async fn a_manual_origin_sets_the_kind_key_only() {
+        let origin = ainb_hangar_core::origin::IssueOrigin::manual();
+        let env = task_env_for_origin(Some(&origin)).await;
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_TYPE_ENV).map(String::as_str),
+            Some("manual")
+        );
+        assert!(!env.contains_key(crate::runner::ORIGIN_ID_ENV));
     }
 }

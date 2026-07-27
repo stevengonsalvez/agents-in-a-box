@@ -239,6 +239,62 @@ async fn migration_0002_creates_skill_tables_with_composite_keys() {
         agent_skill.contains("PRIMARY KEY (agent_id, skill_id)"),
         "agent_skill composite PK: {agent_skill}"
     );
+    // Migration 0051 (parity #24): per-agent enable/disable toggle. `ALTER TABLE
+    // ... ADD COLUMN` rewrites `sqlite_master.sql`, so the added column is
+    // visible in the stored DDL text.
+    assert!(
+        agent_skill.contains("enabled INTEGER NOT NULL DEFAULT 1"),
+        "agent_skill.enabled default-true (0051): {agent_skill}"
+    );
+
+    // Migration 0051 (parity #24, multica 206): per-agent runtime-level skill
+    // suppression list, JSON array text defaulting to the empty array.
+    let agent = table_sql(&pool, "agent").await;
+    assert!(
+        agent.contains("disabled_runtime_skills TEXT NOT NULL DEFAULT '[]'"),
+        "agent.disabled_runtime_skills (0051): {agent}"
+    );
+
+    // Migration 0052 (parity #26, multica 031/085): the archive AUDIT sidecar.
+    // Both columns are NULLABLE with no default — a pre-0052 archived row keeps
+    // NULL (an honest unknown), and there is deliberately no CHECK tying
+    // `archived = 1` to a non-null stamp.
+    assert!(
+        agent.contains("archived_at INTEGER"),
+        "agent.archived_at (0052): {agent}"
+    );
+    assert!(
+        agent.contains("archived_by TEXT"),
+        "agent.archived_by (0052): {agent}"
+    );
+
+    let squad = table_sql(&pool, "squad").await;
+    assert!(
+        squad.contains("archived INTEGER NOT NULL DEFAULT 0"),
+        "squad.archived default-false (0052): {squad}"
+    );
+    assert!(
+        squad.contains("archived_at INTEGER"),
+        "squad.archived_at (0052): {squad}"
+    );
+    assert!(
+        squad.contains("archived_by TEXT"),
+        "squad.archived_by (0052): {squad}"
+    );
+
+    // Migration 0053 (parity #25, multica 084/088): per-member ROLE + per-squad
+    // INSTRUCTIONS. Both are NOT NULL DEFAULT '' — "unset" is the empty string,
+    // which is also the "omit this fragment" sentinel the leader briefing
+    // renders against. Free text, no CHECK (role is a label, not a vocabulary).
+    assert!(
+        squad.contains("instructions TEXT NOT NULL DEFAULT ''"),
+        "squad.instructions (0053): {squad}"
+    );
+    let squad_member = table_sql(&pool, "squad_member").await;
+    assert!(
+        squad_member.contains("role TEXT NOT NULL DEFAULT ''"),
+        "squad_member.role (0053): {squad_member}"
+    );
 
     pool.close().await;
 }
@@ -599,13 +655,21 @@ async fn migration_0009_creates_autopilot_tables_with_scoping_indexes() {
         run.contains("completed_at INTEGER"),
         "autopilot_run.completed_at nullable: {run}"
     );
+    // Per-token membership rather than a frozen whole-CHECK literal: 0057
+    // WIDENS this constraint (adding `skipped`) and later migrations may widen
+    // it again, but every token below must survive and the default must stay
+    // `running`.
     assert!(
-        run.contains(
-            "status TEXT NOT NULL DEFAULT 'running' CHECK (status IN \
-             ('running', 'completed', 'failed', 'cancelled'))"
-        ),
-        "autopilot_run.status default + CHECK: {run}"
+        run.contains("status TEXT NOT NULL DEFAULT 'running'"),
+        "autopilot_run.status default: {run}"
     );
+    let status_check = &run[run.find("CHECK (status IN").expect("status CHECK present")..];
+    for token in ["'running'", "'completed'", "'failed'", "'cancelled'"] {
+        assert!(
+            status_check.contains(token),
+            "autopilot_run.status CHECK must still admit {token}: {run}"
+        );
+    }
 
     pool.close().await;
 }
@@ -1303,6 +1367,93 @@ async fn migration_0047_adds_permission_mode_and_invocation_target() {
         !target.contains("REFERENCES"),
         "agent_invocation_target is FK-less by design: {target}"
     );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0055_types_card_dependency_links() {
+    // multica parity #20: `issue_dependency.type IN ('blocks','blocked_by','related')`.
+    // hangar's row IS the blocked_by relation, so 0055 adds the KIND column with a
+    // constant DEFAULT 'blocked_by' — every pre-0055 row backfills to today's
+    // semantics with no table rewrite — plus the (workspace_id, link_type) index the
+    // typed graph read uses. 0036 is UNTOUCHED (an applied migration is immutable).
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    let cols = sqlx::query("PRAGMA table_info(card_dependency)")
+        .fetch_all(&pool)
+        .await
+        .expect("table_info");
+    let link_type = cols
+        .iter()
+        .find(|r| {
+            let name: String = r.get("name");
+            name == "link_type"
+        })
+        .expect("card_dependency.link_type exists");
+    let notnull: i64 = link_type.get("notnull");
+    let dflt: Option<String> = link_type.get("dflt_value");
+    assert_eq!(notnull, 1, "link_type is NOT NULL");
+    assert_eq!(
+        dflt.as_deref().map(|d| d.trim_matches('\'')),
+        Some("blocked_by"),
+        "the constant default backfills every pre-0055 row as a gating edge"
+    );
+
+    let idx = index_sql(&pool, "idx_card_dependency_ws_type").await;
+    assert!(
+        idx.contains("card_dependency") && idx.contains("link_type"),
+        "idx_card_dependency_ws_type serves the typed graph read: {idx}"
+    );
+
+    pool.close().await;
+}
+
+#[tokio::test]
+async fn migration_0056_adds_issue_and_task_origin_provenance() {
+    // multica parity #21: the (origin_type, origin_id) pair on the issue
+    // (`042_autopilot.up.sql:74-77`, widened by `060_issue_origin_quick_create`),
+    // mirrored onto the task so the daemon can hand a dispatched child its
+    // provenance. NULLABLE and NOT backfilled: a pre-0056 row reads NULL, which
+    // means "provenance unknown" — deliberately distinct from the explicit
+    // 'manual' a human create stamps from now on. NO CHECK constraint (SQLite
+    // cannot add one via ALTER); `OriginKind::parse` is the write-side gate.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = fresh_pool(dir.path()).await;
+
+    for (table, index) in [
+        ("issue", "idx_issue_origin"),
+        ("agent_task_queue", "idx_task_origin"),
+    ] {
+        let cols = sqlx::query(&format!("PRAGMA table_info({table})"))
+            .fetch_all(&pool)
+            .await
+            .expect("table_info");
+        for col in ["origin_type", "origin_id"] {
+            let found = cols
+                .iter()
+                .find(|r| {
+                    let name: String = r.get("name");
+                    name == col
+                })
+                .unwrap_or_else(|| panic!("{table}.{col} exists"));
+            let notnull: i64 = found.get("notnull");
+            let dflt: Option<String> = found.get("dflt_value");
+            assert_eq!(notnull, 0, "{table}.{col} is NULLABLE (no backfill)");
+            assert_eq!(dflt, None, "{table}.{col} has no default");
+        }
+
+        let idx = index_sql(&pool, index).await;
+        assert!(
+            idx.contains(table) && idx.contains("origin_type") && idx.contains("origin_id"),
+            "{index} serves the by-origin lookup: {idx}"
+        );
+        assert!(
+            idx.contains("WHERE origin_type IS NOT NULL"),
+            "{index} is PARTIAL so provenance-less rows stay out of it: {idx}"
+        );
+    }
 
     pool.close().await;
 }

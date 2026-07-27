@@ -832,6 +832,20 @@ pub struct WorkspaceListParams {}
 pub struct WorkspaceListResult {
     /// The workspace rows, in the host's list order.
     pub workspaces: Vec<WorkspaceEntry>,
+    /// Whether this instance refuses new workspaces (multica's
+    /// `workspace_creation_disabled` on `/api/config`).
+    ///
+    /// **Advisory only** — a surface uses it to hide its "new workspace"
+    /// affordance; the store-side gate is the authoritative refusal, and
+    /// `host/workspace_create` still answers
+    /// [`WORKSPACE_CREATION_DISABLED`](crate::errors::WORKSPACE_CREATION_DISABLED)
+    /// for a caller that ignores the hint.
+    ///
+    /// Append-only: `serde(default)` so an older host's reply still deserialises,
+    /// and `skip_serializing_if` keeps the wire bytes byte-identical while the
+    /// flag is off (the common case).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub creation_disabled: bool,
 }
 
 // =====================================================================
@@ -1215,6 +1229,13 @@ mod tests {
                     default: false,
                 },
             ],
+            creation_disabled: false,
+        });
+        // The lockdown flag round-trips in its ON shape too — the OFF shape above
+        // is the one that must stay off the wire (see `..._omits_creation_disabled`).
+        rt(&WorkspaceListResult {
+            workspaces: Vec::new(),
+            creation_disabled: true,
         });
         rt(&WorkspaceGetActiveParams::default());
         rt(&WorkspaceGetActiveResult {
@@ -1560,5 +1581,31 @@ mod tests {
             let back: HandleKeyParams = serde_json::from_str(&j).unwrap();
             assert_eq!(params, back, "round-trip failed for {code:?}");
         }
+    }
+
+    /// The new `creation_disabled` field must be invisible on the wire while it
+    /// is OFF — otherwise every existing `workspace_list` golden/CTS comparison
+    /// drifts — and an older host's reply (no key at all) must still decode.
+    #[test]
+    fn workspace_list_result_omits_creation_disabled_when_off() {
+        let off = WorkspaceListResult {
+            workspaces: Vec::new(),
+            creation_disabled: false,
+        };
+        let j = serde_json::to_string(&off).unwrap();
+        assert!(
+            !j.contains("creation_disabled"),
+            "the OFF flag must not appear on the wire, got {j}"
+        );
+
+        let on = WorkspaceListResult {
+            workspaces: Vec::new(),
+            creation_disabled: true,
+        };
+        assert!(serde_json::to_string(&on).unwrap().contains("\"creation_disabled\":true"));
+
+        // An older host omits the key entirely: serde(default) must decode it.
+        let legacy: WorkspaceListResult = serde_json::from_str(r#"{"workspaces":[]}"#).unwrap();
+        assert!(!legacy.creation_disabled);
     }
 }

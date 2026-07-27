@@ -109,10 +109,19 @@ impl AutopilotsState {
             .map(|ap| {
                 let last = ap.last_run_status.clone().unwrap_or_else(|| "never".into());
                 let state = if ap.enabled { "enabled" } else { "disabled" };
+                // An armed `api` trigger (migration 0057) is a second way this
+                // autopilot can fire, so it belongs on the card next to the
+                // schedule state.
+                let api = if ap.api_trigger_enabled {
+                    " · api"
+                } else {
+                    ""
+                };
                 BoardCard {
+                    not_dispatched: false,
                     issue_id: ap.id.clone(),
                     display_id: ap.name.clone(),
-                    title: format!("{} · {state} · last {last}", ap.cron_expr),
+                    title: format!("{} · {state}{api} · last {last}", ap.cron_expr),
                     priority: PriorityChip::from_priority(0),
                     assignee_initial: ap.name.chars().next(),
                     linked: false,
@@ -448,7 +457,16 @@ fn render_run(buf: &mut WireBuffer, row: u16, area_w: u16, run: &AutopilotRunRow
         "completed" => SELECTION_GREEN,
         _ => SOFT_WHITE,
     };
-    let line = format!("{}  {}", run.started_at, run.status);
+    // `·source` names WHICH trigger fired the run, and a declined (`skipped`)
+    // dispatch appends its admission reason — both migration 0057. The reason is
+    // clipped by `put_str` at the pane width.
+    let mut line = format!("{}  {}", run.started_at, run.status);
+    if !run.source.is_empty() {
+        line.push_str(&format!("  ·{}", run.source));
+    }
+    if let Some(reason) = run.failure_reason.as_deref().filter(|r| !r.is_empty()) {
+        line.push_str(&format!(" — {reason}"));
+    }
     put_str(buf, 0, row, &line, color, area_w);
 }
 
@@ -483,6 +501,7 @@ mod tests {
             enabled,
             last_run_status: Some("completed".into()),
             last_run_at: Some(1),
+            api_trigger_enabled: false,
         }
     }
 

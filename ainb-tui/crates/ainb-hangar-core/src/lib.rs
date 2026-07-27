@@ -8,8 +8,21 @@
 //! ([`ainb_hangar_store`](../ainb_hangar_store/index.html)) and the daemon both
 //! depend on it, never the other way around.
 
+/// Structured acceptance criteria: per-criterion stable id + checked state
+/// (multica parity #11-rest), plus the tolerant legacy/structured JSON codec
+/// shared by the store column and the wire.
+pub mod acceptance;
+/// Per-issue ACTIVITY vocabulary (multica parity #13): the stable
+/// `created | status_changed | assignee_changed | …` action tokens plus the
+/// activity-only `system` actor kind, shared by the diff service that decides a
+/// change happened and the repo/wire that serialize it.
+pub mod activity;
 /// Polymorphic actor references (`member:<id>` / `agent:<id>`).
 pub mod actor;
+/// Per-agent environment variables with a redact-by-construction contract
+/// (multica parity #30): plaintext inside, masked on every egress except the
+/// single named exec seam ([`agent_env::AgentEnv::expose_for_child_env`]).
+pub mod agent_env;
 /// The card provider-agent kind (`claude`/`codex`/`copilot`) + the task-create
 /// default cascade (spec F4).
 pub mod agent_kind;
@@ -26,6 +39,12 @@ pub mod clock;
 /// typed descriptor registry both the TUI Settings pane and the
 /// `ainb hangar daemon config` CLI iterate (keys, kinds, defaults, validation).
 pub mod daemon_config;
+/// ADMISSION-TIME dispatch reason codes (multica parity #12): the stable
+/// `queued | deferred | already_active | target_unavailable | …` vocabulary
+/// shared by the service layer that decides and the handler layer that
+/// serializes it, so the two cannot drift. Distinct from the post-hoc run
+/// `FailureReason` by design.
+pub mod dispatch_reason;
 /// Environment allowlist policy (P5.3): allowlist passthrough with a hardcoded
 /// deny family that always overrides. Pure + IO-free; the TOML loader and
 /// daemon wiring live in `ainb-hangar-daemon`.
@@ -37,6 +56,10 @@ pub mod ids;
 /// Structured-log line model + `daemon.<date>` reader shared by the
 /// `ainb hangar logs tail` CLI verb and the TUI `LogsScreen` (P8.6).
 pub mod logs;
+/// Issue / task ORIGIN PROVENANCE: the validated `(origin_type, origin_id)`
+/// pair over the closed `{autopilot, comment_mention, manual}` allow-list
+/// (multica parity #21, migration 0056).
+pub mod origin;
 /// The single source of truth for the Hangar home directory
 /// ([`paths::hangar_home`], re-exported at the crate root). Every Hangar
 /// resolver delegates here so the `$AINB_HANGAR_HOME`-else-`~/.agents-in-a-box`

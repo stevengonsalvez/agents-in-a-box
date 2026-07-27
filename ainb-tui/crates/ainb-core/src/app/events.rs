@@ -403,7 +403,7 @@ pub enum AppEvent {
     FleetPanelBroadcast, // Fleet panel: broadcast a ping to the selected session (B)
     FleetPanelApprove, // Fleet panel: approve the selected APPROVE permission request (y)
     FleetPanelDeny,   // Fleet panel: deny the selected APPROVE permission request (n)
-    FleetPanelRefresh, // Fleet panel: force-refresh from current_state (r)
+    FleetPanelRefresh, // Fleet panel: force-refresh request
     /// Route one canonical reducer key through main ainb Fleet panel.
     FleetPanelCanonicalKey(FleetKey),
     /// Apply canonical Fleet roster filter.
@@ -2939,9 +2939,10 @@ impl EventHandler {
     ///
     ///   - ↑/↓ · k/j        move the row selection
     ///   - Tab / BackTab    move the ASK option cursor (when the row is an ASK)
-    ///   - Enter / a        answer the selected ASK with the highlighted option
-    ///   - B                broadcast a ping prompt to the selected session
-    ///   - r                force-refresh from current_state
+    ///   - Enter            answer the selected structured question
+    ///   - B                open broadcast composer for the current lens
+    ///   - 1 / 2 / 3 / 4 / 5 switch Needs input / Idle / Completed / Running / All
+    ///   - r                restart the selected session after confirmation
     ///   - q / Esc          back to the screen it was opened from (PanelBack)
     ///
     /// Routed through `PanelBack` so it pops the `previous_screen` that
@@ -2964,8 +2965,10 @@ impl EventHandler {
                 KeyCode::Esc => FleetKey::Esc,
                 KeyCode::Enter => FleetKey::Enter,
                 KeyCode::Backspace => FleetKey::Backspace,
-                KeyCode::Up | KeyCode::BackTab => FleetKey::Up,
-                KeyCode::Down | KeyCode::Tab => FleetKey::Down,
+                KeyCode::Up => FleetKey::Up,
+                KeyCode::Down => FleetKey::Down,
+                KeyCode::Tab => FleetKey::Tab,
+                KeyCode::BackTab => FleetKey::BackTab,
                 KeyCode::Left => FleetKey::Left,
                 KeyCode::Right => FleetKey::Right,
                 KeyCode::Char(' ') => FleetKey::Space,
@@ -2980,7 +2983,7 @@ impl EventHandler {
             KeyCode::Down | KeyCode::Char('j') => Some(AppEvent::FleetPanelMoveDown),
             KeyCode::Tab => Some(AppEvent::FleetPanelOptionNext),
             KeyCode::BackTab => Some(AppEvent::FleetPanelOptionPrev),
-            KeyCode::Enter | KeyCode::Char('a') => Some(AppEvent::FleetPanelAnswer),
+            KeyCode::Enter => Some(AppEvent::FleetPanelAnswer),
             KeyCode::Char('B') => Some(AppEvent::FleetPanelBroadcast),
             KeyCode::Char('y') => Some(AppEvent::FleetPanelApprove),
             // `n` is claimed twice: deny (the y/n pair the APPROVE detail pane
@@ -3000,29 +3003,32 @@ impl EventHandler {
                     Some(AppEvent::FleetPanelNewAtcOpen)
                 }
             }
-            KeyCode::Char('r') => Some(AppEvent::FleetPanelRefresh),
-            KeyCode::Char('R') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart)),
+            KeyCode::Char('r' | 'R') => {
+                Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
+            }
             KeyCode::Char('s') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Stop)),
             KeyCode::Char('i') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Interrupt)),
             KeyCode::Char('c') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Continue)),
             KeyCode::Char('e') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Retry)),
             KeyCode::Char('!') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Kill)),
             KeyCode::Char('#') => Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Archive)),
-            KeyCode::Char('t' | 'p') | KeyCode::Right | KeyCode::Char('A') => {
+            KeyCode::Char('t' | 'p' | 'a') | KeyCode::Right | KeyCode::Char('A') => {
                 let key = match key_event.code {
                     KeyCode::Right => FleetKey::Right,
+                    // The pane reducer binds takeover-attach to lowercase `a`
+                    // (uppercase `A` is a reserved hangar router key, #450); the
+                    // host panel keeps its `A` shortcut and forwards onto it.
+                    KeyCode::Char('A') => FleetKey::Char('a'),
                     KeyCode::Char(character) => FleetKey::Char(character),
                     _ => unreachable!(),
                 };
                 Some(AppEvent::FleetPanelCanonicalKey(key))
             }
-            KeyCode::Char('f') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Focus)),
-            KeyCode::Char('o') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Actionable)),
-            KeyCode::Char('m') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Managed)),
-            KeyCode::Char('d') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Degraded)),
-            KeyCode::Char('l') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Claude)),
-            KeyCode::Char('x') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Codex)),
-            KeyCode::Char('v') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
+            KeyCode::Char('1') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput)),
+            KeyCode::Char('2') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle)),
+            KeyCode::Char('3') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed)),
+            KeyCode::Char('4') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running)),
+            KeyCode::Char('5') => Some(AppEvent::FleetPanelSetFilter(FleetFilter::All)),
             _ => None,
         }
     }
@@ -6182,7 +6188,10 @@ impl EventHandler {
                 Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Enter));
             }
             AppEvent::FleetPanelBroadcast => {
-                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('B')));
+                // The pane reducer binds broadcast to lowercase `b` (uppercase `B`
+                // is a reserved hangar router key, #450); the host panel's `B`
+                // shortcut forwards onto it.
+                Self::reduce_fleet_event(state, FleetEvent::Key(FleetKey::Char('b')));
             }
             AppEvent::FleetPanelApprove => {
                 match selected_approval_action(&state.fleet_panel_state.canonical, true) {
@@ -8767,7 +8776,7 @@ mod panel_back_tests {
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('a')),
-            Some(AppEvent::FleetPanelAnswer)
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('a')))
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('B')),
@@ -8775,7 +8784,7 @@ mod panel_back_tests {
         ));
         assert!(matches!(
             route(&mut state, KeyCode::Char('r')),
-            Some(AppEvent::FleetPanelRefresh)
+            Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
         ));
 
         // Esc/q pop back to the saved origin, not hardcoded home.
@@ -8809,20 +8818,38 @@ mod panel_back_tests {
         EventHandler::process_event(start.unwrap(), &mut state);
         assert!(state.fleet_panel_state.canonical_modal_open());
         assert!(matches!(
-            route(&mut state, KeyCode::Char('/')),
-            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('/')))
+            route(&mut state, KeyCode::Char('1')),
+            Some(AppEvent::FleetPanelCanonicalKey(FleetKey::Char('1')))
         ));
         EventHandler::process_event(AppEvent::FleetPanelCanonicalKey(FleetKey::Esc), &mut state);
         assert!(!state.fleet_panel_state.canonical_modal_open());
 
         assert!(matches!(
-            route(&mut state, KeyCode::Char('f')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Focus))
+            route(&mut state, KeyCode::Char('1')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::NeedsInput))
         ));
         assert!(matches!(
-            route(&mut state, KeyCode::Char('x')),
-            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Codex))
+            route(&mut state, KeyCode::Char('2')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Idle))
         ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('3')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Completed))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('4')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::Running))
+        ));
+        assert!(matches!(
+            route(&mut state, KeyCode::Char('5')),
+            Some(AppEvent::FleetPanelSetFilter(FleetFilter::All))
+        ));
+        for legacy in ['f', 'o', 'm', 'd', 'l', 'x', 'v'] {
+            assert!(
+                route(&mut state, KeyCode::Char(legacy)).is_none(),
+                "legacy Fleet filter key {legacy:?} must be unbound"
+            );
+        }
         assert!(matches!(
             route(&mut state, KeyCode::Char('R')),
             Some(AppEvent::FleetPanelCanonicalAction(FleetAction::Restart))
@@ -9224,6 +9251,12 @@ mod text_input_guard_tests {
         state.start_onboarding(false, None);
         if let Some(o) = state.onboarding_state.as_mut() {
             o.current_step = crate::components::onboarding::OnboardingStep::OtelSetup;
+            // `start_onboarding` re-populates this form from the HOST's saved
+            // Grafana creds (`otel::read_grafana_creds`), so on a machine that
+            // has OTEL configured the field starts non-empty and the paste
+            // appends to it. Blank it so the assertion is about the paste, not
+            // about the developer's config.
+            o.otel_otlp_endpoint.clear();
         }
 
         let consumed = EventHandler::paste_into_text_input(

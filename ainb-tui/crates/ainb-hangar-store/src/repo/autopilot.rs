@@ -154,6 +154,13 @@ pub struct Autopilot {
     pub next_tick_at: Option<i64>,
     /// Whether the scheduler considers this autopilot (the `0/1` column).
     pub enabled: bool,
+    /// Whether the bare programmatic `api` trigger is armed (migration 0057).
+    ///
+    /// The third trigger surface after cron (0009) and webhook (0018): no cron
+    /// expression, no HMAC — a caller with normal API access fires the autopilot
+    /// directly. Defaults to `false`, mirroring `webhook_enabled`: a
+    /// half-configured autopilot is never firable.
+    pub api_trigger_enabled: bool,
     /// Creation time (epoch-ms).
     pub created_at: i64,
 }
@@ -169,8 +176,17 @@ pub struct AutopilotRun {
     pub started_at: i64,
     /// When the run finished (epoch-ms); `None` while in flight.
     pub completed_at: Option<i64>,
-    /// Lifecycle status (`running` / `completed` / `failed` / `cancelled`).
+    /// Lifecycle status (`running` / `completed` / `failed` / `cancelled` /
+    /// `skipped`). `skipped` (migration 0057) is TERMINAL — a dispatch the
+    /// admission gate intentionally declined, kept distinct from `failed` so it
+    /// does not pollute the failure-rate signal.
     pub status: String,
+    /// Which trigger fired this run: `schedule` | `manual` | `webhook` | `api`
+    /// (migration 0057). Pre-0057 rows backfilled to `schedule`.
+    pub source: String,
+    /// Why a `skipped` run was declined (the admission reason); `None` for every
+    /// other status.
+    pub failure_reason: Option<String>,
 }
 
 /// The inputs to [`AutopilotRepo::create`]. `cron_expr` is validated by `create`.
@@ -193,6 +209,9 @@ pub struct NewAutopilot {
     /// What the scheduler does when a tick comes due at the in-flight limit
     /// (migration 0019).
     pub concurrency_policy: ConcurrencyPolicy,
+    /// Whether to arm the bare programmatic `api` trigger at create time
+    /// (migration 0057). `false` is the safe default.
+    pub api_trigger_enabled: bool,
 }
 
 /// Stateless typed wrapper over the autopilot tables.
@@ -227,8 +246,8 @@ impl AutopilotRepo {
             "INSERT INTO autopilot \
              (id, workspace_id, agent_id, name, instructions, cron_expr, \
               max_concurrent_runs, execution_mode, concurrency_policy, \
-              next_tick_at, enabled, created_at) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?)",
+              next_tick_at, enabled, api_trigger_enabled, created_at) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?)",
         )
         .bind(&id)
         .bind(req.workspace_id.as_str())
@@ -240,6 +259,7 @@ impl AutopilotRepo {
         .bind(req.execution_mode.as_str())
         .bind(req.concurrency_policy.as_str())
         .bind(next_tick_at)
+        .bind(i64::from(req.api_trigger_enabled))
         .bind(now_ms)
         .execute(pool)
         .await?;
@@ -261,7 +281,8 @@ impl AutopilotRepo {
     ) -> Result<Vec<Autopilot>, AutopilotRepoError> {
         let rows = sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
+                    api_trigger_enabled, created_at \
              FROM autopilot WHERE workspace_id = ? ORDER BY name",
         )
         .bind(workspace.as_str())
@@ -282,7 +303,8 @@ impl AutopilotRepo {
     ) -> Result<Option<Autopilot>, AutopilotRepoError> {
         let row = sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
+                    api_trigger_enabled, created_at \
              FROM autopilot WHERE id = ? AND workspace_id = ?",
         )
         .bind(id.as_str())
@@ -308,7 +330,8 @@ impl AutopilotRepo {
     ) -> Result<Option<Autopilot>, AutopilotRepoError> {
         let row = sqlx::query_as::<_, Autopilot>(
             "SELECT id, workspace_id, agent_id, name, instructions, cron_expr, \
-                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, created_at \
+                    max_concurrent_runs, execution_mode, concurrency_policy, next_tick_at, enabled, \
+                    api_trigger_enabled, created_at \
              FROM autopilot WHERE id = ?",
         )
         .bind(id.as_str())
@@ -395,7 +418,8 @@ impl AutopilotRepo {
         limit: u32,
     ) -> Result<Vec<AutopilotRun>, AutopilotRepoError> {
         let rows = sqlx::query_as::<_, AutopilotRun>(
-            "SELECT r.id, r.autopilot_id, r.started_at, r.completed_at, r.status \
+            "SELECT r.id, r.autopilot_id, r.started_at, r.completed_at, r.status, \
+                    r.source, r.failure_reason \
              FROM autopilot_run r \
              JOIN autopilot a ON a.id = r.autopilot_id \
              WHERE r.autopilot_id = ? AND a.workspace_id = ? \
@@ -408,6 +432,34 @@ impl AutopilotRepo {
         .fetch_all(pool)
         .await?;
         Ok(rows)
+    }
+
+    /// Arm (or disarm) the bare programmatic `api` trigger, scoped to
+    /// `workspace` (migration 0057). A foreign / absent id touches no row.
+    ///
+    /// Mirrors [`AutopilotWebhookRepo::set_config`](super::autopilot_webhook::AutopilotWebhookRepo::set_config):
+    /// a trigger surface is armed by an explicit operator action, never
+    /// implicitly at create time.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AutopilotRepoError::Db`] on a SQL failure.
+    pub async fn set_api_trigger_enabled(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        id: &AutopilotId,
+        enabled: bool,
+    ) -> Result<bool, AutopilotRepoError> {
+        let affected = sqlx::query(
+            "UPDATE autopilot SET api_trigger_enabled = ? WHERE id = ? AND workspace_id = ?",
+        )
+        .bind(i64::from(enabled))
+        .bind(id.as_str())
+        .bind(workspace.as_str())
+        .execute(pool)
+        .await?
+        .rows_affected();
+        Ok(affected > 0)
     }
 
     /// Insert one `autopilot_run` row (test/seed helper for run-history reads).
@@ -492,6 +544,7 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for Autopilot {
             next_tick_at: row.try_get("next_tick_at")?,
             // SQLite stores the boolean as INTEGER 0/1.
             enabled: row.try_get::<i64, _>("enabled")? != 0,
+            api_trigger_enabled: row.try_get::<i64, _>("api_trigger_enabled")? != 0,
             created_at: row.try_get("created_at")?,
         })
     }
@@ -506,6 +559,8 @@ impl sqlx::FromRow<'_, sqlx::sqlite::SqliteRow> for AutopilotRun {
             started_at: row.try_get("started_at")?,
             completed_at: row.try_get("completed_at")?,
             status: row.try_get("status")?,
+            source: row.try_get("source")?,
+            failure_reason: row.try_get("failure_reason")?,
         })
     }
 }

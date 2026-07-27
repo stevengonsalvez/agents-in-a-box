@@ -79,6 +79,7 @@ async fn seed_autopilot_with_policy(
         max_concurrent_runs: 1,
         execution_mode: ExecutionMode::RunOnly,
         concurrency_policy: policy,
+        api_trigger_enabled: false,
     };
     let create_clock = FixedClock(T0);
     ainb_hangar_store::repo::autopilot::AutopilotRepo::create(pool, &create_clock, &req)
@@ -132,7 +133,8 @@ async fn skip_policy_drops_the_second_tick_under_contention() {
     );
     assert_eq!(count(&pool, "SELECT count(*) FROM autopilot_run").await, 1);
 
-    // advance #2: at the limit (run #1 still in flight) → SKIPPED, no new rows.
+    // advance #2: at the limit (run #1 still in flight) → SKIPPED: no new task,
+    // and the decline recorded as a terminal `skipped` run (migration 0057).
     clock.advance(FIVE_MIN_MS);
     let ev = next_event(&mut rx, Duration::from_secs(2)).await;
     assert!(
@@ -145,15 +147,35 @@ async fn skip_policy_drops_the_second_tick_under_contention() {
         ),
         "second tick at the limit must be skipped, got {ev:?}"
     );
+    // The skip enqueues NO work (the invariant that matters) …
     assert_eq!(
-        count(&pool, "SELECT count(*) FROM autopilot_run").await,
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run WHERE status <> 'skipped'"
+        )
+        .await,
         1,
-        "skip must not create a second run"
+        "skip must not create a second LIVE run"
     );
     assert_eq!(
         count(&pool, "SELECT count(*) FROM agent_task_queue").await,
         1,
         "skip must not enqueue a second task"
+    );
+    // … but since migration 0057 it IS recorded: a terminal `skipped` run with
+    // its trigger source and the admission reason, so a declined dispatch is
+    // visible to every read path instead of existing only as a log line.
+    assert_eq!(
+        count(
+            &pool,
+            "SELECT count(*) FROM autopilot_run \
+             WHERE status = 'skipped' AND source = 'schedule' \
+               AND completed_at IS NOT NULL \
+               AND failure_reason LIKE 'concurrency limit%'"
+        )
+        .await,
+        1,
+        "the declined dispatch must be persisted as a skipped run"
     );
 
     shutdown.cancel();

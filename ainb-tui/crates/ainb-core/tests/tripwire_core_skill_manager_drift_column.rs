@@ -53,7 +53,9 @@ fn units_table_renders_in_sync_glyph_for_in_sync_unit() {
         sources: vec![SourceRow {
             name: "acme".to_string(),
             uri: "gh:org/acme".to_string(),
+            r#ref: "main".to_string(),
             enabled: true,
+            is_library: false,
         }],
         units: vec![row(1, "foo", uri)],
         selected: 0,

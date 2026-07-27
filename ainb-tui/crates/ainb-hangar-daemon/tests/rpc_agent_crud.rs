@@ -343,3 +343,116 @@ async fn agent_update_with_no_fields_is_rejected() {
         "an empty edit must be rejected: {resp}"
     );
 }
+
+/// Parity #30 — the acceptance the RPC layer owns: a per-agent env VALUE never
+/// reaches the wire, in either the write response or a later list snapshot.
+///
+/// The response instead carries the multica-shaped metadata (key names, a count,
+/// and the `redacted` flag), which is everything a UI needs and nothing an
+/// attacker does. This test FAILS on `main` — before the change the response
+/// simply had no `agent_env_*` keys and the daemon had no redaction concept.
+#[tokio::test]
+async fn agent_env_value_never_reaches_the_wire() {
+    const SECRET: &str = "sk-live-DEADBEEF01";
+
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_AGENT_UPDATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "agent_id": "agent-1",
+                "agent_env": [["SECRET_TOKEN", SECRET]],
+            }),
+        )
+        .await;
+    assert!(resp["error"].is_null(), "update must ack: {resp}");
+
+    let body = resp.to_string();
+    assert!(
+        !body.contains("sk-live-"),
+        "the update response leaked the env value: {body}"
+    );
+    let row = &resp["result"];
+    assert_eq!(row["agent_env_key_count"], 1, "{resp}");
+    assert_eq!(
+        row["agent_env_keys"],
+        serde_json::json!(["SECRET_TOKEN"]),
+        "{resp}"
+    );
+    assert_eq!(row["agent_env_redacted"], true, "{resp}");
+
+    // Same contract on the list snapshot — the surface every TUI actually reads.
+    let list = c
+        .call(
+            methods::HANGAR_AGENTS_LIST,
+            serde_json::json!({ "workspace_id": WS_SLUG }),
+        )
+        .await;
+    let body = list.to_string();
+    assert!(
+        !body.contains("sk-live-"),
+        "agents_list leaked the env value: {body}"
+    );
+    let agent = list["result"]["actors"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|a| a["actor_ref"] == "agent:agent-1")
+        .expect("agent-1 present");
+    assert_eq!(agent["agent_env_key_count"], 1, "{list}");
+    assert_eq!(
+        agent["agent_env_keys"],
+        serde_json::json!(["SECRET_TOKEN"]),
+        "{list}"
+    );
+    assert_eq!(agent["agent_env_redacted"], true, "{list}");
+}
+
+/// Parity #30 — a malformed `agent_env` is rejected with a CONTENT-FREE message.
+///
+/// `serde_json` quotes the offending scalar (`invalid type: integer `31337`,
+/// expected a string`), which for this field IS the secret, and the error text
+/// lands in the caller's logs. Multica drops the underlying error for exactly
+/// this reason (`cmd_agent.go:757-759`).
+#[tokio::test]
+async fn malformed_agent_env_error_echoes_neither_key_nor_value() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, _store) = start_server(dir.path()).await;
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let resp = c
+        .call(
+            methods::HANGAR_AGENT_UPDATE,
+            serde_json::json!({
+                "workspace_id": WS_SLUG,
+                "agent_id": "agent-1",
+                "agent_env": [["SECRET_TOKEN", 31337]],
+            }),
+        )
+        .await;
+    assert!(
+        !resp["error"].is_null(),
+        "a non-string env value must be rejected: {resp}"
+    );
+    let message = resp["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        !message.contains("31337"),
+        "the error echoed the value: {message}"
+    );
+    assert!(
+        !message.contains("SECRET_TOKEN"),
+        "the error echoed the key: {message}"
+    );
+    assert!(
+        message.starts_with("expected "),
+        "the message still names the shape: {message}"
+    );
+}

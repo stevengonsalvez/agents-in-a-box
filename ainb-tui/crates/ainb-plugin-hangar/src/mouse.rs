@@ -535,6 +535,7 @@ mod tests {
                 glyph: '☰',
                 name: "Backlog".into(),
                 cards: vec![BoardCard {
+                    not_dispatched: false,
                     issue_id: "HGR-1".into(),
                     display_id: "HGR-1".into(),
                     title: "Triage".into(),
@@ -549,6 +550,7 @@ mod tests {
                 glyph: '○',
                 name: "Todo".into(),
                 cards: vec![BoardCard {
+                    not_dispatched: false,
                     issue_id: "HGR-2".into(),
                     display_id: "HGR-2".into(),
                     title: "Write".into(),

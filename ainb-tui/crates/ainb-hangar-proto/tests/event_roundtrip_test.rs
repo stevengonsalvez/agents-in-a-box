@@ -31,6 +31,11 @@ fn comment_id(s: &str) -> CommentId {
 
 fn sample_issue() -> IssueRow {
     IssueRow {
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        origin_type: None,
+        origin_id: None,
         id: issue_id("issue-1"),
         display_id: None,
         workspace_id: "default".to_string(),
@@ -57,7 +62,9 @@ fn sample_issue() -> IssueRow {
         child_total: 0,
         child_done: 0,
         acceptance_criteria: Vec::new(),
+        acceptance: Vec::new(),
         context_refs: Vec::new(),
+        dependencies: Vec::new(),
     }
 }
 
@@ -123,6 +130,7 @@ fn all_variants() -> Vec<HangarEvent> {
             enabled: true,
             last_run_status: Some("completed".to_string()),
             last_run_at: Some(1_699_999_000_000),
+            api_trigger_enabled: true,
         }),
         HangarEvent::AutopilotRunChanged {
             autopilot_id: "ap-1".to_string(),
@@ -206,6 +214,8 @@ fn presence_state_three_states_roundtrip() {
 #[test]
 fn issue_row_pr_url_is_additive() {
     let no_pr = IssueRow {
+        origin_type: None,
+        origin_id: None,
         pr_url: None,
         branch: None,
         ..sample_issue()
@@ -236,6 +246,8 @@ fn issue_row_pr_url_is_additive() {
 #[test]
 fn issue_row_priority_due_date_labels_roundtrip_and_default() {
     let row = IssueRow {
+        origin_type: None,
+        origin_id: None,
         priority: 3,
         due_date: Some(1_700_000_500_000),
         labels: vec!["bug".to_string(), "p0".to_string()],
@@ -260,6 +272,8 @@ fn issue_row_priority_due_date_labels_roundtrip_and_default() {
 #[test]
 fn issue_row_subtask_fields_roundtrip_and_default() {
     let row = IssueRow {
+        origin_type: None,
+        origin_id: None,
         parent_id: Some("parent-issue".to_string()),
         child_total: 3,
         child_done: 1,
@@ -272,6 +286,8 @@ fn issue_row_subtask_fields_roundtrip_and_default() {
     // A top-level issue omits parent_id entirely (skip_serializing_if), and a zero
     // roll-up omits nothing that breaks an old reader.
     let top = IssueRow {
+        origin_type: None,
+        origin_id: None,
         child_total: 0,
         child_done: 0,
         ..sample_issue()
@@ -297,15 +313,14 @@ fn issue_row_subtask_fields_roundtrip_and_default() {
 fn issue_create_params_parent_is_additive() {
     use ainb_hangar_proto::snapshots::IssueCreateParams;
 
+    // `..Default::default()` on purpose: this fixture asserts ONE field, so a
+    // later append-only field must not red-gate it (the exhaustive literal did).
     let sub = IssueCreateParams {
         workspace_id: "default".to_string(),
         title: "child".to_string(),
-        description: None,
         creator: "member:alice".to_string(),
-        external_ref: None,
         parent_issue_id: Some("parent-1".to_string()),
-        acceptance_criteria: Vec::new(),
-        context_refs: Vec::new(),
+        ..Default::default()
     };
     let json = serde_json::to_string(&sub).expect("encode");
     let back: IssueCreateParams = serde_json::from_str(&json).expect("decode");
@@ -331,6 +346,72 @@ fn issue_create_params_parent_is_additive() {
     );
 }
 
+/// Parity 28: `parse_calendar_date_ms` is the ONE calendar-date parser every
+/// hangar client uses — exact `YYYY-MM-DD`, UTC midnight, loud on anything else
+/// (multica's `util.ParseCalendarDate` contract).
+#[test]
+fn calendar_date_parses_at_utc_midnight_and_rejects_other_shapes() {
+    use ainb_hangar_proto::dates::parse_calendar_date_ms;
+
+    assert_eq!(
+        parse_calendar_date_ms("2026-08-01"),
+        Ok(1_785_542_400_000),
+        "2026-08-01 is UTC midnight epoch ms"
+    );
+    assert_eq!(parse_calendar_date_ms("1970-01-01"), Ok(0));
+    for bad in ["31-12-2026", "2026-13-01", "", "2026/08/01"] {
+        assert!(
+            parse_calendar_date_ms(bad).is_err(),
+            "{bad:?} must be rejected, never coerced to a silent no-due-date"
+        );
+    }
+}
+
+/// Parity 28: `priority` / `due_date` / `labels` are append-only on
+/// `IssueCreateParams` — absent from the wire when defaulted, and a pre-28
+/// payload decodes them to `None` / `None` / `[]`.
+#[test]
+fn issue_create_params_priority_due_labels_are_additive() {
+    use ainb_hangar_proto::snapshots::IssueCreateParams;
+
+    let rich = IssueCreateParams {
+        workspace_id: "default".to_string(),
+        title: "urgent".to_string(),
+        creator: "member:alice".to_string(),
+        priority: Some(3),
+        due_date: Some(1_785_542_400_000),
+        labels: vec!["bug".to_string(), "p0".to_string()],
+        ..Default::default()
+    };
+    let json = serde_json::to_string(&rich).expect("encode");
+    let back: IssueCreateParams = serde_json::from_str(&json).expect("decode");
+    assert_eq!(back.priority, Some(3));
+    assert_eq!(back.due_date, Some(1_785_542_400_000));
+    assert_eq!(back.labels, vec!["bug".to_string(), "p0".to_string()]);
+
+    // An unadorned create's wire shape is byte-identical to pre-28.
+    let plain = IssueCreateParams {
+        priority: None,
+        due_date: None,
+        labels: Vec::new(),
+        ..rich
+    };
+    let json = serde_json::to_string(&plain).expect("encode");
+    for key in ["priority", "due_date", "labels"] {
+        assert!(
+            !json.contains(key),
+            "{key} must be omitted when unset, got {json}"
+        );
+    }
+
+    // A pre-28 payload decodes to the schema defaults.
+    let legacy = r#"{"workspace_id":"default","title":"t","creator":"member:alice"}"#;
+    let legacy_row: IssueCreateParams = serde_json::from_str(legacy).expect("decode legacy");
+    assert_eq!(legacy_row.priority, None, "default priority is None (P3)");
+    assert_eq!(legacy_row.due_date, None, "default due_date is None");
+    assert!(legacy_row.labels.is_empty(), "default labels is empty");
+}
+
 #[test]
 fn task_result_variants_roundtrip() {
     for (r, wire) in [
@@ -343,4 +424,85 @@ fn task_result_variants_roundtrip() {
         let back: TaskResult = serde_json::from_value(v).expect("decode");
         assert_eq!(back, r);
     }
+}
+
+// ---- ORIGIN PROVENANCE wire back-compat (migration 0056, parity #21) --------
+
+/// A pre-0056 snapshot carries no `origin_*` keys at all: it must decode, not
+/// fail, and read as "provenance unknown".
+#[test]
+fn issue_row_without_origin_keys_decodes_to_none() {
+    let mut json = serde_json::to_value(sample_issue()).unwrap();
+    let obj = json.as_object_mut().unwrap();
+    obj.remove("origin_type");
+    obj.remove("origin_id");
+    let decoded: IssueRow = serde_json::from_value(json).unwrap();
+    assert_eq!(decoded.origin_type, None);
+    assert_eq!(decoded.origin_id, None);
+}
+
+/// An unstamped row does not GROW the wire: the keys are omitted entirely, so
+/// an old reader sees byte-identical JSON to what it saw pre-0056.
+#[test]
+fn issue_row_with_no_origin_omits_both_keys() {
+    let json = serde_json::to_value(sample_issue()).unwrap();
+    let obj = json.as_object().unwrap();
+    assert!(!obj.contains_key("origin_type"));
+    assert!(!obj.contains_key("origin_id"));
+}
+
+/// A stamped row round-trips both halves.
+#[test]
+fn issue_row_with_origin_round_trips() {
+    let mut row = sample_issue();
+    row.origin_type = Some("comment_mention".to_string());
+    row.origin_id = Some("c-7".to_string());
+    let json = serde_json::to_string(&row).unwrap();
+    assert!(json.contains("\"origin_type\":\"comment_mention\""));
+    let back: IssueRow = serde_json::from_str(&json).unwrap();
+    assert_eq!(back, row);
+}
+
+/// `manual` carries a kind and no id — the id key stays off the wire.
+#[test]
+fn manual_origin_serialises_the_kind_without_an_id() {
+    let mut row = sample_issue();
+    row.origin_type = Some("manual".to_string());
+    let json = serde_json::to_value(&row).unwrap();
+    let obj = json.as_object().unwrap();
+    assert_eq!(
+        obj.get("origin_type").and_then(|v| v.as_str()),
+        Some("manual")
+    );
+    assert!(!obj.contains_key("origin_id"));
+    let back: IssueRow = serde_json::from_value(json).unwrap();
+    assert_eq!(back, row);
+}
+
+/// The CREATE params are append-only in the same way: an old client's payload
+/// (no `origin_*`) decodes with both halves absent, which the daemon reads as
+/// "stamp `manual`".
+#[test]
+fn issue_create_params_origin_is_append_only() {
+    use ainb_hangar_proto::snapshots::IssueCreateParams;
+
+    let old_client = serde_json::json!({
+        "workspace_id": "default",
+        "title": "t",
+        "creator": "member:u-1",
+    });
+    let decoded: IssueCreateParams = serde_json::from_value(old_client).unwrap();
+    assert_eq!(decoded.origin_type, None);
+    assert_eq!(decoded.origin_id, None);
+
+    let stamped = serde_json::json!({
+        "workspace_id": "default",
+        "title": "t",
+        "creator": "member:u-1",
+        "origin_type": "autopilot",
+        "origin_id": "ap-1",
+    });
+    let decoded: IssueCreateParams = serde_json::from_value(stamped).unwrap();
+    assert_eq!(decoded.origin_type.as_deref(), Some("autopilot"));
+    assert_eq!(decoded.origin_id.as_deref(), Some("ap-1"));
 }

@@ -84,20 +84,38 @@ fn is_qualifying(event_type: &str) -> bool {
 /// breaks the tail.
 #[derive(Debug, Deserialize)]
 struct HookEventLine {
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     ts: i64,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     session_id: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     cwd: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     transcript_path: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     event_type: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     matcher: String,
-    #[serde(default)]
+    #[serde(default, deserialize_with = "null_as_default")]
     agent: String,
+}
+
+/// Deserialize a field that may be `null` into its `Default`.
+///
+/// `#[serde(default)]` alone only covers an ABSENT key — an EXPLICIT `null` on a
+/// non-`Option` field is still a hard type error that fails the whole line. The
+/// hook writes its optional fields as explicit nulls (`"matcher":null`,
+/// `"transcript_path":null`), so without this every such line failed to parse and
+/// was silently dropped as "corrupt" — an `AskUserQuestion` from a session with
+/// no matcher never reached the attention inbox at all. notifyd's reader models
+/// the same fields as `Option<String>` and was unaffected, which is why the
+/// divergence went unnoticed.
+fn null_as_default<'de, D, T>(de: D) -> Result<T, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Default + Deserialize<'de>,
+{
+    Ok(Option::<T>::deserialize(de)?.unwrap_or_default())
 }
 
 /// The attention ingest producer — owns the paths + the write handles.
@@ -589,10 +607,27 @@ mod tests {
         TranscriptFixture { cwd, dir }
     }
 
+    /// One hook line in the EXACT shape `ainb fleet atc hook` appends —
+    /// including the explicit `null`s it writes for the optional fields. The old
+    /// helper omitted those keys entirely, so the unit suite was green against a
+    /// shape the hook never emits while every real line failed to parse.
     fn hook_line(session: &str, cwd: &str, event_type: &str) -> String {
         format!(
-            r#"{{"ts":1700000000000,"session_id":"{session}","cwd":"{cwd}","transcript_path":"","agent":"claude","event_type":"{event_type}"}}"#
+            r#"{{"agent":"claude","cwd":"{cwd}","event_type":"{event_type}","matcher":null,"parent":"hangar-daemon","process_start_fingerprint":null,"session_id":"{session}","tmux_target":null,"transcript_path":"","ts":1700000000000}}"#
         )
+    }
+
+    /// A verbatim real hook line — nulls and all — parses, rather than being
+    /// discarded as corrupt.
+    #[test]
+    fn real_hook_line_with_explicit_nulls_parses() {
+        let raw = r#"{"agent":"claude","cwd":"/w","event_type":"Notification","matcher":null,"parent":"hangar-daemon","process_start_fingerprint":null,"session_id":"sid-1","tmux_target":null,"transcript_path":null,"ts":1784921161073}"#;
+        let line = serde_json::from_str::<HookEventLine>(raw)
+            .expect("a real hook line must parse (explicit nulls included)");
+        assert_eq!(line.session_id, "sid-1");
+        assert_eq!(line.event_type, "Notification");
+        assert!(line.matcher.is_empty());
+        assert!(line.transcript_path.is_empty());
     }
 
     fn ingest_for(store: &Store, events_jsonl: &Path, cursor: &Path) -> AttentionIngest {

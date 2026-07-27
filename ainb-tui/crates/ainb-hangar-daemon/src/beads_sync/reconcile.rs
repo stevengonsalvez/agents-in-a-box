@@ -51,8 +51,12 @@ use super::outbound::SyncError;
 
 /// The Hangar issue lifecycle state a closed `bd` issue maps to.
 const HANGAR_STATE_DONE: &str = "done";
-/// The Hangar issue lifecycle state any non-closed `bd` issue maps to.
+/// The Hangar issue lifecycle state any other non-closed `bd` issue maps to.
 const HANGAR_STATE_OPEN: &str = "open";
+/// The Hangar issue lifecycle state a `bd`-blocked issue maps to (migration
+/// 0049): `bd` has a first-class `blocked` status and hangar now has its twin,
+/// so the bridge stops collapsing it into `open`.
+const HANGAR_STATE_BLOCKED: &str = "blocked";
 /// The actor recorded as creator on an adopted (orphan-`bd`) Hangar issue.
 const ADOPTED_CREATOR_ID: &str = "stevie";
 
@@ -544,6 +548,8 @@ pub async fn dispatch(args: &cli::ReconcileArgs) -> anyhow::Result<()> {
 const fn hangar_state_for(status: &BdStatus) -> &'static str {
     match status {
         BdStatus::Closed => HANGAR_STATE_DONE,
+        // 0049: bd's `blocked` now has a hangar twin — stop throwing it away.
+        BdStatus::Blocked => HANGAR_STATE_BLOCKED,
         _ => HANGAR_STATE_OPEN,
     }
 }

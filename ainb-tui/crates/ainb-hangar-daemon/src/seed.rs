@@ -16,6 +16,7 @@
 //! so it never ships in the production daemon binary.
 
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::clock::HangarClock as _;
 use ainb_hangar_core::ids::{AgentId, SkillId, WorkspaceId};
 use ainb_hangar_store::repo::agent::{Agent, AgentRepo};
 use ainb_hangar_store::repo::agent_runtime::{AgentRuntime, AgentRuntimeRepo};
@@ -56,7 +57,14 @@ const TODO_ISSUES: &[(&str, &str)] = &[
 ///
 /// Returns a [`sqlx::Error`] if any insert fails.
 pub async fn seed_p4_fixture(pool: &SqlitePool) -> Result<(), sqlx::Error> {
-    let now: i64 = 1_700_000_000_000;
+    // LIVE clock, not a frozen 2023 epoch. The daemon's lifecycle sweepers run
+    // unconditionally (they are spawned before the `disable_claim` gate), so a
+    // fixture stamped in the past is instantly past `queued_ttl` /
+    // `running_ttl`: the seeded `running` task and any test-seeded `queued` card
+    // were swept to `failed` within the first sweep tick, and every tripwire
+    // that asserts on a live queued/running card went red for a reason that had
+    // nothing to do with the code under test.
+    let now: i64 = ainb_hangar_core::clock::SystemClock.now_ms();
 
     // Tenancy: workspace + user + member (the agent picker lists the member).
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
@@ -194,14 +202,7 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
             visibility: "workspace".into(),
             permission_mode: "private".into(),
             owner_id: "user-1".into(),
-            archived: false,
-            model: None,
-            cli_args: Vec::new(),
-            mcp_config: None,
-            thinking: None,
-            agent_env: Vec::new(),
-            provider: None,
-            token_budget: None,
+            ..Agent::default()
         },
     )
     .await?;
@@ -211,6 +212,7 @@ async fn seed_runtime_and_agent(pool: &SqlitePool, now: i64) -> Result<(), sqlx:
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ainb_hangar_core::clock::SystemClock;
     use ainb_hangar_store::Store;
 
     #[tokio::test]
@@ -223,7 +225,9 @@ mod tests {
         assert_eq!(issues.len(), 3, "three seeded issues");
         assert!(issues.iter().any(|i| i.title == "Refactor API"));
 
-        let actors = crate::rpc::snapshots::agents_list(store.pool(), WS_ID).await.unwrap();
+        let actors = crate::rpc::snapshots::agents_list(store.pool(), WS_ID, SystemClock.now_ms())
+            .await
+            .unwrap();
         assert!(actors.iter().any(|a| a.display_name == "claude-agent" && a.is_agent));
         assert!(actors.iter().any(|a| !a.is_agent), "member present");
 
