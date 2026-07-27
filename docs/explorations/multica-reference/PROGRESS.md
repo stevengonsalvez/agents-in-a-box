@@ -17,3 +17,4 @@
 | 12 | #496 | d9dbbf9df7f0ab909e071dd944ee91bc6fb05ea9 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit before merge) |
 | 13 | #497 | 056c618404a9742dd58d7a15867aafc87149b321 | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit; Test ubuntu known beads-lock flake rerun once to green) |
 | 1-rest | #498 | 763c4fe79a36d24f0312885056b3ae7c2adb5ffc | 2026-07-27 | gate green both OSes |
+| 14 | #499 | 742a71d5a814ab546055c76081e7ef0114fe051e | 2026-07-27 | gate green both OSes (CLI reference freshness fixed with follow-up commit before merge) |
