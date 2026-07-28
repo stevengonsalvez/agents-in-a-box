@@ -231,9 +231,9 @@ fn pressing_m_renders_drift_warning_glyph_against_real_local_bare() {
     assert!(status.success(), "tmux new-session failed");
 
     let cmd = format!(
-        "HOME={} exec {} 2>&1",
-        home_tmp.path().display(),
-        bin.display()
+        "HOME={home} AINB_HOME={home}/.agents-in-a-box exec {bin} 2>&1",
+        home = home_tmp.path().display(),
+        bin = bin.display()
     );
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
