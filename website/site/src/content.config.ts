@@ -31,6 +31,12 @@ export const collections = {
         // positive pattern can't un-prune it. The extglob form below excludes
         // every hangar/ entry except architecture.md while still letting the
         // walker descend into hangar/ to find it.
+        //
+        // architecture.md is the ONLY public page under hangar/. Anything
+        // else that becomes public must MOVE out of hangar/ rather than
+        // being added here. A second name in this pattern means the
+        // directory-exclusion convention has been abandoned, which is the
+        // exact per-file-exception drift this change was meant to end.
         '!hangar/!(architecture.md)',
       ],
     }),
