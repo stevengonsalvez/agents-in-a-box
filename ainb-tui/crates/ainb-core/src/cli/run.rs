@@ -9,7 +9,7 @@ use anyhow::{Context, Result};
 use chrono::Utc;
 use std::path::PathBuf;
 use tokio::process::Command;
-use tokio::time::{Duration, sleep};
+use tokio::time::{Duration, Instant, sleep};
 use tracing::{info, warn};
 use uuid::Uuid;
 
@@ -116,10 +116,10 @@ pub async fn execute(args: RunArgs) -> Result<()> {
     let tmux_name = tmux.name().to_string();
     info!("Started tmux session: {}", tmux_name);
 
-    // Step 8: Send initial prompt if provided
+    // Step 8: send the initial prompt (if any) once the input box is ready.
+    // A fixed sleep loses keystrokes into Claude Code's not-yet-ready splash.
     if let Some(ref prompt) = args.prompt {
-        info!("Sending initial prompt after 2 second delay...");
-        sleep(Duration::from_secs(2)).await;
+        wait_for_prompt_ready(&tmux_name, Duration::from_secs(30)).await;
         send_prompt_to_tmux(&tmux_name, prompt).await?;
     }
 
@@ -417,12 +417,9 @@ fn build_agent_command(args: &RunArgs) -> String {
 
 /// Send a prompt to the tmux session
 async fn send_prompt_to_tmux(session_name: &str, prompt: &str) -> Result<()> {
-    // Target pane explicitly
-    let target = format!("{session_name}:0");
-
     // Send the prompt text
     let output = Command::new("tmux")
-        .args(["send-keys", "-t", &target, prompt, "C-m"])
+        .args(["send-keys", "-t", session_name, prompt, "C-m"])
         .output()
         .await?;
 
@@ -436,6 +433,38 @@ async fn send_prompt_to_tmux(session_name: &str, prompt: &str) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Poll the tmux pane until the agent's input box is ready, or `timeout` elapses.
+/// Best-effort: on timeout we send anyway rather than drop the prompt.
+async fn wait_for_prompt_ready(session_name: &str, timeout: Duration) {
+    use crate::tmux::capture::{CaptureOptions, capture_pane};
+    let deadline = Instant::now() + timeout;
+    loop {
+        if let Ok(pane) = capture_pane(session_name, CaptureOptions::visible()).await {
+            if input_box_ready(&pane) {
+                return;
+            }
+        }
+        if Instant::now() >= deadline {
+            warn!("Input box not detected within {timeout:?}; sending prompt anyway");
+            return;
+        }
+        sleep(Duration::from_millis(250)).await;
+    }
+}
+
+/// Whether a captured pane shows an interactive input box ready for a prompt.
+/// Recognises the footer hints the agent CLIs print once their prompt is live;
+/// deliberately conservative: an empty or splash pane returns false.
+fn input_box_ready(pane: &str) -> bool {
+    const READY_MARKERS: [&str; 4] = [
+        "? for shortcuts",  // Claude Code idle prompt
+        "esc to interrupt", // Claude Code mid-turn (still accepts input)
+        "Ctrl+C to exit",   // codex / others
+        "for newline",      // "shift+enter for newline" style hints
+    ];
+    READY_MARKERS.iter().any(|marker| pane.contains(marker))
 }
 
 /// Attach to a tmux session (replaces current process)
@@ -455,6 +484,16 @@ fn attach_to_session(session_name: &str) -> Result<()> {
 mod tests {
     use super::*;
     use crate::cli::Tool;
+
+    #[test]
+    fn input_box_ready_detects_prompt_footer_not_splash() {
+        assert!(input_box_ready("output line\n? for shortcuts"));
+        assert!(input_box_ready("│ > │\nesc to interrupt"));
+        assert!(!input_box_ready(""));
+        assert!(!input_box_ready(
+            "Loading…\n╭──────────╮\n│ Welcome  │\n╰──────────╯"
+        ));
+    }
 
     #[test]
     fn test_build_agent_command() {
