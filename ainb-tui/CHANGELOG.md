@@ -7,6 +7,403 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.17.0] - 2026-07-27
+### Added
+- Merge pull request #458 from stevengonsalvez/merge/fleet-atc-main-20260723
+- Merge pull request #460 from stevengonsalvez/feat/multica-gap-1
+- Merge pull request #461 from stevengonsalvez/feat/multica-gap-5
+- Merge pull request #463 from stevengonsalvez/feat/multica-gap-3
+- Merge pull request #465 from stevengonsalvez/feat/multica-gap-4
+- Merge pull request #466 from stevengonsalvez/feat/multica-gap-6
+- Merge pull request #467 from stevengonsalvez/feat/multica-gap-7
+- Merge pull request #468 from stevengonsalvez/feat/multica-gap-8
+- Merge pull request #469 from stevengonsalvez/feat/multica-gap-9
+- Merge pull request #470 from stevengonsalvez/feat/multica-gap-10
+- Merge pull request #471 from stevengonsalvez/feat/multica-gap-11
+- Merge pull request #475 from stevengonsalvez/f/atc
+- Merge pull request #476 from stevengonsalvez/feat/multica-gap-28
+- Merge pull request #478 from stevengonsalvez/feat/parity-6-rest
+- Merge pull request #479 from stevengonsalvez/feat/parity-8-rest
+- Merge pull request #480 from stevengonsalvez/feat/parity-19
+- Merge pull request #481 from stevengonsalvez/feat/parity-23
+- Merge pull request #482 from stevengonsalvez/feat/parity-24
+- Merge pull request #483 from stevengonsalvez/feat/parity-26
+- Merge pull request #484 from stevengonsalvez/feat/parity-25
+- Merge pull request #486 from stevengonsalvez/feat/parity-7-rest
+- Merge pull request #488 from stevengonsalvez/feat/parity-11-rest
+- Merge pull request #489 from stevengonsalvez/feat/parity-20
+- Merge pull request #491 from stevengonsalvez/feat/parity-21
+- Merge pull request #492 from stevengonsalvez/feat/parity-15
+- Merge pull request #494 from stevengonsalvez/feat/parity-30
+- Merge pull request #495 from stevengonsalvez/feat/parity-4-rest
+- Merge pull request #496 from stevengonsalvez/feat/parity-12
+- Merge pull request #497 from stevengonsalvez/feat/parity-13
+- Merge pull request #498 from stevengonsalvez/feat/parity-1-rest
+- Merge pull request #499 from stevengonsalvez/feat/parity-14
+- Merge pull request #501 from stevengonsalvez/feat/parity-22
+- Merge pull request #503 from stevengonsalvez/feat/parity-18
+- Merge pull request #505 from stevengonsalvez/feat/parity-27
+- Merge pull request #506 from stevengonsalvez/feat/parity-3-rest
+- Merge pull request #507 from stevengonsalvez/feat/parity-17
+- Merge pull request #509 from stevengonsalvez/feat/parity-2-rest
+- **ainb-core**: inject sqlite workspace mutator into the host store
+- **cli**: hangar issue create --parent + cascade on issue update
+- **fleet**: add authoritative control plane
+- **fleet**: build control center UI
+- **fleet**: redesign operator control view
+- **fleet**: redesign operator control view (#490)
+- **hangar-cli**: --acceptance / --context-ref repeatable flags on issue create
+- **hangar-cli**: --by on agent archive, squad archive/unarchive, audit in list output
+- **hangar-cli**: --description/--avatar/--service-tier on agent create + edit
+- **hangar-cli**: --fanout / --invoker on hangar squad assign
+- **hangar-cli**: --model on agent create
+- **hangar-cli**: --origin-type/--origin-id on issue create, Origin on show
+- **hangar-cli**: --role on add-member, squad member-role + instructions verbs
+- **hangar-cli**: agent permission / allow / can-invoke verbs
+- **hangar-cli**: ainb hangar issue link add/remove/list
+- **hangar-cli**: api-trigger verb, run --source, and a runs history read
+- **hangar-cli**: autopilot collaborator/subscriber/access verbs
+- **hangar-cli**: comment add/preview + inbox list verbs
+- **hangar-cli**: hangar autopilot edit / versions with --as-user
+- **hangar-cli**: hangar squad briefing prints the injected leader prompt
+- **hangar-cli**: hangar workspace create/list, refused under lockdown
+- **hangar-cli**: issue --stage authoring + issue batch-state verb
+- **hangar-cli**: issue criteria list|check|uncheck
+- **hangar-cli**: issue subscribe/unsubscribe/subscribers + react verbs, shown on issue show
+- **hangar-cli**: issue why + record the assign path's silent refusals
+- **hangar-cli**: mask env values in agent json, add --env-stdin/--env-file and agent env
+- **hangar-cli**: member add verb + polymorphic issue assignment
+- **hangar-cli**: member invite/invites/accept/decline/revoke verbs
+- **hangar-cli**: property catalog and issue property/meta verbs
+- **hangar-cli**: record activity and add 'ainb hangar issue timeline'
+- **hangar-cli**: skills attach/detach/toggle + list --agent
+- **hangar-cli**: surface assignee actor-ref in issue list/show/json output
+- **hangar-cli**: validate --state against the lifecycle vocabulary
+- **hangar-core**: AcceptanceCriterion domain type + tolerant JSON codec
+- **hangar-core**: AgentEnv redact-by-construction type for per-agent env
+- **hangar-core**: RuleChangeKind + substantive-vs-cosmetic classifier
+- **hangar-core**: admission-time DispatchReason + DispatchSource vocabulary
+- **hangar-core**: canonical local-member actor ref
+- **hangar-core**: mention grammar with mention:// links + outcome vocabulary
+- **hangar-core**: typed IssueOrigin domain with allow-listed kinds
+- **hangar-core**: typed property + metadata value model
+- **hangar-core**: workspace.creation_disabled registry knob + env override
+- **hangar-daemon**: address inbox entries to an actor and read per recipient
+- **hangar-daemon**: apply create-time model override
+- **hangar-daemon**: apply the invocation gate to the squad fan-out
+- **hangar-daemon**: autopilot collaborator RPCs + restricted-mode write gate
+- **hangar-daemon**: autopilot_trigger_api + set_api_trigger snapshot fns
+- **hangar-daemon**: autopilot_update / autopilot_versions RPC + actor threading
+- **hangar-daemon**: claim-time squad briefing injection hook point
+- **hangar-daemon**: derive ActorRow.workload from live task counts
+- **hangar-daemon**: disabled skills never materialise
+- **hangar-daemon**: fold heartbeat age into the agents_list presence
+- **hangar-daemon**: gate @mention dispatch on the comment author
+- **hangar-daemon**: gate single-agent enqueue on can_invoke
+- **hangar-daemon**: hand the agent child its origin via env
+- **hangar-daemon**: hangar/issue_criterion_set handler emits IssueUpdated
+- **hangar-daemon**: inbox fan-out reads the real subscriber set
+- **hangar-daemon**: inject squad leader briefing into claim-time CLAUDE.md
+- **hangar-daemon**: invite_create/accept/decline/revoke RPCs
+- **hangar-daemon**: issues_batch_update handler with one aggregated cascade
+- **hangar-daemon**: map bd blocked onto the hangar blocked state
+- **hangar-daemon**: persist priority / due date / labels on issue create
+- **hangar-daemon**: property + metadata RPC and detail-row enrichment
+- **hangar-daemon**: record issue activity and serve hangar/issue_timeline
+- **hangar-daemon**: record one dispatch_attempt per run_card, surface the code
+- **hangar-daemon**: redact agent_env on the wire and in dispatch Debug
+- **hangar-daemon**: render member roles + instructions in the leader briefing
+- **hangar-daemon**: render member skills on the squad-leader roster
+- **hangar-daemon**: resolve the archiving actor and expose the audit
+- **hangar-daemon**: route comment mentions and return per-target outcomes
+- **hangar-daemon**: route the api-trigger RPCs and emit run-changed events
+- **hangar-daemon**: skill_set_enabled + agent_skills_list RPCs
+- **hangar-daemon**: squad leader briefing builder (protocol + roster)
+- **hangar-daemon**: squad member-role + instructions RPCs
+- **hangar-daemon**: stamp origin on issue create and mention fan-out
+- **hangar-daemon**: subscribe + reaction RPCs and comment/mention auto-subscribe writers
+- **hangar-daemon**: sweep stale runtimes and push AgentPresence
+- **hangar-daemon**: thread acceptance_criteria + context_refs through issue create
+- **hangar-daemon**: thread parent on create + fire child-done cascade
+- **hangar-daemon**: thread stage through issue_create
+- **hangar-daemon**: typed issue_link RPCs + typed links on snapshots
+- **hangar-daemon**: validate + persist agent metadata, refuse duplicate names
+- **hangar-daemon**: validate issue state on write and refuse to run a cancelled card
+- **hangar-plugin**: author acceptance criteria + context refs in wizard, render on detail card
+- **hangar-plugin**: author priority / due date / labels in the create wizard
+- **hangar-plugin**: blocked + cancelled board columns
+- **hangar-plugin**: description step in the agent wizard, blurb + avatar on the roster
+- **hangar-plugin**: faceted filter panel overlay widget
+- **hangar-plugin**: faceted issue filters — model, reducer, render & routing
+- **hangar-plugin**: guided agent-create wizard (provider/model/instructions)
+- **hangar-plugin**: hide the new-workspace affordance under lockdown
+- **hangar-plugin**: inbox screen reads the local human's inbox
+- **hangar-plugin**: per-issue activity timeline modal on y
+- **hangar-plugin**: r/i edit member roles + squad instructions on the Squads screen
+- **hangar-plugin**: render Props / Meta on the task-detail card
+- **hangar-plugin**: render agent workload beside availability
+- **hangar-plugin**: render checked criteria and bind a/t to tick one
+- **hangar-plugin**: render collaborator/subscriber badges on autopilot cards
+- **hangar-plugin**: render pending invites in the Members pane
+- **hangar-plugin**: render rule version + run attribution
+- **hangar-plugin**: render run source + admission reason and the api badge
+- **hangar-plugin**: render the due date on the issue detail card
+- **hangar-plugin**: render the issue origin badge on the detail card
+- **hangar-plugin**: render typed links and add a kind picker to w
+- **hangar-plugin**: subscriber count and reaction buckets on the task detail card
+- **hangar-plugin**: surface f facets in help bar + e2e facet tripwire
+- **hangar-plugin**: surface mention outcomes in the task transcript
+- **hangar-plugin**: surface per-agent env as a hidden key count on the agent roster
+- **hangar-plugin**: surface the dispatch decline on the card and the board
+- **hangar-plugin**: toggle a skill for the selected agent with t
+- **hangar-plugin-host**: map the store lockdown to -32008 in the mutator
+- **hangar-proto**: IssueRow carries last_dispatch_{reason,detail,at}
+- **hangar-proto**: add Workload dimension + ActorRow.workload (append-only)
+- **hangar-proto**: add optional model to AgentCreateParams
+- **hangar-proto**: api-trigger param/result envelopes with back-compat roundtrip
+- **hangar-proto**: append api_trigger_enabled + run source/failure_reason to wire rows
+- **hangar-proto**: append-only acceptance field + issue_criterion_set method
+- **hangar-proto**: append-only agent metadata on create/update params + ActorRow
+- **hangar-proto**: append-only agent_env key metadata on ActorRow, typed write carrier
+- **hangar-proto**: append-only parent_issue_id + child roll-up wire fields
+- **hangar-proto**: archive audit on the wire (append-only)
+- **hangar-proto**: autopilot collaborator/subscriber wire surface
+- **hangar-proto**: autopilot update/versions methods + append-only wire fields
+- **hangar-proto**: autopilot_trigger_api + autopilot_set_api_trigger methods
+- **hangar-proto**: blocked + cancelled in the issue lifecycle vocabulary
+- **hangar-proto**: carry acceptance_criteria + context_refs on issue wire
+- **hangar-proto**: carry an invoker override on squad-assign + board-card-run
+- **hangar-proto**: carry inbox recipient on the wire
+- **hangar-proto**: carry link_type and typed issue links on the wire
+- **hangar-proto**: carry origin_type/origin_id on the issue wire
+- **hangar-proto**: carry priority / due_date / labels on issue create
+- **hangar-proto**: carry squad instructions + member roles on the wire
+- **hangar-proto**: custom-property + metadata row types
+- **hangar-proto**: derive presence from runtime status + heartbeat age
+- **hangar-proto**: dispatch_attempts_list method + BoardCardRunResult.reason
+- **hangar-proto**: invite lifecycle methods + pending_invites on members_list
+- **hangar-proto**: issue_timeline method + append-only TimelineEntryRow
+- **hangar-proto**: issues_batch_update method + params (append-only)
+- **hangar-proto**: mention outcome rows + comment parent_id + preview method
+- **hangar-proto**: properties + metadata fields on IssueRow
+- **hangar-proto**: property + metadata RPC method catalogue and params
+- **hangar-proto**: skill_set_enabled + agent_skills_list envelopes
+- **hangar-proto**: subscribe/react methods + append-only IssueRow subscriber and reaction fields
+- **hangar-store**: 0056 issue + task origin provenance columns
+- **hangar-store**: 0066 custom property catalog + issue metadata columns
+- **hangar-store**: AutopilotRepo::update_as edit path + actor-carrying variants
+- **hangar-store**: AutopilotRuleVersionRepo over the accountability ledger
+- **hangar-store**: CommentRepo::insert_with over any executor
+- **hangar-store**: InvitationRepo create/accept/decline/revoke with 7-day expiry
+- **hangar-store**: IssuePropertyRepo + IssueMetadataRepo
+- **hangar-store**: IssueRepo::set_state_batch applies one state to N issues atomically
+- **hangar-store**: LinkKind repo API over typed card links
+- **hangar-store**: MemberRepo::add — find-or-create user by email + membership insert
+- **hangar-store**: RunSource + record_skipped_run + shared dispatch_with_admission
+- **hangar-store**: SquadRepo::get single-squad-by-id lookup
+- **hangar-store**: activity_log table + activity vocabulary and repo
+- **hangar-store**: actor recipient columns on inbox_entry
+- **hangar-store**: add agent_task_queue.squad_id column (migration 0045)
+- **hangar-store**: add issue acceptance_criteria + context_refs columns (0048)
+- **hangar-store**: add issue.parent_issue_id + stage columns (mig 0046)
+- **hangar-store**: agent invocation-permission schema (migration 0047)
+- **hangar-store**: agent metadata columns + unique name index (migration 0050)
+- **hangar-store**: agent_skill.enabled + agent.disabled_runtime_skills schema
+- **hangar-store**: archive audit columns on agent + squad (migration 0052)
+- **hangar-store**: attribute autopilot runs to the accountable human
+- **hangar-store**: auto-subscribe an issue's creator and assignee at the one create seam
+- **hangar-store**: autopilot access_mode on the row, edit and rule ledger
+- **hangar-store**: autopilot fire stamps issue + task origin
+- **hangar-store**: autopilot repo carries api_trigger_enabled + run source/reason
+- **hangar-store**: autopilot subscriber + collaborator tables (migration 0064)
+- **hangar-store**: autopilot_rule_version ledger + run attribution columns
+- **hangar-store**: can_invoke deny-by-default invocation gate
+- **hangar-store**: carry description/avatar/kind/system_key/service_tier on Agent
+- **hangar-store**: carry squad_id on the claim projection
+- **hangar-store**: cascade_children_done aggregates a batch into one parent comment
+- **hangar-store**: child-done → parent cascade service
+- **hangar-store**: constrain issue.state to the lifecycle vocabulary
+- **hangar-store**: diff issue edits into per-field activity rows
+- **hangar-store**: dispatch_attempt table + repo (migration 0058)
+- **hangar-store**: fan out autopilot subscribers onto spawned issues
+- **hangar-store**: gate every squad dispatch target on can_invoke
+- **hangar-store**: heartbeat + age-based presence sweep on agent_runtime
+- **hangar-store**: issue_cascade_barrier claim ledger (migration 0065)
+- **hangar-store**: issue_subscriber + issue_reaction schema (0062) with backfill
+- **hangar-store**: live per-agent task-count queries for workload
+- **hangar-store**: mention routing service with per-target outcomes
+- **hangar-store**: migration 0054 normalises acceptance_criteria to objects
+- **hangar-store**: migration 0055 adds link_type to card_dependency
+- **hangar-store**: migration 0057 — api trigger column + skipped run status
+- **hangar-store**: migration 0067 comment threading + task trigger comment
+- **hangar-store**: name-only enabled-skill read for the squad roster
+- **hangar-store**: per-agent skill enablement in the skill repo
+- **hangar-store**: permission_mode field + invocation-target repo
+- **hangar-store**: read + stamp issue/task origin provenance
+- **hangar-store**: read squad_id back on Task + stamp helpers
+- **hangar-store**: reap activity rows on issue delete
+- **hangar-store**: refuse WorkspaceRepo::create under instance lockdown
+- **hangar-store**: refuse assignment to an archived squad
+- **hangar-store**: role + instructions levers on SquadRepo
+- **hangar-store**: set_criterion_checked mutator + structured criteria columns
+- **hangar-store**: squad archive with audit trail
+- **hangar-store**: squad member role + squad instructions columns (migration 0053)
+- **hangar-store**: stamp squad_id on squad-dispatched tasks
+- **hangar-store**: stamp who/when on agent archive
+- **hangar-store**: typed autopilot collaborator + subscriber repos
+- **hangar-store**: typed subscriber + reaction repos, reaped by issue delete cascade
+- **hangar-store**: workspace create/delete + slug validation
+- **hangar-store**: workspace_invitation table (migration 0063)
+- **hangar-tui**: keyboard sub-issue create (s) + mark-done (d)
+- **hangar-tui**: sub-issue roll-up badge on the board card
+- **plugin-hangar**: wire New/Delete workspace UI to host caps
+- **plugin-proto**: creation_disabled on workspace_list + -32008 code
+- **plugin-protocol**: host/workspace_create + delete methods + params
+- **plugin-runtime**: thread creation_disabled through the workspace caps
+- **plugin-runtime**: workspace create/delete cap logic + mutator DI
+- **plugin-sdk**: workspace_create/workspace_delete host_client methods
+- add Fleet command cockpit
+
+### Fixed
+- Merge pull request #412 from stevengonsalvez/fix/ainb-cli-session
+- Merge pull request #462 from stevengonsalvez/feat/daemon-oauth-env
+- Merge pull request #473 from stevengonsalvez/fix/restore-authoritative-ci-gate
+- Merge pull request #474 from stevengonsalvez/f/claude-resume
+- Merge pull request #477 from stevengonsalvez/feat/parity-450
+- feat(hangar-proto): carry priority / due_date / labels on issue create
+- feat(hangar-store): carry description/avatar/kind/system_key/service_tier on Agent
+- **cli**: give `ainb notifyd --help` an EXAMPLES block
+- **cli**: preserve idle session restarts
+- **cli**: preserve provider launch settings
+- **docs**: escape the pipes in the #17 row so the parity table still renders
+- **fleet**: align attach shortcut
+- **fleet**: align restart shortcut
+- **hangar**: an absent autopilot is not-found, never a permission refusal
+- **hangar**: carry access_mode through every autopilot row fixture and select
+- **hangar**: read the system claude login via /usr/bin/security
+- **hangar**: warn clearly when the system claude login token is expired
+- **hangar-cli**: route issue-create labels through the label join
+- **hangar-daemon**: publish the bd pidfile atomically so the lock cannot admit two holders
+- **hangar-daemon**: query blocked + cancelled in the issues snapshot
+- **hangar-daemon**: rank issue progress separately from board column order
+- **hangar-daemon**: scope invite accept/decline to the claimed workspace
+- **hangar-daemon**: self-register the daemon pid at boot
+- **hangar-daemon**: tolerate explicit nulls in hook event lines
+- **hangar-daemon**: unlink the secret-bearing interactive pane wrapper at teardown
+- **hangar-plugin**: carry acceptance_criteria + context_refs in facet fixtures
+- **hangar-plugin**: keep the selected board column inside the painted window
+- **hangar-plugin**: move the Boards squad/depends-on/reorder keys off reserved chars
+- **hangar-plugin**: move the Kanban/Fleet/Settings bindings off reserved chars
+- **hangar-plugin**: stop the router claiming chorded (ctrl/alt) tab keys
+- **hangar-proto**: repair the CommentRow fixture's parent_id placement
+- **hangar-store**: inherit squad_id on task retry
+- **hangar-store**: make property/metadata writes a real single-key json_set
+- **hangar-store**: stamp diff activity rows at increasing timestamps
+- **hangar-store**: stop losing a board card's auto-move under contention
+- **hangar-store**: widen child_done Issue literal for #17 columns
+- **hangar-tests**: drop plaintext env fixtures drifted by the redaction contract
+- **hangar-tui**: capture keys while the new-workspace name modal is open
+- **hangar-tui**: render the sub-issue badge only when it fully fits
+- **tui**: encode Claude project dirs with non-alnum-to-dash rule
+- **tui**: harden Claude project-dir probe per review
+- **tui**: use real transcript probe in orphan recovery
+- preserve raw model IDs
+- respawn dead panes on idle restart
+- test(hangar): realign the create-flow tripwire with the Phase-5 wizard
+
+### Documentation
+- Merge pull request #459 from stevengonsalvez/docs/multica-parity-reference
+- Merge pull request #472 from stevengonsalvez/docs/parity-status-2026-07
+- Merge pull request #504 from stevengonsalvez/docs/parity-18-progress
+- **cli**: regenerate CLI reference for hangar issue --parent
+- **cli**: regenerate CLI reference for hangar issue criteria
+- **cli**: regenerate CLI reference for hangar workspace create/list
+- **cli**: regenerate cli.md for hangar issue why
+- **cli**: regenerate reference for autopilot api-trigger + runs --limit
+- **cli**: regenerate reference for hangar issue link
+- **cli**: regenerate reference for issue create --origin-type/--origin-id
+- **cli**: regenerate stale CLI reference for squad assign fanout/invoker
+- **cli**: regenerate the CLI reference for hangar squad briefing
+- **cli**: regenerate the CLI reference for the #17 property and meta verbs
+- **cli**: regenerate the CLI reference for the agent env verb and secret flags
+- **cli**: regenerate the CLI reference for the agent-metadata flags
+- **cli**: regenerate the CLI reference for the comment and inbox verbs
+- **cli**: regenerate the CLI reference for the create --label help text
+- **cli**: regenerate the CLI reference for the skill toggle flags
+- **cli**: regenerate the CLI reference for the squad archive verbs
+- **cli**: regenerate the CLI reference for the squad role + instructions verbs
+- **cli**: regenerate the CLI reference from the binary
+- **cli-reference**: regenerate for autopilot edit/versions (parity #14)
+- **cli-reference**: regenerate for hangar issue timeline command
+- **cli-reference**: regenerate for issue --stage and batch-state
+- **hangar**: document the /usr/bin/security system-login credential path
+- **hangar**: note the 8h system-token caveat + long-lived env override
+- **hangar-store**: correct the single-key-write note after the json_set change
+- **hangar-store**: note that squad get stays unfiltered by archive
+- **multica-reference**: audited parity status as of 2026-07-24
+- **multica-reference**: close gap #10 with its unmatched facets recorded
+- **multica-reference**: record gap #8 enforced on all three dispatch paths
+- **multica-reference**: record the #450 reserved-key fix
+- **parity**: fix the dangling 7-rest pointer on the 25 backlog row
+- **parity**: record #14 autopilot rule versioning + human attribution as landed
+- **parity**: record #17 custom properties + metadata as landed
+- **parity**: record 1-rest landed
+- **parity**: record 11-rest landed
+- **parity**: record 12 landed
+- **parity**: record 13 landed
+- **parity**: record 14 landed
+- **parity**: record 15 landed
+- **parity**: record 17 landed
+- **parity**: record 18 landed
+- **parity**: record 18 merged
+- **parity**: record 19 landed
+- **parity**: record 2-rest landed
+- **parity**: record 20 landed
+- **parity**: record 21 landed
+- **parity**: record 22 landed
+- **parity**: record 23 landed
+- **parity**: record 24 landed
+- **parity**: record 25 landed
+- **parity**: record 26 landed
+- **parity**: record 27 landed
+- **parity**: record 3-rest landed
+- **parity**: record 30 landed
+- **parity**: record 4-rest landed
+- **parity**: record 7-rest landed
+- **parity**: record 7-rest landed in #486
+- **parity**: retire the 7-rest backlog row, record 7-cwd (#485) in its place
+- **parity**: row 7 now ships instructions, roles and roster skills
+- **parity**: squad coverage row drops the instructions/roles remainder
+- **skills**: close ship-it base-resolution and merge-state gaps
+- **skills**: harden ship-it merge gate and codex routing
+- **skills**: make ship-it merge and codex gates actually reachable
+- **squad**: gap #1 is closed — briefing is protocol + roster(role, skills) + instructions
+- **tui**: regenerate CLI reference for hangar agent can-invoke
+- **tui**: regenerate CLI reference for issue subscribe/react verbs
+- **tui**: regenerate CLI reference for member invite verbs
+- multica parity reference — master gap matrix + roadmap
+- multica parity reference — per-entity deep dives
+- refresh CLI reference
+
+### Other
+- Merge pull request #502 from stevengonsalvez/chore/cli-ref-precheck
+- **hangar**: fill the new wire fields in existing struct literals
+- **hangar**: thread the new IssueRow fields through every construction site
+- **hangar-plugin**: spread SquadWireRow defaults at fixture sites
+- **justfile**: regenerate and verify the CLI reference in just check
+- **skills**: add ship-it commit-review-merge pipeline skill
+- **skills**: fold heavy-run learnings into ship-it
+- **hangar**: spread Agent/ActorRow/AgentConfigUpdate defaults at fixture sites
+- **hangar-cli**: drop the unused key binding in the property dispatcher
+- **hangar-daemon**: extract deliver_cascade from maybe_cascade_child_done
+- **hangar-daemon**: scheduler fires through the shared admission gate
+- **hangar-plugin**: hoist the reserved router/host key sets into router.rs
+- **hangar-plugin**: scope the test-only wire row imports to the test module
+- **hangar-store**: extract MemberRepo::add_in_tx for transactional joins
+- **hangar-store**: type agent_env as AgentEnv on the Agent row and config update
+- **tui**: single source of truth for Claude project-dir name
+
+
 ## [1.16.1] - 2026-07-23
 ### Added
 - Merge pull request #457 from stevengonsalvez/feat/hangar-agents-screen

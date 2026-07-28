@@ -263,6 +263,10 @@ const AGENT_SKILLS_LIST_REQ_ID: i64 = 62;
 /// #11-rest). Fired by the task-detail `t` key; the reply is an `IssueRow` and
 /// the daemon's `IssueUpdated` push re-renders the card.
 const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
+
+/// `hangar/issue_timeline` — the per-issue activity + comment narrative behind
+/// the `y` modal (multica parity #13).
+const ISSUE_TIMELINE_REQ_ID: i64 = 64;
 /// The actor-ref the plugin authors comments as (e38.5).
 ///
 /// The plugin has no per-user auth/identity layer yet (a later concern), so a
@@ -271,6 +275,58 @@ const ISSUE_CRITERION_SET_REQ_ID: i64 = 63;
 /// `comment.author_type` CHECK), so this is accepted as-is; swapping in the real
 /// signed-in member is a drop-in change once identity lands.
 const SELF_AUTHOR_REF: &str = "member:me";
+
+/// Params for the two inbox RPCs: the workspace plus WHOSE inbox this is.
+///
+/// Every inbox entry is addressed to exactly one actor (store migration 0060),
+/// so the Inbox screen is THE LOCAL HUMAN's inbox, not a workspace-wide feed:
+/// the request names [`SELF_AUTHOR_REF`] as the recipient, and the daemon
+/// returns / sweeps only that actor's rows. When a real signed-in identity
+/// lands, only that constant changes.
+/// Render the `@`-mention routing outcomes of one `comment_add` reply as a
+/// single transcript line, or `None` when there is nothing to say
+/// (multica parity #2-rest).
+///
+/// Shape: `↪ @alice notified · @builder queued · @bot blocked (invocation not allowed)`.
+/// A `blocked` / `deferred` row carries the DispatchReason's human label in
+/// parentheses — that parenthetical IS the feature: before this item a refused
+/// mention was indistinguishable from one that ran.
+///
+/// An EMPTY outcome set renders nothing, so a comment with no mentions looks
+/// exactly as it did before.
+fn render_mention_outcomes(
+    rows: &[ainb_hangar_proto::snapshots::MentionOutcomeRow],
+) -> Option<String> {
+    use ainb_hangar_core::dispatch_reason::DispatchReason;
+
+    if rows.is_empty() {
+        return None;
+    }
+    let parts: Vec<String> = rows
+        .iter()
+        .map(|r| {
+            let who = if r.handle.is_empty() {
+                "(unknown)".to_string()
+            } else {
+                format!("@{}", r.handle)
+            };
+            // Only a refusal / deferral needs the WHY; `queued` and `notified`
+            // already say everything.
+            let why = match r.outcome.as_str() {
+                "blocked" | "deferred" => DispatchReason::parse(&r.reason)
+                    .map(|d| format!(" ({})", d.label()))
+                    .unwrap_or_default(),
+                _ => String::new(),
+            };
+            format!("{who} {}{why}", r.outcome)
+        })
+        .collect();
+    Some(format!("↪ {}", parts.join(" · ")))
+}
+
+fn inbox_params(ws: &str) -> serde_json::Value {
+    serde_json::json!({ "workspace_id": ws, "recipient": SELF_AUTHOR_REF })
+}
 /// How many trailing log lines the logs pane reads from the newest `daemon.*`
 /// file on each refresh (P8.6). Bounded so a huge log file never blows up the
 /// pane; the daily rotation keeps a single day's file the practical ceiling.
@@ -1025,11 +1081,17 @@ impl HangarPlugin {
                 }
                 self.conn.on_event();
             }
+            // multica parity #2-rest: the `comment_add` reply now carries one
+            // outcome row per `@`-mention. Before this the reply was dropped on
+            // the floor, so a refused or coalesced mention looked exactly like
+            // one that ran.
+            RpcId::Number(COMMENT_ADD_REQ_ID) => self.apply_comment_mention_outcomes(resp),
             RpcId::Number(SQUAD_FANOUT_REQ_ID) => self.apply_squad_fanout(resp),
             RpcId::Number(DAEMON_HEALTH_REQ_ID) => self.apply_daemon_health(resp),
             RpcId::Number(USAGE_ROLLUP_REQ_ID) => self.apply_usage(resp),
             RpcId::Number(RUN_HISTORY_REQ_ID) => self.apply_run_history(resp),
             RpcId::Number(PR_STATUS_REFRESH_REQ_ID) => self.apply_pr_status(resp),
+            RpcId::Number(ISSUE_TIMELINE_REQ_ID) => self.apply_issue_timeline(resp),
             RpcId::Number(MEMBERS_REQ_ID) => self.apply_members(resp),
             // tcp T5: the notification routing grid snapshot.
             RpcId::Number(NOTIFY_RULES_REQ_ID) => self.apply_notify_rules(resp),
@@ -1167,13 +1229,16 @@ impl HangarPlugin {
     }
 
     /// Populate the settings Members pane from a `hangar/members_list` result
-    /// (e38.11). The pane is render-only, so the rows are simply cached.
+    /// (e38.11) — members AND the live pending invitations that ride on the same
+    /// envelope (parity #18). The pane is render-only, so the rows are simply
+    /// cached.
     fn apply_members(&mut self, resp: &RpcResponse) {
         if let Some(result) = &resp.result {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::MembersListResult>(
                 result.clone(),
             ) {
                 self.screens.set_members(r.members);
+                self.screens.set_pending_invites(r.pending_invites);
             }
         }
     }
@@ -1294,7 +1359,9 @@ impl HangarPlugin {
             if let Ok(r) = serde_json::from_value::<ainb_hangar_proto::snapshots::InboxListResult>(
                 result.clone(),
             ) {
-                self.screens.set_inbox(r.entries, r.unread);
+                // The snapshot was requested for the local human, so the screen
+                // is tagged with the actor it belongs to.
+                self.screens.set_inbox(r.entries, r.unread, SELF_AUTHOR_REF.to_string());
             }
         }
     }
@@ -1445,6 +1512,28 @@ impl HangarPlugin {
         }
         self.fetch_pending = true;
         self.conn.on_event();
+    }
+
+    /// Fold the `@`-mention routing outcomes off a `comment_add` reply into the
+    /// open task-detail transcript (multica parity #2-rest).
+    ///
+    /// Renders ONE line, e.g.
+    /// `↪ @alice notified · @builder queued · @secret-bot blocked (invocation not allowed)`.
+    /// A comment that mentioned nobody produces an empty vector and therefore
+    /// renders NOTHING, so a plain comment looks exactly as it did before.
+    fn apply_comment_mention_outcomes(&mut self, resp: &RpcResponse) {
+        let Some(result) = resp.result.as_ref() else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_value::<ainb_hangar_proto::snapshots::CommentAddResult>(
+            result.clone(),
+        ) else {
+            return;
+        };
+        if let Some(line) = render_mention_outcomes(&parsed.mention_outcomes) {
+            self.screens.push_task_detail_system_line(line);
+            self.conn.on_event();
+        }
     }
 
     /// Surface a `hangar/board_card_cancel` reply (tcp T3 / F6): a transient note
@@ -1720,7 +1809,8 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let params = serde_json::json!({ "workspace_id": ws });
+        // The sweep names the local human: it must never clear an agent's rows.
+        let params = inbox_params(&ws);
         let Ok(body) = encode_request(
             INBOX_MARK_READ_REQ_ID,
             daemon_methods::HANGAR_INBOX_MARK_READ,
@@ -2098,7 +2188,7 @@ impl HangarPlugin {
             return;
         };
         let ws = self.app_state().ws_id.as_str().to_string();
-        let scoped = serde_json::json!({ "workspace_id": ws });
+        let scoped = serde_json::json!({ "workspace_id": ws.clone() });
         let requests = [
             (
                 ISSUES_REQ_ID,
@@ -2161,10 +2251,14 @@ impl HangarPlugin {
                 daemon_methods::HANGAR_DAEMON_CONFIG_LIST,
                 serde_json::json!({}),
             ),
+            // The Inbox screen is THE LOCAL HUMAN's inbox, not the workspace's:
+            // every entry is addressed to one actor (store migration 0060), so
+            // the request names whose inbox this is. When a real signed-in
+            // identity lands, only `SELF_AUTHOR_REF` changes.
             (
                 INBOX_LIST_REQ_ID,
                 daemon_methods::HANGAR_INBOX_LIST,
-                scoped.clone(),
+                inbox_params(&ws),
             ),
             // The control-center board is FLEET-WIDE (every workspace + the
             // no-workspace host sessions), so its feed is unscoped by design.
@@ -3169,6 +3263,48 @@ impl HangarPlugin {
         }
     }
 
+    /// Fold a `hangar/issue_timeline` reply into the open activity modal
+    /// (multica parity #13).
+    ///
+    /// A no-op when the modal has since closed (a stale reply for a dismissed
+    /// overlay), and an error leaves the modal in its loading state rather than
+    /// showing a fabricated empty narrative.
+    fn apply_issue_timeline(&mut self, resp: &ainb_hangar_proto::RpcResponse) {
+        let Some(result) = resp.result.as_ref() else {
+            return;
+        };
+        let Ok(parsed) = serde_json::from_value::<ainb_hangar_proto::snapshots::IssueTimelineResult>(
+            result.clone(),
+        ) else {
+            return;
+        };
+        if let Some(activity) = self.screens.activity.as_mut() {
+            activity.apply_entries(parsed.entries);
+        }
+        self.conn.on_event();
+    }
+
+    /// Fire a deferred `hangar/issue_timeline` fetch for the open activity modal
+    /// (multica parity #13). A send failure is logged but non-fatal — the modal
+    /// keeps its loading state and `r` retries.
+    async fn fire_issue_timeline(&mut self, host: &HostClient, issue_id: String) {
+        let Some(stream_id) = self.conn.stream_id().map(ToString::to_string) else {
+            return;
+        };
+        let ws = self.app_state().ws_id.as_str().to_string();
+        let params = serde_json::json!({ "workspace_id": ws, "issue_id": issue_id });
+        let Ok(body) = encode_request(
+            ISSUE_TIMELINE_REQ_ID,
+            daemon_methods::HANGAR_ISSUE_TIMELINE,
+            params,
+        ) else {
+            return;
+        };
+        if let Err(e) = host.unix_socket_send(stream_id, body).await {
+            let _ = host.log_info(format!("hangar: issue timeline send failed: {e}")).await;
+        }
+    }
+
     /// Fire the deferred `hangar/pr_status_refresh` for the just-opened
     /// task-detail's issue (e38.34).
     ///
@@ -3622,7 +3758,7 @@ impl HangarPlugin {
                 self.app = Some(next);
             }
         }
-        self.screens.set_workspaces(rows);
+        self.screens.set_workspaces(rows, list.creation_disabled);
     }
 
     /// Compose the full render frame into a fresh [`WireBuffer`] (the pure,
@@ -4316,6 +4452,16 @@ impl HangarPlugin {
         // renders the task's title + status; the streaming transcript folds events
         // addressed to this task id, exactly as the issue board's open does.
         let issue = ainb_hangar_proto::events::IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str(format!("task-{task_id}")).unwrap_or_else(
                 |_| ainb_hangar_core::ids::IssueId::from_str("task").expect("non-empty"),
             ),
@@ -4679,6 +4825,24 @@ impl HangarPlugin {
             NavIntent::OpenAgentPicker(issue_id) => {
                 self.screens.open_picker(issue_id.clone());
                 let reduction = crate::screen::reduce(app, AppEvent::OpenAgentPicker(issue_id));
+                self.app = Some(reduction.state);
+            }
+            // multica parity #13: open the card's activity timeline AND arm the
+            // fetch — the modal opens immediately in its loading state and the
+            // `render` pass fires `hangar/issue_timeline`.
+            NavIntent::OpenActivityTimeline(issue_id) => {
+                let title = self
+                    .screens
+                    .issue_list
+                    .visible_rows()
+                    .find(|r| r.id == issue_id)
+                    .map_or_else(|| issue_id.as_str().to_string(), |r| r.title.clone());
+                self.screens.activity = Some(crate::screen::activity::ActivityState::loading(
+                    &issue_id, title,
+                ));
+                self.screens.pending_activity_fetch = Some(issue_id.as_str().to_string());
+                let reduction =
+                    crate::screen::reduce(app, AppEvent::OpenActivityTimeline(issue_id));
                 self.app = Some(reduction.state);
             }
             NavIntent::OpenTaskForIssue(issue_id) => {
@@ -5167,6 +5331,12 @@ impl Plugin for HangarPlugin {
         if let Some(issue_id) = self.pending_pr_status_refresh.take() {
             self.fire_pr_status_refresh(host, issue_id).await;
         }
+        // multica parity #13: drain a deferred activity-timeline fetch (armed by
+        // `y` opening the modal, or `r` inside it) and fire
+        // `hangar/issue_timeline`. The reply folds the merged narrative in.
+        if let Some(issue_id) = self.screens.pending_activity_fetch.take() {
+            self.fire_issue_timeline(host, issue_id).await;
+        }
         // P8.6: the logs pane reads the daemon's structured-log file directly
         // (not a daemon RPC). Re-read on every render while it is the active
         // screen so live events surface, and on a pending level-filter change.
@@ -5281,6 +5451,35 @@ impl Plugin for HangarPlugin {
 mod tests {
     use super::*;
     use ainb_plugin_protocol::manifest::{CapabilityGrant, Manifest};
+
+    /// Both inbox RPCs must carry the local human as the `recipient`, or the
+    /// daemon silently answers with `member:me`'s inbox by default while the
+    /// screen claims to be someone else's.
+    ///
+    /// MUTATION GUARD: dropping `recipient` from [`inbox_params`] fails this,
+    /// and both `hangar/inbox_list` and `hangar/inbox_mark_read` are encoded
+    /// from it, so the wire shape is pinned end to end.
+    #[test]
+    fn inbox_requests_name_the_local_human_as_recipient() {
+        let params = inbox_params("default");
+        assert_eq!(params["workspace_id"], "default");
+        assert_eq!(
+            params["recipient"], SELF_AUTHOR_REF,
+            "the inbox request must name whose inbox it reads: {params}"
+        );
+
+        for method in [
+            daemon_methods::HANGAR_INBOX_LIST,
+            daemon_methods::HANGAR_INBOX_MARK_READ,
+        ] {
+            let frame = encode_request(29, method, inbox_params("default")).expect("encode");
+            let body = String::from_utf8(frame).expect("utf8 frame");
+            assert!(
+                body.contains("\"recipient\":\"member:me\""),
+                "{method} must carry the recipient on the wire: {body}"
+            );
+        }
+    }
 
     #[test]
     fn manifest_returns_canonical_toml() {
@@ -5753,6 +5952,16 @@ mod tests {
         p.conn.on_dialed("s1");
         p.conn.on_subscribe_ack();
         p.screens.set_issues(vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),
@@ -5909,6 +6118,16 @@ mod tests {
         // more than one column (the press must resolve the RIGHT card).
         p.screens.set_issues(vec![
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
                 display_id: Some("HGR-1".into()),
                 workspace_id: "default".into(),
@@ -5940,6 +6159,16 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("issue-2").unwrap(),
                 display_id: Some("HGR-2".into()),
                 workspace_id: "default".into(),
@@ -6132,6 +6361,16 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "default".into(),
@@ -6223,6 +6462,16 @@ mod tests {
 
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "default".into(),
@@ -6306,6 +6555,16 @@ mod tests {
         // Several Todo cards so a scroll offset is observable.
         let rows: Vec<IssueRow> = (0..4)
             .map(|i| IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str(format!("t{i}")).unwrap(),
                 display_id: Some(format!("HGR-{i}")),
                 workspace_id: "default".into(),
@@ -6393,6 +6652,16 @@ mod tests {
         let mut p = connected_plugin_with_issue();
         p.screens.set_issues(vec![
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-a").unwrap(),
                 display_id: Some("HGR-1".into()),
                 workspace_id: "default".into(),
@@ -6424,6 +6693,16 @@ mod tests {
                 dependencies: Vec::new(),
             },
             IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("card-b").unwrap(),
                 display_id: Some("HGR-2".into()),
                 workspace_id: "default".into(),
@@ -7163,6 +7442,68 @@ mod tests {
     /// into the draft, not routed to the control-center tab-switch. Before the
     /// text-capture guard the routing layer swallowed `C`/`U`/`I` first,
     /// navigating away and abandoning the compose draft.
+    /// **2-rest** — a comment that mentioned NOBODY renders nothing, so a plain
+    /// comment's transcript is byte-identical to what it was before this item.
+    #[test]
+    fn no_mentions_renders_no_transcript_line() {
+        assert_eq!(super::render_mention_outcomes(&[]), None);
+    }
+
+    /// **2-rest** — every outcome is named, and a REFUSAL carries the reason's
+    /// human label in parentheses. Asserted on the exact phrase, not a
+    /// substring-OR: the parenthetical is the whole point of the item.
+    #[test]
+    fn outcomes_render_with_the_refusal_reason_spelled_out() {
+        use ainb_hangar_proto::snapshots::MentionOutcomeRow;
+
+        let row = |handle: &str, outcome: &str, reason: &str| MentionOutcomeRow {
+            target_type: "agent".into(),
+            target_id: "x".into(),
+            handle: handle.into(),
+            outcome: outcome.into(),
+            reason: reason.into(),
+            task_id: None,
+            detail: String::new(),
+            source: "explicit".into(),
+        };
+        let line = super::render_mention_outcomes(&[
+            row("alice", "notified", ""),
+            row("builder", "queued", "queued"),
+            row("secret-bot", "blocked", "invocation_not_allowed"),
+        ])
+        .expect("a non-empty outcome set renders a line");
+        assert_eq!(
+            line,
+            "↪ @alice notified · @builder queued · @secret-bot blocked (invocation not allowed)"
+        );
+    }
+
+    /// **2-rest** — a `coalesced` row says so without a parenthetical (the
+    /// bucket already carries the meaning), and a `deferred` row explains why.
+    #[test]
+    fn coalesced_is_bare_and_deferred_explains_itself() {
+        use ainb_hangar_proto::snapshots::MentionOutcomeRow;
+
+        let row = |outcome: &str, reason: &str| MentionOutcomeRow {
+            target_type: "agent".into(),
+            target_id: "x".into(),
+            handle: "bot".into(),
+            outcome: outcome.into(),
+            reason: reason.into(),
+            task_id: None,
+            detail: String::new(),
+            source: "explicit".into(),
+        };
+        assert_eq!(
+            super::render_mention_outcomes(&[row("coalesced", "coalesced")]).unwrap(),
+            "↪ @bot coalesced"
+        );
+        assert_eq!(
+            super::render_mention_outcomes(&[row("deferred", "deferred")]).unwrap(),
+            "↪ @bot deferred (waiting on blockers)"
+        );
+    }
+
     #[test]
     fn uppercase_c_types_into_task_detail_compose_not_tab_switch() {
         use ainb_hangar_proto::events::IssueRow;
@@ -7170,6 +7511,16 @@ mod tests {
 
         // Open the task detail for a fresh issue.
         let issue = IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: ainb_hangar_core::ids::IssueId::from_str("issue-1").unwrap(),
             display_id: None,
             workspace_id: "default".into(),

@@ -2220,6 +2220,7 @@ pub fn seed_autopilot(home: &Path) {
                 execution_mode: ainb_hangar_store::repo::autopilot::ExecutionMode::default(),
                 concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::default(
                 ),
+                api_trigger_enabled: false,
             },
         )
         .await

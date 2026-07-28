@@ -30,24 +30,39 @@ use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 use ainb_hangar_core::acceptance::AcceptanceCriterion;
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
-use ainb_hangar_core::clock::HangarClock;
-use ainb_hangar_core::idgen::IdGen;
+use ainb_hangar_core::clock::{HangarClock, SystemClock};
+use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
 use ainb_hangar_core::ids::{AgentId, AutopilotId, CommentId, IssueId, SkillId, WorkspaceId};
+use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_core::task_status::TaskStatus;
 use ainb_hangar_proto::events::{
-    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, CommentRow,
-    InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, AutopilotVersionRow,
+    CommentRow, InboxEntryRow, IssueRow, PresenceState, SkillFile, SkillRow, TaskCardRow, Workload,
 };
-use ainb_hangar_proto::snapshots::{AgentSkillsListResult, SkillDetail, SkillsSyncResult};
+use ainb_hangar_proto::snapshots::{
+    AgentSkillsListResult, MentionOutcomeRow, SkillDetail, SkillsSyncResult, TimelineEntryRow,
+};
 use ainb_hangar_store::repo::agent::AgentRepo;
 use ainb_hangar_store::repo::agent_runtime::AgentRuntimeRepo;
 use ainb_hangar_store::repo::attention::AttentionRepo;
-use ainb_hangar_store::repo::autopilot::{AutopilotRepo, AutopilotRepoError};
-use ainb_hangar_store::repo::autopilot_run::{FireError, fire_autopilot_tick};
+use ainb_hangar_store::repo::autopilot::{
+    AutopilotEdit, AutopilotRepo, AutopilotRepoError, UpdateOutcome,
+};
+use ainb_hangar_store::repo::autopilot_access::{
+    AutopilotCollaboratorRepo, AutopilotSubscriberRepo,
+};
+use ainb_hangar_store::repo::autopilot_rule_version::AutopilotRuleVersionRepo;
+use ainb_hangar_store::repo::autopilot_run::{
+    DispatchOutcome, FireError, RunAttribution, RunSource, dispatch_with_admission,
+    fire_autopilot_tick_with_attribution,
+};
 use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
 use ainb_hangar_store::repo::inbox::InboxRepo;
 use ainb_hangar_store::repo::issue::{CriterionError, IssueRepo};
+use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+use ainb_hangar_store::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
 use ainb_hangar_store::repo::label::{LabelRepo, LabelRepoError};
 use ainb_hangar_store::repo::notify_rule::NotifyRuleRepo;
 use ainb_hangar_store::repo::run_history::RunHistoryRepo;
@@ -55,6 +70,7 @@ use ainb_hangar_store::repo::skill::{SkillRepo, SkillRepoError};
 use ainb_hangar_store::repo::task::TaskRepo;
 use ainb_hangar_store::repo::usage::UsageRepo;
 use ainb_hangar_store::repo::workspace::{apply_issue_prefix, issue_display_id};
+use ainb_hangar_store::service::activity::ActivityService;
 use sqlx::{Row, SqlitePool};
 
 /// Every Hangar issue lifecycle state, queried per-state and concatenated so the
@@ -123,6 +139,21 @@ pub async fn issues_list(
             // task-detail card.
             let extras = issue_card_fields(pool, &issue.id).await?;
             out.push(IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                // multica parity #12: WHY this card is not running, from the newest
+                // dispatch_attempt when that attempt was a decline. All `None` on a
+                // healthy card, so the row grows by zero keys.
+                last_dispatch_reason: extras.last_dispatch_reason,
+                last_dispatch_detail: extras.last_dispatch_detail,
+                last_dispatch_at: extras.last_dispatch_at,
+                // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+                // row a snapshot carries and the row an event pushes agree.
+                origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+                origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
                 id,
                 display_id,
                 workspace_id: issue.workspace_id,
@@ -184,6 +215,13 @@ struct IssueCardExtras {
     /// children. Drives the parent card's `⊟ done/total` badge.
     child_done: u32,
     child_total: u32,
+    /// WHY this card is not running (multica parity #12): the stable code +
+    /// detail + timestamp of the newest `dispatch_attempt`, filled ONLY when that
+    /// attempt was a DECLINE. All `None` on a healthy card, so the wire row grows
+    /// by zero keys for one that is running fine.
+    last_dispatch_reason: Option<String>,
+    last_dispatch_detail: Option<String>,
+    last_dispatch_at: Option<i64>,
 }
 
 /// Read the task-detail card extras for one issue (63d): the `repo_ref` / `agent`
@@ -228,6 +266,16 @@ async fn issue_card_fields(
             .await?
             .flatten();
     let (child_done, child_total) = IssueRepo::child_progress(pool, issue_id).await?;
+    // multica parity #12: the newest admission decision, surfaced ONLY when it
+    // was a decline — the field means "why this is not running", so a healthy card
+    // carries no extra bytes. `runtime_offline` counts as a decline even though a
+    // task row exists: that is exactly the invisible-but-queued case.
+    let latest_attempt =
+        ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo::latest_for_issue(
+            pool, issue_id,
+        )
+        .await?
+        .filter(|a| !a.is_dispatched());
     Ok(IssueCardExtras {
         repo_ref,
         agent: agent.map(|a| a.as_str().to_string()),
@@ -239,6 +287,9 @@ async fn issue_card_fields(
         parent_id,
         child_done: u32::try_from(child_done).unwrap_or(u32::MAX),
         child_total: u32::try_from(child_total).unwrap_or(u32::MAX),
+        last_dispatch_reason: latest_attempt.as_ref().map(|a| a.reason.clone()),
+        last_dispatch_detail: latest_attempt.as_ref().and_then(|a| a.detail.clone()),
+        last_dispatch_at: latest_attempt.as_ref().map(|a| a.created_at),
     })
 }
 
@@ -295,6 +346,21 @@ pub async fn issues_search(
         let branch = latest_branch_for_issue(pool, workspace_id, &issue.id).await?;
         let extras = issue_card_fields(pool, &issue.id).await?;
         out.push(IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            // multica parity #12: WHY this card is not running, from the newest
+            // dispatch_attempt when that attempt was a decline. All `None` on a
+            // healthy card, so the row grows by zero keys.
+            last_dispatch_reason: extras.last_dispatch_reason,
+            last_dispatch_detail: extras.last_dispatch_detail,
+            last_dispatch_at: extras.last_dispatch_at,
+            // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+            // row a snapshot carries and the row an event pushes agree.
+            origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+            origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
             id,
             display_id,
             workspace_id: issue.workspace_id,
@@ -538,6 +604,48 @@ pub async fn members_list(
             user_id: m.user_id,
             email: m.email,
             role: m.role,
+        })
+        .collect())
+}
+
+/// Snapshot the LIVE pending invitations of `workspace_id` as wire
+/// [`InvitationWireRow`](ainb_hangar_proto::snapshots::InvitationWireRow)s
+/// (multica parity #18).
+///
+/// Sweeps past-due `pending` rows to `expired` FIRST, so status converges even
+/// when nobody creates a new invite (the pane is re-pull, not event-driven), then
+/// lists what is still live. Workspace-scoped with the same guard as
+/// [`members_list`]: a malformed workspace id yields an empty vec, never an
+/// error.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] if the sweep or the list query fails.
+pub async fn pending_invites(
+    pool: &SqlitePool,
+    workspace_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::InvitationWireRow>, sqlx::Error> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    // A malformed (empty) workspace id resolves to no invites, not an error.
+    let Ok(ws) = WorkspaceId::from_str(workspace_id.to_string()) else {
+        return Ok(Vec::new());
+    };
+    InvitationRepo::expire_stale(pool, &SystemClock, &ws).await?;
+    let invites = InvitationRepo::list_pending(pool, &SystemClock, &ws).await?;
+    Ok(invites
+        .into_iter()
+        .map(|i| ainb_hangar_proto::snapshots::InvitationWireRow {
+            id: i.id,
+            invitee_email: i.invitee_email,
+            role: i.role,
+            status: i.status,
+            inviter_id: i.inviter_id,
+            invitee_user_id: i.invitee_user_id,
+            created_at: i.created_at,
+            expires_at: i.expires_at,
         })
         .collect())
 }
@@ -892,6 +1000,13 @@ async fn agent_actor_row_with_counts(
         // it did before.
         archived_at: agent.archived_at,
         archived_by: agent.archived_by.as_ref().map(ToString::to_string).unwrap_or_default(),
+        // Parity #30. This is the ONLY place a per-agent env reaches the wire,
+        // and it carries KEY NAMES + a count — never a value. All three are
+        // omitted when the agent has no env, so an env-less agent serialises
+        // exactly as it did pre-#30.
+        agent_env_key_count: u32::try_from(agent.agent_env.len()).unwrap_or(u32::MAX),
+        agent_env_keys: agent.agent_env.keys().map(ToString::to_string).collect(),
+        agent_env_redacted: !agent.agent_env.is_empty(),
     })
 }
 
@@ -1239,9 +1354,37 @@ pub async fn autopilots_list(
     workspace: &WorkspaceId,
 ) -> Result<Vec<AutopilotRow>, AutopilotRepoError> {
     let autopilots = AutopilotRepo::list(pool, workspace).await?;
+    // ONE query for the whole workspace's newest rule versions (multica parity
+    // #14) — deliberately not N+1 per autopilot. Labels are resolved from the
+    // same actor-label cache the version pane uses.
+    let latest_versions = AutopilotRuleVersionRepo::latest_by_autopilot(pool, workspace).await?;
+    // Two more GROUP BY reads for the #27 actor-set counts, same rule: one query
+    // per table for the whole workspace, never N+1 per row.
+    let collaborator_counts: HashMap<String, u32> =
+        AutopilotCollaboratorRepo::counts_by_autopilot(pool, workspace.as_str())
+            .await
+            .map_err(AutopilotRepoError::Db)?
+            .into_iter()
+            .collect();
+    let subscriber_counts: HashMap<String, u32> =
+        AutopilotSubscriberRepo::counts_by_autopilot(pool, workspace.as_str())
+            .await
+            .map_err(AutopilotRepoError::Db)?
+            .into_iter()
+            .collect();
+    let mut publisher_labels = ActorLabelCache::default();
+    let mut versions: HashMap<String, (i64, Option<String>)> = HashMap::new();
+    for (autopilot_id, version, published_by) in latest_versions {
+        let label = match published_by.as_deref() {
+            Some(actor) => Some(publisher_labels.label(pool, actor).await),
+            None => None,
+        };
+        versions.insert(autopilot_id, (version, label));
+    }
     let mut out = Vec::with_capacity(autopilots.len());
     for ap in autopilots {
         let id = AutopilotId::from_str(ap.id.clone()).map_err(|_| AutopilotRepoError::EmptyId)?;
+        let id_str = ap.id.clone();
         let last = AutopilotRepo::list_runs(pool, workspace, &id, LAST_RUN_LOOKBACK)
             .await?
             .into_iter()
@@ -1256,9 +1399,56 @@ pub async fn autopilots_list(
             enabled: ap.enabled,
             last_run_status: last.as_ref().map(|r| r.status.clone()),
             last_run_at: last.as_ref().map(|r| r.started_at),
+            api_trigger_enabled: ap.api_trigger_enabled,
+            // `None` for an UNVERSIONED rule (pre-0061, never edited): the
+            // ledger was deliberately not backfilled, so there is nothing
+            // honest to report.
+            rule_version: versions.get(&id_str).map(|(v, _)| *v),
+            last_published_by: versions.get(&id_str).and_then(|(_, l)| l.clone()),
+            collaborator_count: collaborator_counts.get(&id_str).copied().unwrap_or(0),
+            subscriber_count: subscriber_counts.get(&id_str).copied().unwrap_or(0),
+            access_mode: Some(ap.access_mode.as_str().to_string()),
         });
     }
     Ok(out)
+}
+
+/// A tiny per-call cache resolving an actor ref (`member:<user.id>`) to a
+/// human-readable label.
+///
+/// The plugin owns zero domain data, so the daemon does the `user` join. An
+/// unresolvable ref renders the RAW actor ref — never a fabricated name.
+#[derive(Default)]
+struct ActorLabelCache {
+    seen: HashMap<String, String>,
+}
+
+impl ActorLabelCache {
+    async fn label(&mut self, pool: &SqlitePool, actor: &str) -> String {
+        if let Some(hit) = self.seen.get(actor) {
+            return hit.clone();
+        }
+        let resolved = match actor.parse::<ActorRef>() {
+            Ok(a) if a.kind() == ActorKind::Member => {
+                sqlx::query_scalar::<_, String>("SELECT email FROM user WHERE id = ?")
+                    .bind(a.id())
+                    .fetch_optional(pool)
+                    .await
+                    .ok()
+                    .flatten()
+            }
+            Ok(a) => sqlx::query_scalar::<_, String>("SELECT name FROM agent WHERE id = ?")
+                .bind(a.id())
+                .fetch_optional(pool)
+                .await
+                .ok()
+                .flatten(),
+            Err(_) => None,
+        }
+        .unwrap_or_else(|| actor.to_string());
+        self.seen.insert(actor.to_string(), resolved.clone());
+        resolved
+    }
 }
 
 /// Snapshot one autopilot's recent runs, latest-first (`hangar/autopilot_runs`,
@@ -1285,6 +1475,10 @@ pub async fn autopilot_runs(
             started_at: r.started_at,
             completed_at: r.completed_at,
             status: r.status,
+            source: r.source,
+            failure_reason: r.failure_reason,
+            accountable_actor: r.accountable_actor,
+            attribution: r.attribution,
         })
         .collect())
 }
@@ -1307,12 +1501,188 @@ pub async fn autopilot_fire_now(
     clock: &dyn HangarClock,
     workspace: &WorkspaceId,
     autopilot_id: &AutopilotId,
+    actor: Option<&ActorRef>,
 ) -> Result<bool, AutopilotFireError> {
     let Some(autopilot) = AutopilotRepo::get(pool, workspace, autopilot_id).await? else {
         return Ok(false);
     };
-    fire_autopilot_tick(pool, clock, &autopilot).await?;
+    // A MANUAL fire: the operator's explicit override, stamped as such on the
+    // run so the history can tell it from a scheduled or api-triggered tick.
+    //
+    // ATTRIBUTION FORK (multica parity #14): a NAMED human clicking "run now" is
+    // `direct_human` — them, not the rule's owner. Without a named human it
+    // falls back to `rule_owner`, exactly like an unattended fire.
+    let attribution = match actor {
+        Some(a) => RunAttribution::DirectHuman(a.clone()),
+        None => RunAttribution::RuleOwner,
+    };
+    fire_autopilot_tick_with_attribution(pool, clock, &autopilot, RunSource::Manual, &attribution)
+        .await?;
     Ok(true)
+}
+
+/// EDIT one autopilot's config (`hangar/autopilot_update`, multica parity #14),
+/// scoped to `workspace`.
+///
+/// Thin pass-through to [`AutopilotRepo::update_as`], which does the real work:
+/// revalidate a new cron before any write, apply the patch, then publish a rule
+/// version IFF the edit was substantive. A rename lands but mints no version.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] — [`AutopilotRepoError::Cron`] for a
+/// malformed `cron_expr` (nothing written), otherwise a store failure.
+pub async fn autopilot_update(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    edit: &AutopilotEdit,
+    actor: Option<&ActorRef>,
+) -> Result<UpdateOutcome, AutopilotRepoError> {
+    AutopilotRepo::update_as(pool, clock, workspace, autopilot_id, edit, actor).await
+}
+
+/// Read one autopilot's rule-version ledger, newest-first
+/// (`hangar/autopilot_versions`, multica parity #14), scoped to `workspace`.
+///
+/// Each row carries both the raw `published_by` actor ref AND a
+/// `published_by_label` resolved daemon-side (the `user` join), so the plugin
+/// owns zero domain data. An unresolvable ref renders the raw actor ref, never a
+/// fabricated name.
+///
+/// An unversioned (pre-0061, never-edited) rule yields an empty list — the
+/// ledger was deliberately not backfilled.
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure.
+pub async fn autopilot_versions(
+    pool: &SqlitePool,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    limit: u32,
+) -> Result<Vec<AutopilotVersionRow>, AutopilotRepoError> {
+    let rows = AutopilotRuleVersionRepo::list(pool, workspace, autopilot_id, limit).await?;
+    let mut labels = ActorLabelCache::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for r in rows {
+        let published_by_label = match r.published_by.as_deref() {
+            Some(actor) => Some(labels.label(pool, actor).await),
+            None => None,
+        };
+        out.push(AutopilotVersionRow {
+            id: r.id,
+            autopilot_id: r.autopilot_id,
+            version: r.version,
+            change_kind: r.change_kind,
+            published_by: r.published_by,
+            published_by_label,
+            config_summary: r.config_summary,
+            created_at: r.created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// What [`autopilot_trigger_api`] did.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ApiTriggerOutcome {
+    /// No such autopilot in this workspace. A foreign id leaks nothing.
+    NotFound,
+    /// The autopilot exists but has not armed `api_trigger_enabled`. NOTHING is
+    /// written: the trigger does not exist, so there is nothing to skip (a
+    /// `skipped` run records an ADMISSION decision, not a missing trigger).
+    Disabled,
+    /// The admission gate declined the dispatch; a terminal `skipped` run
+    /// records it.
+    Skipped {
+        /// The recorded `skipped` run.
+        run_id: String,
+        /// The admission reason.
+        reason: String,
+    },
+    /// The dispatch was admitted.
+    Fired {
+        /// The new run.
+        run_id: String,
+        /// The task enqueued against it.
+        task_id: String,
+    },
+}
+
+/// Fire one autopilot through its bare programmatic `api` trigger
+/// (`hangar/autopilot_trigger_api`, migration 0057 / multica parity item 15),
+/// scoped to `workspace`.
+///
+/// The `api` trigger is the third trigger surface after cron and webhook: no
+/// cron expression, no HMAC — a caller with normal API access fires the
+/// autopilot directly (multica `handler/autopilot.go:441`, where
+/// `kind IN ('schedule','webhook','api')` and only `schedule` requires a cron
+/// expression).
+///
+/// Two guards, in order:
+///
+/// 1. the autopilot must exist IN THIS WORKSPACE ([`ApiTriggerOutcome::NotFound`]),
+/// 2. it must have armed `api_trigger_enabled` ([`ApiTriggerOutcome::Disabled`],
+///    writing nothing).
+///
+/// Then it goes through the SAME [`dispatch_with_admission`] gate the scheduler
+/// uses, so an api fire at the concurrency limit under the `skip` policy is
+/// declined and recorded as a terminal `skipped` run stamped `source = 'api'`.
+///
+/// # Errors
+///
+/// Returns [`AutopilotFireError::Repo`] on a store failure resolving the row, or
+/// [`AutopilotFireError::Fire`] when the dispatch fails (e.g. the autopilot's
+/// agent was deleted).
+pub async fn autopilot_trigger_api(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+) -> Result<ApiTriggerOutcome, AutopilotFireError> {
+    let Some(autopilot) = AutopilotRepo::get(pool, workspace, autopilot_id).await? else {
+        return Ok(ApiTriggerOutcome::NotFound);
+    };
+    if !autopilot.api_trigger_enabled {
+        return Ok(ApiTriggerOutcome::Disabled);
+    }
+    Ok(
+        match dispatch_with_admission(pool, clock, &autopilot, RunSource::Api).await? {
+            DispatchOutcome::Fired {
+                run_id, task_id, ..
+            } => ApiTriggerOutcome::Fired {
+                run_id: run_id.to_string(),
+                task_id: task_id.to_string(),
+            },
+            DispatchOutcome::Skipped { run_id, reason, .. } => ApiTriggerOutcome::Skipped {
+                run_id: run_id.to_string(),
+                reason,
+            },
+        },
+    )
+}
+
+/// Arm or disarm one autopilot's `api` trigger
+/// (`hangar/autopilot_set_api_trigger`), scoped to `workspace`.
+///
+/// Returns `false` when the id resolved to no autopilot in this tenant (nothing
+/// written).
+///
+/// # Errors
+///
+/// Returns an [`AutopilotRepoError`] on a store failure.
+pub async fn autopilot_set_api_trigger(
+    pool: &SqlitePool,
+    clock: &dyn HangarClock,
+    workspace: &WorkspaceId,
+    autopilot_id: &AutopilotId,
+    enabled: bool,
+    actor: Option<&ActorRef>,
+) -> Result<bool, AutopilotRepoError> {
+    AutopilotRepo::set_api_trigger_enabled_as(pool, clock, workspace, autopilot_id, enabled, actor)
+        .await
 }
 
 /// Enable or disable one autopilot (`hangar/autopilot_set_enabled`, P7.5),
@@ -1332,11 +1702,15 @@ pub async fn autopilot_set_enabled(
     workspace: &WorkspaceId,
     autopilot_id: &AutopilotId,
     enabled: bool,
+    actor: Option<&ActorRef>,
 ) -> Result<(), AutopilotRepoError> {
+    // Pausing / resuming is a SUBSTANTIVE publish on the rule (multica parity
+    // #14): it changes whether the rule fires unattended, so it re-stamps who is
+    // accountable for its runs.
     if enabled {
-        AutopilotRepo::enable(pool, clock, workspace, autopilot_id).await
+        AutopilotRepo::enable_as(pool, clock, workspace, autopilot_id, actor).await
     } else {
-        AutopilotRepo::disable(pool, workspace, autopilot_id).await
+        AutopilotRepo::disable_as(pool, clock, workspace, autopilot_id, actor).await
     }
 }
 
@@ -1480,14 +1854,15 @@ fn task_pr_url(result_json: Option<&str>) -> Option<String> {
 /// for the screen, and the bound keeps a long-lived workspace's snapshot small.
 const INBOX_LIST_LIMIT: i64 = 200;
 
-/// Snapshot a workspace's aggregated inbox + its unread count
-/// (`hangar/inbox_list`, e38.14).
+/// Snapshot ONE ACTOR's aggregated inbox + their unread count in a workspace
+/// (`hangar/inbox_list`, e38.14; per-recipient since store migration 0060).
 ///
 /// Reads the durable `inbox_entry` rows the daemon's aggregator folds live
-/// issue / comment / task events into, newest-first and capped at
-/// [`INBOX_LIST_LIMIT`], plus the count of unread (`read_at IS NULL`) entries.
-/// Workspace-scoped: a foreign / unknown workspace yields an empty list + zero
-/// unread.
+/// issue / comment / task events into and ADDRESSES to a single actor,
+/// newest-first and capped at [`INBOX_LIST_LIMIT`], plus that recipient's count
+/// of unread (`read_at IS NULL`) entries. Scoped on both axes: a foreign /
+/// unknown workspace yields an empty list + zero unread, and another actor's
+/// entries are never returned.
 ///
 /// # Errors
 ///
@@ -1495,9 +1870,10 @@ const INBOX_LIST_LIMIT: i64 = 200;
 pub async fn inbox_list(
     pool: &SqlitePool,
     workspace_id: &str,
+    recipient: &ActorRef,
 ) -> Result<(Vec<InboxEntryRow>, i64), sqlx::Error> {
-    let entries = InboxRepo::list(pool, workspace_id, INBOX_LIST_LIMIT).await?;
-    let unread = InboxRepo::unread_count(pool, workspace_id).await?;
+    let entries = InboxRepo::list(pool, workspace_id, recipient, INBOX_LIST_LIMIT).await?;
+    let unread = InboxRepo::unread_count(pool, workspace_id, recipient).await?;
     let rows = entries
         .into_iter()
         .map(|e| InboxEntryRow {
@@ -1506,6 +1882,7 @@ pub async fn inbox_list(
             event: e.event,
             subject_id: e.subject_id,
             summary: e.summary,
+            recipient: e.recipient.to_string(),
             created_at: e.created_at,
             read_at: e.read_at,
         })
@@ -1656,14 +2033,16 @@ pub async fn run_history(
     })
 }
 
-/// Mark every currently-unread inbox entry in `workspace` as read, returning
-/// `(marked, unread_after)` (`hangar/inbox_mark_read`, e38.14).
+/// Mark every currently-unread inbox entry ADDRESSED TO `recipient` in
+/// `workspace` as read, returning `(marked, unread_after)`
+/// (`hangar/inbox_mark_read`, e38.14; per-recipient since store migration 0060).
 ///
-/// `marked` is how many rows the sweep flipped (the unread count before);
-/// `unread_after` is the unread count once the sweep commits, which is `0` for
-/// this whole-workspace sweep. Idempotent — a re-sweep flips nothing. The daemon
-/// resolves + rejects a mistyped workspace before this call, so a missing
-/// workspace never reaches here.
+/// `marked` is how many of that recipient's rows the sweep flipped (their unread
+/// count before); `unread_after` is THEIR unread count once the sweep commits,
+/// which is `0`. A sibling actor's unread rows are neither swept nor counted.
+/// Idempotent — a re-sweep flips nothing. The daemon resolves + rejects a
+/// mistyped workspace before this call, so a missing workspace never reaches
+/// here.
 ///
 /// # Errors
 ///
@@ -1672,9 +2051,10 @@ pub async fn inbox_mark_read(
     pool: &SqlitePool,
     clock: &dyn HangarClock,
     workspace_id: &str,
+    recipient: &ActorRef,
 ) -> Result<(i64, i64), sqlx::Error> {
-    let marked = InboxRepo::mark_all_read(pool, workspace_id, clock.now_ms()).await?;
-    let unread = InboxRepo::unread_count(pool, workspace_id).await?;
+    let marked = InboxRepo::mark_all_read(pool, workspace_id, recipient, clock.now_ms()).await?;
+    let unread = InboxRepo::unread_count(pool, workspace_id, recipient).await?;
     Ok((i64::try_from(marked).unwrap_or(i64::MAX), unread))
 }
 
@@ -1768,7 +2148,34 @@ pub async fn issue_row(
     // graph — a list snapshot leaves `dependencies` empty on purpose, because
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
+    // multica parity #22: same DETAIL-ONLY rule as `dependencies` above -- the
+    // watcher count / `subscribed` flag / reaction tallies cost extra queries
+    // per row, so a list snapshot leaves them at their `Default`.
+    let viewer = ainb_hangar_core::actor::local_member();
+    let subscriber_count = IssueSubscriberRepo::count(pool, &issue.id).await?;
+    let subscribed = IssueSubscriberRepo::is_subscribed(pool, &issue.id, &viewer).await?;
+    let reactions = issue_reaction_rows(pool, &issue.id, &viewer).await?;
+    // multica parity #17: same DETAIL-ONLY rule again — resolving the value bag
+    // against the catalog costs an extra join per row, so a list snapshot
+    // leaves both at their `Default` and a pre-#17 client sees no new keys.
+    let properties = issue_property_rows(pool, workspace_id, &issue.id).await?;
+    let metadata = issue_metadata_rows(&issue.metadata);
     Ok(Some(IssueRow {
+        subscriber_count,
+        subscribed,
+        reactions,
+        properties,
+        metadata,
+        // multica parity #12: WHY this card is not running, from the newest
+        // dispatch_attempt when that attempt was a decline. All `None` on a
+        // healthy card, so the row grows by zero keys.
+        last_dispatch_reason: extras.last_dispatch_reason,
+        last_dispatch_detail: extras.last_dispatch_detail,
+        last_dispatch_at: extras.last_dispatch_at,
+        // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+        // row a snapshot carries and the row an event pushes agree.
+        origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+        origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
         id,
         display_id,
         workspace_id: issue.workspace_id,
@@ -1799,6 +2206,107 @@ pub async fn issue_row(
         context_refs: issue.context_refs,
         dependencies,
     }))
+}
+
+/// One issue's SUBSCRIBER set as wire rows (multica parity #22), oldest first.
+///
+/// The `reason` half is the RAW stored token, not the parsed enum, so a
+/// provenance written by a newer daemon renders as text instead of failing the
+/// decode.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_subscriber_rows(
+    pool: &SqlitePool,
+    issue_id: &str,
+) -> Result<Vec<ainb_hangar_proto::events::IssueSubscriberRow>, sqlx::Error> {
+    Ok(IssueSubscriberRepo::list(pool, issue_id)
+        .await?
+        .into_iter()
+        .map(|s| ainb_hangar_proto::events::IssueSubscriberRow {
+            actor: s.actor.to_string(),
+            reason: s.reason_raw,
+            created_at: s.created_at,
+        })
+        .collect())
+}
+
+/// One autopilot rule's write-grant set as wire rows (multica parity #27),
+/// oldest first, with the actor label resolved daemon-side.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn autopilot_collaborator_rows(
+    pool: &SqlitePool,
+    autopilot_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::AutopilotCollaboratorEntry>, sqlx::Error> {
+    let rows = AutopilotCollaboratorRepo::list(pool, autopilot_id).await?;
+    let mut labels = ActorLabelCache::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for c in rows {
+        let actor = c.actor.to_string();
+        let label = labels.label(pool, &actor).await;
+        out.push(ainb_hangar_proto::snapshots::AutopilotCollaboratorEntry {
+            actor,
+            label: Some(label),
+            role: c.role_raw,
+            created_by: c.created_by.map(|a| a.to_string()),
+            created_at: c.created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// One autopilot rule's standing subscriber list as wire rows (multica parity
+/// #27), oldest first.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn autopilot_subscriber_rows(
+    pool: &SqlitePool,
+    autopilot_id: &str,
+) -> Result<Vec<ainb_hangar_proto::snapshots::AutopilotSubscriberEntry>, sqlx::Error> {
+    let rows = AutopilotSubscriberRepo::list(pool, autopilot_id).await?;
+    let mut labels = ActorLabelCache::default();
+    let mut out = Vec::with_capacity(rows.len());
+    for sub in rows {
+        let actor = sub.actor.to_string();
+        let label = labels.label(pool, &actor).await;
+        out.push(ainb_hangar_proto::snapshots::AutopilotSubscriberEntry {
+            actor,
+            label: Some(label),
+            created_by: sub.created_by.map(|a| a.to_string()),
+            created_at: sub.created_at,
+        });
+    }
+    Ok(out)
+}
+
+/// One issue's aggregated emoji buckets as wire rows (multica parity #22),
+/// most-used first, with `mine` set for the buckets `viewer` is in.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_reaction_rows(
+    pool: &SqlitePool,
+    issue_id: &str,
+    viewer: &ainb_hangar_core::actor::ActorRef,
+) -> Result<Vec<ainb_hangar_proto::events::ReactionRow>, sqlx::Error> {
+    use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
+
+    Ok(IssueReactionRepo::tallies(pool, issue_id)
+        .await?
+        .into_iter()
+        .map(|t| ainb_hangar_proto::events::ReactionRow {
+            emoji: t.emoji,
+            count: t.count,
+            mine: t.actors.iter().any(|a| a == viewer),
+        })
+        .collect())
 }
 
 /// One issue's TYPED links (multica parity #20), in render order: `blocked_by`
@@ -1939,6 +2447,50 @@ pub async fn issue_criterion_set(
     Ok(read_issue_row(pool, workspace.as_str(), issue_id).await?)
 }
 
+/// Resolve one issue's stored custom-property bag against the workspace catalog
+/// (multica parity #17).
+///
+/// ARCHIVED definitions and ORPHAN ids are dropped by
+/// [`IssuePropertyRepo::values_for`] — the value stays on disk, it just stops
+/// rendering. The wire carries the ALREADY-RENDERED text so [`IssueRow`] keeps
+/// its `Eq` derive.
+async fn issue_property_rows(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<Vec<ainb_hangar_proto::events::IssuePropertyRow>, sqlx::Error> {
+    let Ok(ws) = WorkspaceId::from_str(workspace_id) else {
+        return Ok(Vec::new());
+    };
+    let values = IssuePropertyRepo::values_for(pool, &ws, issue_id).await?;
+    Ok(values
+        .into_iter()
+        .map(|(def, value)| ainb_hangar_proto::events::IssuePropertyRow {
+            key: def.key,
+            name: def.name,
+            kind: def.kind.as_db_str().to_string(),
+            value: ainb_hangar_core::properties::render_value(&value),
+        })
+        .collect())
+}
+
+/// Project an issue's decoded AGENT METADATA bag onto the wire, key-sorted
+/// (multica parity #17).
+///
+/// `value_json` carries the canonical primitive JSON so integer-vs-string
+/// typing survives; `value` is the same thing rendered unquoted for display.
+fn issue_metadata_rows(
+    bag: &std::collections::BTreeMap<String, ainb_hangar_core::properties::MetadataValue>,
+) -> Vec<ainb_hangar_proto::events::IssueMetadataRow> {
+    bag.iter()
+        .map(|(key, value)| ainb_hangar_proto::events::IssueMetadataRow {
+            key: key.clone(),
+            value_json: ainb_hangar_core::properties::metadata_value_json(value),
+            value: ainb_hangar_core::properties::render_metadata(value),
+        })
+        .collect()
+}
+
 /// Re-read one issue as a wire [`IssueRow`], mapped exactly as `issues_list`
 /// emits it (including the P9 `pr_url` derivation) so a re-read row is
 /// byte-identical to a list snapshot of the same issue. `None` when the id
@@ -1967,7 +2519,34 @@ async fn read_issue_row(
     // graph — a list snapshot leaves `dependencies` empty on purpose, because
     // filling it there would be an N-query fan-out per row.
     let dependencies = issue_link_rows(pool, workspace_id, &issue.id).await?;
+    // multica parity #22: same DETAIL-ONLY rule as `dependencies` above -- the
+    // watcher count / `subscribed` flag / reaction tallies cost extra queries
+    // per row, so a list snapshot leaves them at their `Default`.
+    let viewer = ainb_hangar_core::actor::local_member();
+    let subscriber_count = IssueSubscriberRepo::count(pool, &issue.id).await?;
+    let subscribed = IssueSubscriberRepo::is_subscribed(pool, &issue.id, &viewer).await?;
+    let reactions = issue_reaction_rows(pool, &issue.id, &viewer).await?;
+    // multica parity #17: same DETAIL-ONLY rule again — resolving the value bag
+    // against the catalog costs an extra join per row, so a list snapshot
+    // leaves both at their `Default` and a pre-#17 client sees no new keys.
+    let properties = issue_property_rows(pool, workspace_id, &issue.id).await?;
+    let metadata = issue_metadata_rows(&issue.metadata);
     Ok(Some(IssueRow {
+        subscriber_count,
+        subscribed,
+        reactions,
+        properties,
+        metadata,
+        // multica parity #12: WHY this card is not running, from the newest
+        // dispatch_attempt when that attempt was a decline. All `None` on a
+        // healthy card, so the row grows by zero keys.
+        last_dispatch_reason: extras.last_dispatch_reason,
+        last_dispatch_detail: extras.last_dispatch_detail,
+        last_dispatch_at: extras.last_dispatch_at,
+        // ORIGIN PROVENANCE (0056): echoed from the stored pair so the wire
+        // row a snapshot carries and the row an event pushes agree.
+        origin_type: issue.origin.as_ref().map(|o| o.kind_db_str().to_string()),
+        origin_id: issue.origin.as_ref().and_then(|o| o.id().map(ToString::to_string)),
         id,
         display_id,
         workspace_id: issue.workspace_id,
@@ -2052,7 +2631,26 @@ pub async fn refresh_pr_status(
     if issue.state == PR_MERGED_DONE_STATE {
         return Ok((status, None));
     }
+    let prev_state = issue.state.clone();
     IssueRepo::update_state(pool, issue_id, PR_MERGED_DONE_STATE).await?;
+    // multica parity #13: a daemon-driven transition is a `system` activity row
+    // carrying `via` so the narrative distinguishes "a human moved this" from
+    // "the merged PR moved this". Best-effort — never fails the transition.
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        workspace_id,
+        issue_id,
+        &ActivityActor::System,
+        ActivityAction::StatusChanged,
+        serde_json::json!({
+            "from": prev_state,
+            "to": PR_MERGED_DONE_STATE,
+            "via": "pr_merged",
+        }),
+    )
+    .await;
     // Re-read the now-Done row so the caller can push `IssueUpdated`.
     let row = read_issue_row(pool, workspace_id, issue_id).await?;
     Ok((status, row))
@@ -2079,6 +2677,12 @@ pub struct IssueCreateInput<'a> {
     pub external_ref: Option<&'a str>,
     /// Optional parent issue, making this a sub-issue (migration 0046).
     pub parent_issue_id: Option<&'a str>,
+    /// Optional 1-based STAGE BARRIER among the parent's children (migration
+    /// 0046). Siblings sharing a stage close their barrier together, and the
+    /// child-done cascade posts ONE aggregated roll-up when it closes (parity
+    /// #3-rest). Range-validated at the handler boundary; ignored without a
+    /// parent.
+    pub stage: Option<i64>,
     /// Ordered acceptance criteria (migration 0048).
     pub acceptance_criteria: &'a [String],
     /// Ordered context references (migration 0048).
@@ -2091,6 +2695,10 @@ pub struct IssueCreateInput<'a> {
     /// Label NAMES to attach (migration 0016): each resolve-or-created in the
     /// workspace and joined to the new issue.
     pub labels: &'a [String],
+    /// ORIGIN PROVENANCE for the created issue (migration 0056, multica parity
+    /// #21), already validated against the closed allow-list at the handler
+    /// boundary. `None` => the create stamps `manual` - a human authored it.
+    pub origin: Option<&'a IssueOrigin>,
 }
 
 /// Create one new issue in `workspace_id`, then return it as a wire [`IssueRow`]
@@ -2125,11 +2733,13 @@ pub async fn issue_create(
         creator,
         external_ref,
         parent_issue_id,
+        stage,
         acceptance_criteria,
         context_refs,
         priority,
         due_date,
         labels,
+        origin,
     } = input;
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
@@ -2166,7 +2776,9 @@ pub async fn issue_create(
             acceptance_criteria: minted_criteria.clone(),
             context_refs: context_refs.to_vec(),
             parent_issue_id: parent_issue_id.map(ToString::to_string),
-            stage: None,
+            // 0046: the authored stage barrier. Only meaningful with a parent,
+            // so a stage without one is stored but inert.
+            stage,
         },
     )
     .await?;
@@ -2174,6 +2786,13 @@ pub async fn issue_create(
     // post-insert card-parity pattern as source/target branches). A `None` /
     // blank ref is a no-op, so a link-less create leaves `external_ref` NULL.
     CardParityRepo::set_issue_external_ref(pool, workspace_id, &id, external_ref).await?;
+    // 0056: stamp the ORIGIN PROVENANCE with the same post-insert pattern. An
+    // absent origin is stamped `manual` (never left NULL) so from here on
+    // `origin_type IS NULL` means exactly one thing: "created before provenance
+    // existed". multica leaves human creates NULL; recording them explicitly
+    // makes the column a complete record without needing a backfill.
+    let stamped_origin = origin.cloned().unwrap_or_else(IssueOrigin::manual);
+    IssueRepo::set_origin(pool, workspace_id, &id, &stamped_origin).await?;
     // 0016: attach the authored labels through the join (resolve-or-create per
     // name, `ON CONFLICT DO NOTHING` on the join row, `issue.labels` re-derived
     // inside the same transaction). Attach is idempotent, so a repeated name is
@@ -2207,6 +2826,19 @@ pub async fn issue_create(
     // shows.
     let display_id = issue_display_row(pool, workspace_id, &id, prefix.as_deref()).await?;
     Ok(IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
+        properties: Vec::new(),
+        metadata: Vec::new(),
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        // ORIGIN PROVENANCE (0056): echo exactly what was just stamped, so the
+        // response row and the pushed IssueCreated event stay byte-identical to
+        // a later list snapshot of the same issue.
+        origin_type: Some(stamped_origin.kind_db_str().to_string()),
+        origin_id: stamped_origin.id().map(ToString::to_string),
         id: issue_id,
         display_id,
         workspace_id: workspace_id.to_string(),
@@ -2285,6 +2917,45 @@ async fn workspace_issue_prefix(
 ///
 /// Returns a [`sqlx::Error`] on a store fault, or a malformed minted id on the
 /// re-wrap (impossible for a ULID).
+/// Auto-subscribe `actor` to `issue_id` (multica parity #22).
+///
+/// BEST EFFORT by design, matching the reference's rule at `service/task.go:1877`:
+/// a failure is logged and swallowed, never propagated, because a subscription
+/// side effect must not turn a successful comment / create / assign into an
+/// error. The write is idempotent and FIRST-REASON-WINS, so calling it from
+/// several seams for the same actor keeps the earliest provenance.
+pub async fn auto_subscribe(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    actor: &ActorRef,
+    reason: SubscribeReason,
+    now_ms: i64,
+) {
+    if let Err(e) =
+        IssueSubscriberRepo::add(pool, workspace_id, issue_id, actor, reason, now_ms).await
+    {
+        tracing::warn!(
+            error = %e,
+            issue_id,
+            actor = %actor,
+            reason = reason.as_db_str(),
+            "auto-subscribe failed"
+        );
+    }
+}
+
+/// Write one comment on an issue, workspace-scoped, and return its wire row.
+///
+/// Returns `None` when `(issue_id, workspace_id)` matched no issue — an unknown
+/// id or a foreign tenant's — so the caller can reject rather than ack a write
+/// that never happened. `parent_id` threads the comment under an existing one
+/// (migration 0067); a malformed id is dropped from the WIRE row rather than
+/// failing the write.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
 pub async fn comment_add(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
@@ -2293,6 +2964,7 @@ pub async fn comment_add(
     issue_id: &str,
     author: &ActorRef,
     body: &str,
+    parent_id: Option<&str>,
 ) -> Result<Option<CommentRow>, sqlx::Error> {
     let id = idgen.new_ulid();
     let created_at = clock.now_ms();
@@ -2305,12 +2977,25 @@ pub async fn comment_add(
             author: author.clone(),
             body: body.to_string(),
             created_at,
+            parent_id: parent_id.map(str::to_string),
         },
     )
     .await?;
     if !landed {
         return Ok(None);
     }
+    // multica parity #22: commenting subscribes you to the thread. The reference
+    // seeds `reason='commenter'` the same way; first-reason-wins keeps an
+    // author who also created the issue on `creator`.
+    auto_subscribe(
+        pool,
+        workspace_id,
+        issue_id,
+        author,
+        SubscribeReason::Commenter,
+        created_at,
+    )
+    .await;
     let comment_id = CommentId::from_str(id.clone()).map_err(|e| sqlx::Error::ColumnDecode {
         index: "id".to_string(),
         source: format!("malformed comment id {id:?}: {e}").into(),
@@ -2319,182 +3004,118 @@ pub async fn comment_add(
         index: "issue_id".to_string(),
         source: format!("malformed issue id {issue_id:?}: {e}").into(),
     })?;
+    // A malformed parent id is dropped from the WIRE row rather than failing the
+    // write: the comment landed with the pointer the caller gave, and a row the
+    // client cannot decode would be a worse outcome than a missing optional.
+    let parent = parent_id.and_then(|p| CommentId::from_str(p.to_string()).ok());
     Ok(Some(CommentRow {
         id: comment_id,
         issue_id: issue,
         author: format!("{}:{}", author.kind().as_str(), author.id()),
         body: body.to_string(),
         created_at,
+        parent_id: parent,
     }))
 }
 
-/// Resolve the `@handle` mentions in a just-committed comment to agents in
-/// `workspace_id`, and enqueue an issue task for each that matches (e38.7).
+/// Route the `@`-mentions of a just-committed comment and return one wire row
+/// per addressed target (multica parity #2-rest).
 ///
-/// This is the comment-triggered task-spawn path: the `comment_add` handler
-/// calls it AFTER the comment commits, so a user `@`-mentioning an agent in a
-/// comment spawns that agent's task on the comment's issue. The trigger fires
-/// after the write so a spawn-side failure can never roll back (or lose) the
-/// comment — matching the bead's "fires from inside `comment_add` after the
-/// comment commits" contract and side-stepping the reference's mid-write expansion race.
-///
-/// Every resolved target is GATED (gap #8, multica
-/// `resolveMentionedAgentCommentTriggers`): the comment's `author` is mapped to an
-/// effective invoker ([`effective_mention_invoker`]) and an agent that invoker may
-/// not invoke is skipped exactly like an unresolvable handle — no task row, and no
-/// error. The gate runs BEFORE any other per-agent state is consulted, so a caller
-/// who cannot invoke an agent learns nothing about it from the trigger; and it is a
-/// per-target skip, so a denied `@handle` never suppresses the others in the same
-/// comment.
-///
-/// Resolution is by agent **name**, **workspace-scoped**: the candidate set is
-/// [`AgentRepo::list_by_workspace`] for the comment's workspace, so a foreign
-/// tenant's agent sharing the handle never gets a task. An unknown handle resolves
-/// to no agent and is silently ignored — never an error. Each matched agent is
-/// enqueued through the ordinary [`TaskRepo::insert`] path (no claim/dispatch
-/// logic is duplicated), bound to the comment's `issue_id` with the agent's
-/// `runtime_id` (`NOT NULL` + FK-enforced, so a resolved agent always has one).
-/// A duplicate enqueue while the agent still holds a *pending* (`queued` /
-/// `dispatched`) task on this issue — the per-`(issue, agent)` unique index — is
-/// coalesced, not an error, so re-mentioning is idempotent. Once that task has
-/// advanced to `running` the index no longer guards it, so a fresh mention
-/// enqueues a new task (intended: a follow-up mention after work started is a
-/// new request).
-///
-/// Returns the agent ids that actually got a task enqueued (for the caller's
-/// logging / future event push), empty when no mention resolved.
+/// A thin adapter: every decision lives in
+/// [`ainb_hangar_store::service::mention::route`], which is also what the
+/// `comment_mention_preview` dry run drives, so a preview can never disagree
+/// with the write it previews.
 ///
 /// # Errors
 ///
-/// Returns a [`sqlx::Error`] only on an unexpected store fault — the expected
-/// duplicate-pending-task case is coalesced inline by the unique index, not
-/// surfaced, so a single repeated mention never poisons the whole comment.
+/// Returns a [`sqlx::Error`] only on a store fault that is not attributable to
+/// one target — a per-target fault is reported as that target's
+/// `blocked` / `internal_error` row and the other targets still route.
+pub async fn route_comment_mentions(
+    pool: &SqlitePool,
+    idgen: &dyn IdGen,
+    clock: &dyn HangarClock,
+    workspace_id: &str,
+    issue_id: &str,
+    comment_id: Option<&str>,
+    parent_comment_id: Option<&str>,
+    author: &ainb_hangar_core::actor::ActorRef,
+    body: &str,
+    dry_run: bool,
+) -> Result<Vec<MentionOutcomeRow>, sqlx::Error> {
+    use ainb_hangar_store::service::mention::{MentionRouteRequest, route};
+
+    let rows = route(
+        pool,
+        idgen,
+        clock,
+        &MentionRouteRequest {
+            workspace_id,
+            issue_id,
+            comment_id,
+            parent_comment_id,
+            author,
+            body,
+            dry_run,
+        },
+    )
+    .await?;
+    Ok(rows.into_iter().map(to_wire).collect())
+}
+
+/// Map one store routing row onto the wire row.
+fn to_wire(row: ainb_hangar_store::service::mention::MentionRouteRow) -> MentionOutcomeRow {
+    MentionOutcomeRow {
+        target_type: row.target_type,
+        target_id: row.target_id,
+        handle: row.handle,
+        outcome: row.outcome.as_str().to_string(),
+        reason: row.reason.map(|r| r.as_db_str().to_string()).unwrap_or_default(),
+        task_id: row.task_id,
+        detail: row.detail.unwrap_or_default(),
+        source: row.source.as_str().to_string(),
+    }
+}
+
+/// The agent ids a comment's mentions actually ENQUEUED a task for (e38.7).
+///
+/// Kept as the historical name + shape over
+/// [`route_comment_mentions`] so the existing call sites and the in-source
+/// regression tests below — which are the mention tests the `--lib` job runs —
+/// keep exercising the same contract they always did. New callers that need the
+/// per-target outcome codes should use [`route_comment_mentions`] directly.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on an unexpected store fault.
 pub async fn spawn_mention_tasks(
     pool: &SqlitePool,
     idgen: &dyn IdGen,
     clock: &dyn HangarClock,
     workspace_id: &str,
     issue_id: &str,
+    comment_id: &str,
     author: &ainb_hangar_core::actor::ActorRef,
     body: &str,
 ) -> Result<Vec<String>, sqlx::Error> {
-    use crate::mentions::parse_mentions;
-    use ainb_hangar_store::repo::agent::AgentRepo;
-    use ainb_hangar_store::repo::task::NewTask;
-
-    let handles = parse_mentions(body);
-    if handles.is_empty() {
-        return Ok(Vec::new());
-    }
-    // gap #8 — the EFFECTIVE invoker the invocation gate judges each mention target
-    // by (multica `resolveMentionedAgentCommentTriggers`, `comment.go:2323`/`:2365`).
-    let (invoker_kind, invoker_id) = effective_mention_invoker(pool, workspace_id, author).await?;
-    // The workspace's agents are the only resolution candidates: a foreign
-    // tenant's agent sharing a handle is never in this list, so it cannot be
-    // mention-triggered here.
-    let agents = AgentRepo::list_by_workspace(pool, workspace_id).await?;
-    let now = clock.now_ms();
-    // One mention event is one run GENERATION (migration 0039, tcp 8ln): every agent
-    // fanned out from this comment shares it, and it scopes the card-state folds to
-    // this run so a prior run's terminal rows on the issue do not poison it. Minted
-    // once, before the fan-out loop, exactly like the squad fan-out.
-    let generation = TaskRepo::next_generation_for_issue(pool, issue_id).await?;
-    let mut spawned = Vec::new();
-    for handle in &handles {
-        // Resolve by name; an unknown handle simply matches no agent (ignored).
-        let Some(agent) = agents.iter().find(|a| &a.name == handle) else {
-            continue;
-        };
-        // gap #8 — the invocation gate, FIRST: multica checks invocability before
-        // any other per-agent state is read, so a caller who cannot invoke an agent
-        // never learns its archived / runtime state from the trigger's behaviour
-        // (`comment.go:2364`, enumeration-safety). A refusal is a per-target
-        // `continue`, never an early return: one denied `@handle` must not suppress
-        // the other mentions in the same comment. Denied ⇒ NO task row.
-        if !AgentRepo::can_invoke(pool, agent, invoker_kind, invoker_id.as_deref()).await? {
-            tracing::debug!(
-                agent = %agent.id,
-                handle = %handle,
-                "mention dispatch refused: invocation not allowed"
-            );
-            continue;
-        }
-        let task = NewTask {
-            id: idgen.new_ulid(),
-            workspace_id: workspace_id.to_string(),
-            runtime_id: agent.runtime_id.clone(),
-            agent_id: agent.id.clone(),
-            issue_id: Some(issue_id.to_string()),
-            work_dir: None,
-            // A mention is a direct, user-initiated ask: default urgency (P3),
-            // drained FIFO among equals — the same default the autopilot path uses.
-            priority: 0,
-            created_at: now,
-            autopilot_run_id: None,
-            generation,
-        };
-        match TaskRepo::insert(pool, &task).await {
-            Ok(_) => spawned.push(agent.id.clone()),
-            // The agent already has a pending task on this issue (the per-(issue,
-            // agent) unique index): coalesce, don't error. The trigger is
-            // idempotent — re-mentioning an already-queued agent is a no-op.
-            Err(e) if is_unique_violation(&e) => {}
-            Err(e) => return Err(e),
-        }
-    }
-    Ok(spawned)
-}
-
-/// The actor id the local TUI stamps on everything it authors (`member:me`).
-///
-/// It is a PLACEHOLDER, not a `user.id`: the plugin has no identity of its own and
-/// the daemon socket is the local operator's. `handle_issue_create` mints the same
-/// ref for wizard-created issues.
-pub(crate) const LOCAL_OPERATOR_MEMBER_ID: &str = "me";
-
-/// Resolve a comment author to the EFFECTIVE invoking identity the gap #8
-/// invocation gate judges its `@`-mention targets by.
-///
-/// - a `member` author naming a REAL user id → that user (the multi-user case the
-///   allow-list exists for);
-/// - the local-operator placeholder [`LOCAL_OPERATOR_MEMBER_ID`] → the workspace
-///   OWNER, exactly like `run_card`'s "no explicit invoker ⇒ owner" default. The
-///   local TUI stamps `member:me` on every comment it composes, so without this the
-///   gate would deny the single operator access to their own private agents — a
-///   regression with no security gain, since that socket IS the operator's. An
-///   owner-less workspace resolves to `""`, which matches no `owner_id` and fails
-///   closed, the same shape `run_card` has;
-/// - an `agent` author → `(Agent, None)`: hangar has no `originator_user_id`
-///   column (multica 184/185 is a separate gap), so an agent-authored mention is
-///   the UNATTRIBUTED A2A case — it fails closed for `private` and `member`-target
-///   agents and admits only a `public_to workspace` target (`workspaceBroad`).
-async fn effective_mention_invoker(
-    pool: &SqlitePool,
-    workspace_id: &str,
-    author: &ainb_hangar_core::actor::ActorRef,
-) -> Result<(ainb_hangar_core::actor::ActorKind, Option<String>), sqlx::Error> {
-    use ainb_hangar_core::actor::ActorKind;
-    use ainb_hangar_core::ids::WorkspaceId;
-
-    if author.kind() != ActorKind::Member {
-        return Ok((ActorKind::Agent, None));
-    }
-    if author.id() != LOCAL_OPERATOR_MEMBER_ID {
-        return Ok((ActorKind::Member, Some(author.id().to_string())));
-    }
-    let owner = match WorkspaceId::from_str(workspace_id.to_string()) {
-        Ok(ws) => ainb_hangar_store::repo::workspace::WorkspaceRepo::owner_id(pool, &ws)
-            .await?
-            .unwrap_or_default(),
-        Err(_) => String::new(),
-    };
-    Ok((ActorKind::Member, Some(owner)))
-}
-
-/// Whether a `sqlx` error is a UNIQUE-constraint violation (the per-`(issue,
-/// agent)` pending-task index coalescing a duplicate mention enqueue).
-fn is_unique_violation(e: &sqlx::Error) -> bool {
-    matches!(e, sqlx::Error::Database(db) if db.is_unique_violation())
+    let rows = route_comment_mentions(
+        pool,
+        idgen,
+        clock,
+        workspace_id,
+        issue_id,
+        Some(comment_id),
+        None,
+        author,
+        body,
+        false,
+    )
+    .await?;
+    Ok(rows
+        .into_iter()
+        .filter(|r| r.target_type == "agent" && r.outcome == "queued")
+        .map(|r| r.target_id)
+        .collect())
 }
 
 /// Snapshot the registered runtimes of `workspace` for the daemon-health pane.
@@ -2587,7 +3208,7 @@ mod issue_states_contract_tests {
 
 #[cfg(test)]
 mod mention_spawn_tests {
-    use super::spawn_mention_tasks;
+    use super::{route_comment_mentions, spawn_mention_tasks};
     use ainb_hangar_core::actor::{ActorKind, ActorRef};
     use ainb_hangar_core::clock::SystemClock;
     use ainb_hangar_core::idgen::SystemIdGen;
@@ -2625,6 +3246,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent please do X",
         )
@@ -2650,6 +3272,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent do X",
         )
@@ -2664,6 +3287,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent again",
         )
@@ -2695,6 +3319,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@claude-agent and also @claude-agent",
         )
@@ -2719,6 +3344,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &owner(),
             "@nobody hello and @ghost too",
         )
@@ -2798,6 +3424,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &bob,
             "@claude-agent please do X",
         )
@@ -2818,6 +3445,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &bob,
             "@claude-agent please do X",
         )
@@ -2846,6 +3474,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &bob,
             "@private-bot and @claude-agent please do X",
         )
@@ -2888,6 +3517,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &peer,
             "@claude-agent take this over",
         )
@@ -2920,6 +3550,7 @@ mod mention_spawn_tests {
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &peer,
             "@claude-agent take this over",
         )
@@ -2943,13 +3574,18 @@ mod mention_spawn_tests {
         let store = Store::open_in(dir.path()).await.unwrap();
         crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
 
-        let me = ActorRef::new(ActorKind::Member, super::LOCAL_OPERATOR_MEMBER_ID).unwrap();
+        let me = ActorRef::new(
+            ActorKind::Member,
+            ainb_hangar_store::service::mention::LOCAL_OPERATOR_MEMBER_ID,
+        )
+        .unwrap();
         let spawned = spawn_mention_tasks(
             store.pool(),
             &SystemIdGen,
             &SystemClock,
             crate::seed::WS_ID,
             "issue-3",
+            "c-1",
             &me,
             "@claude-agent please do X",
         )
@@ -2958,6 +3594,372 @@ mod mention_spawn_tests {
 
         assert_eq!(spawned, vec!["agent-1".to_string()]);
         assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// Route helper with the defaults the daemon's `comment_add` uses.
+    async fn route_for(
+        store: &Store,
+        author: &ActorRef,
+        body: &str,
+    ) -> Vec<ainb_hangar_proto::snapshots::MentionOutcomeRow> {
+        route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            Some("c-1"),
+            None,
+            author,
+            body,
+            false,
+        )
+        .await
+        .unwrap()
+    }
+
+    /// **2-rest** — the router reports a per-target OUTCOME, not just the ids it
+    /// spawned. A plain resolved mention is `queued`.
+    #[tokio::test]
+    async fn a_resolved_mention_reports_queued() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(&store, &owner(), "@claude-agent please do X").await;
+        assert_eq!(rows.len(), 1, "one row per target: {rows:?}");
+        assert_eq!(rows[0].outcome, "queued");
+        assert_eq!(rows[0].reason, "queued");
+        assert_eq!(rows[0].target_type, "agent");
+        assert_eq!(rows[0].target_id, "agent-1");
+        assert_eq!(rows[0].source, "explicit");
+        assert!(rows[0].task_id.is_some(), "the queued row names its task");
+    }
+
+    /// **2-rest** — a REPEAT mention against a still-pending task is reported as
+    /// `coalesced` instead of vanishing into a swallowed unique violation, and
+    /// the pending task is re-pointed at the NEWER comment.
+    #[tokio::test]
+    async fn a_repeat_mention_reports_coalesced_and_repoints_the_trigger() {
+        use ainb_hangar_store::repo::task::TaskRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let first = route_for(&store, &owner(), "@claude-agent do X").await;
+        assert_eq!(first[0].outcome, "queued");
+        let task_id = first[0].task_id.clone().unwrap();
+        assert_eq!(
+            TaskRepo::trigger_comment_id(store.pool(), &task_id).await.unwrap(),
+            Some("c-1".to_string()),
+            "the queued task records the comment that summoned it"
+        );
+
+        let second = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            Some("c-2"),
+            None,
+            &owner(),
+            "@claude-agent again",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(second.len(), 1, "{second:?}");
+        assert_eq!(second[0].outcome, "coalesced");
+        assert_eq!(second[0].reason, "coalesced");
+        assert_eq!(count_for_issue3(&store).await, 1, "still one task");
+        assert_eq!(
+            TaskRepo::trigger_comment_id(store.pool(), &task_id).await.unwrap(),
+            Some("c-2".to_string()),
+            "merge-into-pending re-points the task at the NEWER comment"
+        );
+    }
+
+    /// **2-rest** — a refusal now carries a CODE. Before this item the same call
+    /// returned an empty spawn list with no way to tell "denied" from "nobody
+    /// was mentioned".
+    #[tokio::test]
+    async fn a_refused_mention_reports_blocked_invocation_not_allowed() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let rows = route_for(&store, &bob, "@claude-agent please do X").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "blocked");
+        assert_eq!(rows[0].reason, "invocation_not_allowed");
+        assert_eq!(count_for_issue3(&store).await, 0, "no task row is written");
+    }
+
+    /// **2-rest** — an agent's own comment never re-triggers itself
+    /// (multica's self-loop guard), and says so.
+    #[tokio::test]
+    async fn an_agent_mentioning_itself_is_suppressed_with_a_code() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let itself = ActorRef::new(ActorKind::Agent, "agent-1").unwrap();
+        let rows = route_for(&store, &itself, "@claude-agent keep going").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "blocked");
+        assert_eq!(rows[0].reason, "self_trigger_suppressed");
+        assert_eq!(count_for_issue3(&store).await, 0);
+    }
+
+    /// **2-rest** — one denied handle produces its OWN row rather than
+    /// suppressing the allowed one: two rows, one task.
+    #[tokio::test]
+    async fn one_denied_handle_never_suppresses_the_others() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+        seed_second_agent(&store, "agent-priv", "private-bot").await;
+        allow_member(&store, "agent-1", "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let rows = route_for(&store, &bob, "@private-bot and @claude-agent do X").await;
+        assert_eq!(rows.len(), 2, "one row per target: {rows:?}");
+        assert_eq!(rows[0].outcome, "blocked", "{rows:?}");
+        assert_eq!(rows[0].reason, "invocation_not_allowed");
+        assert_eq!(rows[1].outcome, "queued", "{rows:?}");
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// **2-rest** — the LINK form addresses the same agent by id and produces the
+    /// same task the bare form does.
+    #[tokio::test]
+    async fn the_link_form_spawns_the_same_task_the_bare_form_does() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(
+            &store,
+            &owner(),
+            "[@Claude](mention://agent/agent-1) ship it",
+        )
+        .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "queued");
+        assert_eq!(rows[0].target_id, "agent-1");
+        assert_eq!(count_for_issue3(&store).await, 1);
+    }
+
+    /// **2-rest** — mentioning a HUMAN routes to that human: zero tasks, one
+    /// inbox entry addressed to them, and a `notified` outcome. This is the leg
+    /// that did not exist at all before this item.
+    #[tokio::test]
+    async fn mentioning_a_human_notifies_them_and_spawns_no_task() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        // A member who is NOT the issue creator, so the subscription reason this
+        // asserts on is the mention's own and not a pre-existing `creator` row
+        // (the subscriber repo is first-reason-wins).
+        seed_plain_member(&store, "bob").await;
+
+        let rows = route_for(
+            &store,
+            &owner(),
+            "[@Bob](mention://member/bob) can you look?",
+        )
+        .await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "notified");
+        assert_eq!(rows[0].target_type, "member");
+        assert_eq!(rows[0].target_id, "bob");
+        assert_eq!(
+            count_for_issue3(&store).await,
+            0,
+            "a human mention is not a run"
+        );
+
+        let inbox: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM inbox_entry \
+             WHERE recipient_type = 'member' AND recipient_id = 'bob' \
+               AND event = 'mention' AND subject_id = 'issue-3'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(inbox, 1, "the mention landed in that human's inbox");
+
+        let subscribed: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM issue_subscriber \
+             WHERE issue_id = 'issue-3' AND actor_type = 'member' \
+               AND actor_id = 'bob' AND reason = 'mentioned'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .unwrap();
+        assert_eq!(subscribed, 1, "being @-mentioned subscribes you");
+    }
+
+    /// **2-rest** — the bare-handle form finds the human too (`@alice` is the
+    /// email local part), since hangar has no `handle` column.
+    #[tokio::test]
+    async fn a_bare_handle_resolves_to_a_human_when_no_agent_matches() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(&store, &owner(), "@alice thoughts?").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "notified");
+        assert_eq!(rows[0].target_id, "user-1");
+    }
+
+    /// **2-rest** — an `issue` cross-reference is understood and reported as
+    /// `ignored`, never treated as a trigger.
+    #[tokio::test]
+    async fn an_issue_cross_reference_is_ignored_not_triggered() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        let rows = route_for(&store, &owner(), "see [#1](mention://issue/issue-1)").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].outcome, "ignored");
+        assert_eq!(rows[0].target_type, "issue");
+        assert_eq!(count_for_issue3(&store).await, 0);
+    }
+
+    /// **2-rest** — a mention-less comment on an AGENT-ASSIGNED issue falls back
+    /// to the assignee (multica's implicit chain), tagged `assignee`.
+    #[tokio::test]
+    async fn a_mentionless_comment_falls_back_to_the_agent_assignee() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+
+        // issue-1 is the fixture's agent-assigned card; issue-3 is unassigned.
+        let rows = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-1",
+            Some("c-1"),
+            None,
+            &owner(),
+            "any update?",
+            false,
+        )
+        .await
+        .unwrap();
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].source, "assignee");
+        assert_eq!(rows[0].target_id, "agent-1");
+
+        // The unassigned issue has nowhere to fall back to: zero rows.
+        let none = route_for(&store, &owner(), "any update?").await;
+        assert!(
+            none.is_empty(),
+            "no parent, no assignee ⇒ nothing: {none:?}"
+        );
+    }
+
+    /// **2-rest** — the DRY RUN reports the identical outcome codes the write
+    /// then produces, and writes nothing at all.
+    #[tokio::test]
+    async fn a_dry_run_matches_the_write_and_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        async fn counts(store: &Store) -> (i64, i64, i64) {
+            let t: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            let i: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM inbox_entry")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            let s: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM issue_subscriber")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+            (t, i, s)
+        }
+
+        let body = "[@Alice](mention://member/user-1) and @claude-agent go";
+        let before = counts(&store).await;
+        let preview = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            None,
+            None,
+            &owner(),
+            body,
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(counts(&store).await, before, "a preview writes NOTHING");
+
+        let written = route_for(&store, &owner(), body).await;
+        let codes = |rows: &[ainb_hangar_proto::snapshots::MentionOutcomeRow]| {
+            rows.iter()
+                .map(|r| {
+                    (
+                        r.target_type.clone(),
+                        r.target_id.clone(),
+                        r.outcome.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            codes(&preview),
+            codes(&written),
+            "the preview must report exactly what the write then does"
+        );
+        assert_ne!(counts(&store).await, before, "the write DOES write");
+    }
+
+    /// **2-rest** — the private-agent gate is IDENTICAL on the preview path, so
+    /// a preview can never leak an agent's readiness to someone who may not
+    /// invoke it.
+    #[tokio::test]
+    async fn the_preview_applies_the_private_gate_identically() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        crate::seed::seed_p4_fixture(store.pool()).await.unwrap();
+        seed_plain_member(&store, "bob").await;
+
+        let bob = ActorRef::new(ActorKind::Member, "bob").unwrap();
+        let preview = route_comment_mentions(
+            store.pool(),
+            &SystemIdGen,
+            &SystemClock,
+            crate::seed::WS_ID,
+            "issue-3",
+            None,
+            None,
+            &bob,
+            "@claude-agent go",
+            true,
+        )
+        .await
+        .unwrap();
+        assert_eq!(preview.len(), 1, "{preview:?}");
+        assert_eq!(preview[0].outcome, "blocked");
+        assert_eq!(preview[0].reason, "invocation_not_allowed");
     }
 }
 
@@ -3115,4 +4117,76 @@ mod pr_fetch_bound_tests {
             "no urls → no fetches spawned"
         );
     }
+}
+
+/// Merge one issue's activity rows and comments into the wire timeline,
+/// **oldest first**, sorted by `(created_at, id)` — multica's `mergeTimeline`
+/// (parity #13).
+///
+/// Comments are NOT duplicated as `activity_log` rows; they are merged here at
+/// READ time so the comment body stays the single source of truth. Each side is
+/// fetched independently and capped at `limit`; the merged list keeps the NEWEST
+/// `limit` entries and renders them oldest-first.
+///
+/// # Errors
+///
+/// Returns a [`sqlx::Error`] on a store fault.
+pub async fn issue_timeline(
+    pool: &SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    limit: i64,
+) -> Result<Vec<TimelineEntryRow>, sqlx::Error> {
+    use ainb_hangar_proto::snapshots::{TIMELINE_KIND_ACTIVITY, TIMELINE_KIND_COMMENT};
+    use ainb_hangar_store::repo::activity::ActivityRepo;
+    use ainb_hangar_store::repo::comment::CommentRepo;
+
+    let activities = ActivityRepo::list_for_issue(pool, issue_id, limit).await?;
+    let comments = CommentRepo::list_by_issue(pool, workspace_id, issue_id).await?;
+
+    let mut entries: Vec<TimelineEntryRow> = Vec::with_capacity(activities.len() + comments.len());
+    for a in activities {
+        // Re-assert the tenant: the per-issue query keys on the issue id, and the
+        // activity row carries its own workspace column.
+        if a.workspace_id != workspace_id {
+            continue;
+        }
+        let details = a.details_json();
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_ACTIVITY.to_string(),
+            id: a.id,
+            actor_type: a.actor_type,
+            actor_id: a.actor_id,
+            created_at: a.created_at,
+            action: Some(a.action),
+            // An empty details object adds no information — omit it so the frame
+            // stays small and an activity with nothing to say looks like one.
+            details: (!details.as_object().is_some_and(serde_json::Map::is_empty))
+                .then_some(details),
+            body: None,
+        });
+    }
+    for c in comments {
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_COMMENT.to_string(),
+            id: c.id,
+            actor_type: Some(c.author.kind().as_str().to_string()),
+            actor_id: Some(c.author.id().to_string()),
+            created_at: c.created_at,
+            action: None,
+            details: None,
+            body: Some(c.body),
+        });
+    }
+
+    // `(created_at, id)` ascending — the id is a deterministic tiebreak for two
+    // entries recorded in the same millisecond.
+    entries.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    // Keep the NEWEST window when the merged list overflows, then render it
+    // oldest-first (multica's flat contract).
+    let cap = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+    if entries.len() > cap {
+        entries.drain(..entries.len() - cap);
+    }
+    Ok(entries)
 }

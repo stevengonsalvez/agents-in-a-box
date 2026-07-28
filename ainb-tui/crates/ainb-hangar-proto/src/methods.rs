@@ -162,6 +162,113 @@ pub const HANGAR_AUTOPILOT_FIRE_NOW: &str = "hangar/autopilot_fire_now";
 /// `d` key toggles the selected autopilot (P7.5). Workspace-scoped.
 pub const HANGAR_AUTOPILOT_SET_ENABLED: &str = "hangar/autopilot_set_enabled";
 
+/// `hangar/autopilot_trigger_api` — fire one autopilot through its bare
+/// programmatic `api` trigger (migration 0057).
+///
+/// Params: `{ workspace_id: String, autopilot_id: String }`. Result: a
+/// [`crate::snapshots::AutopilotTriggerApiResult`]. Unlike
+/// [`HANGAR_AUTOPILOT_FIRE_NOW`] (an operator's manual override), this is the
+/// `api` TRIGGER: it only fires when the autopilot has explicitly armed
+/// `api_trigger_enabled`, and it runs the SAME admission gate the scheduler
+/// does — so a dispatch at the concurrency limit under the `skip` policy is
+/// declined and recorded as a terminal `skipped` run rather than silently
+/// dropped. Workspace-scoped: a foreign id reports `not_found` and fires
+/// nothing.
+pub const HANGAR_AUTOPILOT_TRIGGER_API: &str = "hangar/autopilot_trigger_api";
+
+/// `hangar/autopilot_set_api_trigger` — arm or disarm the `api` trigger.
+///
+/// Params: `{ workspace_id: String, autopilot_id: String, enabled: bool }`.
+/// Result: `{ updated: bool }` (`false` when the id is foreign / absent).
+/// Mirrors [`HANGAR_AUTOPILOT_SET_ENABLED`]: a trigger surface is armed by an
+/// explicit operator action, never implicitly at create time. Workspace-scoped.
+pub const HANGAR_AUTOPILOT_SET_API_TRIGGER: &str = "hangar/autopilot_set_api_trigger";
+
+/// `hangar/autopilot_update` — EDIT one autopilot's config (multica parity #14).
+///
+/// Params: a [`crate::snapshots::AutopilotUpdateParams`] (every editable field
+/// optional; `None` leaves it alone). Result: a
+/// [`crate::snapshots::AutopilotUpdateResult`].
+///
+/// Before this method there was no edit surface at all — an autopilot's cron,
+/// instructions, agent or policy could not be changed without hand-editing
+/// sqlite. A SUBSTANTIVE edit appends a row to the `autopilot_rule_version`
+/// accountability ledger naming `actor_user_id` as the accountable human; a
+/// COSMETIC edit (a rename) lands the change but mints NO version, which the
+/// result reports as `version: null`. Workspace-scoped: a foreign id reports
+/// `not_found` and writes nothing.
+pub const HANGAR_AUTOPILOT_UPDATE: &str = "hangar/autopilot_update";
+
+/// `hangar/autopilot_versions` — read one autopilot's rule-version ledger.
+///
+/// Params: a [`crate::snapshots::AutopilotVersionsParams`]. Result: a
+/// [`crate::snapshots::AutopilotVersionsResult`] (newest-first, capped at
+/// `limit`). The append-only audit trail of who published what, and the source
+/// of the accountable human for every unattended run. Workspace-scoped: a
+/// foreign autopilot id yields an empty set.
+pub const HANGAR_AUTOPILOT_VERSIONS: &str = "hangar/autopilot_versions";
+
+/// `hangar/autopilot_collaborator_add` — grant an actor WRITE access to one
+/// autopilot rule (multica parity #27, migration 0064).
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`] (`role` omitted ⇒
+/// `editor`). Result: a [`crate::snapshots::AutopilotCollaboratorsResult`] —
+/// the REFRESHED set, so a mutator needs no read-after-write round trip.
+///
+/// A grant is set membership: re-adding an existing collaborator keeps the
+/// ORIGINAL row. Itself a rule mutation, so it goes through the same
+/// restricted-mode write gate — a non-collaborator cannot grant themselves
+/// collaboration.
+pub const HANGAR_AUTOPILOT_COLLABORATOR_ADD: &str = "hangar/autopilot_collaborator_add";
+
+/// `hangar/autopilot_collaborator_remove` — revoke an actor's write grant.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`]. Result: a
+/// [`crate::snapshots::AutopilotCollaboratorsResult`]. Idempotent.
+pub const HANGAR_AUTOPILOT_COLLABORATOR_REMOVE: &str = "hangar/autopilot_collaborator_remove";
+
+/// `hangar/autopilot_collaborators` — read one rule's write-grant set.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`] (`actor` / `role`
+/// ignored). Result: a [`crate::snapshots::AutopilotCollaboratorsResult`],
+/// oldest first. Workspace-scoped: a foreign id yields an empty set.
+pub const HANGAR_AUTOPILOT_COLLABORATORS: &str = "hangar/autopilot_collaborators";
+
+/// `hangar/autopilot_subscriber_add` — add an actor to a rule's STANDING
+/// subscriber list (multica parity #27).
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`]. Result: a
+/// [`crate::snapshots::AutopilotSubscribersResult`]. Every issue the rule
+/// SPAWNS thereafter auto-subscribes this set, so a human tracking a recurring
+/// automation is notified per occurrence.
+pub const HANGAR_AUTOPILOT_SUBSCRIBER_ADD: &str = "hangar/autopilot_subscriber_add";
+
+/// `hangar/autopilot_subscriber_remove` — drop an actor from the standing list.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`]. Result: a
+/// [`crate::snapshots::AutopilotSubscribersResult`]. Idempotent. Already-spawned
+/// issues keep their own subscriber rows — a past notification is not retracted.
+pub const HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE: &str = "hangar/autopilot_subscriber_remove";
+
+/// `hangar/autopilot_subscribers` — read one rule's standing subscriber list.
+///
+/// Params: a [`crate::snapshots::AutopilotActorParams`] (`actor` / `role`
+/// ignored). Result: a [`crate::snapshots::AutopilotSubscribersResult`].
+pub const HANGAR_AUTOPILOT_SUBSCRIBERS: &str = "hangar/autopilot_subscribers";
+
+/// `hangar/autopilot_set_access_mode` — open or restrict who may WRITE a rule
+/// (multica parity #27, migration 0064).
+///
+/// Params: a [`crate::snapshots::AutopilotSetAccessModeParams`]. Result: a
+/// [`crate::snapshots::AutopilotUpdateResult`] — flipping the mode is a
+/// SUBSTANTIVE publish, so it mints a rule version like any other.
+///
+/// `"open"` (the default, and every pre-0064 row) means any actor in the
+/// workspace may write, i.e. the behaviour before this method existed.
+/// `"restricted"` means the rule's owner, a workspace owner/admin, or an
+/// explicit `editor` collaborator only.
+pub const HANGAR_AUTOPILOT_SET_ACCESS_MODE: &str = "hangar/autopilot_set_access_mode";
+
 /// `hangar/tasks_list` — snapshot the task queue of a workspace for the Kanban
 /// board (P8.4).
 ///
@@ -213,6 +320,27 @@ pub const HANGAR_TASK_RETRY: &str = "hangar/task_retry";
 /// so a foreign-tenant issue id touches no row. After a committed edit the
 /// daemon pushes the matching [`crate::events::HangarEvent::IssueUpdated`].
 pub const HANGAR_ISSUE_UPDATE: &str = "hangar/issue_update";
+
+/// `hangar/issues_batch_update` — apply ONE lifecycle state to N issues in a
+/// single pass, then run ONE aggregated child-done cascade (multica parity
+/// #3-rest, MUL-4155).
+///
+/// Params: [`crate::snapshots::IssuesBatchUpdateParams`]
+/// (`{ workspace_id, issue_ids, state? }`). Result:
+/// [`crate::snapshots::IssuesBatchUpdateResult`].
+///
+/// The point of the verb is the cascade: several sibling completions closing the
+/// same stage barrier produce a SINGLE parent comment naming all of them, not
+/// one comment per child. The state edits commit in one transaction so the
+/// cascade observes FINAL state, never per-child intermediate state.
+///
+/// Mutating + workspace-scoped, mirroring [`HANGAR_ISSUE_UPDATE`]: the daemon
+/// resolves the workspace and rejects a mistyped one with `INVALID_PARAMS`, and
+/// every edit is scoped by `(id, workspace_id)` so a foreign-tenant id touches
+/// no row. After the commit the daemon pushes one
+/// [`crate::events::HangarEvent::IssueUpdated`] per changed row and one
+/// [`crate::events::HangarEvent::CommentAdded`] per aggregated cascade.
+pub const HANGAR_ISSUES_BATCH_UPDATE: &str = "hangar/issues_batch_update";
 
 /// `hangar/issue_create` — create one new issue in a workspace (e38.29).
 ///
@@ -284,6 +412,130 @@ pub const FLEET_BROADCAST: &str = "fleet/broadcast";
 /// caller cares about the enqueued task, not the surface it launched from).
 pub const HANGAR_ISSUE_RUN: &str = "hangar/issue_run";
 
+/// `hangar/dispatch_attempts_list` — the ADMISSION-DECISION audit feed (multica
+/// parity #12, migration 0058).
+///
+/// Every dispatch attempt — the ones that queued a run and the ones that were
+/// declined — is persisted with a stable [`ainb_hangar_core::dispatch_reason::DispatchReason`]
+/// code, a free-text detail, and the trigger surface that made it. This method is
+/// the read side: "why is this card not running", answerable after the fact
+/// rather than only in the RPC error that scrolled past.
+///
+/// Params: [`crate::snapshots::DispatchAttemptsListParams`]
+/// (`{ workspace_id, issue_id?, limit? }`); result:
+/// [`crate::snapshots::DispatchAttemptsListResult`] — newest first, default
+/// `limit` 50, hard cap 200. Workspace-scoped through the same tenant guard as
+/// every other list method, so a sibling tenant's attempts are never returned.
+pub const HANGAR_DISPATCH_ATTEMPTS_LIST: &str = "hangar/dispatch_attempts_list";
+
+/// `hangar/issue_timeline` — read one issue's merged activity + comment
+/// timeline (multica parity #13, migration 0059).
+///
+/// The per-issue NARRATIVE: creation, state moves, re-assignments,
+/// priority/title/due-date edits and task outcomes from `activity_log`, merged
+/// at READ time with the issue's comments (comments are never duplicated as
+/// activity rows — the comment body stays the single source of truth, matching
+/// multica's `mergeTimeline`).
+///
+/// Params: [`crate::snapshots::IssueTimelineParams`]
+/// (`{ workspace_id, issue_id, limit? }`); result:
+/// [`crate::snapshots::IssueTimelineResult`] — entries **oldest first**, default
+/// `limit` 200, hard cap 2000 (multica's `timelineHardCap`). Read-only and
+/// workspace-scoped through the same tenant guard as
+/// [`HANGAR_DISPATCH_ATTEMPTS_LIST`]; an `issue_id` that does not resolve inside
+/// the workspace is `INVALID_PARAMS`, never a silent empty list.
+///
+/// **No live push.** multica broadcasts an `activity:created` WS event; hangar
+/// deliberately does not add a `HangarEvent` variant for it — the surfaces fetch
+/// on open and on refresh. Adding one later is append-only.
+pub const HANGAR_ISSUE_TIMELINE: &str = "hangar/issue_timeline";
+
+/// `hangar/properties_list` — the workspace's CUSTOM PROPERTY catalog (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::PropertiesListParams`]
+/// (`{ workspace_id, include_archived? }`); result:
+/// [`crate::snapshots::PropertiesListResult`] — definitions in `position, key`
+/// order. Archived definitions are omitted unless `include_archived` is set.
+/// Read-only + workspace-scoped.
+pub const HANGAR_PROPERTIES_LIST: &str = "hangar/properties_list";
+
+/// `hangar/property_define` — create or update ONE custom-property definition
+/// (multica parity #17).
+///
+/// Params: [`crate::snapshots::PropertyDefineParams`]
+/// (`{ workspace_id, key, name?, kind?, options?, position? }`); result:
+/// [`crate::events::PropertyDefRow`]. Idempotent resolve-or-update by
+/// `(workspace_id, key)`: re-defining an existing key updates the display label
+/// / kind / options IN PLACE and KEEPS the definition id, so a rename touches
+/// zero issue rows. Defining a 21st ACTIVE definition, a `select` with no
+/// options, or an unknown `kind` is `INVALID_PARAMS`. Mutating +
+/// workspace-scoped.
+pub const HANGAR_PROPERTY_DEFINE: &str = "hangar/property_define";
+
+/// `hangar/property_archive` — archive or un-archive a definition (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::PropertyArchiveParams`]
+/// (`{ workspace_id, key, archived }`); result:
+/// [`crate::events::PropertyDefRow`]. NEVER a delete: stored issue values
+/// survive an archive untouched and render again on un-archive. An unknown key
+/// is `INVALID_PARAMS`. Mutating + workspace-scoped.
+pub const HANGAR_PROPERTY_ARCHIVE: &str = "hangar/property_archive";
+
+/// `hangar/issue_property_set` — set ONE custom property on an issue (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::IssuePropertySetParams`]
+/// (`{ workspace_id, issue_id, key, value?, values? }`; `values` is the
+/// `multi_select` form). Result: the refreshed issue
+/// [`crate::events::IssueRow`]. The value is validated against the catalogued
+/// kind + options; a mismatch, an unknown key, a foreign-tenant issue, and a
+/// bag past 16 KB are all `INVALID_PARAMS`, never a 500. Single-key atomic —
+/// a concurrent write to a DIFFERENT property is never clobbered. Mutating +
+/// workspace-scoped.
+pub const HANGAR_ISSUE_PROPERTY_SET: &str = "hangar/issue_property_set";
+
+/// `hangar/issue_property_clear` — clear ONE custom property from an issue
+/// (multica parity #17).
+///
+/// Params: [`crate::snapshots::IssuePropertyClearParams`]
+/// (`{ workspace_id, issue_id, key }`); result: the refreshed
+/// [`crate::events::IssueRow`]. Clearing an unset property is an idempotent
+/// no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_PROPERTY_CLEAR: &str = "hangar/issue_property_clear";
+
+/// `hangar/issue_metadata_get` — read an issue's AGENT METADATA bag (multica
+/// parity #17).
+///
+/// Params: [`crate::snapshots::IssueMetadataParams`]
+/// (`{ workspace_id, issue_id }`; `key` narrows to one entry); result:
+/// [`crate::snapshots::IssueMetadataResult`] — entries key-sorted, each
+/// carrying the canonical `value_json` so numeric-vs-string typing survives the
+/// wire. Read-only + workspace-scoped.
+pub const HANGAR_ISSUE_METADATA_GET: &str = "hangar/issue_metadata_get";
+
+/// `hangar/issue_metadata_set` — set ONE metadata key (multica parity #17).
+///
+/// Params: [`crate::snapshots::IssueMetadataParams`]
+/// (`{ workspace_id, issue_id, key, value, value_type? }`; `value_type` is
+/// `string` | `number` | `bool`, absent ⇒ sniff); result:
+/// [`crate::snapshots::IssueMetadataResult`]. Keys match
+/// `^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$`, values are PRIMITIVES only (a null is
+/// rejected — use delete), at most 50 keys and 8 KB per issue; every one of
+/// those is `INVALID_PARAMS`. Single-key atomic: `hangar/issue_update` never
+/// touches the bag. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_METADATA_SET: &str = "hangar/issue_metadata_set";
+
+/// `hangar/issue_metadata_delete` — delete ONE metadata key (multica parity
+/// #17).
+///
+/// Params: [`crate::snapshots::IssueMetadataParams`]
+/// (`{ workspace_id, issue_id, key }`); result:
+/// [`crate::snapshots::IssueMetadataResult`]. Deleting an absent key is an
+/// idempotent no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_METADATA_DELETE: &str = "hangar/issue_metadata_delete";
+
 /// `hangar/issue_label_attach` — attach a label to one issue (e38.10).
 ///
 /// Params: [`crate::snapshots::IssueLabelParams`]
@@ -352,6 +604,23 @@ pub const HANGAR_ISSUE_CRITERION_SET: &str = "hangar/issue_criterion_set";
 /// daemon pushes the matching [`crate::events::HangarEvent::CommentAdded`] so a
 /// subscribed task-detail screen re-renders the new comment.
 pub const HANGAR_COMMENT_ADD: &str = "hangar/comment_add";
+
+/// `hangar/comment_mention_preview` — dry-run the mention router over a comment
+/// body WITHOUT writing anything (multica `PreviewCommentTriggers`, parity
+/// #2-rest).
+///
+/// Params: [`crate::snapshots::CommentMentionPreviewParams`]
+/// (`{ workspace_id, issue_id, author, body, parent_id? }`). Result:
+/// [`crate::snapshots::CommentMentionPreviewResult`] — the SAME
+/// [`crate::snapshots::MentionOutcomeRow`] vector
+/// [`HANGAR_COMMENT_ADD`] returns, produced by the same code path with
+/// `dry_run` set. That shared path is the contract: the preview runs the
+/// identical visibility / invocation gate, so it can never leak a private
+/// agent's readiness, and it can never disagree with the write it previews.
+///
+/// Read-only but workspace-scoped like the mutating handlers: a mistyped
+/// workspace is `INVALID_PARAMS`, never a silently empty preview.
+pub const HANGAR_COMMENT_MENTION_PREVIEW: &str = "hangar/comment_mention_preview";
 
 /// `hangar/agent_update` — edit one agent's config knobs (e38.15).
 ///
@@ -453,6 +722,56 @@ pub const HANGAR_MEMBER_SET_ROLE: &str = "hangar/member_set_role";
 /// member touches no row (a not-found error). Removing the workspace's *only*
 /// owner is rejected so a workspace always keeps an owner.
 pub const HANGAR_MEMBER_REMOVE: &str = "hangar/member_remove";
+
+/// `hangar/invite_create` — invite an email into a workspace (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteCreateParams`]
+/// (`{ workspace_id, inviter_user_id, invitee_email, role }`). Result: the
+/// refreshed [`crate::snapshots::MembersListResult`] for the workspace (its
+/// `pending_invites` now carries the new row), or an error.
+///
+/// The pending state between "someone was invited" and "someone is a member":
+/// an invite adds NO member until it is accepted. `role` is `admin` or `member`
+/// — `owner` is rejected with `INVALID_PARAMS` ("cannot invite as owner").
+/// Mutating + workspace-scoped like [`HANGAR_MEMBER_SET_ROLE`]: the daemon
+/// resolves the workspace and **rejects** a mistyped one with `INVALID_PARAMS`
+/// (never a silent no-op). A live pending invite for the same
+/// (workspace, email), or an email that already belongs to a member, is
+/// rejected; a past-due pending row is swept to `expired` first so a re-invite
+/// after expiry always fits the partial unique index.
+pub const HANGAR_INVITE_CREATE: &str = "hangar/invite_create";
+
+/// `hangar/invite_accept` — accept a pending invitation (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteActParams`]
+/// (`{ workspace_id, invitation_id, actor_email }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`] — the accepting human is now a
+/// member and the invite has left `pending_invites`.
+///
+/// The status flip and the membership insert are ONE transaction. `actor_email`
+/// must match the invitee (hangar has no session, so the acting identity is
+/// explicit); a foreign accept, a non-pending invitation, or one past its
+/// 7-day window is rejected with `INVALID_PARAMS`.
+pub const HANGAR_INVITE_ACCEPT: &str = "hangar/invite_accept";
+
+/// `hangar/invite_decline` — decline a pending invitation (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteActParams`]
+/// (`{ workspace_id, invitation_id, actor_email }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`]. No member is created; the row
+/// becomes `declined` and stops blocking a future invite to the same email.
+/// Same ownership + pending gates as [`HANGAR_INVITE_ACCEPT`].
+pub const HANGAR_INVITE_DECLINE: &str = "hangar/invite_decline";
+
+/// `hangar/invite_revoke` — withdraw a pending invitation (multica parity #18).
+///
+/// Params: [`crate::snapshots::InviteRevokeParams`]
+/// (`{ workspace_id, invitation_id }`). Result: the refreshed
+/// [`crate::snapshots::MembersListResult`]. The admin-side counterpart of
+/// decline: the pending row is DELETED. Workspace-scoped in SQL, so another
+/// tenant's invitation matches no row and is reported as `INVALID_PARAMS`,
+/// never deleted.
+pub const HANGAR_INVITE_REVOKE: &str = "hangar/invite_revoke";
 
 /// `hangar/squads_list` — snapshot the squads of a workspace (e38.17).
 ///
@@ -638,31 +957,42 @@ pub const HANGAR_USAGE_ROLLUP: &str = "hangar/usage_rollup";
 /// error).
 pub const HANGAR_PR_STATUS_REFRESH: &str = "hangar/pr_status_refresh";
 
-/// `hangar/inbox_list` — snapshot the aggregated notification inbox of a
-/// workspace (e38.14).
+/// `hangar/inbox_list` — snapshot ONE ACTOR's aggregated notification inbox in a
+/// workspace (e38.14; per-recipient since store migration 0060).
 ///
-/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
-/// Result: [`crate::snapshots::InboxListResult`] — the workspace's inbox entries
-/// (newest-first) plus the unread count. Drives the Inbox screen's list + unread
-/// badge. The entries are the durable aggregate the daemon's inbox writer folds
-/// live issue / comment / task events into (store migration 0021), so an event
-/// that fired while no plugin was attached is still here. Workspace-scoped like
-/// every snapshot: a foreign / unknown workspace yields an empty list + zero
-/// unread (a read, so no `INVALID_PARAMS` rejection — mirrors `issues_list`).
+/// Params: [`crate::snapshots::InboxScopedParams`]
+/// (`{ workspace_id, recipient? }`).
+/// Result: [`crate::snapshots::InboxListResult`] — that recipient's inbox entries
+/// (newest-first) plus THEIR unread count. Drives the Inbox screen's list +
+/// unread badge. The entries are the durable aggregate the daemon's inbox writer
+/// folds live issue / comment / task events into, each addressed to exactly one
+/// actor, so an event that fired while no plugin was attached is still here and
+/// another actor's notifications never leak in.
+///
+/// Scoped on both axes: a foreign / unknown workspace yields an empty list +
+/// zero unread (a read, so no `INVALID_PARAMS` rejection — mirrors
+/// `issues_list`), and only the named recipient's rows are returned. An OMITTED
+/// `recipient` defaults to the LOCAL HUMAN (`member:me`) — never the union of
+/// every actor's entries; a MALFORMED one is rejected with `INVALID_PARAMS`.
 pub const HANGAR_INBOX_LIST: &str = "hangar/inbox_list";
 
-/// `hangar/inbox_mark_read` — mark a workspace's inbox entries read (e38.14).
+/// `hangar/inbox_mark_read` — mark ONE ACTOR's inbox entries read in a workspace
+/// (e38.14; per-recipient since store migration 0060).
 ///
-/// Params: [`crate::snapshots::WorkspaceScopedParams`] (`{ workspace_id }`).
-/// Result: [`crate::snapshots::InboxMarkReadResult`] — how many entries the sweep
-/// flipped + the unread count after (which is `0` for a whole-workspace sweep).
-/// This is the mark-read sweep: it stamps `read_at` on every currently-unread
-/// entry so the unread count drops to zero. Idempotent (a re-sweep flips nothing
-/// and leaves already-read entries on their original timestamp).
+/// Params: [`crate::snapshots::InboxScopedParams`]
+/// (`{ workspace_id, recipient? }`).
+/// Result: [`crate::snapshots::InboxMarkReadResult`] — how many of THAT
+/// recipient's entries the sweep flipped + their unread count after (which is
+/// `0` once their own sweep commits). It stamps `read_at` on every currently-
+/// unread entry addressed to that actor so their unread count drops to zero.
+/// Idempotent (a re-sweep flips nothing and leaves already-read entries on their
+/// original timestamp).
 ///
-/// Mutating + workspace-scoped: the daemon resolves the workspace and rejects a
-/// mistyped one with `INVALID_PARAMS` (never a silent no-op, mirroring
-/// `hangar/task_transition`); a sibling tenant's inbox is never touched.
+/// Mutating + scoped on both axes: the daemon resolves the workspace and rejects
+/// a mistyped one with `INVALID_PARAMS` (never a silent no-op, mirroring
+/// `hangar/task_transition`); neither a sibling tenant's nor a sibling ACTOR's
+/// entries are ever touched. An omitted `recipient` sweeps the LOCAL HUMAN's
+/// inbox (`member:me`); a malformed one is `INVALID_PARAMS`.
 pub const HANGAR_INBOX_MARK_READ: &str = "hangar/inbox_mark_read";
 
 /// `hangar/boards_list` — snapshot the user-defined kanban boards of a workspace
@@ -935,6 +1265,60 @@ pub const HANGAR_ISSUE_LINK_REMOVE: &str = "hangar/issue_link_remove";
 /// Read-only + workspace-scoped.
 pub const HANGAR_ISSUE_LINKS: &str = "hangar/issue_links";
 
+/// `hangar/issue_subscribe` — subscribe an actor to an issue (multica parity
+/// #22).
+///
+/// Params: [`crate::snapshots::IssueSubscribeParams`] (`{ workspace_id,
+/// issue_id, actor? }`). Result: the refreshed
+/// [`crate::snapshots::IssueSubscribersResult`]. `actor` defaults to the LOCAL
+/// HUMAN (`member:me`), mirroring the reference's "the target defaults to the
+/// caller" (`internal/handler/subscriber.go`). The write is idempotent and
+/// first-reason-wins: subscribing over an existing `creator` row is a no-op that
+/// still answers "subscribed", because the caller's intent is already satisfied.
+/// A target outside the workspace, a malformed actor token, or an unknown issue
+/// is rejected (`INVALID_PARAMS`). Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_SUBSCRIBE: &str = "hangar/issue_subscribe";
+
+/// `hangar/issue_unsubscribe` — unsubscribe an actor from an issue (multica
+/// parity #22).
+///
+/// Params: [`crate::snapshots::IssueSubscribeParams`]. Result: the refreshed
+/// [`crate::snapshots::IssueSubscribersResult`]. Removing an absent subscription
+/// is an idempotent no-op. Matched to the reference, there is NO mute flag: a
+/// later auto-subscribe trigger (a fresh comment by that actor) re-adds the row.
+/// Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_UNSUBSCRIBE: &str = "hangar/issue_unsubscribe";
+
+/// `hangar/issue_subscribers` — read one issue's subscriber set (multica parity
+/// #22).
+///
+/// Params: [`crate::snapshots::IssueSubscribersParams`] (`{ workspace_id,
+/// issue_id }`). Result: [`crate::snapshots::IssueSubscribersResult`] — one
+/// [`crate::events::IssueSubscriberRow`] per watcher, oldest first, each
+/// carrying the `reason` PROVENANCE token (`creator` / `assignee` / `commenter`
+/// / `mentioned` / `manual`). This set is what the inbox aggregator fans out to.
+/// Read-only + workspace-scoped.
+pub const HANGAR_ISSUE_SUBSCRIBERS: &str = "hangar/issue_subscribers";
+
+/// `hangar/issue_reaction_add` — add an emoji reaction to an issue (multica
+/// parity #22).
+///
+/// Params: [`crate::snapshots::IssueReactionParams`] (`{ workspace_id, issue_id,
+/// emoji, actor? }`). Result: the refreshed
+/// [`crate::snapshots::IssueReactionsResult`] (aggregated buckets, most-used
+/// first). `actor` defaults to the LOCAL HUMAN. A blank `emoji` is rejected
+/// (`INVALID_PARAMS`, the reference's `400 "emoji is required"`); reacting twice
+/// with the same emoji is an idempotent no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_REACTION_ADD: &str = "hangar/issue_reaction_add";
+
+/// `hangar/issue_reaction_remove` — remove an emoji reaction (multica parity
+/// #22).
+///
+/// Params: [`crate::snapshots::IssueReactionParams`]. Result: the refreshed
+/// [`crate::snapshots::IssueReactionsResult`]. Removing an absent reaction is an
+/// idempotent no-op. Mutating + workspace-scoped.
+pub const HANGAR_ISSUE_REACTION_REMOVE: &str = "hangar/issue_reaction_remove";
+
 /// `hangar/board_card_set_auto_run` — flip a card's auto-run flag (tcp T4 / F7).
 ///
 /// Params: [`crate::snapshots::BoardCardAutoRunParams`] (`{ workspace_id, board_id,
@@ -1123,19 +1507,36 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_AUTOPILOT_RUNS,
     HANGAR_AUTOPILOT_FIRE_NOW,
     HANGAR_AUTOPILOT_SET_ENABLED,
+    HANGAR_AUTOPILOT_TRIGGER_API,
+    HANGAR_AUTOPILOT_SET_API_TRIGGER,
+    HANGAR_AUTOPILOT_UPDATE,
+    HANGAR_AUTOPILOT_VERSIONS,
+    HANGAR_AUTOPILOT_COLLABORATOR_ADD,
+    HANGAR_AUTOPILOT_COLLABORATOR_REMOVE,
+    HANGAR_AUTOPILOT_COLLABORATORS,
+    HANGAR_AUTOPILOT_SUBSCRIBER_ADD,
+    HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE,
+    HANGAR_AUTOPILOT_SUBSCRIBERS,
+    HANGAR_AUTOPILOT_SET_ACCESS_MODE,
     HANGAR_TASKS_LIST,
     HANGAR_TASK_TRANSITION,
     HANGAR_TASK_RETRY,
     HANGAR_ISSUE_UPDATE,
+    HANGAR_ISSUES_BATCH_UPDATE,
     HANGAR_ISSUE_LABEL_ATTACH,
     HANGAR_ISSUE_LABEL_DETACH,
     HANGAR_ISSUE_CRITERION_SET,
     HANGAR_COMMENT_ADD,
+    HANGAR_COMMENT_MENTION_PREVIEW,
     HANGAR_AGENT_UPDATE,
     HANGAR_AGENT_ARCHIVE,
     HANGAR_MEMBERS_LIST,
     HANGAR_MEMBER_SET_ROLE,
     HANGAR_MEMBER_REMOVE,
+    HANGAR_INVITE_CREATE,
+    HANGAR_INVITE_ACCEPT,
+    HANGAR_INVITE_DECLINE,
+    HANGAR_INVITE_REVOKE,
     HANGAR_SQUADS_LIST,
     HANGAR_SQUAD_CREATE,
     HANGAR_SQUAD_MEMBER_ADD,
@@ -1228,11 +1629,32 @@ pub const ALL_METHODS: &[&str] = &[
     HANGAR_ISSUE_LINK_ADD,
     HANGAR_ISSUE_LINK_REMOVE,
     HANGAR_ISSUE_LINKS,
+    HANGAR_ISSUE_SUBSCRIBE,
+    HANGAR_ISSUE_UNSUBSCRIBE,
+    HANGAR_ISSUE_SUBSCRIBERS,
+    HANGAR_ISSUE_REACTION_ADD,
+    HANGAR_ISSUE_REACTION_REMOVE,
     // Fleet control-plane methods are appended at the wire catalogue tail.
     FLEET_SNAPSHOT,
     FLEET_SUBSCRIBE,
     FLEET_ACTION,
     FLEET_BROADCAST,
+    // Dispatch reason codes (multica parity #12) — APPENDED at the catalogue
+    // tail, append-only wire.
+    HANGAR_DISPATCH_ATTEMPTS_LIST,
+    // Per-issue activity timeline (multica parity #13) — APPENDED at the
+    // catalogue tail, append-only wire.
+    HANGAR_ISSUE_TIMELINE,
+    // Custom property catalog + issue metadata (multica parity #17) — APPENDED
+    // at the catalogue tail, append-only wire.
+    HANGAR_PROPERTIES_LIST,
+    HANGAR_PROPERTY_DEFINE,
+    HANGAR_PROPERTY_ARCHIVE,
+    HANGAR_ISSUE_PROPERTY_SET,
+    HANGAR_ISSUE_PROPERTY_CLEAR,
+    HANGAR_ISSUE_METADATA_GET,
+    HANGAR_ISSUE_METADATA_SET,
+    HANGAR_ISSUE_METADATA_DELETE,
 ];
 
 #[cfg(test)]
@@ -1303,10 +1725,22 @@ mod tests {
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
+            HANGAR_AUTOPILOT_TRIGGER_API,
+            HANGAR_AUTOPILOT_SET_API_TRIGGER,
+            HANGAR_AUTOPILOT_UPDATE,
+            HANGAR_AUTOPILOT_VERSIONS,
+            HANGAR_AUTOPILOT_COLLABORATOR_ADD,
+            HANGAR_AUTOPILOT_COLLABORATOR_REMOVE,
+            HANGAR_AUTOPILOT_COLLABORATORS,
+            HANGAR_AUTOPILOT_SUBSCRIBER_ADD,
+            HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE,
+            HANGAR_AUTOPILOT_SUBSCRIBERS,
+            HANGAR_AUTOPILOT_SET_ACCESS_MODE,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_ISSUES_BATCH_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
             HANGAR_ISSUE_CRITERION_SET,
@@ -1316,6 +1750,10 @@ mod tests {
             HANGAR_MEMBERS_LIST,
             HANGAR_MEMBER_SET_ROLE,
             HANGAR_MEMBER_REMOVE,
+            HANGAR_INVITE_CREATE,
+            HANGAR_INVITE_ACCEPT,
+            HANGAR_INVITE_DECLINE,
+            HANGAR_INVITE_REVOKE,
             HANGAR_SQUADS_LIST,
             HANGAR_SQUAD_CREATE,
             HANGAR_SQUAD_MEMBER_ADD,
@@ -1377,10 +1815,22 @@ mod tests {
             HANGAR_AUTOPILOT_RUNS,
             HANGAR_AUTOPILOT_FIRE_NOW,
             HANGAR_AUTOPILOT_SET_ENABLED,
+            HANGAR_AUTOPILOT_TRIGGER_API,
+            HANGAR_AUTOPILOT_SET_API_TRIGGER,
+            HANGAR_AUTOPILOT_UPDATE,
+            HANGAR_AUTOPILOT_VERSIONS,
+            HANGAR_AUTOPILOT_COLLABORATOR_ADD,
+            HANGAR_AUTOPILOT_COLLABORATOR_REMOVE,
+            HANGAR_AUTOPILOT_COLLABORATORS,
+            HANGAR_AUTOPILOT_SUBSCRIBER_ADD,
+            HANGAR_AUTOPILOT_SUBSCRIBER_REMOVE,
+            HANGAR_AUTOPILOT_SUBSCRIBERS,
+            HANGAR_AUTOPILOT_SET_ACCESS_MODE,
             HANGAR_TASKS_LIST,
             HANGAR_TASK_TRANSITION,
             HANGAR_TASK_RETRY,
             HANGAR_ISSUE_UPDATE,
+            HANGAR_ISSUES_BATCH_UPDATE,
             HANGAR_ISSUE_LABEL_ATTACH,
             HANGAR_ISSUE_LABEL_DETACH,
             HANGAR_ISSUE_CRITERION_SET,
@@ -1390,6 +1840,10 @@ mod tests {
             HANGAR_MEMBERS_LIST,
             HANGAR_MEMBER_SET_ROLE,
             HANGAR_MEMBER_REMOVE,
+            HANGAR_INVITE_CREATE,
+            HANGAR_INVITE_ACCEPT,
+            HANGAR_INVITE_DECLINE,
+            HANGAR_INVITE_REVOKE,
             HANGAR_SQUADS_LIST,
             HANGAR_SQUAD_CREATE,
             HANGAR_SQUAD_MEMBER_ADD,
@@ -1451,10 +1905,26 @@ mod tests {
             HANGAR_ISSUE_LINK_ADD,
             HANGAR_ISSUE_LINK_REMOVE,
             HANGAR_ISSUE_LINKS,
+            HANGAR_ISSUE_SUBSCRIBE,
+            HANGAR_ISSUE_UNSUBSCRIBE,
+            HANGAR_ISSUE_SUBSCRIBERS,
+            HANGAR_ISSUE_REACTION_ADD,
+            HANGAR_ISSUE_REACTION_REMOVE,
             FLEET_SNAPSHOT,
             FLEET_SUBSCRIBE,
             FLEET_ACTION,
             FLEET_BROADCAST,
+            HANGAR_DISPATCH_ATTEMPTS_LIST,
+            HANGAR_ISSUE_TIMELINE,
+            HANGAR_PROPERTIES_LIST,
+            HANGAR_PROPERTY_DEFINE,
+            HANGAR_PROPERTY_ARCHIVE,
+            HANGAR_ISSUE_PROPERTY_SET,
+            HANGAR_ISSUE_PROPERTY_CLEAR,
+            HANGAR_ISSUE_METADATA_GET,
+            HANGAR_ISSUE_METADATA_SET,
+            HANGAR_ISSUE_METADATA_DELETE,
+            HANGAR_COMMENT_MENTION_PREVIEW,
         ];
         for m in declared {
             assert!(

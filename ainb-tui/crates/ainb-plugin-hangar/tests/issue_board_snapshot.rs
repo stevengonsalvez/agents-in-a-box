@@ -29,6 +29,16 @@ const CLAY: Color = Color::rgb(210, 130, 90);
 /// urgency so the card anatomy (id line + priority chip) renders predictably.
 fn row(id: &str, display: &str, state: &str, priority: i64, assignee: Option<&str>) -> IssueRow {
     IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
+        properties: Vec::new(),
+        metadata: Vec::new(),
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str(id).unwrap(),
         display_id: Some(display.into()),
         workspace_id: "default".into(),

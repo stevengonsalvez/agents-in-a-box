@@ -496,9 +496,33 @@ fn agent_edit_and_archive_round_trip() {
         shown.contains("\"thinking\":\"high\""),
         "thinking not persisted:\n{shown}"
     );
+    // Parity #30: the env is persisted but RENDERED REDACTED — the key survives,
+    // the value is masked, and the count/flag say so. The value's round-trip is
+    // proven at the store boundary (`repo_agent_env_redaction`), which is the
+    // only layer allowed to see it.
     assert!(
-        shown.contains("\"FOO\":\"bar\""),
-        "env not persisted:\n{shown}"
+        shown.contains("\"FOO\":\"****\""),
+        "env key not persisted (or the value leaked):\n{shown}"
+    );
+    assert!(
+        !shown.contains("\"bar\""),
+        "the env value must never be rendered:\n{shown}"
+    );
+    assert!(
+        shown.contains("\"env_key_count\":1") && shown.contains("\"env_redacted\":true"),
+        "the redaction metadata must accompany the masked map:\n{shown}"
+    );
+
+    // The dedicated redacted read verb agrees.
+    let (ok, env_out) = run(tmp.path(), &["hangar", "agent", "env", "agent-1"]);
+    assert!(ok, "agent env should exit 0; out={env_out}");
+    assert!(
+        env_out.contains("FOO=****"),
+        "agent env must mask the value:\n{env_out}"
+    );
+    assert!(
+        env_out.contains("1 keys (values hidden)"),
+        "agent env must report the count:\n{env_out}"
     );
 
     // Archive it: the active list no longer shows it.
@@ -2462,4 +2486,155 @@ fn issue_link_refuses_a_self_link_and_a_cycle() {
         ],
     );
     assert!(ok, "a related link is cycle-exempt; out={out}");
+}
+
+/// THE ACCEPTANCE for multica parity #22: *an actor can subscribe to an issue;
+/// persists (sqlite)*.
+///
+/// A real-binary round trip — `issue create` then `issue subscribe` — followed by
+/// a raw `SELECT` on the same `hangar.db` the binary wrote. The row must read
+/// `member|me|manual`, and a SECOND process invocation must still list it, which
+/// is the "persists" half proven across a process boundary rather than asserted.
+#[test]
+fn issue_subscribe_persists_to_sqlite_and_survives_a_new_process() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = create_issue(tmp.path(), "Subscribe proof");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "subscribe", &id]);
+    assert!(ok, "issue subscribe should exit 0; out={out}");
+    assert!(
+        out.contains("member:me") && out.contains("(manual)"),
+        "the refreshed set names the local human with its provenance:\n{out}"
+    );
+
+    // The at-rest proof: read the row the binary wrote, in a FRESH connection.
+    let rows = tokio::runtime::Runtime::new().unwrap().block_on(async {
+        let pool = sqlx::SqlitePool::connect(&format!(
+            "sqlite://{}",
+            tmp.path().join("hangar.db").display()
+        ))
+        .await
+        .expect("open the db the binary wrote");
+        sqlx::query_as::<_, (String, String, String)>(
+            "SELECT actor_type, actor_id, reason FROM issue_subscriber WHERE issue_id = ?",
+        )
+        .bind(&id)
+        .fetch_all(&pool)
+        .await
+        .expect("read issue_subscriber")
+    });
+    assert!(
+        rows.contains(&("member".to_string(), "me".to_string(), "manual".to_string())),
+        "the manual subscription is at rest in sqlite: {rows:?}"
+    );
+
+    // A SECOND process still sees it — the persistence half, not asserted but run.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "subscribers", &id]);
+    assert!(ok, "issue subscribers should exit 0; out={out}");
+    assert!(
+        out.contains("member:me"),
+        "still listed after a restart:\n{out}"
+    );
+
+    // `issue show` surfaces it too, so the read needs neither daemon nor TUI.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "show", &id]);
+    assert!(ok, "issue show should exit 0; out={out}");
+    assert!(out.contains("Subscribers:"), "the show block:\n{out}");
+
+    // Unsubscribe really removes the row (the CLI's own creator row survives —
+    // it is a DIFFERENT actor, so this also proves the delete is actor-scoped)
+    // and a second unsubscribe is an idempotent no-op.
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "unsubscribe", &id]);
+    assert!(ok, "unsubscribe should exit 0; out={out}");
+    assert!(
+        !out.contains("member:me"),
+        "the manual subscription is gone:\n{out}"
+    );
+    assert!(
+        out.contains("(creator)"),
+        "the creator's own row is untouched:\n{out}"
+    );
+    let (ok, _) = run(tmp.path(), &["hangar", "issue", "unsubscribe", &id]);
+    assert!(ok, "a second unsubscribe is an idempotent no-op");
+}
+
+/// A create auto-subscribes its CREATOR (multica parity #22), so an issue is
+/// never born with an empty watcher set.
+#[test]
+fn issue_create_auto_subscribes_its_creator() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = create_issue(tmp.path(), "Auto watched");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "subscribers", &id]);
+    assert!(ok, "issue subscribers should exit 0; out={out}");
+    assert!(
+        out.contains("(creator)"),
+        "the creator is subscribed with `creator` provenance:\n{out}"
+    );
+}
+
+/// `hangar issue react add|remove|list` round trip (multica parity #22), plus the
+/// reference's required-emoji guard.
+#[test]
+fn issue_react_add_remove_round_trip() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = create_issue(tmp.path(), "Reactable");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "react", "add", &id, "--emoji", "👍"],
+    );
+    assert!(ok, "react add should exit 0; out={out}");
+    assert!(out.contains("👍 1"), "the bucket:\n{out}");
+
+    // Reacting twice is idempotent — still one.
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "react", "add", &id, "--emoji", "👍"],
+    );
+    assert!(ok, "a repeat react is a no-op; out={out}");
+    assert!(out.contains("👍 1"), "still one reactor:\n{out}");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "react", "list", &id]);
+    assert!(ok && out.contains("👍 1"), "list reads it back:\n{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "react", "remove", &id, "--emoji", "👍"],
+    );
+    assert!(ok, "react remove should exit 0; out={out}");
+    assert!(out.contains("no reactions"), "the set empties:\n{out}");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "react", "add", &id, "--emoji", "  "],
+    );
+    assert!(!ok, "a blank emoji must exit non-zero; out={out}");
+    assert!(out.contains("emoji is required"), "the guard text:\n{out}");
+}
+
+/// A foreign / unknown issue is a NON-ZERO exit, never a silent no-op — the
+/// repos' tenant join would otherwise swallow it.
+#[test]
+fn issue_subscribe_unknown_id_is_an_error() {
+    let tmp = tempfile::tempdir().unwrap();
+    create_issue(tmp.path(), "Anchor");
+
+    let (ok, out) = run(tmp.path(), &["hangar", "issue", "subscribe", "no-such-id"]);
+    assert!(!ok, "an unknown issue must exit non-zero; out={out}");
+    assert!(out.contains("no issue"), "the refusal text:\n{out}");
+}
+
+/// A malformed `--actor` token is rejected rather than silently treated as "me".
+#[test]
+fn issue_subscribe_rejects_a_malformed_actor() {
+    let tmp = tempfile::tempdir().unwrap();
+    let id = create_issue(tmp.path(), "Actor guard");
+
+    let (ok, out) = run(
+        tmp.path(),
+        &["hangar", "issue", "subscribe", &id, "--actor", "nonsense"],
+    );
+    assert!(!ok, "a malformed actor must exit non-zero; out={out}");
+    assert!(out.contains("bad --actor"), "the refusal text:\n{out}");
 }

@@ -453,6 +453,19 @@ pub struct IssueRow {
     /// it — a pre-0043 snapshot decodes to `None`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// The card's ORIGIN PROVENANCE kind (`issue.origin_type`, migration 0056,
+    /// multica parity #21): `autopilot` | `comment_mention` | `manual`, or
+    /// `None` for a pre-0056 row whose provenance is unknown. Drives the
+    /// task-detail card's `Origin:` badge. Append-only: omitted from the wire
+    /// when `None` (`skip_serializing_if`), so a pre-0056 snapshot decodes to
+    /// `None` and an old daemon simply never sends it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_type: Option<String>,
+    /// The ORIGIN PROVENANCE id (`issue.origin_id`): the autopilot id for
+    /// `autopilot`, the comment id for `comment_mention`, `None` for `manual`.
+    /// Append-only, same contract as [`Self::origin_type`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
     /// How many tasks (any lifecycle) have ever run against this issue (63d).
     /// `0` for a never-run issue. Drives the task-detail card's `Runs:` history
     /// line, shown only when non-zero. `#[serde(default)]` keeps a pre-63d snapshot
@@ -518,6 +531,119 @@ pub struct IssueRow {
     /// detail card simply renders no `Links:` block.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub dependencies: Vec<IssueLinkRow>,
+    /// WHY this card is not running — the stable admission code of its newest
+    /// `dispatch_attempt` (multica parity #12, migration 0058), e.g.
+    /// `target_unavailable` / `runtime_offline` / `deferred` / `already_active`.
+    ///
+    /// Filled ONLY when that newest attempt is a DECLINE
+    /// (`!DispatchReason::is_dispatched()`), so the field means "why nothing is
+    /// happening" and a healthy card carries no extra bytes. `runtime_offline`
+    /// counts as a decline even though hangar does write the task row — that is
+    /// exactly the invisible-but-queued case this exists to surface.
+    ///
+    /// Kept as a raw `String` rather than the typed enum so a token from a newer
+    /// daemon renders as raw text instead of failing the decode. Append-only:
+    /// omitted from the wire when `None` (`skip_serializing_if`), so a pre-#12
+    /// snapshot decodes to `None` and a healthy row serializes byte-identically
+    /// to today.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dispatch_reason: Option<String>,
+    /// The free-text specifics behind [`Self::last_dispatch_reason`] (the code is
+    /// deliberately generic — the detail names the runtime, the blockers, the
+    /// missing repo). Same append-only contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dispatch_detail: Option<String>,
+    /// When that declined attempt was recorded (epoch millis). Same append-only
+    /// contract.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_dispatch_at: Option<i64>,
+    /// How many actors watch this issue (multica parity #22, migration 0062).
+    ///
+    /// DETAIL PATH ONLY — a list snapshot leaves it `0`, exactly like
+    /// [`Self::dependencies`], because filling it would need an N-query fan-out
+    /// per row. `#[serde(default)]` keeps a pre-0062 snapshot decodable.
+    #[serde(default)]
+    pub subscriber_count: u32,
+    /// Whether the LOCAL HUMAN (`member:me`) watches this issue — the viewer the
+    /// TUI renders for. The authoritative read is
+    /// [`crate::methods::HANGAR_ISSUE_SUBSCRIBERS`]; this is the convenience the
+    /// detail card's `✓ you` marker needs. Detail path only.
+    #[serde(default)]
+    pub subscribed: bool,
+    /// Aggregated emoji reactions, most-used first (multica parity #22). Detail
+    /// path only; empty ⇒ the key is not sent, so a pre-#22 daemon leaves the
+    /// card byte-identical.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<ReactionRow>,
+    /// This issue's resolved CUSTOM PROPERTIES (multica parity #17), driving the
+    /// task-detail card's `Props:` block, in catalog `position` order.
+    ///
+    /// DETAIL PATH ONLY — a list snapshot leaves it empty on purpose, exactly
+    /// like [`Self::dependencies`] and [`Self::subscriber_count`], because
+    /// filling it needs a catalog join per row. Do not "fix" that.
+    /// Append-only: empty ⇒ the key is not sent, so a pre-#17 daemon leaves the
+    /// row byte-identical and a pre-#17 client ignores it.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<IssuePropertyRow>,
+    /// This issue's AGENT METADATA scratch bag (multica parity #17), key-sorted.
+    /// Same DETAIL-ONLY + append-only contract as [`Self::properties`].
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub metadata: Vec<IssueMetadataRow>,
+}
+
+/// One custom-property DEFINITION from a workspace's catalog (multica parity
+/// #17) — the shape `hangar/properties_list` returns.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertyDefRow {
+    /// Stable slug the CLI / RPC address this property by.
+    pub key: String,
+    /// Display label; renaming it touches zero issue rows.
+    pub name: String,
+    /// `text` / `number` / `select` / `multi_select` / `date` / `checkbox` /
+    /// `url`. Raw `String`, not a typed enum, so a token from a newer daemon
+    /// renders as text rather than failing the decode.
+    pub kind: String,
+    /// Catalogued options for `select` / `multi_select`; empty otherwise.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Render order within the workspace (ascending).
+    #[serde(default)]
+    pub position: i64,
+    /// Whether the definition is archived (hidden from the active catalog and
+    /// from render, but never deleted).
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// One RESOLVED custom property on an issue's detail card (multica parity #17):
+/// the catalog's display name + kind joined to this issue's stored value.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuePropertyRow {
+    /// The definition's stable slug.
+    pub key: String,
+    /// The definition's display label — what the card actually shows.
+    pub name: String,
+    /// The definition's kind token.
+    pub kind: String,
+    /// Already RENDERED (`properties::render_value`) — a `String`, not a
+    /// `serde_json::Value`, so [`IssueRow`] keeps its `Eq` derive. The typed
+    /// read is the repo (CLI) or
+    /// [`crate::methods::HANGAR_ISSUE_METADATA_GET`] (agents).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
+}
+
+/// One AGENT METADATA entry on an issue (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMetadataRow {
+    /// The metadata key (`^[a-zA-Z_][a-zA-Z0-9_.-]{0,63}$`).
+    pub key: String,
+    /// Canonical JSON TEXT of the primitive (`42`, `"open"`, `true`) — typing
+    /// survives the wire without an `Eq`-breaking `serde_json::Value`.
+    pub value_json: String,
+    /// The same value rendered for display (unquoted).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub value: String,
 }
 
 /// One TYPED link on an issue's detail card (multica parity #20), always stated
@@ -542,6 +668,33 @@ pub struct IssueLinkRow {
     /// the subject. Always `false` for `blocks` / `related` (neither gates).
     #[serde(default)]
     pub satisfied: bool,
+}
+
+/// One watcher on an issue's subscriber set (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscriberRow {
+    /// The watching actor in canonical `member:<id>` / `agent:<id>` form.
+    pub actor: String,
+    /// WHY they watch — `creator` / `assignee` / `commenter` / `mentioned` /
+    /// `manual`. PROVENANCE, not state: the FIRST reason wins, so an actor who
+    /// created the issue and later commented stays `creator`. Kept as a raw
+    /// `String` so a token from a newer daemon renders instead of failing the
+    /// decode.
+    pub reason: String,
+    /// When the subscription was created (epoch millis).
+    pub created_at: i64,
+}
+
+/// One aggregated emoji bucket on an issue (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ReactionRow {
+    /// The emoji this bucket counts.
+    pub emoji: String,
+    /// How many distinct actors used it.
+    pub count: u32,
+    /// True when the LOCAL HUMAN is one of those actors (drives the `✓` pip).
+    #[serde(default)]
+    pub mine: bool,
 }
 
 /// A wire-side actor row for the agent-picker snapshot (`hangar/agents_list`).
@@ -590,6 +743,37 @@ pub struct ActorRow {
     /// when active / unknown / unattributed. Omitted from the wire when empty.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub archived_by: String,
+    /// How many per-agent env vars the agent carries (multica parity #30,
+    /// multica's derived `has_custom_env` is simply `> 0`). `0` for members and
+    /// for a pre-#30 producer. Omitted from the wire when zero.
+    ///
+    /// This is a COUNT, never a value: the wire deliberately has no field that
+    /// can carry an env VALUE, so no consumer can render one.
+    #[serde(default, skip_serializing_if = "is_zero_u32")]
+    pub agent_env_key_count: u32,
+    /// The per-agent env var NAMES, in stored order (multica ships keys too —
+    /// only values are secret). Empty for members and for a pre-#30 producer.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub agent_env_keys: Vec<String>,
+    /// Mirrors multica's `custom_env_redacted` (`agent.go:42`): `true` iff the
+    /// agent has env vars, i.e. what the caller sees is a MASKED view. Hangar
+    /// masks unconditionally (deviation D-1), so this is always
+    /// `agent_env_key_count > 0`. Omitted from the wire when `false`.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub agent_env_redacted: bool,
+}
+
+/// `skip_serializing_if` helper: omit a zero count from the wire so a
+/// metadata-less agent serialises byte-identically to a pre-#30 producer.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires the `&` signature
+const fn is_zero_u32(n: &u32) -> bool {
+    *n == 0
+}
+
+/// `skip_serializing_if` helper: omit a `false` flag from the wire.
+#[allow(clippy::trivially_copy_pass_by_ref)] // serde requires the `&` signature
+const fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl Default for ActorRow {
@@ -611,6 +795,9 @@ impl Default for ActorRow {
             avatar: String::new(),
             archived_at: None,
             archived_by: String::new(),
+            agent_env_key_count: 0,
+            agent_env_keys: Vec::new(),
+            agent_env_redacted: false,
         }
     }
 }
@@ -675,7 +862,7 @@ pub struct SkillFile {
 /// A cron-scheduled autopilot (P7). The manager table (P7.5) renders these; the
 /// daemon flattens its rich store row (typed ids, epoch-ms `next_tick_at`) into
 /// this flat shape. The plugin owns zero domain data — it only renders the row.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotRow {
     /// The autopilot id (ULID string, the stable id the table rows carry).
     pub id: String,
@@ -698,13 +885,44 @@ pub struct AutopilotRow {
     pub last_run_status: Option<String>,
     /// The most recent run's start instant (epoch-ms), or `None` when never run.
     pub last_run_at: Option<i64>,
+    /// Whether the bare programmatic `api` trigger is armed (migration 0057).
+    ///
+    /// Append-only + `serde(default)`: a pre-0057 daemon's payload omits it and
+    /// deserialises as `false`, and an older plugin ignores it.
+    #[serde(default)]
+    pub api_trigger_enabled: bool,
+    /// The rule's newest published version number (migration 0061), or `None`
+    /// for an UNVERSIONED rule — one created before 0061 and never edited
+    /// since. Deliberately not backfilled: a fabricated v1 would be a false
+    /// audit record.
+    #[serde(default)]
+    pub rule_version: Option<i64>,
+    /// A human-readable label for whoever published that newest version
+    /// (resolved daemon-side), or `None` when unversioned / unattributed. The
+    /// plugin owns zero domain data, so the daemon does the `user` join.
+    #[serde(default)]
+    pub last_published_by: Option<String>,
+    /// Count of explicit write-grant rows on this rule (migration 0064,
+    /// multica parity #27). Append-only + `serde(default)`: a pre-0064
+    /// daemon's payload omits it and reads `0`.
+    #[serde(default)]
+    pub collaborator_count: u32,
+    /// Count of standing subscribers auto-subscribed to every issue this rule
+    /// SPAWNS. Append-only + `serde(default)`.
+    #[serde(default)]
+    pub subscriber_count: u32,
+    /// `"open"` | `"restricted"` (migration 0064). An OMITTED field reads as
+    /// `None`, which renders as open — the permissive legacy meaning, never an
+    /// accidental lock glyph on a rule nobody restricted.
+    #[serde(default)]
+    pub access_mode: Option<String>,
 }
 
 /// A wire-side autopilot run row for the history pane (`hangar/autopilot_runs`).
 ///
 /// One firing of an autopilot. The run-history pane (P7.5) renders these
 /// latest-first below the selected autopilot.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotRunRow {
     /// The run id (ULID string).
     pub id: String,
@@ -715,8 +933,60 @@ pub struct AutopilotRunRow {
     /// When the run finished (epoch-ms); `None` while in flight.
     pub completed_at: Option<i64>,
     /// Lifecycle status (`running` / `completed` / `failed` / `cancelled` /
-    /// `skipped`).
+    /// `skipped`). `skipped` is terminal — a dispatch the admission gate
+    /// intentionally declined (migration 0057).
     pub status: String,
+    /// Which trigger fired this run: `schedule` | `manual` | `webhook` | `api`.
+    /// Empty when produced by a pre-0057 daemon.
+    #[serde(default)]
+    pub source: String,
+    /// Why a `skipped` run was declined (the admission reason); `None` for every
+    /// other status, and for pre-0057 payloads.
+    #[serde(default)]
+    pub failure_reason: Option<String>,
+    /// The ACCOUNTABLE HUMAN for this run (migration 0061), as a canonical actor
+    /// ref. `None` for every pre-0061 run and for an unattended fire of an
+    /// unversioned rule — an honest unknown, never a fabricated actor.
+    #[serde(default)]
+    pub accountable_actor: Option<String>,
+    /// HOW that actor was resolved: `rule_owner` (unattended — the rule's
+    /// publisher) or `direct_human` (a named human clicked "run now"). `None`
+    /// exactly when [`accountable_actor`](Self::accountable_actor) is `None`.
+    #[serde(default)]
+    pub attribution: Option<String>,
+}
+
+/// A wire-side rule-version row for the autopilot audit trail
+/// (`hangar/autopilot_versions`, multica parity #14).
+///
+/// One append-only entry in the `autopilot_rule_version` accountability ledger:
+/// who published this rule, when, and what the rule looked like as published.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotVersionRow {
+    /// The ledger row id (ULID string).
+    pub id: String,
+    /// The autopilot this version describes.
+    pub autopilot_id: String,
+    /// 1-based, monotonic per autopilot.
+    pub version: i64,
+    /// Why it was published: `created` | `instructions` | `schedule` |
+    /// `target` | `policy` | `paused` | `resumed` | `trigger`. Carried RAW so a
+    /// token written by a newer daemon renders as text rather than erroring.
+    pub change_kind: String,
+    /// The accountable actor ref (`member:<id>` / `agent:<id>`); `None` when the
+    /// mutation carried no actor.
+    #[serde(default)]
+    pub published_by: Option<String>,
+    /// The resolved human-readable name/email for
+    /// [`published_by`](Self::published_by), joined daemon-side. An unresolvable
+    /// ref renders the raw actor ref, never a fabricated name.
+    #[serde(default)]
+    pub published_by_label: Option<String>,
+    /// The rule as published: a serialised JSON object, including `changed`
+    /// (every field this publish touched).
+    pub config_summary: String,
+    /// Publish instant (epoch-ms).
+    pub created_at: i64,
 }
 
 /// A wire-side task card row for the Kanban board (`hangar/tasks_list`, P8.4).
@@ -790,6 +1060,12 @@ pub struct InboxEntryRow {
     pub subject_id: String,
     /// A short pre-rendered human line for the list row.
     pub summary: String,
+    /// The actor this entry is addressed to, as `"member:<id>"` / `"agent:<id>"`
+    /// (store migration 0060, multica parity #1). Every entry targets exactly one
+    /// actor and only that actor's reads return it. Append-only: defaults to the
+    /// empty string when an older daemon omits the field.
+    #[serde(default)]
+    pub recipient: String,
     /// Creation timestamp (epoch milliseconds) — drives ordering + age.
     pub created_at: i64,
     /// When the entry was marked read (epoch milliseconds), or `None` when UNREAD.
@@ -856,6 +1132,13 @@ pub struct CommentRow {
     pub body: String,
     /// Creation timestamp (epoch milliseconds).
     pub created_at: i64,
+    /// The comment this one REPLIES to, or `None` at the top level
+    /// (migration 0067, multica parity #2-rest).
+    ///
+    /// **Append-only**: absent on the wire when unset, so a pre-2-rest snapshot
+    /// still decodes and the bytes an old client sees are unchanged.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<CommentId>,
 }
 
 #[cfg(test)]
@@ -1105,5 +1388,41 @@ mod tests {
         let out = serde_json::to_string(&stamped).unwrap();
         assert!(out.contains("\"archived_by\":\"member:user-1\""), "{out}");
         assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), stamped);
+    }
+
+    /// The parity-#30 per-agent-env metadata is APPEND-ONLY on `ActorRow`: a
+    /// pre-#30 payload decodes with all three fields at their neutral values,
+    /// an env-less row emits none of the keys, and a populated row round-trips.
+    ///
+    /// It also pins the shape itself: the wire carries KEY NAMES and a COUNT,
+    /// never a value — there is no field a consumer could render a secret from.
+    #[test]
+    fn actor_row_agent_env_metadata_is_append_only_and_value_free() {
+        let legacy = r#"{"actor_ref":"agent:a1","display_name":"bot","subtitle":"agent",
+            "presence":"online","is_agent":true,"recent_rank":null}"#;
+        let row: ActorRow = serde_json::from_str(legacy).expect("pre-#30 payload decodes");
+        assert_eq!(row.agent_env_key_count, 0);
+        assert!(row.agent_env_keys.is_empty());
+        assert!(!row.agent_env_redacted);
+        let out = serde_json::to_string(&row).unwrap();
+        assert!(
+            !out.contains("agent_env"),
+            "an env-less row must not emit any agent_env key: {out}"
+        );
+
+        let with_env = ActorRow {
+            agent_env_key_count: 1,
+            agent_env_keys: vec!["SECRET_TOKEN".into()],
+            agent_env_redacted: true,
+            ..row
+        };
+        let out = serde_json::to_string(&with_env).unwrap();
+        assert!(out.contains("\"agent_env_key_count\":1"), "{out}");
+        assert!(
+            out.contains("\"agent_env_keys\":[\"SECRET_TOKEN\"]"),
+            "{out}"
+        );
+        assert!(out.contains("\"agent_env_redacted\":true"), "{out}");
+        assert_eq!(serde_json::from_str::<ActorRow>(&out).unwrap(), with_env);
     }
 }

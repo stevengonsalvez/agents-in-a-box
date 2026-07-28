@@ -1487,6 +1487,13 @@ impl IssueListState {
                             // `⊟ done/total` badge that flips to gold `1/1` when its
                             // last child completes. `None` for a childless issue.
                             subtasks: (r.child_total > 0).then_some((r.child_done, r.child_total)),
+                            // multica parity #12: the card wears a ⚠ when its
+                            // newest dispatch attempt was declined, so "not
+                            // running, and why" is discoverable from the board.
+                            not_dispatched: r
+                                .last_dispatch_reason
+                                .as_deref()
+                                .is_some_and(|c| !c.trim().is_empty()),
                         })
                         .collect::<Vec<_>>();
                 // Clamp the stored offset to the column's card count so a column
@@ -1773,6 +1780,10 @@ pub enum IssueListIntent {
     OpenTaskDetail(IssueId),
     /// Open the agent-picker modal for the issue under the selection.
     OpenAgentPicker(IssueId),
+    /// Open the activity-timeline modal for the issue under the selection
+    /// (raised by `y`, multica parity #13). `y` is free: the host reserves only
+    /// the uppercase tab keys plus `,` `?` and `1-4`.
+    OpenActivityTimeline(IssueId),
     /// Commit the create wizard (Phase 5): create the issue AND dispatch it.
     /// Raised ONLY by Enter on the wizard's final Agent stage — there is no path
     /// to this intent without an agent, so a title-only inert issue (assignee
@@ -1931,6 +1942,17 @@ fn reduce_normal_key(state: &IssueListState, c: char) -> IssueListReduction {
                 with_intent(
                     state.clone(),
                     IssueListIntent::OpenAgentPicker(row.id.clone()),
+                )
+            },
+        ),
+        // multica parity #13: the card's activity timeline. A no-op with no row
+        // selected — never a modal opened on nothing.
+        'y' => state.selected_row().map_or_else(
+            || unchanged(state),
+            |row| {
+                with_intent(
+                    state.clone(),
+                    IssueListIntent::OpenActivityTimeline(row.id.clone()),
                 )
             },
         ),
@@ -3669,6 +3691,16 @@ mod tests {
 
     fn row(id: &str, state: &str, assignee: Option<&str>) -> IssueRow {
         IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str(id).unwrap(),
             display_id: None,
             workspace_id: "ws".into(),

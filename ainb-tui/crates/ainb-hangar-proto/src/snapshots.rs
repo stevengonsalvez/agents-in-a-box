@@ -12,12 +12,13 @@
 //! These are **pure wire types** — `serde` only, no host deps — matching the
 //! rest of `ainb-hangar-proto`.
 
+use ainb_hangar_core::agent_env::AgentEnvInput;
 use ainb_hangar_core::channel::ChannelSet;
 use serde::{Deserialize, Serialize};
 
 use crate::events::{
-    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, InboxEntryRow,
-    IssueRow, SkillFile, SkillRow, TaskCardRow,
+    ActorRow, AgentSkillLinkRow, AttentionRow, AutopilotRow, AutopilotRunRow, AutopilotVersionRow,
+    InboxEntryRow, IssueRow, SkillFile, SkillRow, TaskCardRow,
 };
 
 /// `serde(default)` helper — an absent `is_answer` defaults to `true`.
@@ -30,6 +31,25 @@ const fn default_true() -> bool {
 pub struct WorkspaceScopedParams {
     /// The workspace whose rows to snapshot.
     pub workspace_id: String,
+}
+
+/// Params for [`crate::methods::HANGAR_INBOX_LIST`] and
+/// [`crate::methods::HANGAR_INBOX_MARK_READ`]: the workspace plus the actor
+/// whose inbox is being read / swept (store migration 0060, multica parity #1).
+///
+/// `recipient` is the canonical `"member:<id>"` / `"agent:<id>"` actor form. It
+/// is append-only-optional: a surface written before 0060 omits it and gets the
+/// LOCAL HUMAN's inbox (`member:me`) — never another actor's, and never the
+/// union of everyone's, which would defeat the per-actor scoping. A malformed
+/// value is rejected with `INVALID_PARAMS` rather than silently defaulted, so a
+/// typo can never read someone else's inbox.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct InboxScopedParams {
+    /// The workspace whose inbox to read / sweep.
+    pub workspace_id: String,
+    /// The actor whose inbox this is; `None` means the local human.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub recipient: Option<String>,
 }
 
 /// Params for [`crate::methods::WORKSPACE_SUBSCRIBE`] — the workspace to stream,
@@ -350,17 +370,24 @@ pub struct AutopilotRunsResult {
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_FIRE_NOW`]: the workspace
 /// (tenant guard) plus the autopilot to fire immediately (P7.5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotFireNowParams {
     /// The subscribed workspace the autopilot must belong to.
     pub workspace_id: String,
     /// The autopilot to fire now (bypassing the schedule).
     pub autopilot_id: String,
+    /// The bare `user.id` of the human clicking "run now" — the daemon renders
+    /// it to `member:<id>` and attributes the run `direct_human` (multica
+    /// parity #14). Omitted / empty ⇒ the run falls back to the rule owner.
+    ///
+    /// Append-only + `serde(default)`: a pre-0061 caller's payload omits it.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_ENABLED`]: the workspace
 /// (tenant guard), the autopilot, and the target enabled flag (P7.5).
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct AutopilotSetEnabledParams {
     /// The subscribed workspace the autopilot must belong to.
     pub workspace_id: String,
@@ -368,6 +395,265 @@ pub struct AutopilotSetEnabledParams {
     pub autopilot_id: String,
     /// `true` enables (recompute next-tick from now); `false` disables.
     pub enabled: bool,
+    /// The bare `user.id` of the human toggling it. Pausing / resuming is a
+    /// SUBSTANTIVE publish, so this becomes the rule version's accountable
+    /// human. Omitted ⇒ the version is minted unattributed.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`]: the workspace
+/// (tenant guard) plus the autopilot to fire through its `api` trigger.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotTriggerApiParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot to fire.
+    pub autopilot_id: String,
+    /// The bare `user.id` of the caller, when there is one. An `api` trigger is
+    /// an UNATTENDED fire, so this does NOT change the run's attribution
+    /// (multica keeps `originator` NULL for unattended dispatch); it is carried
+    /// for symmetry and future auditing.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_TRIGGER_API`].
+///
+/// Four outcomes, discriminated by [`outcome`](Self::outcome):
+///
+/// - `fired` — admitted; `run_id` + `task_id` are set.
+/// - `skipped` — the admission gate declined it (concurrency limit under the
+///   `skip` policy); `run_id` names the recorded terminal `skipped` run and
+///   `reason` carries the admission reason. This is a SUCCESSFUL, declined
+///   dispatch, not an error.
+/// - `disabled` — the autopilot has not armed `api_trigger_enabled`; nothing was
+///   written (the trigger does not exist, so there is nothing to skip).
+/// - `not_found` — no such autopilot in this workspace.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotTriggerApiResult {
+    /// `fired` | `skipped` | `disabled` | `not_found`.
+    pub outcome: String,
+    /// The run created (`fired`) or recorded (`skipped`).
+    #[serde(default)]
+    pub run_id: Option<String>,
+    /// The task enqueued; only set on `fired`.
+    #[serde(default)]
+    pub task_id: Option<String>,
+    /// The admission reason; only set on `skipped`.
+    #[serde(default)]
+    pub reason: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: the
+/// workspace (tenant guard), the autopilot, and the target armed flag.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetApiTriggerParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot to arm / disarm.
+    pub autopilot_id: String,
+    /// `true` arms the `api` trigger; `false` disarms it.
+    pub enabled: bool,
+    /// The bare `user.id` of the human arming / disarming it. Arming a trigger
+    /// is a SUBSTANTIVE publish on the rule, so this becomes the version's
+    /// accountable human.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_SET_API_TRIGGER`]: whether a row
+/// was actually updated (`false` when the id is foreign / absent).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetApiTriggerResult {
+    /// `true` when the autopilot existed in this workspace and was updated.
+    pub updated: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_UPDATE`] (multica parity #14):
+/// an all-optional patch over one autopilot's editable config.
+///
+/// Every field is `Option<_>` + `#[serde(default)]`: omitted means "leave
+/// alone", so a caller sends only what it is changing and a pre-0061 payload
+/// still parses. `name` is the one COSMETIC field — changing only it lands the
+/// rename but mints no rule version.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotUpdateParams {
+    /// The subscribed workspace the autopilot must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The autopilot to edit.
+    pub autopilot_id: String,
+    /// New display name (cosmetic on its own).
+    #[serde(default)]
+    pub name: Option<String>,
+    /// Re-target the rule at a different agent.
+    #[serde(default)]
+    pub agent_id: Option<String>,
+    /// New instructions. Ignored when
+    /// [`clear_instructions`](Self::clear_instructions) is `true`.
+    #[serde(default)]
+    pub instructions: Option<String>,
+    /// CLEAR the instructions. A separate flag because JSON cannot distinguish
+    /// "set to null" from "omitted" in an all-optional patch.
+    #[serde(default)]
+    pub clear_instructions: bool,
+    /// New cron expression. Revalidated before any write: a malformed
+    /// expression yields `invalid_cron` with nothing written.
+    #[serde(default)]
+    pub cron_expr: Option<String>,
+    /// New in-flight ceiling.
+    #[serde(default)]
+    pub max_concurrent_runs: Option<i64>,
+    /// New execution mode (`run_only` | `create_issue`).
+    #[serde(default)]
+    pub execution_mode: Option<String>,
+    /// New concurrency policy (`skip` | `queue` | `replace`).
+    #[serde(default)]
+    pub concurrency_policy: Option<String>,
+    /// The bare `user.id` of the editing human — the accountable human recorded
+    /// on the minted rule version. Omitted ⇒ unattributed.
+    #[serde(default)]
+    pub actor_user_id: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_UPDATE`].
+///
+/// Three outcomes, discriminated by [`outcome`](Self::outcome):
+///
+/// - `updated` — the row was written. [`version`](Self::version) is the minted
+///   rule version, or `null` when the edit was COSMETIC (a rename / no-op).
+///   That `null` is the wire-visible proof of multica's rename rule.
+/// - `not_found` — no such autopilot in this workspace; nothing written.
+/// - `invalid_cron` — the supplied `cron_expr` failed to parse; nothing
+///   written and no version minted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotUpdateResult {
+    /// `updated` | `not_found` | `invalid_cron`.
+    pub outcome: String,
+    /// The minted rule version; `None` on a cosmetic-only edit, and on every
+    /// non-`updated` outcome.
+    #[serde(default)]
+    pub version: Option<i64>,
+}
+
+/// Params for every #27 autopilot actor-set method
+/// ([`crate::methods::HANGAR_AUTOPILOT_COLLABORATOR_ADD`] /
+/// `_REMOVE` / [`crate::methods::HANGAR_AUTOPILOT_COLLABORATORS`], and the
+/// three subscriber twins).
+///
+/// One shape for add / remove / list because the tuple they address is the
+/// same; the list reads ignore `actor` and `role`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotActorParams {
+    /// The subscribed workspace the autopilot must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The autopilot whose actor set is addressed.
+    pub autopilot_id: String,
+    /// The target actor in canonical `member:<id>` / `agent:<id>` form. Omitted
+    /// ⇒ the LOCAL HUMAN (`member:me`), mirroring `IssueSubscribeParams`.
+    /// Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+    /// Collaborator ADD only: `"editor"` (the default when omitted) or
+    /// `"viewer"`. A `viewer` grant is visibility, NOT write access.
+    /// Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub role: Option<String>,
+    /// The ACTING human, in canonical actor form — both the restricted-mode
+    /// write gate's subject and the `created_by` attribution. Omitted ⇒ an
+    /// unattributed local caller, which the gate admits (the daemon's own /
+    /// legacy path). Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_user_id: Option<String>,
+}
+
+/// One write-grant on an autopilot rule (multica parity #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotCollaboratorEntry {
+    /// The granted actor in canonical `member:<id>` / `agent:<id>` form.
+    pub actor: String,
+    /// A human-readable label for that actor (the daemon does the `user` join —
+    /// the plugin owns zero domain data), or `None` when unresolvable.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// The raw stored role token. Kept as a `String` so a token from a newer
+    /// daemon renders instead of failing the decode.
+    pub role: String,
+    /// Who granted it (canonical actor form), or `None` when unattributed.
+    #[serde(default)]
+    pub created_by: Option<String>,
+    /// When the grant was created (epoch millis).
+    pub created_at: i64,
+}
+
+/// One standing subscriber on an autopilot rule (multica parity #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSubscriberEntry {
+    /// The subscribing actor in canonical form.
+    pub actor: String,
+    /// A human-readable label, resolved daemon-side.
+    #[serde(default)]
+    pub label: Option<String>,
+    /// Who added them, or `None` when unattributed.
+    #[serde(default)]
+    pub created_by: Option<String>,
+    /// When the subscription was created (epoch millis).
+    pub created_at: i64,
+}
+
+/// Result of every #27 collaborator method: the rule's REFRESHED grant set, so
+/// a mutator needs no read-after-write round trip.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotCollaboratorsResult {
+    /// Every grant, oldest first. Empty ⇒ nobody holds an explicit grant.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub collaborators: Vec<AutopilotCollaboratorEntry>,
+}
+
+/// Result of every #27 subscriber method: the rule's REFRESHED standing list.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSubscribersResult {
+    /// Every subscriber, oldest first.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscribers: Vec<AutopilotSubscriberEntry>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_SET_ACCESS_MODE`]
+/// (multica parity #27).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotSetAccessModeParams {
+    /// The subscribed workspace the autopilot must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The autopilot to open or restrict.
+    pub autopilot_id: String,
+    /// `"open"` | `"restricted"`. Anything else is rejected with
+    /// `INVALID_PARAMS` rather than silently coerced — a typo must never
+    /// quietly leave a rule world-writable.
+    pub access_mode: String,
+    /// The acting human (gate subject + rule-version attribution). Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_user_id: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_AUTOPILOT_VERSIONS`]: the workspace
+/// (tenant guard), the autopilot, and a row cap.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotVersionsParams {
+    /// The subscribed workspace the autopilot must belong to.
+    pub workspace_id: String,
+    /// The autopilot whose version ledger to read.
+    pub autopilot_id: String,
+    /// Maximum number of versions to return (newest-first).
+    pub limit: u32,
+}
+
+/// Result of [`crate::methods::HANGAR_AUTOPILOT_VERSIONS`]: one autopilot's
+/// rule-version ledger, newest-first.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AutopilotVersionsResult {
+    /// The ledger rows, newest-first, capped at the requested limit. Empty for
+    /// an unversioned (pre-0061, never-edited) rule.
+    pub versions: Vec<AutopilotVersionRow>,
 }
 
 /// Result of [`crate::methods::HANGAR_TASKS_LIST`]: every task in the workspace
@@ -1091,6 +1377,21 @@ pub struct IssueCreateParams {
     /// it). Append-only field: an old client omits it, an old daemon ignores it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub external_ref: Option<String>,
+    /// Optional ORIGIN PROVENANCE kind for the created issue (migration 0056,
+    /// multica parity #21): `autopilot` | `comment_mention` | `manual`. ABSENT
+    /// ⇒ the daemon stamps `manual` (a human authored it). Validated against the
+    /// closed allow-list at the handler, with multica's pair rule
+    /// (`internal/handler/issue.go:1213-1231`): supplying one half of the pair
+    /// without the other, or a kind outside the list, is `INVALID_PARAMS` —
+    /// never a silent drop. Append-only field: an old client omits it, an old
+    /// daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_type: Option<String>,
+    /// Optional ORIGIN PROVENANCE id: the autopilot id for `autopilot`, the
+    /// comment id for `comment_mention`. REQUIRED for every kind but `manual`.
+    /// Append-only, same contract as [`Self::origin_type`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin_id: Option<String>,
     /// Optional parent issue id: when set, the created issue is a **sub-issue** of
     /// that parent (migration 0046). The daemon validates the parent exists in the
     /// same workspace and rejects a foreign/unknown parent. Append-only field: an
@@ -1128,6 +1429,62 @@ pub struct IssueCreateParams {
     /// daemon ignores it.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub labels: Vec<String>,
+    /// Optional 1-based **stage barrier** this sub-issue belongs to (migration
+    /// 0046). Only meaningful together with [`Self::parent_issue_id`]: siblings
+    /// sharing a stage close their barrier together, and the child-done cascade
+    /// posts ONE aggregated roll-up comment when a stage closes (parity #3-rest).
+    /// A value below 1 is `INVALID_PARAMS`. Append-only field: an old client
+    /// omits it, an old daemon ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stage: Option<i64>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUES_BATCH_UPDATE`] (multica parity
+/// #3-rest): apply ONE lifecycle state to N issues, then cascade ONCE.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuesBatchUpdateParams {
+    /// The subscribed workspace every id must belong to (tenant guard).
+    pub workspace_id: String,
+    /// Issue ids to transition, in caller order. Duplicates collapse (first wins)
+    /// and a foreign-tenant / unknown id touches nothing.
+    #[serde(default)]
+    pub issue_ids: Vec<String>,
+    /// The single lifecycle state applied to every id. Absent = no-op (the verb
+    /// exists for the aggregated cascade, so there is nothing else to apply).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUES_BATCH_UPDATE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuesBatchUpdateResult {
+    /// The refreshed rows, one per id that actually changed.
+    #[serde(default)]
+    pub updated: Vec<crate::events::IssueRow>,
+    /// One entry per parent that received an AGGREGATED cascade comment. A batch
+    /// closing one barrier under one parent yields exactly one entry, however
+    /// many children it names.
+    #[serde(default)]
+    pub cascades: Vec<BatchCascadeRow>,
+}
+
+/// One parent's aggregated child-done cascade, as reported by
+/// [`IssuesBatchUpdateResult`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct BatchCascadeRow {
+    /// The parent issue that received the comment.
+    pub parent_id: String,
+    /// The id of the ONE comment written on it.
+    pub comment_id: String,
+    /// Ids of the children this one comment reports (>1 = aggregated).
+    #[serde(default)]
+    pub child_ids: Vec<String>,
+    /// How many of the parent's sub-issues are now terminal.
+    #[serde(default)]
+    pub children_done: i64,
+    /// The parent's total sub-issue count.
+    #[serde(default)]
+    pub children_total: i64,
 }
 
 /// Params for [`crate::methods::HANGAR_AGENT_UPDATE`] (e38.15): edit one agent's
@@ -1173,8 +1530,13 @@ pub struct AgentUpdateParams {
     pub thinking: FieldUpdate<String>,
     /// New per-agent env map (ordered key-value pairs); `None` leaves it (an
     /// empty list is a valid "no env").
+    ///
+    /// Typed [`AgentEnvInput`] rather than a bare `Vec` so a `Debug` of these
+    /// params (an `INVALID_PARAMS` context, a trace span) masks the VALUES
+    /// (multica parity #30). `#[serde(transparent)]` keeps the wire bytes
+    /// (`[["FOO","bar"]]`) byte-identical — a pure type change.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub agent_env: Option<Vec<(String, String)>>,
+    pub agent_env: Option<AgentEnvInput>,
     /// New token budget (rtk/headroom); omitted leaves it, `null` clears it
     /// (back to unlimited), a value sets it (migration 0042).
     #[serde(default, skip_serializing_if = "FieldUpdate::is_keep")]
@@ -1304,6 +1666,100 @@ pub struct CommentAddParams {
     pub author: String,
     /// The comment body text.
     pub body: String,
+    /// The comment this one REPLIES to (`comment.id`), or `None` for a
+    /// top-level comment (migration 0067, multica parity #2-rest).
+    ///
+    /// **Append-only**: `#[serde(default)]` means a pre-2-rest client that omits
+    /// the key still decodes, and the field is skipped on the wire when unset so
+    /// the serialized shape is byte-identical to what old clients send today.
+    /// The mention router walks it for the reply-to-parent-author fallback.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// One routed `@mention` target and what the router DID about it
+/// (multica `CommentTriggerOutcome`, MUL-4525 §2; parity #2-rest).
+///
+/// Rides the `comment_add` RPC **result** and the
+/// [`crate::methods::HANGAR_COMMENT_MENTION_PREVIEW`] result only — deliberately
+/// NOT on [`crate::events::CommentRow`]. `CommentRow` is the `CommentAdded`
+/// event payload broadcast to every workspace subscriber, and broadcasting
+/// per-target refusal reasons there would leak the invocation gate's decisions
+/// to people who were not the ones asking. The outcomes go back to the caller
+/// that wrote the comment, and nobody else.
+///
+/// Every optional field is `#[serde(default)]` + skipped when empty, so this row
+/// stays append-only.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct MentionOutcomeRow {
+    /// `agent` | `member` | `squad` | `issue` | `all`.
+    pub target_type: String,
+    /// The resolved id, `""` when nothing resolved.
+    pub target_id: String,
+    /// The token exactly as typed.
+    pub handle: String,
+    /// `queued` | `coalesced` | `deferred` | `blocked` | `notified` | `ignored`
+    /// (`ainb_hangar_core::mention::MentionOutcome`).
+    pub outcome: String,
+    /// The `DispatchReason` token, `""` when the outcome carries none.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub reason: String,
+    /// The task written or coalesced into, when there is one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// Free-form human detail. Never an existence oracle.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub detail: String,
+    /// `explicit` | `reply_parent` | `thread_root` | `assignee`.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+}
+
+/// The result of [`crate::methods::HANGAR_COMMENT_ADD`] (parity #2-rest).
+///
+/// `#[serde(flatten)]` over the comment keeps the wire **byte-compatible** with
+/// the bare [`crate::events::CommentRow`] every existing client parses: with no
+/// mentions the payload is exactly what it was before this item, and a client
+/// that only knows about `CommentRow` decodes the richer payload unchanged.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommentAddResult {
+    /// The comment that was written.
+    #[serde(flatten)]
+    pub comment: crate::events::CommentRow,
+    /// One row per addressed target. Empty — and omitted from the wire — when
+    /// the comment mentioned nobody.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mention_outcomes: Vec<MentionOutcomeRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_COMMENT_MENTION_PREVIEW`].
+///
+/// The same inputs `comment_add` takes, minus the write. `parent_id` matters:
+/// the fallback chain and the parent-mention inheritance both key off it, so a
+/// preview that omitted it would preview a different comment than the one the
+/// user is about to send.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CommentMentionPreviewParams {
+    /// The subscribed workspace the issue must belong to (tenant guard).
+    pub workspace_id: String,
+    /// The issue the comment would be posted on.
+    pub issue_id: String,
+    /// The prospective author in canonical `member:<id>` / `agent:<id>` form.
+    pub author: String,
+    /// The draft comment body.
+    pub body: String,
+    /// The comment this draft would reply to, if any.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parent_id: Option<String>,
+}
+
+/// The result of [`crate::methods::HANGAR_COMMENT_MENTION_PREVIEW`]: exactly the
+/// rows the real write would produce, with nothing written.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct CommentMentionPreviewResult {
+    /// One row per addressed target, in the same order `comment_add` returns.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mention_outcomes: Vec<MentionOutcomeRow>,
 }
 
 /// One workspace member for the settings Members pane
@@ -1333,6 +1789,106 @@ pub struct MemberWireRow {
 pub struct MembersListResult {
     /// The member rows.
     pub members: Vec<MemberWireRow>,
+    /// The workspace's LIVE pending invitations (multica parity #18).
+    ///
+    /// Append-only: `#[serde(default)]` means a pre-#18 daemon's response (which
+    /// omits the field entirely) still deserializes, and
+    /// `skip_serializing_if = "Vec::is_empty"` keeps the common empty case off
+    /// the wire, so an old consumer parses the envelope unchanged.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending_invites: Vec<InvitationWireRow>,
+}
+
+/// One LIVE pending invitation for the settings Members pane
+/// ([`crate::methods::HANGAR_INVITE_CREATE`], multica parity #18).
+///
+/// A pure wire row: the pane paints `email · role · expires in Nd` under the
+/// member rows, and the accept / decline / revoke RPCs key off `id`.
+/// `invitee_user_id` is present only when the invitee already has an account.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InvitationWireRow {
+    /// The invitation id — what accept / decline / revoke key off.
+    #[serde(default)]
+    pub id: String,
+    /// The invitee's email, normalised (trimmed + lowercased).
+    #[serde(default)]
+    pub invitee_email: String,
+    /// The role the invitee will hold on accept (`admin` / `member`).
+    #[serde(default)]
+    pub role: String,
+    /// The invitation status — always `pending` on this list.
+    #[serde(default)]
+    pub status: String,
+    /// `user.id` of whoever issued the invite.
+    #[serde(default)]
+    pub inviter_id: String,
+    /// `user.id` of the invitee, when one already exists.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub invitee_user_id: Option<String>,
+    /// Epoch-ms the invite was issued.
+    #[serde(default)]
+    pub created_at: i64,
+    /// Epoch-ms the invite stops being acceptable (issue + 7 days).
+    #[serde(default)]
+    pub expires_at: i64,
+}
+
+/// Params for [`crate::methods::HANGAR_INVITE_CREATE`] (parity #18): invite an
+/// email into a workspace.
+///
+/// `workspace_id` is the tenant-isolation guard. `inviter_user_id` must already
+/// be a member of it. `role` is `admin` or `member` — `owner` is rejected
+/// ("cannot invite as owner"). The email is normalised (trim + lowercase) by the
+/// store, so casing never forks an identity.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InviteCreateParams {
+    /// The workspace being invited into (tenant guard).
+    #[serde(default)]
+    pub workspace_id: String,
+    /// The inviting member (`user.id`); must be a member of `workspace_id`.
+    #[serde(default)]
+    pub inviter_user_id: String,
+    /// The invitee's email.
+    #[serde(default)]
+    pub invitee_email: String,
+    /// The role the invitee will hold on accept (`admin` / `member`).
+    #[serde(default)]
+    pub role: String,
+}
+
+/// Params for [`crate::methods::HANGAR_INVITE_ACCEPT`] and
+/// [`crate::methods::HANGAR_INVITE_DECLINE`] (parity #18): the invitee acts on
+/// their own invitation.
+///
+/// `actor_email` is the acting identity: hangar has no session, so the invitee
+/// must be named explicitly or the ownership gate is theatre. It is compared
+/// against the invitation's normalised `invitee_email`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InviteActParams {
+    /// The workspace the invitation belongs to (tenant guard).
+    #[serde(default)]
+    pub workspace_id: String,
+    /// The invitation being accepted / declined.
+    #[serde(default)]
+    pub invitation_id: String,
+    /// The acting human's email; must match the invitee.
+    #[serde(default)]
+    pub actor_email: String,
+}
+
+/// Params for [`crate::methods::HANGAR_INVITE_REVOKE`] (parity #18): an admin
+/// withdraws a still-pending invitation.
+///
+/// Workspace-scoped in SQL, so another tenant's invitation matches no row and is
+/// rejected rather than deleted.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct InviteRevokeParams {
+    /// The workspace the invitation must belong to (tenant guard).
+    #[serde(default)]
+    pub workspace_id: String,
+    /// The invitation being withdrawn.
+    #[serde(default)]
+    pub invitation_id: String,
 }
 
 /// Params for [`crate::methods::HANGAR_MEMBER_SET_ROLE`] (e38.11): change one
@@ -2058,6 +2614,17 @@ pub struct BoardCardRunResult {
     /// pre-T4 single-agent run serializes byte-identically.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub member_task_ids: Vec<String>,
+    /// The admission code the daemon RECORDED for this dispatch (multica parity
+    /// #12): `queued` on the healthy path, `runtime_offline` when the task was
+    /// written against a runtime that is not `online`.
+    ///
+    /// This is the reference's stated invariant made concrete — the handler
+    /// serializes the SAME vocabulary the service decided
+    /// (`DispatchReason::as_db_str`), so decider and serializer cannot drift.
+    /// Append-only: omitted when `None`, so a pre-#12 result decodes and a
+    /// pre-#12 client ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub reason: Option<String>,
 }
 
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_CANCEL`] (tcp T3 / F6): cancel
@@ -2241,6 +2808,180 @@ pub struct IssueLinksResult {
     pub links: Vec<crate::events::IssueLinkRow>,
 }
 
+/// Params for [`crate::methods::HANGAR_ISSUE_SUBSCRIBE`] /
+/// [`crate::methods::HANGAR_ISSUE_UNSUBSCRIBE`] (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscribeParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue to watch / stop watching.
+    pub issue_id: String,
+    /// The target actor in canonical `member:<id>` / `agent:<id>` form. Omitted
+    /// ⇒ the LOCAL HUMAN (`member:me`), mirroring the reference's "the target
+    /// defaults to the caller" — an agent caller subscribes ITSELF, not the
+    /// human behind it. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_SUBSCRIBERS`] (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscribersParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose subscriber set to read.
+    pub issue_id: String,
+}
+
+/// Result of every #22 subscriber method: the issue's REFRESHED subscriber set,
+/// so a mutator needs no read-after-write round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueSubscribersResult {
+    /// Every watcher, oldest first. Empty ⇒ nobody watches the issue.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub subscribers: Vec<crate::events::IssueSubscriberRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_REACTION_ADD`] /
+/// [`crate::methods::HANGAR_ISSUE_REACTION_REMOVE`] (multica parity #22).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueReactionParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue reacted to.
+    pub issue_id: String,
+    /// The emoji. Blank is rejected (`INVALID_PARAMS`), matching the reference's
+    /// `400 "emoji is required"`.
+    pub emoji: String,
+    /// The reacting actor. Omitted ⇒ the LOCAL HUMAN. Append-only.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor: Option<String>,
+}
+
+/// Result of every #22 reaction method: the issue's REFRESHED aggregated
+/// buckets, most-used first.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueReactionsResult {
+    /// One bucket per distinct emoji. Empty ⇒ the issue has no reactions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub reactions: Vec<crate::events::ReactionRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_PROPERTIES_LIST`] (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertiesListParams {
+    /// The subscribed workspace whose catalog is read (tenant guard).
+    pub workspace_id: String,
+    /// Include ARCHIVED definitions too. Default `false` = the active catalog.
+    #[serde(default)]
+    pub include_archived: bool,
+}
+
+/// Result of [`crate::methods::HANGAR_PROPERTIES_LIST`] (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertiesListResult {
+    /// Definitions in `position, key` order. Empty ⇒ no custom properties.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub properties: Vec<crate::events::PropertyDefRow>,
+}
+
+/// Params for [`crate::methods::HANGAR_PROPERTY_DEFINE`] (multica parity #17).
+///
+/// Idempotent by `(workspace_id, key)`: every optional field left absent keeps
+/// the stored value, so a rename is `{ workspace_id, key, name }` alone.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertyDefineParams {
+    /// The subscribed workspace the definition belongs to (tenant guard).
+    pub workspace_id: String,
+    /// Stable slug. Blank is rejected (`INVALID_PARAMS`).
+    pub key: String,
+    /// Display label. Absent on a NEW definition ⇒ the key is used.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// `text` / `number` / `select` / `multi_select` / `date` / `checkbox` /
+    /// `url`. Absent on a NEW definition ⇒ `text`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    /// Option catalog for `select` / `multi_select`; required for those kinds.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub options: Vec<String>,
+    /// Render order within the workspace. Absent ⇒ unchanged (0 when new).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub position: Option<i64>,
+}
+
+/// Params for [`crate::methods::HANGAR_PROPERTY_ARCHIVE`] (multica parity #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct PropertyArchiveParams {
+    /// The subscribed workspace the definition belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The definition's stable slug.
+    pub key: String,
+    /// `true` archives, `false` un-archives. NEVER a delete.
+    #[serde(default)]
+    pub archived: bool,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_PROPERTY_SET`] (multica parity
+/// #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuePropertySetParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose value bag is written.
+    pub issue_id: String,
+    /// The definition's stable slug.
+    pub key: String,
+    /// The scalar value for every kind except `multi_select`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// The `multi_select` form. Takes precedence over `value` when non-empty.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub values: Vec<String>,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_PROPERTY_CLEAR`] (multica parity
+/// #17).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssuePropertyClearParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose value bag is written.
+    pub issue_id: String,
+    /// The definition's stable slug.
+    pub key: String,
+}
+
+/// Params shared by the three `hangar/issue_metadata_*` methods (multica parity
+/// #17) — get, set and delete take one shape so an agent binds one struct.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMetadataParams {
+    /// The subscribed workspace the issue belongs to (tenant guard).
+    pub workspace_id: String,
+    /// The issue whose scratch bag is read or written.
+    pub issue_id: String,
+    /// The metadata key. Required for set / delete; on get it narrows the
+    /// result to that one entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    /// The value, as TEXT. Required for set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value: Option<String>,
+    /// `string` | `number` | `bool`. ABSENT ⇒ sniff (`true`/`false` ⇒ bool, a
+    /// valid decimal ⇒ number, else string), the reference's `--type` override.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub value_type: Option<String>,
+}
+
+/// Result of every `hangar/issue_metadata_*` method (multica parity #17): the
+/// issue's REFRESHED bag, so a mutator needs no read-after-write round trip.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueMetadataResult {
+    /// Entries key-sorted. Empty ⇒ the issue carries no metadata.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub entries: Vec<crate::events::IssueMetadataRow>,
+}
+
 /// Params for [`crate::methods::HANGAR_BOARD_CARD_SET_AUTO_RUN`] (tcp T4 / F7):
 /// flip a card's auto-run flag.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
@@ -2418,6 +3159,126 @@ pub struct DaemonConfigListResult {
     pub entries: Vec<DaemonConfigEntry>,
 }
 
+/// Params for [`crate::methods::HANGAR_DISPATCH_ATTEMPTS_LIST`] (multica parity
+/// #12): read the admission-decision audit, workspace-scoped and optionally
+/// narrowed to one card.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DispatchAttemptsListParams {
+    /// The subscribed workspace (tenant guard).
+    pub workspace_id: String,
+    /// Narrow to one card's history. Omit for the whole workspace feed.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// How many rows to return, newest first. Defaults to 50, hard-capped at 200
+    /// by the daemon.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Result of [`crate::methods::HANGAR_DISPATCH_ATTEMPTS_LIST`]: the attempts,
+/// **newest first**.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DispatchAttemptsListResult {
+    /// The matching attempts, newest first.
+    pub attempts: Vec<DispatchAttemptRow>,
+}
+
+/// One `dispatch_attempt` row on the wire (multica parity #12, migration 0058).
+///
+/// [`Self::reason`] and [`Self::source`] are carried as raw strings, not typed
+/// enums, so a token minted by a newer daemon renders as raw text instead of
+/// failing the decode — the append-only vocabulary contract. Decode with
+/// `DispatchReason::parse` / `DispatchSource::parse`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct DispatchAttemptRow {
+    /// ULID primary key.
+    pub id: String,
+    /// The card the attempt was for; `None` for an issue-less trigger.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub issue_id: Option<String>,
+    /// The resolved target agent, when one resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub agent_id: Option<String>,
+    /// The target agent's runtime, when one resolved.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runtime_id: Option<String>,
+    /// Set iff a task row was actually written. Present on `queued` AND on
+    /// `runtime_offline` (hangar enqueues then records — see the daemon's
+    /// divergence note).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub task_id: Option<String>,
+    /// The stable admission code (`DispatchReason::as_db_str`).
+    pub reason: String,
+    /// Free-text specifics the deliberately-generic code omits.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub detail: Option<String>,
+    /// Which trigger surface made the attempt (`DispatchSource::as_db_str`).
+    pub source: String,
+    /// When it was recorded (epoch millis).
+    pub created_at: i64,
+}
+
+/// Params for [`crate::methods::HANGAR_ISSUE_TIMELINE`] (multica parity #13):
+/// read one card's merged activity + comment narrative.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueTimelineParams {
+    /// The subscribed workspace (tenant guard).
+    pub workspace_id: String,
+    /// The card whose timeline to read.
+    pub issue_id: String,
+    /// Max entries: the newest window, rendered oldest-first. Defaults to 200,
+    /// hard-capped at 2000 by the daemon (multica's `timelineHardCap`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub limit: Option<u32>,
+}
+
+/// Result of [`crate::methods::HANGAR_ISSUE_TIMELINE`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct IssueTimelineResult {
+    /// The merged entries, **oldest first** (multica's default flat contract).
+    #[serde(default)]
+    pub entries: Vec<TimelineEntryRow>,
+}
+
+/// One merged timeline entry (multica parity #13).
+///
+/// [`Self::kind`] discriminates `"activity"` from `"comment"`; every optional
+/// field is `serde(default, skip_serializing_if)` so an older client decodes a
+/// newer daemon's frame and a newer client decodes an older daemon's frame.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TimelineEntryRow {
+    /// `"activity"` | `"comment"` — a raw string, not an enum, so an unknown
+    /// future kind renders as text instead of failing the decode.
+    pub kind: String,
+    /// The source row's primary key (an `activity_log.id` or a `comment.id`).
+    pub id: String,
+    /// `"member"` | `"agent"` | `"system"`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_type: Option<String>,
+    /// The actor's id; absent for a `system` entry.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub actor_id: Option<String>,
+    /// When it happened (epoch millis). The primary sort key.
+    pub created_at: i64,
+    /// Activity-only: the stable action token
+    /// (`ActivityAction::as_db_str`). Decode tolerantly with
+    /// `ActivityAction::parse` — an unknown token renders raw.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub action: Option<String>,
+    /// Activity-only: the free-form details object (`{"from":…,"to":…}` and
+    /// friends).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub details: Option<serde_json::Value>,
+    /// Comment-only: the comment body.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub body: Option<String>,
+}
+
+/// The `kind` discriminant for an activity entry.
+pub const TIMELINE_KIND_ACTIVITY: &str = "activity";
+/// The `kind` discriminant for a comment entry.
+pub const TIMELINE_KIND_COMMENT: &str = "comment";
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2467,6 +3328,16 @@ mod tests {
 
         let issues = IssuesListResult {
             issues: vec![IssueRow {
+                subscriber_count: 0,
+                subscribed: false,
+                reactions: Vec::new(),
+                properties: Vec::new(),
+                metadata: Vec::new(),
+                last_dispatch_reason: None,
+                last_dispatch_detail: None,
+                last_dispatch_at: None,
+                origin_type: None,
+                origin_id: None,
                 id: ainb_hangar_core::ids::IssueId::from_str("i1").unwrap(),
                 display_id: None,
                 workspace_id: "ws-1".into(),
@@ -2720,6 +3591,8 @@ mod tests {
                 enabled: true,
                 last_run_status: Some("completed".into()),
                 last_run_at: Some(1_699_000_000_000),
+                api_trigger_enabled: true,
+                ..Default::default()
             }],
         };
         let s = serde_json::to_string(&list).unwrap();
@@ -2746,6 +3619,9 @@ mod tests {
                 started_at: 1_699_000_000_000,
                 completed_at: Some(1_699_000_120_000),
                 status: "completed".into(),
+                source: "api".into(),
+                failure_reason: None,
+                ..Default::default()
             }],
         };
         let s = serde_json::to_string(&runs).unwrap();
@@ -2757,6 +3633,7 @@ mod tests {
         let fire = AutopilotFireNowParams {
             workspace_id: "ws-1".into(),
             autopilot_id: "ap-1".into(),
+            ..Default::default()
         };
         let s = serde_json::to_string(&fire).unwrap();
         assert_eq!(
@@ -2768,12 +3645,263 @@ mod tests {
             workspace_id: "ws-1".into(),
             autopilot_id: "ap-1".into(),
             enabled: false,
+            ..Default::default()
         };
         let s = serde_json::to_string(&toggle).unwrap();
         assert_eq!(
             serde_json::from_str::<AutopilotSetEnabledParams>(&s).unwrap(),
             toggle
         );
+    }
+
+    /// The `api`-trigger envelopes (migration 0057 / parity item 15) round-trip,
+    /// and the two wire structs stay BACKWARDS-COMPATIBLE: a pre-0057 daemon's
+    /// payload — no `api_trigger_enabled`, no `source`, no `failure_reason` —
+    /// still deserialises, via the serde defaults.
+    #[test]
+    fn autopilot_api_trigger_envelopes_roundtrip_and_stay_backwards_compatible() {
+        let params = AutopilotTriggerApiParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotTriggerApiParams>(&s).unwrap(),
+            params
+        );
+
+        for result in [
+            AutopilotTriggerApiResult {
+                outcome: "fired".into(),
+                run_id: Some("run-1".into()),
+                task_id: Some("task-1".into()),
+                reason: None,
+            },
+            AutopilotTriggerApiResult {
+                outcome: "skipped".into(),
+                run_id: Some("run-2".into()),
+                task_id: None,
+                reason: Some("concurrency limit: 1/1 in flight".into()),
+            },
+            AutopilotTriggerApiResult {
+                outcome: "disabled".into(),
+                run_id: None,
+                task_id: None,
+                reason: None,
+            },
+        ] {
+            let s = serde_json::to_string(&result).unwrap();
+            assert_eq!(
+                serde_json::from_str::<AutopilotTriggerApiResult>(&s).unwrap(),
+                result
+            );
+        }
+
+        let arm = AutopilotSetApiTriggerParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            enabled: true,
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&arm).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSetApiTriggerParams>(&s).unwrap(),
+            arm
+        );
+        assert!(
+            serde_json::from_str::<AutopilotSetApiTriggerResult>(r#"{"updated":true}"#)
+                .unwrap()
+                .updated
+        );
+
+        // A pre-0057 daemon's payloads, verbatim.
+        let legacy_ap: AutopilotRow = serde_json::from_str(
+            r#"{"id":"ap-1","workspace_id":"ws-1","agent_id":"agent-1","name":"daily",
+                "cron_expr":"0 9 * * *","next_tick_at":null,"enabled":true,
+                "last_run_status":null,"last_run_at":null}"#,
+        )
+        .expect("a pre-0057 AutopilotRow must still deserialise");
+        assert!(
+            !legacy_ap.api_trigger_enabled,
+            "an omitted api trigger flag means UNARMED"
+        );
+
+        let legacy_run: AutopilotRunRow = serde_json::from_str(
+            r#"{"id":"run-1","autopilot_id":"ap-1","started_at":1,"completed_at":null,
+                "status":"running"}"#,
+        )
+        .expect("a pre-0057 AutopilotRunRow must still deserialise");
+        assert_eq!(
+            legacy_run.source, "",
+            "an omitted source is empty, not a guessed provenance"
+        );
+        assert_eq!(legacy_run.failure_reason, None);
+    }
+
+    /// The parity-#14 rule-version envelopes round-trip, and every field the
+    /// item added is APPEND-ONLY: a pre-0061 daemon's payload (no
+    /// `actor_user_id`, no `rule_version`, no `accountable_actor`) still
+    /// deserialises, and a cosmetic edit's `version: null` survives the wire.
+    #[test]
+    fn autopilot_rule_version_envelopes_roundtrip_and_are_append_only() {
+        let params = AutopilotUpdateParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            instructions: Some("v2 instructions".into()),
+            actor_user_id: Some("u-bob".into()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotUpdateParams>(&s).unwrap(),
+            params
+        );
+
+        // A COSMETIC edit reports `version: null` — the wire-visible proof of
+        // multica's rename rule.
+        let cosmetic: AutopilotUpdateResult =
+            serde_json::from_str(r#"{"outcome":"updated","version":null}"#).unwrap();
+        assert_eq!(cosmetic.outcome, "updated");
+        assert_eq!(cosmetic.version, None);
+        let substantive: AutopilotUpdateResult =
+            serde_json::from_str(r#"{"outcome":"updated","version":2}"#).unwrap();
+        assert_eq!(substantive.version, Some(2));
+
+        let versions = AutopilotVersionsResult {
+            versions: vec![AutopilotVersionRow {
+                id: "v-1".into(),
+                autopilot_id: "ap-1".into(),
+                version: 2,
+                change_kind: "instructions".into(),
+                published_by: Some("member:u-bob".into()),
+                published_by_label: Some("bob@example.com".into()),
+                config_summary: r#"{"changed":["instructions"]}"#.into(),
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&versions).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotVersionsResult>(&s).unwrap(),
+            versions
+        );
+
+        // APPEND-ONLY: pre-0061 payloads, verbatim.
+        let legacy_update: AutopilotUpdateParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","autopilot_id":"ap-1"}"#)
+                .expect("a pre-0061 AutopilotUpdateParams must still deserialise");
+        assert_eq!(legacy_update.actor_user_id, None);
+
+        let legacy_fire: AutopilotFireNowParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","autopilot_id":"ap-1"}"#)
+                .expect("a pre-0061 AutopilotFireNowParams must still deserialise");
+        assert_eq!(legacy_fire.actor_user_id, None);
+
+        let legacy_ap: AutopilotRow = serde_json::from_str(
+            r#"{"id":"ap-1","workspace_id":"ws-1","agent_id":"a","name":"n",
+                 "cron_expr":"* * * * *","next_tick_at":null,"enabled":true,
+                 "last_run_status":null,"last_run_at":null}"#,
+        )
+        .expect("a pre-0061 AutopilotRow must still deserialise");
+        assert_eq!(
+            legacy_ap.rule_version, None,
+            "an omitted rule_version is unversioned, not a fabricated v1"
+        );
+        assert_eq!(legacy_ap.last_published_by, None);
+
+        let legacy_run: AutopilotRunRow = serde_json::from_str(
+            r#"{"id":"r-1","autopilot_id":"ap-1","started_at":1,"completed_at":null,
+                 "status":"running"}"#,
+        )
+        .expect("a pre-0061 AutopilotRunRow must still deserialise");
+        assert_eq!(
+            legacy_run.accountable_actor, None,
+            "an omitted accountable_actor is an honest unknown, not a guess"
+        );
+        assert_eq!(legacy_run.attribution, None);
+    }
+
+    /// The #27 autopilot collaborator / subscriber envelopes round-trip, and a
+    /// PRE-0064 payload still decodes with the permissive defaults.
+    #[test]
+    fn autopilot_actor_set_envelopes_roundtrip_and_are_append_only() {
+        let params = AutopilotActorParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            actor: Some("member:bob".into()),
+            role: Some("editor".into()),
+            actor_user_id: Some("member:amy".into()),
+        };
+        let s = serde_json::to_string(&params).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotActorParams>(&s).unwrap(),
+            params
+        );
+
+        let collaborators = AutopilotCollaboratorsResult {
+            collaborators: vec![AutopilotCollaboratorEntry {
+                actor: "member:bob".into(),
+                label: Some("bob@example.com".into()),
+                role: "editor".into(),
+                created_by: Some("member:amy".into()),
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&collaborators).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotCollaboratorsResult>(&s).unwrap(),
+            collaborators
+        );
+
+        let subscribers = AutopilotSubscribersResult {
+            subscribers: vec![AutopilotSubscriberEntry {
+                actor: "member:bob".into(),
+                label: None,
+                created_by: None,
+                created_at: 1_700_000_000_000,
+            }],
+        };
+        let s = serde_json::to_string(&subscribers).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSubscribersResult>(&s).unwrap(),
+            subscribers
+        );
+
+        let mode = AutopilotSetAccessModeParams {
+            workspace_id: "ws-1".into(),
+            autopilot_id: "ap-1".into(),
+            access_mode: "restricted".into(),
+            actor_user_id: Some("member:amy".into()),
+        };
+        let s = serde_json::to_string(&mode).unwrap();
+        assert_eq!(
+            serde_json::from_str::<AutopilotSetAccessModeParams>(&s).unwrap(),
+            mode
+        );
+
+        // APPEND-ONLY: a pre-0064 AutopilotRow payload, carrying none of the
+        // three new fields, still decodes — and decodes PERMISSIVELY. An
+        // omitted access_mode must never render as a lock on a rule nobody
+        // restricted.
+        let legacy: AutopilotRow = serde_json::from_str(
+            r#"{"id":"ap-1","workspace_id":"ws-1","agent_id":"a","name":"n",
+                 "cron_expr":"* * * * *","next_tick_at":null,"enabled":true,
+                 "last_run_status":null,"last_run_at":null}"#,
+        )
+        .expect("a pre-0064 AutopilotRow must still deserialise");
+        assert_eq!(legacy.collaborator_count, 0);
+        assert_eq!(legacy.subscriber_count, 0);
+        assert_eq!(
+            legacy.access_mode, None,
+            "an omitted access_mode is open, never a fabricated restriction"
+        );
+
+        // Minimal params, as an older caller would send them.
+        let legacy_params: AutopilotActorParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","autopilot_id":"ap-1"}"#).unwrap();
+        assert_eq!(legacy_params.actor, None);
+        assert_eq!(legacy_params.role, None);
+        assert_eq!(legacy_params.actor_user_id, None);
     }
 
     /// The P8.4 Kanban task envelopes round-trip through JSON.
@@ -2953,12 +4081,93 @@ mod tests {
             issue_id: "issue-1".into(),
             author: "member:alice".into(),
             body: "looks good to me".into(),
+            parent_id: None,
         };
         let s = serde_json::to_string(&params).unwrap();
         assert_eq!(
             serde_json::from_str::<CommentAddParams>(&s).unwrap(),
             params
         );
+    }
+
+    /// **2-rest** — `parent_id` is APPEND-ONLY: a pre-2-rest client's payload
+    /// (no `parent_id` key at all) still decodes, and an unset `parent_id` is
+    /// OMITTED from the wire so the serialized shape an old daemon sees is
+    /// byte-identical to today's.
+    #[test]
+    fn comment_add_params_parent_id_is_append_only() {
+        let legacy = r#"{"workspace_id":"ws-1","issue_id":"i-1","author":"member:a","body":"hi"}"#;
+        let decoded: CommentAddParams = serde_json::from_str(legacy).unwrap();
+        assert_eq!(decoded.parent_id, None, "an absent key decodes to None");
+        assert_eq!(
+            serde_json::to_string(&decoded).unwrap(),
+            legacy,
+            "an unset parent_id is omitted, so the wire shape is unchanged"
+        );
+
+        let reply = CommentAddParams {
+            parent_id: Some("c-1".into()),
+            ..decoded
+        };
+        let encoded = serde_json::to_string(&reply).unwrap();
+        assert!(encoded.contains(r#""parent_id":"c-1""#), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<CommentAddParams>(&encoded).unwrap(),
+            reply
+        );
+    }
+
+    /// **2-rest** — `CommentAddResult` is `#[serde(flatten)]`ed over
+    /// `CommentRow`, so a pre-2-rest client that parses the result as a bare
+    /// `CommentRow` still succeeds, and a result with no outcomes is
+    /// BYTE-IDENTICAL to the bare row it used to be.
+    #[test]
+    fn comment_add_result_stays_wire_compatible_with_a_bare_comment_row() {
+        use crate::events::CommentRow;
+        use ainb_hangar_core::ids::{CommentId, IssueId};
+
+        let comment = CommentRow {
+            id: CommentId::from_str("c-1".to_string()).unwrap(),
+            issue_id: IssueId::from_str("i-1").unwrap(),
+            author: "member:alice".into(),
+            body: "ship it".into(),
+            created_at: 7,
+            parent_id: None,
+        };
+        let bare = serde_json::to_string(&comment).unwrap();
+        let empty = CommentAddResult {
+            comment: comment.clone(),
+            mention_outcomes: Vec::new(),
+        };
+        assert_eq!(
+            serde_json::to_string(&empty).unwrap(),
+            bare,
+            "no outcomes ⇒ the exact bytes an old client already parses"
+        );
+
+        let with_outcomes = CommentAddResult {
+            comment,
+            mention_outcomes: vec![MentionOutcomeRow {
+                target_type: "agent".into(),
+                target_id: "a-1".into(),
+                handle: "builder".into(),
+                outcome: "queued".into(),
+                reason: "queued".into(),
+                task_id: Some("t-1".into()),
+                detail: String::new(),
+                source: "explicit".into(),
+            }],
+        };
+        let encoded = serde_json::to_string(&with_outcomes).unwrap();
+        // An OLD client still gets its comment out of the richer payload.
+        let as_row: CommentRow = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(as_row.body, "ship it");
+        assert_eq!(
+            serde_json::from_str::<CommentAddResult>(&encoded).unwrap(),
+            with_outcomes
+        );
+        // Empty optional fields never hit the wire.
+        assert!(!encoded.contains("\"detail\""), "{encoded}");
     }
 
     /// `AgentUpdateParams` round-trips, and the three-state nullable wrapper keeps
@@ -2976,7 +4185,7 @@ mod tests {
             cli_args: Some(vec!["--verbose".into()]),
             mcp_config: FieldUpdate::Set(r#"{"servers":{}}"#.into()),
             thinking: FieldUpdate::Set("high".into()),
-            agent_env: Some(vec![("FOO".into(), "bar".into())]),
+            agent_env: Some(vec![("FOO".into(), "bar".into())].into()),
             token_budget: FieldUpdate::Set(500_000),
             description: Some("ships the backend".into()),
             avatar_url: FieldUpdate::Set("emoji:\u{1F98A}".into()),
@@ -3214,6 +4423,7 @@ mod tests {
                     role: "admin".into(),
                 },
             ],
+            pending_invites: Vec::new(),
         };
         let s = serde_json::to_string(&list).unwrap();
         assert_eq!(serde_json::from_str::<MembersListResult>(&s).unwrap(), list);
@@ -3237,6 +4447,90 @@ mod tests {
         assert_eq!(
             serde_json::from_str::<MemberRemoveParams>(&s).unwrap(),
             remove
+        );
+    }
+
+    /// The parity-#18 invite envelopes round-trip, and `pending_invites` is
+    /// APPEND-ONLY: a pre-#18 daemon's `members_list` payload (no such field)
+    /// still deserializes, and the field stays off the wire when empty.
+    #[test]
+    fn invite_envelopes_roundtrip_and_members_list_stays_append_only() {
+        // (a) A pre-#18 response parses unchanged, with an empty invite list.
+        let legacy = r#"{"members":[{"user_id":"u-amy","email":"amy@x.io","role":"owner"}]}"#;
+        let parsed: MembersListResult = serde_json::from_str(legacy).unwrap();
+        assert_eq!(parsed.members.len(), 1);
+        assert!(
+            parsed.pending_invites.is_empty(),
+            "absent pending_invites defaults to empty, never an error"
+        );
+        // (b) …and an empty invite list serialises back to the legacy shape.
+        assert_eq!(serde_json::to_string(&parsed).unwrap(), legacy);
+
+        // (c) A populated invite row round-trips.
+        let with_invite = MembersListResult {
+            members: Vec::new(),
+            pending_invites: vec![InvitationWireRow {
+                id: "inv-1".into(),
+                invitee_email: "dana@example.com".into(),
+                role: "member".into(),
+                status: "pending".into(),
+                inviter_id: "u-amy".into(),
+                invitee_user_id: None,
+                created_at: 1_000,
+                expires_at: 605_800_000,
+            }],
+        };
+        let s = serde_json::to_string(&with_invite).unwrap();
+        assert!(
+            !s.contains("invitee_user_id"),
+            "a None invitee_user_id stays off the wire: {s}"
+        );
+        assert_eq!(
+            serde_json::from_str::<MembersListResult>(&s).unwrap(),
+            with_invite
+        );
+
+        // (d) …and serialises the id when it IS known.
+        let known = InvitationWireRow {
+            invitee_user_id: Some("u-dana".into()),
+            ..with_invite.pending_invites[0].clone()
+        };
+        let s = serde_json::to_string(&known).unwrap();
+        assert!(s.contains(r#""invitee_user_id":"u-dana""#), "{s}");
+        assert_eq!(
+            serde_json::from_str::<InvitationWireRow>(&s).unwrap(),
+            known
+        );
+
+        // (e) The three param envelopes round-trip.
+        let create = InviteCreateParams {
+            workspace_id: "ws-1".into(),
+            inviter_user_id: "u-amy".into(),
+            invitee_email: "dana@example.com".into(),
+            role: "member".into(),
+        };
+        let s = serde_json::to_string(&create).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InviteCreateParams>(&s).unwrap(),
+            create
+        );
+
+        let act = InviteActParams {
+            workspace_id: "ws-1".into(),
+            invitation_id: "inv-1".into(),
+            actor_email: "dana@example.com".into(),
+        };
+        let s = serde_json::to_string(&act).unwrap();
+        assert_eq!(serde_json::from_str::<InviteActParams>(&s).unwrap(), act);
+
+        let revoke = InviteRevokeParams {
+            workspace_id: "ws-1".into(),
+            invitation_id: "inv-1".into(),
+        };
+        let s = serde_json::to_string(&revoke).unwrap();
+        assert_eq!(
+            serde_json::from_str::<InviteRevokeParams>(&s).unwrap(),
+            revoke
         );
     }
 
@@ -3478,6 +4772,7 @@ mod tests {
             runtime_id: "rt-lead".into(),
             mode: "headless".into(),
             member_task_ids: vec!["t-m1".into(), "t-m2".into()],
+            reason: None,
         };
         let s = serde_json::to_string(&run).unwrap();
         assert_eq!(serde_json::from_str::<BoardCardRunResult>(&s).unwrap(), run);
@@ -3624,6 +4919,99 @@ mod tests {
         assert!(
             !s.contains("\"blocks\"") && !s.contains("\"related\""),
             "{s}"
+        );
+    }
+
+    /// Parity #13: the timeline entry is append-only — every optional field is
+    /// omitted when absent, so an older daemon's frame decodes and a comment
+    /// entry never carries activity-only keys.
+    #[test]
+    fn timeline_entry_omits_absent_fields_and_roundtrips() {
+        let comment = TimelineEntryRow {
+            kind: TIMELINE_KIND_COMMENT.into(),
+            id: "c-1".into(),
+            actor_type: Some("agent".into()),
+            actor_id: Some("a-1".into()),
+            created_at: 100,
+            body: Some("picked this up".into()),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&comment).unwrap();
+        assert!(!s.contains("\"action\""), "{s}");
+        assert!(!s.contains("\"details\""), "{s}");
+        assert_eq!(
+            serde_json::from_str::<TimelineEntryRow>(&s).unwrap(),
+            comment
+        );
+
+        let activity = TimelineEntryRow {
+            kind: TIMELINE_KIND_ACTIVITY.into(),
+            id: "a-1".into(),
+            actor_type: Some("system".into()),
+            created_at: 101,
+            action: Some("status_changed".into()),
+            details: Some(serde_json::json!({"from": "open", "to": "done"})),
+            ..Default::default()
+        };
+        let s = serde_json::to_string(&activity).unwrap();
+        assert!(!s.contains("\"body\""), "{s}");
+        assert!(!s.contains("\"actor_id\""), "{s}");
+        assert_eq!(
+            serde_json::from_str::<TimelineEntryRow>(&s).unwrap(),
+            activity
+        );
+
+        // A minimal legacy frame decodes with every optional field defaulted.
+        let bare: TimelineEntryRow =
+            serde_json::from_str(r#"{"kind":"activity","id":"x","created_at":1}"#).unwrap();
+        assert_eq!(bare.action, None);
+        assert_eq!(bare.body, None);
+
+        // An empty result decodes from an absent `entries` key.
+        let empty: IssueTimelineResult = serde_json::from_str("{}").unwrap();
+        assert!(empty.entries.is_empty());
+    }
+
+    /// The inbox params are append-only: a pre-0060 caller that sends only
+    /// `workspace_id` still decodes (recipient absent = the local human), and a
+    /// `None` recipient is omitted from the encoded frame entirely.
+    #[test]
+    fn inbox_scoped_params_recipient_is_append_only_optional() {
+        let legacy: InboxScopedParams = serde_json::from_str(r#"{"workspace_id":"ws-1"}"#).unwrap();
+        assert_eq!(legacy.recipient, None, "an omitted recipient is absent");
+
+        let scoped: InboxScopedParams =
+            serde_json::from_str(r#"{"workspace_id":"ws-1","recipient":"agent:a1"}"#).unwrap();
+        assert_eq!(scoped.recipient.as_deref(), Some("agent:a1"));
+
+        let encoded = serde_json::to_string(&legacy).unwrap();
+        assert!(
+            !encoded.contains("recipient"),
+            "a None recipient is skipped on the wire: {encoded}"
+        );
+        assert_eq!(
+            serde_json::from_str::<InboxScopedParams>(&encoded).unwrap(),
+            legacy
+        );
+    }
+
+    /// `InboxEntryRow.recipient` is append-only too: an older daemon's frame
+    /// without the field still decodes, and a fresh one round-trips it.
+    #[test]
+    fn inbox_entry_row_recipient_round_trips_and_defaults() {
+        let legacy: crate::events::InboxEntryRow = serde_json::from_str(
+            r#"{"id":"ie-1","kind":"issue","event":"issue_created","subject_id":"i1","summary":"s","created_at":1}"#,
+        )
+        .unwrap();
+        assert_eq!(legacy.recipient, "", "an older daemon omits the recipient");
+
+        let mut fresh = legacy.clone();
+        fresh.recipient = "member:me".into();
+        let encoded = serde_json::to_string(&fresh).unwrap();
+        assert!(encoded.contains("\"recipient\":\"member:me\""), "{encoded}");
+        assert_eq!(
+            serde_json::from_str::<crate::events::InboxEntryRow>(&encoded).unwrap(),
+            fresh
         );
     }
 }

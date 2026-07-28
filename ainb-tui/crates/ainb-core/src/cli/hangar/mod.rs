@@ -12,7 +12,7 @@
 //!
 //! | path                          | backing impl                                            |
 //! |-------------------------------|---------------------------------------------------------|
-//! | `hangar issue create`         | [`ainb_hangar_store::repo::issue::IssueRepo::insert`]    |
+//! | `hangar issue create`         | [`ainb_hangar_store::repo::issue::IssueRepo::insert`] + [`ainb_hangar_store::repo::issue::IssueRepo::set_origin`] |
 //! | `hangar issue list`           | `IssueRepo::list_by_workspace_state`                     |
 //! | `hangar issue show`           | `IssueRepo::get_by_id`                                   |
 //! | `hangar task list`            | `ainb_hangar_store::repo::task::TaskRepo`                |
@@ -40,8 +40,10 @@ use ainb_hangar_core::acceptance::AcceptanceCriterion;
 use ainb_hangar_core::actor::{ActorKind, ActorRef};
 use ainb_hangar_core::clock::SystemClock;
 use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+use ainb_hangar_core::origin::IssueOrigin;
 use ainb_hangar_store::Store;
 use ainb_hangar_store::repo::autopilot::Autopilot;
+use ainb_hangar_store::repo::autopilot_rule_version::AutopilotRuleVersionRepo;
 use ainb_hangar_store::repo::issue::{Issue, IssueRepo, NewIssue};
 use ainb_hangar_store::repo::task::{Task, TaskRepo};
 use ainb_hangar_store::repo::token::{PatRecord, PatRepo, mint_daemon_token, mint_pat};
@@ -113,6 +115,143 @@ pub enum HangarCommand {
     /// Read the daemon's structured logs.
     #[command(subcommand)]
     Logs(LogsCommand),
+    /// Define and archive a workspace's custom issue properties.
+    #[command(subcommand)]
+    Property(PropertyCommand),
+    /// Post issue comments and preview their `@`-mention routing.
+    #[command(subcommand)]
+    Comment(CommentCommand),
+    /// Read an actor's notification inbox.
+    #[command(subcommand)]
+    Inbox(InboxCommand),
+}
+
+/// `hangar comment <verb>` — post a comment and see EXACTLY where its
+/// `@`-mentions went (multica parity #2-rest).
+///
+/// Store-direct, like `issue timeline`: no daemon required, which is what makes
+/// the routing behaviour provable against a bare SQLite file.
+#[derive(Subcommand, Debug)]
+pub enum CommentCommand {
+    /// Post a comment on an issue and print one row per routed `@`-mention.
+    Add(CommentAddArgs),
+    /// DRY-RUN the mention router over a draft body: identical resolution and
+    /// identical gates, zero writes.
+    Preview(CommentAddArgs),
+}
+
+/// `hangar inbox <verb>` — the read surface that proves a mention of a human
+/// actually landed on that human.
+#[derive(Subcommand, Debug)]
+pub enum InboxCommand {
+    /// List one actor's inbox entries, newest first.
+    List(InboxListArgs),
+}
+
+/// Arguments shared by `hangar comment add` and `hangar comment preview`.
+#[derive(Args, Debug)]
+pub struct CommentAddArgs {
+    /// Issue id (ULID) to comment on.
+    #[arg(long)]
+    pub issue: String,
+    /// The comment body. `@handle` and `[@Label](mention://type/id)` both route.
+    #[arg(long)]
+    pub body: String,
+    /// The author as a canonical actor-ref. `member:me` is the local operator,
+    /// which the invocation gate resolves to the workspace owner.
+    #[arg(long, default_value = "member:me")]
+    pub author: String,
+    /// The comment this one replies to — drives the reply-parent fallback and
+    /// multica's parent-mention inheritance.
+    #[arg(long)]
+    pub parent: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar inbox list`.
+#[derive(Args, Debug)]
+pub struct InboxListArgs {
+    /// Whose inbox to read, as `member:<user-id>` / `agent:<agent-id>`.
+    #[arg(long, default_value = "member:me")]
+    pub recipient: String,
+    /// Show only UNREAD entries.
+    #[arg(long)]
+    pub unread: bool,
+    /// How many entries to show, newest first.
+    #[arg(long, default_value_t = 50)]
+    pub limit: i64,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// `hangar property <verb>` — the per-workspace CUSTOM PROPERTY catalog
+/// (multica parity #17).
+///
+/// Values on issues are keyed by the definition's ID, never by its name, so
+/// renaming a property (`define` again with a new `--name`) is a catalog-only
+/// write that touches zero issue rows. A definition is ARCHIVED, never deleted:
+/// its stored values survive and render again if it is un-archived.
+#[derive(Subcommand, Debug)]
+pub enum PropertyCommand {
+    /// Create or update ONE custom property definition (idempotent by key).
+    Define(PropertyDefineArgs),
+    /// List the workspace's custom property catalog, in render order.
+    List(PropertyListArgs),
+    /// Archive (or un-archive) a definition. NEVER deletes stored values.
+    Archive(PropertyArchiveArgs),
+}
+
+/// Arguments for `hangar property define`.
+#[derive(Args, Debug)]
+pub struct PropertyDefineArgs {
+    /// Stable slug the CLI and RPC address this property by.
+    #[arg(long)]
+    pub key: String,
+    /// Display label. Defaults to the key on a new definition; changing it is
+    /// a free rename.
+    #[arg(long)]
+    pub name: Option<String>,
+    /// Value type: text, number, select, multi_select, date, checkbox, url.
+    #[arg(long)]
+    pub kind: Option<String>,
+    /// One catalogued option (repeat). Required for select / multi_select.
+    #[arg(long = "option")]
+    pub options: Vec<String>,
+    /// Render order within the workspace (ascending).
+    #[arg(long)]
+    pub position: Option<i64>,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar property list`.
+#[derive(Args, Debug)]
+pub struct PropertyListArgs {
+    /// Include archived definitions too.
+    #[arg(long)]
+    pub include_archived: bool,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar property archive`.
+#[derive(Args, Debug)]
+pub struct PropertyArchiveArgs {
+    /// The definition's stable slug.
+    #[arg(long)]
+    pub key: String,
+    /// Un-archive instead: bring the definition (and its values) back.
+    #[arg(long)]
+    pub unarchive: bool,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar workspace <verb>`.
@@ -130,11 +269,40 @@ pub enum HangarCommand {
 ///   (persisted + validated; the checkout flow that consumes it lands later).
 #[derive(Subcommand, Debug)]
 pub enum WorkspaceCommand {
+    /// Create a new workspace (slug + display name).
+    Create(WorkspaceCreateArgs),
+    /// List every workspace on this instance.
+    List(WorkspaceListArgs),
     /// Set one or more of the workspace's config knobs.
     Config(WorkspaceConfigArgs),
     /// Show the workspace's current config.
     Show(WorkspaceShowArgs),
 }
+
+/// Arguments for `hangar workspace create`.
+///
+/// Refused when the instance has workspace creation locked down
+/// (`daemon config set workspace.creation_disabled true`, or the
+/// `HANGAR_DISABLE_WORKSPACE_CREATION` env override) — the refusal is
+/// store-side and exits non-zero.
+#[derive(Args, Debug)]
+pub struct WorkspaceCreateArgs {
+    /// Short handle for the workspace (`^[a-z0-9]+(-[a-z0-9]+)*$`), unique
+    /// host-wide.
+    #[arg(long)]
+    pub slug: String,
+    /// Human-readable display name.
+    #[arg(long)]
+    pub name: String,
+    /// Optional prefix prepended to a newly-created issue's title in this
+    /// workspace (e.g. `OPS`). Omitted leaves titles verbatim.
+    #[arg(long)]
+    pub issue_prefix: Option<String>,
+}
+
+/// Arguments for `hangar workspace list` — host-wide, so no `--workspace`.
+#[derive(Args, Debug)]
+pub struct WorkspaceListArgs {}
 
 /// Arguments for `hangar workspace config`.
 ///
@@ -228,12 +396,86 @@ pub enum AutopilotCommand {
     Disable(AutopilotIdArgs),
     /// Re-enable an autopilot, recomputing its next tick from now.
     Enable(AutopilotIdArgs),
-    /// Fire one tick immediately (manual run), bypassing the schedule.
-    Run(AutopilotIdArgs),
+    /// Edit an autopilot's config (cron / agent / instructions / policy).
+    /// A substantive edit appends a rule version naming the accountable human;
+    /// a rename alone is cosmetic and mints none.
+    Edit(AutopilotEditArgs),
+    /// Show the autopilot's rule-version ledger (who published what, when).
+    Versions(AutopilotVersionsArgs),
+    /// Fire one tick immediately, bypassing the schedule (`--source` picks the
+    /// trigger recorded on the run: `manual` by default, or `api`).
+    Run(AutopilotRunNowArgs),
+    /// Arm (or `--disable`) the bare programmatic `api` trigger.
+    ApiTrigger(AutopilotIdArgs),
+    /// List the autopilot's recent runs (status, trigger source, reason).
+    Runs(AutopilotRunsArgs),
     /// Configure the HTTP webhook trigger (enable/disable, rotate secret, filter).
     Webhook(AutopilotWebhookArgs),
     /// List the autopilot's recent webhook deliveries (audit log).
     Deliveries(AutopilotDeliveriesArgs),
+    /// Manage the rule's explicit WRITE-GRANT set (multica parity #27).
+    #[command(subcommand)]
+    Collaborator(AutopilotActorCommand),
+    /// Manage the rule's STANDING subscriber list — every issue the rule spawns
+    /// auto-subscribes it (multica parity #27).
+    #[command(subcommand)]
+    Subscriber(AutopilotActorCommand),
+    /// Open or restrict who may WRITE this rule (multica parity #27).
+    Access(AutopilotAccessArgs),
+}
+
+/// The add / remove / list verbs shared by `autopilot collaborator` and
+/// `autopilot subscriber` — the addressed tuple is identical, so the shape is.
+#[derive(Subcommand, Debug)]
+pub enum AutopilotActorCommand {
+    /// Add an actor to the set (idempotent; a re-add keeps the FIRST grant).
+    Add(AutopilotActorArgs),
+    /// Remove an actor from the set (idempotent).
+    Remove(AutopilotActorArgs),
+    /// List the set, oldest first.
+    List(AutopilotActorArgs),
+}
+
+/// Arguments for every `hangar autopilot collaborator|subscriber` verb.
+#[derive(Args, Debug)]
+pub struct AutopilotActorArgs {
+    /// The autopilot id (`autopilot.id`).
+    #[arg(long)]
+    pub id: String,
+    /// The target actor, `member:<id>` / `agent:<id>`. Defaults to the local
+    /// human (`member:me`).
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Collaborator ADD only: `editor` (the default) grants write, `viewer`
+    /// grants visibility only.
+    #[arg(long)]
+    pub role: Option<String>,
+    /// The ACTING human, as the write gate's subject and the grant's
+    /// attribution. Defaults to the local human.
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot access`.
+#[derive(Args, Debug)]
+pub struct AutopilotAccessArgs {
+    /// The autopilot id (`autopilot.id`).
+    #[arg(long)]
+    pub id: String,
+    /// `open` (any actor in the workspace may write — the default and every
+    /// pre-0064 rule) or `restricted` (owner / workspace owner+admin / an
+    /// explicit `editor` collaborator only).
+    #[arg(long)]
+    pub mode: String,
+    /// The acting human (write gate subject + rule-version attribution).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar autopilot webhook <id>`.
@@ -313,6 +555,12 @@ pub struct AutopilotCreateArgs {
     /// in-flight one), or `replace` (supersede the in-flight run and fire fresh).
     #[arg(long = "concurrency-policy", value_enum, default_value_t = ConcurrencyPolicyArg::Skip)]
     pub concurrency_policy: ConcurrencyPolicyArg,
+    /// The ACCOUNTABLE HUMAN for this rule (`user.id` or email). Recorded on
+    /// rule-version v1, which creation writes in the same transaction. Omitted
+    /// defaults to the local human (`member:me`) — a CLI create always has a
+    /// human at the keyboard.
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
     /// Workspace slug to create in. Defaults to the bootstrapped `default`.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -372,11 +620,124 @@ pub struct AutopilotListArgs {
     pub workspace: Option<String>,
 }
 
-/// Arguments for the id-only autopilot verbs (`disable`, `enable`, `run`).
+/// Arguments for the id-only autopilot verbs (`disable`, `enable`,
+/// `api-trigger`).
 #[derive(Args, Debug)]
 pub struct AutopilotIdArgs {
     /// The autopilot id (`autopilot.id`).
     pub id: String,
+    /// Turn the trigger OFF instead of on (`api-trigger` only).
+    #[arg(long)]
+    pub disable: bool,
+    /// The accountable human for this publish (`user.id` or email). Pausing,
+    /// resuming and arming a trigger are all SUBSTANTIVE publishes, so each
+    /// stamps a rule version. Defaults to the local human (`member:me`).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Which trigger a manual `hangar autopilot run` records on the run it creates
+/// (`autopilot_run.source`, migration 0057).
+///
+/// `manual` is the operator's explicit override and always allowed. `api` is the
+/// bare programmatic trigger and is REFUSED unless the autopilot has armed it
+/// (`hangar autopilot api-trigger <id>`) — a half-configured trigger is never
+/// firable, exactly like the webhook one.
+#[derive(clap::ValueEnum, Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum RunSourceArg {
+    /// An operator firing by hand (the default).
+    #[default]
+    Manual,
+    /// The bare programmatic `api` trigger; requires it to be armed.
+    Api,
+}
+
+/// Arguments for `hangar autopilot run <id>`.
+#[derive(Args, Debug)]
+pub struct AutopilotRunNowArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Which trigger to record on the run (`manual` | `api`).
+    #[arg(long, value_enum, default_value_t = RunSourceArg::Manual)]
+    pub source: RunSourceArg,
+    /// The human firing it (`user.id` or email). A `manual` run attributes to
+    /// this human (`direct_human`) — them, not the rule's owner. An `api` run
+    /// stays UNATTENDED (`rule_owner`), matching multica. Defaults to the local
+    /// human (`member:me`).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot edit <id>` (multica parity #14).
+///
+/// An all-optional patch: an omitted flag leaves the field alone. `--name` is
+/// COSMETIC — changing only it lands the rename but mints no rule version, so a
+/// title tweak never re-assigns blame for an unattended run.
+#[derive(Args, Debug)]
+pub struct AutopilotEditArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// New display name (cosmetic on its own).
+    #[arg(long)]
+    pub name: Option<String>,
+    /// New cron expression (UTC, 5-field) — revalidated before any write.
+    #[arg(long)]
+    pub cron: Option<String>,
+    /// Re-target the rule at a different agent (`agent.id`).
+    #[arg(long)]
+    pub agent: Option<String>,
+    /// New instructions handed to the agent on every tick.
+    #[arg(long, conflicts_with = "clear_instructions")]
+    pub instructions: Option<String>,
+    /// Clear the instructions entirely.
+    #[arg(long = "clear-instructions")]
+    pub clear_instructions: bool,
+    /// New maximum simultaneous in-flight runs.
+    #[arg(long = "max-concurrent-runs")]
+    pub max_concurrent_runs: Option<i64>,
+    /// New execution mode (`run-only` | `create-issue`).
+    #[arg(long = "execution-mode", value_enum)]
+    pub execution_mode: Option<ExecutionModeArg>,
+    /// New concurrency policy (`skip` | `queue` | `replace`).
+    #[arg(long = "concurrency-policy", value_enum)]
+    pub concurrency_policy: Option<ConcurrencyPolicyArg>,
+    /// The ACCOUNTABLE HUMAN for this edit (`user.id` or email) — the name
+    /// recorded on the minted rule version. Defaults to the local human
+    /// (`member:me`).
+    #[arg(long = "as-user")]
+    pub as_user: Option<String>,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot versions <id>` (the rule-version ledger).
+#[derive(Args, Debug)]
+pub struct AutopilotVersionsArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Maximum number of versions to show (newest-first).
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
+    /// Workspace slug the autopilot belongs to. Defaults to `default`.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar autopilot runs <id>` (the run-history read surface).
+#[derive(Args, Debug)]
+pub struct AutopilotRunsArgs {
+    /// The autopilot id (`autopilot.id`).
+    pub id: String,
+    /// Maximum number of runs to show (latest-first).
+    #[arg(long, default_value_t = 20)]
+    pub limit: u32,
     /// Workspace slug the autopilot belongs to. Defaults to `default`.
     #[arg(long)]
     pub workspace: Option<String>,
@@ -411,6 +772,23 @@ pub enum AgentCommand {
     Allow(AgentAllowArgs),
     /// Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`).
     CanInvoke(AgentCanInvokeArgs),
+    /// Show an agent's per-agent env: variable NAMES only, values masked.
+    Env(AgentEnvArgs),
+}
+
+/// Arguments for `hangar agent env` — the REDACTED read of one agent's env.
+///
+/// Deliberately has no `--reveal` (parity #30 deviation D-1): hangar masks
+/// unconditionally, so there is exactly one plaintext egress (the provider
+/// child's environment at exec) and no CLI affordance that re-opens the hole.
+#[derive(Args, Debug)]
+pub struct AgentEnvArgs {
+    /// Agent id (ULID) to inspect.
+    pub id: String,
+    /// Workspace slug the agent belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar agent permission`.
@@ -578,10 +956,19 @@ pub struct AgentEditArgs {
     /// Clear the thinking level; omitted leaves it.
     #[arg(long = "clear-thinking")]
     pub clear_thinking: bool,
-    /// A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is
-    /// given the whole env map is REPLACED with the values.
-    #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append)]
+    // NOTE: each of the three env flags keeps a SINGLE-paragraph doc comment on
+    // purpose — a second paragraph flips clap's whole `agent edit` help into the
+    // long-help layout, which churns the generated `docs/tui/cli.md` reference.
+    /// A `KEY=VALUE` env var for the agent (repeatable; ANY `--env` REPLACES the whole map). Visible in `ps` / shell history — prefer `--env-stdin` / `--env-file` for secrets.
+    #[arg(long = "env", value_parser = parse_env_kv, action = clap::ArgAction::Append,
+          conflicts_with_all = ["env_stdin", "env_file"])]
     pub env: Vec<(String, String)>,
+    /// Read the whole env map from STDIN as a JSON object of string→string, keeping secrets off argv; `{}` clears it and empty input is an ERROR, not a clear
+    #[arg(long = "env-stdin", conflicts_with_all = ["env", "env_file"])]
+    pub env_stdin: bool,
+    /// Read the whole env map from a FILE as a JSON object of string→string (same contract as `--env-stdin`)
+    #[arg(long = "env-file", conflicts_with_all = ["env", "env_stdin"])]
+    pub env_file: Option<std::path::PathBuf>,
     /// New token budget (rtk/headroom, migration 0042); omitted leaves it.
     /// Mutually exclusive with `--clear-token-budget`.
     #[arg(long = "token-budget", conflicts_with = "clear_token_budget")]
@@ -648,6 +1035,67 @@ pub enum MemberCommand {
     SetRole(MemberSetRoleArgs),
     /// Remove a member from the workspace (the user row survives).
     Remove(MemberRemoveArgs),
+    /// Invite an email to join (pending until accepted — parity #18).
+    Invite(MemberInviteArgs),
+    /// List the workspace's live pending invitations.
+    Invites(MemberInvitesArgs),
+    /// Accept an invitation addressed to you (this is what adds the member).
+    Accept(MemberInviteActArgs),
+    /// Decline an invitation addressed to you (no member is created).
+    Decline(MemberInviteActArgs),
+    /// Withdraw a still-pending invitation (admin-side).
+    Revoke(MemberInviteRevokeArgs),
+}
+
+/// Arguments for `hangar member invite` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInviteArgs {
+    /// The invitee's email. Normalised (trimmed + lowercased) by the store.
+    #[arg(long)]
+    pub email: String,
+    /// The role the invitee will hold on accept: `admin` or `member` (default
+    /// `member`). `owner` parses but is rejected — ownership is transferred,
+    /// never invited.
+    #[arg(long, value_enum, default_value_t = MemberRoleArg::Member)]
+    pub role: MemberRoleArg,
+    /// Email of the inviting member. Defaults to the bootstrapped workspace
+    /// owner. Must already be a member of the workspace.
+    #[arg(long)]
+    pub from: Option<String>,
+    /// Workspace slug to invite into. Defaults to the bootstrapped `default`
+    /// workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member invites` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInvitesArgs {
+    /// Workspace slug to list. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar member accept` / `hangar member decline` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInviteActArgs {
+    /// The invitation id to act on.
+    pub invitation_id: String,
+    /// The acting human's email. REQUIRED, not defaulted: hangar has no session,
+    /// so the identity must be explicit or the ownership gate is theatre.
+    #[arg(long = "as")]
+    pub acting_as: String,
+}
+
+/// Arguments for `hangar member revoke` (parity #18).
+#[derive(Args, Debug)]
+pub struct MemberInviteRevokeArgs {
+    /// The invitation id to withdraw.
+    pub invitation_id: String,
+    /// Workspace slug the invitation belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// Arguments for `hangar member add`.
@@ -912,14 +1360,46 @@ pub struct SquadAssignArgs {
 ///
 /// # Errors
 ///
-/// Returns a human-readable message if the input has no `=` or an empty key.
+/// Returns a CONTENT-FREE message if the input has no `=` or an empty key.
+/// The message deliberately never echoes `raw` (parity #30, multica
+/// `cmd_agent.go:757-759`): the whole point of `--env` is that the argument
+/// carries a secret, and clap prints a `value_parser` error to stderr, which
+/// lands in shell logs and CI transcripts.
 fn parse_env_kv(raw: &str) -> Result<(String, String), String> {
     let (key, value) =
-        raw.split_once('=').ok_or_else(|| format!("expected KEY=VALUE, got {raw:?}"))?;
+        raw.split_once('=').ok_or_else(|| "--env: expected KEY=VALUE".to_string())?;
     if key.is_empty() {
-        return Err(format!("env var name must not be empty in {raw:?}"));
+        return Err("--env: env var name must not be empty".to_string());
     }
     Ok((key.to_string(), value.to_string()))
+}
+
+/// Decode a JSON-object-of-strings env payload from `--env-file` / `--env-stdin`.
+///
+/// Ported shape-for-shape from multica's `resolveCustomEnv`
+/// (`server/cmd/multica/cmd_agent.go:788-852`):
+///
+/// * empty / whitespace-only input is an **error**, never a clear — an empty
+///   read almost always means a broken upstream pipe, and treating it as a clear
+///   would silently wipe the agent's secrets;
+/// * the explicit `{}` is the only clear;
+/// * a parse failure is CONTENT-FREE — `serde_json`'s message quotes fragments
+///   of the input, which here IS the secret.
+///
+/// # Errors
+///
+/// Returns a value-free message when the payload is blank or is not a JSON
+/// object of string keys to string values.
+fn parse_env_json(raw: &str, flag: &str) -> Result<Vec<(String, String)>, String> {
+    if raw.trim().is_empty() {
+        return Err(format!("{flag}: empty input; pass '{{}}' to clear the env"));
+    }
+    let shape = format!("{flag} must be a valid JSON object of string keys and string values");
+    let value: serde_json::Value = serde_json::from_str(raw).map_err(|_| shape.clone())?;
+    let obj = value.as_object().ok_or_else(|| shape.clone())?;
+    obj.iter()
+        .map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())).ok_or_else(|| shape.clone()))
+        .collect()
 }
 
 /// `hangar templates <verb>`.
@@ -1198,6 +1678,9 @@ pub enum IssueCommand {
     Show(IssueShowArgs),
     /// Edit an existing issue's state, assignee, priority, or due date.
     Update(IssueUpdateArgs),
+    /// Apply ONE lifecycle state to several issues, cascading to parents ONCE.
+    #[command(name = "batch-state")]
+    BatchState(IssueBatchStateArgs),
     /// Delete an issue and all its history (dry-run without `--yes`).
     Delete(IssueDeleteArgs),
     /// Attach or detach a label on an issue.
@@ -1209,6 +1692,151 @@ pub enum IssueCommand {
     /// Add, remove, or list an issue's typed links to other issues.
     #[command(subcommand)]
     Link(IssueLinkCommand),
+    /// Subscribe an actor to an issue's notifications (multica parity #22).
+    Subscribe(IssueSubscribeArgs),
+    /// Unsubscribe an actor from an issue's notifications. Idempotent.
+    Unsubscribe(IssueSubscribeArgs),
+    /// List who watches an issue, with the reason each one was subscribed.
+    Subscribers(IssueSubscribersArgs),
+    /// Add, remove, or list an issue's emoji reactions.
+    #[command(subcommand)]
+    React(IssueReactCommand),
+    /// Explain why an issue did (or did not) dispatch — its admission history.
+    #[command(alias = "dispatch-log")]
+    Why(IssueWhyArgs),
+    /// Show one issue's activity timeline: state changes, assignments, comments.
+    #[command(alias = "activity")]
+    Timeline(IssueTimelineArgs),
+    /// Set or clear one of the workspace's custom properties on an issue.
+    #[command(subcommand)]
+    Property(IssuePropertyCommand),
+    /// Read and write an issue's agent metadata scratch bag.
+    #[command(subcommand, alias = "metadata")]
+    Meta(IssueMetaCommand),
+}
+
+/// `hangar issue property <verb>` (multica parity #17).
+#[derive(Subcommand, Debug)]
+pub enum IssuePropertyCommand {
+    /// Set ONE custom property's value on an issue.
+    Set(IssuePropertySetArgs),
+    /// Clear ONE custom property from an issue. Idempotent.
+    Clear(IssuePropertyClearArgs),
+}
+
+/// Arguments for `hangar issue property set`.
+#[derive(Args, Debug)]
+pub struct IssuePropertySetArgs {
+    /// Issue id (ULID) to write.
+    pub id: String,
+    /// The definition's stable slug.
+    #[arg(long)]
+    pub key: String,
+    /// The value. Repeat for a multi_select.
+    #[arg(long = "value")]
+    pub values: Vec<String>,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue property clear`.
+#[derive(Args, Debug)]
+pub struct IssuePropertyClearArgs {
+    /// Issue id (ULID) to write.
+    pub id: String,
+    /// The definition's stable slug.
+    #[arg(long)]
+    pub key: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// `hangar issue meta <verb>` — the AGENT scratch bag (multica parity #17).
+///
+/// Flat primitive KV for pipeline bookkeeping. Every mutation is single-key
+/// atomic, so `hangar issue update` never disturbs it.
+#[derive(Subcommand, Debug)]
+pub enum IssueMetaCommand {
+    /// List an issue's metadata entries, key-sorted.
+    List(IssueMetaListArgs),
+    /// Print ONE metadata value.
+    Get(IssueMetaKeyArgs),
+    /// Set ONE metadata key.
+    Set(IssueMetaSetArgs),
+    /// Delete ONE metadata key. Idempotent.
+    Delete(IssueMetaKeyArgs),
+}
+
+/// Arguments for `hangar issue meta list`.
+#[derive(Args, Debug)]
+pub struct IssueMetaListArgs {
+    /// Issue id (ULID) whose bag to read.
+    pub id: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue meta get|delete`.
+#[derive(Args, Debug)]
+pub struct IssueMetaKeyArgs {
+    /// Issue id (ULID) whose bag to address.
+    pub id: String,
+    /// The metadata key.
+    #[arg(long)]
+    pub key: String,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue meta set`.
+#[derive(Args, Debug)]
+pub struct IssueMetaSetArgs {
+    /// Issue id (ULID) whose bag to write.
+    pub id: String,
+    /// The metadata key (letters, digits, `_`, `.`, `-`; max 64).
+    #[arg(long)]
+    pub key: String,
+    /// The value.
+    #[arg(long)]
+    pub value: String,
+    /// Force the value's type: string, number, or bool. Default sniffs.
+    #[arg(long = "type")]
+    pub value_type: Option<String>,
+    /// Workspace slug. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue timeline` (multica parity #13).
+#[derive(Args, Debug)]
+pub struct IssueTimelineArgs {
+    /// Issue id (ULID) whose narrative to print.
+    pub id: String,
+    /// How many entries to show — the newest window, printed oldest-first.
+    #[arg(long, default_value_t = 200)]
+    pub limit: i64,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue why` (multica parity #12).
+#[derive(Args, Debug)]
+pub struct IssueWhyArgs {
+    /// Issue id (ULID) whose dispatch history to explain.
+    pub id: String,
+    /// How many attempts to show, newest first.
+    #[arg(long, default_value_t = 20)]
+    pub limit: i64,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar issue link <verb>` (multica parity #20).
@@ -1273,6 +1901,65 @@ pub struct IssueLinkArgs {
 pub struct IssueLinkListArgs {
     /// Issue id (ULID) whose links to list.
     pub id: String,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue subscribe|unsubscribe` (multica parity #22).
+#[derive(Args, Debug)]
+pub struct IssueSubscribeArgs {
+    /// Issue id (ULID) to watch / stop watching.
+    pub id: String,
+    /// The actor, as `member:<id>` / `agent:<id>`. Defaults to the LOCAL HUMAN
+    /// (`member:me`), mirroring the reference's "the target defaults to the
+    /// caller".
+    #[arg(long)]
+    pub actor: Option<String>,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// Arguments for `hangar issue subscribers` (multica parity #22).
+#[derive(Args, Debug)]
+pub struct IssueSubscribersArgs {
+    /// Issue id (ULID) whose watchers to list.
+    pub id: String,
+    /// Workspace slug the issue belongs to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
+/// `hangar issue react <verb>` (multica parity #22).
+///
+/// An emoji reaction is unique per `(issue, actor, emoji)`, so `add` is
+/// idempotent and `remove` never errors on an absent one. Talks to the store
+/// repo directly, exactly like `issue link`, so it works with no daemon running.
+#[derive(Subcommand, Debug)]
+pub enum IssueReactCommand {
+    /// React to an issue with an emoji. Idempotent.
+    Add(IssueReactArgs),
+    /// Remove your reaction. Idempotent.
+    Remove(IssueReactArgs),
+    /// List an issue's reactions as `<emoji> <count>` buckets.
+    List(IssueSubscribersArgs),
+}
+
+/// Arguments for `hangar issue react add|remove`.
+#[derive(Args, Debug)]
+pub struct IssueReactArgs {
+    /// Issue id (ULID) to react to.
+    pub id: String,
+    /// The emoji. Required and non-blank (the reference's "emoji is required").
+    #[arg(long)]
+    pub emoji: String,
+    /// The reacting actor. Defaults to the LOCAL HUMAN (`member:me`).
+    #[arg(long)]
+    pub actor: Option<String>,
     /// Workspace slug the issue belongs to. Defaults to the bootstrapped
     /// `default` workspace.
     #[arg(long)]
@@ -1427,6 +2114,22 @@ pub struct IssueUpdateArgs {
     pub workspace: Option<String>,
 }
 
+/// Arguments for `hangar issue batch-state` (multica parity #3-rest).
+#[derive(Args, Debug)]
+pub struct IssueBatchStateArgs {
+    /// Issue ids (ULIDs) to transition. Duplicates collapse.
+    #[arg(num_args = 1.., required = true)]
+    pub ids: Vec<String>,
+    /// The lifecycle state applied to EVERY id — one of `backlog`, `todo`,
+    /// `in_progress`, `in_review`, `done`, `blocked`, `cancelled`.
+    #[arg(long)]
+    pub state: String,
+    /// Workspace slug the issues belong to. Defaults to the bootstrapped
+    /// `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
+}
+
 /// Arguments for `hangar issue create`.
 #[derive(Args, Debug)]
 pub struct IssueCreateArgs {
@@ -1500,6 +2203,57 @@ pub struct IssueCreateArgs {
     /// the lowest unfinished stage cascades a roll-up comment onto the parent.
     #[arg(long)]
     pub parent: Option<String>,
+    /// The 1-based STAGE BARRIER this sub-issue belongs to (migration 0046).
+    ///
+    /// Only meaningful with `--parent`. Siblings sharing a stage close their
+    /// barrier together: when the LAST of them finishes, ONE aggregated roll-up
+    /// comment is posted on the parent naming every child that closed it
+    /// (multica parity #3-rest), not one comment per child.
+    #[arg(long, value_parser = clap::value_parser!(i64).range(1..))]
+    pub stage: Option<i64>,
+    /// Provenance of this issue: `autopilot` | `comment_mention` | `manual`
+    /// (migration 0056, multica parity #21).
+    ///
+    /// Defaults to `$HANGAR_ORIGIN_TYPE` — the daemon injects it into a
+    /// dispatched agent's environment, so an issue an agent creates mid-run is
+    /// attributable back to the comment / autopilot that asked for it. With
+    /// neither flag nor env, a create is stamped `manual`.
+    #[arg(long = "origin-type")]
+    pub origin_type: Option<String>,
+    /// The provenance id: the autopilot id for `autopilot`, the comment id for
+    /// `comment_mention`. REQUIRED for every kind except `manual`.
+    ///
+    /// Defaults to `$HANGAR_ORIGIN_ID`. Supplying an id with no
+    /// `--origin-type` is an error, never a silent drop.
+    #[arg(long = "origin-id")]
+    pub origin_id: Option<String>,
+}
+
+/// Resolve an issue create's ORIGIN PROVENANCE from flags, then env, then the
+/// `manual` default (migration 0056, multica parity #21).
+///
+/// Precedence rule: an explicit `--origin-type` suppresses the env pair
+/// ENTIRELY, so a flag kind is never mixed with an inherited env id. Only when
+/// NEITHER flag is given does the daemon-injected `HANGAR_ORIGIN_TYPE` /
+/// `HANGAR_ORIGIN_ID` pair apply.
+///
+/// # Errors
+///
+/// Returns an error for an id without a kind, a kind outside the allow-list, or
+/// a kind that requires an id and got none — the same messages the RPC handler
+/// produces, so both surfaces say the same thing.
+fn resolve_cli_origin(
+    flag_type: Option<&str>,
+    flag_id: Option<&str>,
+    env_type: Option<&str>,
+    env_id: Option<&str>,
+) -> Result<IssueOrigin> {
+    let (kind, id) = if flag_type.is_some() || flag_id.is_some() {
+        (flag_type, flag_id)
+    } else {
+        (env_type, env_id)
+    };
+    Ok(IssueOrigin::from_wire(kind, id)?.unwrap_or_else(IssueOrigin::manual))
 }
 
 /// Parse a `--due` value (`YYYY-MM-DD`) into an epoch-millisecond timestamp at
@@ -1724,7 +2478,265 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Autopilot(c) => dispatch_autopilot(c, format).await,
         HangarCommand::Workspace(c) => dispatch_workspace(c, format).await,
         HangarCommand::Logs(LogsCommand::Tail(args)) => run_logs_tail(args).await,
+        HangarCommand::Property(c) => dispatch_property(c, format).await,
+        HangarCommand::Comment(c) => dispatch_comment(c, format).await,
+        HangarCommand::Inbox(InboxCommand::List(args)) => run_inbox_list(args, format).await,
     }
+}
+
+/// `hangar comment add|preview`: post a comment (or dry-run one) and report
+/// where every `@`-mention went (multica parity #2-rest).
+///
+/// Both verbs drive the SAME `service::mention::route` the daemon drives, with
+/// `dry_run` flipped — the shared path is the contract, so the preview applies
+/// the identical invocation gate and can never disagree with the write.
+async fn dispatch_comment(cmd: CommentCommand, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::idgen::{IdGen as _, SystemIdGen};
+    use ainb_hangar_store::repo::comment::{CommentRepo, NewComment};
+    use ainb_hangar_store::service::mention::{MentionRouteRequest, route};
+    use std::str::FromStr as _;
+
+    let (args, dry_run) = match cmd {
+        CommentCommand::Add(a) => (a, false),
+        CommentCommand::Preview(a) => (a, true),
+    };
+    if args.body.trim().is_empty() {
+        anyhow::bail!("comment body must not be empty");
+    }
+    let author = ActorRef::from_str(&args.author)
+        .map_err(|e| anyhow::anyhow!("author must be `agent:<id>` or `member:<id>`: {e}"))?;
+
+    let store = Store::open_default().await.context("open hangar database")?;
+    // A typo'd workspace is an ERROR, never a silently empty routing report.
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+
+    // The write happens FIRST and separately, exactly as the daemon does it: a
+    // routing fault can then never lose the comment.
+    let comment_id = if dry_run {
+        None
+    } else {
+        let id = SystemIdGen.new_ulid();
+        let landed = CommentRepo::insert(
+            store.pool(),
+            &workspace_id,
+            &NewComment {
+                id: id.clone(),
+                issue_id: args.issue.clone(),
+                author: author.clone(),
+                body: args.body.clone(),
+                created_at: SystemClock.now_ms(),
+                parent_id: args.parent.clone(),
+            },
+        )
+        .await
+        .context("write comment")?;
+        anyhow::ensure!(
+            landed,
+            "no issue `{}` in this workspace (nothing was written)",
+            args.issue
+        );
+        Some(id)
+    };
+
+    let rows = route(
+        store.pool(),
+        &SystemIdGen,
+        &SystemClock,
+        &MentionRouteRequest {
+            workspace_id: &workspace_id,
+            issue_id: &args.issue,
+            comment_id: comment_id.as_deref(),
+            parent_comment_id: args.parent.as_deref(),
+            author: &author,
+            body: &args.body,
+            dry_run,
+        },
+    )
+    .await
+    .context("route comment mentions")?;
+
+    print_mention_rows(&rows, format, dry_run);
+    Ok(())
+}
+
+/// Render the routing rows in the requested output format.
+fn print_mention_rows(
+    rows: &[ainb_hangar_store::service::mention::MentionRouteRow],
+    format: OutputFormat,
+    dry_run: bool,
+) {
+    let reason = |r: &ainb_hangar_store::service::mention::MentionRouteRow| {
+        r.reason.map(|d| d.as_db_str()).unwrap_or_default()
+    };
+    match format {
+        OutputFormat::Json => {
+            let wire: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|r| {
+                    serde_json::json!({
+                        "target_type": r.target_type,
+                        "target_id": r.target_id,
+                        "handle": r.handle,
+                        "outcome": r.outcome.as_str(),
+                        "reason": reason(r),
+                        "task_id": r.task_id,
+                        "source": r.source.as_str(),
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string(&wire).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("target_type,target_id,handle,outcome,reason,source,task_id");
+            for r in rows {
+                println!(
+                    "{},{},{},{},{},{},{}",
+                    r.target_type,
+                    csv_field(&r.target_id),
+                    csv_field(&r.handle),
+                    r.outcome.as_str(),
+                    reason(r),
+                    r.source.as_str(),
+                    r.task_id.as_deref().unwrap_or_default()
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| target | handle | outcome | reason | source |");
+            println!("|---|---|---|---|---|");
+            for r in rows {
+                println!(
+                    "| {}:{} | @{} | {} | {} | {} |",
+                    r.target_type,
+                    r.target_id,
+                    r.handle,
+                    r.outcome.as_str(),
+                    reason(r),
+                    r.source.as_str()
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no mentions routed");
+                return;
+            }
+            for r in rows {
+                let why = if reason(r).is_empty() {
+                    String::new()
+                } else {
+                    format!(" ({})", reason(r))
+                };
+                println!(
+                    "{:<8} @{:<20} {}{}  [{}]",
+                    r.target_type,
+                    r.handle,
+                    r.outcome.as_str(),
+                    why,
+                    r.source.as_str()
+                );
+            }
+            if dry_run {
+                println!("(preview — nothing was written)");
+            }
+        }
+    }
+}
+
+/// `hangar inbox list`: one actor's notification entries, newest first.
+///
+/// The read surface that proves an `@`-mention of a HUMAN actually landed on
+/// that human (migration 0060 made `inbox_entry` actor-polymorphic).
+async fn run_inbox_list(args: InboxListArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::actor::ActorRef;
+    use ainb_hangar_store::repo::inbox::InboxRepo;
+    use std::str::FromStr as _;
+
+    let recipient = ActorRef::from_str(&args.recipient)
+        .map_err(|e| anyhow::anyhow!("recipient must be `agent:<id>` or `member:<id>`: {e}"))?;
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+    let mut entries = InboxRepo::list(store.pool(), &workspace_id, &recipient, args.limit.max(1))
+        .await
+        .context("read inbox")?;
+    // `--unread` filters HERE rather than in SQL: the repo's list is the shared
+    // read the TUI also drives, and the unread model is a single nullable
+    // column, so a post-filter cannot drift from `unread_count`'s definition.
+    if args.unread {
+        entries.retain(|e| e.read_at.is_none());
+    }
+
+    match format {
+        OutputFormat::Json => {
+            let wire: Vec<serde_json::Value> = entries
+                .iter()
+                .map(|e| {
+                    serde_json::json!({
+                        "id": e.id,
+                        "kind": e.kind.as_str(),
+                        "event": e.event,
+                        "subject_id": e.subject_id,
+                        "summary": e.summary,
+                        "created_at": e.created_at,
+                        "read_at": e.read_at,
+                    })
+                })
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string(&wire).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("kind,event,subject_id,summary,created_at,read");
+            for e in &entries {
+                println!(
+                    "{},{},{},{},{},{}",
+                    e.kind.as_str(),
+                    csv_field(&e.event),
+                    csv_field(&e.subject_id),
+                    csv_field(&e.summary),
+                    e.created_at,
+                    e.read_at.is_some()
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| when | event | subject | summary |");
+            println!("|---|---|---|---|");
+            for e in &entries {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    fmt_epoch_ms_utc(e.created_at),
+                    e.event,
+                    e.subject_id,
+                    md_cell(&e.summary)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if entries.is_empty() {
+                println!("inbox empty for {}", args.recipient);
+                return Ok(());
+            }
+            for e in &entries {
+                println!(
+                    "{}  {}  {:<14} {:<28} {}",
+                    fmt_epoch_ms_utc(e.created_at),
+                    if e.read_at.is_some() { " " } else { "*" },
+                    e.event,
+                    e.subject_id,
+                    e.summary
+                );
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `hangar logs tail`: pretty-print the daemon's structured-log events.
@@ -1873,8 +2885,271 @@ async fn dispatch_autopilot(cmd: AutopilotCommand, format: OutputFormat) -> Resu
         AutopilotCommand::Disable(args) => run_autopilot_set_enabled(&store, args, false).await,
         AutopilotCommand::Enable(args) => run_autopilot_set_enabled(&store, args, true).await,
         AutopilotCommand::Run(args) => run_autopilot_run_now(&store, args).await,
+        AutopilotCommand::ApiTrigger(args) => run_autopilot_api_trigger(&store, args).await,
+        AutopilotCommand::Runs(args) => run_autopilot_runs(&store, args, format).await,
         AutopilotCommand::Webhook(args) => run_autopilot_webhook(&store, args).await,
+        AutopilotCommand::Edit(args) => run_autopilot_edit(&store, args).await,
+        AutopilotCommand::Versions(args) => run_autopilot_versions(&store, args, format).await,
         AutopilotCommand::Deliveries(args) => run_autopilot_deliveries(&store, args, format).await,
+        AutopilotCommand::Collaborator(cmd) => {
+            run_autopilot_collaborator(&store, cmd, format).await
+        }
+        AutopilotCommand::Subscriber(cmd) => run_autopilot_subscriber(&store, cmd, format).await,
+        AutopilotCommand::Access(args) => run_autopilot_access(&store, args).await,
+    }
+}
+
+/// Resolve `(workspace_id, autopilot_id)` and fail LOUDLY on a foreign /
+/// unknown id — the repos' tenant join would otherwise turn a typo into a
+/// silent no-op that looks like success.
+async fn require_autopilot_in_workspace(
+    store: &Store,
+    workspace: Option<&str>,
+    id: &str,
+) -> Result<(String, ainb_hangar_core::ids::AutopilotId)> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, workspace).await?.to_string();
+    let ws = WorkspaceId::from_str(workspace_id.clone()).context("workspace id was empty")?;
+    let autopilot_id = AutopilotId::from_str(id.to_string()).context("autopilot id was empty")?;
+    if AutopilotRepo::get(store.pool(), &ws, &autopilot_id)
+        .await
+        .context("read autopilot")?
+        .is_none()
+    {
+        anyhow::bail!("no autopilot `{id}` in this workspace");
+    }
+    Ok((workspace_id, autopilot_id))
+}
+
+/// The CLI writes the sqlite file DIRECTLY, so it must apply the same
+/// restricted-mode write gate the daemon's request seam does — otherwise
+/// `ainb hangar autopilot ...` would be a trivially open back door around it.
+async fn require_autopilot_write(
+    store: &Store,
+    workspace_id: &str,
+    id: &ainb_hangar_core::ids::AutopilotId,
+    actor: &ainb_hangar_core::actor::ActorRef,
+) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::autopilot_access::{WriteDecision, can_write};
+
+    let ws = WorkspaceId::from_str(workspace_id.to_string()).context("workspace id was empty")?;
+    match can_write(store.pool(), &ws, id, actor).await.context("write predicate")? {
+        // No such rule here: fall through so the caller's own not-found path
+        // reports it honestly rather than as a permission refusal.
+        WriteDecision::Allowed(_) | WriteDecision::NotFound => Ok(()),
+        WriteDecision::Denied => anyhow::bail!(
+            "actor `{actor}` may not modify autopilot `{id}` (access_mode = restricted)"
+        ),
+    }
+}
+
+/// `hangar autopilot collaborator add|remove|list` (multica parity #27).
+async fn run_autopilot_collaborator(
+    store: &Store,
+    cmd: AutopilotActorCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_store::repo::autopilot_access::{AutopilotCollaboratorRepo, CollaboratorRole};
+
+    let (args, add) = match cmd {
+        AutopilotActorCommand::Add(a) => (a, Some(true)),
+        AutopilotActorCommand::Remove(a) => (a, Some(false)),
+        AutopilotActorCommand::List(a) => (a, None),
+    };
+    let (workspace_id, id) =
+        require_autopilot_in_workspace(store, args.workspace.as_deref(), &args.id).await?;
+
+    if let Some(add) = add {
+        let target = parse_actor_arg(args.actor.as_deref())?;
+        let acting = resolve_publisher(store, args.as_user.as_deref()).await?;
+        require_autopilot_write(store, &workspace_id, &id, &acting).await?;
+        if add {
+            // An unknown role is a caller error, not a silent downgrade to
+            // viewer — which would look exactly like the grant worked.
+            let role = match args.role.as_deref() {
+                None => CollaboratorRole::Editor,
+                Some(raw) => CollaboratorRole::parse(raw)
+                    .ok_or_else(|| anyhow::anyhow!("--role must be `editor` or `viewer`"))?,
+            };
+            let landed = AutopilotCollaboratorRepo::add(
+                store.pool(),
+                &workspace_id,
+                id.as_str(),
+                &target,
+                role,
+                Some(&acting),
+                <ainb_hangar_core::clock::SystemClock as ainb_hangar_core::clock::HangarClock>::now_ms(
+                    &ainb_hangar_core::clock::SystemClock,
+                ),
+            )
+            .await
+            .context("add collaborator")?;
+            // Set membership: a re-add keeps the FIRST grant, so an explicit
+            // role change stays explicit.
+            if !landed {
+                AutopilotCollaboratorRepo::set_role(
+                    store.pool(),
+                    &workspace_id,
+                    id.as_str(),
+                    &target,
+                    role,
+                )
+                .await
+                .context("update collaborator role")?;
+            }
+        } else {
+            AutopilotCollaboratorRepo::remove(store.pool(), &workspace_id, id.as_str(), &target)
+                .await
+                .context("remove collaborator")?;
+        }
+    }
+
+    let rows = AutopilotCollaboratorRepo::list(store.pool(), id.as_str())
+        .await
+        .context("read collaborators")?;
+    if format == OutputFormat::Json {
+        let json: Vec<_> = rows
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "actor": c.actor.to_string(),
+                    "role": c.role_raw,
+                    "created_by": c.created_by.as_ref().map(ToString::to_string),
+                    "created_at": c.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no collaborators");
+        return Ok(());
+    }
+    for c in rows {
+        println!("{}  {}  {}", c.actor, c.role_raw, c.created_at);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot subscriber add|remove|list` (multica parity #27).
+async fn run_autopilot_subscriber(
+    store: &Store,
+    cmd: AutopilotActorCommand,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_store::repo::autopilot_access::AutopilotSubscriberRepo;
+
+    let (args, add) = match cmd {
+        AutopilotActorCommand::Add(a) => (a, Some(true)),
+        AutopilotActorCommand::Remove(a) => (a, Some(false)),
+        AutopilotActorCommand::List(a) => (a, None),
+    };
+    let (workspace_id, id) =
+        require_autopilot_in_workspace(store, args.workspace.as_deref(), &args.id).await?;
+
+    if let Some(add) = add {
+        let target = parse_actor_arg(args.actor.as_deref())?;
+        let acting = resolve_publisher(store, args.as_user.as_deref()).await?;
+        require_autopilot_write(store, &workspace_id, &id, &acting).await?;
+        if add {
+            AutopilotSubscriberRepo::add(
+                store.pool(),
+                &workspace_id,
+                id.as_str(),
+                &target,
+                Some(&acting),
+                <ainb_hangar_core::clock::SystemClock as ainb_hangar_core::clock::HangarClock>::now_ms(
+                    &ainb_hangar_core::clock::SystemClock,
+                ),
+            )
+            .await
+            .context("add subscriber")?;
+        } else {
+            AutopilotSubscriberRepo::remove(store.pool(), &workspace_id, id.as_str(), &target)
+                .await
+                .context("remove subscriber")?;
+        }
+    }
+
+    let rows = AutopilotSubscriberRepo::list(store.pool(), id.as_str())
+        .await
+        .context("read subscribers")?;
+    if format == OutputFormat::Json {
+        let json: Vec<_> = rows
+            .iter()
+            .map(|sub| {
+                serde_json::json!({
+                    "actor": sub.actor.to_string(),
+                    "created_by": sub.created_by.as_ref().map(ToString::to_string),
+                    "created_at": sub.created_at,
+                })
+            })
+            .collect();
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+    if rows.is_empty() {
+        println!("no subscribers");
+        return Ok(());
+    }
+    for sub in rows {
+        println!("{}  {}", sub.actor, sub.created_at);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot access --mode open|restricted` (multica parity #27).
+///
+/// Goes through `update_as` with the acting human so the flip mints a rule
+/// version — widening who may write a rule is exactly the kind of publish the
+/// accountability ledger exists to record.
+async fn run_autopilot_access(store: &Store, args: AutopilotAccessArgs) -> Result<()> {
+    use ainb_hangar_store::repo::autopilot::{
+        AccessMode, AutopilotEdit, AutopilotRepo, UpdateOutcome,
+    };
+
+    let mode = match args.mode.as_str() {
+        "open" => AccessMode::Open,
+        "restricted" => AccessMode::Restricted,
+        // Validated, never tolerantly coerced: a typo must not quietly leave a
+        // rule world-writable.
+        other => anyhow::bail!("--mode must be `open` or `restricted`, got `{other}`"),
+    };
+    let (workspace_id, id) =
+        require_autopilot_in_workspace(store, args.workspace.as_deref(), &args.id).await?;
+    let acting = resolve_publisher(store, args.as_user.as_deref()).await?;
+    require_autopilot_write(store, &workspace_id, &id, &acting).await?;
+
+    let ws = ainb_hangar_core::ids::WorkspaceId::from_str(workspace_id)
+        .context("workspace id was empty")?;
+    let outcome = AutopilotRepo::update_as(
+        store.pool(),
+        &ainb_hangar_core::clock::SystemClock,
+        &ws,
+        &id,
+        &AutopilotEdit {
+            access_mode: Some(mode),
+            ..AutopilotEdit::default()
+        },
+        Some(&acting),
+    )
+    .await
+    .context("set access mode")?;
+    match outcome {
+        UpdateOutcome::NotFound => anyhow::bail!("no autopilot `{}` in this workspace", id),
+        UpdateOutcome::Updated { version } => {
+            match version {
+                Some(v) => println!("access_mode = {}  (rule version v{v})", mode.as_str()),
+                // Already in that mode: the write landed, it just was not a
+                // change worth an accountability row.
+                None => println!("access_mode = {}  (unchanged)", mode.as_str()),
+            }
+            Ok(())
+        }
     }
 }
 
@@ -1897,15 +3172,132 @@ async fn run_autopilot_create(store: &Store, args: AutopilotCreateArgs) -> Resul
         max_concurrent_runs: args.max_concurrent_runs,
         execution_mode: args.execution_mode.into(),
         concurrency_policy: args.concurrency_policy.into(),
+        api_trigger_enabled: false,
     };
 
-    let id = AutopilotRepo::create(store.pool(), &SystemClock, &req)
+    // The accountable human for rule-version v1, written in the SAME
+    // transaction as the insert (multica parity #14).
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    let id = AutopilotRepo::create_as(store.pool(), &SystemClock, &req, Some(&actor))
         .await
         .with_context(|| format!("create autopilot `{}` (cron `{}`)", args.name, args.cron))?;
     println!(
-        "created autopilot {id} `{}` (cron `{}`)",
+        "created autopilot {id} `{}` (cron `{}`) (v1 created by {actor})",
         args.name, args.cron
     );
+    Ok(())
+}
+
+/// Resolve `--as-user` to the canonical `member:<user.id>` actor ref.
+///
+/// An omitted flag defaults to [`local_member`](ainb_hangar_core::actor::local_member)
+/// (`member:me`), the same honest local-human default migration 0060 established
+/// for inbox recipients — deliberately NOT `None`: a CLI mutation always has a
+/// human at the keyboard, and recording "unattributed" would be less true than
+/// recording "the local human".
+async fn resolve_publisher(
+    store: &Store,
+    as_user: Option<&str>,
+) -> Result<ainb_hangar_core::actor::ActorRef> {
+    use ainb_hangar_core::actor::{ActorKind, ActorRef, local_member};
+    match as_user {
+        Some(token) => {
+            let user_id = resolve_user_id(store, token).await?;
+            ActorRef::new(ActorKind::Member, user_id).context("--as-user resolved to an empty id")
+        }
+        None => Ok(local_member()),
+    }
+}
+
+/// `hangar autopilot edit <id>`: patch an autopilot's config (multica parity
+/// #14).
+///
+/// Prints the minted rule version, or announces the COSMETIC case explicitly —
+/// a rename lands but mints no version, and silently printing "updated" would
+/// hide that distinction from the operator.
+async fn run_autopilot_edit(store: &Store, args: AutopilotEditArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AgentId, AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::{AutopilotEdit, AutopilotRepo, UpdateOutcome};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    // The CLI writes sqlite DIRECTLY, so it applies the same restricted-mode
+    // write gate the daemon's request seam does (multica parity #27).
+    require_autopilot_write(store, ws.as_str(), &id, &actor).await?;
+
+    let edit = AutopilotEdit {
+        name: args.name.clone(),
+        agent_id: match args.agent.clone() {
+            Some(a) => Some(AgentId::from_str(a).context("agent id was empty")?),
+            None => None,
+        },
+        instructions: if args.clear_instructions {
+            Some(None)
+        } else {
+            args.instructions.clone().map(Some)
+        },
+        cron_expr: args.cron.clone(),
+        max_concurrent_runs: args.max_concurrent_runs,
+        execution_mode: args.execution_mode.map(Into::into),
+        concurrency_policy: args.concurrency_policy.map(Into::into),
+        // `ainb hangar autopilot access` is the one door onto the write-access
+        // mode, so the generic edit patch deliberately leaves it alone.
+        access_mode: None,
+    };
+    anyhow::ensure!(
+        !edit.is_empty(),
+        "nothing to edit — pass at least one of --name/--cron/--agent/--instructions/\
+         --clear-instructions/--max-concurrent-runs/--execution-mode/--concurrency-policy"
+    );
+
+    match AutopilotRepo::update_as(store.pool(), &SystemClock, &ws, &id, &edit, Some(&actor))
+        .await
+        .with_context(|| format!("edit autopilot `{}`", args.id))?
+    {
+        UpdateOutcome::NotFound => {
+            anyhow::bail!("no autopilot `{}` in this workspace", args.id)
+        }
+        UpdateOutcome::Updated {
+            version: Some(version),
+        } => {
+            let kind = AutopilotRuleVersionRepo::latest(store.pool(), &ws, &id)
+                .await
+                .ok()
+                .flatten()
+                .map_or_else(|| "updated".to_string(), |v| v.change_kind);
+            println!(
+                "autopilot {} updated (v{version} {kind} by {actor})",
+                args.id
+            );
+        }
+        UpdateOutcome::Updated { version: None } => {
+            println!("autopilot {} updated (no new version — cosmetic)", args.id);
+        }
+    }
+    Ok(())
+}
+
+/// `hangar autopilot versions <id>`: the append-only rule-version ledger —
+/// who published this rule, when, and why. Workspace-scoped: a foreign id
+/// yields an empty set. An UNVERSIONED (pre-0061, never-edited) rule also yields
+/// an empty set: the ledger was deliberately not backfilled.
+async fn run_autopilot_versions(
+    store: &Store,
+    args: AutopilotVersionsArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let versions = AutopilotRuleVersionRepo::list(store.pool(), &ws, &id, args.limit)
+        .await
+        .context("list autopilot rule versions")?;
+    render_autopilot_versions(&versions, format);
     Ok(())
 }
 
@@ -1970,26 +3362,44 @@ async fn run_autopilot_set_enabled(
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
     let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
 
+    // Pausing / resuming is a SUBSTANTIVE publish: it changes whether the rule
+    // fires unattended, so it re-stamps who is accountable (multica parity #14).
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    // The CLI writes sqlite DIRECTLY, so it applies the same restricted-mode
+    // write gate the daemon's request seam does (multica parity #27).
+    require_autopilot_write(store, ws.as_str(), &id, &actor).await?;
     if enabled {
-        AutopilotRepo::enable(store.pool(), &SystemClock, &ws, &id)
+        AutopilotRepo::enable_as(store.pool(), &SystemClock, &ws, &id, Some(&actor))
             .await
             .with_context(|| format!("enable autopilot `{}`", args.id))?;
-        println!("enabled autopilot {}", args.id);
+        println!("enabled autopilot {} (resumed by {actor})", args.id);
     } else {
-        AutopilotRepo::disable(store.pool(), &ws, &id)
+        AutopilotRepo::disable_as(store.pool(), &SystemClock, &ws, &id, Some(&actor))
             .await
             .with_context(|| format!("disable autopilot `{}`", args.id))?;
-        println!("disabled autopilot {}", args.id);
+        println!("disabled autopilot {} (paused by {actor})", args.id);
     }
     Ok(())
 }
 
-/// `hangar autopilot run <id>`: fire one tick immediately via the P7.4 enqueue
-/// path, bypassing the schedule. Workspace-scoped: a foreign id is rejected.
-async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<()> {
+/// `hangar autopilot run <id> [--source manual|api]`: dispatch one tick
+/// immediately, bypassing the schedule. Workspace-scoped: a foreign id is
+/// rejected.
+///
+/// `--source api` is REFUSED unless the autopilot has armed its api trigger —
+/// a half-configured trigger is never firable (the same discipline as the
+/// webhook one).
+///
+/// The dispatch goes through the SAME admission gate the scheduler uses, so at
+/// the concurrency limit under the `skip` policy it is DECLINED and recorded as
+/// a terminal `skipped` run. That is a successful, no-op dispatch (exit 0), not
+/// an error — matching multica's dispatch contract.
+async fn run_autopilot_run_now(store: &Store, args: AutopilotRunNowArgs) -> Result<()> {
     use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
     use ainb_hangar_store::repo::autopilot::AutopilotRepo;
-    use ainb_hangar_store::repo::autopilot_run::fire_autopilot_tick;
+    use ainb_hangar_store::repo::autopilot_run::{
+        DispatchOutcome, RunAttribution, RunSource, dispatch_with_admission_as,
+    };
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
     let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
@@ -2000,10 +3410,101 @@ async fn run_autopilot_run_now(store: &Store, args: AutopilotIdArgs) -> Result<(
         .context("look up autopilot")?
         .with_context(|| format!("no autopilot `{}` in this workspace", args.id))?;
 
-    let (run_id, task_id) = fire_autopilot_tick(store.pool(), &SystemClock, &autopilot)
+    let source = match args.source {
+        RunSourceArg::Manual => RunSource::Manual,
+        RunSourceArg::Api => {
+            anyhow::ensure!(
+                autopilot.api_trigger_enabled,
+                "api trigger not enabled for autopilot {} — run `ainb hangar autopilot api-trigger {}`",
+                args.id,
+                args.id
+            );
+            RunSource::Api
+        }
+    };
+
+    // THE ATTRIBUTION FORK (multica parity #14): a MANUAL fire is attributed to
+    // the human at the keyboard (`direct_human`); an `api` fire is UNATTENDED,
+    // so it resolves the rule owner from the version chain instead.
+    let attribution = match source {
+        RunSource::Manual => {
+            RunAttribution::DirectHuman(resolve_publisher(store, args.as_user.as_deref()).await?)
+        }
+        _ => RunAttribution::RuleOwner,
+    };
+
+    match dispatch_with_admission_as(store.pool(), &SystemClock, &autopilot, source, &attribution)
         .await
-        .with_context(|| format!("fire autopilot `{}`", args.id))?;
-    println!("fired autopilot {} → run {run_id} task {task_id}", args.id);
+        .with_context(|| format!("fire autopilot `{}`", args.id))?
+    {
+        DispatchOutcome::Fired {
+            run_id, task_id, ..
+        } => println!("fired autopilot {} → run {run_id} task {task_id}", args.id),
+        DispatchOutcome::Skipped { run_id, reason, .. } => {
+            println!("skipped autopilot {} → run {run_id} ({reason})", args.id);
+        }
+    }
+    Ok(())
+}
+
+/// `hangar autopilot api-trigger <id> [--disable]`: arm (or disarm) the bare
+/// programmatic `api` trigger (migration 0057). Workspace-scoped.
+async fn run_autopilot_api_trigger(store: &Store, args: AutopilotIdArgs) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+    let enabled = !args.disable;
+
+    let actor = resolve_publisher(store, args.as_user.as_deref()).await?;
+    // The CLI writes sqlite DIRECTLY, so it applies the same restricted-mode
+    // write gate the daemon's request seam does (multica parity #27).
+    require_autopilot_write(store, ws.as_str(), &id, &actor).await?;
+    let updated = AutopilotRepo::set_api_trigger_enabled_as(
+        store.pool(),
+        &SystemClock,
+        &ws,
+        &id,
+        enabled,
+        Some(&actor),
+    )
+    .await
+    .with_context(|| format!("set api trigger for autopilot `{}`", args.id))?;
+    anyhow::ensure!(updated, "no autopilot `{}` in this workspace", args.id);
+
+    if enabled {
+        println!("enabled api trigger for autopilot {}", args.id);
+        println!(
+            "  fire with: ainb hangar autopilot run {} --source api",
+            args.id
+        );
+    } else {
+        println!("disabled api trigger for autopilot {}", args.id);
+    }
+    Ok(())
+}
+
+/// `hangar autopilot runs <id>`: the run-history read surface — every run with
+/// its status, the trigger that fired it, and (for a declined dispatch) the
+/// admission reason. Workspace-scoped: a foreign id yields an empty set.
+async fn run_autopilot_runs(
+    store: &Store,
+    args: AutopilotRunsArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::ids::{AutopilotId, WorkspaceId};
+    use ainb_hangar_store::repo::autopilot::AutopilotRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let id = AutopilotId::from_str(args.id.clone()).context("autopilot id was empty")?;
+
+    let runs = AutopilotRepo::list_runs(store.pool(), &ws, &id, args.limit)
+        .await
+        .context("list autopilot runs")?;
+    render_autopilot_runs(&runs, format);
     Ok(())
 }
 
@@ -2202,6 +3703,7 @@ async fn dispatch_agent(cmd: AgentCommand, format: OutputFormat) -> Result<()> {
         AgentCommand::Permission(args) => run_agent_permission(&store, args).await,
         AgentCommand::Allow(args) => run_agent_allow(&store, args).await,
         AgentCommand::CanInvoke(args) => run_agent_can_invoke(&store, args).await,
+        AgentCommand::Env(args) => run_agent_env(&store, args, format).await,
     }
 }
 
@@ -2465,6 +3967,92 @@ async fn run_agent_list(store: &Store, args: AgentListArgs, format: OutputFormat
     Ok(())
 }
 
+/// Resolve which of the three mutually-exclusive env write channels was used,
+/// returning `None` when none was (leave the map unchanged).
+///
+/// `--env` is the argv channel (convenient, but the value lands in `ps` and
+/// shell history); `--env-stdin` / `--env-file` are the SECRET channels multica
+/// added for exactly that reason (`cmd_agent.go:788-852`). Clap already bars
+/// combining them, so at most one arm can fire.
+///
+/// # Errors
+///
+/// Returns a value-free error when the JSON payload is blank or malformed, or
+/// when the file cannot be read.
+fn resolve_agent_env_write(args: &AgentEditArgs) -> Result<Option<Vec<(String, String)>>> {
+    if !args.env.is_empty() {
+        return Ok(Some(args.env.clone()));
+    }
+    if args.env_stdin {
+        use std::io::Read as _;
+        let mut raw = String::new();
+        std::io::stdin().read_to_string(&mut raw).context("read --env-stdin")?;
+        return parse_env_json(&raw, "--env-stdin").map(Some).map_err(|e| anyhow::anyhow!(e));
+    }
+    if let Some(path) = args.env_file.as_deref() {
+        // The read error names the PATH, never the contents.
+        let raw = std::fs::read_to_string(path)
+            .with_context(|| format!("read --env-file {}", path.display()))?;
+        return parse_env_json(&raw, "--env-file").map(Some).map_err(|e| anyhow::anyhow!(e));
+    }
+    Ok(None)
+}
+
+/// `hangar agent env <id>`: print one agent's env with every VALUE masked.
+///
+/// The redacted-GET parity (multica `ListAgents`/`GetAgent` + `redactEnv`).
+/// There is no plaintext mode — see [`AgentEnvArgs`].
+///
+/// # Errors
+///
+/// Returns an error when the workspace cannot be resolved, the store read
+/// fails, or no agent with that id exists in the workspace.
+async fn run_agent_env(store: &Store, args: AgentEnvArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::agent::AgentRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let agent = AgentRepo::get(store.pool(), &args.id)
+        .await
+        .context("read agent")?
+        .filter(|a| a.workspace_id == workspace_id)
+        .ok_or_else(|| anyhow::anyhow!("no agent {} in this workspace", args.id))?;
+
+    let redacted = agent.agent_env.redacted_pairs();
+    match format {
+        OutputFormat::Json => {
+            let body = redacted
+                .iter()
+                .map(|(k, mask)| format!("{}:{}", json_string(k), json_string(mask)))
+                .collect::<Vec<_>>()
+                .join(",");
+            println!(
+                "{{\"env\":{{{body}}},\"env_key_count\":{},\"env_redacted\":{}}}",
+                redacted.len(),
+                !redacted.is_empty()
+            );
+        }
+        OutputFormat::Csv => {
+            println!("key,value");
+            for (k, mask) in &redacted {
+                println!("{k},{mask}");
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| key | value |\n| --- | --- |");
+            for (k, mask) in &redacted {
+                println!("| {} | {mask} |", md_cell(k));
+            }
+        }
+        OutputFormat::Text => {
+            for (k, mask) in &redacted {
+                println!("{k}={mask}");
+            }
+            println!("{} keys (values hidden)", redacted.len());
+        }
+    }
+    Ok(())
+}
+
 /// `hangar agent edit`: map the present flags onto an [`AgentConfigUpdate`] and
 /// drive the workspace-scoped edit. An empty edit (no field flag) is rejected;
 /// an agent id outside the workspace is reported as a not-found error.
@@ -2473,6 +4061,11 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
 
     let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
 
+    // `--env` / `--env-stdin` / `--env-file` are mutually exclusive at the clap
+    // layer; whichever is present REPLACES the whole map (parity #30). Resolved
+    // FIRST because it borrows `args` whole (the reads below move out of it).
+    let agent_env =
+        resolve_agent_env_write(&args)?.map(ainb_hangar_core::agent_env::AgentEnv::from_pairs);
     // Each nullable text field uses its clear-flag to distinguish "clear to none"
     // from "leave unchanged" (a clap conflict already bars setting both).
     let instructions = clear_or_set(args.clear_instructions, args.instructions);
@@ -2482,7 +4075,6 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
     // `--arg` / `--env` REPLACE the list when any value is given (an empty Vec
     // means "no flag passed" → leave unchanged).
     let cli_args = (!args.args.is_empty()).then_some(args.args);
-    let agent_env = (!args.env.is_empty()).then_some(args.env);
 
     let token_budget = clear_or_set(args.clear_token_budget, args.token_budget);
     // Migration 0050: `description` is NOT NULL so it has no clear-flag (`""` IS
@@ -2509,7 +4101,8 @@ async fn run_agent_edit(store: &Store, args: AgentEditArgs) -> Result<()> {
         anyhow::bail!(
             "nothing to update: pass at least one of --name / --instructions / --clear-instructions \
              / --model / --clear-model / --arg / --mcp / --clear-mcp / --thinking / --clear-thinking \
-             / --env / --token-budget / --clear-token-budget / --description / --avatar / \
+             / --env / --env-stdin / --env-file / --token-budget / --clear-token-budget / \
+             --description / --avatar / \
              --clear-avatar / --service-tier / --clear-service-tier"
         );
     }
@@ -2624,6 +4217,176 @@ async fn dispatch_member(cmd: MemberCommand, format: OutputFormat) -> Result<()>
         MemberCommand::List(args) => run_member_list(&store, args, format).await,
         MemberCommand::SetRole(args) => run_member_set_role(&store, args).await,
         MemberCommand::Remove(args) => run_member_remove(&store, args).await,
+        MemberCommand::Invite(args) => run_member_invite(&store, args).await,
+        MemberCommand::Invites(args) => run_member_invites(&store, args, format).await,
+        MemberCommand::Accept(args) => run_member_invite_accept(&store, args).await,
+        MemberCommand::Decline(args) => run_member_invite_decline(&store, args).await,
+        MemberCommand::Revoke(args) => run_member_invite_revoke(&store, args).await,
+    }
+}
+
+/// `hangar member invite`: issue a PENDING invitation (parity #18).
+///
+/// Unlike [`run_member_add`] (the instant join) this writes no member — the
+/// membership only appears when the invitee runs `member accept`. `--from`
+/// resolves the inviter's email to a `user.id`; an unknown address is an error
+/// naming it, so a typo never silently invites "from" nobody.
+async fn run_member_invite(store: &Store, args: MemberInviteArgs) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    let inviter_email = args
+        .from
+        .unwrap_or_else(|| ainb_hangar_store::bootstrap::DEFAULT_OWNER_EMAIL.to_string());
+    let inviter_id = user_id_for_email(store, &inviter_email).await?;
+
+    let inv = InvitationRepo::create(
+        store.pool(),
+        &SystemClock,
+        &ws,
+        &inviter_id,
+        &args.email,
+        args.role.to_repo(),
+    )
+    .await
+    .map_err(invitation_cli_err)?;
+    println!(
+        "invited {} as {} (invitation {}, expires {})",
+        inv.invitee_email,
+        inv.role,
+        inv.id,
+        fmt_epoch_ms_utc(inv.expires_at)
+    );
+    Ok(())
+}
+
+/// `hangar member invites`: list the workspace's LIVE pending invitations.
+///
+/// Sweeps past-due rows to `expired` first, so what prints is what can still be
+/// accepted. A missing / unknown workspace lists as empty, mirroring
+/// [`run_member_list`].
+async fn run_member_invites(
+    store: &Store,
+    args: MemberInvitesArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let workspace_id = match args.workspace.as_deref() {
+        Some(slug) => sqlx::query_scalar("SELECT id FROM workspace WHERE slug = ?")
+            .bind(slug)
+            .fetch_optional(store.pool())
+            .await
+            .context("look up workspace by slug")?,
+        None => find_default_workspace(store).await?,
+    };
+    let Some(workspace_id) = workspace_id else {
+        render_invitation_list(&[], format);
+        return Ok(());
+    };
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    InvitationRepo::expire_stale(store.pool(), &SystemClock, &ws)
+        .await
+        .context("expire stale invitations")?;
+    let invites = InvitationRepo::list_pending(store.pool(), &SystemClock, &ws)
+        .await
+        .context("list pending invitations")?;
+    render_invitation_list(&invites, format);
+    Ok(())
+}
+
+/// `hangar member accept`: the invitee joins. This is the verb that adds the
+/// member row (the invitation and the membership land in one transaction).
+async fn run_member_invite_accept(store: &Store, args: MemberInviteActArgs) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let member = InvitationRepo::accept(
+        store.pool(),
+        &SystemClock,
+        &args.invitation_id,
+        &args.acting_as,
+    )
+    .await
+    .map_err(invitation_cli_err)?;
+    println!(
+        "{} joined as {} (user {})",
+        member.email, member.role, member.user_id
+    );
+    Ok(())
+}
+
+/// `hangar member decline`: the invitee refuses. No member is created.
+async fn run_member_invite_decline(store: &Store, args: MemberInviteActArgs) -> Result<()> {
+    use ainb_hangar_core::clock::SystemClock;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    InvitationRepo::decline(
+        store.pool(),
+        &SystemClock,
+        &args.invitation_id,
+        &args.acting_as,
+    )
+    .await
+    .map_err(invitation_cli_err)?;
+    println!(
+        "declined invitation {} for {}",
+        args.invitation_id, args.acting_as
+    );
+    Ok(())
+}
+
+/// `hangar member revoke`: withdraw a still-pending invitation, workspace-scoped
+/// (another tenant's invitation matches no row and is a not-found error).
+async fn run_member_invite_revoke(store: &Store, args: MemberInviteRevokeArgs) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::repo::invitation::InvitationRepo;
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+    InvitationRepo::revoke(store.pool(), &ws, &args.invitation_id)
+        .await
+        .map_err(invitation_cli_err)?;
+    println!("revoked invitation {}", args.invitation_id);
+    Ok(())
+}
+
+/// Resolve an email to its `user.id`, erroring with the address when unknown.
+async fn user_id_for_email(store: &Store, email: &str) -> Result<String> {
+    let normalized = ainb_hangar_store::repo::invitation::normalize_email(email);
+    let id: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
+        .bind(&normalized)
+        .fetch_optional(store.pool())
+        .await
+        .context("look up user by email")?;
+    id.ok_or_else(|| anyhow::anyhow!("no user with email {normalized}"))
+}
+
+/// Map an [`InvitationRepoError`] onto a human CLI error, keeping multica's
+/// wording so the CLI, the RPC, and the reference all say the same thing.
+///
+/// [`InvitationRepoError`]: ainb_hangar_store::repo::invitation::InvitationRepoError
+fn invitation_cli_err(
+    e: ainb_hangar_store::repo::invitation::InvitationRepoError,
+) -> anyhow::Error {
+    use ainb_hangar_store::repo::invitation::InvitationRepoError as E;
+    match e {
+        E::EmptyEmail => anyhow::anyhow!("email must not be empty"),
+        E::InvalidRole => anyhow::anyhow!("role must be one of admin/member"),
+        E::CannotInviteOwner => anyhow::anyhow!("cannot invite as owner"),
+        E::InviterNotMember => anyhow::anyhow!("only a workspace member can invite"),
+        E::AlreadyMember => anyhow::anyhow!("user is already a member"),
+        E::AlreadyPending => anyhow::anyhow!("invitation already pending for this email"),
+        E::NotFound => anyhow::anyhow!("invitation not found"),
+        E::NotYours => anyhow::anyhow!("invitation does not belong to you"),
+        E::NotPending => anyhow::anyhow!("invitation is not pending"),
+        E::Expired => anyhow::anyhow!("invitation has expired"),
+        other => anyhow::Error::new(other).context("invitation mutation failed"),
     }
 }
 
@@ -2731,15 +4494,103 @@ fn member_cli_err(e: ainb_hangar_store::repo::member::MemberRepoError) -> anyhow
 
 /// Dispatch the `hangar workspace` verbs against a local store (e38.21).
 ///
-/// `config` sets one or more of the workspace's agent-run config knobs (context
-/// prompt, issue prefix, repo whitelist); `show` renders the current config.
-/// Both resolve the workspace the same way the skills/member verbs do.
+/// `create` makes a workspace (refused under the instance lockdown), `list`
+/// enumerates them host-wide, `config` sets one or more of the workspace's
+/// agent-run config knobs (context prompt, issue prefix, repo whitelist), and
+/// `show` renders the current config. The scoped verbs resolve the workspace the
+/// same way the skills/member verbs do.
 async fn dispatch_workspace(cmd: WorkspaceCommand, format: OutputFormat) -> Result<()> {
     let store = Store::open_default().await.context("open hangar database")?;
     match cmd {
+        WorkspaceCommand::Create(args) => run_workspace_create(&store, args).await,
+        WorkspaceCommand::List(args) => run_workspace_list(&store, &args, format).await,
         WorkspaceCommand::Config(args) => run_workspace_config(&store, args).await,
         WorkspaceCommand::Show(args) => run_workspace_show(&store, args, format).await,
     }
+}
+
+/// `hangar workspace create`: validate the slug, then create the workspace + its
+/// owner member row.
+///
+/// The instance lockdown (`workspace.creation_disabled`) is enforced store-side
+/// inside `WorkspaceRepo::create`, so a locked-down instance surfaces
+/// [`WorkspaceRepoError::CreationDisabled`] here and the command exits non-zero
+/// having written nothing.
+///
+/// [`WorkspaceRepoError::CreationDisabled`]: ainb_hangar_store::repo::workspace::WorkspaceRepoError::CreationDisabled
+async fn run_workspace_create(store: &Store, args: WorkspaceCreateArgs) -> Result<()> {
+    use ainb_hangar_store::repo::workspace::{WorkspaceRepo, validate_slug};
+
+    // A create needs the bootstrap owner user to link as the new workspace's
+    // `owner` member, so seed it the way every other write verb does rather than
+    // failing "no such workspace" on a never-touched database. This is
+    // platform-owned creation and is deliberately NOT gated by the lockdown — a
+    // locked-down instance still needs its default tenant.
+    ensure_default_workspace(store).await?;
+    let slug = validate_slug(&args.slug).map_err(workspace_cli_err)?;
+    let row = WorkspaceRepo::create(
+        store.pool(),
+        &slug,
+        &args.name,
+        args.issue_prefix.as_deref(),
+    )
+    .await
+    .map_err(workspace_cli_err)?;
+    println!("created workspace {} ({})", row.slug, row.id);
+    Ok(())
+}
+
+/// `hangar workspace list`: every workspace on this instance, in creation order.
+///
+/// Host-wide (no `--workspace` scope) — it is the surface that answers "did the
+/// create land?", so it reads the `workspace` table directly rather than any
+/// per-workspace config.
+async fn run_workspace_list(
+    store: &Store,
+    _args: &WorkspaceListArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    let rows: Vec<(String, String, String)> =
+        sqlx::query_as("SELECT id, slug, name FROM workspace ORDER BY created_at")
+            .fetch_all(store.pool())
+            .await
+            .context("list workspaces")?;
+
+    match format {
+        OutputFormat::Json => {
+            let v: Vec<serde_json::Value> = rows
+                .iter()
+                .map(|(id, slug, name)| serde_json::json!({ "id": id, "slug": slug, "name": name }))
+                .collect();
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&v).context("render workspace list json")?
+            );
+        }
+        OutputFormat::Csv => {
+            println!("id,slug,name");
+            for (id, slug, name) in &rows {
+                println!("{id},{slug},{name}");
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| id | slug | name |");
+            println!("| --- | --- | --- |");
+            for (id, slug, name) in &rows {
+                println!("| {id} | {slug} | {name} |");
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no workspaces");
+            } else {
+                for (id, slug, name) in &rows {
+                    println!("{id}  {slug}  {name}");
+                }
+            }
+        }
+    }
+    Ok(())
 }
 
 /// `hangar workspace config`: overwrite one or more of the workspace's config
@@ -2845,6 +4696,10 @@ fn workspace_cli_err(e: ainb_hangar_store::repo::workspace::WorkspaceRepoError) 
             anyhow::anyhow!("a workspace with that slug already exists")
         }
         WorkspaceRepoError::LastWorkspace => anyhow::anyhow!("cannot delete the last workspace"),
+        WorkspaceRepoError::CreationDisabled => anyhow::anyhow!(
+            "workspace creation is disabled for this instance \
+             (unset with: ainb hangar daemon config set workspace.creation_disabled false)"
+        ),
         db @ WorkspaceRepoError::Db(_) => {
             anyhow::Error::new(db).context("workspace config mutation failed")
         }
@@ -3697,10 +5552,22 @@ async fn dispatch_issue(cmd: IssueCommand, format: OutputFormat) -> Result<()> {
         IssueCommand::Search(args) => run_issue_search(&store, args, format).await,
         IssueCommand::Show(args) => run_issue_show(&store, args, format).await,
         IssueCommand::Update(args) => run_issue_update(&store, args).await,
+        IssueCommand::BatchState(args) => run_issue_batch_state(&store, args).await,
         IssueCommand::Delete(args) => run_issue_delete(&store, args).await,
         IssueCommand::Label(cmd) => run_issue_label(&store, cmd).await,
         IssueCommand::Criteria(cmd) => run_issue_criteria(&store, cmd).await,
         IssueCommand::Link(cmd) => run_issue_link(&store, cmd).await,
+        IssueCommand::Subscribe(args) => run_issue_subscribe(&store, args, true).await,
+        IssueCommand::Unsubscribe(args) => run_issue_subscribe(&store, args, false).await,
+        IssueCommand::Subscribers(args) => {
+            let ws = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+            print_issue_subscribers(&store, &ws, &args.id).await
+        }
+        IssueCommand::React(cmd) => run_issue_react(&store, cmd).await,
+        IssueCommand::Why(args) => run_issue_why(&store, args, format).await,
+        IssueCommand::Timeline(args) => run_issue_timeline(&store, args, format).await,
+        IssueCommand::Property(cmd) => run_issue_property(&store, cmd).await,
+        IssueCommand::Meta(cmd) => run_issue_meta(&store, cmd, format).await,
     }
 }
 
@@ -3730,8 +5597,11 @@ async fn run_issue_delete(store: &Store, args: IssueDeleteArgs) -> Result<()> {
         // DRY RUN: report what a real delete would remove and exit untouched.
         println!("would delete issue {} \"{}\"", args.id, preview.title);
         println!(
-            "  removes: {} comment(s), {} task(s), {} board placement(s), plus label links, dependency edges, and usage rows",
-            preview.summary.comments, preview.summary.tasks, preview.summary.placements
+            "  removes: {} comment(s), {} task(s), {} board placement(s), {} activity row(s), plus label links, dependency edges, and usage rows",
+            preview.summary.comments,
+            preview.summary.tasks,
+            preview.summary.placements,
+            preview.summary.activities
         );
         if preview.active_tasks > 0 {
             println!(
@@ -3747,8 +5617,13 @@ async fn run_issue_delete(store: &Store, args: IssueDeleteArgs) -> Result<()> {
     match IssueRepo::delete_cascade(store.pool(), &workspace_id, &args.id).await {
         Ok(summary) => {
             println!(
-                "deleted issue {} \"{}\" ({} comment(s), {} task(s), {} placement(s))",
-                args.id, preview.title, summary.comments, summary.tasks, summary.placements
+                "deleted issue {} \"{}\" ({} comment(s), {} task(s), {} placement(s), {} activity row(s))",
+                args.id,
+                preview.title,
+                summary.comments,
+                summary.tasks,
+                summary.placements,
+                summary.activities
             );
             Ok(())
         }
@@ -3930,6 +5805,414 @@ async fn run_issue_criteria(store: &Store, cmd: IssueCriteriaCommand) -> Result<
     Ok(())
 }
 
+/// `hangar issue subscribe|unsubscribe` (multica parity #22): author an issue's
+/// subscriber set.
+///
+/// Routes through the SAME [`IssueSubscriberRepo`] seam the daemon RPC uses, so
+/// there is exactly one mutator. The actor defaults to the LOCAL HUMAN. An
+/// unknown / foreign-tenant issue is a NON-ZERO exit with the daemon's own
+/// phrasing, never a silent no-op. Prints the refreshed set afterwards.
+///
+/// [`IssueSubscriberRepo`]: ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo
+async fn run_issue_subscribe(
+    store: &Store,
+    args: IssueSubscribeArgs,
+    subscribe: bool,
+) -> Result<()> {
+    use ainb_hangar_store::repo::issue_subscriber::{IssueSubscriberRepo, SubscribeReason};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let actor = parse_actor_arg(args.actor.as_deref())?;
+    // The repo's tenant join makes a foreign / unknown issue a silent no-op, so
+    // resolve the issue FIRST and fail loudly instead.
+    require_issue_in_workspace(store, &workspace_id, &args.id).await?;
+
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    if subscribe {
+        IssueSubscriberRepo::add(
+            store.pool(),
+            &workspace_id,
+            &args.id,
+            &actor,
+            SubscribeReason::Manual,
+            now,
+        )
+        .await
+        .context("subscribe to issue")?;
+    } else {
+        IssueSubscriberRepo::remove(store.pool(), &workspace_id, &args.id, &actor)
+            .await
+            .context("unsubscribe from issue")?;
+    }
+    print_issue_subscribers(store, &workspace_id, &args.id).await
+}
+
+/// `hangar issue react add|remove|list` (multica parity #22).
+/// `hangar property <verb>` — the workspace's CUSTOM PROPERTY catalog
+/// (multica parity #17).
+///
+/// Opens the store DIRECTLY (the `run_issue_label` precedent) and drives the
+/// SAME [`IssuePropertyRepo`] the daemon's RPC handlers use, so the CLI and the
+/// RPC can never validate differently.
+async fn dispatch_property(cmd: PropertyCommand, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_core::properties::PropertyKind;
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace = match &cmd {
+        PropertyCommand::Define(a) => a.workspace.clone(),
+        PropertyCommand::List(a) => a.workspace.clone(),
+        PropertyCommand::Archive(a) => a.workspace.clone(),
+    };
+    let workspace_id = resolve_skills_workspace(&store, workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    match cmd {
+        PropertyCommand::Define(args) => {
+            // Absent flags KEEP whatever the stored definition has, so
+            // `--name` alone is a rename and nothing else moves.
+            let existing = IssuePropertyRepo::get_by_key(store.pool(), &ws, &args.key)
+                .await
+                .context("look up the definition")?;
+            let kind = match args.kind.as_deref() {
+                Some(raw) => PropertyKind::parse_strict(raw)?,
+                None => existing.as_ref().map_or(PropertyKind::Text, |d| d.kind.clone()),
+            };
+            let name = args.name.as_deref().map(str::trim).filter(|n| !n.is_empty()).map_or_else(
+                || {
+                    existing
+                        .as_ref()
+                        .map_or_else(|| args.key.trim().to_string(), |d| d.name.clone())
+                },
+                ToString::to_string,
+            );
+            let options = if args.options.is_empty() {
+                existing.as_ref().map(|d| d.options.clone()).unwrap_or_default()
+            } else {
+                args.options.clone()
+            };
+            let position = args.position.unwrap_or_else(|| existing.map_or(0, |d| d.position));
+            let def = IssuePropertyRepo::define(
+                store.pool(),
+                &ws,
+                &args.key,
+                &name,
+                &kind,
+                &options,
+                position,
+                SystemClock.now_ms(),
+            )
+            .await
+            .context("define custom property")?;
+            println!(
+                "defined `{}` ({}) as {} [{}] pos={}",
+                def.key,
+                def.name,
+                def.kind.as_db_str(),
+                def.options.join(", "),
+                def.position
+            );
+            Ok(())
+        }
+        PropertyCommand::List(args) => {
+            let defs = IssuePropertyRepo::list(store.pool(), &ws, args.include_archived)
+                .await
+                .context("list custom properties")?;
+            match format {
+                OutputFormat::Json => {
+                    let rows: Vec<serde_json::Value> = defs
+                        .iter()
+                        .map(|d| {
+                            serde_json::json!({
+                                "key": d.key,
+                                "name": d.name,
+                                "kind": d.kind.as_db_str(),
+                                "options": d.options,
+                                "position": d.position,
+                                "archived": d.archived_at.is_some(),
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                }
+                _ => {
+                    if defs.is_empty() {
+                        println!("no custom properties");
+                    }
+                    for d in &defs {
+                        println!(
+                            "{}\t{}\t{}\t[{}]\tpos={}\t{}",
+                            d.key,
+                            d.name,
+                            d.kind.as_db_str(),
+                            d.options.join(", "),
+                            d.position,
+                            if d.archived_at.is_some() {
+                                "archived"
+                            } else {
+                                "active"
+                            }
+                        );
+                    }
+                }
+            }
+            Ok(())
+        }
+        PropertyCommand::Archive(args) => {
+            let archived = !args.unarchive;
+            let found = IssuePropertyRepo::set_archived(
+                store.pool(),
+                &ws,
+                &args.key,
+                archived,
+                SystemClock.now_ms(),
+            )
+            .await
+            .context("archive custom property")?;
+            if !found {
+                anyhow::bail!("no custom property `{}` in this workspace", args.key);
+            }
+            println!(
+                "{} `{}` (stored values are never deleted)",
+                if archived { "archived" } else { "un-archived" },
+                args.key
+            );
+            Ok(())
+        }
+    }
+}
+
+/// `hangar issue property set|clear` (multica parity #17).
+async fn run_issue_property(store: &Store, cmd: IssuePropertyCommand) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_core::properties::{coerce_value, render_value};
+    use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+    let (id, key, values, workspace, set) = match cmd {
+        IssuePropertyCommand::Set(a) => (a.id, a.key, a.values, a.workspace, true),
+        IssuePropertyCommand::Clear(a) => (a.id, a.key, Vec::new(), a.workspace, false),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    if set {
+        let def = IssuePropertyRepo::get_by_key(store.pool(), &ws, &key)
+            .await
+            .context("look up the definition")?
+            .filter(|d| d.archived_at.is_none())
+            .with_context(|| format!("no active custom property `{key}` in this workspace"))?;
+        let value = coerce_value(&def.kind, &values)?;
+        IssuePropertyRepo::set_value(store.pool(), &ws, &id, &key, &value)
+            .await
+            .with_context(|| format!("set property `{key}` on issue {id}"))?;
+        println!("{}: {}", def.name, render_value(&value));
+    } else {
+        let cleared = IssuePropertyRepo::clear_value(store.pool(), &ws, &id, &key)
+            .await
+            .with_context(|| format!("clear property `{key}` on issue {id}"))?;
+        println!(
+            "{} `{key}` on issue {id}",
+            if cleared { "cleared" } else { "already unset:" }
+        );
+    }
+    Ok(())
+}
+
+/// `hangar issue meta list|get|set|delete` (multica parity #17).
+async fn run_issue_meta(store: &Store, cmd: IssueMetaCommand, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_core::properties::{coerce_metadata_value, render_metadata};
+    use ainb_hangar_store::repo::issue_metadata::IssueMetadataRepo;
+
+    let workspace = match &cmd {
+        IssueMetaCommand::List(a) => a.workspace.clone(),
+        IssueMetaCommand::Get(a) | IssueMetaCommand::Delete(a) => a.workspace.clone(),
+        IssueMetaCommand::Set(a) => a.workspace.clone(),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    match cmd {
+        IssueMetaCommand::Set(args) => {
+            let value = coerce_metadata_value(&args.value, args.value_type.as_deref())?;
+            IssueMetadataRepo::set(store.pool(), &ws, &args.id, &args.key, &value)
+                .await
+                .with_context(|| format!("set metadata `{}` on issue {}", args.key, args.id))?;
+            println!("{} = {}", args.key, render_metadata(&value));
+            Ok(())
+        }
+        IssueMetaCommand::Delete(args) => {
+            let removed = IssueMetadataRepo::delete(store.pool(), &ws, &args.id, &args.key)
+                .await
+                .with_context(|| {
+                format!("delete metadata `{}` on issue {}", args.key, args.id)
+            })?;
+            println!(
+                "{} `{}` on issue {}",
+                if removed {
+                    "deleted"
+                } else {
+                    "already absent:"
+                },
+                args.key,
+                args.id
+            );
+            Ok(())
+        }
+        IssueMetaCommand::Get(args) => {
+            let bag = IssueMetadataRepo::get(store.pool(), &ws, &args.id)
+                .await
+                .with_context(|| format!("read metadata on issue {}", args.id))?;
+            let value = bag
+                .get(&args.key)
+                .with_context(|| format!("no metadata key `{}` on issue {}", args.key, args.id))?;
+            println!("{}", render_metadata(value));
+            Ok(())
+        }
+        IssueMetaCommand::List(args) => {
+            let bag = IssueMetadataRepo::get(store.pool(), &ws, &args.id)
+                .await
+                .with_context(|| format!("read metadata on issue {}", args.id))?;
+            match format {
+                OutputFormat::Json => {
+                    let rows: Vec<serde_json::Value> = bag
+                        .iter()
+                        .map(|(k, v)| {
+                            serde_json::json!({
+                                "key": k,
+                                "value": render_metadata(v),
+                                "value_json": ainb_hangar_core::properties::metadata_value_json(v),
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&rows)?);
+                }
+                _ => {
+                    if bag.is_empty() {
+                        println!("no metadata");
+                    }
+                    for (k, v) in &bag {
+                        println!("{k} = {}", render_metadata(v));
+                    }
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+async fn run_issue_react(store: &Store, cmd: IssueReactCommand) -> Result<()> {
+    use ainb_hangar_core::idgen::{IdGen, SystemIdGen};
+    use ainb_hangar_store::repo::issue_reaction::{IssueReactionError, IssueReactionRepo};
+
+    let (id, workspace) = match &cmd {
+        IssueReactCommand::Add(a) | IssueReactCommand::Remove(a) => {
+            (a.id.clone(), a.workspace.clone())
+        }
+        IssueReactCommand::List(a) => (a.id.clone(), a.workspace.clone()),
+    };
+    let workspace_id = resolve_skills_workspace(store, workspace.as_deref()).await?;
+    require_issue_in_workspace(store, &workspace_id, &id).await?;
+
+    let map = |e: IssueReactionError| match e {
+        IssueReactionError::EmptyEmoji => anyhow::anyhow!("emoji is required"),
+        IssueReactionError::Db(db) => anyhow::Error::new(db).context("issue reaction"),
+    };
+    match &cmd {
+        IssueReactCommand::Add(args) => {
+            let actor = parse_actor_arg(args.actor.as_deref())?;
+            IssueReactionRepo::add(
+                store.pool(),
+                &workspace_id,
+                &args.id,
+                &actor,
+                &args.emoji,
+                &SystemIdGen.new_ulid(),
+                ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock),
+            )
+            .await
+            .map_err(map)?;
+        }
+        IssueReactCommand::Remove(args) => {
+            let actor = parse_actor_arg(args.actor.as_deref())?;
+            IssueReactionRepo::remove(store.pool(), &workspace_id, &args.id, &actor, &args.emoji)
+                .await
+                .map_err(map)?;
+        }
+        IssueReactCommand::List(_) => {}
+    }
+    print_issue_reactions(store, &id).await
+}
+
+/// Parse an `--actor` argument, defaulting to the LOCAL HUMAN (`member:me`).
+fn parse_actor_arg(raw: Option<&str>) -> Result<ainb_hangar_core::actor::ActorRef> {
+    match raw {
+        None => Ok(ainb_hangar_core::actor::local_member()),
+        Some(token) => <ainb_hangar_core::actor::ActorRef as std::str::FromStr>::from_str(token)
+            .map_err(|e| anyhow::anyhow!("bad --actor `{token}`: {e}")),
+    }
+}
+
+/// Fail loudly when `issue_id` does not live in `workspace_id` — the repos'
+/// tenant join would otherwise turn it into a silent no-op.
+async fn require_issue_in_workspace(
+    store: &Store,
+    workspace_id: &str,
+    issue_id: &str,
+) -> Result<()> {
+    let found = IssueRepo::get_by_id(store.pool(), issue_id)
+        .await
+        .context("read issue")?
+        .is_some_and(|i| i.workspace_id == workspace_id);
+    if found {
+        Ok(())
+    } else {
+        anyhow::bail!("no issue `{issue_id}` in this workspace")
+    }
+}
+
+/// Print one issue's subscriber set, one `<actor>  (<reason>)` row each.
+/// No subscribers ⇒ `no subscribers`.
+async fn print_issue_subscribers(store: &Store, workspace_id: &str, issue_id: &str) -> Result<()> {
+    use ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo;
+
+    require_issue_in_workspace(store, workspace_id, issue_id).await?;
+    let subs = IssueSubscriberRepo::list(store.pool(), issue_id)
+        .await
+        .context("read subscribers")?;
+    if subs.is_empty() {
+        println!("no subscribers");
+        return Ok(());
+    }
+    for s in subs {
+        println!("{}  ({})", s.actor, s.reason_raw);
+    }
+    Ok(())
+}
+
+/// Print one issue's aggregated reactions as `<emoji> <count>`, most-used first.
+/// No reactions ⇒ `no reactions`.
+async fn print_issue_reactions(store: &Store, issue_id: &str) -> Result<()> {
+    use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
+
+    let tallies = IssueReactionRepo::tallies(store.pool(), issue_id)
+        .await
+        .context("read reactions")?;
+    if tallies.is_empty() {
+        println!("no reactions");
+        return Ok(());
+    }
+    let line = tallies
+        .iter()
+        .map(|t| format!("{} {}", t.emoji, t.count))
+        .collect::<Vec<_>>()
+        .join("  ");
+    println!("{line}");
+    Ok(())
+}
+
 /// `hangar issue link add|remove|list`: author and read an issue's TYPED links
 /// (multica parity #20).
 ///
@@ -4069,6 +6352,75 @@ async fn issue_display_ref(store: &Store, workspace_id: &str, issue_id: &str) ->
 /// that resolves to no row in the workspace (an unknown id or a foreign tenant's
 /// issue) is reported as an error — never a silent no-op. The mutually-exclusive
 /// `--assign`/`--unassign` and `--due`/`--clear-due` pairs are enforced by clap.
+/// `hangar issue batch-state --state <S> <ID>…` — apply ONE lifecycle state to
+/// several issues, then run the child-done cascade ONCE over the whole batch
+/// (multica parity #3-rest, MUL-4155).
+///
+/// The verb exists for the cascade. Completing two siblings of the same stage
+/// one-at-a-time through `issue update` used to post a roll-up comment on the
+/// parent EACH TIME; here the whole batch closes the barrier once and posts a
+/// SINGLE comment naming every child that closed it. Store-direct like
+/// `issue update` — no daemon needed, so there is no agent wake; the comment is
+/// the observable side.
+async fn run_issue_batch_state(store: &Store, args: IssueBatchStateArgs) -> Result<()> {
+    use ainb_hangar_store::repo::issue::IssueRepo;
+    use ainb_hangar_store::service::child_done::{ChildTransition, cascade_children_done};
+
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+
+    // 0049: reject a non-canonical state BEFORE any write — a typo must never
+    // half-apply a batch.
+    if ainb_hangar_proto::lifecycle::IssueLifecycle::parse_canonical(&args.state).is_none() {
+        anyhow::bail!(
+            "invalid --state {:?}; valid values: {}",
+            args.state,
+            ainb_hangar_proto::lifecycle::IssueLifecycle::canonical_list()
+        );
+    }
+
+    // Dedupe preserving caller order — a repeated id must not be counted twice.
+    let mut ids: Vec<String> = Vec::new();
+    for id in &args.ids {
+        if !ids.iter().any(|seen| seen == id) {
+            ids.push(id.clone());
+        }
+    }
+
+    let changed = IssueRepo::set_state_batch(store.pool(), &workspace_id, &ids, &args.state)
+        .await
+        .context("apply batch state")?;
+    println!(
+        "updated {} of {} issue(s) to {}",
+        changed.len(),
+        ids.len(),
+        args.state
+    );
+
+    let transitions: Vec<ChildTransition> = changed
+        .iter()
+        .map(|(id, prev)| ChildTransition {
+            child_id: id.clone(),
+            prev_state: prev.clone(),
+            new_state: args.state.clone(),
+        })
+        .collect();
+    let now = ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock);
+    let cascades =
+        cascade_children_done(store.pool(), &workspace_id, &transitions, now, &SystemIdGen)
+            .await
+            .context("child-done cascade")?;
+    for c in &cascades {
+        println!(
+            "posted sub-issue roll-up on parent {} ({}/{}) covering {} sub-issues",
+            c.parent_id,
+            c.children_done,
+            c.children_total,
+            c.children.len()
+        );
+    }
+    Ok(())
+}
+
 async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
     use ainb_hangar_store::repo::issue::IssueFieldUpdate;
 
@@ -4130,6 +6482,14 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         None
     };
 
+    // multica parity #13: the FULL pre-edit row, so the post-edit diff can write
+    // one activity row per changed field. Deliberately separate from
+    // `prev_state` above, which only carries the state token for the cascade.
+    let before_issue = IssueRepo::get_by_id(store.pool(), &args.id)
+        .await
+        .with_context(|| format!("read issue {} before update", args.id))?
+        .filter(|i| i.workspace_id == workspace_id);
+
     let touched = IssueRepo::update_fields(store.pool(), &workspace_id, &args.id, &update)
         .await
         .with_context(|| format!("update issue {}", args.id))?;
@@ -4137,6 +6497,30 @@ async fn run_issue_update(store: &Store, args: IssueUpdateArgs) -> Result<()> {
         anyhow::bail!("no issue with id {} in this workspace", args.id);
     }
     println!("updated issue {}", args.id);
+
+    // multica parity #13: diff the pre-edit row against the committed one and
+    // record one activity row per changed field. The CLI shares the daemon's
+    // diff service so the two writers cannot drift. Best-effort throughout.
+    if let Some(before) = before_issue.as_ref() {
+        if let Ok(Some(after)) = IssueRepo::get_by_id(store.pool(), &args.id).await {
+            let owner = ainb_hangar_store::bootstrap::default_owner_id(store.pool())
+                .await
+                .ok()
+                .flatten();
+            let actor =
+                ainb_hangar_core::activity::ActivityActor::member_or_system(owner.as_deref());
+            ainb_hangar_store::service::activity::ActivityService::record_issue_diff(
+                store.pool(),
+                &SystemIdGen,
+                &SystemClock,
+                &workspace_id,
+                &actor,
+                before,
+                &after,
+            )
+            .await;
+        }
+    }
 
     // 0046: a CLI-driven completion also posts the parent roll-up comment, so
     // CLI and TUI behaviour stay aligned (the CLI has no daemon, so there is no
@@ -4218,16 +6602,29 @@ async fn enqueue_assigned_task(
     issue_id: &str,
     agent_id: &str,
 ) -> Result<Option<String>> {
+    use ainb_hangar_core::dispatch_reason::DispatchReason;
     use ainb_hangar_store::repo::card_parity::CardParityRepo;
     use ainb_hangar_store::repo::task::NewTask;
 
     // One active run per card: an in-flight (queued/dispatched/running) task keeps
     // the issue; recovery only re-dispatches once the prior run is terminal.
-    if TaskRepo::active_task_for_issue(pool, workspace_id, issue_id)
+    if let Some(active) = TaskRepo::active_task_for_issue(pool, workspace_id, issue_id)
         .await
         .context("check for an active run before re-dispatch")?
-        .is_some()
     {
+        // multica parity #12: this used to be a bare `Ok(None)` — no record, no
+        // message, no way for the user to learn why assigning an agent did not
+        // start anything. Record it.
+        record_cli_dispatch_attempt(
+            pool,
+            workspace_id,
+            issue_id,
+            Some(agent_id),
+            None,
+            DispatchReason::AlreadyActive,
+            Some(&format!("a run is already active ({})", active.status)),
+        )
+        .await;
         return Ok(None);
     }
 
@@ -4243,6 +6640,17 @@ async fn enqueue_assigned_task(
         .context("read issue repo/agent for re-dispatch")?
         .unwrap_or((None, None));
     let Some(repo_ref) = card_repo else {
+        // multica parity #12: the other silent `Ok(None)`.
+        record_cli_dispatch_attempt(
+            pool,
+            workspace_id,
+            issue_id,
+            Some(agent_id),
+            None,
+            DispatchReason::TargetUnavailable,
+            Some("no repo pinned on this card"),
+        )
+        .await;
         return Ok(None);
     };
     let source_branch = CardParityRepo::get_issue_branches(pool, issue_id)
@@ -4301,7 +6709,58 @@ async fn enqueue_assigned_task(
         .await
         .context("persist re-dispatched task source branch")?;
     tx.commit().await.context("commit re-dispatch tx")?;
+    record_cli_dispatch_attempt(
+        pool,
+        workspace_id,
+        issue_id,
+        Some(agent_id),
+        Some(&task_id),
+        DispatchReason::Queued,
+        Some(&format!("task {task_id}")),
+    )
+    .await;
     Ok(Some(task_id))
+}
+
+/// Record one `dispatch_attempt` row from a CLI path (multica parity #12).
+///
+/// The CLI talks to the store DIRECTLY (no daemon), so it cannot ride the
+/// daemon's `run_card` recording seam — this is its equivalent. Best-effort by
+/// the same contract: a record fault warns and never changes the caller's
+/// outcome, because an audit write must not be able to break an assignment that
+/// otherwise succeeded.
+///
+/// `source` is always [`DispatchSource::Assign`]: every CLI producer today is the
+/// assignee re-dispatch.
+async fn record_cli_dispatch_attempt(
+    pool: &sqlx::SqlitePool,
+    workspace_id: &str,
+    issue_id: &str,
+    agent_id: Option<&str>,
+    task_id: Option<&str>,
+    reason: ainb_hangar_core::dispatch_reason::DispatchReason,
+    detail: Option<&str>,
+) {
+    use ainb_hangar_store::repo::dispatch_attempt::{DispatchAttemptRepo, NewDispatchAttempt};
+
+    let record = NewDispatchAttempt {
+        workspace_id,
+        issue_id: Some(issue_id),
+        agent_id,
+        runtime_id: None,
+        task_id,
+        reason,
+        detail,
+        source: ainb_hangar_core::dispatch_reason::DispatchSource::Assign,
+        created_at: ainb_hangar_core::clock::HangarClock::now_ms(&SystemClock),
+    };
+    if let Err(e) = DispatchAttemptRepo::record(pool, &SystemIdGen.new_ulid(), &record).await {
+        tracing::warn!(
+            error = %e,
+            issue_id,
+            "dispatch attempt record failed (audit only; the assignment is unchanged)"
+        );
+    }
 }
 
 /// `hangar issue create`: bootstrap a workspace if absent, then insert.
@@ -4318,6 +6777,9 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
     let id = idgen.new_ulid();
     let creator = ActorRef::new(ActorKind::Member, DEFAULT_CREATOR_ID)
         .expect("default creator id is non-empty");
+    // A second handle for the parity-#13 `created` activity row: `creator` is
+    // moved into `NewIssue` below, and the audit write happens after the insert.
+    let activity_creator = creator.clone();
 
     // Resolve the assignee (if any). The token is polymorphic: an AGENT
     // (`agent:<id>` or a bare id) must exist in the workspace and its runtime is
@@ -4347,6 +6809,16 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
             .is_some_and(|p| p.workspace_id == workspace_id);
         anyhow::ensure!(ok, "parent issue `{parent}` not found in this workspace");
     }
+
+    // 0056: resolve the ORIGIN PROVENANCE BEFORE any write (like the assignee and
+    // parent resolves above) — a bad origin must fail the command before the
+    // insert, never leave a half-provenanced issue behind.
+    let origin = resolve_cli_origin(
+        args.origin_type.as_deref(),
+        args.origin_id.as_deref(),
+        std::env::var("HANGAR_ORIGIN_TYPE").ok().as_deref(),
+        std::env::var("HANGAR_ORIGIN_ID").ok().as_deref(),
+    )?;
 
     // e38.21: apply the workspace's issue_prefix to the new title so the prefix
     // actually takes effect on a created issue. An unconfigured workspace leaves
@@ -4393,9 +6865,30 @@ async fn run_issue_create(store: &Store, args: IssueCreateArgs) -> Result<()> {
             .map(ToString::to_string)
             .collect(),
         parent_issue_id: parent_issue_id.map(ToString::to_string),
-        stage: None,
+        // #3-rest: the authored stage barrier (clap range-checks >= 1). Only
+        // meaningful with a parent; without one it is stored and inert.
+        stage: args.stage,
     };
     IssueRepo::insert(pool, &new).await.context("insert issue")?;
+    // multica parity #13: open the card's narrative. Best-effort — an audit
+    // failure never fails the create.
+    ainb_hangar_store::service::activity::ActivityService::record(
+        pool,
+        &idgen,
+        &clock,
+        &workspace_id,
+        &id,
+        &ainb_hangar_core::activity::ActivityActor::Actor(activity_creator),
+        ainb_hangar_core::activity::ActivityAction::Created,
+        serde_json::json!({}),
+    )
+    .await;
+    // 0056: stamp the resolved provenance post-insert, the same pattern the
+    // daemon's create uses, so a CLI-created and a TUI-created issue read back
+    // identically.
+    IssueRepo::set_origin(pool, &workspace_id, &id, &origin)
+        .await
+        .context("stamp issue origin")?;
 
     // 0016: attach each `--label` through the join — `LabelRepo::attach` resolves
     // or creates the label in the workspace, writes the `issue_label` row
@@ -4605,6 +7098,16 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
         }
         OutputFormat::Text => {
             println!("{}", issue_line(&issue));
+            // 0056 / multica parity #21: the provenance, so the "an issue created
+            // by autopilot or by a comment mention records its origin" proof needs
+            // no daemon and no TUI. Omitted entirely for a pre-0056 row, whose
+            // provenance is genuinely unknown.
+            if let Some(origin) = issue.origin.as_ref() {
+                match origin.id() {
+                    Some(id) => println!("Origin: {} ({id})", origin.kind_db_str()),
+                    None => println!("Origin: {}", origin.kind_db_str()),
+                }
+            }
             // #11-rest: the definition-of-done, with its per-criterion ☑/☐ state,
             // so the CLI proof does not depend on the TUI.
             if !issue.acceptance_criteria.is_empty() {
@@ -4625,9 +7128,365 @@ async fn run_issue_show(store: &Store, args: IssueShowArgs, format: OutputFormat
                 println!("Links:");
                 print_issue_links(store, &issue.workspace_id, &issue.id).await?;
             }
+            // multica parity #22: who watches this issue and how it was reacted
+            // to — the daemon-free, TUI-free acceptance read. Silent when there
+            // are none, so existing output is unchanged.
+            {
+                use ainb_hangar_store::repo::issue_reaction::IssueReactionRepo;
+                use ainb_hangar_store::repo::issue_subscriber::IssueSubscriberRepo;
+
+                let subs = IssueSubscriberRepo::list(store.pool(), &issue.id)
+                    .await
+                    .context("read subscribers")?;
+                if !subs.is_empty() {
+                    println!("Subscribers: {}", subs.len());
+                    for s in &subs {
+                        println!("  {}  ({})", s.actor, s.reason_raw);
+                    }
+                }
+                let tallies = IssueReactionRepo::tallies(store.pool(), &issue.id)
+                    .await
+                    .context("read reactions")?;
+                if !tallies.is_empty() {
+                    let line = tallies
+                        .iter()
+                        .map(|t| format!("{} {}", t.emoji, t.count))
+                        .collect::<Vec<_>>()
+                        .join("  ");
+                    println!("Reactions: {line}");
+                }
+            }
+            // multica parity #17: this issue's RESOLVED custom properties and
+            // its agent metadata scratch bag, rendered through the SAME
+            // `render_value` / `render_metadata` the wire uses. Both silent
+            // when empty, so existing output is unchanged.
+            {
+                use ainb_hangar_core::ids::WorkspaceId;
+                use ainb_hangar_core::properties::{render_metadata, render_value};
+                use ainb_hangar_store::repo::issue_property::IssuePropertyRepo;
+
+                let ws = WorkspaceId::from_str(issue.workspace_id.clone())
+                    .context("issue carries an empty workspace id")?;
+                let resolved = IssuePropertyRepo::values_for(store.pool(), &ws, &issue.id)
+                    .await
+                    .context("resolve custom properties")?;
+                if !resolved.is_empty() {
+                    println!("Properties:");
+                    for (def, value) in &resolved {
+                        println!("  {}: {}", def.name, render_value(value));
+                    }
+                }
+                if !issue.metadata.is_empty() {
+                    println!("Metadata:");
+                    for (key, value) in &issue.metadata {
+                        println!("  {key} = {}", render_metadata(value));
+                    }
+                }
+            }
+            // multica parity #12: WHY this card is not running, when its newest
+            // admission decision was a decline. Silent on a healthy card, so
+            // existing output is unchanged. `issue why` shows the full history.
+            if let Some((code, detail)) = latest_dispatch_decline(store, &issue.id).await? {
+                match detail {
+                    Some(d) => println!("Not dispatched: {code} — {d}"),
+                    None => println!("Not dispatched: {code}"),
+                }
+            }
         }
     }
     Ok(())
+}
+
+/// `hangar issue why <id>` (multica parity #12): the card's ADMISSION history,
+/// newest first — the persisted answer to "why is this not running".
+///
+/// Reads the store directly (like `issue criteria` / `issue link`), so it needs
+/// no daemon: the whole dispatch-reason proof is runnable against nothing but
+/// sqlite. Honours the shared `--format json`, which emits the
+/// `DispatchAttemptRow` wire shape verbatim.
+async fn run_issue_why(store: &Store, args: IssueWhyArgs, format: OutputFormat) -> Result<()> {
+    use ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo;
+
+    // Resolve the workspace so a typo'd `--workspace` is an error, not a silently
+    // empty list; the attempts themselves are keyed on the issue id.
+    let _workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let attempts = DispatchAttemptRepo::list_for_issue(store.pool(), &args.id, args.limit.max(1))
+        .await
+        .context("read dispatch attempts")?;
+
+    match format {
+        OutputFormat::Json => {
+            let rows: Vec<serde_json::Value> = attempts.iter().map(dispatch_attempt_json).collect();
+            println!(
+                "{}",
+                serde_json::to_string(&rows).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("id,reason,detail,source,task_id,created_at");
+            for a in &attempts {
+                println!(
+                    "{},{},{},{},{},{}",
+                    a.id,
+                    a.reason,
+                    csv_field(a.detail.as_deref().unwrap_or_default()),
+                    a.source,
+                    a.task_id.as_deref().unwrap_or_default(),
+                    a.created_at
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| reason | detail | source | when |");
+            println!("|---|---|---|---|");
+            for a in &attempts {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    a.reason,
+                    a.detail.as_deref().unwrap_or("—"),
+                    a.source,
+                    fmt_epoch_ms_utc(a.created_at)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if attempts.is_empty() {
+                println!("no dispatch attempts recorded for {}", args.id);
+            } else {
+                println!("{:<22} {:<8} {:<22} detail", "reason", "source", "when");
+                for a in &attempts {
+                    println!(
+                        "{:<22} {:<8} {:<22} {}",
+                        a.reason,
+                        a.source,
+                        fmt_epoch_ms_utc(a.created_at),
+                        a.detail.as_deref().unwrap_or("—")
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// `hangar issue timeline <id>` (multica parity #13): the card's NARRATIVE,
+/// oldest first — creation, state moves, re-assignments, priority/title/due-date
+/// edits, task outcomes, and the comments merged in by timestamp.
+///
+/// Reads the store directly (like `issue why`), so the whole activity-log proof
+/// is runnable against nothing but sqlite with no daemon. `--format json` emits
+/// the `TimelineEntryRow` wire shape verbatim, so the CLI and
+/// `hangar/issue_timeline` agree.
+async fn run_issue_timeline(
+    store: &Store,
+    args: IssueTimelineArgs,
+    format: OutputFormat,
+) -> Result<()> {
+    // Resolve the workspace so a typo'd `--workspace` is an error, not a silently
+    // empty timeline.
+    let workspace_id = resolve_skills_workspace(store, args.workspace.as_deref()).await?;
+    let entries = read_issue_timeline(store, &workspace_id, &args.id, args.limit.max(1)).await?;
+
+    match format {
+        OutputFormat::Json => {
+            println!(
+                "{}",
+                serde_json::to_string(&entries).unwrap_or_else(|_| "[]".to_string())
+            );
+        }
+        OutputFormat::Csv => {
+            println!("kind,actor,action,detail,created_at");
+            for e in &entries {
+                println!(
+                    "{},{},{},{},{}",
+                    e.kind,
+                    timeline_actor(e),
+                    e.action.as_deref().unwrap_or_default(),
+                    csv_field(&timeline_detail(e)),
+                    e.created_at
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| when | who | what | detail |");
+            println!("|---|---|---|---|");
+            for e in &entries {
+                println!(
+                    "| {} | {} | {} | {} |",
+                    fmt_epoch_ms_utc(e.created_at),
+                    timeline_actor(e),
+                    e.action.as_deref().unwrap_or("comment"),
+                    timeline_detail(e)
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if entries.is_empty() {
+                println!("no activity recorded for {}", args.id);
+            } else {
+                for e in &entries {
+                    println!(
+                        "{}  {:<18} {:<17} {}",
+                        fmt_epoch_ms_utc(e.created_at),
+                        timeline_actor(e),
+                        e.action.as_deref().unwrap_or("comment"),
+                        timeline_detail(e)
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Merge the card's activity rows with its comments into the wire
+/// [`TimelineEntryRow`] shape, oldest first — the store-side twin of the
+/// daemon's `snapshots::issue_timeline` (parity #13).
+async fn read_issue_timeline(
+    store: &Store,
+    workspace_id: &str,
+    issue_id: &str,
+    limit: i64,
+) -> Result<Vec<ainb_hangar_proto::snapshots::TimelineEntryRow>> {
+    use ainb_hangar_proto::snapshots::{
+        TIMELINE_KIND_ACTIVITY, TIMELINE_KIND_COMMENT, TimelineEntryRow,
+    };
+    use ainb_hangar_store::repo::activity::ActivityRepo;
+    use ainb_hangar_store::repo::comment::CommentRepo;
+
+    let activities = ActivityRepo::list_for_issue(store.pool(), issue_id, limit)
+        .await
+        .context("read issue activity")?;
+    let comments = CommentRepo::list_by_issue(store.pool(), workspace_id, issue_id)
+        .await
+        .context("read issue comments")?;
+
+    let mut entries: Vec<TimelineEntryRow> = Vec::with_capacity(activities.len() + comments.len());
+    for a in activities {
+        if a.workspace_id != workspace_id {
+            continue;
+        }
+        let details = a.details_json();
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_ACTIVITY.to_string(),
+            id: a.id,
+            actor_type: a.actor_type,
+            actor_id: a.actor_id,
+            created_at: a.created_at,
+            action: Some(a.action),
+            details: (!details.as_object().is_some_and(serde_json::Map::is_empty))
+                .then_some(details),
+            body: None,
+        });
+    }
+    for c in comments {
+        entries.push(TimelineEntryRow {
+            kind: TIMELINE_KIND_COMMENT.to_string(),
+            id: c.id,
+            actor_type: Some(c.author.kind().as_str().to_string()),
+            actor_id: Some(c.author.id().to_string()),
+            created_at: c.created_at,
+            action: None,
+            details: None,
+            body: Some(c.body),
+        });
+    }
+    entries.sort_by(|a, b| a.created_at.cmp(&b.created_at).then_with(|| a.id.cmp(&b.id)));
+    let cap = usize::try_from(limit.max(0)).unwrap_or(usize::MAX);
+    if entries.len() > cap {
+        entries.drain(..entries.len() - cap);
+    }
+    Ok(entries)
+}
+
+/// `member:<id>` / `agent:<id>` / `system` for one timeline entry.
+fn timeline_actor(e: &ainb_hangar_proto::snapshots::TimelineEntryRow) -> String {
+    match (e.actor_type.as_deref(), e.actor_id.as_deref()) {
+        (Some("system") | None, _) => "system".to_string(),
+        (Some(kind), Some(id)) => format!("{kind}:{id}"),
+        (Some(kind), None) => kind.to_string(),
+    }
+}
+
+/// The human-readable right-hand column: the comment body, or the change the
+/// activity's details describe (`open → in_progress`).
+fn timeline_detail(e: &ainb_hangar_proto::snapshots::TimelineEntryRow) -> String {
+    if let Some(body) = e.body.as_deref() {
+        return body.replace('\n', " ");
+    }
+    let Some(details) = e.details.as_ref() else {
+        return String::new();
+    };
+    let render = |v: Option<&serde_json::Value>| -> String {
+        match v {
+            None | Some(serde_json::Value::Null) => "—".to_string(),
+            Some(serde_json::Value::String(s)) => s.clone(),
+            Some(other) => other.to_string(),
+        }
+    };
+    // The assignee shape carries `*_type` + `*_id` halves, each side omitted when
+    // absent; every other shape is a plain `from`/`to` pair.
+    if details.get("from_type").is_some() || details.get("to_type").is_some() {
+        let side = |t: &str, i: &str| match (details.get(t), details.get(i)) {
+            (Some(serde_json::Value::String(t)), Some(serde_json::Value::String(i))) => {
+                format!("{t}:{i}")
+            }
+            _ => "—".to_string(),
+        };
+        return format!(
+            "{} → {}",
+            side("from_type", "from_id"),
+            side("to_type", "to_id")
+        );
+    }
+    if details.get("from").is_some() || details.get("to").is_some() {
+        let via = details
+            .get("via")
+            .and_then(serde_json::Value::as_str)
+            .map(|v| format!(" (via {v})"))
+            .unwrap_or_default();
+        return format!(
+            "{} → {}{via}",
+            render(details.get("from")),
+            render(details.get("to"))
+        );
+    }
+    details.to_string()
+}
+
+/// One dispatch attempt as the `DispatchAttemptRow` wire shape, so
+/// `issue why --format json` and `hangar/dispatch_attempts_list` agree.
+fn dispatch_attempt_json(
+    a: &ainb_hangar_store::repo::dispatch_attempt::DispatchAttempt,
+) -> serde_json::Value {
+    serde_json::json!({
+        "id": a.id,
+        "issue_id": a.issue_id,
+        "agent_id": a.agent_id,
+        "runtime_id": a.runtime_id,
+        "task_id": a.task_id,
+        "reason": a.reason,
+        "detail": a.detail,
+        "source": a.source,
+        "created_at": a.created_at,
+    })
+}
+
+/// The newest DECLINED dispatch attempt for an issue, as
+/// `(code, detail)` — what `issue show` prints as its `Not dispatched:` line.
+/// `None` when the card never tried to dispatch, or its newest attempt succeeded.
+async fn latest_dispatch_decline(
+    store: &Store,
+    issue_id: &str,
+) -> Result<Option<(String, Option<String>)>> {
+    use ainb_hangar_store::repo::dispatch_attempt::DispatchAttemptRepo;
+    Ok(
+        DispatchAttemptRepo::latest_for_issue(store.pool(), issue_id)
+            .await
+            .context("read latest dispatch attempt")?
+            .filter(|a| !a.is_dispatched())
+            .map(|a| (a.reason, a.detail)),
+    )
 }
 
 /// Whether an issue carries ANY typed link (multica parity #20) — so
@@ -5742,6 +8601,172 @@ const fn autopilot_badge(enabled: bool) -> &'static str {
     if enabled { "enabled" } else { "disabled" }
 }
 
+/// Render an autopilot's run history (`hangar autopilot runs <id>`).
+///
+/// Carries the two columns migration 0057 added: `SOURCE` (which trigger fired
+/// the run) and `REASON` (why a `skipped` dispatch was declined).
+fn render_autopilot_runs(
+    rows: &[ainb_hangar_store::repo::autopilot::AutopilotRun],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows.iter().map(autopilot_run_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("id,status,source,started_at,completed_at,failure_reason,by,attribution");
+            for r in rows {
+                println!(
+                    "{},{},{},{},{},{},{},{}",
+                    csv_field(&r.id),
+                    csv_field(&r.status),
+                    csv_field(&r.source),
+                    r.started_at,
+                    r.completed_at.map_or_else(String::new, |v| v.to_string()),
+                    csv_field(r.failure_reason.as_deref().unwrap_or("")),
+                    csv_field(r.accountable_actor.as_deref().unwrap_or("")),
+                    csv_field(r.attribution.as_deref().unwrap_or("")),
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| run id | status | source | started | reason | by |");
+            println!("| --- | --- | --- | --- | --- | --- |");
+            for r in rows {
+                println!(
+                    "| {} | {} | {} | {} | {} | {} |",
+                    md_cell(&r.id),
+                    md_cell(&r.status),
+                    md_cell(&r.source),
+                    r.started_at,
+                    md_cell(r.failure_reason.as_deref().unwrap_or("-")),
+                    md_cell(&run_attribution_cell(r)),
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no autopilot runs");
+            } else {
+                for r in rows {
+                    println!(
+                        "{}  {}  source={}  started={}  reason={}  by={}",
+                        r.id,
+                        r.status,
+                        r.source,
+                        r.started_at,
+                        r.failure_reason.as_deref().unwrap_or("-"),
+                        run_attribution_cell(r),
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// The `BY` cell for one run: the accountable human plus HOW it was resolved
+/// (multica parity #14).
+///
+/// `-` for an unattributed run — a pre-0061 row, or an unattended fire of an
+/// unversioned rule. An honest unknown, never a fabricated actor.
+fn run_attribution_cell(r: &ainb_hangar_store::repo::autopilot::AutopilotRun) -> String {
+    match (r.accountable_actor.as_deref(), r.attribution.as_deref()) {
+        (Some(actor), Some(how)) => format!("{actor} ({how})"),
+        (Some(actor), None) => actor.to_string(),
+        _ => "-".to_string(),
+    }
+}
+
+/// Render an autopilot's rule-version ledger (`hangar autopilot versions <id>`).
+///
+/// Newest-first. An empty ledger means the rule is UNVERSIONED — created before
+/// migration 0061 and never edited since; the ledger was deliberately not
+/// backfilled rather than fabricating a v1.
+fn render_autopilot_versions(
+    rows: &[ainb_hangar_store::repo::autopilot_rule_version::RuleVersion],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = rows.iter().map(rule_version_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("version,change_kind,published_by,created_at");
+            for v in rows {
+                println!(
+                    "{},{},{},{}",
+                    v.version,
+                    csv_field(&v.change_kind),
+                    csv_field(v.published_by.as_deref().unwrap_or("")),
+                    v.created_at,
+                );
+            }
+        }
+        OutputFormat::Markdown => {
+            println!("| version | change | published by | at |");
+            println!("| --- | --- | --- | --- |");
+            for v in rows {
+                println!(
+                    "| v{} | {} | {} | {} |",
+                    v.version,
+                    md_cell(&v.change_kind),
+                    md_cell(v.published_by.as_deref().unwrap_or("-")),
+                    v.created_at,
+                );
+            }
+        }
+        OutputFormat::Text => {
+            if rows.is_empty() {
+                println!("no rule versions (unversioned autopilot)");
+            } else {
+                for v in rows {
+                    println!(
+                        "v{}  {}  by={}  at={}",
+                        v.version,
+                        v.change_kind,
+                        v.published_by.as_deref().unwrap_or("-"),
+                        v.created_at,
+                    );
+                }
+            }
+        }
+    }
+}
+
+/// One rule-version ledger row as a JSON object (the `--format json` surface).
+fn rule_version_to_json(
+    v: &ainb_hangar_store::repo::autopilot_rule_version::RuleVersion,
+) -> String {
+    serde_json::json!({
+        "id": v.id,
+        "autopilot_id": v.autopilot_id,
+        "version": v.version,
+        "change_kind": v.change_kind,
+        "published_by": v.published_by,
+        "config_summary": v.config_summary,
+        "created_at": v.created_at,
+    })
+    .to_string()
+}
+
+/// One autopilot run as a JSON object (for the `--format json` surface).
+fn autopilot_run_to_json(r: &ainb_hangar_store::repo::autopilot::AutopilotRun) -> String {
+    serde_json::json!({
+        "id": r.id,
+        "autopilot_id": r.autopilot_id,
+        "status": r.status,
+        "source": r.source,
+        "started_at": r.started_at,
+        "completed_at": r.completed_at,
+        "failure_reason": r.failure_reason,
+        "accountable_actor": r.accountable_actor,
+        "attribution": r.attribution,
+    })
+    .to_string()
+}
+
 /// Render the webhook delivery audit log (`hangar autopilot deliveries <id>`).
 fn render_webhook_deliveries(
     rows: &[ainb_hangar_store::repo::autopilot_webhook::WebhookDelivery],
@@ -5827,7 +8852,7 @@ fn autopilot_line(a: &Autopilot, last_run: Option<&str>) -> String {
         a.next_tick_at.map_or_else(|| "-".to_string(), |v| v.to_string()),
         last_run.unwrap_or("-"),
         autopilot_badge(a.enabled),
-    )
+    ) + if a.api_trigger_enabled { " [api]" } else { "" }
 }
 
 const fn autopilot_csv_header() -> &'static str {
@@ -5869,7 +8894,7 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
         "{{\"id\":{},\"workspace_id\":{},\"agent_id\":{},\"name\":{},\"instructions\":{},\
           \"cron_expr\":{},\"max_concurrent_runs\":{},\"execution_mode\":{},\
           \"concurrency_policy\":{},\"next_tick_at\":{},\"enabled\":{},\
-          \"last_run\":{}}}",
+          \"api_trigger_enabled\":{},\"last_run\":{}}}",
         json_string(&a.id),
         json_string(&a.workspace_id),
         json_string(&a.agent_id),
@@ -5881,6 +8906,7 @@ fn autopilot_to_json(a: &Autopilot, last_run: Option<&str>) -> String {
         json_string(a.concurrency_policy.as_str()),
         next_tick,
         a.enabled,
+        a.api_trigger_enabled,
         last,
     )
 }
@@ -6172,14 +9198,18 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         |actor| json_string(&actor.to_string()),
     );
     let args = json_string_array(a.cli_args.iter().map(String::as_str));
+    // Parity #30 / multica `redactEnv` (`agent.go:552-562`): KEYS are preserved,
+    // every VALUE becomes the `****` mask, and `env_redacted` says so. This used
+    // to print `"env":{"SECRET_TOKEN":"sk-live-…"}` — full plaintext on stdout.
     let env = a
         .agent_env
-        .iter()
-        .map(|(k, v)| format!("{}:{}", json_string(k), json_string(v)))
+        .redacted_pairs()
+        .into_iter()
+        .map(|(k, mask)| format!("{}:{}", json_string(k), json_string(mask)))
         .collect::<Vec<_>>()
         .join(",");
     format!(
-        "{{\"id\":{},\"name\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"description\":{}}}",
+        "{{\"id\":{},\"name\":{},\"archived\":{},\"archived_at\":{},\"archived_by\":{},\"model\":{},\"thinking\":{},\"args\":{},\"env\":{{{}}},\"env_key_count\":{},\"env_redacted\":{},\"description\":{}}}",
         json_string(a.id.as_str()),
         json_string(a.name.as_str()),
         a.archived,
@@ -6189,6 +9219,8 @@ fn agent_to_json(a: &ainb_hangar_store::repo::agent::Agent) -> String {
         thinking,
         args,
         env,
+        a.agent_env.len(),
+        !a.agent_env.is_empty(),
         json_string(a.description.as_str()),
     )
 }
@@ -6261,6 +9293,94 @@ fn member_to_json(m: &ainb_hangar_store::repo::member::Member) -> String {
         json_string(&m.user_id),
         json_string(&m.email),
         json_string(&m.role),
+    )
+}
+
+// ──────────────────────────────────────────────────────────────────────────
+// Invitation render helpers (pure, over the store's Invitation row — #18).
+// ──────────────────────────────────────────────────────────────────────────
+
+/// Render a slice of pending invitations in the chosen format.
+fn render_invitation_list(
+    invites: &[ainb_hangar_store::repo::invitation::Invitation],
+    format: OutputFormat,
+) {
+    match format {
+        OutputFormat::Json => {
+            let body = invites.iter().map(invitation_to_json).collect::<Vec<_>>().join(",");
+            println!("[{body}]");
+        }
+        OutputFormat::Csv => {
+            println!("{}", invitation_csv_header());
+            for i in invites {
+                println!("{}", invitation_csv_row(i));
+            }
+        }
+        OutputFormat::Markdown => {
+            print!("{}", invitation_md_header());
+            for i in invites {
+                println!("{}", invitation_md_row(i));
+            }
+        }
+        OutputFormat::Text => {
+            if invites.is_empty() {
+                println!("no pending invitations");
+            } else {
+                for i in invites {
+                    println!("{}", invitation_line(i));
+                }
+            }
+        }
+    }
+}
+
+/// One-line text summary of an invitation (id, email, role, status, expiry).
+fn invitation_line(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "{}  {}  role={}  {}  expires {}",
+        i.id,
+        i.invitee_email,
+        i.role,
+        i.status,
+        fmt_epoch_ms_utc(i.expires_at)
+    )
+}
+const fn invitation_csv_header() -> &'static str {
+    "id,invitee_email,role,status,expires_at"
+}
+fn invitation_csv_row(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "{},{},{},{},{}",
+        csv_field(&i.id),
+        csv_field(&i.invitee_email),
+        csv_field(&i.role),
+        csv_field(&i.status),
+        i.expires_at,
+    )
+}
+const fn invitation_md_header() -> &'static str {
+    "| id | invitee_email | role | status | expires_at |\n| --- | --- | --- | --- | --- |\n"
+}
+fn invitation_md_row(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "| {} | {} | {} | {} | {} |",
+        md_cell(&i.id),
+        md_cell(&i.invitee_email),
+        md_cell(&i.role),
+        md_cell(&i.status),
+        fmt_epoch_ms_utc(i.expires_at),
+    )
+}
+/// Minimal stable JSON object for one invitation.
+fn invitation_to_json(i: &ainb_hangar_store::repo::invitation::Invitation) -> String {
+    format!(
+        "{{\"id\":{},\"invitee_email\":{},\"role\":{},\"status\":{},\"created_at\":{},\"expires_at\":{}}}",
+        json_string(&i.id),
+        json_string(&i.invitee_email),
+        json_string(&i.role),
+        json_string(&i.status),
+        i.created_at,
+        i.expires_at,
     )
 }
 
@@ -6739,6 +9859,133 @@ mod tests {
         HangarCommand::from_arg_matches(sub).expect("extract HangarCommand")
     }
 
+    // ──────────────────────────────────────────────────────────────────
+    // Parity #30 — the per-agent env redaction contract at the CLI boundary.
+    // ──────────────────────────────────────────────────────────────────
+
+    /// The canary. Any appearance of this literal in rendered output is a leak.
+    const ENV_SECRET: &str = "sk-live-DEADBEEF01";
+
+    /// An agent row carrying one secret env var.
+    fn agent_with_secret_env() -> ainb_hangar_store::repo::agent::Agent {
+        ainb_hangar_store::repo::agent::Agent {
+            id: "agent-1".to_string(),
+            name: "secretive".to_string(),
+            agent_env: vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())].into(),
+            ..ainb_hangar_store::repo::agent::Agent::default()
+        }
+    }
+
+    /// `hangar agent list --format json` used to print `"env":{"K":"<plaintext>"}`.
+    /// Multica's contract is keep-keys / mask-values plus a `redacted` flag.
+    #[test]
+    fn agent_json_masks_env_values() {
+        let out = agent_to_json(&agent_with_secret_env());
+        assert!(
+            !out.contains(ENV_SECRET),
+            "agent JSON leaked the env value: {out}"
+        );
+        assert!(out.contains(r#""SECRET_TOKEN":"****""#), "{out}");
+        assert!(out.contains(r#""env_key_count":1"#), "{out}");
+        assert!(out.contains(r#""env_redacted":true"#), "{out}");
+    }
+
+    /// An env-less agent reports the honest zero/false, not a redacted-looking
+    /// empty map with `env_redacted: true`.
+    #[test]
+    fn agent_json_env_less_agent_is_not_marked_redacted() {
+        let out = agent_to_json(&ainb_hangar_store::repo::agent::Agent::default());
+        assert!(out.contains(r#""env_key_count":0"#), "{out}");
+        assert!(out.contains(r#""env_redacted":false"#), "{out}");
+    }
+
+    /// A malformed `--env` used to echo the WHOLE raw argument (the secret) into
+    /// stderr via clap's `value_parser` error.
+    #[test]
+    fn parse_env_kv_error_never_echoes_the_value() {
+        let no_eq = parse_env_kv(ENV_SECRET).expect_err("missing '=' must error");
+        assert!(
+            !no_eq.contains(ENV_SECRET),
+            "error echoed the value: {no_eq}"
+        );
+        let empty_key = parse_env_kv(&format!("={ENV_SECRET}")).expect_err("empty key must error");
+        assert!(
+            !empty_key.contains("sk-live-"),
+            "error echoed the value: {empty_key}"
+        );
+    }
+
+    /// Clap must refuse any two of the three env write channels together, so a
+    /// secret-bearing file can never be silently overridden by an argv value.
+    #[test]
+    fn env_file_and_env_stdin_and_env_are_mutually_exclusive() {
+        let registry = CommandRegistry::built_ins();
+        for extra in [
+            vec!["--env", "A=b", "--env-stdin"],
+            vec!["--env", "A=b", "--env-file", "/tmp/e.json"],
+            vec!["--env-stdin", "--env-file", "/tmp/e.json"],
+        ] {
+            let mut argv = vec!["ainb", "hangar", "agent", "edit", "agent-1"];
+            argv.extend(extra.iter().copied());
+            let app = registry.build_clap(crate::cli::root_clap_command());
+            assert!(
+                app.try_get_matches_from(&argv).is_err(),
+                "clap accepted mutually exclusive env channels: {argv:?}"
+            );
+        }
+    }
+
+    /// Multica's empty-input rule (`cmd_agent.go:750-762`): a blank payload is an
+    /// ERROR (it almost always means a broken upstream pipe, and treating it as a
+    /// clear silently wipes secrets); only the explicit `{}` clears.
+    #[test]
+    fn env_file_empty_is_an_error_but_brace_brace_clears() {
+        let err = parse_env_json("   \n ", "--env-file").expect_err("blank input must error");
+        assert!(err.contains("pass '{}' to clear"), "{err}");
+        assert_eq!(
+            parse_env_json("{}", "--env-file").expect("{} clears"),
+            Vec::new()
+        );
+        assert_eq!(
+            parse_env_json(
+                &format!(r#"{{"SECRET_TOKEN":"{ENV_SECRET}"}}"#),
+                "--env-file"
+            )
+            .expect("valid object"),
+            vec![("SECRET_TOKEN".to_string(), ENV_SECRET.to_string())]
+        );
+    }
+
+    /// A JSON parse failure must not reflect the payload back — `serde_json`
+    /// messages quote the offending scalar, which here IS the secret.
+    #[test]
+    fn env_json_parse_error_never_echoes_the_payload() {
+        let err = parse_env_json(&format!(r#"{{"K":"{ENV_SECRET}"#), "--env-stdin")
+            .expect_err("truncated JSON must error");
+        assert!(!err.contains("sk-live-"), "{err}");
+        let err = parse_env_json(r#"{"K":31337}"#, "--env-stdin")
+            .expect_err("non-string value must error");
+        assert!(!err.contains("31337"), "{err}");
+    }
+
+    /// The redacted read verb parses, and carries NO `--reveal` (deviation D-1).
+    #[test]
+    fn parses_agent_env_verb_and_has_no_reveal_flag() {
+        let cmd = parse_hangar(&["ainb", "hangar", "agent", "env", "agent-1"]);
+        let HangarCommand::Agent(AgentCommand::Env(args)) = cmd else {
+            panic!("expected agent env, got {cmd:?}");
+        };
+        assert_eq!(args.id, "agent-1");
+
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        assert!(
+            app.try_get_matches_from(["ainb", "hangar", "agent", "env", "agent-1", "--reveal"])
+                .is_err(),
+            "there must be no plaintext escape hatch on the CLI"
+        );
+    }
+
     #[test]
     fn parses_issue_create_with_title_and_description() {
         let cmd = parse_hangar(&[
@@ -7147,6 +10394,162 @@ mod tests {
         assert!(
             issue_line(&issue).contains(&format!("assignee=member:{}", member.user_id)),
             "text line surfaces the member actor-ref"
+        );
+    }
+
+    /// `hangar member invite` then `hangar member accept` drives the whole
+    /// parity-#18 lifecycle through the REAL clap surface: the member count goes
+    /// 1 → 2, and only on accept.
+    ///
+    /// This mutation-tests the ARGV SHAPE, not just the repo — a repo-only test
+    /// would stay green while the clap wiring (`--email`, `--role`, the
+    /// positional invitation id, `--as`) was wrong or missing.
+    #[tokio::test]
+    async fn member_invite_then_accept_adds_member_via_cli() {
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::invitation::InvitationRepo;
+        use ainb_hangar_store::repo::member::MemberRepo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws_id = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        let ws = WorkspaceId::from_str(ws_id).unwrap();
+        assert_eq!(
+            MemberRepo::list(store.pool(), &ws).await.unwrap().len(),
+            1,
+            "bootstrap starts with the sole owner"
+        );
+
+        let HangarCommand::Member(MemberCommand::Invite(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "invite",
+            "--email",
+            "Dana@Example.com",
+            "--role",
+            "member",
+        ]) else {
+            panic!("expected member invite");
+        };
+        run_member_invite(&store, args).await.expect("invite");
+
+        // An invite adds NO member — it only creates the pending row.
+        assert_eq!(
+            MemberRepo::list(store.pool(), &ws).await.unwrap().len(),
+            1,
+            "an invite is not a membership"
+        );
+        let pending = InvitationRepo::list_pending(store.pool(), &SystemClock, &ws)
+            .await
+            .expect("list pending");
+        assert_eq!(pending.len(), 1, "one pending invitation");
+        assert_eq!(
+            pending[0].invitee_email, "dana@example.com",
+            "the CLI email is normalised"
+        );
+        let invitation_id = pending[0].id.clone();
+
+        // Accepting is what joins the member.
+        let HangarCommand::Member(MemberCommand::Accept(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "accept",
+            &invitation_id,
+            "--as",
+            "dana@example.com",
+        ]) else {
+            panic!("expected member accept");
+        };
+        run_member_invite_accept(&store, args).await.expect("accept");
+
+        let members = MemberRepo::list(store.pool(), &ws).await.unwrap();
+        assert_eq!(members.len(), 2, "accept added the member");
+        let dana = members.iter().find(|m| m.email == "dana@example.com").expect("dana joined");
+        assert_eq!(dana.role, "member");
+        assert!(
+            InvitationRepo::list_pending(store.pool(), &SystemClock, &ws)
+                .await
+                .unwrap()
+                .is_empty(),
+            "the accepted invite is no longer pending"
+        );
+    }
+
+    /// `--as` is REQUIRED on accept / decline: without an explicit identity the
+    /// ownership gate would be theatre, so clap must refuse the argv outright.
+    #[test]
+    fn member_accept_requires_an_explicit_actor_email() {
+        let registry = CommandRegistry::built_ins();
+        let app = registry.build_clap(crate::cli::root_clap_command());
+        let err = app
+            .try_get_matches_from(["ainb", "hangar", "member", "accept", "inv-1"])
+            .expect_err("accept without --as must be rejected");
+        assert_eq!(
+            err.kind(),
+            clap::error::ErrorKind::MissingRequiredArgument,
+            "got {err}"
+        );
+    }
+
+    /// A foreign accept never creates a member, and the CLI says so in multica's
+    /// wording.
+    #[tokio::test]
+    async fn member_accept_by_a_stranger_is_rejected_via_cli() {
+        use ainb_hangar_core::clock::SystemClock;
+        use ainb_hangar_core::ids::WorkspaceId;
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::invitation::InvitationRepo;
+        use ainb_hangar_store::repo::member::MemberRepo;
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let ws_id = bootstrap::ensure_default_workspace(store.pool())
+            .await
+            .expect("bootstrap workspace");
+        let ws = WorkspaceId::from_str(ws_id).unwrap();
+
+        let HangarCommand::Member(MemberCommand::Invite(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "invite",
+            "--email",
+            "dana@example.com",
+        ]) else {
+            panic!("expected member invite");
+        };
+        run_member_invite(&store, args).await.expect("invite");
+        let invitation_id =
+            InvitationRepo::list_pending(store.pool(), &SystemClock, &ws).await.unwrap()[0]
+                .id
+                .clone();
+
+        let HangarCommand::Member(MemberCommand::Accept(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "member",
+            "accept",
+            &invitation_id,
+            "--as",
+            "eve@example.com",
+        ]) else {
+            panic!("expected member accept");
+        };
+        let err = run_member_invite_accept(&store, args).await.unwrap_err();
+        assert!(
+            err.to_string().contains("does not belong to you"),
+            "got {err}"
+        );
+        assert_eq!(
+            MemberRepo::list(store.pool(), &ws).await.unwrap().len(),
+            1,
+            "no member created by a stranger's accept"
         );
     }
 
@@ -7935,17 +11338,112 @@ mod tests {
 
     #[test]
     fn parses_autopilot_disable_enable_run_with_id() {
-        for (verb, is) in [("disable", "disable"), ("enable", "enable"), ("run", "run")] {
+        for (verb, is) in [("disable", "disable"), ("enable", "enable")] {
             let cmd = parse_hangar(&["ainb", "hangar", "autopilot", verb, "ap-1"]);
             match (is, cmd) {
                 ("disable", HangarCommand::Autopilot(AutopilotCommand::Disable(a)))
-                | ("enable", HangarCommand::Autopilot(AutopilotCommand::Enable(a)))
-                | ("run", HangarCommand::Autopilot(AutopilotCommand::Run(a))) => {
+                | ("enable", HangarCommand::Autopilot(AutopilotCommand::Enable(a))) => {
                     assert_eq!(a.id, "ap-1");
                 }
                 (_, other) => panic!("expected autopilot {verb}, got {other:?}"),
             }
         }
+        let cmd = parse_hangar(&["ainb", "hangar", "autopilot", "run", "ap-1"]);
+        let HangarCommand::Autopilot(AutopilotCommand::Run(a)) = cmd else {
+            panic!("expected autopilot run, got {cmd:?}");
+        };
+        assert_eq!(a.id, "ap-1");
+        assert_eq!(
+            a.source,
+            RunSourceArg::Manual,
+            "an unqualified `run` is the operator's MANUAL fire"
+        );
+    }
+
+    /// The `api`-trigger verbs parse (migration 0057 / parity item 15): the
+    /// arm/disarm toggle, the `--source api` fire, and the run-history read.
+    #[test]
+    fn parses_autopilot_api_trigger_verbs() {
+        let cmd = parse_hangar(&["ainb", "hangar", "autopilot", "api-trigger", "ap-1"]);
+        let HangarCommand::Autopilot(AutopilotCommand::ApiTrigger(a)) = cmd else {
+            panic!("expected autopilot api-trigger, got {cmd:?}");
+        };
+        assert_eq!(a.id, "ap-1");
+        assert!(!a.disable, "the bare verb ARMS the trigger");
+
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "api-trigger",
+            "ap-1",
+            "--disable",
+        ]);
+        let HangarCommand::Autopilot(AutopilotCommand::ApiTrigger(a)) = cmd else {
+            panic!("expected autopilot api-trigger, got {cmd:?}");
+        };
+        assert!(a.disable);
+
+        let cmd = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "run",
+            "ap-1",
+            "--source",
+            "api",
+        ]);
+        let HangarCommand::Autopilot(AutopilotCommand::Run(a)) = cmd else {
+            panic!("expected autopilot run, got {cmd:?}");
+        };
+        assert_eq!(a.source, RunSourceArg::Api);
+
+        let cmd = parse_hangar(&["ainb", "hangar", "autopilot", "runs", "ap-1"]);
+        let HangarCommand::Autopilot(AutopilotCommand::Runs(a)) = cmd else {
+            panic!("expected autopilot runs, got {cmd:?}");
+        };
+        assert_eq!(a.id, "ap-1");
+        assert_eq!(a.limit, 20, "the history read defaults to a bounded window");
+    }
+
+    /// The list surface makes an armed api trigger visible, and the JSON
+    /// surface carries the flag.
+    #[test]
+    fn autopilot_renderers_surface_the_api_trigger() {
+        let mut ap = sample_autopilot(true);
+        assert!(
+            !autopilot_line(&ap, None).contains("[api]"),
+            "an unarmed trigger shows no badge"
+        );
+        assert!(autopilot_to_json(&ap, None).contains("\"api_trigger_enabled\":false"));
+
+        ap.api_trigger_enabled = true;
+        assert!(
+            autopilot_line(&ap, None).contains("[api]"),
+            "an armed api trigger must be visible: {}",
+            autopilot_line(&ap, None)
+        );
+        assert!(autopilot_to_json(&ap, None).contains("\"api_trigger_enabled\":true"));
+    }
+
+    /// The run-history renderers carry the trigger source and the admission
+    /// reason — without them a recorded skip is unreadable from the CLI.
+    #[test]
+    fn autopilot_run_renderers_carry_source_and_reason() {
+        let run = ainb_hangar_store::repo::autopilot::AutopilotRun {
+            id: "01RUN".into(),
+            autopilot_id: "01AP".into(),
+            started_at: 1_767_258_000_000,
+            completed_at: Some(1_767_258_000_000),
+            status: "skipped".into(),
+            source: "api".into(),
+            failure_reason: Some("concurrency limit: 1/1 in flight".into()),
+            ..Default::default()
+        };
+        let json = autopilot_run_to_json(&run);
+        assert!(json.contains("\"status\":\"skipped\""), "{json}");
+        assert!(json.contains("\"source\":\"api\""), "{json}");
+        assert!(json.contains("concurrency limit"), "{json}");
     }
 
     /// Build a stored autopilot fixture for the render tests.
@@ -7962,6 +11460,8 @@ mod tests {
             concurrency_policy: ainb_hangar_store::repo::autopilot::ConcurrencyPolicy::Skip,
             next_tick_at: Some(1_767_258_000_000),
             enabled,
+            api_trigger_enabled: false,
+            access_mode: ainb_hangar_store::repo::autopilot::AccessMode::Open,
             created_at: 0,
         }
     }
@@ -8045,5 +11545,254 @@ mod tests {
         )
         .await
         .expect("a padded key must resolve on get too");
+    }
+
+    // ---- ORIGIN PROVENANCE (0056, multica parity #21) ----------------------
+
+    /// The precedence rule: flags win, else the daemon-injected env pair, else
+    /// `manual`. An explicit `--origin-type` suppresses the env pair ENTIRELY, so
+    /// a flag kind is never married to an inherited env id.
+    #[test]
+    fn cli_origin_precedence_is_flags_then_env_then_manual() {
+        // Neither: manual.
+        let o = resolve_cli_origin(None, None, None, None).unwrap();
+        assert_eq!(o.kind_db_str(), "manual");
+        assert_eq!(o.id(), None);
+
+        // Env only: the daemon's injection is the default (the mention chain).
+        let o = resolve_cli_origin(None, None, Some("comment_mention"), Some("c-1")).unwrap();
+        assert_eq!(o.kind_db_str(), "comment_mention");
+        assert_eq!(o.id(), Some("c-1"));
+
+        // Flags beat env, and the env ID does NOT leak into a flag kind.
+        let o =
+            resolve_cli_origin(Some("manual"), None, Some("comment_mention"), Some("c-1")).unwrap();
+        assert_eq!(o.kind_db_str(), "manual");
+        assert_eq!(
+            o.id(),
+            None,
+            "an explicit flag kind never inherits the env id"
+        );
+    }
+
+    /// A bad origin is a hard error at resolve time, with the same wording the
+    /// RPC handler produces.
+    #[test]
+    fn cli_origin_rejects_a_bad_pair() {
+        let err = resolve_cli_origin(Some("quick_create"), Some("x"), None, None).unwrap_err();
+        assert!(err.to_string().contains("unsupported origin_type"));
+
+        let err = resolve_cli_origin(None, Some("c-1"), None, None).unwrap_err();
+        assert!(err.to_string().contains("must be provided together"));
+
+        let err = resolve_cli_origin(Some("autopilot"), None, None, None).unwrap_err();
+        assert!(err.to_string().contains("requires an origin_id"));
+    }
+
+    /// End-to-end: `hangar issue create --origin-type … --origin-id …` stamps the
+    /// pair onto the created row, and `issue show`'s read surface reads it back.
+    #[tokio::test]
+    async fn issue_create_stamps_the_authored_origin() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Split this out",
+            "--origin-type",
+            "comment_mention",
+            "--origin-id",
+            "c-42",
+        ]) else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let (kind, id): (String, Option<String>) =
+            sqlx::query_as("SELECT origin_type, origin_id FROM issue LIMIT 1")
+                .fetch_one(store.pool())
+                .await
+                .expect("read origin");
+        assert_eq!(kind, "comment_mention");
+        assert_eq!(id.as_deref(), Some("c-42"));
+    }
+
+    /// A create with no origin flags (and no daemon env) is stamped `manual` —
+    /// never left NULL, so `origin_type IS NULL` keeps meaning exactly one thing:
+    /// "created before provenance existed".
+    #[tokio::test]
+    async fn issue_create_without_flags_stamps_manual() {
+        // The env pair is a DAEMON injection into a dispatched agent child; a test
+        // process never has it, and mutating process env from a test is unsound
+        // (and lint-denied here), so this asserts the plain no-flag-no-env path.
+        // `cli_origin_precedence_is_flags_then_env_then_manual` covers the env
+        // legs directly, with no process-global state.
+        assert!(
+            std::env::var("HANGAR_ORIGIN_TYPE").is_err(),
+            "a test process must not inherit the daemon's origin injection"
+        );
+
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        let HangarCommand::Issue(IssueCommand::Create(args)) =
+            parse_hangar(&["ainb", "hangar", "issue", "create", "--title", "By hand"])
+        else {
+            panic!("expected issue create");
+        };
+        run_issue_create(&store, args).await.expect("create issue");
+
+        let (kind, id): (String, Option<String>) =
+            sqlx::query_as("SELECT origin_type, origin_id FROM issue LIMIT 1")
+                .fetch_one(store.pool())
+                .await
+                .expect("read origin");
+        assert_eq!(kind, "manual");
+        assert_eq!(id, None);
+    }
+
+    /// A bogus `--origin-type` fails BEFORE any write: the issue table is still
+    /// empty afterwards (the resolve is deliberately ahead of the insert, like
+    /// the assignee / parent resolves).
+    #[tokio::test]
+    async fn issue_create_with_a_bad_origin_writes_nothing() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+
+        let HangarCommand::Issue(IssueCommand::Create(args)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            "Nope",
+            "--origin-type",
+            "bogus",
+            "--origin-id",
+            "x",
+        ]) else {
+            panic!("expected issue create");
+        };
+        let err = run_issue_create(&store, args).await.unwrap_err();
+        assert!(err.to_string().contains("unsupported origin_type"));
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM issue")
+            .fetch_one(store.pool())
+            .await
+            .expect("count issues");
+        assert_eq!(count, 0, "a bad origin must fail ahead of the insert");
+    }
+
+    /// End-to-end through the parsed command: `hangar autopilot collaborator add`
+    /// PERSISTS a row, read back with raw SQL after the command returns
+    /// (multica parity #27).
+    #[tokio::test]
+    async fn autopilot_collaborator_add_persists_row() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        for sql in [
+            "INSERT INTO workspace (id, slug, name, created_at) \
+             VALUES ('ws-1','default','Default',0)",
+            "INSERT INTO user (id, email, created_at) VALUES ('u-amy','amy@x.io',0)",
+            "INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode) \
+             VALUES ('rt-1','ws-1','d-1','claude','local')",
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('ag-1','ws-1','builder','rt-1','workspace','u-amy')",
+            "INSERT INTO autopilot \
+             (id, workspace_id, agent_id, name, cron_expr, max_concurrent_runs, execution_mode, \
+              concurrency_policy, next_tick_at, enabled, api_trigger_enabled, created_at) \
+             VALUES ('ap-1','ws-1','ag-1','nightly','0 3 * * *',1,'run_only','skip', \
+                     999999999999,1,0,0)",
+        ] {
+            sqlx::query(sql).execute(store.pool()).await.expect(sql);
+        }
+
+        let HangarCommand::Autopilot(AutopilotCommand::Collaborator(cmd)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "collaborator",
+            "add",
+            "--id",
+            "ap-1",
+            "--actor",
+            "member:bob",
+            "--role",
+            "editor",
+        ]) else {
+            panic!("expected autopilot collaborator add");
+        };
+        run_autopilot_collaborator(&store, cmd, OutputFormat::Text)
+            .await
+            .expect("add collaborator");
+
+        let (actor_type, actor_id, role): (String, String, String) = sqlx::query_as(
+            "SELECT actor_type, actor_id, role FROM autopilot_collaborator \
+             WHERE autopilot_id = 'ap-1'",
+        )
+        .fetch_one(store.pool())
+        .await
+        .expect("read the persisted grant");
+        assert_eq!(actor_type, "member");
+        assert_eq!(actor_id, "bob");
+        assert_eq!(role, "editor");
+    }
+
+    /// The CLI honours the restricted-mode gate too — otherwise it would be a
+    /// trivially open back door around the daemon's request seam.
+    #[tokio::test]
+    async fn autopilot_collaborator_add_is_denied_on_a_restricted_rule() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let store = Store::open_in(dir.path()).await.expect("open store");
+        for sql in [
+            "INSERT INTO workspace (id, slug, name, created_at) \
+             VALUES ('ws-1','default','Default',0)",
+            "INSERT INTO user (id, email, created_at) VALUES ('u-amy','amy@x.io',0)",
+            "INSERT INTO member (workspace_id, user_id, role) VALUES ('ws-1','u-amy','member')",
+            "INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode) \
+             VALUES ('rt-1','ws-1','d-1','claude','local')",
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             VALUES ('ag-1','ws-1','builder','rt-1','workspace','u-amy')",
+            "INSERT INTO autopilot \
+             (id, workspace_id, agent_id, name, cron_expr, max_concurrent_runs, execution_mode, \
+              concurrency_policy, next_tick_at, enabled, api_trigger_enabled, access_mode, \
+              created_at) \
+             VALUES ('ap-1','ws-1','ag-1','nightly','0 3 * * *',1,'run_only','skip', \
+                     999999999999,1,0,'restricted',0)",
+        ] {
+            sqlx::query(sql).execute(store.pool()).await.expect(sql);
+        }
+
+        let HangarCommand::Autopilot(AutopilotCommand::Collaborator(cmd)) = parse_hangar(&[
+            "ainb",
+            "hangar",
+            "autopilot",
+            "collaborator",
+            "add",
+            "--id",
+            "ap-1",
+            "--actor",
+            "member:bob",
+            "--as-user",
+            "u-amy",
+        ]) else {
+            panic!("expected autopilot collaborator add");
+        };
+        let err = run_autopilot_collaborator(&store, cmd, OutputFormat::Text)
+            .await
+            .expect_err("a plain member may not grant on a restricted rule");
+        assert!(
+            err.to_string().contains("access_mode = restricted"),
+            "got {err}"
+        );
+
+        let count: i64 = sqlx::query_scalar("SELECT count(*) FROM autopilot_collaborator")
+            .fetch_one(store.pool())
+            .await
+            .expect("count grants");
+        assert_eq!(count, 0, "a denied grant writes nothing");
     }
 }

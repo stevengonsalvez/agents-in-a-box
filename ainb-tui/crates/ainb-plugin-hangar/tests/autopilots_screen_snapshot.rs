@@ -29,6 +29,8 @@ fn autopilot(id: &str, name: &str, cron: &str, enabled: bool, last: Option<&str>
         enabled,
         last_run_status: last.map(str::to_string),
         last_run_at: last.map(|_| 1_699_000_000_000),
+        api_trigger_enabled: false,
+        ..Default::default()
     }
 }
 
@@ -195,6 +197,9 @@ fn render_run_history_below_selection() {
                     started_at: 1_700_000_120_000,
                     completed_at: Some(1_700_000_300_000),
                     status: "completed".into(),
+                    source: "schedule".into(),
+                    failure_reason: None,
+                    ..Default::default()
                 },
                 AutopilotRunRow {
                     id: "run-2".into(),
@@ -202,6 +207,9 @@ fn render_run_history_below_selection() {
                     started_at: 1_699_999_000_000,
                     completed_at: Some(1_699_999_100_000),
                     status: "completed".into(),
+                    source: "schedule".into(),
+                    failure_reason: None,
+                    ..Default::default()
                 },
             ],
         },
@@ -245,6 +253,9 @@ fn render_skipped_run_marked() {
                 started_at: 1_700_000_000_000,
                 completed_at: None,
                 status: "skipped".into(),
+                source: "schedule".into(),
+                failure_reason: None,
+                ..Default::default()
             }],
         },
     )
@@ -268,5 +279,75 @@ fn render_skipped_run_marked() {
     assert!(
         red_skipped,
         "the skipped run must be marked with the warn-red accent"
+    );
+}
+
+/// A declined dispatch is READABLE in the history pane: its trigger source and
+/// the admission reason render alongside the `skipped` status (migration 0057 /
+/// multica parity item 15). Without this the only record of a decline is a log
+/// line the operator never sees.
+#[test]
+fn render_skipped_run_shows_source_and_reason() {
+    let state = AutopilotsState::new(three_autopilots());
+    let loaded = reduce_autopilots(
+        &state,
+        AutopilotsEvent::RunsLoaded {
+            autopilot_id: "ap-1".into(),
+            runs: vec![AutopilotRunRow {
+                id: "run-x".into(),
+                autopilot_id: "ap-1".into(),
+                started_at: 1_700_000_000_000,
+                completed_at: Some(1_700_000_000_000),
+                status: "skipped".into(),
+                source: "api".into(),
+                failure_reason: Some("concurrency limit: 1/1 in flight".into()),
+                ..Default::default()
+            }],
+        },
+    )
+    .state;
+
+    let mut buf = WireBuffer::new(120, 14);
+    render_autopilots(&mut buf, 120, 0, 14, &loaded);
+    let full = glyph_map(&buf, 120);
+
+    assert!(full.contains("skipped"), "status missing:\n{full}");
+    assert!(
+        full.contains("api"),
+        "the trigger that fired the run must be visible:\n{full}"
+    );
+    assert!(
+        full.contains("concurrency limit"),
+        "the admission reason must be visible:\n{full}"
+    );
+}
+
+/// An armed `api` trigger is visible on the autopilot card, next to the
+/// enabled/disabled state — it is a second way the autopilot can fire.
+#[test]
+fn board_card_shows_the_armed_api_trigger() {
+    let mut armed = autopilot("ap-1", "daily-triage", "0 9 * * *", true, Some("completed"));
+    armed.api_trigger_enabled = true;
+    let unarmed = autopilot(
+        "ap-2",
+        "nightly-clean",
+        "0 3 * * *",
+        true,
+        Some("completed"),
+    );
+
+    let state = AutopilotsState::new(vec![armed, unarmed]);
+    let columns = state.board_columns();
+    let cards = &columns[0].cards;
+
+    assert!(
+        cards[0].title.contains("api"),
+        "an armed api trigger must show on the card: {}",
+        cards[0].title
+    );
+    assert!(
+        !cards[1].title.contains("api"),
+        "an unarmed one must not: {}",
+        cards[1].title
     );
 }

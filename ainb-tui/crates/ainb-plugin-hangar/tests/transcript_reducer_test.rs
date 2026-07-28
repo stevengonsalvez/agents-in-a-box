@@ -22,6 +22,16 @@ fn task() -> TaskId {
 
 fn issue_row() -> IssueRow {
     IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
+        properties: Vec::new(),
+        metadata: Vec::new(),
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str("i1").unwrap(),
         display_id: None,
         workspace_id: "ws".into(),
@@ -332,6 +342,7 @@ fn comments_interleave_with_transcript_in_arrival_order() {
             author: "member:alice".into(),
             body: "a comment".into(),
             created_at: 5,
+            parent_id: None,
         })),
     )
     .state;

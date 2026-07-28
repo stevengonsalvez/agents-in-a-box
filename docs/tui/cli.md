@@ -2839,6 +2839,9 @@ Commands:
   autopilot  Create and control cron-scheduled autopilots
   workspace  View + set per-workspace config (context prompt, issue prefix, repo whitelist)
   logs       Read the daemon's structured logs
+  property   Define and archive a workspace's custom issue properties
+  comment    Post issue comments and preview their `@`-mention routing
+  inbox      Read an actor's notification inbox
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -2863,16 +2866,25 @@ Manage Hangar issues
 Usage: ainb hangar issue [OPTIONS] <COMMAND>
 
 Commands:
-  create    Create a new issue (bootstraps a default workspace on first use)
-  list      List issues in the default workspace
-  search    Search issues by title, description, or comment body (ranked)
-  show      Show one issue by id
-  update    Edit an existing issue's state, assignee, priority, or due date
-  delete    Delete an issue and all its history (dry-run without `--yes`)
-  label     Attach or detach a label on an issue
-  criteria  Inspect or tick off an issue's acceptance criteria
-  link      Add, remove, or list an issue's typed links to other issues
-  help      Print this message or the help of the given subcommand(s)
+  create       Create a new issue (bootstraps a default workspace on first use)
+  list         List issues in the default workspace
+  search       Search issues by title, description, or comment body (ranked)
+  show         Show one issue by id
+  update       Edit an existing issue's state, assignee, priority, or due date
+  batch-state  Apply ONE lifecycle state to several issues, cascading to parents ONCE
+  delete       Delete an issue and all its history (dry-run without `--yes`)
+  label        Attach or detach a label on an issue
+  criteria     Inspect or tick off an issue's acceptance criteria
+  link         Add, remove, or list an issue's typed links to other issues
+  subscribe    Subscribe an actor to an issue's notifications (multica parity #22)
+  unsubscribe  Unsubscribe an actor from an issue's notifications. Idempotent
+  subscribers  List who watches an issue, with the reason each one was subscribed
+  react        Add, remove, or list an issue's emoji reactions
+  why          Explain why an issue did (or did not) dispatch — its admission history
+  timeline     Show one issue's activity timeline: state changes, assignments, comments
+  property     Set or clear one of the workspace's custom properties on an issue
+  meta         Read and write an issue's agent metadata scratch bag
+  help         Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -2952,6 +2964,21 @@ Options:
           Make this a SUB-ISSUE of an existing issue (`issue.id`, migration 0046).
           
           The parent must exist in the same workspace; completing the last child of the lowest unfinished stage cascades a roll-up comment onto the parent.
+
+      --stage <STAGE>
+          The 1-based STAGE BARRIER this sub-issue belongs to (migration 0046).
+          
+          Only meaningful with `--parent`. Siblings sharing a stage close their barrier together: when the LAST of them finishes, ONE aggregated roll-up comment is posted on the parent naming every child that closed it (multica parity #3-rest), not one comment per child.
+
+      --origin-type <ORIGIN_TYPE>
+          Provenance of this issue: `autopilot` | `comment_mention` | `manual` (migration 0056, multica parity #21).
+          
+          Defaults to `$HANGAR_ORIGIN_TYPE` — the daemon injects it into a dispatched agent's environment, so an issue an agent creates mid-run is attributable back to the comment / autopilot that asked for it. With neither flag nor env, a create is stamped `manual`.
+
+      --origin-id <ORIGIN_ID>
+          The provenance id: the autopilot id for `autopilot`, the comment id for `comment_mention`. REQUIRED for every kind except `manual`.
+          
+          Defaults to `$HANGAR_ORIGIN_ID`. Supplying an id with no `--origin-type` is an error, never a silent drop.
 
   -h, --help
           Print help (see a summary with '-h')
@@ -3060,6 +3087,26 @@ Options:
           Print help (see a summary with '-h')
 ```
 
+#### `ainb hangar issue batch-state`
+
+Apply ONE lifecycle state to several issues, cascading to parents ONCE
+
+```console
+$ ainb hangar issue batch-state --help
+Apply ONE lifecycle state to several issues, cascading to parents ONCE
+
+Usage: ainb hangar issue batch-state [OPTIONS] --state <STATE> <IDS>...
+
+Arguments:
+  <IDS>...  Issue ids (ULIDs) to transition. Duplicates collapse
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --state <STATE>          The lifecycle state applied to EVERY id — one of `backlog`, `todo`, `in_progress`, `in_review`, `done`, `blocked`, `cancelled`
+      --workspace <WORKSPACE>  Workspace slug the issues belong to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
 #### `ainb hangar issue delete`
 
 Delete an issue and all its history (dry-run without `--yes`)
@@ -3135,6 +3182,168 @@ Commands:
   add     Link two issues. Re-adding a pair with a new kind replaces the kind
   remove  Remove a link between two issues. Idempotent
   list    List an issue's links (`🔒`/`✓` blocked-by, `→` blocks, `~` related)
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue subscribe`
+
+Subscribe an actor to an issue's notifications (multica parity #22)
+
+```console
+$ ainb hangar issue subscribe --help
+Subscribe an actor to an issue's notifications (multica parity #22)
+
+Usage: ainb hangar issue subscribe [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) to watch / stop watching
+
+Options:
+      --actor <ACTOR>          The actor, as `member:<id>` / `agent:<id>`. Defaults to the LOCAL HUMAN (`member:me`), mirroring the reference's "the target defaults to the caller"
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue unsubscribe`
+
+Unsubscribe an actor from an issue's notifications. Idempotent
+
+```console
+$ ainb hangar issue unsubscribe --help
+Unsubscribe an actor from an issue's notifications. Idempotent
+
+Usage: ainb hangar issue unsubscribe [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) to watch / stop watching
+
+Options:
+      --actor <ACTOR>          The actor, as `member:<id>` / `agent:<id>`. Defaults to the LOCAL HUMAN (`member:me`), mirroring the reference's "the target defaults to the caller"
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue subscribers`
+
+List who watches an issue, with the reason each one was subscribed
+
+```console
+$ ainb hangar issue subscribers --help
+List who watches an issue, with the reason each one was subscribed
+
+Usage: ainb hangar issue subscribers [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) whose watchers to list
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue react`
+
+Add, remove, or list an issue's emoji reactions
+
+```console
+$ ainb hangar issue react --help
+Add, remove, or list an issue's emoji reactions
+
+Usage: ainb hangar issue react [OPTIONS] <COMMAND>
+
+Commands:
+  add     React to an issue with an emoji. Idempotent
+  remove  Remove your reaction. Idempotent
+  list    List an issue's reactions as `<emoji> <count>` buckets
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue why`
+
+Explain why an issue did (or did not) dispatch — its admission history
+
+```console
+$ ainb hangar issue why --help
+Explain why an issue did (or did not) dispatch — its admission history
+
+Usage: ainb hangar issue why [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) whose dispatch history to explain
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          How many attempts to show, newest first [default: 20]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue timeline`
+
+Show one issue's activity timeline: state changes, assignments, comments
+
+```console
+$ ainb hangar issue timeline --help
+Show one issue's activity timeline: state changes, assignments, comments
+
+Usage: ainb hangar issue timeline [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Issue id (ULID) whose narrative to print
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          How many entries to show — the newest window, printed oldest-first [default: 200]
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar issue property`
+
+Set or clear one of the workspace's custom properties on an issue
+
+```console
+$ ainb hangar issue property --help
+Set or clear one of the workspace's custom properties on an issue
+
+Usage: ainb hangar issue property [OPTIONS] <COMMAND>
+
+Commands:
+  set    Set ONE custom property's value on an issue
+  clear  Clear ONE custom property from an issue. Idempotent
+  help   Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar issue meta`
+
+Read and write an issue's agent metadata scratch bag
+
+```console
+$ ainb hangar issue meta --help
+Read and write an issue's agent metadata scratch bag
+
+Usage: ainb hangar issue meta [OPTIONS] <COMMAND>
+
+Commands:
+  list    List an issue's metadata entries, key-sorted
+  get     Print ONE metadata value
+  set     Set ONE metadata key
+  delete  Delete ONE metadata key. Idempotent
   help    Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3738,6 +3947,7 @@ Commands:
   permission  Set an agent's invocation permission mode (gap #8: `private`/`public_to`)
   allow       Manage an agent's invocation allow-list (add/revoke/list a target)
   can-invoke  Report whether a user (or agent actor) may invoke an agent (`ALLOW`/`DENY`)
+  env         Show an agent's per-agent env: variable NAMES only, values masked
   help        Print this message or the help of the given subcommand(s)
 
 Options:
@@ -3810,7 +4020,9 @@ Options:
       --clear-mcp                    Clear the MCP config; omitted leaves it
       --thinking <THINKING>          New thinking level (e.g. `low`/`medium`/`high`); omitted leaves it. Mutually exclusive with `--clear-thinking`
       --clear-thinking               Clear the thinking level; omitted leaves it
-      --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable). When ANY `--env` is given the whole env map is REPLACED with the values
+      --env <ENV>                    A `KEY=VALUE` env var for the agent (repeatable; ANY `--env` REPLACES the whole map). Visible in `ps` / shell history — prefer `--env-stdin` / `--env-file` for secrets
+      --env-stdin                    Read the whole env map from STDIN as a JSON object of string→string, keeping secrets off argv; `{}` clears it and empty input is an ERROR, not a clear
+      --env-file <ENV_FILE>          Read the whole env map from a FILE as a JSON object of string→string (same contract as `--env-stdin`)
       --token-budget <TOKEN_BUDGET>  New token budget (rtk/headroom, migration 0042); omitted leaves it. Mutually exclusive with `--clear-token-budget`
       --clear-token-budget           Clear the token budget (back to unlimited); omitted leaves it
       --description <DESCRIPTION>    New description (≤255 characters); omitted leaves it. Pass `--description ""` to blank it (the column is NOT NULL, so `""` IS its cleared state)
@@ -3935,6 +4147,25 @@ Options:
   -h, --help                   Print help
 ```
 
+#### `ainb hangar agent env`
+
+Show an agent's per-agent env: variable NAMES only, values masked
+
+```console
+$ ainb hangar agent env --help
+Show an agent's per-agent env: variable NAMES only, values masked
+
+Usage: ainb hangar agent env [OPTIONS] <ID>
+
+Arguments:
+  <ID>  Agent id (ULID) to inspect
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the agent belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
 ### `ainb hangar member`
 
 List, re-role, and remove workspace members
@@ -3950,6 +4181,11 @@ Commands:
   list      List the workspace's members (email + role)
   set-role  Change a member's role (`owner` / `admin` / `member`)
   remove    Remove a member from the workspace (the user row survives)
+  invite    Invite an email to join (pending until accepted — parity #18)
+  invites   List the workspace's live pending invitations
+  accept    Accept an invitation addressed to you (this is what adds the member)
+  decline   Decline an invitation addressed to you (no member is created)
+  revoke    Withdraw a still-pending invitation (admin-side)
   help      Print this message or the help of the given subcommand(s)
 
 Options:
@@ -4062,6 +4298,119 @@ Arguments:
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
       --workspace <WORKSPACE>  Workspace slug the member belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar member invite`
+
+Invite an email to join (pending until accepted — parity #18)
+
+```console
+$ ainb hangar member invite --help
+Invite an email to join (pending until accepted — parity #18)
+
+Usage: ainb hangar member invite [OPTIONS] --email <EMAIL>
+
+Options:
+      --email <EMAIL>
+          The invitee's email. Normalised (trimmed + lowercased) by the store
+
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --role <ROLE>
+          The role the invitee will hold on accept: `admin` or `member` (default `member`). `owner` parses but is rejected — ownership is transferred, never invited
+
+          Possible values:
+          - owner:  Full administrative control; a workspace must always keep one
+          - admin:  Elevated management, short of ownership
+          - member: A regular member
+          
+          [default: member]
+
+      --from <FROM>
+          Email of the inviting member. Defaults to the bootstrapped workspace owner. Must already be a member of the workspace
+
+      --workspace <WORKSPACE>
+          Workspace slug to invite into. Defaults to the bootstrapped `default` workspace
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar member invites`
+
+List the workspace's live pending invitations
+
+```console
+$ ainb hangar member invites --help
+List the workspace's live pending invitations
+
+Usage: ainb hangar member invites [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to list. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar member accept`
+
+Accept an invitation addressed to you (this is what adds the member)
+
+```console
+$ ainb hangar member accept --help
+Accept an invitation addressed to you (this is what adds the member)
+
+Usage: ainb hangar member accept [OPTIONS] --as <ACTING_AS> <INVITATION_ID>
+
+Arguments:
+  <INVITATION_ID>  The invitation id to act on
+
+Options:
+      --as <ACTING_AS>   The acting human's email. REQUIRED, not defaulted: hangar has no session, so the identity must be explicit or the ownership gate is theatre
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar member decline`
+
+Decline an invitation addressed to you (no member is created)
+
+```console
+$ ainb hangar member decline --help
+Decline an invitation addressed to you (no member is created)
+
+Usage: ainb hangar member decline [OPTIONS] --as <ACTING_AS> <INVITATION_ID>
+
+Arguments:
+  <INVITATION_ID>  The invitation id to act on
+
+Options:
+      --as <ACTING_AS>   The acting human's email. REQUIRED, not defaulted: hangar has no session, so the identity must be explicit or the ownership gate is theatre
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar member revoke`
+
+Withdraw a still-pending invitation (admin-side)
+
+```console
+$ ainb hangar member revoke --help
+Withdraw a still-pending invitation (admin-side)
+
+Usage: ainb hangar member revoke [OPTIONS] <INVITATION_ID>
+
+Arguments:
+  <INVITATION_ID>  The invitation id to withdraw
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug the invitation belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 
@@ -4309,14 +4658,21 @@ Create and control cron-scheduled autopilots
 Usage: ainb hangar autopilot [OPTIONS] <COMMAND>
 
 Commands:
-  create      Create a cron-scheduled autopilot (rejects an invalid cron expression)
-  list        List the workspace's autopilots (cron, next tick, last run, enabled)
-  disable     Disable an autopilot so the scheduler stops firing it
-  enable      Re-enable an autopilot, recomputing its next tick from now
-  run         Fire one tick immediately (manual run), bypassing the schedule
-  webhook     Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
-  deliveries  List the autopilot's recent webhook deliveries (audit log)
-  help        Print this message or the help of the given subcommand(s)
+  create        Create a cron-scheduled autopilot (rejects an invalid cron expression)
+  list          List the workspace's autopilots (cron, next tick, last run, enabled)
+  disable       Disable an autopilot so the scheduler stops firing it
+  enable        Re-enable an autopilot, recomputing its next tick from now
+  edit          Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
+  versions      Show the autopilot's rule-version ledger (who published what, when)
+  run           Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
+  api-trigger   Arm (or `--disable`) the bare programmatic `api` trigger
+  runs          List the autopilot's recent runs (status, trigger source, reason)
+  webhook       Configure the HTTP webhook trigger (enable/disable, rotate secret, filter)
+  deliveries    List the autopilot's recent webhook deliveries (audit log)
+  collaborator  Manage the rule's explicit WRITE-GRANT set (multica parity #27)
+  subscriber    Manage the rule's STANDING subscriber list — every issue the rule spawns auto-subscribes it (multica parity #27)
+  access        Open or restrict who may WRITE this rule (multica parity #27)
+  help          Print this message or the help of the given subcommand(s)
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -4376,6 +4732,9 @@ Options:
           
           [default: skip]
 
+      --as-user <AS_USER>
+          The ACCOUNTABLE HUMAN for this rule (`user.id` or email). Recorded on rule-version v1, which creation writes in the same transaction. Omitted defaults to the local human (`member:me`) — a CLI create always has a human at the keyboard
+
       --workspace <WORKSPACE>
           Workspace slug to create in. Defaults to the bootstrapped `default`
 
@@ -4413,7 +4772,9 @@ Arguments:
   <ID>  The autopilot id (`autopilot.id`)
 
 Options:
+      --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --as-user <AS_USER>      The accountable human for this publish (`user.id` or email). Pausing, resuming and arming a trigger are all SUBSTANTIVE publishes, so each stamps a rule version. Defaults to the local human (`member:me`)
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```
@@ -4432,26 +4793,174 @@ Arguments:
   <ID>  The autopilot id (`autopilot.id`)
 
 Options:
+      --disable                Turn the trigger OFF instead of on (`api-trigger` only)
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --as-user <AS_USER>      The accountable human for this publish (`user.id` or email). Pausing, resuming and arming a trigger are all SUBSTANTIVE publishes, so each stamps a rule version. Defaults to the local human (`member:me`)
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```
 
-#### `ainb hangar autopilot run`
+#### `ainb hangar autopilot edit`
 
-Fire one tick immediately (manual run), bypassing the schedule
+Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
 
 ```console
-$ ainb hangar autopilot run --help
-Fire one tick immediately (manual run), bypassing the schedule
+$ ainb hangar autopilot edit --help
+Edit an autopilot's config (cron / agent / instructions / policy). A substantive edit appends a rule version naming the accountable human; a rename alone is cosmetic and mints none
 
-Usage: ainb hangar autopilot run [OPTIONS] <ID>
+Usage: ainb hangar autopilot edit [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --name <NAME>
+          New display name (cosmetic on its own)
+
+      --cron <CRON>
+          New cron expression (UTC, 5-field) — revalidated before any write
+
+      --agent <AGENT>
+          Re-target the rule at a different agent (`agent.id`)
+
+      --instructions <INSTRUCTIONS>
+          New instructions handed to the agent on every tick
+
+      --clear-instructions
+          Clear the instructions entirely
+
+      --max-concurrent-runs <MAX_CONCURRENT_RUNS>
+          New maximum simultaneous in-flight runs
+
+      --execution-mode <EXECUTION_MODE>
+          New execution mode (`run-only` | `create-issue`)
+
+          Possible values:
+          - run-only:     Enqueue a task with no issue (the v1 default)
+          - create-issue: Create an issue, then enqueue a task against it
+
+      --concurrency-policy <CONCURRENCY_POLICY>
+          New concurrency policy (`skip` | `queue` | `replace`)
+
+          Possible values:
+          - skip:    Drop a tick that comes due at the in-flight limit (the v1 default)
+          - queue:   Fire the tick anyway; the queue runs it after the in-flight one
+          - replace: Supersede the in-flight run and fire fresh
+
+      --as-user <AS_USER>
+          The ACCOUNTABLE HUMAN for this edit (`user.id` or email) — the name recorded on the minted rule version. Defaults to the local human (`member:me`)
+
+      --workspace <WORKSPACE>
+          Workspace slug the autopilot belongs to. Defaults to `default`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar autopilot versions`
+
+Show the autopilot's rule-version ledger (who published what, when)
+
+```console
+$ ainb hangar autopilot versions --help
+Show the autopilot's rule-version ledger (who published what, when)
+
+Usage: ainb hangar autopilot versions [OPTIONS] <ID>
 
 Arguments:
   <ID>  The autopilot id (`autopilot.id`)
 
 Options:
       --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          Maximum number of versions to show (newest-first) [default: 20]
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot run`
+
+Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
+
+```console
+$ ainb hangar autopilot run --help
+Fire one tick immediately, bypassing the schedule (`--source` picks the trigger recorded on the run: `manual` by default, or `api`)
+
+Usage: ainb hangar autopilot run [OPTIONS] <ID>
+
+Arguments:
+  <ID>
+          The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>
+          Output format
+          
+          [default: text]
+          [possible values: text, json, csv, markdown]
+
+      --source <SOURCE>
+          Which trigger to record on the run (`manual` | `api`)
+
+          Possible values:
+          - manual: An operator firing by hand (the default)
+          - api:    The bare programmatic `api` trigger; requires it to be armed
+          
+          [default: manual]
+
+      --as-user <AS_USER>
+          The human firing it (`user.id` or email). A `manual` run attributes to this human (`direct_human`) — them, not the rule's owner. An `api` run stays UNATTENDED (`rule_owner`), matching multica. Defaults to the local human (`member:me`)
+
+      --workspace <WORKSPACE>
+          Workspace slug the autopilot belongs to. Defaults to `default`
+
+  -h, --help
+          Print help (see a summary with '-h')
+```
+
+#### `ainb hangar autopilot api-trigger`
+
+Arm (or `--disable`) the bare programmatic `api` trigger
+
+```console
+$ ainb hangar autopilot api-trigger --help
+Arm (or `--disable`) the bare programmatic `api` trigger
+
+Usage: ainb hangar autopilot api-trigger [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --disable                Turn the trigger OFF instead of on (`api-trigger` only)
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --as-user <AS_USER>      The accountable human for this publish (`user.id` or email). Pausing, resuming and arming a trigger are all SUBSTANTIVE publishes, so each stamps a rule version. Defaults to the local human (`member:me`)
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
+#### `ainb hangar autopilot runs`
+
+List the autopilot's recent runs (status, trigger source, reason)
+
+```console
+$ ainb hangar autopilot runs --help
+List the autopilot's recent runs (status, trigger source, reason)
+
+Usage: ainb hangar autopilot runs [OPTIONS] <ID>
+
+Arguments:
+  <ID>  The autopilot id (`autopilot.id`)
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --limit <LIMIT>          Maximum number of runs to show (latest-first) [default: 20]
       --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
   -h, --help                   Print help
 ```
@@ -4500,6 +5009,67 @@ Options:
   -h, --help                   Print help
 ```
 
+#### `ainb hangar autopilot collaborator`
+
+Manage the rule's explicit WRITE-GRANT set (multica parity #27)
+
+```console
+$ ainb hangar autopilot collaborator --help
+Manage the rule's explicit WRITE-GRANT set (multica parity #27)
+
+Usage: ainb hangar autopilot collaborator [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add an actor to the set (idempotent; a re-add keeps the FIRST grant)
+  remove  Remove an actor from the set (idempotent)
+  list    List the set, oldest first
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar autopilot subscriber`
+
+Manage the rule's STANDING subscriber list — every issue the rule spawns auto-subscribes it (multica parity #27)
+
+```console
+$ ainb hangar autopilot subscriber --help
+Manage the rule's STANDING subscriber list — every issue the rule spawns auto-subscribes it (multica parity #27)
+
+Usage: ainb hangar autopilot subscriber [OPTIONS] <COMMAND>
+
+Commands:
+  add     Add an actor to the set (idempotent; a re-add keeps the FIRST grant)
+  remove  Remove an actor from the set (idempotent)
+  list    List the set, oldest first
+  help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar autopilot access`
+
+Open or restrict who may WRITE this rule (multica parity #27)
+
+```console
+$ ainb hangar autopilot access --help
+Open or restrict who may WRITE this rule (multica parity #27)
+
+Usage: ainb hangar autopilot access [OPTIONS] --id <ID> --mode <MODE>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --id <ID>                The autopilot id (`autopilot.id`)
+      --mode <MODE>            `open` (any actor in the workspace may write — the default and every pre-0064 rule) or `restricted` (owner / workspace owner+admin / an explicit `editor` collaborator only)
+      --as-user <AS_USER>      The acting human (write gate subject + rule-version attribution)
+      --workspace <WORKSPACE>  Workspace slug the autopilot belongs to. Defaults to `default`
+  -h, --help                   Print help
+```
+
 ### `ainb hangar workspace`
 
 View + set per-workspace config (context prompt, issue prefix, repo whitelist)
@@ -4511,9 +5081,44 @@ View + set per-workspace config (context prompt, issue prefix, repo whitelist)
 Usage: ainb hangar workspace [OPTIONS] <COMMAND>
 
 Commands:
+  create  Create a new workspace (slug + display name)
+  list    List every workspace on this instance
   config  Set one or more of the workspace's config knobs
   show    Show the workspace's current config
   help    Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar workspace create`
+
+Create a new workspace (slug + display name)
+
+```console
+$ ainb hangar workspace create --help
+Create a new workspace (slug + display name)
+
+Usage: ainb hangar workspace create [OPTIONS] --slug <SLUG> --name <NAME>
+
+Options:
+      --format <format>              Output format [default: text] [possible values: text, json, csv, markdown]
+      --slug <SLUG>                  Short handle for the workspace (`^[a-z0-9]+(-[a-z0-9]+)*$`), unique host-wide
+      --name <NAME>                  Human-readable display name
+      --issue-prefix <ISSUE_PREFIX>  Optional prefix prepended to a newly-created issue's title in this workspace (e.g. `OPS`). Omitted leaves titles verbatim
+  -h, --help                         Print help
+```
+
+#### `ainb hangar workspace list`
+
+List every workspace on this instance
+
+```console
+$ ainb hangar workspace list --help
+List every workspace on this instance
+
+Usage: ainb hangar workspace list [OPTIONS]
 
 Options:
       --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
@@ -4603,6 +5208,181 @@ Options:
       --level <LEVEL>    Only show events at or above this level (`trace`/`debug`/`info`/`warn`/`error`)
       --no-follow        Print + exit even when `--follow` is set (bounded mode for tests/CI)
   -h, --help             Print help
+```
+
+### `ainb hangar property`
+
+Define and archive a workspace's custom issue properties
+
+```console
+$ ainb hangar property --help
+Define and archive a workspace's custom issue properties
+
+Usage: ainb hangar property [OPTIONS] <COMMAND>
+
+Commands:
+  define   Create or update ONE custom property definition (idempotent by key)
+  list     List the workspace's custom property catalog, in render order
+  archive  Archive (or un-archive) a definition. NEVER deletes stored values
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar property define`
+
+Create or update ONE custom property definition (idempotent by key)
+
+```console
+$ ainb hangar property define --help
+Create or update ONE custom property definition (idempotent by key)
+
+Usage: ainb hangar property define [OPTIONS] --key <KEY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --key <KEY>              Stable slug the CLI and RPC address this property by
+      --name <NAME>            Display label. Defaults to the key on a new definition; changing it is a free rename
+      --kind <KIND>            Value type: text, number, select, multi_select, date, checkbox, url
+      --option <OPTIONS>       One catalogued option (repeat). Required for select / multi_select
+      --position <POSITION>    Render order within the workspace (ascending)
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar property list`
+
+List the workspace's custom property catalog, in render order
+
+```console
+$ ainb hangar property list --help
+List the workspace's custom property catalog, in render order
+
+Usage: ainb hangar property list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --include-archived       Include archived definitions too
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar property archive`
+
+Archive (or un-archive) a definition. NEVER deletes stored values
+
+```console
+$ ainb hangar property archive --help
+Archive (or un-archive) a definition. NEVER deletes stored values
+
+Usage: ainb hangar property archive [OPTIONS] --key <KEY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --key <KEY>              The definition's stable slug
+      --unarchive              Un-archive instead: bring the definition (and its values) back
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar comment`
+
+Post issue comments and preview their `@`-mention routing
+
+```console
+$ ainb hangar comment --help
+Post issue comments and preview their `@`-mention routing
+
+Usage: ainb hangar comment [OPTIONS] <COMMAND>
+
+Commands:
+  add      Post a comment on an issue and print one row per routed `@`-mention
+  preview  DRY-RUN the mention router over a draft body: identical resolution and identical gates, zero writes
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar comment add`
+
+Post a comment on an issue and print one row per routed `@`-mention
+
+```console
+$ ainb hangar comment add --help
+Post a comment on an issue and print one row per routed `@`-mention
+
+Usage: ainb hangar comment add [OPTIONS] --issue <ISSUE> --body <BODY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --issue <ISSUE>          Issue id (ULID) to comment on
+      --body <BODY>            The comment body. `@handle` and `[@Label](mention://type/id)` both route
+      --author <AUTHOR>        The author as a canonical actor-ref. `member:me` is the local operator, which the invocation gate resolves to the workspace owner [default: member:me]
+      --parent <PARENT>        The comment this one replies to — drives the reply-parent fallback and multica's parent-mention inheritance
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar comment preview`
+
+DRY-RUN the mention router over a draft body: identical resolution and identical gates, zero writes
+
+```console
+$ ainb hangar comment preview --help
+DRY-RUN the mention router over a draft body: identical resolution and identical gates, zero writes
+
+Usage: ainb hangar comment preview [OPTIONS] --issue <ISSUE> --body <BODY>
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --issue <ISSUE>          Issue id (ULID) to comment on
+      --body <BODY>            The comment body. `@handle` and `[@Label](mention://type/id)` both route
+      --author <AUTHOR>        The author as a canonical actor-ref. `member:me` is the local operator, which the invocation gate resolves to the workspace owner [default: member:me]
+      --parent <PARENT>        The comment this one replies to — drives the reply-parent fallback and multica's parent-mention inheritance
+      --workspace <WORKSPACE>  Workspace slug the issue belongs to. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar inbox`
+
+Read an actor's notification inbox
+
+```console
+$ ainb hangar inbox --help
+Read an actor's notification inbox
+
+Usage: ainb hangar inbox [OPTIONS] <COMMAND>
+
+Commands:
+  list  List one actor's inbox entries, newest first
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar inbox list`
+
+List one actor's inbox entries, newest first
+
+```console
+$ ainb hangar inbox list --help
+List one actor's inbox entries, newest first
+
+Usage: ainb hangar inbox list [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --recipient <RECIPIENT>  Whose inbox to read, as `member:<user-id>` / `agent:<agent-id>` [default: member:me]
+      --unread                 Show only UNREAD entries
+      --limit <LIMIT>          How many entries to show, newest first [default: 50]
+      --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
 ```
 
 ## `ainb rtk`

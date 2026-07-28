@@ -98,6 +98,16 @@ async fn read_one_raw_frame<R: tokio::io::AsyncBufRead + Unpin>(r: &mut R) -> Op
 /// `2` = P1); `state` drives the board column; `labels` drive the label facet.
 fn row(id: &str, title: &str, state: &str, priority: i64, labels: &[&str]) -> IssueRow {
     IssueRow {
+        subscriber_count: 0,
+        subscribed: false,
+        reactions: Vec::new(),
+        properties: Vec::new(),
+        metadata: Vec::new(),
+        last_dispatch_reason: None,
+        last_dispatch_detail: None,
+        last_dispatch_at: None,
+        origin_type: None,
+        origin_id: None,
         id: IssueId::from_str(id).unwrap(),
         display_id: Some(id.to_uppercase()),
         workspace_id: "default".into(),

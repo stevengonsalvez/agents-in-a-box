@@ -121,12 +121,38 @@ impl MemberRepo {
         email: &str,
         role: MemberRole,
     ) -> Result<Member, MemberRepoError> {
+        let mut tx = pool.begin().await?;
+        let member = Self::add_in_tx(&mut tx, workspace, email, role).await?;
+        tx.commit().await?;
+        Ok(member)
+    }
+
+    /// The body of [`add`](MemberRepo::add), running inside a caller-owned
+    /// transaction so a join can be made ATOMIC with another write.
+    ///
+    /// [`InvitationRepo::accept`](crate::repo::invitation::InvitationRepo::accept)
+    /// (parity #18) must flip the invitation to `accepted` *and* create the
+    /// membership in ONE transaction — multica does exactly this with a `qtx`.
+    /// `add` is now a thin `begin → add_in_tx → commit`, so this extraction is a
+    /// pure refactor: the public verb's behaviour is unchanged.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`MemberRepoError::EmptyEmail`] when `email` is blank,
+    /// [`MemberRepoError::AlreadyMember`] when the pair already exists, or
+    /// [`MemberRepoError::Db`] on a store failure. On any error the caller's
+    /// transaction is left un-committed (i.e. rolled back on drop).
+    pub(crate) async fn add_in_tx(
+        tx: &mut sqlx::SqliteConnection,
+        workspace: &WorkspaceId,
+        email: &str,
+        role: MemberRole,
+    ) -> Result<Member, MemberRepoError> {
         let email = email.trim();
         if email.is_empty() {
             return Err(MemberRepoError::EmptyEmail);
         }
 
-        let mut tx = pool.begin().await?;
         // Find-or-create the user by email (`user.email` is NOT NULL UNIQUE).
         let existing: Option<String> = sqlx::query_scalar("SELECT id FROM user WHERE email = ?")
             .bind(email)
@@ -164,7 +190,6 @@ impl MemberRepo {
             }
             return Err(MemberRepoError::Db(e));
         }
-        tx.commit().await?;
         Ok(Member {
             user_id,
             email: email.to_string(),
@@ -229,6 +254,75 @@ impl MemberRepo {
                 })
             })
             .collect()
+    }
+
+    /// Resolve a human `@handle` from a comment body to a workspace member.
+    ///
+    /// hangar has **no `handle` column on `user`** — the identity it stores is
+    /// the email — so the email's LOCAL PART is the human handle:
+    /// `alice@example.com` is `@alice`. Matching is attempted in this order,
+    /// first hit wins, all workspace-scoped and all case-insensitive except the
+    /// exact id:
+    ///
+    /// 1. exact `user.id` (so a roster that pastes the raw id works);
+    /// 2. the email local part (`substr(email, 1, instr(email,'@') - 1)`);
+    /// 3. the full email.
+    ///
+    /// A handle that matches more than one member (two tenants' users sharing a
+    /// local part, e.g. `alice@a.com` and `alice@b.com` both in this workspace)
+    /// is genuinely ambiguous; the lowest `user.id` wins deterministically
+    /// rather than the query returning an arbitrary row. The unambiguous address
+    /// is the link form `[@Alice](mention://member/<user_id>)`, which never goes
+    /// through this resolver at all — every generated roster prefers it.
+    ///
+    /// Returns `None` for an unknown handle: an unresolvable mention is an
+    /// `ignored` outcome, never an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn resolve_handle(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        handle: &str,
+    ) -> Result<Option<Member>, sqlx::Error> {
+        use sqlx::Row;
+        let handle = handle.trim();
+        if handle.is_empty() {
+            return Ok(None);
+        }
+        // One query, three ranked predicates: SQLite has no NULLS-ordered CASE
+        // shortcut, so the rank is computed and ordered on. `instr` returns 0
+        // for an email with no `@`, and `substr(x, 1, -1)` is empty, so such a
+        // row can only ever match rule 1 or 3 — never a phantom local part.
+        let rows = sqlx::query(
+            "SELECT m.user_id AS user_id, u.email AS email, m.role AS role, \
+                    CASE WHEN m.user_id = ?1 THEN 0 \
+                         WHEN instr(u.email, '@') > 1 \
+                              AND lower(substr(u.email, 1, instr(u.email, '@') - 1)) \
+                                  = lower(?1) THEN 1 \
+                         ELSE 2 END AS rank \
+             FROM member m JOIN user u ON u.id = m.user_id \
+             WHERE m.workspace_id = ?2 \
+               AND ( m.user_id = ?1 \
+                     OR lower(u.email) = lower(?1) \
+                     OR ( instr(u.email, '@') > 1 \
+                          AND lower(substr(u.email, 1, instr(u.email, '@') - 1)) \
+                              = lower(?1) ) ) \
+             ORDER BY rank, m.user_id LIMIT 1",
+        )
+        .bind(handle)
+        .bind(workspace.as_str())
+        .fetch_optional(pool)
+        .await?;
+        rows.map(|r| {
+            Ok(Member {
+                user_id: r.try_get("user_id")?,
+                email: r.try_get("email")?,
+                role: r.try_get("role")?,
+            })
+        })
+        .transpose()
     }
 
     /// Set `user_id`'s role within `workspace` to `role`, guarding the last owner.
@@ -316,7 +410,7 @@ impl MemberRepo {
 /// Read one member's current role within `workspace`, scoped by the composite PK,
 /// inside the mutation's transaction. `None` when no such member exists (an
 /// unknown user, or a foreign-tenant pair).
-async fn member_role_in_tx(
+pub(crate) async fn member_role_in_tx(
     tx: &mut sqlx::SqliteConnection,
     workspace: &WorkspaceId,
     user_id: &str,

@@ -111,6 +111,17 @@ pub trait WorkspaceCatalogueMutator: Send + Sync {
     /// Returns an [`RpcError`] for an unknown/last workspace (`-32602`) or a store
     /// fault (`-32603`).
     fn delete(&self, id: &str) -> Result<(), RpcError>;
+
+    /// Whether the host instance refuses new workspaces (the store's
+    /// `workspace.creation_disabled` lockdown).
+    ///
+    /// An ADVISORY read used to populate `workspace_list`'s hint — never a gate.
+    /// [`WorkspaceCatalogueMutator::create`] stays the authoritative refusal, so a
+    /// mutator that cannot answer (or a double that does not implement this) must
+    /// report `false` rather than fake a lockdown; hence the default.
+    fn creation_disabled(&self) -> bool {
+        false
+    }
 }
 
 /// The injected host workspace store.
@@ -153,6 +164,13 @@ pub trait WorkspaceStore: Send + Sync {
     /// mutator's store error verbatim.
     fn delete(&self, id: &str) -> Result<(), RpcError>;
 
+    /// Whether this instance refuses new workspaces — the advisory hint
+    /// [`list_logic`] surfaces to plugins so they can hide a create affordance.
+    /// Defaults to `false` so existing stores/doubles keep compiling.
+    fn creation_disabled(&self) -> bool {
+        false
+    }
+
     /// Broadcast a [`HangarEvent::WorkspaceChanged`] to subscribers.
     fn broadcast(&self, event: HangarEvent);
 }
@@ -183,8 +201,11 @@ pub fn list_logic(store: &dyn WorkspaceStore) -> Value {
             default: state.default.as_deref() == Some(w.id.as_str()),
         })
         .collect();
-    serde_json::to_value(WorkspaceListResult { workspaces })
-        .expect("WorkspaceListResult serializable")
+    serde_json::to_value(WorkspaceListResult {
+        workspaces,
+        creation_disabled: store.creation_disabled(),
+    })
+    .expect("WorkspaceListResult serializable")
 }
 
 /// `host/workspace_get_active` logic: the effective active id (active → default
@@ -288,10 +309,16 @@ pub fn set_default_logic(
 /// workspace, and return the new row (never `active`/`default` — the plugin
 /// switches to it explicitly).
 ///
+/// Deliberately carries NO instance-lockdown pre-check even though
+/// [`WorkspaceStore::creation_disabled`] is readable here: a second gate would be
+/// a second source of truth that can disagree with the store (and would race a
+/// lockdown toggled between the read and the write). The store's refusal, mapped
+/// to `-32008`, is the one authority; this function surfaces it verbatim.
+///
 /// # Errors
 /// Returns `-32001` when the cap is ungranted (before any store hit), or the
-/// store's create error (`-32602` for a bad/taken slug, `-32603` on a store
-/// fault) verbatim.
+/// store's create error (`-32602` for a bad/taken slug, `-32008` when the
+/// instance is locked down, `-32603` on a store fault) verbatim.
 pub fn create_logic(
     grant: &CapabilityGrant,
     store: &dyn WorkspaceStore,
@@ -537,6 +564,13 @@ impl WorkspaceStore for StateTomlWorkspaceStore {
         self.catalogue.write().retain(|w| w.id != id);
         self.broadcast(workspace_changed(None, id.to_string()));
         Ok(())
+    }
+
+    fn creation_disabled(&self) -> bool {
+        // No mutator injected = no store to ask, so report "allowed". Faking a
+        // lockdown here would hide the create affordance on an instance that is
+        // not locked down at all.
+        self.mutator.as_ref().is_some_and(|m| m.creation_disabled())
     }
 
     fn broadcast(&self, event: HangarEvent) {

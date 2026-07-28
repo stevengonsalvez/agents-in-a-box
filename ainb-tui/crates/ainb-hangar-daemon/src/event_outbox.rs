@@ -166,6 +166,16 @@ mod tests {
 
     fn issue_row(id: &str) -> IssueRow {
         IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str(id).unwrap(),
             display_id: None,
             workspace_id: "ws-a".into(),
@@ -243,6 +253,7 @@ mod tests {
                 author: "member:u1".into(),
                 body: "lgtm".into(),
                 created_at: 0,
+                parent_id: None,
             }),
             HangarEvent::AgentPresence {
                 agent_id: AgentId::from_str("a1").unwrap(),

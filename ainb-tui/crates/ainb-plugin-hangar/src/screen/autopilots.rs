@@ -109,10 +109,44 @@ impl AutopilotsState {
             .map(|ap| {
                 let last = ap.last_run_status.clone().unwrap_or_else(|| "never".into());
                 let state = if ap.enabled { "enabled" } else { "disabled" };
+                // An armed `api` trigger (migration 0057) is a second way this
+                // autopilot can fire, so it belongs on the card next to the
+                // schedule state.
+                let api = if ap.api_trigger_enabled {
+                    " · api"
+                } else {
+                    ""
+                };
+                // The rule VERSION (multica parity #14): `v3` for a versioned
+                // rule, `v—` for one created before migration 0061 and never
+                // edited since. The ledger was deliberately not backfilled, so
+                // the dash is an honest "unversioned", not a missing value.
+                let ver = ap.rule_version.map_or_else(|| "v—".to_string(), |v| format!("v{v}"));
+                // The #27 actor sets (migration 0064). Each suffix appears only
+                // when it has something to say, so an ordinary rule's card is
+                // exactly as busy as it was before this item.
+                let people = match (ap.collaborator_count, ap.subscriber_count) {
+                    (0, 0) => String::new(),
+                    (c, 0) => format!(" · 👥{c}"),
+                    (0, n) => format!(" · 🔔{n}"),
+                    (c, n) => format!(" · 👥{c} · 🔔{n}"),
+                };
+                // A lock ONLY on an explicit `restricted`. An omitted
+                // `access_mode` (a pre-0064 daemon's payload) is open, so it
+                // renders no lock — never a fabricated restriction.
+                let lock = if ap.access_mode.as_deref() == Some("restricted") {
+                    " · 🔒"
+                } else {
+                    ""
+                };
                 BoardCard {
+                    not_dispatched: false,
                     issue_id: ap.id.clone(),
                     display_id: ap.name.clone(),
-                    title: format!("{} · {state} · last {last}", ap.cron_expr),
+                    title: format!(
+                        "{} · {ver} · {state}{api}{lock}{people} · last {last}",
+                        ap.cron_expr
+                    ),
                     priority: PriorityChip::from_priority(0),
                     assignee_initial: ap.name.chars().next(),
                     linked: false,
@@ -404,9 +438,15 @@ pub fn render_autopilots(
 
     // Divider + run-history pane.
     let divider_row = board_bottom;
-    let label = state
-        .selected_autopilot()
-        .map_or_else(String::new, |ap| format!("─ Recent runs ({}) ", ap.name));
+    // The selected rule's PUBLISHER (multica parity #14) rides on the divider
+    // label, so the accountable human for its unattended runs is visible right
+    // above the run history that names them.
+    let label = state.selected_autopilot().map_or_else(String::new, |ap| {
+        match ap.last_published_by.as_deref().filter(|s| !s.is_empty()) {
+            Some(by) => format!("─ Recent runs ({}) — published by {by} ", ap.name),
+            None => format!("─ Recent runs ({}) ", ap.name),
+        }
+    });
     let divider = format!(
         "{label}{}",
         "─".repeat((area_w as usize).saturating_sub(label.chars().count()))
@@ -448,7 +488,25 @@ fn render_run(buf: &mut WireBuffer, row: u16, area_w: u16, run: &AutopilotRunRow
         "completed" => SELECTION_GREEN,
         _ => SOFT_WHITE,
     };
-    let line = format!("{}  {}", run.started_at, run.status);
+    // `·source` names WHICH trigger fired the run, and a declined (`skipped`)
+    // dispatch appends its admission reason — both migration 0057. The reason is
+    // clipped by `put_str` at the pane width.
+    let mut line = format!("{}  {}", run.started_at, run.status);
+    if !run.source.is_empty() {
+        line.push_str(&format!("  ·{}", run.source));
+    }
+    // WHO is accountable for this run, and HOW that was resolved (migration
+    // 0061). Absent for a pre-0061 run or an unattended fire of an unversioned
+    // rule — rendered as nothing rather than a fabricated actor.
+    if let Some(actor) = run.accountable_actor.as_deref().filter(|a| !a.is_empty()) {
+        match run.attribution.as_deref().filter(|a| !a.is_empty()) {
+            Some(how) => line.push_str(&format!("  · by {actor} ({how})")),
+            None => line.push_str(&format!("  · by {actor}")),
+        }
+    }
+    if let Some(reason) = run.failure_reason.as_deref().filter(|r| !r.is_empty()) {
+        line.push_str(&format!(" — {reason}"));
+    }
     put_str(buf, 0, row, &line, color, area_w);
 }
 
@@ -483,6 +541,8 @@ mod tests {
             enabled,
             last_run_status: Some("completed".into()),
             last_run_at: Some(1),
+            api_trigger_enabled: false,
+            ..Default::default()
         }
     }
 
@@ -558,5 +618,119 @@ mod tests {
         assert_eq!(state.selected_index(), 1);
         state.select_by_id("ghost");
         assert_eq!(state.selected_index(), 1, "an unknown id is a no-op");
+    }
+
+    /// The card carries the rule VERSION badge (multica parity #14), and an
+    /// UNVERSIONED rule renders an honest dash rather than a fabricated `v1`.
+    #[test]
+    fn card_title_carries_the_rule_version_badge() {
+        let mut versioned = autopilot("ap-1", "daily", true);
+        versioned.rule_version = Some(3);
+        let unversioned = autopilot("ap-2", "legacy", true);
+        assert_eq!(unversioned.rule_version, None);
+
+        let state = AutopilotsState::new(vec![versioned, unversioned]);
+        let cols = state.board_columns();
+        assert!(
+            cols[0].cards[0].title.contains("v3"),
+            "a versioned rule shows its version: {:?}",
+            cols[0].cards[0].title
+        );
+        assert!(
+            cols[0].cards[1].title.contains("v\u{2014}"),
+            "an unversioned rule shows a dash, not a fabricated v1: {:?}",
+            cols[0].cards[1].title
+        );
+    }
+
+    /// The card carries the #27 collaborator / subscriber counts and the lock,
+    /// and a LEGACY row (no `access_mode`, both counts zero) carries none of
+    /// them — a pre-0064 payload must never render as a restricted rule.
+    #[test]
+    fn card_title_carries_the_actor_set_badges() {
+        let mut shared = autopilot("ap-1", "daily", true);
+        shared.collaborator_count = 3;
+        shared.subscriber_count = 2;
+        shared.access_mode = Some("restricted".into());
+
+        let mut open_rule = autopilot("ap-2", "nightly", true);
+        open_rule.subscriber_count = 1;
+        open_rule.access_mode = Some("open".into());
+
+        // Exactly what a pre-0064 daemon sends: the three fields absent.
+        let legacy = autopilot("ap-3", "legacy", true);
+        assert_eq!(legacy.collaborator_count, 0);
+        assert_eq!(legacy.subscriber_count, 0);
+        assert_eq!(legacy.access_mode, None);
+
+        let state = AutopilotsState::new(vec![shared, open_rule, legacy]);
+        let cards = &state.board_columns()[0].cards;
+
+        assert!(cards[0].title.contains("👥3"), "{:?}", cards[0].title);
+        assert!(cards[0].title.contains("🔔2"), "{:?}", cards[0].title);
+        assert!(cards[0].title.contains('🔒'), "{:?}", cards[0].title);
+
+        assert!(cards[1].title.contains("🔔1"), "{:?}", cards[1].title);
+        assert!(
+            !cards[1].title.contains("👥"),
+            "no grants means no grant badge: {:?}",
+            cards[1].title
+        );
+        assert!(
+            !cards[1].title.contains('🔒'),
+            "an explicitly OPEN rule carries no lock: {:?}",
+            cards[1].title
+        );
+
+        assert!(
+            !cards[2].title.contains('🔒')
+                && !cards[2].title.contains("👥")
+                && !cards[2].title.contains("🔔"),
+            "a legacy payload renders none of the #27 badges: {:?}",
+            cards[2].title
+        );
+    }
+
+    /// The run line renders the accountable human and HOW it was resolved, and
+    /// renders NEITHER for an unattributed run.
+    #[test]
+    fn run_line_carries_the_attribution_when_there_is_one() {
+        let mut buf = WireBuffer::new(200, 10);
+        let attributed = AutopilotRunRow {
+            id: "r-1".into(),
+            autopilot_id: "ap-1".into(),
+            started_at: 1,
+            status: "completed".into(),
+            source: "manual".into(),
+            accountable_actor: Some("member:bob".into()),
+            attribution: Some("direct_human".into()),
+            ..Default::default()
+        };
+        render_run(&mut buf, 0, 200, &attributed);
+        let line: String = buf.cells.iter().map(|(_, cell)| cell.symbol.clone()).collect();
+        assert!(
+            line.contains("member:bob"),
+            "the accountable human must be visible: {line}"
+        );
+        assert!(
+            line.contains("direct_human"),
+            "how it was resolved must be visible: {line}"
+        );
+
+        let mut buf2 = WireBuffer::new(200, 10);
+        let unattributed = AutopilotRunRow {
+            id: "r-2".into(),
+            autopilot_id: "ap-1".into(),
+            started_at: 1,
+            status: "completed".into(),
+            source: "schedule".into(),
+            ..Default::default()
+        };
+        render_run(&mut buf2, 0, 200, &unattributed);
+        let line2: String = buf2.cells.iter().map(|(_, cell)| cell.symbol.clone()).collect();
+        assert!(
+            !line2.contains("by "),
+            "an unattributed run must name nobody: {line2}"
+        );
     }
 }

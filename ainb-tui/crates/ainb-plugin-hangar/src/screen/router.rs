@@ -81,6 +81,7 @@ pub fn reduce(state: &AppState, ev: AppEvent) -> Reduction {
         AppEvent::Key(c) => reduce_key(state, c),
         AppEvent::Esc => reduce_esc(state),
         AppEvent::OpenAgentPicker(issue) => open_modal(state, Screen::AgentPicker(issue)),
+        AppEvent::OpenActivityTimeline(issue) => open_modal(state, Screen::ActivityTimeline(issue)),
         AppEvent::OpenCommandPalette => open_modal(state, Screen::CommandPalette),
     }
 }

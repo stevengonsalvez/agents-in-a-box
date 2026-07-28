@@ -20,12 +20,17 @@
 //! committed, and an auto-move failure must never down the claim loop. A task
 //! with no matching auto-move column is a silent no-op.
 
+use ainb_hangar_core::activity::{ActivityAction, ActivityActor};
+use ainb_hangar_core::actor::{ActorKind, ActorRef};
+use ainb_hangar_core::clock::SystemClock;
+use ainb_hangar_core::idgen::SystemIdGen;
 use ainb_hangar_core::ids::WorkspaceId;
 use ainb_hangar_proto::lifecycle::IssueLifecycle;
 use ainb_hangar_store::repo::board::BoardRepo;
 use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
 use ainb_hangar_store::repo::issue::IssueRepo;
 use ainb_hangar_store::repo::task::Task;
+use ainb_hangar_store::service::activity::ActivityService;
 use sqlx::SqlitePool;
 
 use crate::events::EventSink;
@@ -162,13 +167,33 @@ pub async fn advance_issue_lifecycle_after_transition(
         return;
     }
     match IssueRepo::update_state(pool, issue_id, target.as_str()).await {
-        Ok(()) => tracing::info!(
-            task_id = %task.id,
-            issue_id = %issue_id,
-            from = %current.state,
-            to = target.as_str(),
-            "issue lifecycle advanced"
-        ),
+        Ok(()) => {
+            // multica parity #13: a daemon-driven move is a `system` activity row
+            // carrying `via:"board"`, so the narrative distinguishes it from an
+            // owner edit. Best-effort — never fails the advance.
+            ActivityService::record(
+                pool,
+                &SystemIdGen,
+                &SystemClock,
+                &current.workspace_id,
+                issue_id,
+                &ActivityActor::System,
+                ActivityAction::StatusChanged,
+                serde_json::json!({
+                    "from": current.state,
+                    "to": target.as_str(),
+                    "via": "board",
+                }),
+            )
+            .await;
+            tracing::info!(
+                task_id = %task.id,
+                issue_id = %issue_id,
+                from = %current.state,
+                to = target.as_str(),
+                "issue lifecycle advanced"
+            );
+        }
         Err(e) => {
             tracing::warn!(error = %e, task_id = %task.id, "issue lifecycle advance failed; proceeding");
         }
@@ -339,7 +364,19 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
     // Board-agnostic (the auto-run seam does not know which board); the F4 board
     // tier is skipped, the cascade still resolves the agent. Headless run.
     match crate::rpc::run_card(
-        pool, ws, None, &issue, "headless", None, None, None, None, None,
+        pool,
+        ws,
+        None,
+        &issue,
+        "headless",
+        None,
+        None,
+        None,
+        None,
+        None,
+        // multica parity #12: the dependency cascade is an AUTO_RUN trigger
+        // surface. Its refusals used to be a `debug!` line and nothing else.
+        ainb_hangar_core::dispatch_reason::DispatchSource::AutoRun,
     )
     .await
     {
@@ -351,6 +388,40 @@ async fn auto_run_dependent(pool: &SqlitePool, ws: &WorkspaceId, issue_id: &str)
             tracing::warn!(issue = %issue_id, "auto-run refused (no repo/agent or store fault)")
         }
     }
+}
+
+/// Record a task's terminal OUTCOME on its issue's narrative (multica parity
+/// #13, write sites 8 + 9).
+///
+/// Attributed to `agent:<agent_id>` — the run's own agent, matching multica's
+/// listeners, which force the actor for `task:completed` / `task:failed`
+/// regardless of who triggered the run. `details` carries the task id (additive
+/// over multica's `{}`; the column is free-form).
+///
+/// Best-effort and no-op for a chat task with no issue: the task's terminal
+/// state has already committed and an audit write must never down the run loop.
+pub async fn record_task_outcome(pool: &SqlitePool, task: &Task, completed: bool) {
+    let Some(issue_id) = task.issue_id.as_deref() else {
+        return;
+    };
+    let actor = ActorRef::new(ActorKind::Agent, task.agent_id.clone())
+        .map_or(ActivityActor::System, ActivityActor::Actor);
+    let action = if completed {
+        ActivityAction::TaskCompleted
+    } else {
+        ActivityAction::TaskFailed
+    };
+    ActivityService::record(
+        pool,
+        &SystemIdGen,
+        &SystemClock,
+        &task.workspace_id,
+        issue_id,
+        &actor,
+        action,
+        serde_json::json!({ "task_id": task.id }),
+    )
+    .await;
 }
 
 /// Advance the issue lifecycle, then cascade a completed sub-issue to its parent.
@@ -406,10 +477,8 @@ pub async fn maybe_cascade_child_done(
     new_state: &str,
     events: &EventSink,
 ) {
-    use ainb_hangar_core::actor::ActorKind;
     use ainb_hangar_core::clock::{HangarClock as _, SystemClock};
     use ainb_hangar_core::idgen::{IdGen as _, SystemIdGen};
-    use ainb_hangar_proto::events::{CommentRow, HangarEvent};
     use ainb_hangar_store::service::child_done::cascade_child_done;
 
     let now_ms = SystemClock.now_ms();
@@ -432,6 +501,28 @@ pub async fn maybe_cascade_child_done(
             return;
         }
     };
+    deliver_cascade(pool, ws, &cascade, now_ms, events).await;
+}
+
+/// Deliver a FIRED cascade: push its comment as a live event and wake the parent.
+///
+/// The daemon-only tail of the cascade, shared by the single-child seam
+/// ([`maybe_cascade_child_done`]) and the batch handler
+/// (`hangar/issues_batch_update`) so the two cannot drift — a batch that
+/// aggregates N completions into ONE comment must also emit exactly ONE
+/// `CommentAdded` and run exactly ONE parent wake.
+///
+/// Best-effort: the comment is already durable, so a malformed id only skips the
+/// event and a refused wake is logged, never propagated.
+pub async fn deliver_cascade(
+    pool: &SqlitePool,
+    ws: &WorkspaceId,
+    cascade: &ainb_hangar_store::service::child_done::ParentCascade,
+    now_ms: i64,
+    events: &EventSink,
+) {
+    use ainb_hangar_core::actor::ActorKind;
+    use ainb_hangar_proto::events::{CommentRow, HangarEvent};
 
     // Push the parent's new comment so a subscribed parent-detail view refreshes
     // live (best-effort: a malformed id only skips the event, not the wake).
@@ -451,6 +542,7 @@ pub async fn maybe_cascade_child_done(
                 ),
                 body: cascade.comment_body.clone(),
                 created_at: now_ms,
+                parent_id: None,
             }),
         );
     }
@@ -479,6 +571,8 @@ pub async fn maybe_cascade_child_done(
         None,
         Some(assignee),
         None,
+        // multica parity #12: the child-done cascade is an AUTO_RUN surface too.
+        ainb_hangar_core::dispatch_reason::DispatchSource::AutoRun,
     )
     .await
     {

@@ -101,6 +101,7 @@ fn main() {
                 max_concurrent_runs: 1,
                 execution_mode: ExecutionMode::default(),
                 concurrency_policy: ConcurrencyPolicy::default(),
+                api_trigger_enabled: false,
             },
         )
         .await

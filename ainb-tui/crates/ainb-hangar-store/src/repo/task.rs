@@ -26,6 +26,7 @@
 //! `sweep_expired_queued`). Those belong to the P1 daemon FSM, which builds on
 //! these read/enqueue primitives.
 
+use ainb_hangar_core::origin::IssueOrigin;
 use sqlx::{Row, SqlitePool};
 
 /// Parameters for enqueueing a new task (always inserted as `queued`).
@@ -160,12 +161,64 @@ pub struct Task {
     /// read back so the daemon claim path can key a leader-briefing injection off
     /// it. An infra-retry child copies it verbatim.
     pub squad_id: Option<String>,
+    /// Who/what enqueued this task (migration 0056, multica parity #21). The
+    /// daemon hands it to the agent child as `HANGAR_ORIGIN_TYPE` /
+    /// `HANGAR_ORIGIN_ID` at dispatch, so an issue the agent creates mid-run
+    /// carries the same provenance. `None` for every pre-0056 row.
+    pub origin: Option<IssueOrigin>,
 }
 
 /// Stateless typed wrapper over the `agent_task_queue` table.
 pub struct TaskRepo;
 
 impl TaskRepo {
+    /// Stamp a task's ORIGIN PROVENANCE (migration 0056) WITHIN an enqueue
+    /// transaction — same atomicity contract as
+    /// [`CardParityRepo::set_task_source_branch_in_tx`]: the claim loop can
+    /// never observe a task missing its dispatch inputs, so a task can never
+    /// exist without the provenance the dispatcher hands its child.
+    ///
+    /// [`CardParityRepo::set_task_source_branch_in_tx`]: crate::repo::card_parity::CardParityRepo::set_task_source_branch_in_tx
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_origin_in_tx(
+        tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+        task_id: &str,
+        origin: &IssueOrigin,
+    ) -> Result<(), sqlx::Error> {
+        sqlx::query("UPDATE agent_task_queue SET origin_type = ?, origin_id = ? WHERE id = ?")
+            .bind(origin.kind_db_str())
+            .bind(origin.id())
+            .bind(task_id)
+            .execute(&mut **tx)
+            .await?;
+        Ok(())
+    }
+
+    /// Post-insert [`Self::set_origin_in_tx`] for callers outside a transaction.
+    ///
+    /// Returns `true` when exactly one row was stamped.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] on a store fault.
+    pub async fn set_origin(
+        pool: &SqlitePool,
+        task_id: &str,
+        origin: &IssueOrigin,
+    ) -> Result<bool, sqlx::Error> {
+        let res =
+            sqlx::query("UPDATE agent_task_queue SET origin_type = ?, origin_id = ? WHERE id = ?")
+                .bind(origin.kind_db_str())
+                .bind(origin.id())
+                .bind(task_id)
+                .execute(pool)
+                .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
     /// Enqueue one task as `queued`, leaving every lifecycle/retry column at its
     /// schema default. Returns the new row's `id` on success.
     ///
@@ -655,6 +708,90 @@ impl TaskRepo {
             .await?;
         Ok(res.rows_affected() == 1)
     }
+
+    /// The PENDING (`queued` / `dispatched`) task this agent already holds on
+    /// `issue_id`, if any — the row the per-`(issue, agent)` partial unique
+    /// index (migration 0012) guards.
+    ///
+    /// This is the mention router's COALESCE probe. Before 2-rest a repeat
+    /// mention hit the unique index and the resulting violation was swallowed,
+    /// so "already pending" was indistinguishable from "enqueued": detecting it
+    /// up front is what lets the router report multica's `coalesced` outcome
+    /// instead of silently doing nothing.
+    ///
+    /// Workspace-scoped, so a foreign tenant's pending task never satisfies the
+    /// probe. Deterministic when (impossibly, given the index) two rows match:
+    /// the oldest wins.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn pending_for_issue_agent(
+        pool: &SqlitePool,
+        workspace_id: &str,
+        issue_id: &str,
+        agent_id: &str,
+    ) -> Result<Option<Task>, sqlx::Error> {
+        let sql = format!(
+            "SELECT {COLUMNS} FROM agent_task_queue \
+             WHERE workspace_id = ? AND issue_id = ? AND agent_id = ? \
+               AND status IN ('queued', 'dispatched') \
+             ORDER BY created_at, id LIMIT 1"
+        );
+        let row = sqlx::query(&sql)
+            .bind(workspace_id)
+            .bind(issue_id)
+            .bind(agent_id)
+            .fetch_optional(pool)
+            .await?;
+        row.as_ref().map(task_from_row).transpose()
+    }
+
+    /// Re-point a task at the comment that (re-)summoned it (migration 0067).
+    ///
+    /// multica's merge-into-pending: when a second mention coalesces into a task
+    /// the agent has not claimed yet, the task is re-pointed at the NEWER
+    /// comment so the agent reads the latest ask rather than the stale first
+    /// one. Returns `true` when exactly one row was updated (`false` for an
+    /// unknown task id — never an error).
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the update fails.
+    pub async fn set_trigger_comment(
+        pool: &SqlitePool,
+        task_id: &str,
+        comment_id: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let res = sqlx::query("UPDATE agent_task_queue SET trigger_comment_id = ? WHERE id = ?")
+            .bind(comment_id)
+            .bind(task_id)
+            .execute(pool)
+            .await?;
+        Ok(res.rows_affected() == 1)
+    }
+
+    /// The comment that summoned `task_id`, or `None` when the task was not
+    /// mention-triggered (or predates migration 0067).
+    ///
+    /// A dangling id — 0067 deliberately carries no FK, so deleting a comment
+    /// neither cascades the task away nor is blocked by it — still reads back
+    /// here; the caller decides whether the comment still exists.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`sqlx::Error`] if the query fails.
+    pub async fn trigger_comment_id(
+        pool: &SqlitePool,
+        task_id: &str,
+    ) -> Result<Option<String>, sqlx::Error> {
+        let row: Option<(Option<String>,)> =
+            sqlx::query_as("SELECT trigger_comment_id FROM agent_task_queue WHERE id = ?")
+                .bind(task_id)
+                .fetch_optional(pool)
+                .await?;
+        Ok(row.and_then(|(v,)| v))
+    }
 }
 
 /// The full `agent_task_queue` column list, in the order [`task_from_row`]
@@ -662,7 +799,8 @@ impl TaskRepo {
 const COLUMNS: &str = "id, workspace_id, runtime_id, agent_id, issue_id, status, result, \
      session_id, work_dir, attempt, max_attempts, parent_task_id, failure_reason, \
      priority, created_at, dispatched_at, started_at, finished_at, autopilot_run_id, \
-     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch, squad_id";
+     mode, session_name, repo_ref, agent_kind, branch, generation, source_branch, squad_id, \
+     origin_type, origin_id";
 
 /// Map one raw `agent_task_queue` row into a [`Task`].
 fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
@@ -694,6 +832,9 @@ fn task_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<Task, sqlx::Error> {
         generation: row.try_get("generation")?,
         source_branch: row.try_get("source_branch")?,
         squad_id: row.try_get("squad_id")?,
+        // LENIENT (migration 0056): an unknown stored kind degrades to `manual`
+        // rather than failing the row — see `IssueOrigin::from_db`.
+        origin: IssueOrigin::from_db(row.try_get("origin_type")?, row.try_get("origin_id")?),
     })
 }
 

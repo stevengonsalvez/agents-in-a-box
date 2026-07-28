@@ -28,6 +28,15 @@ use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
 struct Client {
     reader: BufReader<OwnedReadHalf>,
     writer: OwnedWriteHalf,
+    /// Event pushes seen while draining frames for an RPC RESPONSE.
+    ///
+    /// The daemon emits `comment_added` BEFORE it writes the `comment_add`
+    /// reply, so whether the push or the reply reaches this socket first is a
+    /// race on how much work the handler does after the emit. Buffering the
+    /// pushes `call` walks past makes `next_event` deterministic either way —
+    /// without it, a handler that grows slower silently starts eating the very
+    /// event the test is asserting on.
+    pending_events: std::collections::VecDeque<serde_json::Value>,
 }
 
 impl Client {
@@ -46,6 +55,7 @@ impl Client {
         Self {
             reader: BufReader::new(read_half),
             writer,
+            pending_events: std::collections::VecDeque::new(),
         }
     }
 
@@ -98,10 +108,16 @@ impl Client {
             if frame.get("id").is_some() {
                 return frame;
             }
+            if frame["method"] == EVENT_METHOD {
+                self.pending_events.push_back(frame["params"].clone());
+            }
         }
     }
 
     async fn next_event(&mut self, timeout: Duration) -> Option<serde_json::Value> {
+        if let Some(buffered) = self.pending_events.pop_front() {
+            return Some(buffered);
+        }
         let deadline = Instant::now() + timeout;
         loop {
             let remaining = deadline.checked_duration_since(Instant::now())?;

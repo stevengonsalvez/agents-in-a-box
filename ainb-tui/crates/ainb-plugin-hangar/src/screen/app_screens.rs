@@ -633,6 +633,12 @@ pub struct ScreenStates {
     pub task_detail: Option<TaskDetailState>,
     /// Agent-picker modal cache (present only while the modal is open).
     pub agent_picker: Option<AgentPickerState>,
+    /// Activity-timeline modal cache (multica parity #13; present only while the
+    /// modal is open).
+    pub activity: Option<super::activity::ActivityState>,
+    /// An issue id whose `hangar/issue_timeline` fetch is armed, awaiting the
+    /// `render` pass to fire it over the daemon socket. `None` when idle.
+    pub pending_activity_fetch: Option<String>,
     /// Command-palette modal cache (present only while the palette is open,
     /// e38.13).
     pub command_palette: Option<CommandPaletteState>,
@@ -696,9 +702,17 @@ pub struct ScreenStates {
     /// Cached workspace catalogue from `host/workspace_list` (P5.5). Seeds the
     /// Settings Workspace pane regardless of which snapshot arrives first.
     pub workspace_rows: Vec<WorkspaceRow>,
+    /// Cached `creation_disabled` hint from the same `host/workspace_list` reply.
+    /// Held beside the rows so a `set_health` rebuild cannot silently un-hide the
+    /// new-workspace affordance on a locked-down instance.
+    pub workspace_creation_disabled: bool,
     /// Cached member roster from `hangar/members_list` (e38.11). Seeds the
     /// Settings Members pane regardless of which snapshot arrives first.
     pub member_rows: Vec<MemberWireRow>,
+    /// Cached pending invitations from the same `hangar/members_list` envelope
+    /// (parity #18). Held beside the roster so a `set_health` rebuild cannot drop
+    /// the `Pending invites` block.
+    pub pending_invite_rows: Vec<ainb_hangar_proto::snapshots::InvitationWireRow>,
     /// Cached notification routing grid from `hangar/notify_rules_list` (tcp T5).
     /// Seeds the Settings Notifications pane regardless of arrival order.
     pub notify_rule_rows: Vec<ainb_hangar_proto::snapshots::NotifyRuleWireRow>,
@@ -875,8 +889,9 @@ impl ScreenStates {
         &mut self,
         entries: Vec<ainb_hangar_proto::events::InboxEntryRow>,
         unread: i64,
+        recipient: String,
     ) {
-        self.inbox = InboxState::from_snapshot(entries, unread);
+        self.inbox = InboxState::from_snapshot(entries, unread, recipient);
     }
 
     /// Take the pending mark-all-read request (`r` pressed), if any (e38.14).
@@ -1027,9 +1042,11 @@ impl ScreenStates {
             self.workspace_rows.clone()
         };
         let mut state = SettingsState::new(health, providers, keys, workspaces);
+        state.set_workspace_creation_disabled(self.workspace_creation_disabled);
         // Carry any cached member roster into the rebuilt state so the Members
         // pane survives a `set_health` rebuild (mirrors workspace_rows).
         state.set_members(self.member_rows.clone());
+        state.set_pending_invites(self.pending_invite_rows.clone());
         // Carry any cached notification grid too (tcp T5), same rebuild survival.
         state.set_notify_rules(self.notify_rule_rows.clone());
         // Replay the cached daemon-config values so a `set_health` rebuild keeps
@@ -1043,10 +1060,12 @@ impl ScreenStates {
     /// Refresh the Settings Workspace pane from a `host/workspace_list` result
     /// (P5.5). Caches the rows so a later `set_health` rebuild keeps them, and
     /// overlays the live settings state when it already exists.
-    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>) {
+    pub fn set_workspaces(&mut self, workspaces: Vec<WorkspaceRow>, creation_disabled: bool) {
         self.workspace_rows.clone_from(&workspaces);
+        self.workspace_creation_disabled = creation_disabled;
         if let Some(s) = self.settings.as_mut() {
             s.set_workspaces(workspaces);
+            s.set_workspace_creation_disabled(creation_disabled);
         }
     }
 
@@ -1057,6 +1076,19 @@ impl ScreenStates {
         self.member_rows.clone_from(&members);
         if let Some(s) = self.settings.as_mut() {
             s.set_members(members);
+        }
+    }
+
+    /// Refresh the Settings pane's pending invitations from the same
+    /// `hangar/members_list` result (parity #18), with the same cache-then-overlay
+    /// shape as [`set_members`](Self::set_members).
+    pub fn set_pending_invites(
+        &mut self,
+        invites: Vec<ainb_hangar_proto::snapshots::InvitationWireRow>,
+    ) {
+        self.pending_invite_rows.clone_from(&invites);
+        if let Some(s) = self.settings.as_mut() {
+            s.set_pending_invites(invites);
         }
     }
 
@@ -1232,6 +1264,15 @@ impl ScreenStates {
             td.set_pr_status(status);
         }
     }
+
+    /// Fold a system transcript line into the OPEN task-detail screen, if one is
+    /// open. A no-op otherwise — the mention outcomes are informational and must
+    /// never resurrect a closed screen.
+    pub fn push_task_detail_system_line(&mut self, body: String) {
+        if let Some(td) = self.task_detail.as_mut() {
+            td.push_system_line(body);
+        }
+    }
 }
 
 /// A cross-screen navigation the key router surfaces to the plugin glue, which
@@ -1240,6 +1281,9 @@ impl ScreenStates {
 pub enum NavIntent {
     /// Open the agent-picker modal for an issue (raised by `a`).
     OpenAgentPicker(ainb_hangar_core::ids::IssueId),
+    /// Open the activity-timeline modal for an issue (raised by `y`, multica
+    /// parity #13).
+    OpenActivityTimeline(ainb_hangar_core::ids::IssueId),
     /// Open task detail for the issue under the selection (raised by Enter).
     OpenTaskForIssue(ainb_hangar_core::ids::IssueId),
     /// 0046 sub-issues: mark an issue Done from the keyboard (`d`). The glue moves
@@ -1351,6 +1395,16 @@ pub fn render_body(buf: &mut WireBuffer, w: u16, h: u16, app: &AppState, states:
             }
             if let Some(picker) = &states.agent_picker {
                 super::agent_picker::render_agent_picker(buf, w, h, picker);
+            }
+        }
+        Screen::ActivityTimeline(_) => {
+            // The timeline is a modal: paint the screen it overlays first, then
+            // the modal centred over the whole area (multica parity #13).
+            if let Some(prior) = &app.prior_screen {
+                render_prior(buf, w, h, prior, states);
+            }
+            if let Some(activity) = &states.activity {
+                super::activity::render_activity(buf, w, h, activity);
             }
         }
         Screen::CommandPalette => {
@@ -1584,6 +1638,7 @@ pub fn route_key(app: &AppState, states: &mut ScreenStates, key: &KeyEvent) -> O
         }
         Screen::TaskDetail(_) => route_task_detail(states, key),
         Screen::AgentPicker(_) => route_agent_picker(states, key),
+        Screen::ActivityTimeline(_) => route_activity(states, key),
         Screen::CommandPalette => route_command_palette(states, key),
         Screen::Logs => {
             // The logs pane owns the level-filter chips (`a`/`i`/`w`/`e`). A
@@ -1766,6 +1821,10 @@ fn route_issue_list(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavInte
     states.issue_list = out.state;
     match out.intent {
         Some(IssueListIntent::OpenAgentPicker(id)) => Some(NavIntent::OpenAgentPicker(id)),
+        // multica parity #13: `y` opens the card's activity timeline.
+        Some(IssueListIntent::OpenActivityTimeline(id)) => {
+            Some(NavIntent::OpenActivityTimeline(id))
+        }
         Some(IssueListIntent::OpenTaskDetail(id)) => Some(NavIntent::OpenTaskForIssue(id)),
         // 0046: `d` marks the highlighted issue Done, surfaced as a NavIntent the
         // glue lifts into the SAME optimistic-move + `hangar/issue_update{state}`
@@ -2445,6 +2504,32 @@ fn route_agent_picker(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIn
     } else {
         None
     }
+}
+
+/// Activity-timeline key routing (multica parity #13): fold the key into the
+/// pure reducer, then act on the reduction.
+///
+/// `j`/`k` scroll, `r` arms a re-fetch the `render` pass fires, Esc dismisses
+/// the modal back to the screen that opened it (the host reserves only Ctrl+C,
+/// so a modal MUST offer its own way out).
+fn route_activity(states: &mut ScreenStates, key: &KeyEvent) -> Option<NavIntent> {
+    use super::activity::{ActivityEvent, ActivityIntent, reduce_activity};
+
+    if matches!(key.code, KeyCode::Esc) {
+        states.activity = None;
+        return Some(NavIntent::CloseModal);
+    }
+    let state = states.activity.take()?;
+    let Some(c) = key_char(key) else {
+        states.activity = Some(state);
+        return None;
+    };
+    let out = reduce_activity(&state, ActivityEvent::Key(c));
+    if let Some(ActivityIntent::Refresh { issue_id }) = out.intent {
+        states.pending_activity_fetch = Some(issue_id);
+    }
+    states.activity = Some(out.state);
+    None
 }
 
 /// Command-palette key routing (e38.13): fold the key into the pure reducer, then

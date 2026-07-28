@@ -186,7 +186,8 @@ mod tests {
         ));
     }
 
-    /// Path encoding mirrors `find_transcript_path` in spawn-agent-lib.sh:30-69.
+    /// Path encoding = Claude Code's rule: every non-alphanumeric UTF-16 code
+    /// unit becomes `-`.
     #[test]
     fn test_encode_claude_project_dir() {
         use std::path::PathBuf;
@@ -198,20 +199,96 @@ mod tests {
 
         let p = PathBuf::from("/");
         assert_eq!(AppState::encode_claude_project_dir(&p), "-");
+
+        // Regression: DOTTED path. Every ainb worktree lives under
+        // `~/.agents-in-a-box/`, so the `.` MUST encode to `-`. The old
+        // `/`-only rule produced `-.agents-in-a-box` and never matched the
+        // real on-disk project dir, so Claude never resumed.
+        let p =
+            PathBuf::from("/Users/stevie/.agents-in-a-box/worktrees/by-name/repo--f-x--cc7dbd22");
+        assert_eq!(
+            AppState::encode_claude_project_dir(&p),
+            "-Users-stevie--agents-in-a-box-worktrees-by-name-repo--f-x--cc7dbd22"
+        );
+
+        // Underscore, space, and non-ASCII all map to `-`; an astral char
+        // (emoji, 2 UTF-16 units in Claude Code's JS encoder) maps to TWO.
+        let p = PathBuf::from("/tmp/a_b c/é🚀");
+        assert_eq!(AppState::encode_claude_project_dir(&p), "-tmp-a-b-c----");
+    }
+
+    /// End-to-end guard for the resume-history probe on a dotted worktree
+    /// path: a transcript under `~/.claude/projects/{encoded}/` must be found
+    /// so `--continue` is emitted. The expected directory name is a HARDCODED
+    /// literal, not derived from the encoder under test, so this fails on the
+    /// old `/`-only encoding rule.
+    #[test]
+    fn test_find_latest_transcript_dotted_worktree_path() {
+        use std::fs;
+        use std::path::PathBuf;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let fake_home = tmp.path().to_path_buf();
+
+        let worktree = PathBuf::from("/Users/stevie/.agents-in-a-box/worktrees/by-name/repo--f-x");
+        let project_dir = fake_home
+            .join(".claude")
+            .join("projects")
+            .join("-Users-stevie--agents-in-a-box-worktrees-by-name-repo--f-x");
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("sess.jsonl"), "x").unwrap();
+
+        let result = AppState::find_latest_transcript_in(&fake_home, &worktree);
+        assert!(result.is_some(), "dotted worktree transcript must resolve");
+    }
+
+    /// The probe canonicalizes the worktree path before encoding: a symlinked
+    /// path component (e.g. macOS `/tmp` → `/private/tmp`) must still resolve
+    /// to the project dir of the PHYSICAL path, because that is what Claude
+    /// Code keys its transcripts on.
+    #[test]
+    #[cfg(unix)]
+    fn test_find_latest_transcript_resolves_symlinked_worktree() {
+        use std::fs;
+        let tmp = tempfile::tempdir().expect("tmpdir");
+        let fake_home = tmp.path().to_path_buf();
+
+        // Real worktree dir + a symlink alias pointing at it.
+        let physical = tmp.path().join("wt-real");
+        fs::create_dir_all(&physical).unwrap();
+        let alias = tmp.path().join("wt-alias");
+        std::os::unix::fs::symlink(&physical, &alias).unwrap();
+
+        // Transcript lives under the encoding of the CANONICAL path.
+        let canonical = std::fs::canonicalize(&physical).unwrap();
+        let project_dir = fake_home
+            .join(".claude")
+            .join("projects")
+            .join(AppState::encode_claude_project_dir(&canonical));
+        fs::create_dir_all(&project_dir).unwrap();
+        fs::write(project_dir.join("sess.jsonl"), "x").unwrap();
+
+        // Probing via the symlink alias must still find it.
+        let result = AppState::find_latest_transcript_in(&fake_home, &alias);
+        assert!(
+            result.is_some(),
+            "symlinked worktree transcript must resolve"
+        );
     }
 
     /// `find_latest_transcript_in` returns the most recently modified `.jsonl`
-    /// under `<home>/.claude/projects/-{encoded}/`.
+    /// under `<home>/.claude/projects/{encoded}/`.
     #[test]
     fn test_find_latest_transcript_picks_newest_by_mtime() {
         use std::fs::{self, File};
-        use std::path::PathBuf;
         use std::time::{Duration, SystemTime};
 
         let tmp = tempfile::tempdir().expect("tmpdir");
         let fake_home = tmp.path().to_path_buf();
 
-        let worktree = PathBuf::from("/tmp/work-abc-test");
+        // A path inside our tempdir that is never created: canonicalize
+        // always fails and falls back to the raw path, so the fixture dir
+        // built from the raw encoding stays in agreement with the probe.
+        let worktree = tmp.path().join("nonexistent-wt");
         let encoded = AppState::encode_claude_project_dir(&worktree);
         let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
         fs::create_dir_all(&project_dir).unwrap();
@@ -255,10 +332,11 @@ mod tests {
     #[test]
     fn test_find_latest_transcript_empty_dir_returns_none() {
         use std::fs;
-        use std::path::PathBuf;
         let tmp = tempfile::tempdir().expect("tmpdir");
         let fake_home = tmp.path().to_path_buf();
-        let worktree = PathBuf::from("/tmp/empty-work");
+        // Never created: canonicalize falls back to the raw path (see
+        // test_find_latest_transcript_picks_newest_by_mtime).
+        let worktree = tmp.path().join("empty-wt");
         let encoded = AppState::encode_claude_project_dir(&worktree);
         let project_dir = fake_home.join(".claude").join("projects").join(&encoded);
         fs::create_dir_all(&project_dir).unwrap();

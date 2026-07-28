@@ -45,7 +45,7 @@
 
 use ainb_hangar_core::acceptance::{AcceptanceCriterion, checked_count, legacy_placeholder_id};
 use ainb_hangar_core::ids::TaskId;
-use ainb_hangar_proto::events::{HangarEvent, IssueLinkRow, IssueRow, MessageKind, TaskResult};
+use ainb_hangar_proto::events::{HangarEvent, IssueRow, MessageKind, TaskResult};
 use ainb_hangar_proto::pr_status::{CiRollup, MergeState, Mergeable, PrStatus};
 use ainb_plugin_sdk::{Cell, Color, Coord, WireBuffer};
 
@@ -328,6 +328,24 @@ impl TaskDetailState {
     /// merge state on the next paint.
     pub const fn set_pr_status(&mut self, status: PrStatus) {
         self.pr_status = status;
+    }
+
+    /// Append a SYSTEM line to the transcript in the tool-result lane
+    /// (`is_comment: false`, so it is not styled as somebody's comment).
+    ///
+    /// Used to surface the `@`-mention routing outcomes the daemon returns from
+    /// `comment_add` (multica parity #2-rest). Before this, the reply was
+    /// dropped on the floor, so a mention that was refused or coalesced looked
+    /// exactly like one that ran.
+    pub fn push_system_line(&mut self, body: String) {
+        push_entry(
+            self,
+            TranscriptEntry {
+                kind: MessageKind::ToolResult,
+                body,
+                is_comment: false,
+            },
+        );
     }
 
     /// The current lifecycle.
@@ -1136,6 +1154,37 @@ fn render_detail_card(
         row = row.saturating_add(1);
     }
 
+    // --- Origin provenance (0056, multica parity #21): the badge is shown only
+    //     for a PLATFORM-created card. A human-authored card ('manual') and a
+    //     pre-0056 card (no origin_type) need no badge, so they read unchanged. ---
+    if let Some(badge) = origin_badge(issue.origin_type.as_deref()) {
+        card_field_row(
+            buf,
+            card_w,
+            row,
+            &[("Origin: ", CARD_LABEL), (badge, CARD_VALUE)],
+        );
+        row = row.saturating_add(1);
+    }
+
+    // --- Why this card is NOT running (multica parity #12, migration 0058):
+    //     the newest DECLINED dispatch attempt, rendered only when there is one.
+    //     A card that ran fine reads exactly as before — the whole point is that
+    //     "queued forever with no explanation" becomes a stated cause. Amber,
+    //     matching the `unstable` presence band: it is a warning, not a failure. ---
+    if let Some(line) = dispatch_decline_line(
+        issue.last_dispatch_reason.as_deref(),
+        issue.last_dispatch_detail.as_deref(),
+    ) {
+        card_field_row(
+            buf,
+            card_w,
+            row,
+            &[("⚠ Not dispatched: ", CARD_LABEL), (&line, STATUS_AMBER)],
+        );
+        row = row.saturating_add(1);
+    }
+
     // --- Acceptance criteria (0048 + #11-rest): a `Acceptance: <done>/<total>`
     //     header then one `☑`/`☐ <criterion>` line per element, rendered ONLY when
     //     non-empty so an issue without them reads unchanged (mirrors the Linked
@@ -1209,6 +1258,73 @@ fn render_detail_card(
                 card_w,
                 row,
                 &[(&head, CARD_LABEL), (&link.title, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+
+    // --- Subscribers + reactions (multica parity #22). Both are DETAIL-ONLY
+    //     wire fields, so a list snapshot (and any pre-#22 daemon) leaves them
+    //     at their default and the card renders byte-identically to today. ---
+    if issue.subscriber_count > 0 {
+        let count = format!("{}", issue.subscriber_count);
+        let mut cells: Vec<(&str, Color)> = vec![("Subs:  ", CARD_LABEL), (&count, CARD_VALUE)];
+        if issue.subscribed {
+            cells.push(("  ✓ you", SELECTION_GREEN));
+        }
+        card_field_row(buf, card_w, row, &cells);
+        row = row.saturating_add(1);
+    }
+    if !issue.reactions.is_empty() {
+        let buckets: Vec<String> =
+            issue.reactions.iter().map(|r| format!("{} {}  ", r.emoji, r.count)).collect();
+        let mut cells: Vec<(&str, Color)> = vec![("React: ", CARD_LABEL)];
+        for (bucket, reaction) in buckets.iter().zip(&issue.reactions) {
+            // A bucket the local human is in gets the same accent the acceptance
+            // markers use, so "mine" reads at a glance.
+            cells.push((
+                bucket.as_str(),
+                if reaction.mine {
+                    SELECTION_GREEN
+                } else {
+                    CARD_VALUE
+                },
+            ));
+        }
+        card_field_row(buf, card_w, row, &cells);
+        row = row.saturating_add(1);
+    }
+
+    // --- Custom properties (multica parity #17). DETAIL-ONLY wire field, so a
+    //     list snapshot (and any pre-#17 daemon) leaves it empty and the card
+    //     renders byte-identically to today. ---
+    if !issue.properties.is_empty() {
+        card_field_row(buf, card_w, row, &[("Props:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for prop in &issue.properties {
+            let head = format!("  ◆ {}: ", prop.name);
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[(&head, CARD_LABEL), (&prop.value, CARD_VALUE)],
+            );
+            row = row.saturating_add(1);
+        }
+    }
+    // --- Agent metadata scratch (multica parity #17). Read-only, and HIDDEN
+    //     when empty — the reference's own UI rule, so it stays quiet in the
+    //     common case. ---
+    if !issue.metadata.is_empty() {
+        card_field_row(buf, card_w, row, &[("Meta:", CARD_LABEL)]);
+        row = row.saturating_add(1);
+        for entry in &issue.metadata {
+            let head = format!("  · {} = ", entry.key);
+            card_field_row(
+                buf,
+                card_w,
+                row,
+                &[(&head, CARD_LABEL), (&entry.value, CARD_VALUE)],
             );
             row = row.saturating_add(1);
         }
@@ -1308,6 +1424,44 @@ fn link_glyph_and_label(
         "blocks" => ("→", "blocks"),
         _ => ("~", "related"),
     }
+}
+
+/// The `Origin:` badge text for a wire `origin_type`, or `None` when no badge
+/// belongs on the card (migration 0056, multica parity #21).
+///
+/// A badge marks a card the PLATFORM created, so it is deliberately suppressed
+/// for `manual` (a human authored it — the unremarkable case) and for a
+/// pre-0056 card whose provenance is simply unknown. An unrecognised value is
+/// treated like `manual` and shows nothing, mirroring the lenient read side.
+fn origin_badge(origin_type: Option<&str>) -> Option<&'static str> {
+    match origin_type?.trim() {
+        "autopilot" => Some("⚙ autopilot"),
+        "comment_mention" => Some("💬 comment mention"),
+        _ => None,
+    }
+}
+
+/// The human phrase for a declined dispatch (multica parity #12): the code's
+/// [`DispatchReason::label`] plus the free-text detail, e.g.
+/// `runtime offline — task 01J… queued; runtime rt-1 is offline`.
+///
+/// Returns `None` when there is no code, so a healthy card renders no line at
+/// all. A code this build does not know falls back to the RAW token rather than
+/// hiding the line — an older plugin against a newer daemon must still tell the
+/// user something is wrong, and the detail carries the specifics regardless.
+fn dispatch_decline_line(reason: Option<&str>, detail: Option<&str>) -> Option<String> {
+    let raw = reason?.trim();
+    if raw.is_empty() {
+        return None;
+    }
+    let label: &str = match ainb_hangar_core::dispatch_reason::DispatchReason::parse(raw) {
+        Some(code) => code.label(),
+        None => raw,
+    };
+    Some(match detail.map(str::trim).filter(|d| !d.is_empty()) {
+        Some(d) => format!("{label} — {d}"),
+        None => label.to_string(),
+    })
 }
 
 fn card_field_row(buf: &mut WireBuffer, card_w: u16, row: u16, segments: &[(&str, Color)]) {
@@ -1435,6 +1589,10 @@ pub const fn color_for(kind: MessageKind) -> ainb_plugin_sdk::Color {
 
 #[cfg(test)]
 mod card_tests {
+    use ainb_hangar_proto::events::{
+        IssueLinkRow, IssueMetadataRow, IssuePropertyRow, ReactionRow,
+    };
+
     use super::*;
     use ainb_hangar_core::ids::{IssueId, TaskId};
     use ainb_plugin_sdk::WireBuffer;
@@ -1473,6 +1631,16 @@ mod card_tests {
     /// A fully-populated issue row for the card render assertions (63d).
     fn full_issue() -> IssueRow {
         IssueRow {
+            subscriber_count: 0,
+            subscribed: false,
+            reactions: Vec::new(),
+            properties: Vec::new(),
+            metadata: Vec::new(),
+            last_dispatch_reason: None,
+            last_dispatch_detail: None,
+            last_dispatch_at: None,
+            origin_type: None,
+            origin_id: None,
             id: IssueId::from_str("i1").unwrap(),
             display_id: Some("HGR-1".into()),
             workspace_id: "ws".into(),
@@ -1621,6 +1789,128 @@ mod card_tests {
         );
     }
 
+    /// 0056 / multica parity #21: a PLATFORM-created card wears an `Origin:`
+    /// badge naming the provenance kind; a human-authored (`manual`) or
+    /// provenance-less card wears none.
+    #[test]
+    fn detail_card_renders_origin_badge_only_for_platform_created_cards() {
+        for (kind, expected) in [
+            ("autopilot", "autopilot"),
+            ("comment_mention", "comment mention"),
+        ] {
+            let mut issue = full_issue();
+            issue.origin_type = Some(kind.into());
+            issue.origin_id = Some("prov-1".into());
+            let s = state_for(issue);
+            let mut buf = WireBuffer::new(80, 30);
+            render_task_detail(&mut buf, 80, 0, 29, &s);
+            let text = painted_text(&buf);
+            assert!(text.contains("Origin: "), "origin label for {kind}: {text}");
+            assert!(text.contains(expected), "origin value for {kind}: {text}");
+        }
+
+        for manual in [Some("manual".to_string()), None] {
+            let mut issue = full_issue();
+            issue.origin_type = manual.clone();
+            let s = state_for(issue);
+            let mut buf = WireBuffer::new(80, 30);
+            render_task_detail(&mut buf, 80, 0, 29, &s);
+            assert!(
+                !painted_text(&buf).contains("Origin: "),
+                "no badge for {manual:?}"
+            );
+        }
+    }
+
+    /// multica parity #12: a card whose newest dispatch attempt was DECLINED
+    /// renders `⚠ Not dispatched: <human label> — <detail>`, so "queued forever
+    /// with no explanation" becomes a stated cause on the card the user opens.
+    #[test]
+    fn detail_card_renders_the_not_dispatched_line() {
+        let mut issue = full_issue();
+        issue.last_dispatch_reason = Some("runtime_offline".into());
+        issue.last_dispatch_detail = Some("task 01J9 queued; runtime rt-1 is offline".into());
+        issue.last_dispatch_at = Some(1_700_000_000_000);
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(100, 40);
+        render_task_detail(&mut buf, 100, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(text.contains("Not dispatched: "), "label: {text}");
+        assert!(
+            text.contains("runtime offline"),
+            "the HUMAN label, not the raw token: {text}"
+        );
+        assert!(text.contains("runtime rt-1 is offline"), "detail: {text}");
+    }
+
+    /// The negative twin (mirroring `detail_card_renders_linked_line_only_when_linked`):
+    /// a healthy card paints NO such line, so the card reads exactly as it did
+    /// before parity #12.
+    #[test]
+    fn detail_card_omits_the_not_dispatched_line_when_healthy() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(100, 40);
+        render_task_detail(&mut buf, 100, 0, 39, &s);
+        assert!(
+            !painted_text(&buf).contains("Not dispatched"),
+            "a healthy card shows no dispatch warning"
+        );
+    }
+
+    /// A code this build does not know renders the RAW token rather than hiding
+    /// the line or panicking — an older plugin against a newer daemon must still
+    /// tell the user something is wrong.
+    #[test]
+    fn detail_card_renders_an_unknown_dispatch_code_verbatim() {
+        let mut issue = full_issue();
+        issue.last_dispatch_reason = Some("nonsense_code".into());
+        issue.last_dispatch_detail = Some("something new happened".into());
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(100, 40);
+        render_task_detail(&mut buf, 100, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(
+            text.contains("Not dispatched: "),
+            "line still painted: {text}"
+        );
+        assert!(text.contains("nonsense_code"), "raw token kept: {text}");
+    }
+
+    /// The line composer itself, unit-level: known code → human label, unknown
+    /// code → raw token, empty / absent code → no line at all.
+    #[test]
+    fn dispatch_decline_line_maps_codes_and_details() {
+        assert_eq!(
+            dispatch_decline_line(Some("target_unavailable"), Some("no agent")),
+            Some("no dispatch target — no agent".to_string())
+        );
+        assert_eq!(
+            dispatch_decline_line(Some("deferred"), None),
+            Some("waiting on blockers".to_string())
+        );
+        assert_eq!(
+            dispatch_decline_line(Some("future_code"), None),
+            Some("future_code".to_string())
+        );
+        assert_eq!(dispatch_decline_line(None, Some("orphan detail")), None);
+        assert_eq!(dispatch_decline_line(Some("   "), None), None);
+    }
+
+    /// The badge mapper itself: only the two platform kinds earn a badge, and an
+    /// unrecognised (future) kind degrades to no badge rather than painting a raw
+    /// token.
+    #[test]
+    fn origin_badge_is_platform_kinds_only() {
+        assert_eq!(origin_badge(Some("autopilot")), Some("⚙ autopilot"));
+        assert_eq!(
+            origin_badge(Some("comment_mention")),
+            Some("💬 comment mention")
+        );
+        assert_eq!(origin_badge(Some("manual")), None);
+        assert_eq!(origin_badge(None), None);
+        assert_eq!(origin_badge(Some("from_the_future")), None);
+    }
+
     /// One typed link row for the render tests.
     fn link_row(kind: &str, display: &str, title: &str, satisfied: bool) -> IssueLinkRow {
         IssueLinkRow {
@@ -1681,6 +1971,161 @@ mod card_tests {
         );
     }
 
+    /// multica parity #22: the watcher count (with the `✓ you` marker) and the
+    /// aggregated reaction buckets both render on the detail card.
+    #[test]
+    fn detail_card_renders_a_subs_and_react_block() {
+        let mut issue = full_issue();
+        issue.subscriber_count = 3;
+        issue.subscribed = true;
+        issue.reactions = vec![
+            ReactionRow {
+                emoji: "👍".into(),
+                count: 3,
+                mine: true,
+            },
+            ReactionRow {
+                emoji: "🎉".into(),
+                count: 1,
+                mine: false,
+            },
+        ];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(squashed.contains("Subs: 3"), "the count: {squashed}");
+        assert!(squashed.contains("✓ you"), "the you-marker: {squashed}");
+        assert!(
+            squashed.contains("React: 👍 3"),
+            "the mine bucket: {squashed}"
+        );
+        assert!(squashed.contains("🎉 1"), "the other bucket: {squashed}");
+    }
+
+    /// A pre-#22 daemon sends neither field, so the card renders exactly as it
+    /// does today — no `Subs:` line and no `React:` line.
+    #[test]
+    fn detail_card_omits_subs_and_react_when_empty() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(!text.contains("Subs:"), "no subscribers ⇒ no line: {text}");
+        assert!(!text.contains("React:"), "no reactions ⇒ no line: {text}");
+    }
+
+    /// multica parity #17: an issue's resolved CUSTOM PROPERTIES render as a
+    /// `Props:` header followed by one `◆ Name: value` line per definition, in
+    /// the catalog order the daemon sent.
+    #[test]
+    fn detail_card_renders_a_props_block_in_catalog_order() {
+        let mut issue = full_issue();
+        issue.properties = vec![
+            IssuePropertyRow {
+                key: "sprint".into(),
+                name: "Sprint".into(),
+                kind: "select".into(),
+                value: "S2".into(),
+            },
+            IssuePropertyRow {
+                key: "owner".into(),
+                name: "Owner".into(),
+                kind: "text".into(),
+                value: "amy".into(),
+            },
+        ];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(squashed.contains("Props:"), "the header: {squashed}");
+        let sprint = squashed
+            .find("◆ Sprint: S2")
+            .unwrap_or_else(|| panic!("the sprint line: {squashed}"));
+        let owner = squashed
+            .find("◆ Owner: amy")
+            .unwrap_or_else(|| panic!("the owner line: {squashed}"));
+        assert!(sprint < owner, "catalog order is preserved: {squashed}");
+    }
+
+    /// multica parity #17: the AGENT METADATA scratch bag renders as a `Meta:`
+    /// header followed by one `· key = value` line per entry.
+    #[test]
+    fn detail_card_renders_a_meta_block() {
+        let mut issue = full_issue();
+        issue.metadata = vec![IssueMetadataRow {
+            key: "pr_number".into(),
+            value_json: "42".into(),
+            value: "42".into(),
+        }];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert!(squashed.contains("Meta:"), "the header: {squashed}");
+        assert!(
+            squashed.contains("· pr_number = 42"),
+            "the entry: {squashed}"
+        );
+    }
+
+    /// A pre-#17 daemon sends neither field, so the card renders exactly as it
+    /// does today — no `Props:` line and no `Meta:` line.
+    #[test]
+    fn detail_card_omits_props_and_meta_when_empty() {
+        let s = state_for(full_issue());
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let text = painted_text(&buf);
+        assert!(!text.contains("Props:"), "no properties ⇒ no line: {text}");
+        assert!(!text.contains("Meta:"), "no metadata ⇒ no line: {text}");
+    }
+
+    /// DECOY: a property whose RENDERED value is empty still shows its name and
+    /// never paints a bare `◆ :` with a dangling colon.
+    #[test]
+    fn detail_card_keeps_the_name_when_a_property_value_is_empty() {
+        let mut issue = full_issue();
+        issue.properties = vec![IssuePropertyRow {
+            key: "risk".into(),
+            name: "Risk".into(),
+            kind: "text".into(),
+            value: String::new(),
+        }];
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(
+            squashed.contains("◆ Risk:"),
+            "the name survives: {squashed}"
+        );
+        assert!(
+            !squashed.contains("◆ :"),
+            "no dangling bare marker: {squashed}"
+        );
+    }
+
+    /// A subscriber count with the LOCAL HUMAN absent renders the count but no
+    /// `✓ you` marker.
+    #[test]
+    fn detail_card_omits_the_you_marker_when_not_subscribed() {
+        let mut issue = full_issue();
+        issue.subscriber_count = 2;
+        issue.subscribed = false;
+        let s = state_for(issue);
+        let mut buf = WireBuffer::new(80, 40);
+        render_task_detail(&mut buf, 80, 0, 39, &s);
+        let squashed = painted_text(&buf).split_whitespace().collect::<Vec<_>>().join(" ");
+        assert!(squashed.contains("Subs: 2"), "the count: {squashed}");
+        assert!(!squashed.contains("✓ you"), "not subscribed: {squashed}");
+    }
+
+    /// A fresh unchecked criterion with a deterministic id.
     /// A fresh unchecked criterion with a deterministic id.
     fn crit(id: &str, text: &str) -> AcceptanceCriterion {
         AcceptanceCriterion::with_id(id, text).expect("criterion")

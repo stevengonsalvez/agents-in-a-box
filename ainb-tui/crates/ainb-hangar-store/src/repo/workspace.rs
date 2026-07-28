@@ -31,6 +31,7 @@ use ainb_hangar_core::ids::WorkspaceId;
 use sqlx::SqlitePool;
 
 use crate::bootstrap::default_owner_id;
+use crate::repo::daemon_config::DaemonConfigRepo;
 
 /// The per-workspace config read from / written to the `workspace` table's
 /// migration-0020 columns.
@@ -109,15 +110,25 @@ impl WorkspaceRepo {
     ///
     /// # Errors
     ///
-    /// Returns [`WorkspaceRepoError::SlugTaken`] on the slug UNIQUE violation,
-    /// [`WorkspaceRepoError::NotFound`] when no owner user exists yet (an
-    /// un-bootstrapped DB), or [`WorkspaceRepoError::Db`] on any other store fault.
+    /// Returns [`WorkspaceRepoError::CreationDisabled`] when this instance has
+    /// workspace creation locked down, [`WorkspaceRepoError::SlugTaken`] on the
+    /// slug UNIQUE violation, [`WorkspaceRepoError::NotFound`] when no owner user
+    /// exists yet (an un-bootstrapped DB), or [`WorkspaceRepoError::Db`] on any
+    /// other store fault.
     pub async fn create(
         pool: &SqlitePool,
         slug: &str,
         name: &str,
         issue_prefix: Option<&str>,
     ) -> Result<WorkspaceRow, WorkspaceRepoError> {
+        // The self-host lockdown gate, checked FIRST — before the owner lookup,
+        // before minting an id/clock, before the transaction — mirroring multica's
+        // placement ahead of body decode and slug validation in `CreateWorkspace`.
+        // It refuses EVERY caller (including the existing owner) and writes
+        // nothing.
+        if Self::creation_disabled(pool).await? {
+            return Err(WorkspaceRepoError::CreationDisabled);
+        }
         let owner_id = default_owner_id(pool).await?.ok_or(WorkspaceRepoError::NotFound)?;
         let id = SystemIdGen.new_ulid();
         let now = SystemClock.now_ms();
@@ -155,6 +166,38 @@ impl WorkspaceRepo {
             slug: slug.to_string(),
             name: name.to_string(),
         })
+    }
+
+    /// Whether this instance refuses new workspaces (multica's
+    /// `DISABLE_WORKSPACE_CREATION`).
+    ///
+    /// Resolution order: the [`ENV_WORKSPACE_CREATION_DISABLED`] env override wins
+    /// ONE-WAY (true locks down; false/absent defers), else the
+    /// `daemon_config: workspace.creation_disabled` row, else the coded default
+    /// (creation allowed). A malformed stored value falls back to the default
+    /// rather than erroring — a corrupt knob must not brick create, matching
+    /// [`DaemonConfigRepo::get_bool`].
+    ///
+    /// This is a READ helper for surfaces that want to hide a create affordance;
+    /// the authoritative refusal is the gate inside [`WorkspaceRepo::create`].
+    ///
+    /// # Errors
+    ///
+    /// Returns [`WorkspaceRepoError::Db`] only if the `daemon_config` read fails.
+    ///
+    /// [`ENV_WORKSPACE_CREATION_DISABLED`]: ainb_hangar_core::daemon_config::ENV_WORKSPACE_CREATION_DISABLED
+    /// [`DaemonConfigRepo::get_bool`]: crate::repo::daemon_config::DaemonConfigRepo::get_bool
+    pub async fn creation_disabled(pool: &SqlitePool) -> Result<bool, WorkspaceRepoError> {
+        use ainb_hangar_core::daemon_config::{
+            ENV_WORKSPACE_CREATION_DISABLED, KEY_WORKSPACE_CREATION_DISABLED,
+            workspace_creation_disabled,
+        };
+        let stored = DaemonConfigRepo::get(pool, KEY_WORKSPACE_CREATION_DISABLED).await?;
+        let env = std::env::var(ENV_WORKSPACE_CREATION_DISABLED).ok();
+        Ok(workspace_creation_disabled(
+            stored.as_deref(),
+            env.as_deref(),
+        ))
     }
 
     /// The `user_id` of the workspace's owner member, or `None` when the workspace
@@ -525,6 +568,15 @@ pub enum WorkspaceRepoError {
     /// host must always have a tenant to stand in).
     #[error("cannot delete the last workspace")]
     LastWorkspace,
+    /// This instance has workspace creation locked down
+    /// (`daemon_config: workspace.creation_disabled`, or the
+    /// `HANGAR_DISABLE_WORKSPACE_CREATION` env override).
+    ///
+    /// Multica's 403: it refuses EVERY caller, including the existing owner, and
+    /// writes nothing. Creation-only — deletes and the bootstrap seed are not
+    /// gated.
+    #[error("workspace creation is disabled for this instance")]
+    CreationDisabled,
     /// An underlying `sqlx` failure (IO, decode, …).
     #[error(transparent)]
     Db(#[from] sqlx::Error),

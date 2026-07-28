@@ -171,6 +171,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
         Screen::IssueList => {
             vec![
                 ("a", "assign"),
+                ("y", "activity"),
                 ("c", "create"),
                 ("s", "sub-issue"),
                 ("d", "done"),
@@ -188,6 +189,7 @@ fn footer_hints(active: &Screen) -> Vec<(&'static str, &'static str)> {
             ("t", "tick"),
         ],
         Screen::AgentPicker(_) => vec![("enter", "assign"), ("esc", "close")],
+        Screen::ActivityTimeline(_) => vec![("j/k", "scroll"), ("r", "refresh"), ("esc", "close")],
         Screen::SkillManager => vec![("i", "import"), ("/", "filter")],
         Screen::Autopilots => vec![("a", "add"), ("r", "run"), ("d", "disable"), ("e", "edit")],
         Screen::Kanban => vec![("←→", "focus"), ("⇧←→", "move"), ("R", "retry")],

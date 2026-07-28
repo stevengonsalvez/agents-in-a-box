@@ -78,6 +78,11 @@ pub(crate) async fn kill_session(session_name: &str) {
 pub struct TmuxRun {
     session_name: String,
     exit_file: PathBuf,
+    /// The generated pane wrapper. Held so the run can UNLINK it at teardown:
+    /// the script embeds the plaintext child env (a codex agent's `agent_env`,
+    /// keychain-resident API keys), and before parity #30 it lingered on disk
+    /// forever at 0700 (see [`TmuxRun::purge_wrapper`]).
+    wrapper: PathBuf,
     max_runtime: Duration,
 }
 
@@ -157,6 +162,7 @@ pub async fn spawn(
     Ok(TmuxRun {
         session_name: session_name.to_string(),
         exit_file,
+        wrapper,
         max_runtime,
     })
 }
@@ -179,10 +185,13 @@ impl TmuxRun {
         let deadline = Instant::now() + self.max_runtime;
         loop {
             if !tmux_session_exists(&self.session_name).await {
+                // `outcome_from_exit_file` IS the finalize seam — it purges the
+                // wrapper (parity #30).
                 return Ok(self.outcome_from_exit_file());
             }
             if Instant::now() >= deadline {
                 self.kill_and_confirm_reaped().await;
+                self.purge_wrapper();
                 tracing::warn!(
                     session = %self.session_name,
                     reason = "timeout",
@@ -207,10 +216,26 @@ impl TmuxRun {
     /// reason.
     pub async fn abort(&self, reason: FailureReason) -> RunOutcome {
         self.kill_and_confirm_reaped().await;
+        self.purge_wrapper();
         RunOutcome::Failed {
             reason,
             result: interactive_result(None),
         }
+    }
+
+    /// Best-effort UNLINK of the pane wrapper, at the FINALIZE seam only.
+    ///
+    /// The wrapper bakes the plaintext child env into a file on disk. The
+    /// headless path passes that env in-process and never persists it, so the
+    /// interactive path must not leave a durable copy behind once the run is
+    /// over (parity #30 — the acceptance sweep greps the task's logs dir).
+    ///
+    /// Timing matters: this runs AFTER teardown is confirmed, never mid-run,
+    /// because `/bin/sh` re-reads a running script and unlinking it early would
+    /// break a live session. Failure is ignored — a run's outcome must not hinge
+    /// on a cleanup unlink.
+    fn purge_wrapper(&self) {
+        let _ = std::fs::remove_file(&self.wrapper);
     }
 
     /// Kill the session by its EXACT name (never a wildcard / kill-server) and
@@ -242,7 +267,10 @@ impl TmuxRun {
     /// Read the wrapper's recorded exit code and classify it, mirroring the
     /// headless runner's outcome mapping (`0` → success, `75` → retryable
     /// runtime offline, any other / missing → terminal agent error).
+    /// The session is gone by the time this runs, so it is also the FINALIZE
+    /// seam that unlinks the secret-bearing pane wrapper.
     fn outcome_from_exit_file(&self) -> RunOutcome {
+        self.purge_wrapper();
         let code = std::fs::read_to_string(&self.exit_file)
             .ok()
             .and_then(|s| s.trim().parse::<i32>().ok());
@@ -359,8 +387,34 @@ mod tests {
         TmuxRun {
             session_name: "tmux_hangar-test".to_string(),
             exit_file,
+            wrapper: dir.join(WRAPPER_FILE),
             max_runtime: Duration::from_secs(1),
         }
+    }
+
+    /// Parity #30: the pane wrapper bakes the plaintext child env onto disk, so
+    /// once the run reaches a terminal outcome (the session is gone and the exit
+    /// code is being classified) the file MUST be unlinked. Before this, it
+    /// lingered forever at 0700 and every `sk-…` an agent ran with stayed
+    /// greppable under the task's logs dir.
+    #[test]
+    fn terminal_outcome_unlinks_the_secret_bearing_wrapper() {
+        let dir = tempfile::tempdir().unwrap();
+        let run = run_with_exit(dir.path(), Some("0"));
+        let wrapper = dir.path().join(WRAPPER_FILE);
+        std::fs::write(
+            &wrapper,
+            "#!/bin/sh\nenv -i SECRET_TOKEN='sk-live-DEADBEEF01' x\n",
+        )
+        .unwrap();
+        assert!(wrapper.exists(), "precondition: the wrapper is on disk");
+
+        let _ = run.outcome_from_exit_file();
+
+        assert!(
+            !wrapper.exists(),
+            "the wrapper embeds the plaintext child env and must not survive teardown"
+        );
     }
 
     #[test]

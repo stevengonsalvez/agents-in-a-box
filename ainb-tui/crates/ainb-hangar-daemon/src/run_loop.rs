@@ -903,6 +903,24 @@ async fn prepare_spawn_inputs(
         HANGAR_PARENT_SESSION.to_string(),
     );
 
+    // 0056 / multica parity #21: hand the child its ORIGIN PROVENANCE, the seam
+    // that lets a mention-spawned (or autopilot-fired) run stamp the issues it
+    // creates — multica does the same by injecting the quick-create task id into
+    // the agent's environment (`internal/daemon/daemon.go:1742`). The runner
+    // allowlists both keys; set AFTER `build_task_env` so the daemon's value
+    // always beats an ambient one. A provenance-less task sets NEITHER key, so
+    // an agent's create falls back to `manual` rather than inheriting a stale
+    // pair from the operator's shell.
+    if let Some(origin) = task.origin.as_ref() {
+        task_env.insert(
+            crate::runner::ORIGIN_TYPE_ENV.to_string(),
+            origin.kind_db_str().to_string(),
+        );
+        if let Some(id) = origin.id() {
+            task_env.insert(crate::runner::ORIGIN_ID_ENV.to_string(), id.to_string());
+        }
+    }
+
     // P6.4: materialise the agent's attached skills into the provider's layout,
     // forwarding the `*_HOME` pointer via `task_env`. Non-fatal — a task must
     // still dispatch even if a skill bundle cannot be written.
@@ -1294,7 +1312,8 @@ async fn execute_claimed(
                     .run_codex_in(
                         &env,
                         task_env,
-                        dispatch.agent_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
                         &dispatch.invocation,
                         &location,
                     )
@@ -1304,7 +1323,8 @@ async fn execute_claimed(
                     .run_copilot_in(
                         &env,
                         task_env,
-                        dispatch.agent_env,
+                        // The ONE permitted plaintext escape: the child env.
+                        dispatch.agent_env.expose_for_child_env(),
                         &dispatch.invocation,
                         &location,
                     )
@@ -1446,7 +1466,8 @@ async fn run_interactive(
     // agent's `agent_env`; the claude path layers nothing (parity with
     // `execute_claimed`).
     let extra_env = match dispatch.backend {
-        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone(),
+        // The ONE permitted plaintext escape: the child env.
+        Backend::Codex | Backend::Copilot => dispatch.agent_env.clone().expose_for_child_env(),
         Backend::Claude => Vec::new(),
     };
     let child_env = crate::runner::compose_child_env(task_env, extra_env);
@@ -1650,6 +1671,9 @@ async fn finalize_success(
     // card does not slide to `done` while its leader / other members still run.
     // Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative,
+    // attributed to the agent that ran it. Best-effort.
+    crate::board::record_task_outcome(pool, task, true).await;
     // Twin the durable-card move on the issue's own `state` (the default board
     // buckets by it): an aggregate-`done` set promotes the issue to `done`;
     // failed/cancelled sets leave it untouched. Advance-only + best-effort.
@@ -1849,6 +1873,8 @@ async fn finalize_failure(
     // and one failed sibling lands the whole card in the `failed` column (aggregate
     // precedence). Best-effort; never blocks.
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative.
+    crate::board::record_task_outcome(pool, task, false).await;
     // Twin on `issue.state`: the aggregate is `failed`/`cancelled` here (this
     // task's own failure is in the set), so this no-ops — but it keeps the
     // lifecycle seam symmetric with the board seam. Advance-only + best-effort.
@@ -1973,6 +1999,8 @@ async fn finalize_setup_failure(
         clock,
     );
     crate::board::auto_move_after_terminal(pool, task).await;
+    // multica parity #13: the run's own outcome on the card's narrative.
+    crate::board::record_task_outcome(pool, task, false).await;
     // Twin on `issue.state`; no-ops on the failed aggregate, kept for symmetry
     // with the board seam. Advance-only + best-effort.
     crate::board::advance_and_cascade_child(pool, task, events).await;
@@ -2263,7 +2291,12 @@ struct ResolvedDispatch {
     invocation: ProviderInvocation,
     /// The agent's per-agent env (`agent_env`), layered onto the child env
     /// after the deny-by-default ambient allowlist.
-    agent_env: Vec<(String, String)>,
+    ///
+    /// Typed [`AgentEnv`](ainb_hangar_core::agent_env::AgentEnv), so this
+    /// struct's derived `Debug` (a `tracing::debug!(?dispatch)`, an `anyhow`
+    /// context, a panic message) masks the VALUES (parity #30). The plaintext
+    /// is reached only at the compose seam, via `expose_for_child_env`.
+    agent_env: ainb_hangar_core::agent_env::AgentEnv,
 }
 
 /// The `tasks.mode` column value that asks for an attachable session (ccc / D6,
@@ -2310,7 +2343,7 @@ impl ResolvedDispatch {
                 model: None,
                 cli_args: Vec::new(),
             },
-            agent_env: Vec::new(),
+            agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         }
     }
 }
@@ -4015,7 +4048,7 @@ mod tests {
             backend,
             mode: dispatch_mode("interactive"),
             invocation: inv.clone(),
-            agent_env: Vec::new(),
+            agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
         };
 
         // The argv an INTERACTIVE task row actually gets, through the same
@@ -4099,7 +4132,7 @@ mod tests {
                 backend: Backend::Codex,
                 mode: dispatch_mode("interactive"),
                 invocation: inv.clone(),
-                agent_env: Vec::new(),
+                agent_env: ainb_hangar_core::agent_env::AgentEnv::default(),
             },
         );
         assert!(
@@ -4217,5 +4250,134 @@ mod tests {
             Backend::Claude,
             "no per-agent override falls back to the runtime's advertised provider"
         );
+    }
+
+    // ---- ORIGIN PROVENANCE env seam (0056, multica parity #21) -------------
+
+    /// A secret backend that holds nothing — the preamble's credential read is
+    /// irrelevant to the env-key assertions below.
+    struct NoSecretsBackend;
+    impl ainb_hangar_secrets::SecretBackend for NoSecretsBackend {
+        fn get(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<Option<ainb_hangar_secrets::SecretBytes>> {
+            Ok(None)
+        }
+        fn put(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+            _: &[u8],
+        ) -> ainb_hangar_secrets::Result<()> {
+            Ok(())
+        }
+        fn delete(
+            &self,
+            _: &ainb_hangar_secrets::Scope,
+            _: &str,
+        ) -> ainb_hangar_secrets::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// Build a real queued task, optionally stamped with `origin`, and run the
+    /// dispatch preamble over it. Returns the child `task_env`.
+    async fn task_env_for_origin(
+        origin: Option<&ainb_hangar_core::origin::IssueOrigin>,
+    ) -> std::collections::HashMap<String, String> {
+        use ainb_hangar_store::bootstrap;
+        use ainb_hangar_store::repo::task::{NewTask, TaskRepo};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = ainb_hangar_store::Store::open_in(dir.path()).await.unwrap();
+        let pool = store.pool();
+        let ws = bootstrap::ensure_default_workspace(pool).await.unwrap();
+        bootstrap::ensure_runtime(pool, &bootstrap::default_runtime_id(), 1)
+            .await
+            .unwrap();
+        let agent = bootstrap::create_agent(pool, &ws, "worker", "claude", None).await.unwrap();
+        let task_id =
+            ainb_hangar_core::idgen::IdGen::new_ulid(&ainb_hangar_core::idgen::SystemIdGen);
+        TaskRepo::insert(
+            pool,
+            &NewTask {
+                id: task_id.clone(),
+                workspace_id: ws.clone(),
+                runtime_id: bootstrap::default_runtime_id(),
+                agent_id: agent.id.clone(),
+                issue_id: None,
+                work_dir: None,
+                priority: 0,
+                created_at: 1,
+                autopilot_run_id: None,
+                generation: 0,
+            },
+        )
+        .await
+        .unwrap();
+        if let Some(origin) = origin {
+            TaskRepo::set_origin(pool, &task_id, origin).await.unwrap();
+        }
+        let task = TaskRepo::get_by_id(pool, &task_id).await.unwrap().unwrap();
+
+        let root = dir.path().join("task-root");
+        let env = crate::execenv::ExecEnv {
+            workdir: root.join("workdir"),
+            output: root.join("output"),
+            logs: root.join("logs"),
+            gc_meta: root.join(".gc_meta.json"),
+        };
+        // Codex backend + a zero cred timeout: the claude-only credential read is
+        // skipped, so the preamble is just the env build we are asserting on.
+        let (task_env, _cred) = prepare_spawn_inputs(
+            pool,
+            &task,
+            &env,
+            Backend::Codex,
+            Arc::new(NoSecretsBackend),
+            Duration::from_millis(1),
+        )
+        .await;
+        task_env
+    }
+
+    /// A mention-spawned task hands its child BOTH provenance keys — the seam
+    /// that lets the agent's `ainb hangar issue create` stamp the issue it
+    /// creates with the comment that asked for it.
+    #[tokio::test]
+    async fn a_mention_task_carries_its_origin_into_the_child_env() {
+        let origin = ainb_hangar_core::origin::IssueOrigin::comment_mention("c-77").unwrap();
+        let env = task_env_for_origin(Some(&origin)).await;
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_TYPE_ENV).map(String::as_str),
+            Some("comment_mention")
+        );
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_ID_ENV).map(String::as_str),
+            Some("c-77")
+        );
+    }
+
+    /// A provenance-less task sets NEITHER key, so the agent's create falls back
+    /// to `manual` instead of inheriting a stale pair.
+    #[tokio::test]
+    async fn a_task_without_origin_sets_neither_env_key() {
+        let env = task_env_for_origin(None).await;
+        assert!(!env.contains_key(crate::runner::ORIGIN_TYPE_ENV));
+        assert!(!env.contains_key(crate::runner::ORIGIN_ID_ENV));
+    }
+
+    /// `manual` carries no id: the kind key is set, the id key is not.
+    #[tokio::test]
+    async fn a_manual_origin_sets_the_kind_key_only() {
+        let origin = ainb_hangar_core::origin::IssueOrigin::manual();
+        let env = task_env_for_origin(Some(&origin)).await;
+        assert_eq!(
+            env.get(crate::runner::ORIGIN_TYPE_ENV).map(String::as_str),
+            Some("manual")
+        );
+        assert!(!env.contains_key(crate::runner::ORIGIN_ID_ENV));
     }
 }
