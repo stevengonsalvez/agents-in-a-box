@@ -413,7 +413,7 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
     }
 
     let preparation = prepare_socket(&config.socket_path, &config.codex_binary).await?;
-    let owns_server = preparation.owns_server;
+    let mut owns_server = preparation.owns_server;
     let owner_marker_path = socket_owner_marker(&config.socket_path);
     let mut server = if !owns_server {
         None
@@ -437,22 +437,34 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
         let pid = child.id().ok_or_else(|| {
             ProviderError::Transport("Codex app-server process id unavailable".into())
         })?;
-        let identity = process_identity(pid).await.ok_or_else(|| {
-            ProviderError::Transport("Codex app-server process identity unavailable".into())
-        })?;
-        let marker = SocketOwnerMarker {
-            schema: 1,
-            pid,
-            process_start_fingerprint: identity.process_start_fingerprint,
-            executable: identity.executable,
-        };
-        let marker_json = serde_json::to_vec(&marker)?;
-        if let Err(error) = tokio::fs::write(&owner_marker_path, marker_json).await {
+        // `wait_for_socket` only proves the socket path appeared, not that THIS child
+        // bound it. `prepare_socket` is a check-then-act with no lock, so concurrent
+        // callers can each decide they own the server; without this check every loser
+        // leaks a live app-server that nothing holds a handle to.
+        let listeners = socket_listener_pids(&config.socket_path).await;
+        if bound_by_child(pid, listeners.as_deref()) {
+            let identity = process_identity(pid).await.ok_or_else(|| {
+                ProviderError::Transport("Codex app-server process identity unavailable".into())
+            })?;
+            let marker = SocketOwnerMarker {
+                schema: 1,
+                pid,
+                process_start_fingerprint: identity.process_start_fingerprint,
+                executable: identity.executable,
+            };
+            let marker_json = serde_json::to_vec(&marker)?;
+            if let Err(error) = tokio::fs::write(&owner_marker_path, marker_json).await {
+                stop_child(&mut child).await;
+                remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
+                return Err(error.into());
+            }
+            Some(child)
+        } else {
+            // Lost the bind race: reap our own server and adopt the winner's.
             stop_child(&mut child).await;
-            remove_owned_socket(Some(&config.socket_path), Some(&owner_marker_path)).await;
-            return Err(error.into());
+            owns_server = false;
+            None
         }
-        Some(child)
     };
 
     let mut proxy_command = tokio_command(proxy_command(&config.codex_binary, &config.socket_path));
@@ -708,6 +720,36 @@ async fn listener_owner_marker(
         }
     }
     (owners.len() == 1).then(|| owners.remove(0))
+}
+
+/// PIDs currently holding `socket_path`, or `None` when `lsof` cannot answer.
+///
+/// `None` means "unknown", never "nobody" — callers must not read it as proof the
+/// socket is free.
+async fn socket_listener_pids(socket_path: &Path) -> Option<Vec<u32>> {
+    let output = Command::new("lsof")
+        .args(["-n", "-t", "--"])
+        .arg(socket_path)
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|output| output.status.success())?;
+    String::from_utf8(output.stdout)
+        .ok()?
+        .lines()
+        .map(|line| line.trim().parse::<u32>().ok())
+        .collect()
+}
+
+/// Whether the app-server just spawned is the sole process holding the socket.
+///
+/// `listeners == None` means `lsof` could not answer, so we trust the spawn rather
+/// than kill a healthy server on a host without `lsof`. Any other shape (a different
+/// pid, several pids, or none) means this child did not win the bind.
+fn bound_by_child(child_pid: u32, listeners: Option<&[u32]>) -> bool {
+    listeners.is_none_or(|pids| pids.len() == 1 && pids[0] == child_pid)
 }
 
 async fn repair_owner_marker(repair: MarkerRepair) -> Result<bool, ProviderError> {
@@ -1180,6 +1222,20 @@ mod tests {
 
     use super::*;
     use crate::fleet_provider::{QuestionOption, StructuredQuestion};
+
+    #[test]
+    fn bound_by_child_rejects_race_losers() {
+        // Sole holder: this child won the bind, so it owns the server.
+        assert!(bound_by_child(42, Some(&[42])));
+        // Another process won the bind: claiming ownership here strands our child.
+        assert!(!bound_by_child(42, Some(&[7])));
+        // Several holders, i.e. the duplicate-spawn race: ambiguous, do not claim.
+        assert!(!bound_by_child(42, Some(&[7, 42])));
+        // Nothing holds the socket: our child did not bind it.
+        assert!(!bound_by_child(42, Some(&[])));
+        // `lsof` unavailable: trust the spawn rather than kill a healthy server.
+        assert!(bound_by_child(42, None));
+    }
 
     struct FakeCleanup(Arc<AtomicBool>);
 
