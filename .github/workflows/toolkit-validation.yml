@@ -109,7 +109,15 @@ jobs:
           # Naming convention: `tripwire_<area>_<feature>_*` where area is
           # one of {cli, core, plugin}. `tripwire_helpers.rs` is the shared
           # module (not a test) and is excluded by the prefix scheme.
-          cargo test -p ainb --release \
+          #
+          # --no-fail-fast is deliberate: without it cargo stops at the
+          # first failing test binary, so a run reports one casualty and
+          # hides the rest. This workflow was unparseable for six weeks
+          # and several tripwires rotted meanwhile; each fix then cost a
+          # full CI cycle just to reveal the next failure. Surfacing every
+          # failure in one run is what makes the next such gap cheap to
+          # recover from.
+          cargo test -p ainb --release --no-fail-fast \
               --test 'tripwire_cli_*' \
               --test 'tripwire_core_skill_manager_*' \
               --test 'tripwire_core_home_tile_lists_skill_manager'
