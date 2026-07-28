@@ -89,6 +89,16 @@ final class FleetConnectionTests: XCTestCase {
         }
     }
 
+    func testATCReadProjectionDecodesOwnershipAndScheduleFacts() throws {
+        let result = try FleetWire.decoder().decode(AtcListResult.self, from: Data(#"""
+        {"instances":[{"name":"main","cwd":"/tmp","tmux_session":"atc-main","heartbeat_cron":"*/2 * * * *","err_retry_cap":3,"idle_pause_min":60,"next_tick_at":2000,"enabled":true,"last_heartbeat_at":1000,"config_generation":4}],"scheduler_ownership":"legacy_timer_reconciliation_required"}
+        """#.utf8))
+
+        XCTAssertEqual(result.instances.map(\.name), ["main"])
+        XCTAssertEqual(result.instances.first?.configGeneration, 4)
+        XCTAssertEqual(result.schedulerOwnership, .legacyTimerReconciliationRequired)
+    }
+
     func testOldCatalogueRefusesReceiptAndStartBeforeWireIO() async throws {
         var descriptors = [Int32](repeating: 0, count: 2)
         XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)

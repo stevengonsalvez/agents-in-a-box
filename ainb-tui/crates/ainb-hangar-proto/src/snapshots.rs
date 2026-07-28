@@ -550,6 +550,31 @@ pub struct AtcRegisterParams {
     /// The idle-pause threshold in minutes; `None` uses the daemon default (60).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_pause_min: Option<i64>,
+    /// Configuration generation read from the daemon. Omitted only for legacy
+    /// CLI compatibility; negotiated clients must send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<i64>,
+}
+
+/// Authoritative scheduler ownership state. Mutation stays unavailable until
+/// reconciliation proves the daemon is the only heartbeat scheduler.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtcSchedulerOwnership {
+    /// Existing launchd/systemd timer files have not been reconciled safely.
+    LegacyTimerReconciliationRequired,
+}
+
+/// Result state for a generation-checked mutation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum AtcMutationStatus {
+    /// The requested mutation was written.
+    Applied,
+    /// A matching lost-response retry found the already-written mutation.
+    AlreadyApplied,
+    /// Another configuration won; `config_generation` is current.
+    Stale,
 }
 
 /// Result of [`crate::methods::ATC_REGISTER`]: the persisted instance name + its
@@ -561,6 +586,12 @@ pub struct AtcRegisterResult {
     pub name: String,
     /// The cached next heartbeat instant (epoch-ms), or `None`.
     pub next_tick_at: Option<i64>,
+    /// Current durable configuration generation.
+    pub config_generation: i64,
+    /// Whether the requested conditional mutation applied.
+    pub status: AtcMutationStatus,
+    /// Scheduler ownership exposed so clients fail closed for mutation.
+    pub scheduler_ownership: AtcSchedulerOwnership,
 }
 
 /// One registered ATC instance in the [`crate::methods::ATC_LIST`] result.
@@ -584,6 +615,8 @@ pub struct AtcInstanceWire {
     pub enabled: bool,
     /// Epoch-ms of the last fired heartbeat, or `None`.
     pub last_heartbeat_at: Option<i64>,
+    /// Current durable configuration generation for conditional mutation.
+    pub config_generation: i64,
 }
 
 /// Result of [`crate::methods::ATC_LIST`]: every registered ATC instance,
@@ -592,6 +625,8 @@ pub struct AtcInstanceWire {
 pub struct AtcListResult {
     /// The registered instances.
     pub instances: Vec<AtcInstanceWire>,
+    /// Global ownership fact, not inferred by clients from local timer files.
+    pub scheduler_ownership: AtcSchedulerOwnership,
 }
 
 /// Params for [`crate::methods::ATC_ESCALATE`] (spec P9, D12): raise an ATC
@@ -626,6 +661,10 @@ pub struct AtcEscalateResult {
 pub struct AtcUnregisterParams {
     /// The sanitized instance name to disable.
     pub name: String,
+    /// Configuration generation read from the daemon. Omitted only for legacy
+    /// CLI compatibility; negotiated clients must send it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expected_generation: Option<i64>,
 }
 
 /// Result of [`crate::methods::ATC_UNREGISTER`]: the instance name and whether it
@@ -637,6 +676,12 @@ pub struct AtcUnregisterResult {
     pub name: String,
     /// `true` when a registered instance was disabled; `false` for an unknown name.
     pub disabled: bool,
+    /// Current durable configuration generation, or `None` when unknown.
+    pub config_generation: Option<i64>,
+    /// Conditional mutation result.
+    pub status: AtcMutationStatus,
+    /// Scheduler ownership exposed so clients fail closed for mutation.
+    pub scheduler_ownership: AtcSchedulerOwnership,
 }
 
 /// One indexed profile in the [`crate::methods::PROFILE_LIST`] result (spec P5):

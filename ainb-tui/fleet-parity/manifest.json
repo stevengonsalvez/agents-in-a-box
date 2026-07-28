@@ -42,6 +42,35 @@
       "release_classification": "deferred_tui"
     },
     {
+      "id": "fleet.atc.read",
+      "tier": "v1",
+      "daemon_request_method": "atc/list",
+      "expected_behavior": "Daemon returns typed ATC schedule facts and explicit scheduler ownership state.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs",
+          "crates/ainb-hangar-daemon/tests/rpc_atc.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; legacy CLI scheduler migration needs separate parity proof."
+      },
+      "swift": {
+        "status": "blocked_proof",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRoster/FleetWindowView.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetConnectionTests.swift"
+        ],
+        "rationale": "AFM-E04 exposes read-only typed schedule facts. Direct XCUI and isolated booted-daemon proof remain unrun."
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
       "id": "fleet.broadcast.execute",
       "tier": "v1",
       "daemon_request_method": "fleet/broadcast",

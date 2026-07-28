@@ -323,3 +323,65 @@ async fn atc_register_rejects_an_invalid_cron() {
         "an unparseable heartbeat cron is a client error: {resp}"
     );
 }
+
+#[tokio::test]
+async fn atc_generation_retry_is_idempotent_and_conflicts_are_typed() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, _store) = start_server(dir.path()).await;
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+
+    let created = client
+        .call(
+            methods::ATC_REGISTER,
+            serde_json::json!({ "name": "main", "expected_generation": 0 }),
+        )
+        .await;
+    assert_eq!(created["result"]["status"], "applied");
+    assert_eq!(created["result"]["config_generation"], 1);
+
+    let changed = client
+        .call(
+            methods::ATC_REGISTER,
+            serde_json::json!({
+                "name": "main",
+                "heartbeat_cron": "*/5 * * * *",
+                "expected_generation": 1
+            }),
+        )
+        .await;
+    assert_eq!(changed["result"]["status"], "applied");
+    assert_eq!(changed["result"]["config_generation"], 2);
+
+    let retry = client
+        .call(
+            methods::ATC_REGISTER,
+            serde_json::json!({
+                "name": "main",
+                "heartbeat_cron": "*/5 * * * *",
+                "expected_generation": 1
+            }),
+        )
+        .await;
+    assert_eq!(retry["result"]["status"], "already_applied");
+    assert_eq!(retry["result"]["config_generation"], 2);
+
+    let conflict = client
+        .call(
+            methods::ATC_REGISTER,
+            serde_json::json!({
+                "name": "main",
+                "heartbeat_cron": "*/10 * * * *",
+                "expected_generation": 1
+            }),
+        )
+        .await;
+    assert_eq!(conflict["result"]["status"], "stale");
+    assert_eq!(conflict["result"]["config_generation"], 2);
+
+    let list = client.call(methods::ATC_LIST, serde_json::json!({})).await;
+    assert_eq!(
+        list["result"]["scheduler_ownership"],
+        "legacy_timer_reconciliation_required"
+    );
+}

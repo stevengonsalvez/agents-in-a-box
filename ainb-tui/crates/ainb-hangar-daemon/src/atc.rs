@@ -203,8 +203,30 @@ impl AtcHeartbeatScheduler {
                 () = tokio::time::sleep(delay) => {}
             }
             if let Some(inst) = fire_target {
-                self.fire(&inst).await;
-                self.reschedule(&inst).await;
+                let due_tick_at = inst.next_tick_at.expect("schedulable rows have a due tick");
+                match AtcInstanceRepo::claim_due(
+                    &self.pool,
+                    &inst.name,
+                    inst.config_generation,
+                    due_tick_at,
+                )
+                .await
+                {
+                    Ok(true) => {
+                        let fired_at = self.fire(&inst).await;
+                        self.reschedule(&inst, fired_at).await;
+                    }
+                    Ok(false) => tracing::debug!(
+                        instance = %inst.name,
+                        generation = inst.config_generation,
+                        "ATC heartbeat claim invalidated by a configuration mutation"
+                    ),
+                    Err(error) => tracing::error!(
+                        instance = %inst.name,
+                        error = %error,
+                        "ATC heartbeat claim failed"
+                    ),
+                }
             }
         }
         tracing::info!("ATC heartbeat cron stopped");
@@ -217,7 +239,7 @@ impl AtcHeartbeatScheduler {
     ///
     /// Non-fatal end to end: an unspawned instance (no tmux target) or a send
     /// fault is warned and skipped, never a panic.
-    async fn fire(&self, inst: &AtcInstanceRow) {
+    async fn fire(&self, inst: &AtcInstanceRow) -> i64 {
         let now = self.clock.now_ms();
         let rows = probe_fleet_needs(now).await;
 
@@ -246,7 +268,7 @@ impl AtcHeartbeatScheduler {
             tracing::debug!(instance = %inst.name, "ATC heartbeat: no tmux target; nudge not sent");
         }
 
-        let _ = AtcInstanceRepo::mark_heartbeat(&self.pool, &inst.name, now).await;
+        now
     }
 
     /// Apply the retry-cap decision for ONE ERR session of an instance.
@@ -301,11 +323,29 @@ impl AtcHeartbeatScheduler {
     }
 
     /// Recompute + persist the instance's next heartbeat tick from the fired slot.
-    async fn reschedule(&self, inst: &AtcInstanceRow) {
+    async fn reschedule(&self, inst: &AtcInstanceRow, fired_at: i64) {
         let next =
             recompute_next_tick(&inst.heartbeat_cron, inst.next_tick_at, self.clock.now_ms());
-        if let Err(e) = AtcInstanceRepo::set_next_tick(&self.pool, &inst.name, next).await {
-            tracing::error!(instance = %inst.name, error = %e, "ATC heartbeat reschedule failed");
+        match AtcInstanceRepo::complete_claim(
+            &self.pool,
+            &inst.name,
+            inst.config_generation,
+            next,
+            fired_at,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                instance = %inst.name,
+                generation = inst.config_generation,
+                "ATC heartbeat completion invalidated by a configuration mutation"
+            ),
+            Err(error) => tracing::error!(
+                instance = %inst.name,
+                error = %error,
+                "ATC heartbeat reschedule failed"
+            ),
         }
     }
 

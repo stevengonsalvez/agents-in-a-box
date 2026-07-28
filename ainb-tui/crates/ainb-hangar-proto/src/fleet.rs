@@ -16,10 +16,13 @@ pub const FLEET_CAPABILITY_BROADCAST_EXECUTE: &str = "fleet.broadcast.execute";
 pub const FLEET_CAPABILITY_RECEIPT_READ: &str = "fleet.receipt.read";
 /// Negotiated capability required for daemon-owned new-session starts.
 pub const FLEET_CAPABILITY_START_EXECUTE: &str = "fleet.start.execute";
+/// Negotiated capability for daemon-owned ATC read projections.
+pub const FLEET_CAPABILITY_ATC_READ: &str = "fleet.atc.read";
 
 /// Fleet capability identifiers advertised during protocol negotiation.
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     FLEET_CAPABILITY_ACTION_EXECUTE,
+    FLEET_CAPABILITY_ATC_READ,
     FLEET_CAPABILITY_BROADCAST_EXECUTE,
     "fleet.protocol.negotiate",
     FLEET_CAPABILITY_RECEIPT_READ,

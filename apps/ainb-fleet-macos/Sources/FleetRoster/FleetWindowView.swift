@@ -8,6 +8,7 @@ struct FleetWindowView: View {
     @State private var startPresented = false
     @State private var receiptsPresented = false
     @State private var broadcastPresented = false
+    @State private var atcPresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -41,7 +42,10 @@ struct FleetWindowView: View {
                 ToolbarItem { Button("Quick switch") { switcherPresented = true } }
                 ToolbarItem { Button("Start") { startPresented = true }.disabled(!store.canStart).accessibilityIdentifier("fleet.start.open") }
                 ToolbarItem { Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts).accessibilityIdentifier("fleet.receipts.open") }
-                ToolbarItem { Button("Broadcast") { broadcastPresented = true }.disabled(!store.canBroadcast).accessibilityIdentifier("fleet.broadcast.open") }
+                ToolbarItemGroup {
+                    Button("ATC") { atcPresented = true }.disabled(!store.canReadATC).accessibilityIdentifier("fleet.atc.open")
+                    Button("Broadcast") { broadcastPresented = true }.disabled(!store.canBroadcast).accessibilityIdentifier("fleet.broadcast.open")
+                }
             }
         } detail: {
             if let key = store.selectedSessionKey, let session = store.sessions.first(where: { $0.sessionKey == key }) {
@@ -56,8 +60,60 @@ struct FleetWindowView: View {
         .sheet(isPresented: $switcherPresented) { FleetQuickSwitcher(store: store, sort: presentation.sort, isPresented: $switcherPresented) }
         .sheet(isPresented: $startPresented) { FleetStartForm(store: store, isPresented: $startPresented) }
         .sheet(isPresented: $receiptsPresented) { FleetReceiptList(store: store) }
+        .sheet(isPresented: $atcPresented) { FleetATCList(store: store) }
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
         .frame(minWidth: 820, minHeight: 520)
+    }
+}
+
+private struct FleetATCList: View {
+    @ObservedObject var store: FleetStore
+
+    var body: some View {
+        List(store.atcInstances, id: \.name) { instance in
+            VStack(alignment: .leading) {
+                Text(instance.name)
+                Text(instance.enabled ? "Enabled" : "Disabled")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Cron \(instance.heartbeatCron) · retry cap \(instance.errRetryCap)")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+                Text("Next \(timestamp(instance.nextTickAt)) · last \(timestamp(instance.lastHeartbeatAt))")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(instance.name)
+            .accessibilityValue(instance.enabled ? "Enabled" : "Disabled")
+        }
+        .navigationTitle("ATC")
+        .safeAreaInset(edge: .bottom) {
+            VStack(alignment: .leading, spacing: 4) {
+                if let ownership = store.atcSchedulerOwnership {
+                    Text(ownershipLabel(ownership)).font(.caption).foregroundStyle(.secondary)
+                }
+                Text("Schedule edits remain disabled until daemon scheduler ownership is proven.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding()
+        }
+        .frame(minWidth: 520, minHeight: 360)
+        .onAppear { store.refreshATC() }
+        .accessibilityIdentifier("fleet.atc.list")
+    }
+
+    private func timestamp(_ value: Int64?) -> String {
+        guard let value else { return "not scheduled" }
+        return Date(timeIntervalSince1970: TimeInterval(value) / 1_000).formatted(date: .abbreviated, time: .shortened)
+    }
+
+    private func ownershipLabel(_ ownership: AtcSchedulerOwnership) -> String {
+        switch ownership {
+        case .legacyTimerReconciliationRequired: "Legacy timer reconciliation required"
+        }
     }
 }
 

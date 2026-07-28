@@ -66,6 +66,8 @@ final class FleetStore: ObservableObject {
     @Published private(set) var connectionState: FleetConnectionState = .connecting
     @Published var selectedSessionKey: String?
     @Published private(set) var receipts: [FleetActionReceipt] = []
+    @Published private(set) var atcInstances: [AtcInstance] = []
+    @Published private(set) var atcSchedulerOwnership: AtcSchedulerOwnership?
     @Published private(set) var pendingIntentID: String?
     @Published private(set) var controlNotice: String?
     @Published private(set) var lastStart: FleetStartResult?
@@ -115,6 +117,10 @@ final class FleetStore: ObservableObject {
 
     var canReadReceipts: Bool {
         connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.receipt.read") == true
+    }
+
+    var canReadATC: Bool {
+        connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.atc.read") == true
     }
 
     var canStart: Bool {
@@ -297,6 +303,23 @@ final class FleetStore: ObservableObject {
         }
     }
 
+    func refreshATC() {
+        guard canReadATC, let connection else {
+            controlNotice = "ATC reads are unavailable for this daemon."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                let result = try await connection.atcList()
+                atcInstances = result.instances
+                atcSchedulerOwnership = result.schedulerOwnership
+            } catch {
+                controlNotice = "ATC refresh refused: \(String(describing: error))"
+            }
+        }
+    }
+
     private func beginConnection() {
         connectionGeneration &+= 1
         let generation = connectionGeneration
@@ -339,6 +362,14 @@ final class FleetStore: ObservableObject {
             apply(bootstrapped)
             if result.capabilityIDs.contains("fleet.receipt.read") {
                 receipts = try await newConnection.receiptList(FleetReceiptListParams(limit: 50)).receipts
+            }
+            if result.capabilityIDs.contains("fleet.atc.read") {
+                let atc = try await newConnection.atcList()
+                atcInstances = atc.instances
+                atcSchedulerOwnership = atc.schedulerOwnership
+            } else {
+                atcInstances = []
+                atcSchedulerOwnership = nil
             }
             connectionState = .live(daemonVersion: result.daemonVersion, writeCompatible: result.writeCompatible)
             established = true

@@ -389,6 +389,46 @@ struct FleetBroadcastParams: Codable, Equatable {
 
 struct FleetBroadcastResult: Codable, Equatable { let receipts: [FleetActionReceipt] }
 
+enum AtcSchedulerOwnership: String, Codable, Equatable {
+    case legacyTimerReconciliationRequired = "legacy_timer_reconciliation_required"
+}
+
+struct AtcListParams: Codable, Equatable { init() {} }
+
+struct AtcInstance: Codable, Equatable {
+    let name: String
+    let cwd: String
+    let tmuxSession: String?
+    let heartbeatCron: String
+    let errRetryCap: Int64
+    let idlePauseMin: Int64
+    let nextTickAt: Int64?
+    let enabled: Bool
+    let lastHeartbeatAt: Int64?
+    let configGeneration: Int64
+
+    private enum CodingKeys: String, CodingKey {
+        case name, cwd, enabled
+        case tmuxSession = "tmux_session"
+        case heartbeatCron = "heartbeat_cron"
+        case errRetryCap = "err_retry_cap"
+        case idlePauseMin = "idle_pause_min"
+        case nextTickAt = "next_tick_at"
+        case lastHeartbeatAt = "last_heartbeat_at"
+        case configGeneration = "config_generation"
+    }
+}
+
+struct AtcListResult: Codable, Equatable {
+    let instances: [AtcInstance]
+    let schedulerOwnership: AtcSchedulerOwnership
+
+    private enum CodingKeys: String, CodingKey {
+        case instances
+        case schedulerOwnership = "scheduler_ownership"
+    }
+}
+
 enum FleetWire {
     static func decoder() -> JSONDecoder { JSONDecoder() }
     static func encoder() -> JSONEncoder {

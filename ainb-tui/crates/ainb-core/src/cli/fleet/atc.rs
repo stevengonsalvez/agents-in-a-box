@@ -245,6 +245,7 @@ heartbeat falls back to the local timer"
         heartbeat_cron: Some(heartbeat_cron_for_interval(meta.heartbeat_interval_min)),
         err_retry_cap: None,
         idle_pause_min: Some(i64::from(meta.idle_pause_min)),
+        expected_generation: None,
     };
     match client.atc_register(params).await {
         Ok(_) => true,
@@ -282,6 +283,7 @@ the instance row is left as-is"
     match client
         .atc_unregister(AtcUnregisterParams {
             name: name.to_string(),
+            expected_generation: None,
         })
         .await
     {
