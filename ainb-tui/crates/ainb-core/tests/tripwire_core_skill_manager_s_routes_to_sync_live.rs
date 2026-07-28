@@ -67,13 +67,13 @@ fn seed_manifest_and_lockfile(home: &Path) {
 
     let manifest_yaml = r#"schema_version: 1
 sources:
-  - name: stevie-skills
-    type: gh
-    uri: gh:stevie/skills
-    ref: main
+  - name: local-skills
+    type: local
+    uri: local:~/.claude/skills
+    ref: head
     enabled: true
 units:
-  - uri: gh:stevie/skills@main/skills/commit
+  - uri: local:~/.claude/skills@head/commit
     targets: [claude]
 "#;
     fs::write(ainb_home.join("manifest.yaml"), manifest_yaml).expect("seed manifest.yaml");
@@ -82,8 +82,8 @@ units:
 generated_at: "2026-05-26T00:00:00+00:00"
 sources: []
 units:
-  - uri: gh:stevie/skills@abc123/skills/commit
-    declared_uri: gh:stevie/skills@main/skills/commit
+  - uri: local:~/.claude/skills@head/commit
+    declared_uri: local:~/.claude/skills@head/commit
     kind: skill
     sha: abc123
     deployed:
@@ -149,9 +149,11 @@ fn pressing_s_routes_to_sync_in_live_binary_when_no_shadow_peer() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
+    let ainb_home = home_tmp.path().join(".agents-in-a-box");
     let cmd = format!(
-        "HOME={} exec {} 2>&1",
+        "unset XDG_CONFIG_HOME; HOME={} AINB_HOME={} exec {} 2>&1",
         home_tmp.path().display(),
+        ainb_home.display(),
         bin.display()
     );
     Command::new("tmux")
@@ -187,12 +189,12 @@ fn pressing_s_routes_to_sync_in_live_binary_when_no_shadow_peer() {
     thread::sleep(Duration::from_millis(200));
     // Press 's' (lowercase, no Enter — see tripwire-skill hard rule
     // #3). With NO shadowed_by peer on the selected unit, the
-    // handler routes to SkillManagerSync, which surfaces a
-    // `sync: <name>` info notification.
+    // handler routes to SkillManagerSync, which surfaces an
+    // `already in sync` info notification for this local fixture.
     send_key(&session, "s");
 
     let post = poll_capture(&session, Instant::now() + Duration::from_secs(45), |c| {
-        c.contains("sync:") && c.contains("commit")
+        c.contains("already in sync") && c.contains("commit")
     });
     let post = match post {
         Some(p) => p,
@@ -200,7 +202,7 @@ fn pressing_s_routes_to_sync_in_live_binary_when_no_shadow_peer() {
             let dump = capture_pane(&session);
             kill_session(&session);
             panic!(
-                "Live binary did not surface `sync: <unit>` notification after [s]. \
+                "Live binary did not surface `already in sync` notification after [s]. \
                  last capture:\n{dump}"
             );
         }
@@ -210,8 +212,8 @@ fn pressing_s_routes_to_sync_in_live_binary_when_no_shadow_peer() {
     // Positive — the sync routing fired and produced the
     // user-visible notification we assert on.
     assert!(
-        post.contains("sync:"),
-        "missing `sync:` notification prefix: {post}"
+        post.contains("already in sync"),
+        "missing `already in sync` notification: {post}"
     );
     assert!(
         post.contains("commit"),
