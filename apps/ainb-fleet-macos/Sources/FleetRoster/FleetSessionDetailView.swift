@@ -1,8 +1,11 @@
 import SwiftUI
 
 struct FleetSessionDetailView: View {
+    @ObservedObject var store: FleetStore
     let session: FleetSession
     let connection: FleetConnectionState
+    @State private var prompt = ""
+    @State private var pendingDestructiveAction: FleetOperatorAction?
 
     var body: some View {
         Form {
@@ -33,9 +36,58 @@ struct FleetSessionDetailView: View {
                 capability("Retry", session.capabilities.retry)
                 capability("Interrupt", session.capabilities.interrupt)
             }
+            Section("Controls") {
+                TextField("Prompt", text: $prompt, axis: .vertical)
+                    .accessibilityIdentifier("fleet.control.prompt")
+                Button("Send prompt") {
+                    store.perform(.sendPrompt, on: session, prompt: prompt)
+                    prompt = ""
+                }
+                .disabled(!store.canSendPrompt(prompt, on: session))
+                .accessibilityIdentifier("fleet.control.send-prompt")
+                ForEach(FleetOperatorAction.allCases.filter { $0 != .sendPrompt }) { action in
+                    Button(action.title) {
+                        if action.isDestructive {
+                            pendingDestructiveAction = action
+                        } else {
+                            store.perform(action, on: session)
+                        }
+                    }
+                    .disabled(!store.canPerform(action, on: session))
+                    .accessibilityIdentifier("fleet.control.\(action.id)")
+                }
+                Text("Approve and deny are unavailable until Fleet projects durable typed request context.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            if let pendingIntentID = store.pendingIntentID {
+                Section("Control status") {
+                    LabeledContent("Pending intent", value: pendingIntentID)
+                    ProgressView()
+                }
+            }
+            if let notice = store.controlNotice {
+                Section("Control status") { Text(notice).foregroundStyle(.secondary) }
+            }
             Section("Connection") { Text(connection.message) }
         }
         .accessibilityIdentifier("fleet.detail.\(session.sessionKey)")
+        .confirmationDialog(
+            "Confirm \(pendingDestructiveAction?.title ?? "action") for \(session.displayName ?? session.sessionKey)?",
+            isPresented: Binding(
+                get: { pendingDestructiveAction != nil },
+                set: { if !$0 { pendingDestructiveAction = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            if let action = pendingDestructiveAction {
+                Button(action.title, role: .destructive) {
+                    pendingDestructiveAction = nil
+                    store.perform(action, on: session)
+                }
+            }
+            Button("Cancel", role: .cancel) { pendingDestructiveAction = nil }
+        }
     }
 
     @ViewBuilder private func capability(_ name: String, _ available: Bool) -> some View {

@@ -356,6 +356,139 @@ async fn action_rejects_stale_or_wrong_request_and_replays_receipt() {
 }
 
 #[tokio::test]
+async fn receipt_queries_are_bounded_newest_first_and_start_owns_session_key() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    let payload = serde_json::json!({ "source": "hook" });
+    apply_hook(
+        &store,
+        &sink,
+        "receipt-session-start",
+        "claude",
+        "receipt-session",
+        "SessionStart",
+        &payload,
+        200,
+    )
+    .await;
+
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+    let snapshot = client.call(methods::FLEET_SNAPSHOT, serde_json::json!({})).await;
+    let version = snapshot["result"]["sessions"][0]["version"].as_i64().unwrap();
+    for request_id in ["receipt-a", "receipt-z"] {
+        let response = client
+            .call(
+                methods::FLEET_ACTION,
+                serde_json::json!({
+                    "session_key": "claude:receipt-session",
+                    "expected_version": version,
+                    "request_id": request_id,
+                    "action": { "action": "send_prompt", "text": "hello" }
+                }),
+            )
+            .await;
+        assert!(
+            response["error"].is_null(),
+            "action must persist receipt: {response}"
+        );
+    }
+
+    let list = client
+        .call(
+            methods::FLEET_RECEIPT_LIST,
+            serde_json::json!({ "limit": 1 }),
+        )
+        .await;
+    assert!(list["error"].is_null(), "receipt list must ack: {list}");
+    assert_eq!(list["result"]["receipts"].as_array().unwrap().len(), 1);
+    assert_eq!(list["result"]["receipts"][0]["request_id"], "receipt-z");
+    let get = client
+        .call(
+            methods::FLEET_RECEIPT_GET,
+            serde_json::json!({ "request_id": "receipt-z" }),
+        )
+        .await;
+    assert_eq!(get["result"]["receipt"]["request_id"], "receipt-z");
+    let miss = client
+        .call(
+            methods::FLEET_RECEIPT_GET,
+            serde_json::json!({ "request_id": "receipt-missing" }),
+        )
+        .await;
+    assert!(miss["result"]["receipt"].is_null());
+    let oversized = client
+        .call(
+            methods::FLEET_RECEIPT_LIST,
+            serde_json::json!({ "limit": 101 }),
+        )
+        .await;
+    assert!(
+        oversized["error"].is_object(),
+        "server must bound receipt list"
+    );
+
+    let start = serde_json::json!({
+        "request_id": "start-request",
+        "provider": "codex",
+        "cwd": "/work/new",
+        "prompt": "inspect failures"
+    });
+    let first = client.call(methods::FLEET_START, start.clone()).await;
+    assert!(
+        first["error"].is_null(),
+        "start must persist a receipt: {first}"
+    );
+    assert!(
+        first["result"]["prospective_session_key"]
+            .as_str()
+            .is_some_and(|key| key.starts_with("start:codex:"))
+    );
+    assert_eq!(
+        first["result"]["receipt"]["session_key"],
+        first["result"]["prospective_session_key"]
+    );
+    let replay = client.call(methods::FLEET_START, start).await;
+    assert_eq!(replay["result"], first["result"]);
+    let changed = client
+        .call(
+            methods::FLEET_START,
+            serde_json::json!({
+                "request_id": "start-request",
+                "provider": "codex",
+                "cwd": "/work/other"
+            }),
+        )
+        .await;
+    assert!(
+        changed["error"].is_object(),
+        "changed start payload must reject"
+    );
+
+    let legacy_start = client
+        .call(
+            methods::FLEET_ACTION,
+            serde_json::json!({
+                "session_key": "claude:receipt-session",
+                "expected_version": version,
+                "request_id": "legacy-start",
+                "action": {
+                    "action": "start",
+                    "provider": "codex",
+                    "cwd": "/work/new"
+                }
+            }),
+        )
+        .await;
+    assert!(
+        legacy_start["error"]["message"]
+            .as_str()
+            .is_some_and(|message| message.contains("fleet/start")),
+        "legacy action start must refuse the selected-session route: {legacy_start}"
+    );
+}
+
+#[tokio::test]
 async fn claude_structured_action_delivers_exact_complete_answer_once() {
     use ainb_plugin_notifyd::broker::{
         BrokerState, StructuredResolution, client_await_structured, client_list,
@@ -570,6 +703,16 @@ async fn authenticated_negotiate_reports_compatibility_and_rejects_invalid_range
             .iter()
             .any(|id| id == "fleet.protocol.negotiate")
     );
+    for capability in ["fleet.receipt.read", "fleet.start.execute"] {
+        assert!(
+            compatible["result"]["capability_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|id| id == capability),
+            "negotiate must advertise {capability}: {compatible}"
+        );
+    }
 
     let read_only = client
         .call(

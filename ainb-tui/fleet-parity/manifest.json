@@ -8,7 +8,8 @@
       "Current proof script needs exact tmux pane targeting because reattach-to-user-namespace creates shell window index 1.",
       "TUI has no automatic reconnect: retained-cursor redial requires offline [s] path.",
       "fleet/resync_required has no TUI-visible marker; runtime resync proof needs a trustworthy observable artifact.",
-      "Three isolated tmux captures do not yet exist."
+      "Three isolated tmux captures do not yet exist.",
+      "No TUI tripwire proves daemon-owned fleet/start or receipt list/get behavior."
     ]
   },
   "capabilities": [
@@ -29,9 +30,14 @@
         "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
       },
       "swift": {
-        "status": "not_applicable",
-        "evidence_paths": [],
-        "rationale": "AFM-E01 exposes no product writes. AFM-E03 owns the Swift action and receipt proof."
+        "status": "blocked_proof",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/App/FleetStore.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetConnectionTests.swift"
+        ],
+        "rationale": "AFM-E03 Swift action client and old-catalogue refusal proof exist. XCUI and isolated daemon delivery proof remain unrun."
       },
       "release_classification": "deferred_tui"
     },
@@ -52,9 +58,13 @@
         "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
       },
       "swift": {
-        "status": "not_applicable",
-        "evidence_paths": [],
-        "rationale": "AFM-E01 exposes no product writes. AFM-E03 owns the Swift broadcast and receipt proof."
+        "status": "blocked_proof",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/App/FleetStore.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRoster/FleetWindowView.swift"
+        ],
+        "rationale": "AFM-E03 Swift broadcast UI preserves explicit target and daemon receipt ordering. XCUI and isolated daemon mixed-outcome proof remain unrun."
       },
       "release_classification": "deferred_tui"
     },
@@ -85,6 +95,36 @@
       "release_classification": "deferred_tui"
     },
     {
+      "id": "fleet.receipt.read",
+      "tier": "v1",
+      "daemon_request_method": "fleet/receipt_list",
+      "expected_behavior": "Daemon returns bounded newest-first durable receipts and exact request-id lookup.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs",
+          "crates/ainb-hangar-store/src/repo/fleet.rs",
+          "crates/ainb-hangar-daemon/tests/rpc_fleet.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "blocked_proof",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRoster/FleetWindowView.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetConnectionTests.swift"
+        ],
+        "rationale": "AFM-E03 typed receipt read and old-catalogue refusal proof exist. Receipt-center XCUI and isolated daemon proof remain unrun."
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
       "id": "fleet.snapshot.read",
       "tier": "foundation",
       "daemon_request_method": "fleet/snapshot",
@@ -107,6 +147,36 @@
           "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
           "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetDaemonContractTests.swift"
         ]
+      },
+      "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.start.execute",
+      "tier": "v1",
+      "daemon_request_method": "fleet/start",
+      "expected_behavior": "Daemon starts a provider session from daemon-owned new-session parameters and returns a durable receipt.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs",
+          "crates/ainb-hangar-daemon/tests/rpc_fleet.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "blocked_proof",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/App/FleetStore.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRoster/FleetWindowView.swift",
+          "apps/ainb-fleet-macos/Tests/FleetRPCTests/FleetConnectionTests.swift"
+        ],
+        "rationale": "AFM-E03 typed daemon-owned Start client and local cwd preflight exist. Start XCUI and isolated daemon delivery proof remain unrun."
       },
       "release_classification": "deferred_tui"
     },

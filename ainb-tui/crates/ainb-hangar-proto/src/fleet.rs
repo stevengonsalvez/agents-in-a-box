@@ -8,12 +8,23 @@ use serde::{Deserialize, Serialize};
 /// Current Fleet wire protocol version.
 pub const FLEET_PROTOCOL_VERSION: u32 = 1;
 
+/// Negotiated capability required for versioned selected-session actions.
+pub const FLEET_CAPABILITY_ACTION_EXECUTE: &str = "fleet.action.execute";
+/// Negotiated capability required for explicit-recipient broadcasts.
+pub const FLEET_CAPABILITY_BROADCAST_EXECUTE: &str = "fleet.broadcast.execute";
+/// Negotiated capability required for durable receipt list and exact lookup.
+pub const FLEET_CAPABILITY_RECEIPT_READ: &str = "fleet.receipt.read";
+/// Negotiated capability required for daemon-owned new-session starts.
+pub const FLEET_CAPABILITY_START_EXECUTE: &str = "fleet.start.execute";
+
 /// Fleet capability identifiers advertised during protocol negotiation.
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
-    "fleet.action.execute",
-    "fleet.broadcast.execute",
+    FLEET_CAPABILITY_ACTION_EXECUTE,
+    FLEET_CAPABILITY_BROADCAST_EXECUTE,
     "fleet.protocol.negotiate",
+    FLEET_CAPABILITY_RECEIPT_READ,
     "fleet.snapshot.read",
+    FLEET_CAPABILITY_START_EXECUTE,
     "fleet.subscription.live",
     "fleet.subscription.replay",
     "fleet.subscription.resync",
@@ -439,7 +450,10 @@ pub enum ControlAction {
     Retry,
     /// Interrupt active turn.
     Interrupt,
-    /// Start a managed session.
+    /// Legacy wire form. New clients must use daemon-owned fleet/start.
+    ///
+    /// The daemon rejects this variant before selected-session validation, so
+    /// it cannot create a session through fleet/action.
     Start {
         /// Provider to start.
         provider: FleetProvider,
@@ -541,6 +555,60 @@ pub struct FleetActionReceipt {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetActionResult {
     /// Durable action receipt.
+    pub receipt: FleetActionReceipt,
+}
+
+/// Parameters for `fleet/receipt_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetReceiptListParams {
+    /// Maximum number of durable receipts, newest first.
+    pub limit: u32,
+}
+
+/// Result for `fleet/receipt_list`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetReceiptListResult {
+    /// Durable receipts ordered by `updated_at DESC, request_id DESC`.
+    pub receipts: Vec<FleetActionReceipt>,
+}
+
+/// Parameters for `fleet/receipt_get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetReceiptGetParams {
+    /// Exact idempotent action request identifier.
+    pub request_id: String,
+}
+
+/// Result for `fleet/receipt_get`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetReceiptGetResult {
+    /// Durable receipt when the daemon has one for this request id.
+    pub receipt: Option<FleetActionReceipt>,
+}
+
+/// Parameters for `fleet/start`.
+///
+/// Start has no selected session and therefore carries no caller-supplied
+/// session key or optimistic concurrency version.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetStartParams {
+    /// Idempotent new-session request identifier.
+    pub request_id: String,
+    /// Provider to start.
+    pub provider: FleetProvider,
+    /// Working directory for the new provider session.
+    pub cwd: String,
+    /// Optional initial prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prompt: Option<String>,
+}
+
+/// Result for `fleet/start`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetStartResult {
+    /// Daemon-generated prospective session identity for this request.
+    pub prospective_session_key: String,
+    /// Durable start receipt.
     pub receipt: FleetActionReceipt,
 }
 

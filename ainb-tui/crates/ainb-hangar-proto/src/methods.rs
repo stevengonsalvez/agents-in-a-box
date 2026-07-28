@@ -274,6 +274,12 @@ pub const FLEET_SUBSCRIBE: &str = "fleet/subscribe";
 pub const FLEET_ACTION: &str = "fleet/action";
 /// Deliver text to explicit Fleet targets.
 pub const FLEET_BROADCAST: &str = "fleet/broadcast";
+/// List durable action receipts newest first.
+pub const FLEET_RECEIPT_LIST: &str = "fleet/receipt_list";
+/// Fetch one durable action receipt by request id.
+pub const FLEET_RECEIPT_GET: &str = "fleet/receipt_get";
+/// Start a provider session without borrowing selected-session state.
+pub const FLEET_START: &str = "fleet/start";
 
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
 pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &["fleet/resync_required"];
@@ -1239,6 +1245,9 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_ACTION,
     FLEET_BROADCAST,
     FLEET_NEGOTIATE,
+    FLEET_RECEIPT_LIST,
+    FLEET_RECEIPT_GET,
+    FLEET_START,
 ];
 
 #[cfg(test)]
@@ -1462,6 +1471,9 @@ mod tests {
             FLEET_ACTION,
             FLEET_BROADCAST,
             FLEET_NEGOTIATE,
+            FLEET_RECEIPT_LIST,
+            FLEET_RECEIPT_GET,
+            FLEET_START,
         ];
         for m in declared {
             assert!(

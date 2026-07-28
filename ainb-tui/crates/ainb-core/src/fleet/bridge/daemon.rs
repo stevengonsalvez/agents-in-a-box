@@ -219,6 +219,16 @@ impl DaemonClient {
         Ok(result.receipt)
     }
 
+    /// Start one provider session through daemon-owned new-session state.
+    pub async fn fleet_start(
+        &self,
+        params: ainb_hangar_proto::fleet::FleetStartParams,
+    ) -> Result<ainb_hangar_proto::fleet::FleetStartResult, DaemonError> {
+        let value = serde_json::to_value(params).expect("FleetStartParams serializes");
+        let result = self.call(methods::FLEET_START, value).await?;
+        serde_json::from_value(result).map_err(|error| DaemonError::Decode(error.to_string()))
+    }
+
     /// Broadcast text to explicit stable Fleet targets.
     pub async fn fleet_broadcast(
         &self,

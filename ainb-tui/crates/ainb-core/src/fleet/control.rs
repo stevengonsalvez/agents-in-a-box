@@ -213,6 +213,21 @@ pub fn execute_fleet_action_blocking(
     })
 }
 
+/// Start one provider session through daemon-owned new-session state.
+pub fn execute_fleet_start_blocking(
+    params: ainb_hangar_proto::fleet::FleetStartParams,
+) -> Result<ainb_hangar_proto::fleet::FleetStartResult, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    runtime.block_on(async {
+        let client = crate::fleet::bridge::daemon::DaemonClient::from_env()
+            .map_err(|error| error.to_string())?;
+        client.fleet_start(params).await.map_err(|error| error.to_string())
+    })
+}
+
 /// Dispatch a send to the session described by `(session_id, cwd)`, off the UI
 /// thread. Resolves the row to a live `Session` (for its tmux name) via the
 /// same discovery the CLI uses, then sends `text` through `fleet::send::send`.

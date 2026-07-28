@@ -349,6 +349,37 @@ struct FleetActionReceipt: Codable, Equatable {
 
 struct FleetActionResult: Codable, Equatable { let receipt: FleetActionReceipt }
 
+struct FleetReceiptListParams: Codable, Equatable {
+    let limit: UInt32
+}
+
+struct FleetReceiptListResult: Codable, Equatable {
+    let receipts: [FleetActionReceipt]
+}
+
+struct FleetReceiptGetParams: Codable, Equatable {
+    let requestID: String
+    private enum CodingKeys: String, CodingKey { case requestID = "request_id" }
+}
+
+struct FleetReceiptGetResult: Codable, Equatable {
+    let receipt: FleetActionReceipt?
+}
+
+struct FleetStartParams: Codable, Equatable {
+    let requestID: String
+    let provider: FleetProvider
+    let cwd: String
+    let prompt: String?
+    private enum CodingKeys: String, CodingKey { case requestID = "request_id", provider, cwd, prompt }
+}
+
+struct FleetStartResult: Codable, Equatable {
+    let prospectiveSessionKey: String
+    let receipt: FleetActionReceipt
+    private enum CodingKeys: String, CodingKey { case prospectiveSessionKey = "prospective_session_key", receipt }
+}
+
 struct FleetBroadcastParams: Codable, Equatable {
     let targetKeys: [String]
     let text: String

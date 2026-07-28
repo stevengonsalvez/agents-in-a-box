@@ -3258,7 +3258,7 @@ impl EventHandler {
 
     fn dispatch_fleet_intent(state: &mut AppState, intent: FleetIntent) {
         use ainb_hangar_proto::fleet::{
-            ActionReceiptStatus, ControlAction, FleetActionParams, FleetBroadcastParams,
+            ActionReceiptStatus, FleetActionParams, FleetBroadcastParams, FleetStartParams,
         };
 
         match intent {
@@ -3358,31 +3358,28 @@ impl EventHandler {
                     );
                     return;
                 }
-                let session_key = "start:codex".to_string();
-                let params = FleetActionParams {
-                    session_key: session_key.clone(),
-                    expected_version: 1,
+                let params = FleetStartParams {
                     request_id: format!("fleet-host-start-{}", uuid::Uuid::new_v4()),
-                    action: ControlAction::Start {
-                        provider,
-                        cwd,
-                        prompt,
-                    },
+                    provider,
+                    cwd,
+                    prompt,
                 };
                 let sink = state.fleet_panel_state.canonical_update_sink();
                 std::thread::spawn(move || {
-                    let event = match crate::fleet::control::execute_fleet_action_blocking(params) {
-                        Ok(receipt) if receipt.status == ActionReceiptStatus::Delivered => {
-                            FleetEvent::ActionSucceeded { session_key }
+                    let event = match crate::fleet::control::execute_fleet_start_blocking(params) {
+                        Ok(result) if result.receipt.status == ActionReceiptStatus::Delivered => {
+                            FleetEvent::ActionSucceeded {
+                                session_key: result.prospective_session_key,
+                            }
                         }
-                        Ok(receipt) => FleetEvent::ActionFailed {
-                            session_key,
-                            detail: receipt
-                                .detail
-                                .unwrap_or_else(|| format!("delivery status {:?}", receipt.status)),
+                        Ok(result) => FleetEvent::ActionFailed {
+                            session_key: result.prospective_session_key,
+                            detail: result.receipt.detail.unwrap_or_else(|| {
+                                format!("delivery status {:?}", result.receipt.status)
+                            }),
                         },
                         Err(detail) => FleetEvent::ActionFailed {
-                            session_key,
+                            session_key: "start".to_string(),
                             detail,
                         },
                     };

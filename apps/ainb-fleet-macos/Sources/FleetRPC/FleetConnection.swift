@@ -7,6 +7,7 @@ enum FleetConnectionError: Error, Equatable {
     case notAuthenticated
     case protocolReadIncompatible(FleetNegotiateResult)
     case protocolWriteIncompatible
+    case missingNegotiatedCapability(String)
     case emptyToken
     case closed
     case disconnected
@@ -128,6 +129,31 @@ actor FleetConnection {
             params: FleetSubscribeParams(afterRevision: afterRevision),
             result: FleetSubscribeResult.self
         )
+    }
+
+    func action(_ params: FleetActionParams) async throws -> FleetActionResult {
+        try requireWriteCapability("fleet.action.execute")
+        return try await request("fleet/action", params: params, result: FleetActionResult.self)
+    }
+
+    func start(_ params: FleetStartParams) async throws -> FleetStartResult {
+        try requireWriteCapability("fleet.start.execute")
+        return try await request("fleet/start", params: params, result: FleetStartResult.self)
+    }
+
+    func broadcast(_ params: FleetBroadcastParams) async throws -> FleetBroadcastResult {
+        try requireWriteCapability("fleet.broadcast.execute")
+        return try await request("fleet/broadcast", params: params, result: FleetBroadcastResult.self)
+    }
+
+    func receiptList(_ params: FleetReceiptListParams) async throws -> FleetReceiptListResult {
+        try requireReadCapability("fleet.receipt.read")
+        return try await request("fleet/receipt_list", params: params, result: FleetReceiptListResult.self)
+    }
+
+    func receiptGet(_ params: FleetReceiptGetParams) async throws -> FleetReceiptGetResult {
+        try requireReadCapability("fleet.receipt.read")
+        return try await request("fleet/receipt_get", params: params, result: FleetReceiptGetResult.self)
     }
 
     func incoming() -> AsyncStream<FleetIncoming> {
@@ -356,6 +382,28 @@ actor FleetConnection {
         guard result.writeCompatible else {
             throw FleetConnectionError.protocolWriteIncompatible
         }
+    }
+
+    static func validateCapability(_ capabilityID: String, in result: FleetNegotiateResult) throws {
+        guard result.capabilityIDs.contains(capabilityID) else {
+            throw FleetConnectionError.missingNegotiatedCapability(capabilityID)
+        }
+    }
+
+    private func requireWriteCapability(_ capabilityID: String) throws {
+        try requireWriteCompatibility()
+        guard let negotiation else {
+            throw FleetConnectionError.notAuthenticated
+        }
+        try Self.validateCapability(capabilityID, in: negotiation)
+    }
+
+    private func requireReadCapability(_ capabilityID: String) throws {
+        try requireReadCompatibility()
+        guard let negotiation else {
+            throw FleetConnectionError.notAuthenticated
+        }
+        try Self.validateCapability(capabilityID, in: negotiation)
     }
 
     private static func writeAll(_ data: Data, to descriptor: Int32) throws {

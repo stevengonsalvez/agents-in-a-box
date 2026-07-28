@@ -72,6 +72,247 @@ final class FleetConnectionTests: XCTestCase {
         )
     }
 
+    func testOldCatalogueRefusesReceiptReadsAndStart() {
+        let oldCatalogue = FleetNegotiateResult(
+            daemonVersion: "fixture-daemon-0.9.0",
+            protocolVersion: 1,
+            readCompatible: true,
+            writeCompatible: true,
+            capabilityIDs: ["fleet.snapshot.read", "fleet.action.execute"]
+        )
+
+        XCTAssertThrowsError(try FleetConnection.validateCapability("fleet.receipt.read", in: oldCatalogue)) {
+            XCTAssertEqual($0 as? FleetConnectionError, .missingNegotiatedCapability("fleet.receipt.read"))
+        }
+        XCTAssertThrowsError(try FleetConnection.validateCapability("fleet.start.execute", in: oldCatalogue)) {
+            XCTAssertEqual($0 as? FleetConnectionError, .missingNegotiatedCapability("fleet.start.execute"))
+        }
+    }
+
+    func testOldCatalogueRefusesReceiptAndStartBeforeWireIO() async throws {
+        var descriptors = [Int32](repeating: 0, count: 2)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
+        let clientDescriptor = descriptors[0]
+        let serverDescriptor = descriptors[1]
+        defer { Darwin.close(serverDescriptor) }
+        let serverDone = expectation(description: "old catalogue server finished")
+        let serverResult = SocketServerResult()
+
+        DispatchQueue.global().async {
+            defer { serverDone.fulfill() }
+            do {
+                let authentication = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: authentication, result: [:])
+                let negotiation = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: negotiation, result: [
+                    "daemon_version": "old-daemon",
+                    "protocol_version": 1,
+                    "read_compatible": true,
+                    "write_compatible": true,
+                    "capability_ids": ["fleet.snapshot.read"],
+                ])
+                var pollDescriptor = pollfd(fd: serverDescriptor, events: Int16(POLLIN), revents: 0)
+                if Darwin.poll(&pollDescriptor, 1, 200) > 0 {
+                    throw StoreServerError.closed
+                }
+            } catch {
+                serverResult.record(error)
+            }
+        }
+
+        let connection = FleetConnection(
+            location: HangarLocation(environment: ["AINB_HANGAR_HOME": "/unused"]),
+            injectedDescriptor: clientDescriptor
+        )
+        try await connection.connect()
+        defer { Task { await connection.close() } }
+        try await connection.authenticate(token: "mdt_test")
+        _ = try await connection.negotiate()
+
+        do {
+            _ = try await connection.receiptList(FleetReceiptListParams(limit: 1))
+            XCTFail("old catalogue must refuse receipt reads")
+        } catch let error as FleetConnectionError {
+            XCTAssertEqual(error, .missingNegotiatedCapability("fleet.receipt.read"))
+        }
+        do {
+            _ = try await connection.start(FleetStartParams(requestID: "request", provider: .codex, cwd: "/tmp", prompt: nil))
+            XCTFail("old catalogue must refuse fleet/start")
+        } catch let error as FleetConnectionError {
+            XCTAssertEqual(error, .missingNegotiatedCapability("fleet.start.execute"))
+        }
+        await fulfillment(of: [serverDone], timeout: 1)
+        try serverResult.throwIfRecorded()
+    }
+
+    func testTmuxTextCapabilityAllowsPromptAndBroadcastTarget() {
+        let capabilities = FleetCapabilities(
+            structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false,
+            retry: false, interrupt: false, start: false, stop: false, restart: false,
+            kill: false, archive: false, tmuxAttach: false, tmuxText: true, verifiedPicker: false
+        )
+
+        XCTAssertTrue(FleetOperatorAction.sendPrompt.isAvailable(in: capabilities))
+    }
+
+    @MainActor
+    func testBroadcastReceiptMergePreservesDaemonInputOrder() {
+        let existing = [receipt("old")]
+        let daemonOrder = [receipt("first"), receipt("second")]
+
+        XCTAssertEqual(FleetStore.mergedReceipts(daemonOrder, existing: existing).map(\.requestID), ["first", "second", "old"])
+    }
+
+    func testStartCWDPreflightRequiresExistingDirectory() throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
+        let file = root.appendingPathComponent("file")
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        defer { try? FileManager.default.removeItem(at: root) }
+        try Data().write(to: file)
+
+        XCTAssertTrue(FleetStartPreflight.isExistingDirectory(root.path))
+        XCTAssertFalse(FleetStartPreflight.isExistingDirectory(file.path))
+        XCTAssertFalse(FleetStartPreflight.isExistingDirectory(root.appendingPathComponent("missing").path))
+    }
+
+    func testUnavailablePromptNeverWritesActionWire() async throws {
+        var descriptors = [Int32](repeating: 0, count: 2)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
+        let serverDescriptor = descriptors[1]
+        defer { Darwin.close(serverDescriptor) }
+        let location = try Self.testLocation()
+        defer { try? FileManager.default.removeItem(at: location.home) }
+        let releasePoll = DispatchSemaphore(value: 0)
+        let serverDone = expectation(description: "prompt refusal server finished")
+        let serverResult = SocketServerResult()
+
+        DispatchQueue.global().async {
+            defer { serverDone.fulfill() }
+            do {
+                let authentication = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: authentication, result: [:])
+                let negotiation = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: negotiation, result: [
+                    "daemon_version": "fixture-daemon",
+                    "protocol_version": 1,
+                    "read_compatible": true,
+                    "write_compatible": true,
+                    "capability_ids": ["fleet.action.execute"],
+                ])
+                let subscription = try Self.readRequest(from: serverDescriptor)
+                try Self.writeResponse(to: serverDescriptor, request: subscription, result: [
+                    "snapshot": try Self.snapshotObject(head: 1, sessions: [try Self.sampleSessionObject(head: 1)]),
+                    "replay": [],
+                    "replay_state": ["state": "complete"],
+                ])
+                _ = releasePoll.wait(timeout: .now() + 1)
+                var pollDescriptor = pollfd(fd: serverDescriptor, events: Int16(POLLIN), revents: 0)
+                if Darwin.poll(&pollDescriptor, 1, 200) > 0 {
+                    throw StoreServerError.closed
+                }
+            } catch {
+                serverResult.record(error)
+            }
+        }
+
+        let store = await MainActor.run {
+            FleetStore(
+                location: location,
+                makeConnection: { _ in FleetConnection(location: location, injectedDescriptor: descriptors[0]) },
+                reconnectDelayNanoseconds: { _ in 10_000_000_000 }
+            )
+        }
+        await MainActor.run { store.start() }
+        let live = await Self.waitUntil {
+            await MainActor.run {
+                guard case .live = store.connectionState else { return false }
+                return store.sessions.count == 1
+            }
+        }
+        XCTAssertTrue(live)
+        await MainActor.run {
+            let session = store.sessions[0]
+            store.selectedSessionKey = session.sessionKey
+            XCTAssertFalse(store.canSendPrompt("hello", on: session))
+            store.perform(.sendPrompt, on: session, prompt: "hello")
+        }
+        releasePoll.signal()
+        await fulfillment(of: [serverDone], timeout: 1)
+        try serverResult.throwIfRecorded()
+        await MainActor.run { store.stop() }
+    }
+
+    func testReconnectReloadsReceiptsBeforeReturningLive() async throws {
+        var first = [Int32](repeating: 0, count: 2)
+        var second = [Int32](repeating: 0, count: 2)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &first), 0)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &second), 0)
+        let firstServer = first[1]
+        let secondServer = second[1]
+        defer {
+            Darwin.close(firstServer)
+            Darwin.close(secondServer)
+        }
+        let location = try Self.testLocation()
+        defer { try? FileManager.default.removeItem(at: location.home) }
+        let factory = TestConnectionFactory(descriptors: [first[0], second[0]], location: location)
+        let store = await MainActor.run {
+            FleetStore(location: location, makeConnection: factory.make, reconnectDelayNanoseconds: { _ in 0 })
+        }
+        let firstDone = expectation(description: "first receipt server finished")
+        let secondReady = expectation(description: "second receipt server ready")
+        let releaseSecond = DispatchSemaphore(value: 0)
+        let serverResult = SocketServerResult()
+
+        DispatchQueue.global().async {
+            defer { firstDone.fulfill() }
+            do {
+                try Self.serveStoreBootstrap(
+                    descriptor: firstServer,
+                    subscriptionSnapshot: try Self.snapshotObject(head: 1, sessions: [try Self.sampleSessionObject(head: 1)]),
+                    eventBeforeSubscriptionResponse: false,
+                    snapshotAfterEvent: try Self.snapshotObject(head: 1, sessions: [try Self.sampleSessionObject(head: 1)]),
+                    capabilityIDs: ["fleet.receipt.read"],
+                    receiptList: [try Self.receiptObject(requestID: "first")]
+                )
+                Darwin.shutdown(firstServer, SHUT_RDWR)
+            } catch {
+                serverResult.record(error)
+            }
+        }
+        DispatchQueue.global().async {
+            defer { Darwin.shutdown(secondServer, SHUT_RDWR) }
+            do {
+                try Self.serveStoreBootstrap(
+                    descriptor: secondServer,
+                    subscriptionSnapshot: try Self.snapshotObject(head: 1, sessions: [try Self.sampleSessionObject(head: 1)]),
+                    eventBeforeSubscriptionResponse: false,
+                    snapshotAfterEvent: try Self.snapshotObject(head: 1, sessions: [try Self.sampleSessionObject(head: 1)]),
+                    capabilityIDs: ["fleet.receipt.read"],
+                    receiptList: [try Self.receiptObject(requestID: "second")]
+                )
+                secondReady.fulfill()
+                _ = releaseSecond.wait(timeout: .now() + 2)
+            } catch {
+                serverResult.record(error)
+                secondReady.fulfill()
+            }
+        }
+
+        await MainActor.run { store.start() }
+        await fulfillment(of: [firstDone, secondReady], timeout: 2)
+        let reloaded = await Self.waitUntil {
+            await MainActor.run {
+                guard case .live = store.connectionState else { return false }
+                return factory.count == 2 && store.receipts.map(\.requestID) == ["second"]
+            }
+        }
+        await MainActor.run { store.stop() }
+        releaseSecond.signal()
+        try serverResult.throwIfRecorded()
+        XCTAssertTrue(reloaded, "reconnect must reload durable receipts before Fleet becomes live")
+    }
+
     func testResyncNotificationStreamsThroughOwnedSocket() async throws {
         var descriptors = [Int32](repeating: 0, count: 2)
         XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
@@ -360,6 +601,22 @@ final class FleetConnectionTests: XCTestCase {
         }
     }
 
+    private func receipt(_ requestID: String) -> FleetActionReceipt {
+        FleetActionReceipt(
+            requestID: requestID,
+            sessionKey: "session-\(requestID)",
+            actionKind: "send_prompt",
+            actionFingerprint: "fingerprint-\(requestID)",
+            expectedVersion: 1,
+            idempotencyKey: nil,
+            status: .pending,
+            detail: nil,
+            sessionVersion: nil,
+            createdAt: 1,
+            updatedAt: 1
+        )
+    }
+
     private static func testLocation() throws -> HangarLocation {
         let home = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString, isDirectory: true)
         let tokenDirectory = home.appendingPathComponent("hangar", isDirectory: true)
@@ -375,7 +632,9 @@ final class FleetConnectionTests: XCTestCase {
         snapshotAfterEvent: Any?,
         subscriptionReplay: [Any] = [],
         replayState: [String: Any] = ["state": "complete"],
-        resyncAfterSubscription: Bool = false
+        resyncAfterSubscription: Bool = false,
+        capabilityIDs: [String] = [],
+        receiptList: [Any] = []
     ) throws {
         let authentication = try readRequest(from: descriptor)
         try writeResponse(to: descriptor, request: authentication, result: [:])
@@ -386,7 +645,7 @@ final class FleetConnectionTests: XCTestCase {
             "protocol_version": 1,
             "read_compatible": true,
             "write_compatible": true,
-            "capability_ids": [],
+            "capability_ids": capabilityIDs,
         ])
 
         let subscription = try readRequest(from: descriptor)
@@ -399,6 +658,11 @@ final class FleetConnectionTests: XCTestCase {
             "replay": subscriptionReplay,
             "replay_state": replayState,
         ])
+        if capabilityIDs.contains("fleet.receipt.read") {
+            let receiptRequest = try readRequest(from: descriptor)
+            XCTAssertEqual(receiptRequest["method"] as? String, "fleet/receipt_list")
+            try writeResponse(to: descriptor, request: receiptRequest, result: ["receipts": receiptList])
+        }
         if resyncAfterSubscription {
             try writeNotification(
                 to: descriptor,
@@ -448,6 +712,23 @@ final class FleetConnectionTests: XCTestCase {
             throw StoreServerError.closed
         }
         return session
+    }
+
+    private static func receiptObject(requestID: String) throws -> Any {
+        let receipt = FleetActionReceipt(
+            requestID: requestID,
+            sessionKey: "s1",
+            actionKind: "send_prompt",
+            actionFingerprint: "fingerprint-\(requestID)",
+            expectedVersion: 3,
+            idempotencyKey: nil,
+            status: .pending,
+            detail: nil,
+            sessionVersion: nil,
+            createdAt: 1,
+            updatedAt: 1
+        )
+        return try JSONSerialization.jsonObject(with: FleetWire.encoder().encode(receipt))
     }
 
     private static func eventObject(revision: Int64) throws -> Any {

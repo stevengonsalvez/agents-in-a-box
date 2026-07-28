@@ -5,6 +5,9 @@ struct FleetWindowView: View {
     @Binding var presentation: FleetPresentationPreferences
     @State private var search = ""
     @State private var switcherPresented = false
+    @State private var startPresented = false
+    @State private var receiptsPresented = false
+    @State private var broadcastPresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -36,10 +39,13 @@ struct FleetWindowView: View {
                 ToolbarItem { Picker("Management", selection: $presentation.filters.management) { Text("Any management").tag(ManagementState?.none); ForEach([ManagementState.managed, .degraded], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
                 ToolbarItem { Picker("Transport", selection: $presentation.filters.transportHealth) { Text("Any transport").tag(TransportHealth?.none); ForEach([TransportHealth.healthy, .degraded, .unavailable, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
                 ToolbarItem { Button("Quick switch") { switcherPresented = true } }
+                ToolbarItem { Button("Start") { startPresented = true }.disabled(!store.canStart).accessibilityIdentifier("fleet.start.open") }
+                ToolbarItem { Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts).accessibilityIdentifier("fleet.receipts.open") }
+                ToolbarItem { Button("Broadcast") { broadcastPresented = true }.disabled(!store.canBroadcast).accessibilityIdentifier("fleet.broadcast.open") }
             }
         } detail: {
             if let key = store.selectedSessionKey, let session = store.sessions.first(where: { $0.sessionKey == key }) {
-                FleetSessionDetailView(session: session, connection: store.connectionState)
+                FleetSessionDetailView(store: store, session: session, connection: store.connectionState)
             } else {
                 ContentUnavailableView("Select a Fleet session", systemImage: "bolt.circle")
             }
@@ -48,6 +54,120 @@ struct FleetWindowView: View {
             if !store.connectionState.isLive { Text(store.connectionState.message).padding(8).background(.yellow.opacity(0.2)) }
         }
         .sheet(isPresented: $switcherPresented) { FleetQuickSwitcher(store: store, sort: presentation.sort, isPresented: $switcherPresented) }
+        .sheet(isPresented: $startPresented) { FleetStartForm(store: store, isPresented: $startPresented) }
+        .sheet(isPresented: $receiptsPresented) { FleetReceiptList(store: store) }
+        .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
         .frame(minWidth: 820, minHeight: 520)
+    }
+}
+
+private struct FleetStartForm: View {
+    @ObservedObject var store: FleetStore
+    @Binding var isPresented: Bool
+    @State private var provider: FleetProvider = .codex
+    @State private var cwd = FileManager.default.currentDirectoryPath
+    @State private var prompt = ""
+
+    var body: some View {
+        Form {
+            Picker("Provider", selection: $provider) {
+                Text("Codex").tag(FleetProvider.codex)
+                Text("Claude").tag(FleetProvider.claude)
+            }
+            TextField("Working directory", text: $cwd)
+            TextField("Initial prompt", text: $prompt, axis: .vertical)
+            if let start = store.lastStart {
+                LabeledContent("Prospective session", value: start.prospectiveSessionKey)
+                LabeledContent("Receipt", value: start.receipt.status.rawValue)
+            }
+            if let notice = store.controlNotice { Text(notice).foregroundStyle(.secondary) }
+            HStack {
+                Button("Cancel") { isPresented = false }
+                Spacer()
+                Button("Start") {
+                    store.start(provider: provider, cwd: cwd, prompt: prompt)
+                }
+                .disabled(!store.canStart || !FleetStartPreflight.isExistingDirectory(cwd.trimmingCharacters(in: .whitespacesAndNewlines)))
+                .accessibilityIdentifier("fleet.start.submit")
+            }
+        }
+        .padding()
+        .frame(minWidth: 440)
+        .accessibilityIdentifier("fleet.start.form")
+    }
+}
+
+private struct FleetReceiptList: View {
+    @ObservedObject var store: FleetStore
+
+    var body: some View {
+        List(store.receipts, id: \.requestID) { receipt in
+            VStack(alignment: .leading) {
+                Text(receipt.actionKind)
+                Text(receipt.status.rawValue).font(.caption).foregroundStyle(.secondary)
+                Text(receipt.detail ?? "No daemon detail").font(.caption).foregroundStyle(.secondary)
+                Text(receipt.requestID).font(.caption2).textSelection(.enabled)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("\(receipt.actionKind), \(receipt.status.rawValue)")
+            .accessibilityValue(receipt.detail ?? "No daemon detail")
+        }
+        .navigationTitle("Receipts")
+        .frame(minWidth: 520, minHeight: 360)
+        .onAppear { store.refreshReceipts() }
+        .accessibilityIdentifier("fleet.receipts.list")
+    }
+}
+
+private struct FleetBroadcastForm: View {
+    @ObservedObject var store: FleetStore
+    @Binding var isPresented: Bool
+    @State private var text = ""
+    @State private var selected = Set<String>()
+    @State private var confirming = false
+
+    private var targets: [FleetSession] {
+        store.sessions.filter { $0.version > 0 && ($0.capabilities.sendPrompt || $0.capabilities.tmuxText) }
+    }
+
+    private var orderedTargets: [String] {
+        targets.map(\.sessionKey).filter(selected.contains)
+    }
+
+    var body: some View {
+        Form {
+            TextField("Message", text: $text, axis: .vertical)
+            Section("Recipients") {
+                ForEach(targets, id: \.sessionKey) { session in
+                    Toggle(session.displayName ?? session.sessionKey, isOn: Binding(
+                        get: { selected.contains(session.sessionKey) },
+                        set: { enabled in
+                            if enabled { selected.insert(session.sessionKey) }
+                            else { selected.remove(session.sessionKey) }
+                        }
+                    ))
+                }
+            }
+            Text("Targets: \(orderedTargets.joined(separator: ", "))")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+            if let notice = store.controlNotice { Text(notice).foregroundStyle(.secondary) }
+            HStack {
+                Button("Cancel") { isPresented = false }
+                Spacer()
+                Button("Review broadcast") { confirming = true }
+                    .disabled(!store.canBroadcast || orderedTargets.isEmpty || text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            }
+        }
+        .padding()
+        .frame(minWidth: 480)
+        .confirmationDialog("Send to \(orderedTargets.count) explicit recipients?", isPresented: $confirming, titleVisibility: .visible) {
+            Button("Send") {
+                store.broadcast(targetKeys: orderedTargets, text: text)
+                isPresented = false
+            }
+            Button("Cancel", role: .cancel) {}
+        }
+        .accessibilityIdentifier("fleet.broadcast.form")
     }
 }

@@ -3,7 +3,9 @@
     "fleet.action.execute",
     "fleet.broadcast.execute",
     "fleet.protocol.negotiate",
+    "fleet.receipt.read",
     "fleet.snapshot.read",
+    "fleet.start.execute",
     "fleet.subscription.live",
     "fleet.subscription.replay",
     "fleet.subscription.resync"

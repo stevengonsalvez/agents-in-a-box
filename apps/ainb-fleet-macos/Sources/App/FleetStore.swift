@@ -1,11 +1,74 @@
 import Combine
 import Foundation
 
+enum FleetOperatorAction: CaseIterable, Identifiable, Equatable {
+    case sendPrompt, continueTurn, retry, interrupt, restart, stop, kill, archive
+
+    var id: String { title }
+
+    var title: String {
+        switch self {
+        case .sendPrompt: "Send prompt"
+        case .continueTurn: "Continue"
+        case .retry: "Retry"
+        case .interrupt: "Interrupt"
+        case .restart: "Restart"
+        case .stop: "Stop"
+        case .kill: "Kill"
+        case .archive: "Archive"
+        }
+    }
+
+    var isDestructive: Bool {
+        switch self {
+        case .interrupt, .stop, .kill, .archive: true
+        default: false
+        }
+    }
+
+    func isAvailable(in capabilities: FleetCapabilities) -> Bool {
+        switch self {
+        case .sendPrompt: capabilities.sendPrompt || capabilities.tmuxText
+        case .continueTurn: capabilities.continueTurn
+        case .retry: capabilities.retry
+        case .interrupt: capabilities.interrupt
+        case .restart: capabilities.restart
+        case .stop: capabilities.stop
+        case .kill: capabilities.kill
+        case .archive: capabilities.archive
+        }
+    }
+
+    func wireAction(prompt: String = "") -> ControlAction {
+        switch self {
+        case .sendPrompt: .sendPrompt(text: prompt)
+        case .continueTurn: .continue
+        case .retry: .retry
+        case .interrupt: .interrupt
+        case .restart: .restart
+        case .stop: .stop
+        case .kill: .kill
+        case .archive: .archive
+        }
+    }
+}
+
+enum FleetStartPreflight {
+    static func isExistingDirectory(_ path: String) -> Bool {
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
+    }
+}
+
 @MainActor
 final class FleetStore: ObservableObject {
     @Published private(set) var sessions: [FleetSession] = []
     @Published private(set) var connectionState: FleetConnectionState = .connecting
     @Published var selectedSessionKey: String?
+    @Published private(set) var receipts: [FleetActionReceipt] = []
+    @Published private(set) var pendingIntentID: String?
+    @Published private(set) var controlNotice: String?
+    @Published private(set) var lastStart: FleetStartResult?
 
     private let location: HangarLocation
     private let readVersions: FleetProtocolRange
@@ -50,6 +113,18 @@ final class FleetStore: ObservableObject {
         return writeCompatible && negotiation?.readCompatible == true
     }
 
+    var canReadReceipts: Bool {
+        connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.receipt.read") == true
+    }
+
+    var canStart: Bool {
+        canWrite && negotiation?.capabilityIDs.contains("fleet.start.execute") == true && pendingIntentID == nil
+    }
+
+    var canBroadcast: Bool {
+        canWrite && negotiation?.capabilityIDs.contains("fleet.broadcast.execute") == true && pendingIntentID == nil
+    }
+
     #if DEBUG
     var debugConnectionTaskCount: Int {
         [connectionTask, reconnectTask].compactMap { $0 }.count
@@ -82,7 +157,144 @@ final class FleetStore: ObservableObject {
         reconnectTask = nil
         let currentConnection = connection
         connection = nil
+        negotiation = nil
         Task { await currentConnection?.close() }
+    }
+
+    func canPerform(_ action: FleetOperatorAction, on session: FleetSession) -> Bool {
+        canWrite
+            && pendingIntentID == nil
+            && negotiation?.capabilityIDs.contains("fleet.action.execute") == true
+            && selectedSessionKey == session.sessionKey
+            && !session.sessionKey.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && session.version > 0
+            && action.isAvailable(in: session.capabilities)
+    }
+
+    func canSendPrompt(_ prompt: String, on session: FleetSession) -> Bool {
+        canPerform(.sendPrompt, on: session)
+            && !prompt.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+    }
+
+    func perform(_ action: FleetOperatorAction, on session: FleetSession, prompt: String = "") {
+        let trimmedPrompt = prompt.trimmingCharacters(in: .whitespacesAndNewlines)
+        let allowed = action == .sendPrompt
+            ? canSendPrompt(trimmedPrompt, on: session)
+            : canPerform(action, on: session)
+        guard allowed else {
+            controlNotice = "Action is unavailable or incomplete."
+            return
+        }
+        guard selectedSessionKey == session.sessionKey,
+              let current = sessions.first(where: { $0.sessionKey == session.sessionKey }),
+              current.version == session.version else {
+            controlNotice = "Fleet state changed. Review the current session before sending."
+            return
+        }
+        guard let connection else {
+            controlNotice = "Fleet connection is unavailable."
+            return
+        }
+        let requestID = UUID().uuidString
+        pendingIntentID = requestID
+        controlNotice = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.pendingIntentID = nil }
+            do {
+                let result = try await connection.action(FleetActionParams(
+                    sessionKey: current.sessionKey,
+                    expectedVersion: current.version,
+                    requestID: requestID,
+                    action: action.wireAction(prompt: trimmedPrompt)
+                ))
+                self.record(result.receipt)
+                await self.refreshAuthoritativeState(using: connection)
+            } catch {
+                self.controlNotice = "Action refused: \(String(describing: error))"
+            }
+        }
+    }
+
+    func start(provider: FleetProvider, cwd: String, prompt: String?) {
+        let trimmedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canStart,
+              provider != .unknown,
+              !trimmedCWD.isEmpty,
+              FleetStartPreflight.isExistingDirectory(trimmedCWD),
+              let connection else {
+            controlNotice = "Start is unavailable or incomplete."
+            return
+        }
+        let requestID = UUID().uuidString
+        pendingIntentID = requestID
+        controlNotice = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.pendingIntentID = nil }
+            do {
+                let result = try await connection.start(FleetStartParams(
+                    requestID: requestID,
+                    provider: provider,
+                    cwd: trimmedCWD,
+                    prompt: prompt?.trimmingCharacters(in: .whitespacesAndNewlines)
+                ))
+                self.lastStart = result
+                self.record(result.receipt)
+                await self.refreshAuthoritativeState(using: connection)
+            } catch {
+                self.controlNotice = "Start refused: \(String(describing: error))"
+            }
+        }
+    }
+
+    func broadcast(targetKeys: [String], text: String) {
+        var seen = Set<String>()
+        let orderedTargets = targetKeys.filter { seen.insert($0).inserted }
+        let trimmedText = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard canBroadcast,
+              !orderedTargets.isEmpty,
+              !trimmedText.isEmpty,
+              let connection,
+              orderedTargets.allSatisfy({ key in
+                  sessions.contains { $0.sessionKey == key && $0.version > 0 && ($0.capabilities.sendPrompt || $0.capabilities.tmuxText) }
+              }) else {
+            controlNotice = "Broadcast is unavailable or incomplete."
+            return
+        }
+        let intentID = UUID().uuidString
+        pendingIntentID = intentID
+        controlNotice = nil
+        Task { [weak self] in
+            guard let self else { return }
+            defer { self.pendingIntentID = nil }
+            do {
+                let result = try await connection.broadcast(FleetBroadcastParams(
+                    targetKeys: orderedTargets,
+                    text: trimmedText,
+                    idempotencyKey: intentID
+                ))
+                self.record(result.receipts)
+                await self.refreshAuthoritativeState(using: connection)
+            } catch {
+                self.controlNotice = "Broadcast refused: \(String(describing: error))"
+            }
+        }
+    }
+
+    func refreshReceipts() {
+        guard canReadReceipts, let connection else {
+            controlNotice = "Receipt reads are unavailable for this daemon."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                self.receipts = try await connection.receiptList(FleetReceiptListParams(limit: 50)).receipts
+            } catch {
+                self.controlNotice = "Receipt refresh refused: \(String(describing: error))"
+            }
+        }
     }
 
     private func beginConnection() {
@@ -125,6 +337,9 @@ final class FleetStore: ObservableObject {
                 return
             }
             apply(bootstrapped)
+            if result.capabilityIDs.contains("fleet.receipt.read") {
+                receipts = try await newConnection.receiptList(FleetReceiptListParams(limit: 50)).receipts
+            }
             connectionState = .live(daemonVersion: result.daemonVersion, writeCompatible: result.writeCompatible)
             established = true
             if reconnectAttempts > 0 {
@@ -267,5 +482,33 @@ final class FleetStore: ObservableObject {
 
     private func handle(_ error: Error) {
         becomeStale(reason: error.localizedDescription)
+    }
+
+    private func record(_ receipt: FleetActionReceipt) {
+        record([receipt])
+    }
+
+    private func record(_ incoming: [FleetActionReceipt]) {
+        receipts = Self.mergedReceipts(incoming, existing: receipts)
+    }
+
+    static func mergedReceipts(_ incoming: [FleetActionReceipt], existing: [FleetActionReceipt]) -> [FleetActionReceipt] {
+        let incomingIDs = Set(incoming.map(\.requestID))
+        return incoming + existing.filter { !incomingIDs.contains($0.requestID) }
+    }
+
+    private func refreshAuthoritativeState(using connection: FleetConnection) async {
+        do {
+            let snapshot = try await connection.snapshot()
+            apply(FleetProjectionReducer.snapshot(snapshot, from: projection))
+        } catch {
+            controlNotice = "Fleet refresh refused: \(String(describing: error))"
+        }
+        guard canReadReceipts else { return }
+        do {
+            receipts = try await connection.receiptList(FleetReceiptListParams(limit: 50)).receipts
+        } catch {
+            controlNotice = "Receipt refresh refused: \(String(describing: error))"
+        }
     }
 }
