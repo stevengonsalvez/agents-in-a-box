@@ -1,0 +1,35 @@
+name: Actionlint
+
+# Guards against exactly the failure mode that let toolkit-validation.yml sit
+# broken for six weeks: an unparseable workflow file produces a run with ZERO
+# jobs, which GitHub reports as neither red nor amber, so nothing here fails
+# silently again. Triggers only on pull_request for workflow-file changes so
+# it can actually block a merge (a push-only check on main cannot).
+on:
+  pull_request:
+    paths:
+      - ".github/workflows/**"
+
+jobs:
+  actionlint:
+    name: Lint workflow files
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # shellcheck is intentionally disabled (-shellcheck=): it flags
+      # pre-existing style/quoting nits in unrelated `run:` blocks (see
+      # release.yml) that would fail any PR touching workflow files for
+      # reasons unrelated to workflow validity. Everything actionlint checks
+      # on top of shellcheck (YAML syntax, expression syntax, job/step
+      # schema, action input validation, reachability) stays on, which is
+      # what would have caught the original defect (an unquoted colon in a
+      # step name breaking YAML parsing).
+      - name: Download actionlint
+        id: get_actionlint
+        run: bash <(curl -fsSL https://raw.githubusercontent.com/rhysd/actionlint/v1.7.12/scripts/download-actionlint.bash) 1.7.12
+        shell: bash
+
+      - name: Check workflow files
+        run: ${{ steps.get_actionlint.outputs.executable }} -color -shellcheck=
+        shell: bash

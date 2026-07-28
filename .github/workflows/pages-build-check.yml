@@ -1,0 +1,39 @@
+name: Pages build check
+
+# deploy-pages.yml only triggers on push to main, so docs/site breakages were
+# never caught before merge. The first signal was a red deploy on main after
+# the fact. This runs the same build on pull_request, build only, no deploy,
+# so it can actually gate a PR. It intentionally does NOT request
+# `pages: write` / `id-token: write` and does not touch the Pages deployment
+# environment or its concurrency group; deployment stays exclusively on
+# deploy-pages.yml's push-to-main path.
+on:
+  pull_request:
+    paths:
+      - "website/site/**"
+      - "docs/**"
+      - ".github/workflows/pages-build-check.yml"
+
+jobs:
+  build:
+    name: Build site
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: website/site
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: website/site/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build site
+        run: npm run build
