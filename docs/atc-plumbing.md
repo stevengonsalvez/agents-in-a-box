@@ -1,3 +1,7 @@
+---
+title: "ATC plumbing — event-driven orchestration"
+---
+
 # ATC plumbing — event-driven orchestration
 
 The ATC plumbing upgrades **Air Traffic Control** from *poll-mode* (act on the
