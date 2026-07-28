@@ -412,6 +412,18 @@ pub async fn spawn(config: CodexManagerConfig) -> Result<ManagedCodexManager, Pr
         ));
     }
 
+    // Fail loud before we add another app-server to an already-piled-up host. A
+    // SIGKILLed daemon leaks its child at ppid==1; the boot reaper handles that,
+    // but this cap is the second line of defence against an unbounded spawn loop
+    // (e.g. a wedged service-retry). Surfaces as a Transport error the service loop
+    // logs + backs off on, never a silent 900-process pileup.
+    //
+    // This runs BEFORE prepare_socket, so at the cap the daemon also declines to
+    // ADOPT the one healthy shared server it might otherwise reuse; an intentional,
+    // honest downgrade: on an already-saturated host we refuse loudly rather than
+    // quietly join the pile.
+    enforce_codex_server_cap().await?;
+
     let preparation = prepare_socket(&config.socket_path, &config.codex_binary).await?;
     let mut owns_server = preparation.owns_server;
     let owner_marker_path = socket_owner_marker(&config.socket_path);
@@ -724,7 +736,7 @@ async fn listener_owner_marker(
 
 /// PIDs currently holding `socket_path`, or `None` when `lsof` cannot answer.
 ///
-/// `None` means "unknown", never "nobody" — callers must not read it as proof the
+/// `None` means "unknown", never "nobody"; callers must not read it as proof the
 /// socket is free.
 async fn socket_listener_pids(socket_path: &Path) -> Option<Vec<u32>> {
     let output = Command::new("lsof")
@@ -750,6 +762,198 @@ async fn socket_listener_pids(socket_path: &Path) -> Option<Vec<u32>> {
 /// pid, several pids, or none) means this child did not win the bind.
 fn bound_by_child(child_pid: u32, listeners: Option<&[u32]>) -> bool {
     listeners.is_none_or(|pids| pids.len() == 1 && pids[0] == child_pid)
+}
+
+/// Default max concurrent codex app-server processes before `spawn` refuses more.
+const DEFAULT_CODEX_MAX_SERVERS: usize = 8;
+
+/// One `ps -Ao pid,ppid,args` row, borrowed from the dump.
+struct PsRow<'a> {
+    pid: u32,
+    ppid: u32,
+    args: &'a str,
+}
+
+/// Split `s` into (first whitespace-delimited token, rest-including-whitespace).
+/// `None` when there is no token (empty or all-whitespace).
+fn split_first_token(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    if s.is_empty() {
+        return None;
+    }
+    Some(s.find(char::is_whitespace).map_or((s, ""), |end| (&s[..end], &s[end..])))
+}
+
+/// Parse one `ps -Ao pid,ppid,args` line into pid, ppid, and the args remainder.
+/// Returns `None` when the pid/ppid columns do not parse (e.g. the header row).
+fn parse_ps_row(line: &str) -> Option<PsRow<'_>> {
+    let (pid, rest) = split_first_token(line)?;
+    let pid = pid.parse::<u32>().ok()?;
+    let (ppid, args) = split_first_token(rest)?;
+    let ppid = ppid.parse::<u32>().ok()?;
+    Some(PsRow {
+        pid,
+        ppid,
+        args: args.trim_start(),
+    })
+}
+
+/// Whether an argv is a codex app-server invocation from us or the plugin broker.
+///
+/// Requires both `bin/codex` and `app-server`. The desktop Codex/ChatGPT app runs
+/// `.../ChatGPT.app/Contents/Resources/codex` (no `bin/codex`), so it never matches.
+fn is_codex_app_server(args: &str) -> bool {
+    args.contains("bin/codex") && args.contains("app-server")
+}
+
+/// PIDs of orphaned codex app-server processes in a `ps -Ao pid,ppid,args` dump.
+///
+/// Target = ppid == 1 AND argv contains `bin/codex` AND contains `app-server`.
+/// Skips the header line (its pid column does not parse). The desktop app is
+/// excluded twice: no `bin/codex` in its argv, and its ppid is not 1.
+fn codex_orphans_to_reap(ps_output: &str) -> Vec<u32> {
+    ps_output
+        .lines()
+        .filter_map(parse_ps_row)
+        .filter(|row| row.ppid == 1 && is_codex_app_server(row.args))
+        .map(|row| row.pid)
+        .collect()
+}
+
+/// Count of live codex app-server SERVERS (any ppid) in a `ps` dump: argv contains
+/// `bin/codex` AND `app-server`, but NOT `app-server proxy`. Used to fail loud
+/// before piling on more. Proxy processes are excluded because each real server is
+/// fronted by a proxy; counting both would trip the cap at half the real server
+/// count (~4 server+proxy pairs against the default cap of 8).
+fn live_codex_app_server_count(ps_output: &str) -> usize {
+    ps_output
+        .lines()
+        .filter_map(parse_ps_row)
+        .filter(|row| is_codex_app_server(row.args) && !row.args.contains("app-server proxy"))
+        .count()
+}
+
+/// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our
+/// shared socket, then return who to signal.
+///
+/// The live-socket spare is NOT a safety check against killing an in-use server: a
+/// healthy server is never ppid==1 (its launcher stays alive), so no candidate here
+/// is ever in use. It exists only so a booting daemon can ADOPT a still-listening
+/// server left by a prior daemon rather than kill-and-respawn it. When `listeners`
+/// is `None` (lsof could not answer) we still reap every candidate: ppid==1 is
+/// independent proof of orphan-hood, so the "unknown != nobody" caveat that guards
+/// socket-ownership decisions does not apply here.
+fn reap_targets(candidates: &[u32], listeners: Option<&[u32]>, self_pid: u32) -> Vec<u32> {
+    candidates
+        .iter()
+        .copied()
+        .filter(|pid| *pid != self_pid)
+        .filter(|pid| listeners.is_none_or(|live| !live.contains(pid)))
+        .collect()
+}
+
+/// Configured cap on concurrent codex app-server servers (`AINB_CODEX_MAX_SERVERS`,
+/// default `DEFAULT_CODEX_MAX_SERVERS`). A non-numeric override falls back to default.
+/// Clamped to a floor of 1 so `AINB_CODEX_MAX_SERVERS=0` cannot permanently refuse
+/// every spawn (the daemon must always be able to bring up at least one server).
+fn codex_server_cap() -> usize {
+    std::env::var("AINB_CODEX_MAX_SERVERS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(DEFAULT_CODEX_MAX_SERVERS)
+        .max(1)
+}
+
+/// Whether the live codex app-server count in a `ps` dump has reached `cap`.
+/// Pure so the boundary (`count >= cap`) is unit-tested without spawning `ps`.
+fn codex_server_cap_reached(ps_output: &str, cap: usize) -> bool {
+    live_codex_app_server_count(ps_output) >= cap
+}
+
+/// Read the full process table via `ps -Ao pid,ppid,args`, or `None` on failure.
+async fn ps_process_table() -> Option<String> {
+    let output = Command::new("ps")
+        .args(["-Ao", "pid,ppid,args"])
+        .stdin(Stdio::null())
+        .stderr(Stdio::null())
+        .output()
+        .await
+        .ok()
+        .filter(|output| output.status.success())?;
+    String::from_utf8(output.stdout).ok()
+}
+
+/// Refuse to spawn another shared app-server once the cap is already live.
+///
+/// Turns a silent process pileup (a SIGKILL/OOM leak loop that never runs Drop)
+/// into a loud spawn error the service loop logs and backs off on. Fails open when
+/// `ps` cannot answer: we never wedge boot on a host without a readable process
+/// table.
+async fn enforce_codex_server_cap() -> Result<(), ProviderError> {
+    let cap = codex_server_cap();
+    let Some(ps_output) = ps_process_table().await else {
+        return Ok(());
+    };
+    if codex_server_cap_reached(&ps_output, cap) {
+        let live = live_codex_app_server_count(&ps_output);
+        return Err(ProviderError::Transport(format!(
+            "refusing to spawn Codex app-server: {live} already live, at or above cap {cap} \
+             (raise with AINB_CODEX_MAX_SERVERS)"
+        )));
+    }
+    Ok(())
+}
+
+/// Reap codex app-server processes orphaned by a prior daemon or plugin broker.
+///
+/// A codex app-server does not self-daemonize: its `node .../bin/codex app-server`
+/// launcher stays alive for the server's whole life, so a healthy in-use server is
+/// NEVER at ppid==1. A server reaches ppid==1 only when that parent launcher dies:
+/// a daemon `SIGKILL`/crash (Rust `Drop` never runs) or spawn-cleanup killing the
+/// launcher after an initialize failure. ppid==1 therefore means genuinely orphaned,
+/// which is why this boot-time sweep is safe and is the only backstop that survives
+/// `SIGKILL`. Best-effort: any failure returns the count reaped so far. Returns how
+/// many processes were signalled.
+pub async fn reap_orphaned_codex_servers(live_socket: &Path) -> usize {
+    use nix::errno::Errno;
+    use nix::sys::signal::{Signal, kill};
+    use nix::unistd::Pid;
+
+    let Some(ps_output) = ps_process_table().await else {
+        return 0;
+    };
+    let candidates = codex_orphans_to_reap(&ps_output);
+    if candidates.is_empty() {
+        return 0;
+    }
+    let listeners = socket_listener_pids(live_socket).await;
+    let targets = reap_targets(&candidates, listeners.as_deref(), std::process::id());
+
+    let mut reaped = 0_usize;
+    for pid in targets {
+        let Ok(raw_pid) = i32::try_from(pid) else {
+            continue;
+        };
+        match kill(Pid::from_raw(raw_pid), Signal::SIGTERM) {
+            Ok(()) => {
+                reaped += 1;
+                tracing::info!(pid, "reaped orphaned codex app-server");
+            }
+            // Already gone between the `ps` read and the signal, not an error.
+            Err(Errno::ESRCH) => {}
+            Err(error) => {
+                tracing::warn!(pid, error = %error, "failed to signal orphaned codex app-server");
+            }
+        }
+    }
+    if reaped > 0 {
+        tracing::info!(
+            reaped,
+            candidates = candidates.len(),
+            "reaped orphaned codex app-server processes at boot"
+        );
+    }
+    reaped
 }
 
 async fn repair_owner_marker(repair: MarkerRepair) -> Result<bool, ProviderError> {
@@ -1235,6 +1439,70 @@ mod tests {
         assert!(!bound_by_child(42, Some(&[])));
         // `lsof` unavailable: trust the spawn rather than kill a healthy server.
         assert!(bound_by_child(42, None));
+    }
+
+    /// A realistic `ps -Ao pid,ppid,args` dump: header, both orphan leak sources
+    /// (501, 777, real ppid==1 servers), a live `app-server proxy` (1500, ppid!=1,
+    /// a consumer not a server), and the desktop Codex/ChatGPT app (900).
+    const PS_FIXTURE: &str = "\
+  PID  PPID ARGS
+  501     1 /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server --listen unix:///Users/x/.agents-in-a-box/codex-app-server.sock
+  777     1 node /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server --listen unix:///var/folders/ab/cd/T/cxc-9Q2/broker.sock
+ 1500  4242 /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server proxy --listen unix:///Users/x/.agents-in-a-box/codex-app-server.sock
+  900   500 /Applications/ChatGPT.app/Contents/Resources/codex --foo bar
+";
+
+    #[test]
+    fn codex_orphans_reaps_only_ppid1_app_servers() {
+        // Both leak sources (daemon child + node broker child) are ppid==1 orphans.
+        // The live child (ppid!=1) and the desktop app are left alone. Header skipped.
+        assert_eq!(codex_orphans_to_reap(PS_FIXTURE), vec![501, 777]);
+    }
+
+    #[test]
+    fn codex_orphans_ignores_desktop_app_and_non_orphan() {
+        // A ppid!=1 line with a matching argv must NOT be returned.
+        let dump = " 1500  4242 /home/u/.nvm/bin/codex app-server proxy --listen unix:///t.sock\n";
+        assert!(codex_orphans_to_reap(dump).is_empty());
+        // The desktop app has neither `bin/codex` nor ppid==1.
+        let desktop = "  900     1 /Applications/ChatGPT.app/Contents/Resources/codex --foo\n";
+        assert!(codex_orphans_to_reap(desktop).is_empty());
+    }
+
+    #[test]
+    fn reap_targets_spares_live_socket_holder_and_self() {
+        let candidates = [501, 777];
+        // The live server we may adopt is spared.
+        assert_eq!(reap_targets(&candidates, Some(&[501]), 999), vec![777]);
+        // Empty listener set: nobody holds the socket, reap every orphan.
+        assert_eq!(reap_targets(&candidates, Some(&[]), 999), vec![501, 777]);
+        // `lsof` could not answer: ppid==1 alone proves orphan-hood, reap all.
+        assert_eq!(reap_targets(&candidates, None, 999), vec![501, 777]);
+        // Our own pid is never a target.
+        assert_eq!(reap_targets(&[501, 777, 999], None, 999), vec![501, 777]);
+    }
+
+    #[test]
+    fn live_count_counts_servers_not_proxies() {
+        // 501 + 777 are real servers = 2. The 1500 `app-server proxy` line is a
+        // consumer, not a server, so it is NOT counted (counting proxies would trip
+        // the cap at half the real server count). Desktop app + header excluded.
+        assert_eq!(live_codex_app_server_count(PS_FIXTURE), 2);
+        // A lone proxy line, regardless of ppid, counts as zero servers.
+        let proxy_only = " 1500     1 /home/u/.nvm/bin/codex app-server proxy --sock /tmp/x.sock\n";
+        assert_eq!(live_codex_app_server_count(proxy_only), 0);
+    }
+
+    #[test]
+    fn cap_reached_at_or_above_boundary() {
+        // Fixture has 2 live SERVERS (proxies excluded).
+        assert!(!codex_server_cap_reached(PS_FIXTURE, 3)); // below the cap
+        assert!(codex_server_cap_reached(PS_FIXTURE, 2)); // at the cap
+        assert!(codex_server_cap_reached(PS_FIXTURE, 1)); // above the cap
+        assert!(!codex_server_cap_reached(
+            PS_FIXTURE,
+            DEFAULT_CODEX_MAX_SERVERS
+        ));
     }
 
     struct FakeCleanup(Arc<AtomicBool>);
