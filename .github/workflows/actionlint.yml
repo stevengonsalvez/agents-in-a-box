@@ -21,8 +21,8 @@ jobs:
       # pre-existing style/quoting nits in unrelated `run:` blocks (see
       # release.yml) that would fail any PR touching workflow files for
       # reasons unrelated to workflow validity. Everything actionlint checks
-      # on top of shellcheck — YAML syntax, expression syntax, job/step
-      # schema, action input validation, reachability — stays on, which is
+      # on top of shellcheck (YAML syntax, expression syntax, job/step
+      # schema, action input validation, reachability) stays on, which is
       # what would have caught the original defect (an unquoted colon in a
       # step name breaking YAML parsing).
       - name: Download actionlint

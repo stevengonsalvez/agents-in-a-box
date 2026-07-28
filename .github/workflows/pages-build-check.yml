@@ -1,7 +1,7 @@
 name: Pages build check
 
 # deploy-pages.yml only triggers on push to main, so docs/site breakages were
-# never caught before merge — the first signal was a red deploy on main after
+# never caught before merge. The first signal was a red deploy on main after
 # the fact. This runs the same build on pull_request, build only, no deploy,
 # so it can actually gate a PR. It intentionally does NOT request
 # `pages: write` / `id-token: write` and does not touch the Pages deployment
