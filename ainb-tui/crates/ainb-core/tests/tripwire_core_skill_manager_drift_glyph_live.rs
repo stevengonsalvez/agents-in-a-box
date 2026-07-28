@@ -231,7 +231,7 @@ fn pressing_m_renders_drift_warning_glyph_against_real_local_bare() {
     assert!(status.success(), "tmux new-session failed");
 
     // Pin `AINB_HOME` explicitly alongside `HOME` rather than relying
-    // on `default_ainb_home()`'s `HOME`-only fallback — every sibling
+    // on `default_ainb_home()`'s `HOME`-only fallback. Every sibling
     // live tripwire (`SandboxLayout::env_vars()` in
     // ainb-skill-core::fixtures) does the same for exactly this
     // reason: `default_ainb_home()` prefers `$AINB_HOME`, then
@@ -240,7 +240,7 @@ fn pressing_m_renders_drift_warning_glyph_against_real_local_bare() {
     // those higher-precedence vars is set in the job's ambient
     // environment, a bare `HOME=...` override silently loses the race
     // and the app reads an empty/real ainb home instead of the one we
-    // just seeded — Sources/Units render empty and the ⚠ glyph never
+    // just seeded, so Sources/Units render empty and the glyph never
     // appears, which is exactly the failure this test is guarding
     // against, just misattributed to the product instead of the
     // launch line. Also set `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`
