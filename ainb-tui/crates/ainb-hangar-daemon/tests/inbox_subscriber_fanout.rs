@@ -86,8 +86,8 @@ fn emit_comment(
     );
 }
 
-/// Poll until `issue_id` has at least `want` inbox entries, then return every
-/// recipient addressed for it.
+/// Poll until `issue_id` has at least `want` inbox entries and, when specified,
+/// the required recipient, then return every addressed recipient.
 async fn recipients_for_issue(
     store: &Store,
     issue_id: &str,
