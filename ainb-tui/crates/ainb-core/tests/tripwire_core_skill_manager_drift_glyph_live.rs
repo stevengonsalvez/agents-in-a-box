@@ -230,10 +230,28 @@ fn pressing_m_renders_drift_warning_glyph_against_real_local_bare() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
+    // Pin `AINB_HOME` explicitly alongside `HOME` rather than relying
+    // on `default_ainb_home()`'s `HOME`-only fallback — every sibling
+    // live tripwire (`SandboxLayout::env_vars()` in
+    // ainb-skill-core::fixtures) does the same for exactly this
+    // reason: `default_ainb_home()` prefers `$AINB_HOME`, then
+    // `$XDG_CONFIG_HOME/agents-in-a-box`, and only falls back to
+    // `$HOME/.agents-in-a-box` last. On a CI runner where either of
+    // those higher-precedence vars is set in the job's ambient
+    // environment, a bare `HOME=...` override silently loses the race
+    // and the app reads an empty/real ainb home instead of the one we
+    // just seeded — Sources/Units render empty and the ⚠ glyph never
+    // appears, which is exactly the failure this test is guarding
+    // against, just misattributed to the product instead of the
+    // launch line. Also set `GIT_TERMINAL_PROMPT`/`GIT_ASKPASS`
+    // belt-and-braces (matches `SandboxLayout::env_vars()`) so a
+    // credential prompt can never freeze the pane.
+    let ainb_home = home_tmp.path().join(".agents-in-a-box");
     let cmd = format!(
-        "HOME={} exec {} 2>&1",
-        home_tmp.path().display(),
-        bin.display()
+        "HOME={home} AINB_HOME={ainb_home} GIT_TERMINAL_PROMPT=0 GIT_ASKPASS=/bin/true exec {bin} 2>&1",
+        home = home_tmp.path().display(),
+        ainb_home = ainb_home.display(),
+        bin = bin.display(),
     );
     Command::new("tmux")
         .args(["send-keys", "-t", &session, &cmd, "Enter"])
