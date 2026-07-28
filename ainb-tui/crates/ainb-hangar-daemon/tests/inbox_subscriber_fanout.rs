@@ -88,7 +88,12 @@ fn emit_comment(
 
 /// Poll until `issue_id` has at least `want` inbox entries, then return every
 /// recipient addressed for it.
-async fn recipients_for_issue(store: &Store, issue_id: &str, want: usize) -> Vec<String> {
+async fn recipients_for_issue(
+    store: &Store,
+    issue_id: &str,
+    want: usize,
+    required_recipient: Option<&str>,
+) -> Vec<String> {
     let deadline = std::time::Instant::now() + Duration::from_secs(5);
     loop {
         let rows: Vec<(String, String)> = sqlx::query_as(
@@ -102,7 +107,10 @@ async fn recipients_for_issue(store: &Store, issue_id: &str, want: usize) -> Vec
         .await
         .expect("read inbox");
         let out: Vec<String> = rows.into_iter().map(|(k, i)| format!("{k}:{i}")).collect();
-        if out.len() >= want || std::time::Instant::now() > deadline {
+        if (out.len() >= want
+            && required_recipient.is_none_or(|recipient| out.iter().any(|row| row == recipient)))
+            || std::time::Instant::now() > deadline
+        {
             return out;
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
@@ -137,7 +145,7 @@ async fn a_manual_subscriber_who_is_neither_creator_nor_assignee_gets_the_commen
     .unwrap();
 
     emit_comment(&sink, "fanout-1", "cm-1", "member:carol");
-    let recipients = recipients_for_issue(&store, "fanout-1", 3).await;
+    let recipients = recipients_for_issue(&store, "fanout-1", 3, None).await;
 
     assert!(
         recipients.contains(&"member:watcher".to_string()),
@@ -174,7 +182,7 @@ async fn the_comment_author_is_not_notified_of_their_own_comment() {
     .unwrap();
 
     emit_comment(&sink, "fanout-2", "cm-2", "member:dave");
-    let recipients = recipients_for_issue(&store, "fanout-2", 1).await;
+    let recipients = recipients_for_issue(&store, "fanout-2", 1, None).await;
 
     assert!(recipients.contains(&"member:alice".to_string()));
     assert!(
@@ -203,7 +211,7 @@ async fn an_issue_with_no_subscriber_rows_still_notifies_its_participants() {
     .unwrap();
 
     emit_comment(&sink, "fanout-3", "cm-3", "member:carol");
-    let recipients = recipients_for_issue(&store, "fanout-3", 2).await;
+    let recipients = recipients_for_issue(&store, "fanout-3", 2, None).await;
 
     assert!(
         recipients.contains(&"member:alice".to_string())
@@ -297,8 +305,8 @@ async fn an_autopilot_subscriber_is_notified_about_a_spawned_issue() {
 
     emit_comment(&sink, &issue_id, "cm-ap", "member:carol");
     // The fanout writes the creator and rule subscriber independently.
-    // Wait for both rows before asserting on the rule subscriber.
-    let recipients = recipients_for_issue(&store, &issue_id, 2).await;
+    // Wait for both rows, including the rule subscriber.
+    let recipients = recipients_for_issue(&store, &issue_id, 2, Some("member:rule-watcher")).await;
 
     assert!(
         recipients.contains(&"member:rule-watcher".to_string()),
