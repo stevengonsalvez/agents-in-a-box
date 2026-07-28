@@ -20,6 +20,24 @@
 		A1000000000000000000001B /* FleetConnection.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002C /* FleetConnection.swift */; };
 		A1000000000000000000001C /* FleetConnectionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002D /* FleetConnectionTests.swift */; };
 		A1000000000000000000001D /* FleetDaemonContractTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002E /* FleetDaemonContractTests.swift */; };
+		A1000000000000000000001E /* FleetStore.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002F /* FleetStore.swift */; };
+		A1000000000000000000001F /* FleetConnectionState.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000030 /* FleetConnectionState.swift */; };
+		A10000000000000000000020 /* FleetRosterPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000033 /* FleetRosterPresentation.swift */; };
+		A10000000000000000000034 /* FleetStatusPresentation.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000035 /* FleetStatusPresentation.swift */; };
+		A10000000000000000000036 /* FleetMenuBarView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000037 /* FleetMenuBarView.swift */; };
+		A10000000000000000000038 /* FleetWindowView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000039 /* FleetWindowView.swift */; };
+		A1000000000000000000003A /* FleetSessionDetailView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003B /* FleetSessionDetailView.swift */; };
+		A1000000000000000000003C /* FleetQuickSwitcher.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003D /* FleetQuickSwitcher.swift */; };
+		A1000000000000000000003E /* FleetSettingsView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000003F /* FleetSettingsView.swift */; };
+		A10000000000000000000040 /* FleetRosterPresentationTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000043 /* FleetRosterPresentationTests.swift */; };
+		A10000000000000000000045 /* FleetFixtureDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000049 /* FleetFixtureDaemon.swift */; };
+		A1000000000000000000005A /* FleetFixtureDaemonFallbackTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */; };
+		A1000000000000000000005C /* FleetFixtureDaemon.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000049 /* FleetFixtureDaemon.swift */; };
+		A10000000000000000000046 /* FleetUITestCase.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004A /* FleetUITestCase.swift */; };
+		A10000000000000000000047 /* MenuBarRosterJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004B /* MenuBarRosterJourneyTests.swift */; };
+		A10000000000000000000048 /* WindowAndSwitcherJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004C /* WindowAndSwitcherJourneyTests.swift */; };
+		A1000000000000000000004F /* OfflineAndReconnectJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000050 /* OfflineAndReconnectJourneyTests.swift */; };
+		A10000000000000000000058 /* ProtocolCompatibilityJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000059 /* ProtocolCompatibilityJourneyTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -47,6 +65,24 @@
 		A1000000000000000000002C /* FleetConnection.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnection.swift; sourceTree = "<group>"; };
 		A1000000000000000000002D /* FleetConnectionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnectionTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000002E /* FleetDaemonContractTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetDaemonContractTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000002F /* FleetStore.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetStore.swift; sourceTree = "<group>"; };
+		A10000000000000000000030 /* FleetConnectionState.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetConnectionState.swift; sourceTree = "<group>"; };
+		A10000000000000000000033 /* FleetRosterPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetRoster/FleetRosterPresentation.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000035 /* FleetStatusPresentation.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MenuBar/FleetStatusPresentation.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000037 /* FleetMenuBarView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/MenuBar/FleetMenuBarView.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000039 /* FleetWindowView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetRoster/FleetWindowView.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000003B /* FleetSessionDetailView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetRoster/FleetSessionDetailView.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000003D /* FleetQuickSwitcher.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/FleetRoster/FleetQuickSwitcher.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000003F /* FleetSettingsView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Settings/FleetSettingsView.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000043 /* FleetRosterPresentationTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FleetRosterPresentationTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000049 /* FleetFixtureDaemon.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/Support/FleetFixtureDaemon.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Tests/FleetRPCTests/FleetFixtureDaemonFallbackTests.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000004A /* FleetUITestCase.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/Support/FleetUITestCase.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000004B /* MenuBarRosterJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/MenuBarRosterJourneyTests.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000004C /* WindowAndSwitcherJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/WindowAndSwitcherJourneyTests.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000050 /* OfflineAndReconnectJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/OfflineAndReconnectJourneyTests.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000059 /* ProtocolCompatibilityJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/ProtocolCompatibilityJourneyTests.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000004D /* FleetUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000031 /* AINBFleet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AINBFleet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000032 /* FleetRPCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetRPCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
@@ -66,6 +102,13 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		A1000000000000000000004E /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
 
 /* Begin PBXGroup section */
@@ -76,6 +119,7 @@
 				A10000000000000000000056 /* FleetRPC */,
 				A10000000000000000000053 /* Resources */,
 				A10000000000000000000054 /* FleetRPCTests */,
+				A10000000000000000000057 /* FleetUITests */,
 				A10000000000000000000055 /* Products */,
 			);
 			sourceTree = "<group>";
@@ -84,6 +128,15 @@
 			isa = PBXGroup;
 			children = (
 				A10000000000000000000021 /* AINBFleetApp.swift */,
+				A1000000000000000000002F /* FleetStore.swift */,
+				A10000000000000000000030 /* FleetConnectionState.swift */,
+				A10000000000000000000033 /* FleetRosterPresentation.swift */,
+				A10000000000000000000035 /* FleetStatusPresentation.swift */,
+				A10000000000000000000037 /* FleetMenuBarView.swift */,
+				A10000000000000000000039 /* FleetWindowView.swift */,
+				A1000000000000000000003B /* FleetSessionDetailView.swift */,
+				A1000000000000000000003D /* FleetQuickSwitcher.swift */,
+				A1000000000000000000003F /* FleetSettingsView.swift */,
 			);
 			path = Sources/App;
 			sourceTree = "<group>";
@@ -118,6 +171,8 @@
 				A1000000000000000000002A /* FleetSemanticBoundaryTests.swift */,
 				A1000000000000000000002D /* FleetConnectionTests.swift */,
 				A1000000000000000000002E /* FleetDaemonContractTests.swift */,
+				A10000000000000000000043 /* FleetRosterPresentationTests.swift */,
+				A1000000000000000000005B /* FleetFixtureDaemonFallbackTests.swift */,
 			);
 			path = Tests/FleetRPCTests;
 			sourceTree = "<group>";
@@ -127,8 +182,22 @@
 			children = (
 				A10000000000000000000031 /* AINBFleet.app */,
 				A10000000000000000000032 /* FleetRPCTests.xctest */,
+				A1000000000000000000004D /* FleetUITests.xctest */,
 			);
 			name = Products;
+			sourceTree = "<group>";
+		};
+		A10000000000000000000057 /* FleetUITests */ = {
+			isa = PBXGroup;
+			children = (
+				A10000000000000000000049 /* FleetFixtureDaemon.swift */,
+				A1000000000000000000004A /* FleetUITestCase.swift */,
+				A1000000000000000000004B /* MenuBarRosterJourneyTests.swift */,
+				A1000000000000000000004C /* WindowAndSwitcherJourneyTests.swift */,
+				A10000000000000000000050 /* OfflineAndReconnectJourneyTests.swift */,
+				A10000000000000000000059 /* ProtocolCompatibilityJourneyTests.swift */,
+			);
+			path = UITests;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -167,6 +236,23 @@
 			productReference = A10000000000000000000032 /* FleetRPCTests.xctest */;
 			productType = "com.apple.product-type.bundle.unit-test";
 		};
+		A10000000000000000000003 /* FleetUITests */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = A10000000000000000000063 /* Build configuration list for PBXNativeTarget "FleetUITests" */;
+			buildPhases = (
+				A1000000000000000000004E /* Frameworks */,
+				A10000000000000000000073 /* Sources */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+				A10000000000000000000094 /* PBXTargetDependency */,
+			);
+			name = FleetUITests;
+			productName = FleetUITests;
+			productReference = A1000000000000000000004D /* FleetUITests.xctest */;
+			productType = "com.apple.product-type.bundle.ui-testing";
+		};
 /* End PBXNativeTarget section */
 
 /* Begin PBXProject section */
@@ -182,6 +268,10 @@
 					};
 					A10000000000000000000002 = {
 						CreatedOnToolsVersion = 26.4.1;
+						TestTargetID = A10000000000000000000001;
+					};
+					A10000000000000000000003 = {
+						CreatedOnToolsVersion = 2640;
 						TestTargetID = A10000000000000000000001;
 					};
 				};
@@ -201,6 +291,7 @@
 			targets = (
 				A10000000000000000000001 /* AINBFleet */,
 				A10000000000000000000002 /* FleetRPCTests */,
+				A10000000000000000000003 /* FleetUITests */,
 			);
 		};
 /* End PBXProject section */
@@ -209,6 +300,17 @@
 		A10000000000000000000092 /* PBXTargetDependency */ = {
 			isa = PBXTargetDependency;
 			targetProxy = A10000000000000000000091 /* PBXContainerItemProxy */;
+		};
+		A10000000000000000000093 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = A10000000000000000000000 /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = A10000000000000000000001;
+			remoteInfo = AINBFleet;
+		};
+		A10000000000000000000094 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			targetProxy = A10000000000000000000093 /* PBXContainerItemProxy */;
 		};
 /* End PBXTargetDependency section */
 
@@ -223,6 +325,15 @@
 				A10000000000000000000015 /* FleetProjectionReducer.swift in Sources */,
 				A1000000000000000000001A /* HangarLocation.swift in Sources */,
 				A1000000000000000000001B /* FleetConnection.swift in Sources */,
+				A1000000000000000000001E /* FleetStore.swift in Sources */,
+				A1000000000000000000001F /* FleetConnectionState.swift in Sources */,
+				A10000000000000000000020 /* FleetRosterPresentation.swift in Sources */,
+				A10000000000000000000034 /* FleetStatusPresentation.swift in Sources */,
+				A10000000000000000000036 /* FleetMenuBarView.swift in Sources */,
+				A10000000000000000000038 /* FleetWindowView.swift in Sources */,
+				A1000000000000000000003A /* FleetSessionDetailView.swift in Sources */,
+				A1000000000000000000003C /* FleetQuickSwitcher.swift in Sources */,
+				A1000000000000000000003E /* FleetSettingsView.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -237,6 +348,22 @@
 				A10000000000000000000019 /* FleetSemanticBoundaryTests.swift in Sources */,
 				A1000000000000000000001C /* FleetConnectionTests.swift in Sources */,
 				A1000000000000000000001D /* FleetDaemonContractTests.swift in Sources */,
+				A10000000000000000000040 /* FleetRosterPresentationTests.swift in Sources */,
+				A1000000000000000000005C /* FleetFixtureDaemon.swift in Sources */,
+				A1000000000000000000005A /* FleetFixtureDaemonFallbackTests.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		A10000000000000000000073 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				A10000000000000000000045 /* FleetFixtureDaemon.swift in Sources */,
+				A10000000000000000000046 /* FleetUITestCase.swift in Sources */,
+				A10000000000000000000047 /* MenuBarRosterJourneyTests.swift in Sources */,
+				A10000000000000000000048 /* WindowAndSwitcherJourneyTests.swift in Sources */,
+				A1000000000000000000004F /* OfflineAndReconnectJourneyTests.swift in Sources */,
+				A10000000000000000000058 /* ProtocolCompatibilityJourneyTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -279,6 +406,7 @@
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SDKROOT = macosx;
 				SUPPORTED_PLATFORMS = macosx;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
 				SWIFT_VERSION = 6.0;
 			};
 			name = Debug;
@@ -336,6 +464,36 @@
 			};
 			name = Release;
 		};
+		A10000000000000000000087 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ainb.fleet.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = AINBFleet;
+			};
+			name = Debug;
+		};
+		A10000000000000000000088 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				ARCHS = arm64;
+				CODE_SIGN_STYLE = Automatic;
+				GENERATE_INFOPLIST_FILE = YES;
+				MACOSX_DEPLOYMENT_TARGET = 14.0;
+				PRODUCT_BUNDLE_IDENTIFIER = dev.ainb.fleet.uitests;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SDKROOT = macosx;
+				SWIFT_VERSION = 6.0;
+				TEST_TARGET_NAME = AINBFleet;
+			};
+			name = Release;
+		};
 /* End XCBuildConfiguration section */
 
 /* Begin XCConfigurationList section */
@@ -362,6 +520,15 @@
 			buildConfigurations = (
 				A10000000000000000000085 /* Debug */,
 				A10000000000000000000086 /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		A10000000000000000000063 /* Build configuration list for PBXNativeTarget "FleetUITests" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				A10000000000000000000087 /* Debug */,
+				A10000000000000000000088 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

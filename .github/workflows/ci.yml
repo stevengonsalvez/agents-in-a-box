@@ -29,7 +29,7 @@ env:
 
 jobs:
   fleet-macos-foundation:
-    name: Fleet macOS foundation
+    name: Fleet macOS app acceptance
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
@@ -81,18 +81,23 @@ jobs:
             cat "$log"
             exit "$status"
           fi
+      - name: Verify Fleet Release excludes DEBUG diagnostics
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash apps/ainb-fleet-macos/ci/check-release-diagnostics.sh "$RUNNER_TEMP/ainb-fleet-macos-release-derived-data"
       - name: Test Fleet macOS app
         shell: bash
         run: |
           set -euo pipefail
           mkdir -p "$RUNNER_TEMP/fleet-macos-foundation"
           log="$RUNNER_TEMP/fleet-macos-foundation/xcodebuild-test.log"
-          if xcodebuild test \
+          if AINB_FLEET_FIXTURE_DAEMON="$GITHUB_WORKSPACE/ainb-tui/target/debug/examples/fleet_fixture_daemon" xcodebuild test \
             -project apps/ainb-fleet-macos/AINBFleet.xcodeproj \
             -scheme AINBFleet \
             -destination 'platform=macOS,arch=arm64' \
             -derivedDataPath "$RUNNER_TEMP/ainb-fleet-macos-derived-data" \
-            -resultBundlePath "$RUNNER_TEMP/FleetRPCTests.xcresult" \
+            -resultBundlePath "$RUNNER_TEMP/FleetMacOSAcceptance.xcresult" \
             CODE_SIGNING_ALLOWED=NO \
             ARCHS=arm64 \
             ONLY_ACTIVE_ARCH=YES >"$log" 2>&1; then
@@ -109,7 +114,8 @@ jobs:
           name: fleet-macos-foundation-failure-${{ github.run_id }}
           path: |
             ${{ runner.temp }}/fleet-macos-foundation/*.log
-            ${{ runner.temp }}/FleetRPCTests.xcresult
+            ${{ runner.temp }}/FleetMacOSAcceptance.xcresult
+            ${{ runner.temp }}/ainb-fleet-macos-derived-data/Logs/Test/**/*.png
           if-no-files-found: warn
 
   # ────────────────────────────────────────────────────────────────────────────

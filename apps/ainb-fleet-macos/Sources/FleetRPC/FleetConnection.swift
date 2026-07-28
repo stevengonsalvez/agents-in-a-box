@@ -5,7 +5,7 @@ enum FleetConnectionError: Error, Equatable {
     case alreadyConnected
     case notConnected
     case notAuthenticated
-    case protocolReadIncompatible
+    case protocolReadIncompatible(FleetNegotiateResult)
     case protocolWriteIncompatible
     case emptyToken
     case closed
@@ -110,7 +110,7 @@ actor FleetConnection {
             result: FleetNegotiateResult.self
         )
         guard result.readCompatible else {
-            throw FleetConnectionError.protocolReadIncompatible
+            throw FleetConnectionError.protocolReadIncompatible(result)
         }
         negotiation = result
         return result
@@ -301,7 +301,7 @@ actor FleetConnection {
             throw FleetConnectionError.notAuthenticated
         }
         guard negotiation.readCompatible else {
-            throw FleetConnectionError.protocolReadIncompatible
+            throw FleetConnectionError.protocolReadIncompatible(negotiation)
         }
     }
 
