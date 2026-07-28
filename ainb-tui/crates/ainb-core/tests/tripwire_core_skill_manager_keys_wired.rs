@@ -7,8 +7,8 @@
 //! end-to-end):
 //!   1. `[i]` opens the add-source prompt; typing a `git:file://` URI
 //!      (which contains `:` — the char that used to hijack the global
-//!      slash-command palette) and pressing Enter actually writes the
-//!      source into manifest.yaml.
+//!      slash-command palette), choosing the previewed unit, and pressing
+//!      Enter actually writes the source into manifest.yaml.
 //!   2. `[/]` opens the search prompt and filters the Units table.
 //!
 //! The other help-bar keys have their own live tripwires so each file
@@ -186,6 +186,20 @@ fn add_source_key_writes_manifest_in_live_binary() {
     let uri = format!("git:file://{}", layout.bare_remote.display());
     send_literal(&session, &uri);
     thread::sleep(Duration::from_millis(400));
+    send(&session, "Enter");
+
+    // Add-source is preview-first: choose its discovered unit, then confirm
+    // import before asserting the source was persisted.
+    if poll(&session, Instant::now() + Duration::from_secs(15), |c| {
+        c.contains("Import from")
+    })
+    .is_none()
+    {
+        let d = capture(&session);
+        kill(&session);
+        panic!("add-source did not open import preview:\n{d}");
+    }
+    send(&session, "Space");
     send(&session, "Enter");
 
     // The manifest must gain the source. Poll the file directly.
