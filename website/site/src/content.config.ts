@@ -12,16 +12,32 @@ export const collections = {
       pattern: [
         '**/*.{md,mdx}',
         '!assets/**',
-        // Internal Hangar build artifacts (no Starlight frontmatter) — keep
-        // them in-repo but out of the published docsite. Only hangar/architecture.md
-        // is a real site page.
-        '!hangar/research/**',
-        '!hangar/phases/**',
-        '!hangar/build-plan.md',
-        '!hangar/README.md',
-        '!hangar/tui-keybindings.md',
-        '!hangar/verify-hangar-goal.md',
-        '!hangar/execute-hangar-parity-goal.md',
+        // Published docs are human-authored and review-gated. Automation may
+        // only write under these excluded directories: explorations/ (research
+        // notes, gap matrices, progress ledgers), hangar/ (internal build
+        // artifacts, goals, specs, proofs), and solutions/ (reflect-generated
+        // machine-written knowledge notes). None of these carry Starlight
+        // frontmatter, so excluding the whole directory (rather than naming
+        // files one at a time as they're added) keeps the site build from
+        // breaking every time automation drops a new file in one of them.
+        '!explorations/**',
+        '!solutions/**',
+        // hangar/architecture.md is the one exception: a real, human-authored
+        // site page (see astro.config.mjs sidebar entry for slug
+        // 'hangar/architecture'). A plain '!hangar/**' plus a later
+        // re-include pattern does NOT work here: tinyglobby/fdir prunes
+        // excluded directories from traversal entirely, so nothing under
+        // hangar/ is even visited once '!hangar/**' is applied, and a later
+        // positive pattern can't un-prune it. The extglob form below excludes
+        // every hangar/ entry except architecture.md while still letting the
+        // walker descend into hangar/ to find it.
+        //
+        // architecture.md is the ONLY public page under hangar/. Anything
+        // else that becomes public must MOVE out of hangar/ rather than
+        // being added here. A second name in this pattern means the
+        // directory-exclusion convention has been abandoned, which is the
+        // exact per-file-exception drift this change was meant to end.
+        '!hangar/!(architecture.md)',
       ],
     }),
     schema: docsSchema(),
