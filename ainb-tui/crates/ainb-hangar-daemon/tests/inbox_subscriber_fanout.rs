@@ -296,7 +296,9 @@ async fn an_autopilot_subscriber_is_notified_about_a_spawned_issue() {
     .expect("comment on the spawned issue");
 
     emit_comment(&sink, &issue_id, "cm-ap", "member:carol");
-    let recipients = recipients_for_issue(&store, &issue_id, 1).await;
+    // The fanout writes the creator and rule subscriber independently.
+    // Wait for both rows before asserting on the rule subscriber.
+    let recipients = recipients_for_issue(&store, &issue_id, 2).await;
 
     assert!(
         recipients.contains(&"member:rule-watcher".to_string()),
