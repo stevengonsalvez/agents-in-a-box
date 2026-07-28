@@ -87,7 +87,7 @@ jobs:
       - name: Run skill-manager unit + integration test suite
         run: |
           cd ainb-tui
-          cargo test --workspace --no-fail-fast \
+          cargo test --no-fail-fast \
             -p ainb-skill-core \
             -p ainb-fetch \
             -p ainb-adapters-source \
@@ -114,7 +114,7 @@ jobs:
               --test 'tripwire_core_skill_manager_*' \
               --test 'tripwire_core_home_tile_lists_skill_manager'
 
-      - name: Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME
+      - name: "Smoke test: AINB_USE_REAL_HOMES wiring with a tempdir HOME"
         run: |
           cd ainb-tui
           BIN="$PWD/target/release/ainb"
