@@ -9,6 +9,7 @@ struct FleetWindowView: View {
     @State private var receiptsPresented = false
     @State private var broadcastPresented = false
     @State private var atcPresented = false
+    @State private var timelinePresented = false
 
     var body: some View {
         NavigationSplitView {
@@ -44,6 +45,7 @@ struct FleetWindowView: View {
                 ToolbarItem { Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts).accessibilityIdentifier("fleet.receipts.open") }
                 ToolbarItemGroup {
                     Button("ATC") { atcPresented = true }.disabled(!store.canReadATC).accessibilityIdentifier("fleet.atc.open")
+                    Button("Timeline") { timelinePresented = true }.disabled(!store.canReadTimeline).accessibilityIdentifier("fleet.timeline.open")
                     Button("Broadcast") { broadcastPresented = true }.disabled(!store.canBroadcast).accessibilityIdentifier("fleet.broadcast.open")
                 }
             }
@@ -61,8 +63,30 @@ struct FleetWindowView: View {
         .sheet(isPresented: $startPresented) { FleetStartForm(store: store, isPresented: $startPresented) }
         .sheet(isPresented: $receiptsPresented) { FleetReceiptList(store: store) }
         .sheet(isPresented: $atcPresented) { FleetATCList(store: store) }
+        .sheet(isPresented: $timelinePresented) { FleetTimelineList(store: store) }
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
         .frame(minWidth: 820, minHeight: 520)
+    }
+}
+
+private struct FleetTimelineList: View {
+    @ObservedObject var store: FleetStore
+
+    var body: some View {
+        List(store.timeline, id: \.revision) { entry in
+            VStack(alignment: .leading) {
+                Text(entry.kind.rawValue.replacingOccurrences(of: "_", with: " ").capitalized)
+                Text(entry.sessionKey).font(.caption).textSelection(.enabled)
+                Text(Date(timeIntervalSince1970: TimeInterval(entry.observedAt) / 1_000).formatted(date: .abbreviated, time: .shortened)).font(.caption2).foregroundStyle(.secondary)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel(entry.kind.rawValue)
+            .accessibilityValue(entry.sessionKey)
+        }
+        .navigationTitle("Fleet timeline")
+        .frame(minWidth: 520, minHeight: 360)
+        .onAppear { store.refreshTimeline() }
+        .accessibilityIdentifier("fleet.timeline.list")
     }
 }
 

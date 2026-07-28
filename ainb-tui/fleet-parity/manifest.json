@@ -289,6 +289,34 @@
         ]
       },
       "release_classification": "deferred_tui"
+    },
+    {
+      "id": "fleet.timeline.read",
+      "tier": "v1",
+      "daemon_request_method": "fleet/timeline",
+      "expected_behavior": "Daemon returns bounded payload-free Fleet revision entries for visible sessions.",
+      "daemon": {
+        "status": "pass",
+        "evidence_paths": [
+          "crates/ainb-hangar-daemon/src/rpc/mod.rs",
+          "crates/ainb-hangar-store/src/repo/fleet.rs"
+        ]
+      },
+      "tui": {
+        "status": "deferred",
+        "evidence_paths": [],
+        "rationale": "Deferred under agents-in-a-box-afm-e01.1; this does not block Swift app delivery."
+      },
+      "swift": {
+        "status": "blocked_proof",
+        "evidence_root": "workspace",
+        "evidence_paths": [
+          "apps/ainb-fleet-macos/Sources/FleetRPC/FleetConnection.swift",
+          "apps/ainb-fleet-macos/Sources/FleetRoster/FleetWindowView.swift"
+        ],
+        "rationale": "AFM-E05 exposes a capability-gated payload-free revision timeline. Direct XCUI and isolated daemon proof remain unrun."
+      },
+      "release_classification": "deferred_tui"
     }
   ]
 }

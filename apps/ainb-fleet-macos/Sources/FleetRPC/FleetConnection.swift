@@ -161,6 +161,11 @@ actor FleetConnection {
         return try await request("atc/list", params: AtcListParams(), result: AtcListResult.self)
     }
 
+    func timeline(_ params: FleetTimelineParams) async throws -> FleetTimelineResult {
+        try requireReadCapability("fleet.timeline.read")
+        return try await request("fleet/timeline", params: params, result: FleetTimelineResult.self)
+    }
+
     func incoming() -> AsyncStream<FleetIncoming> {
         AsyncStream { continuation in
             let id = UUID()

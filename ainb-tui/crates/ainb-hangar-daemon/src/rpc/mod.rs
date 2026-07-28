@@ -822,6 +822,7 @@ async fn handle(
         methods::FLEET_RECEIPT_LIST => handle_fleet_receipt_list(pool, req).await,
         methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
         methods::FLEET_START => handle_fleet_start(pool, req, events).await,
+        methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -943,6 +944,59 @@ async fn handle_fleet_action(
 }
 
 const FLEET_RECEIPT_LIST_MAX: u32 = 100;
+const FLEET_TIMELINE_MAX: u32 = 100;
+
+/// Return bounded, payload-free Fleet revision timeline entries.
+async fn handle_fleet_timeline(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FleetTimelineKind, FleetTimelineParams, FleetTimelineResult};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let params: FleetTimelineParams =
+        parse_params(req, "{ after_revision?, session_key?, limit }")?;
+    let after_revision = params.after_revision.unwrap_or(0);
+    if after_revision < 0 {
+        return Err(invalid_params("after_revision must be non-negative"));
+    }
+    if params.session_key.as_deref().is_some_and(str::is_empty) {
+        return Err(invalid_params("session_key must not be empty"));
+    }
+    let rows = FleetRepo::timeline_after(
+        pool,
+        after_revision,
+        params.session_key.as_deref(),
+        i64::from(params.limit.clamp(1, FLEET_TIMELINE_MAX)),
+    )
+    .await
+    .map_err(|error| store_err(&error))?;
+    let entries: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            FleetTimelineKind::from_event_type(&row.event_type).map(|kind| {
+                ainb_hangar_proto::fleet::FleetTimelineEntry {
+                    revision: row.revision,
+                    session_key: row.session_key.clone(),
+                    observed_at: row.observed_at,
+                    provenance: if row.authority == "authoritative" {
+                        ainb_hangar_proto::fleet::FleetProvenance::Authoritative
+                    } else {
+                        ainb_hangar_proto::fleet::FleetProvenance::Inferred
+                    },
+                    kind,
+                    applied: row.applied,
+                    session_version: row.session_version,
+                }
+            })
+        })
+        .collect();
+    let next_after_revision = entries.last().map(|entry| entry.revision);
+    to_value(&FleetTimelineResult {
+        entries,
+        next_after_revision,
+    })
+}
 
 /// Return a bounded, durable newest-first receipt projection.
 async fn handle_fleet_receipt_list(

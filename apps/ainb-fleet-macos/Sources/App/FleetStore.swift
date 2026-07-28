@@ -68,6 +68,7 @@ final class FleetStore: ObservableObject {
     @Published private(set) var receipts: [FleetActionReceipt] = []
     @Published private(set) var atcInstances: [AtcInstance] = []
     @Published private(set) var atcSchedulerOwnership: AtcSchedulerOwnership?
+    @Published private(set) var timeline: [FleetTimelineEntry] = []
     @Published private(set) var pendingIntentID: String?
     @Published private(set) var controlNotice: String?
     @Published private(set) var lastStart: FleetStartResult?
@@ -121,6 +122,10 @@ final class FleetStore: ObservableObject {
 
     var canReadATC: Bool {
         connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.atc.read") == true
+    }
+
+    var canReadTimeline: Bool {
+        connectionState.isLive && negotiation?.capabilityIDs.contains("fleet.timeline.read") == true
     }
 
     var canStart: Bool {
@@ -320,6 +325,21 @@ final class FleetStore: ObservableObject {
         }
     }
 
+    func refreshTimeline() {
+        guard canReadTimeline, let connection else {
+            controlNotice = "Timeline reads are unavailable for this daemon."
+            return
+        }
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                timeline = try await connection.timeline(FleetTimelineParams(afterRevision: nil, sessionKey: nil, limit: 100)).entries
+            } catch {
+                controlNotice = "Timeline refresh refused: \(String(describing: error))"
+            }
+        }
+    }
+
     private func beginConnection() {
         connectionGeneration &+= 1
         let generation = connectionGeneration
@@ -370,6 +390,11 @@ final class FleetStore: ObservableObject {
             } else {
                 atcInstances = []
                 atcSchedulerOwnership = nil
+            }
+            if result.capabilityIDs.contains("fleet.timeline.read") {
+                timeline = try await newConnection.timeline(FleetTimelineParams(afterRevision: nil, sessionKey: nil, limit: 100)).entries
+            } else {
+                timeline = []
             }
             connectionState = .live(daemonVersion: result.daemonVersion, writeCompatible: result.writeCompatible)
             established = true

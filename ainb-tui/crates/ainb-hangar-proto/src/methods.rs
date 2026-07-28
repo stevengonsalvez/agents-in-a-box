@@ -280,6 +280,8 @@ pub const FLEET_RECEIPT_LIST: &str = "fleet/receipt_list";
 pub const FLEET_RECEIPT_GET: &str = "fleet/receipt_get";
 /// Start a provider session without borrowing selected-session state.
 pub const FLEET_START: &str = "fleet/start";
+/// Read bounded, payload-free Fleet revision timeline entries.
+pub const FLEET_TIMELINE: &str = "fleet/timeline";
 
 /// Fleet notifications emitted by the daemon, never JSON-RPC request methods.
 pub const FLEET_PROTOCOL_NOTIFICATION_METHODS: &[&str] = &["fleet/resync_required"];
@@ -1248,6 +1250,7 @@ pub const ALL_METHODS: &[&str] = &[
     FLEET_RECEIPT_LIST,
     FLEET_RECEIPT_GET,
     FLEET_START,
+    FLEET_TIMELINE,
 ];
 
 #[cfg(test)]
@@ -1474,6 +1477,7 @@ mod tests {
             FLEET_RECEIPT_LIST,
             FLEET_RECEIPT_GET,
             FLEET_START,
+            FLEET_TIMELINE,
         ];
         for m in declared {
             assert!(

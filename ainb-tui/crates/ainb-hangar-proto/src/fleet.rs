@@ -18,6 +18,8 @@ pub const FLEET_CAPABILITY_RECEIPT_READ: &str = "fleet.receipt.read";
 pub const FLEET_CAPABILITY_START_EXECUTE: &str = "fleet.start.execute";
 /// Negotiated capability for daemon-owned ATC read projections.
 pub const FLEET_CAPABILITY_ATC_READ: &str = "fleet.atc.read";
+/// Negotiated capability for the payload-free Fleet revision timeline.
+pub const FLEET_CAPABILITY_TIMELINE_READ: &str = "fleet.timeline.read";
 
 /// Fleet capability identifiers advertised during protocol negotiation.
 pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
@@ -31,6 +33,7 @@ pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
     "fleet.subscription.live",
     "fleet.subscription.replay",
     "fleet.subscription.resync",
+    FLEET_CAPABILITY_TIMELINE_READ,
 ];
 
 /// Inclusive supported protocol version range.
@@ -366,6 +369,108 @@ pub struct FleetEvent {
     pub session_version: i64,
     /// Whether event changed canonical state.
     pub applied: bool,
+}
+
+/// Closed, payload-free Fleet timeline event classification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetTimelineKind {
+    /// Provider session began.
+    SessionStarted,
+    /// A provider turn started or continued.
+    TurnRunning,
+    /// Provider asked a structured question.
+    QuestionRaised,
+    /// Provider requested approval.
+    ApprovalRequested,
+    /// Provider requested operator attention.
+    AttentionWaiting,
+    /// Provider turn completed.
+    TurnCompleted,
+    /// Provider turn completed with failure.
+    TurnFailed,
+    /// Provider session ended.
+    SessionEnded,
+    /// Codex managed transport became unavailable.
+    ManagerUnavailable,
+    /// Codex managed transport recovered.
+    ManagerRecovered,
+    /// Codex managed TUI started.
+    ManagerStarted,
+    /// Tmux transport became unavailable.
+    TransportUnavailable,
+    /// Tmux transport became available.
+    TransportAvailable,
+    /// Tmux discovery found a session.
+    SessionDiscovered,
+    /// A legacy session was superseded by its managed identity.
+    SessionSuperseded,
+}
+
+impl FleetTimelineKind {
+    /// Map one known stored Fleet event type to its public closed kind.
+    #[must_use]
+    pub fn from_event_type(event_type: &str) -> Option<Self> {
+        match event_type {
+            "SessionStart" => Some(Self::SessionStarted),
+            "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => Some(Self::TurnRunning),
+            "AskUserQuestion" => Some(Self::QuestionRaised),
+            "PermissionRequest" => Some(Self::ApprovalRequested),
+            "Notification" => Some(Self::AttentionWaiting),
+            "Stop" | "SubagentStop" => Some(Self::TurnCompleted),
+            "StopFailure" => Some(Self::TurnFailed),
+            "SessionEnd" => Some(Self::SessionEnded),
+            "codex_manager_unavailable" => Some(Self::ManagerUnavailable),
+            "codex_manager_recovered" => Some(Self::ManagerRecovered),
+            "codex_managed_tui_started" => Some(Self::ManagerStarted),
+            "tmux_missing" | "tmux_unavailable" => Some(Self::TransportUnavailable),
+            "tmux_available" => Some(Self::TransportAvailable),
+            "tmux_discovered" => Some(Self::SessionDiscovered),
+            "session_superseded" => Some(Self::SessionSuperseded),
+            _ => None,
+        }
+    }
+}
+
+/// Parameters for `fleet/timeline`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTimelineParams {
+    /// Return rows strictly after this global Fleet revision.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub after_revision: Option<i64>,
+    /// Optional exact stable Fleet session identity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session_key: Option<String>,
+    /// Requested row count. The daemon clamps this to its server maximum.
+    pub limit: u32,
+}
+
+/// One payload-free Fleet timeline entry.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTimelineEntry {
+    /// Global monotonic revision.
+    pub revision: i64,
+    /// Stable target session.
+    pub session_key: String,
+    /// Observation time in epoch milliseconds.
+    pub observed_at: i64,
+    /// Event authority.
+    pub provenance: FleetProvenance,
+    /// Closed event classification.
+    pub kind: FleetTimelineKind,
+    /// Whether this event changed canonical state.
+    pub applied: bool,
+    /// Session version after event consideration.
+    pub session_version: i64,
+}
+
+/// Result for `fleet/timeline`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetTimelineResult {
+    /// Entries in ascending global revision order.
+    pub entries: Vec<FleetTimelineEntry>,
+    /// Cursor for the next page, or `null` when this page is empty.
+    pub next_after_revision: Option<i64>,
 }
 
 /// Initial result for a replay-safe Fleet subscription.

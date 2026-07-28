@@ -8,7 +8,8 @@
     "fleet.start.execute",
     "fleet.subscription.live",
     "fleet.subscription.replay",
-    "fleet.subscription.resync"
+    "fleet.subscription.resync",
+    "fleet.timeline.read"
   ],
   "daemon_version": "fixture-daemon-1.0.0",
   "protocol_version": 1,

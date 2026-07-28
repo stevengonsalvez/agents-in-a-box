@@ -849,3 +849,63 @@ async fn broadcast_returns_ordered_receipt_for_every_target() {
     assert_eq!(receipts[0]["status"], "REJECTED");
     assert_eq!(receipts[1]["status"], "REJECTED");
 }
+
+#[tokio::test]
+async fn timeline_is_payload_free_bounded_and_cursor_safe_over_the_socket() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    let secret = serde_json::json!({ "prompt": "secret prompt must never leave store" });
+    apply_hook(
+        &store,
+        &sink,
+        "timeline-start",
+        "claude",
+        "timeline",
+        "SessionStart",
+        &secret,
+        100,
+    )
+    .await;
+    apply_hook(
+        &store,
+        &sink,
+        "timeline-turn",
+        "claude",
+        "timeline",
+        "PostToolUse",
+        &secret,
+        200,
+    )
+    .await;
+    apply_hook(
+        &store,
+        &sink,
+        "timeline-unknown",
+        "claude",
+        "timeline",
+        "InternalRaw",
+        &secret,
+        300,
+    )
+    .await;
+
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+    let first = client.call(methods::FLEET_TIMELINE, serde_json::json!({ "limit": 1 })).await;
+    assert!(first["error"].is_null(), "timeline must return: {first}");
+    let entries = first["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1);
+    assert!(entries[0].get("payload").is_none());
+    assert!(!first.to_string().contains("secret prompt"));
+    let cursor = first["result"]["next_after_revision"].as_i64().unwrap();
+
+    let second = client
+        .call(
+            methods::FLEET_TIMELINE,
+            serde_json::json!({ "after_revision": cursor, "limit": 100 }),
+        )
+        .await;
+    let entries = second["result"]["entries"].as_array().unwrap();
+    assert_eq!(entries.len(), 1, "unknown raw type is omitted");
+    assert_eq!(entries[0]["kind"], "turn_running");
+}

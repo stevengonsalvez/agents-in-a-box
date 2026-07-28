@@ -193,6 +193,25 @@ pub struct FleetEventRow {
     pub applied: bool,
 }
 
+/// One durable Fleet revision safe for the public payload-free timeline.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FleetTimelineRow {
+    /// Global monotonic revision.
+    pub revision: i64,
+    /// Target session.
+    pub session_key: String,
+    /// Observation time.
+    pub observed_at: i64,
+    /// Authority token.
+    pub authority: String,
+    /// Known normalized event discriminator.
+    pub event_type: String,
+    /// Session version after this event was considered.
+    pub session_version: i64,
+    /// Whether this event changed canonical session state.
+    pub applied: bool,
+}
+
 /// Result of applying or replaying one event.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ApplyFleetEventResult {
@@ -615,6 +634,43 @@ impl FleetRepo {
         .fetch_all(pool)
         .await?;
         rows.iter().map(event_from_row).collect()
+    }
+
+    /// Read a bounded, payload-free Fleet timeline after a global revision.
+    ///
+    /// The query joins visible Fleet sessions and filters the closed raw type
+    /// allowlist before `LIMIT`, so excluded history can never consume a page
+    /// or strand a caller's cursor.
+    pub async fn timeline_after(
+        pool: &SqlitePool,
+        after_revision: i64,
+        session_key: Option<&str>,
+        limit: i64,
+    ) -> Result<Vec<FleetTimelineRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT e.revision, e.session_key, e.observed_at, e.authority, e.event_type, \
+                    e.session_version, e.applied \
+             FROM fleet_event e \
+             INNER JOIN fleet_session s ON s.session_key = e.session_key AND s.visible = 1 \
+             WHERE e.revision > ? \
+               AND (? IS NULL OR e.session_key = ?) \
+               AND e.event_type IN ( \
+                   'SessionStart', 'UserPromptSubmit', 'PreToolUse', 'PostToolUse', \
+                   'AskUserQuestion', 'PermissionRequest', 'Notification', 'Stop', \
+                   'SubagentStop', 'StopFailure', 'SessionEnd', \
+                   'codex_manager_unavailable', 'codex_manager_recovered', \
+                   'codex_managed_tui_started', 'tmux_missing', 'tmux_unavailable', \
+                   'tmux_available', 'tmux_discovered', 'session_superseded' \
+               ) \
+             ORDER BY e.revision ASC LIMIT ?",
+        )
+        .bind(after_revision)
+        .bind(session_key)
+        .bind(session_key)
+        .bind(limit.max(0))
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(timeline_from_row).collect()
     }
 
     /// Insert or advance one action receipt.
@@ -1056,6 +1112,18 @@ fn event_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetEventRow, sqlx::
         authority: row.try_get("authority")?,
         event_type: row.try_get("event_type")?,
         payload: row.try_get("payload")?,
+        session_version: row.try_get("session_version")?,
+        applied: row.try_get::<i64, _>("applied")? != 0,
+    })
+}
+
+fn timeline_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetTimelineRow, sqlx::Error> {
+    Ok(FleetTimelineRow {
+        revision: row.try_get("revision")?,
+        session_key: row.try_get("session_key")?,
+        observed_at: row.try_get("observed_at")?,
+        authority: row.try_get("authority")?,
+        event_type: row.try_get("event_type")?,
         session_version: row.try_get("session_version")?,
         applied: row.try_get::<i64, _>("applied")? != 0,
     })

@@ -366,6 +366,34 @@ struct FleetReceiptGetResult: Codable, Equatable {
     let receipt: FleetActionReceipt?
 }
 
+enum FleetTimelineKind: String, Codable, Equatable {
+    case sessionStarted = "session_started", turnRunning = "turn_running", questionRaised = "question_raised", approvalRequested = "approval_requested", attentionWaiting = "attention_waiting", turnCompleted = "turn_completed", turnFailed = "turn_failed", sessionEnded = "session_ended", managerUnavailable = "manager_unavailable", managerRecovered = "manager_recovered", managerStarted = "manager_started", transportUnavailable = "transport_unavailable", transportAvailable = "transport_available", sessionDiscovered = "session_discovered", sessionSuperseded = "session_superseded"
+}
+
+struct FleetTimelineParams: Codable, Equatable {
+    let afterRevision: Int64?
+    let sessionKey: String?
+    let limit: UInt32
+    private enum CodingKeys: String, CodingKey { case afterRevision = "after_revision", sessionKey = "session_key", limit }
+}
+
+struct FleetTimelineEntry: Codable, Equatable {
+    let revision: Int64
+    let sessionKey: String
+    let observedAt: Int64
+    let provenance: FleetProvenance
+    let kind: FleetTimelineKind
+    let applied: Bool
+    let sessionVersion: Int64
+    private enum CodingKeys: String, CodingKey { case revision, sessionKey = "session_key", observedAt = "observed_at", provenance, kind, applied, sessionVersion = "session_version" }
+}
+
+struct FleetTimelineResult: Codable, Equatable {
+    let entries: [FleetTimelineEntry]
+    let nextAfterRevision: Int64?
+    private enum CodingKeys: String, CodingKey { case entries, nextAfterRevision = "next_after_revision" }
+}
+
 struct FleetStartParams: Codable, Equatable {
     let requestID: String
     let provider: FleetProvider
