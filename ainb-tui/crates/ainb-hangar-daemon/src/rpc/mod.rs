@@ -6488,13 +6488,14 @@ async fn record_dispatch_attempt(
 /// Order of guards (each a hard stop):
 ///   1. F7 refuse-run — a card with any UNFINISHED blocker never dispatches (it is
 ///      not launchable until its blockers finish);
-///   2. one-active-run guard — a card with an active (queued/dispatched/running)
+///   2. terminal-state guard — a cancelled card never dispatches;
+///   3. one-active-run guard — a card with an active (queued/dispatched/running)
 ///      task cannot start another (card = issue), which also stops a squad card
 ///      from being double-fanned;
-///   3. F2 repo-required — the run-time override, else the card's persisted repo,
+///   4. F2 repo-required — the run-time override, else the card's persisted repo,
 ///      else a refusal (never a "random" run);
-///   4. F4 agent cascade + F8 dispatchable check;
-///   5. gap #8 invocation gate — the EFFECTIVE invoker (`invoker_user_id`, else the
+///   5. F4 agent cascade + F8 dispatchable check;
+///   6. gap #8 invocation gate — the EFFECTIVE invoker (`invoker_user_id`, else the
 ///      workspace owner) is resolved ONCE, above the fork, and every dispatch
 ///      target is judged by it: the single assignee agent here, and the leader plus
 ///      every member inside [`SquadAssignService::assign_fanout`]. A refusal writes
@@ -6526,13 +6527,6 @@ async fn run_card_inner(
 
     let issue_id = issue.id.as_str();
 
-    // 0. One launch of a card at a time (in-process slot, held to the end of this
-    //    function): a manual Run racing the finalize auto-run serializes here, so
-    //    the checks below can never both pass for one card. The loser reports the
-    //    same "already active" refusal a lost re-run gets.
-    let _launch_slot = CardLaunchSlot::acquire(issue_id)
-        .ok_or_else(|| CardRunError::ActiveRun("launching".to_string()))?;
-
     // 1. F7 refuse-run: a card with any UNFINISHED blocker is not dispatched.
     let blockers = CardDependencyRepo::unfinished_blockers_of(pool, issue_id)
         .await
@@ -6551,7 +6545,15 @@ async fn run_card_inner(
         return Err(CardRunError::Cancelled);
     }
 
-    // 2. One active run per card (card = issue). Blocks a re-run — and a second
+    // 2. One launch of a runnable card at a time (in-process slot, held to the
+    //    end of this function): a manual Run racing the finalize auto-run
+    //    serializes here, so the active check and enqueue below cannot both pass
+    //    for one card. Admission failures above remain deterministic and need no
+    //    launch serialization.
+    let _launch_slot = CardLaunchSlot::acquire(issue_id)
+        .ok_or_else(|| CardRunError::ActiveRun("launching".to_string()))?;
+
+    // 3. One active run per card (card = issue). Blocks a re-run — and a second
     //    squad fan-out — until the current run finishes or is cancelled.
     if let Some(active) = TaskRepo::active_task_for_issue(pool, ws.as_str(), issue_id)
         .await
@@ -6560,7 +6562,7 @@ async fn run_card_inner(
         return Err(CardRunError::ActiveRun(active.status));
     }
 
-    // 2a. Mint this run's GENERATION (migration 0039, tcp 8ln): a fresh Run / rerun
+    // 3a. Mint this run's GENERATION (migration 0039, tcp 8ln): a fresh Run / rerun
     //     of a card is a new run epoch, so stamp all of this run's tasks (the single
     //     task, or the whole fan-out) with it. The card-state folds (aggregate /
     //     blocker-finished / auto-move / chip) scope to an issue's LATEST generation,
@@ -6571,14 +6573,14 @@ async fn run_card_inner(
         .await
         .map_err(CardRunError::Db)?;
 
-    // 3. F2 repo-required: run-time override, else the card's persisted repo.
+    // 4. F2 repo-required: run-time override, else the card's persisted repo.
     let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, issue_id)
         .await
         .map_err(CardRunError::Db)?
         .unwrap_or((None, None));
     let repo_ref = repo_override.map(str::to_string).or(card_repo).ok_or(CardRunError::NoRepo)?;
 
-    // 3b. Source branch (0042): run-time override, else the card's persisted
+    // 4b. Source branch (0042): run-time override, else the card's persisted
     // source_branch; `None` lets provision branch off the repo's default HEAD.
     let card_source = CardParityRepo::get_issue_branches(pool, issue_id)
         .await
