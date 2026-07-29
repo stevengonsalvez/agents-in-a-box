@@ -76,13 +76,4 @@ class FleetUITestCase: XCTestCase {
             .firstMatch
     }
 
-    @MainActor
-    func selectToolbarItem(_ title: String) {
-        let overflow = app.popUpButtons["more toolbar items"]
-        waitFor(overflow)
-        overflow.click()
-        let item = app.menuItems[title]
-        waitFor(item)
-        item.click()
-    }
 }
