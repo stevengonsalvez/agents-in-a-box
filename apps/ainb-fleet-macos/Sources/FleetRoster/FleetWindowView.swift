@@ -42,6 +42,8 @@ struct FleetWindowView: View {
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
         .onAppear(perform: selectFirstVisibleSession)
         .onReceive(store.$sessions) { selectFirstVisibleSession(in: $0) }
+        .onChange(of: presentation.filters) { _, _ in selectFirstVisibleSession() }
+        .onChange(of: presentation.sort) { _, _ in selectFirstVisibleSession() }
         .frame(minWidth: 760, minHeight: 560)
     }
 
