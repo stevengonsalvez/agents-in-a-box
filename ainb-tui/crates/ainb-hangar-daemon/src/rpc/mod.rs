@@ -39,6 +39,7 @@
 pub mod auth;
 pub mod snapshots;
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -57,6 +58,7 @@ use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
 use ainb_hangar_store::service::activity::ActivityService;
+use fs2::FileExt as _;
 use futures_util::future::join_all;
 use sqlx::SqlitePool;
 
@@ -83,6 +85,57 @@ const INTERNAL_ERROR: i32 = -32603;
 const PERMISSION_DENIED: i32 = -32000;
 /// Soft cap on one request body. Snapshot requests are tiny.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Cross-process, crash-safe ownership of one operation against one Hangar DB.
+///
+/// The lock file sits beside `hangar.db`, so duplicate daemons using the same
+/// home contend on the same inode. The kernel releases the lock when a process
+/// exits, including a crash; the empty file may remain and is deliberately
+/// reused.
+struct DatabaseOperationSlot(File);
+
+impl DatabaseOperationSlot {
+    async fn try_acquire(
+        pool: &SqlitePool,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let db_file: String =
+            sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+                .fetch_one(pool)
+                .await?;
+        let db_dir = Path::new(&db_file).parent().ok_or_else(|| {
+            sqlx::Error::Protocol(format!(
+                "Hangar database has no parent directory: {db_file}"
+            ))
+        })?;
+        let lock_dir = db_dir.join("hangar").join("operation-locks");
+        tokio::fs::create_dir_all(&lock_dir).await.map_err(sqlx::Error::Io)?;
+        let fingerprint = stable_fingerprint(key);
+        let fingerprint = fingerprint.strip_prefix("fnv1a64:").unwrap_or(&fingerprint);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(lock_dir.join(format!("{namespace}-{fingerprint}.lock")))
+            .map_err(sqlx::Error::Io)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(sqlx::Error::Io(error)),
+        }
+    }
+}
+
+impl Drop for DatabaseOperationSlot {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 static APPROVE_SOCKET_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
@@ -864,6 +917,7 @@ async fn handle(
         methods::HANGAR_ISSUE_TIMELINE => handle_issue_timeline(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
+        methods::FLEET_NEGOTIATE => handle_fleet_negotiate(req, health).await,
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
         // Receiver registration occurs in `serve_conn` before this snapshot is
         // read. The ack carries its exact head, then the forwarder drains rows
@@ -871,6 +925,10 @@ async fn handle(
         methods::FLEET_SUBSCRIBE => handle_fleet_subscribe(pool, req).await,
         methods::FLEET_ACTION => handle_fleet_action(pool, req, events).await,
         methods::FLEET_BROADCAST => handle_fleet_broadcast(pool, req, events).await,
+        methods::FLEET_RECEIPT_LIST => handle_fleet_receipt_list(pool, req).await,
+        methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
+        methods::FLEET_START => handle_fleet_start(pool, req, events).await,
+        methods::FLEET_TIMELINE => handle_fleet_timeline(pool, req).await,
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -902,6 +960,34 @@ async fn handle_fleet_snapshot(pool: &SqlitePool) -> Result<serde_json::Value, R
     to_value(&snapshot)
 }
 
+/// Negotiate the exact Fleet protocol version and capability catalogue.
+async fn handle_fleet_negotiate(
+    req: &RpcRequest,
+    health: &DaemonHealth,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_PROTOCOL_CAPABILITY_IDS, FLEET_PROTOCOL_VERSION, FleetNegotiateParams,
+        FleetNegotiateResult,
+    };
+
+    let params: FleetNegotiateParams = parse_params(
+        req,
+        "{ client_name, client_version, read_versions: { min, max }, write_versions: { min, max } }",
+    )?;
+    if !params.read_versions.is_valid() || !params.write_versions.is_valid() {
+        return Err(invalid_params(
+            "protocol version ranges require 1 <= min <= max",
+        ));
+    }
+    to_value(&FleetNegotiateResult {
+        daemon_version: health.version.clone(),
+        protocol_version: FLEET_PROTOCOL_VERSION,
+        read_compatible: params.read_versions.contains(FLEET_PROTOCOL_VERSION),
+        write_compatible: params.write_versions.contains(FLEET_PROTOCOL_VERSION),
+        capability_ids: FLEET_PROTOCOL_CAPABILITY_IDS.iter().map(|id| (*id).to_string()).collect(),
+    })
+}
+
 /// Register a revision cursor and return the snapshot head paired with it.
 async fn handle_fleet_subscribe(
     pool: &SqlitePool,
@@ -912,10 +998,42 @@ async fn handle_fleet_subscribe(
     if params.after_revision < 0 {
         return Err(invalid_params("after_revision must be non-negative"));
     }
-    let snapshot = crate::fleet::snapshot_wire(pool).await.map_err(|error| store_err(&error))?;
+    let projection = crate::fleet::subscription_wire(pool, params.after_revision, REPLAY_BATCH + 1)
+        .await
+        .map_err(fleet_repo_err)?;
+    let snapshot = crate::fleet::subscription_snapshot_wire(&projection);
+    use ainb_hangar_proto::fleet::{FleetReplayResetReason, FleetReplayState};
+    let (replay, replay_state) = if params.after_revision == 0 {
+        (
+            Vec::new(),
+            FleetReplayState::SnapshotReset {
+                reason: FleetReplayResetReason::Bootstrap,
+            },
+        )
+    } else if params.after_revision > projection.head_revision {
+        (
+            Vec::new(),
+            FleetReplayState::SnapshotReset {
+                reason: FleetReplayResetReason::CursorAhead,
+            },
+        )
+    } else if projection.replay.len() > REPLAY_BATCH as usize {
+        (
+            Vec::new(),
+            FleetReplayState::SnapshotReset {
+                reason: FleetReplayResetReason::ReplayLimitExceeded,
+            },
+        )
+    } else {
+        (
+            projection.replay.iter().map(crate::fleet::event_wire).collect(),
+            FleetReplayState::Complete,
+        )
+    };
     to_value(&ainb_hangar_proto::fleet::FleetSubscribeResult {
         snapshot,
-        replay: Vec::new(),
+        replay,
+        replay_state,
     })
 }
 
@@ -929,6 +1047,209 @@ async fn handle_fleet_action(
         parse_params(req, "{ session_key, expected_version, request_id, action }")?;
     let receipt = execute_fleet_action(pool, params, None, events).await?;
     to_value(&ainb_hangar_proto::fleet::FleetActionResult { receipt })
+}
+
+const FLEET_RECEIPT_LIST_MAX: u32 = 100;
+const FLEET_TIMELINE_MAX: u32 = 100;
+
+/// Return bounded, payload-free Fleet revision timeline entries.
+async fn handle_fleet_timeline(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FleetTimelineKind, FleetTimelineParams, FleetTimelineResult};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let params: FleetTimelineParams =
+        parse_params(req, "{ after_revision?, session_key?, limit }")?;
+    let after_revision = params.after_revision.unwrap_or(0);
+    if after_revision < 0 {
+        return Err(invalid_params("after_revision must be non-negative"));
+    }
+    if params.session_key.as_deref().is_some_and(str::is_empty) {
+        return Err(invalid_params("session_key must not be empty"));
+    }
+    let rows = FleetRepo::timeline_after(
+        pool,
+        after_revision,
+        params.session_key.as_deref(),
+        i64::from(params.limit.clamp(1, FLEET_TIMELINE_MAX)),
+    )
+    .await
+    .map_err(|error| store_err(&error))?;
+    let entries: Vec<_> = rows
+        .iter()
+        .filter_map(|row| {
+            FleetTimelineKind::from_event_type(&row.event_type).map(|kind| {
+                ainb_hangar_proto::fleet::FleetTimelineEntry {
+                    revision: row.revision,
+                    session_key: row.session_key.clone(),
+                    observed_at: row.observed_at,
+                    provenance: if row.authority == "authoritative" {
+                        ainb_hangar_proto::fleet::FleetProvenance::Authoritative
+                    } else {
+                        ainb_hangar_proto::fleet::FleetProvenance::Inferred
+                    },
+                    kind,
+                    applied: row.applied,
+                    session_version: row.session_version,
+                }
+            })
+        })
+        .collect();
+    let next_after_revision = entries.last().map(|entry| entry.revision);
+    to_value(&FleetTimelineResult {
+        entries,
+        next_after_revision,
+    })
+}
+
+/// Return a bounded, durable newest-first receipt projection.
+async fn handle_fleet_receipt_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FleetReceiptListParams, FleetReceiptListResult};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let params: FleetReceiptListParams = parse_params(req, "{ limit }")?;
+    if !(1..=FLEET_RECEIPT_LIST_MAX).contains(&params.limit) {
+        return Err(invalid_params(&format!(
+            "limit must be between 1 and {FLEET_RECEIPT_LIST_MAX}"
+        )));
+    }
+    let rows = FleetRepo::list_action_receipts(pool, i64::from(params.limit))
+        .await
+        .map_err(|error| store_err(&error))?;
+    let mut receipts = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row = reconcile_abandoned_receipt(pool, row).await?;
+        receipts.push(action_receipt_wire(&row));
+    }
+    to_value(&FleetReceiptListResult { receipts })
+}
+
+/// Return one durable receipt, or `null` when its request id is unknown.
+async fn handle_fleet_receipt_get(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FleetReceiptGetParams, FleetReceiptGetResult};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let params: FleetReceiptGetParams = parse_params(req, "{ request_id }")?;
+    if params.request_id.trim().is_empty() {
+        return Err(invalid_params("request_id must not be empty"));
+    }
+    let receipt = FleetRepo::get_action_receipt(pool, &params.request_id)
+        .await
+        .map_err(|error| store_err(&error))?;
+    let receipt = match receipt {
+        Some(row) => Some(action_receipt_wire(
+            &reconcile_abandoned_receipt(pool, row).await?,
+        )),
+        None => None,
+    };
+    to_value(&FleetReceiptGetResult { receipt })
+}
+
+const ABANDONED_RECEIPT_DETAIL: &str = "daemon exited before the delivery outcome was recorded";
+
+/// Resolve a receipt left `PENDING` by a crashed daemon.
+///
+/// A live executor holds the same per-request kernel lock, so its receipt stays
+/// pending. Acquiring the lock proves no process still owns the delivery; the
+/// only honest terminal result is `UNKNOWN`, never a replay that could duplicate
+/// a side effect already delivered before the crash.
+async fn reconcile_abandoned_receipt(
+    pool: &SqlitePool,
+    row: ainb_hangar_store::repo::fleet::ActionReceiptRow,
+) -> Result<ainb_hangar_store::repo::fleet::ActionReceiptRow, RpcError> {
+    if row.status != "PENDING" {
+        return Ok(row);
+    }
+    let Some(_slot) = DatabaseOperationSlot::try_acquire(pool, "fleet-receipt", &row.request_id)
+        .await
+        .map_err(|error| store_err(&error))?
+    else {
+        return Ok(row);
+    };
+    mark_abandoned_receipt(pool, &row.request_id).await
+}
+
+async fn mark_abandoned_receipt(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<ainb_hangar_store::repo::fleet::ActionReceiptRow, RpcError> {
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    sqlx::query(
+        "UPDATE fleet_action_receipt \
+         SET status = 'UNKNOWN', detail = ?, updated_at = ? \
+         WHERE request_id = ? AND status = 'PENDING'",
+    )
+    .bind(ABANDONED_RECEIPT_DETAIL)
+    .bind(SystemClock.now_ms())
+    .bind(request_id)
+    .execute(pool)
+    .await
+    .map_err(|error| store_err(&error))?;
+    FleetRepo::get_action_receipt(pool, request_id)
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| internal("Fleet action receipt disappeared"))
+}
+
+enum ReceiptExecutionClaim {
+    Owned {
+        slot: DatabaseOperationSlot,
+        existing: Option<ainb_hangar_store::repo::fleet::ActionReceiptRow>,
+    },
+    Replay(ainb_hangar_store::repo::fleet::ActionReceiptRow),
+}
+
+/// Own a new or abandoned receipt, or replay a live owner's durable claim.
+///
+/// Lock publication precedes the `PENDING` insert. A contender therefore polls
+/// until either the row appears or the first caller releases ownership before
+/// inserting, such as after validation failure.
+async fn claim_receipt_execution(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<ReceiptExecutionClaim, RpcError> {
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    for _ in 0..2_000 {
+        if let Some(slot) = DatabaseOperationSlot::try_acquire(pool, "fleet-receipt", request_id)
+            .await
+            .map_err(|error| store_err(&error))?
+        {
+            let existing = FleetRepo::get_action_receipt(pool, request_id)
+                .await
+                .map_err(|error| store_err(&error))?;
+            return Ok(ReceiptExecutionClaim::Owned { slot, existing });
+        }
+        if let Some(row) = FleetRepo::get_action_receipt(pool, request_id)
+            .await
+            .map_err(|error| store_err(&error))?
+        {
+            return Ok(ReceiptExecutionClaim::Replay(row));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    Err(internal("Fleet action receipt claim remained unavailable"))
+}
+
+/// Start a provider session through daemon-owned new-session state.
+async fn handle_fleet_start(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::fleet::FleetStartParams =
+        parse_params(req, "{ request_id, provider, cwd, prompt? }")?;
+    let result = execute_fleet_start(pool, params, events).await?;
+    to_value(&result)
 }
 
 /// Deliver one text prompt to explicit stable recipients with bounded fanout.
@@ -1102,10 +1423,17 @@ async fn execute_fleet_action(
         .map_err(|error| internal(&format!("serialize action: {error}")))?;
     let action_fingerprint = stable_fingerprint(&action_json);
 
-    if let Some(existing) = FleetRepo::get_action_receipt(pool, &params.request_id)
-        .await
-        .map_err(|error| store_err(&error))?
-    {
+    if matches!(&params.action, ControlAction::Start { .. }) {
+        return Err(invalid_params(
+            "start must use fleet/start, not fleet/action",
+        ));
+    }
+
+    let (receipt_slot, existing) = match claim_receipt_execution(pool, &params.request_id).await? {
+        ReceiptExecutionClaim::Owned { slot, existing } => (Some(slot), existing),
+        ReceiptExecutionClaim::Replay(existing) => (None, Some(existing)),
+    };
+    if let Some(existing) = existing {
         if existing.session_key != params.session_key
             || existing.action_kind != params.action.kind()
             || existing.action_fingerprint != action_fingerprint
@@ -1116,13 +1444,15 @@ async fn execute_fleet_action(
                 "request_id was reused for a different Fleet action",
             ));
         }
+        if existing.status == "PENDING" && receipt_slot.is_some() {
+            return Ok(action_receipt_wire(
+                &mark_abandoned_receipt(pool, &params.request_id).await?,
+            ));
+        }
         return Ok(action_receipt_wire(&existing));
     }
-
-    if matches!(&params.action, ControlAction::Start { .. }) {
-        return execute_fleet_start(pool, params, idempotency_key, action_fingerprint, events)
-            .await;
-    }
+    let _receipt_slot = receipt_slot
+        .ok_or_else(|| internal("Fleet action receipt lock lost before durable claim"))?;
 
     let request_fingerprint = match &params.action {
         ControlAction::StructuredAnswer {
@@ -1307,28 +1637,65 @@ async fn execute_fleet_action(
 
 async fn execute_fleet_start(
     pool: &SqlitePool,
-    params: ainb_hangar_proto::fleet::FleetActionParams,
-    idempotency_key: Option<String>,
-    action_fingerprint: String,
+    params: ainb_hangar_proto::fleet::FleetStartParams,
     events: &EventSink,
-) -> Result<ainb_hangar_proto::fleet::FleetActionReceipt, RpcError> {
-    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetProvider};
+) -> Result<ainb_hangar_proto::fleet::FleetStartResult, RpcError> {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetProvider, FleetStartResult};
     use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
 
+    if params.request_id.trim().is_empty() || params.cwd.trim().is_empty() {
+        return Err(invalid_params("request_id and cwd must not be empty"));
+    }
+    if params.provider == FleetProvider::Unknown {
+        return Err(invalid_params("provider must be known"));
+    }
+    let prospective_session_key =
+        prospective_start_session_key(params.provider, &params.request_id);
+    let action_fingerprint = stable_fingerprint(
+        &serde_json::to_string(&params)
+            .map_err(|error| internal(&format!("serialize start params: {error}")))?,
+    );
     let now = SystemClock.now_ms();
     let mut receipt = NewActionReceipt {
         request_id: params.request_id.clone(),
-        session_key: params.session_key.clone(),
-        action_kind: params.action.kind().to_string(),
+        session_key: prospective_session_key.clone(),
+        action_kind: "start".to_string(),
         action_fingerprint,
-        expected_version: params.expected_version,
-        idempotency_key,
+        expected_version: 1,
+        idempotency_key: None,
         status: "PENDING".to_string(),
         detail: None,
         session_version: None,
         created_at: now,
         updated_at: now,
     };
+    let (receipt_slot, existing) = match claim_receipt_execution(pool, &params.request_id).await? {
+        ReceiptExecutionClaim::Owned { slot, existing } => (Some(slot), existing),
+        ReceiptExecutionClaim::Replay(existing) => (None, Some(existing)),
+    };
+    if let Some(existing) = existing {
+        if existing.session_key != prospective_session_key
+            || existing.action_kind != "start"
+            || existing.action_fingerprint != receipt.action_fingerprint
+            || existing.expected_version != 1
+            || existing.idempotency_key.is_some()
+        {
+            return Err(invalid_params(
+                "request_id was reused for a different Fleet start",
+            ));
+        }
+        let existing = if existing.status == "PENDING" && receipt_slot.is_some() {
+            mark_abandoned_receipt(pool, &params.request_id).await?
+        } else {
+            existing
+        };
+        return Ok(FleetStartResult {
+            prospective_session_key,
+            receipt: action_receipt_wire(&existing),
+        });
+    }
+    let _receipt_slot = receipt_slot
+        .ok_or_else(|| internal("Fleet start receipt lock lost before durable claim"))?;
     let claimed = sqlx::query(
         "INSERT INTO fleet_action_receipt \
          (request_id, session_key, action_kind, action_fingerprint, expected_version, \
@@ -1356,76 +1723,78 @@ async fn execute_fleet_start(
             .await
             .map_err(|error| store_err(&error))?
             .ok_or_else(|| internal("Fleet start receipt claim disappeared"))?;
-        if existing.session_key != params.session_key
-            || existing.action_kind != params.action.kind()
+        if existing.session_key != prospective_session_key
+            || existing.action_kind != "start"
             || existing.action_fingerprint != receipt.action_fingerprint
-            || existing.expected_version != params.expected_version
-            || existing.idempotency_key != receipt.idempotency_key
+            || existing.expected_version != 1
+            || existing.idempotency_key.is_some()
         {
             return Err(invalid_params(
-                "request_id was reused for a different Fleet action",
+                "request_id was reused for a different Fleet start",
             ));
         }
-        return Ok(action_receipt_wire(&existing));
+        return Ok(FleetStartResult {
+            prospective_session_key,
+            receipt: action_receipt_wire(&existing),
+        });
     }
 
-    let (status, detail) = match &params.action {
-        ControlAction::Start {
-            provider: FleetProvider::Codex,
-            cwd,
-            prompt,
-        } => match crate::fleet_provider::codex_manager::active_handle().await {
-            Some(manager) => match manager.thread_start(Path::new(cwd), None).await {
-                Ok(thread) => match launch_managed_codex_tui(&manager, &thread, cwd).await {
-                    Ok((tmux_name, tmux_session)) => {
-                        match crate::fleet::register_managed_codex_tmux(
-                            pool,
-                            events,
-                            &thread,
-                            cwd,
-                            &tmux_session,
-                            manager.capabilities(),
-                            SystemClock.now_ms(),
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                let turn = match prompt
-                                    .as_deref()
-                                    .filter(|prompt| !prompt.trim().is_empty())
-                                {
-                                    Some(prompt) => {
-                                        manager.turn_start(&thread, prompt).await.map(|_| ())
+    let (status, detail) = match params.provider {
+        FleetProvider::Codex => match crate::fleet_provider::codex_manager::active_handle().await {
+            Some(manager) => match manager.thread_start(Path::new(&params.cwd), None).await {
+                Ok(thread) => {
+                    match launch_managed_codex_tui(&manager, &thread, &params.cwd).await {
+                        Ok((tmux_name, tmux_session)) => {
+                            match crate::fleet::register_managed_codex_tmux(
+                                pool,
+                                events,
+                                &thread,
+                                &params.cwd,
+                                &tmux_session,
+                                manager.capabilities(),
+                                SystemClock.now_ms(),
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    let turn = match params
+                                        .prompt
+                                        .as_deref()
+                                        .filter(|prompt| !prompt.trim().is_empty())
+                                    {
+                                        Some(prompt) => {
+                                            manager.turn_start(&thread, prompt).await.map(|_| ())
+                                        }
+                                        None => Ok(()),
+                                    };
+                                    match turn {
+                                        Ok(()) => (
+                                            ActionReceiptStatus::Delivered,
+                                            Some(format!(
+                                                "codex thread {thread}, tmux {}",
+                                                tmux_session
+                                                    .exact_tmux_target
+                                                    .as_deref()
+                                                    .unwrap_or(&tmux_name)
+                                            )),
+                                        ),
+                                        Err(error) => (
+                                            ActionReceiptStatus::Failed,
+                                            Some(format!(
+                                                "Codex thread {thread} launched in tmux {tmux_name}, initial prompt failed: {error}"
+                                            )),
+                                        ),
                                     }
-                                    None => Ok(()),
-                                };
-                                match turn {
-                                    Ok(()) => (
-                                        ActionReceiptStatus::Delivered,
-                                        Some(format!(
-                                            "codex thread {thread}, tmux {}",
-                                            tmux_session
-                                                .exact_tmux_target
-                                                .as_deref()
-                                                .unwrap_or(&tmux_name)
-                                        )),
-                                    ),
-                                    Err(error) => (
-                                        ActionReceiptStatus::Failed,
-                                        Some(format!(
-                                            "Codex thread {thread} launched in tmux {tmux_name}, initial prompt failed: {error}"
-                                        )),
-                                    ),
+                                }
+                                Err(error) => {
+                                    let _ = kill_tmux_session_exact(&tmux_name).await;
+                                    (ActionReceiptStatus::Failed, Some(error.to_string()))
                                 }
                             }
-                            Err(error) => {
-                                let _ = kill_tmux_session_exact(&tmux_name).await;
-                                (ActionReceiptStatus::Failed, Some(error.to_string()))
-                            }
                         }
+                        Err(error) => (ActionReceiptStatus::Failed, Some(error)),
                     }
-                    Err(error) => (ActionReceiptStatus::Failed, Some(error)),
-                },
+                }
                 Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
             },
             None => (
@@ -1433,17 +1802,31 @@ async fn execute_fleet_start(
                 Some("Codex managed transport is not active".to_string()),
             ),
         },
-        ControlAction::Start { .. } => (
+        FleetProvider::Claude | FleetProvider::Unknown => (
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),
-        _ => unreachable!("start handler only receives start actions"),
     };
     receipt.status = receipt_status_token(status).to_string();
     receipt.detail = detail;
     receipt.updated_at = SystemClock.now_ms();
     let row = FleetRepo::upsert_action_receipt(pool, &receipt).await.map_err(fleet_repo_err)?;
-    Ok(action_receipt_wire(&row))
+    Ok(FleetStartResult {
+        prospective_session_key,
+        receipt: action_receipt_wire(&row),
+    })
+}
+
+fn prospective_start_session_key(
+    provider: ainb_hangar_proto::fleet::FleetProvider,
+    request_id: &str,
+) -> String {
+    let provider = match provider {
+        ainb_hangar_proto::fleet::FleetProvider::Claude => "claude",
+        ainb_hangar_proto::fleet::FleetProvider::Codex => "codex",
+        ainb_hangar_proto::fleet::FleetProvider::Unknown => "unknown",
+    };
+    format!("start:{provider}:{}", stable_fingerprint(request_id))
 }
 
 async fn launch_managed_codex_tui(
@@ -1712,7 +2095,7 @@ async fn execute_codex_action(
     Option<String>,
 ) {
     use crate::fleet_provider::{ApprovalDecision, QuestionAnswer};
-    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetProvider};
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction};
 
     let thread_id = session.provider_session_id.as_deref().unwrap_or_default();
     let result: Result<String, crate::fleet_provider::ProviderError> = async {
@@ -1916,17 +2299,6 @@ async fn execute_codex_action(
                 Ok(format!(
                     "codex thread {thread_id} archived after tmux {tmux_name} stop"
                 ))
-            }
-            ControlAction::Start {
-                provider,
-                cwd,
-                prompt,
-            } if *provider == FleetProvider::Codex => {
-                let thread = manager.thread_start(Path::new(cwd), None).await?;
-                if let Some(prompt) = prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
-                    manager.turn_start(&thread, prompt).await?;
-                }
-                Ok(format!("codex thread {thread}"))
             }
             _ => Err(crate::fleet_provider::ProviderError::Unsupported(
                 "Codex action is not available through app-server".to_string(),
@@ -2504,7 +2876,7 @@ fn action_capability(
         ControlAction::Continue => capabilities.continue_turn,
         ControlAction::Retry => capabilities.retry,
         ControlAction::Interrupt => capabilities.interrupt,
-        ControlAction::Start { .. } => capabilities.start,
+        ControlAction::Start { .. } => false,
         ControlAction::Restart => capabilities.restart,
         ControlAction::Stop => capabilities.stop,
         ControlAction::Kill => capabilities.kill,
@@ -6055,43 +6427,23 @@ fn card_run_message(e: CardRunError) -> RpcError {
     }
 }
 
-/// The card launches currently in flight, keyed by issue id (tcp T4 hardening).
+/// Cross-process card launch slot held across the active check and enqueue.
 ///
-/// [`run_card`]'s blocked/active checks and its enqueue are separate statements,
-/// so two CONCURRENT launches of one card — a manual Run racing the finalize
-/// auto-run — could both pass the checks before either inserts. The migration-0012
-/// unique index only backstops `queued`/`dispatched` rows: once the first task is
-/// claimed to `running`, the second insert would slip through and the card runs
-/// twice. Every launch path lives in this one daemon process (the daemon owns the
-/// socket, the claim loop, AND the store — architecture invariant #1), so an
-/// in-process per-issue slot held across the whole check+enqueue serializes them:
-/// the loser refuses exactly like a run that lost to an already-active task.
-static CARD_LAUNCHES_IN_FLIGHT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-
-/// RAII slot in [`CARD_LAUNCHES_IN_FLIGHT`]: acquired at [`run_card`] entry,
-/// released on drop (any exit path). The mutex is only held inside
-/// acquire/release — never across an await — so it cannot block the runtime.
-struct CardLaunchSlot(String);
+/// Duplicate daemons can temporarily share one Hangar home. A process-local
+/// mutex lets both pass the check+enqueue gap, so this uses the database-scoped
+/// kernel lock shared by every process opening that `hangar.db`. Process exit
+/// releases ownership automatically.
+struct CardLaunchSlot {
+    _slot: DatabaseOperationSlot,
+}
 
 impl CardLaunchSlot {
     /// Claim the launch slot for `issue_id`, or `None` when another launch of the
     /// same card is already in flight.
-    fn acquire(issue_id: &str) -> Option<Self> {
-        let mut set = CARD_LAUNCHES_IN_FLIGHT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set.insert(issue_id.to_string()).then(|| Self(issue_id.to_string()))
-    }
-}
-
-impl Drop for CardLaunchSlot {
-    fn drop(&mut self) {
-        CARD_LAUNCHES_IN_FLIGHT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.0);
+    async fn acquire(pool: &SqlitePool, issue_id: &str) -> Result<Option<Self>, sqlx::Error> {
+        DatabaseOperationSlot::try_acquire(pool, "card-launch", issue_id)
+            .await
+            .map(|slot| slot.map(|slot| Self { _slot: slot }))
     }
 }
 
@@ -6297,13 +6649,14 @@ async fn record_dispatch_attempt(
 /// Order of guards (each a hard stop):
 ///   1. F7 refuse-run — a card with any UNFINISHED blocker never dispatches (it is
 ///      not launchable until its blockers finish);
-///   2. one-active-run guard — a card with an active (queued/dispatched/running)
+///   2. terminal-state guard — a cancelled card never dispatches;
+///   3. one-active-run guard — a card with an active (queued/dispatched/running)
 ///      task cannot start another (card = issue), which also stops a squad card
 ///      from being double-fanned;
-///   3. F2 repo-required — the run-time override, else the card's persisted repo,
+///   4. F2 repo-required — the run-time override, else the card's persisted repo,
 ///      else a refusal (never a "random" run);
-///   4. F4 agent cascade + F8 dispatchable check;
-///   5. gap #8 invocation gate — the EFFECTIVE invoker (`invoker_user_id`, else the
+///   5. F4 agent cascade + F8 dispatchable check;
+///   6. gap #8 invocation gate — the EFFECTIVE invoker (`invoker_user_id`, else the
 ///      workspace owner) is resolved ONCE, above the fork, and every dispatch
 ///      target is judged by it: the single assignee agent here, and the leader plus
 ///      every member inside [`SquadAssignService::assign_fanout`]. A refusal writes
@@ -6335,13 +6688,6 @@ async fn run_card_inner(
 
     let issue_id = issue.id.as_str();
 
-    // 0. One launch of a card at a time (in-process slot, held to the end of this
-    //    function): a manual Run racing the finalize auto-run serializes here, so
-    //    the checks below can never both pass for one card. The loser reports the
-    //    same "already active" refusal a lost re-run gets.
-    let _launch_slot = CardLaunchSlot::acquire(issue_id)
-        .ok_or_else(|| CardRunError::ActiveRun("launching".to_string()))?;
-
     // 1. F7 refuse-run: a card with any UNFINISHED blocker is not dispatched.
     let blockers = CardDependencyRepo::unfinished_blockers_of(pool, issue_id)
         .await
@@ -6360,7 +6706,17 @@ async fn run_card_inner(
         return Err(CardRunError::Cancelled);
     }
 
-    // 2. One active run per card (card = issue). Blocks a re-run — and a second
+    // 2. One launch of a runnable card at a time (in-process slot, held to the
+    //    end of this function): a manual Run racing the finalize auto-run
+    //    serializes here, so the active check and enqueue below cannot both pass
+    //    for one card. Admission failures above remain deterministic and need no
+    //    launch serialization.
+    let _launch_slot = CardLaunchSlot::acquire(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?
+        .ok_or_else(|| CardRunError::ActiveRun("launching".to_string()))?;
+
+    // 3. One active run per card (card = issue). Blocks a re-run — and a second
     //    squad fan-out — until the current run finishes or is cancelled.
     if let Some(active) = TaskRepo::active_task_for_issue(pool, ws.as_str(), issue_id)
         .await
@@ -6369,7 +6725,7 @@ async fn run_card_inner(
         return Err(CardRunError::ActiveRun(active.status));
     }
 
-    // 2a. Mint this run's GENERATION (migration 0039, tcp 8ln): a fresh Run / rerun
+    // 3a. Mint this run's GENERATION (migration 0039, tcp 8ln): a fresh Run / rerun
     //     of a card is a new run epoch, so stamp all of this run's tasks (the single
     //     task, or the whole fan-out) with it. The card-state folds (aggregate /
     //     blocker-finished / auto-move / chip) scope to an issue's LATEST generation,
@@ -6380,14 +6736,14 @@ async fn run_card_inner(
         .await
         .map_err(CardRunError::Db)?;
 
-    // 3. F2 repo-required: run-time override, else the card's persisted repo.
+    // 4. F2 repo-required: run-time override, else the card's persisted repo.
     let (card_repo, card_agent) = CardParityRepo::get_issue_repo_agent(pool, issue_id)
         .await
         .map_err(CardRunError::Db)?
         .unwrap_or((None, None));
     let repo_ref = repo_override.map(str::to_string).or(card_repo).ok_or(CardRunError::NoRepo)?;
 
-    // 3b. Source branch (0042): run-time override, else the card's persisted
+    // 4b. Source branch (0042): run-time override, else the card's persisted
     // source_branch; `None` lets provision branch off the repo's default HEAD.
     let card_source = CardParityRepo::get_issue_branches(pool, issue_id)
         .await
@@ -8387,11 +8743,11 @@ async fn handle_atc_register(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, RegisterAtc};
+    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, RegisterAtc, RegisterAtcOutcome};
 
     let params: ainb_hangar_proto::snapshots::AtcRegisterParams = parse_params(
         req,
-        "{ name, cwd?, tmux_session?, heartbeat_cron?, err_retry_cap?, idle_pause_min? }",
+        "{ name, cwd?, tmux_session?, heartbeat_cron?, err_retry_cap?, idle_pause_min?, expected_generation? }",
     )?;
     if params.name.trim().is_empty() {
         return Err(invalid_params("atc instance name must not be empty"));
@@ -8415,10 +8771,31 @@ async fn handle_atc_register(
         idle_pause_min: params.idle_pause_min.unwrap_or(60),
         next_tick_at,
     };
-    AtcInstanceRepo::register(pool, &reg, now_ms).await.map_err(|e| store_err(&e))?;
+    let outcome = AtcInstanceRepo::register_checked(pool, &reg, now_ms, params.expected_generation)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let (row, status) = match outcome {
+        RegisterAtcOutcome::Applied(row) => (
+            row,
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Applied,
+        ),
+        RegisterAtcOutcome::AlreadyApplied(row) => (
+            row,
+            ainb_hangar_proto::snapshots::AtcMutationStatus::AlreadyApplied,
+        ),
+        RegisterAtcOutcome::Stale(Some(row)) => {
+            (row, ainb_hangar_proto::snapshots::AtcMutationStatus::Stale)
+        }
+        RegisterAtcOutcome::Stale(None) => {
+            return Err(invalid_params("atc configuration generation is stale"));
+        }
+    };
     to_value(&ainb_hangar_proto::snapshots::AtcRegisterResult {
-        name: reg.name,
-        next_tick_at,
+        name: row.name,
+        next_tick_at: row.next_tick_at,
+        config_generation: row.config_generation,
+        status,
+        scheduler_ownership: atc_scheduler_ownership(),
     })
 }
 
@@ -8442,9 +8819,13 @@ async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcErro
             next_tick_at: r.next_tick_at,
             enabled: r.enabled,
             last_heartbeat_at: r.last_heartbeat_at,
+            config_generation: r.config_generation,
         })
         .collect();
-    to_value(&ainb_hangar_proto::snapshots::AtcListResult { instances })
+    to_value(&ainb_hangar_proto::snapshots::AtcListResult {
+        instances,
+        scheduler_ownership: atc_scheduler_ownership(),
+    })
 }
 
 /// Dispatch `atc/escalate` (spec P9, D12): raise an ATC escalation as an
@@ -8659,25 +9040,53 @@ async fn handle_atc_unregister(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
+    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, DisableAtcOutcome};
 
-    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams = parse_params(req, "{ name }")?;
+    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams =
+        parse_params(req, "{ name, expected_generation? }")?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("atc instance name must not be empty"));
     }
-    // Only a registered instance is disabled; an unknown name is a clean no-op so
-    // teardown is safe to fire unconditionally.
-    let disabled = AtcInstanceRepo::get(pool, name).await.map_err(|e| store_err(&e))?.is_some();
-    if disabled {
-        AtcInstanceRepo::set_enabled(pool, name, false, None)
-            .await
-            .map_err(|e| store_err(&e))?;
-    }
+    let outcome = AtcInstanceRepo::disable_checked(pool, name, params.expected_generation)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let (disabled, config_generation, status) = match outcome {
+        DisableAtcOutcome::Applied(row) => (
+            true,
+            Some(row.config_generation),
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Applied,
+        ),
+        DisableAtcOutcome::AlreadyApplied(row) => (
+            true,
+            Some(row.config_generation),
+            ainb_hangar_proto::snapshots::AtcMutationStatus::AlreadyApplied,
+        ),
+        DisableAtcOutcome::NotFound => (
+            false,
+            None,
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Applied,
+        ),
+        DisableAtcOutcome::Stale(row) => (
+            false,
+            Some(row.config_generation),
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Stale,
+        ),
+    };
     to_value(&ainb_hangar_proto::snapshots::AtcUnregisterResult {
         name: name.to_string(),
         disabled,
+        config_generation,
+        status,
+        scheduler_ownership: atc_scheduler_ownership(),
     })
+}
+
+/// E04 deliberately withholds the mutation capability until the legacy
+/// launchd/systemd lifecycle is moved below both core and daemon. The daemon
+/// exposes this fact rather than guessing from files it does not own.
+const fn atc_scheduler_ownership() -> ainb_hangar_proto::snapshots::AtcSchedulerOwnership {
+    ainb_hangar_proto::snapshots::AtcSchedulerOwnership::LegacyTimerReconciliationRequired
 }
 
 /// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).
@@ -8795,33 +9204,71 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
 ) -> std::io::Result<Option<Vec<u8>>> {
     use tokio::io::AsyncBufReadExt;
     let mut content_length: Option<usize> = None;
+    let mut saw_header = false;
     loop {
         let mut line = String::new();
         let n = r.read_line(&mut line).await?;
         if n == 0 {
-            return Ok(None);
+            return if saw_header {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated Content-Length frame header",
+                ))
+            } else {
+                Ok(None)
+            };
         }
+        saw_header = true;
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {
             let Some(len) = content_length else {
-                // Blank line with no Content-Length seen — skip (lenient).
-                continue;
-            };
-            if len > MAX_BODY_BYTES {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Content-Length {len} exceeds cap {MAX_BODY_BYTES}"),
+                    "missing Content-Length header",
                 ));
-            }
+            };
             let mut body = vec![0u8; len];
             r.read_exact(&mut body).await?;
             return Ok(Some(body));
         }
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("Content-Length") {
-                content_length = value.trim().parse().ok();
-            }
+        let Some((name, value)) = trimmed.split_once(':') else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed frame header",
+            ));
+        };
+        if !name.trim().eq_ignore_ascii_case("Content-Length") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported frame header: {}", name.trim()),
+            ));
         }
+        if content_length.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "duplicate Content-Length header",
+            ));
+        }
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Content-Length must be an unsigned decimal byte length",
+            ));
+        }
+        let len = value.parse::<usize>().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Content-Length is out of range",
+            )
+        })?;
+        if len > MAX_BODY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Content-Length {len} exceeds cap {MAX_BODY_BYTES}"),
+            ));
+        }
+        content_length = Some(len);
     }
 }
 
@@ -8861,6 +9308,145 @@ mod tests {
             method: method.into(),
             params,
         }
+    }
+
+    #[tokio::test]
+    async fn abandoned_action_and_start_receipts_become_unknown() {
+        use ainb_hangar_proto::fleet::{
+            ActionReceiptStatus, ControlAction, FleetActionParams, FleetProvider, FleetStartParams,
+        };
+        use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let action = FleetActionParams {
+            session_key: "claude:crashed".to_string(),
+            expected_version: 1,
+            request_id: "crashed-action".to_string(),
+            action: ControlAction::SendPrompt {
+                text: "hello".to_string(),
+            },
+        };
+        let action_slot =
+            DatabaseOperationSlot::try_acquire(store.pool(), "fleet-receipt", &action.request_id)
+                .await
+                .unwrap()
+                .expect("first daemon owns action receipt");
+        FleetRepo::upsert_action_receipt(
+            store.pool(),
+            &NewActionReceipt {
+                request_id: action.request_id.clone(),
+                session_key: action.session_key.clone(),
+                action_kind: action.action.kind().to_string(),
+                action_fingerprint: stable_fingerprint(
+                    &serde_json::to_string(&action.action).unwrap(),
+                ),
+                expected_version: action.expected_version,
+                idempotency_key: None,
+                status: "PENDING".to_string(),
+                detail: None,
+                session_version: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let live = execute_fleet_action(store.pool(), action.clone(), None, &sink()).await.unwrap();
+        assert_eq!(live.status, ActionReceiptStatus::Pending);
+        drop(action_slot);
+        let recovered = execute_fleet_action(store.pool(), action, None, &sink()).await.unwrap();
+        assert_eq!(recovered.status, ActionReceiptStatus::Unknown);
+        assert_eq!(recovered.detail.as_deref(), Some(ABANDONED_RECEIPT_DETAIL));
+
+        let start = FleetStartParams {
+            request_id: "crashed-start".to_string(),
+            provider: FleetProvider::Codex,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: None,
+        };
+        let start_slot =
+            DatabaseOperationSlot::try_acquire(store.pool(), "fleet-receipt", &start.request_id)
+                .await
+                .unwrap()
+                .expect("first daemon owns start receipt");
+        FleetRepo::upsert_action_receipt(
+            store.pool(),
+            &NewActionReceipt {
+                request_id: start.request_id.clone(),
+                session_key: prospective_start_session_key(start.provider, &start.request_id),
+                action_kind: "start".to_string(),
+                action_fingerprint: stable_fingerprint(&serde_json::to_string(&start).unwrap()),
+                expected_version: 1,
+                idempotency_key: None,
+                status: "PENDING".to_string(),
+                detail: None,
+                session_version: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let live = execute_fleet_start(store.pool(), start.clone(), &sink()).await.unwrap();
+        assert_eq!(live.receipt.status, ActionReceiptStatus::Pending);
+        drop(start_slot);
+        let recovered = execute_fleet_start(store.pool(), start, &sink()).await.unwrap();
+        assert_eq!(recovered.receipt.status, ActionReceiptStatus::Unknown);
+        assert_eq!(
+            recovered.receipt.detail.as_deref(),
+            Some(ABANDONED_RECEIPT_DETAIL)
+        );
+    }
+
+    const CARD_SLOT_CHILD_HOME: &str = "AINB_TEST_CARD_SLOT_CHILD_HOME";
+    const CARD_SLOT_CHILD_EXPECT: &str = "AINB_TEST_CARD_SLOT_CHILD_EXPECT";
+
+    #[test]
+    fn card_launch_slot_subprocess_probe() {
+        let Some(home) = std::env::var_os(CARD_SLOT_CHILD_HOME) else {
+            return;
+        };
+        let expected = std::env::var(CARD_SLOT_CHILD_EXPECT).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let acquired = runtime.block_on(async {
+            let store = Store::open_in(Path::new(&home)).await.unwrap();
+            CardLaunchSlot::acquire(store.pool(), "shared-card").await.unwrap()
+        });
+        assert_eq!(acquired.is_some(), expected == "acquired");
+    }
+
+    #[test]
+    fn card_launch_slot_serializes_duplicate_daemon_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let store = runtime.block_on(Store::open_in(dir.path())).unwrap();
+        let slot = runtime
+            .block_on(CardLaunchSlot::acquire(store.pool(), "shared-card"))
+            .unwrap()
+            .expect("first daemon owns launch");
+
+        let run_probe = |expected: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "rpc::tests::card_launch_slot_subprocess_probe",
+                    "--nocapture",
+                ])
+                .env(CARD_SLOT_CHILD_HOME, dir.path())
+                .env(CARD_SLOT_CHILD_EXPECT, expected)
+                .status()
+                .unwrap()
+        };
+        assert!(
+            run_probe("blocked").success(),
+            "second daemon must not acquire live card launch"
+        );
+        drop(slot);
+        assert!(
+            run_probe("acquired").success(),
+            "kernel must release card launch when owner drops it"
+        );
     }
 
     #[tokio::test]

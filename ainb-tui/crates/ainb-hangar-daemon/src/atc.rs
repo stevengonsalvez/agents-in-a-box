@@ -25,7 +25,9 @@ use ainb_fleet_core::send::send;
 use ainb_fleet_core::types::{SendOutcome, Session};
 use ainb_hangar_core::clock::HangarClock;
 use ainb_hangar_proto::events::HangarEvent;
-use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, AtcInstanceRow};
+use ainb_hangar_store::repo::atc_instance::{
+    ATC_SCHEDULER_CLAIM_RENEW_MS, AtcInstanceRepo, AtcInstanceRow,
+};
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
 use sqlx::SqlitePool;
 use tokio_util::sync::CancellationToken;
@@ -184,7 +186,8 @@ impl AtcHeartbeatScheduler {
             if self.shutdown.is_cancelled() {
                 break;
             }
-            let next = match AtcInstanceRepo::list_schedulable(&self.pool).await {
+            let now_ms = self.clock.now_ms();
+            let next = match AtcInstanceRepo::list_schedulable(&self.pool, now_ms).await {
                 Ok(rows) => rows.into_iter().min_by_key(|r| r.next_tick_at.unwrap_or(i64::MAX)),
                 Err(e) => {
                     tracing::error!(error = %e, "ATC heartbeat cron: load failed; re-polling");
@@ -194,7 +197,12 @@ impl AtcHeartbeatScheduler {
             let (delay, fire_target) = match next {
                 Some(inst) => {
                     let tick = inst.next_tick_at.unwrap_or_else(|| self.clock.now_ms());
-                    (sleep_delay(tick, self.clock.now_ms()), Some(inst))
+                    let until_tick = sleep_delay(tick, self.clock.now_ms());
+                    if until_tick > NO_WORK_REPOLL {
+                        (NO_WORK_REPOLL, None)
+                    } else {
+                        (until_tick, Some(inst))
+                    }
                 }
                 None => (NO_WORK_REPOLL, None),
             };
@@ -203,11 +211,119 @@ impl AtcHeartbeatScheduler {
                 () = tokio::time::sleep(delay) => {}
             }
             if let Some(inst) = fire_target {
-                self.fire(&inst).await;
-                self.reschedule(&inst).await;
+                let due_tick_at = inst.next_tick_at.expect("schedulable rows have a due tick");
+                match AtcInstanceRepo::claim_due(
+                    &self.pool,
+                    &inst.name,
+                    inst.config_generation,
+                    due_tick_at,
+                    self.clock.now_ms(),
+                )
+                .await
+                {
+                    Ok(Some(claim_token)) => {
+                        if let Some(fired_at) = self.fire_while_claimed(&inst, &claim_token).await {
+                            self.reschedule(&inst, &claim_token, fired_at).await;
+                        }
+                    }
+                    Ok(None) => tracing::debug!(
+                        instance = %inst.name,
+                        generation = inst.config_generation,
+                        "ATC heartbeat claim unavailable or invalidated"
+                    ),
+                    Err(error) => tracing::error!(
+                        instance = %inst.name,
+                        error = %error,
+                        "ATC heartbeat claim failed"
+                    ),
+                }
             }
         }
         tracing::info!("ATC heartbeat cron stopped");
+    }
+
+    /// Keep the exact-token lease alive for the full asynchronous heartbeat.
+    /// Losing or failing to renew the claim cancels the in-flight future before
+    /// another scheduler may deliver the same tick.
+    async fn fire_while_claimed(&self, inst: &AtcInstanceRow, claim_token: &str) -> Option<i64> {
+        let renew_every = Duration::from_millis(
+            u64::try_from(ATC_SCHEDULER_CLAIM_RENEW_MS)
+                .expect("ATC claim renewal interval is positive"),
+        );
+        let mut renewals =
+            tokio::time::interval_at(tokio::time::Instant::now() + renew_every, renew_every);
+        let fire = self.fire(inst);
+        tokio::pin!(fire);
+
+        loop {
+            tokio::select! {
+                fired_at = &mut fire => return Some(fired_at),
+                () = self.shutdown.cancelled() => {
+                    self.release_claim(inst, claim_token, "shutdown").await;
+                    return None;
+                },
+                _ = renewals.tick() => {
+                    match AtcInstanceRepo::renew_claim(
+                        &self.pool,
+                        &inst.name,
+                        inst.config_generation,
+                        claim_token,
+                        self.clock.now_ms(),
+                    )
+                    .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            tracing::warn!(
+                                instance = %inst.name,
+                                generation = inst.config_generation,
+                                "ATC heartbeat claim lost during delivery"
+                            );
+                            return None;
+                        }
+                        Err(error) => {
+                            tracing::warn!(
+                                instance = %inst.name,
+                                error = %error,
+                                "ATC heartbeat claim renewal failed"
+                            );
+                            self.release_claim(inst, claim_token, "renewal failure").await;
+                            return None;
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    async fn release_claim(&self, inst: &AtcInstanceRow, claim_token: &str, reason: &str) {
+        match AtcInstanceRepo::release_claim(
+            &self.pool,
+            &inst.name,
+            inst.config_generation,
+            claim_token,
+        )
+        .await
+        {
+            Ok(true) => tracing::debug!(
+                instance = %inst.name,
+                generation = inst.config_generation,
+                %reason,
+                "ATC heartbeat claim released"
+            ),
+            Ok(false) => tracing::debug!(
+                instance = %inst.name,
+                generation = inst.config_generation,
+                %reason,
+                "ATC heartbeat claim already lost"
+            ),
+            Err(error) => tracing::warn!(
+                instance = %inst.name,
+                %reason,
+                error = %error,
+                "ATC heartbeat claim release failed"
+            ),
+        }
     }
 
     /// Fire one instance's heartbeat: read the fleet needs, enforce the retry cap
@@ -217,7 +333,7 @@ impl AtcHeartbeatScheduler {
     ///
     /// Non-fatal end to end: an unspawned instance (no tmux target) or a send
     /// fault is warned and skipped, never a panic.
-    async fn fire(&self, inst: &AtcInstanceRow) {
+    async fn fire(&self, inst: &AtcInstanceRow) -> i64 {
         let now = self.clock.now_ms();
         let rows = probe_fleet_needs(now).await;
 
@@ -246,7 +362,7 @@ impl AtcHeartbeatScheduler {
             tracing::debug!(instance = %inst.name, "ATC heartbeat: no tmux target; nudge not sent");
         }
 
-        let _ = AtcInstanceRepo::mark_heartbeat(&self.pool, &inst.name, now).await;
+        now
     }
 
     /// Apply the retry-cap decision for ONE ERR session of an instance.
@@ -301,11 +417,30 @@ impl AtcHeartbeatScheduler {
     }
 
     /// Recompute + persist the instance's next heartbeat tick from the fired slot.
-    async fn reschedule(&self, inst: &AtcInstanceRow) {
+    async fn reschedule(&self, inst: &AtcInstanceRow, claim_token: &str, fired_at: i64) {
         let next =
             recompute_next_tick(&inst.heartbeat_cron, inst.next_tick_at, self.clock.now_ms());
-        if let Err(e) = AtcInstanceRepo::set_next_tick(&self.pool, &inst.name, next).await {
-            tracing::error!(instance = %inst.name, error = %e, "ATC heartbeat reschedule failed");
+        match AtcInstanceRepo::complete_claim(
+            &self.pool,
+            &inst.name,
+            inst.config_generation,
+            claim_token,
+            next,
+            fired_at,
+        )
+        .await
+        {
+            Ok(true) => {}
+            Ok(false) => tracing::debug!(
+                instance = %inst.name,
+                generation = inst.config_generation,
+                "ATC heartbeat completion invalidated by mutation or claim takeover"
+            ),
+            Err(error) => tracing::error!(
+                instance = %inst.name,
+                error = %error,
+                "ATC heartbeat reschedule failed"
+            ),
         }
     }
 

@@ -163,20 +163,37 @@ async fn retire_correlated_legacy(
 pub async fn snapshot_wire(
     pool: &SqlitePool,
 ) -> Result<ainb_hangar_proto::fleet::FleetSnapshot, sqlx::Error> {
-    let snapshot = FleetRepo::snapshot(pool).await?;
-    let mut sessions = Vec::with_capacity(snapshot.sessions.len());
-    for row in &snapshot.sessions {
-        let current_request = if row.current_request_fingerprint.is_some() {
-            current_request_wire(pool, &row.session_key).await?
-        } else {
-            None
-        };
-        sessions.push(session_wire(row, current_request));
+    let projection = FleetRepo::subscription_projection(pool, 0, 0).await?;
+    Ok(subscription_snapshot_wire(&projection))
+}
+
+/// Read a wire-ready Fleet subscription projection from one store transaction.
+pub async fn subscription_wire(
+    pool: &SqlitePool,
+    after_revision: i64,
+    replay_limit: i64,
+) -> Result<ainb_hangar_store::repo::fleet::FleetSubscriptionProjection, FleetRepoError> {
+    ainb_hangar_store::repo::fleet::FleetRepo::subscription_projection(
+        pool,
+        after_revision,
+        replay_limit,
+    )
+    .await
+    .map_err(FleetRepoError::from)
+}
+
+/// Convert one atomic store subscription projection into its Fleet wire shape.
+pub fn subscription_snapshot_wire(
+    projection: &ainb_hangar_store::repo::fleet::FleetSubscriptionProjection,
+) -> ainb_hangar_proto::fleet::FleetSnapshot {
+    ainb_hangar_proto::fleet::FleetSnapshot {
+        head_revision: projection.head_revision,
+        sessions: projection
+            .sessions
+            .iter()
+            .map(|row| session_wire(&row.session, row.current_request.clone()))
+            .collect(),
     }
-    Ok(ainb_hangar_proto::fleet::FleetSnapshot {
-        head_revision: snapshot.head_revision,
-        sessions,
-    })
 }
 
 /// Read complete payload for current structured request or approval.
@@ -663,7 +680,8 @@ fn session_wire(
     }
 }
 
-fn event_wire(row: &FleetEventRow) -> ainb_hangar_proto::fleet::FleetEvent {
+/// Convert one durable Fleet event row into its public wire representation.
+pub fn event_wire(row: &FleetEventRow) -> ainb_hangar_proto::fleet::FleetEvent {
     ainb_hangar_proto::fleet::FleetEvent {
         revision: row.revision,
         event_id: row.event_id.clone(),
@@ -1456,6 +1474,11 @@ mod tests {
         assert_eq!(
             session.attention,
             ainb_hangar_proto::fleet::AttentionState::Ask
+        );
+        assert_eq!(
+            session.current_request.as_ref().unwrap()["questions"][0]["id"],
+            "q1",
+            "snapshot must carry the request body from its atomic projection"
         );
         assert_eq!(
             session.lifecycle,

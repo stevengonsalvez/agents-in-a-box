@@ -29,8 +29,9 @@ or power cut.
 
 | Process | argv | ppid | reaped? |
 |---|---|---|---|
-| Daemon-spawned server (Source A) | `node /Users/…/bin/codex app-server --listen unix://…` | 1 when orphaned | **yes** |
-| Plugin broker server (Source B) | `node /…/bin/codex app-server --listen unix:///var/folders/…/cxc-…/broker.sock` | 1 when orphaned | **yes** |
+| Daemon-spawned server (Source A) | `node /Users/…/bin/codex app-server --listen unix://…` | 1 after launcher exit | **if no live proxy** |
+| Plugin broker server (Source B) | `node /…/bin/codex app-server --listen unix:///var/folders/…/cxc-…/broker.sock` | 1 after launcher exit | **if no live proxy** |
+| Fleet proxy | `node /…/bin/codex app-server proxy --sock …` | any | **never** |
 | Desktop Codex/ChatGPT app | `/Applications/ChatGPT.app/Contents/Resources/codex … app-server …` | ≠ 1 | **never** |
 
 `codex` on PATH is a node shim, so a daemon that spawns bare `codex` still shows
@@ -38,7 +39,8 @@ or power cut.
 `grep '[b]in/codex'` filter catches Source-A orphans even though the daemon
 never passes a full path. The desktop app is excluded twice over: no `bin/codex`
 in its path **and** `ppid != 1`. The reap filter is therefore:
-`ppid == 1` AND argv contains `bin/codex` AND `app-server`.
+`ppid == 1` AND argv contains `bin/codex` AND server `app-server --listen`
+AND no live `app-server proxy --sock` targets that server socket.
 
 ## Fix
 
@@ -49,15 +51,16 @@ Three layers, none of which depend on an exit path running:
    its own child and adopts the winner's server instead of stranding it.
    (`codex_manager.rs`, committed separately.)
 2. **Daemon-owned reaper (both sources).** `reap_orphaned_codex_servers()` reads
-   `ps -Ao pid,ppid,args`, selects `ppid == 1` codex-app-server processes, spares
-   any pid currently listening on the daemon's own live socket (the server it
-   adopts), and `SIGTERM`s the rest by exact pid via `nix`. It runs at daemon
+   `ps -Ao pid,ppid,args`, selects `ppid == 1` codex app-server processes,
+   excludes proxy processes, spares every server socket targeted by a live proxy
+   across all Hangar homes, spares the daemon's own adoption socket, and
+   `SIGTERM`s the rest by exact pid via `nix`. It runs at daemon
    boot (before we spawn our own server) AND on the daemon's periodic sweeper
    tick, so a long-running daemon keeps the machine clean. This is the only
    backstop that survives `SIGKILL`/OOM, and it reaps **both** sources' orphans
-   because both share the `bin/codex … app-server` shape: a dead-daemon Source-A
-   leftover and a dead-session Source-B plugin broker (on its own temp socket)
-   are both `ppid == 1` and neither holds the daemon's socket, so both get reaped.
+   because both share the `bin/codex … app-server` shape. Dead Source-A and
+   Source-B servers have no live proxy targeting their socket, so both get
+   reaped.
 3. **Cap that fails loud.** `spawn()` refuses to start a server once
    `AINB_CODEX_MAX_SERVERS` (default 8, floor 1) live `codex app-server`
    processes already exist, turning a silent 900-process pileup into a visible
@@ -67,11 +70,11 @@ Three layers, none of which depend on an exit path running:
 
 The reaper lives entirely inside the ainb daemon (boot + periodic sweep). We do
 **not** ship a Claude Code `SessionStart` hook or edit `~/.claude/settings.json`,
-and we do **not** touch the vendored third-party `openai-codex` plugin. Because
-the daemon's reaper already reaps every `ppid == 1` codex app-server machine-wide
-(Source A leftovers and Source B plugin brokers alike), a running daemon is the
-single cleanup owner. Trade-off: a machine that runs the codex plugin with **no**
-ainb daemon gets no backstop, but such a machine is outside ainb's reach anyway.
+and we do **not** touch the vendored third-party `openai-codex` plugin. The
+daemon reaps every unproxied `ppid == 1` codex app-server machine-wide while
+sparing live consumers across all Hangar homes, so a running daemon is the
+single cleanup owner. Trade-off: a machine that runs the codex plugin with
+**no** ainb daemon gets no backstop, but such a machine is outside ainb's reach.
 A proper Source-B fix (shared-socket broker, or a broker that self-terminates on
 parent death) is upstream territory (logged below).
 
@@ -104,8 +107,8 @@ cargo fmt --check
 # Soak proof (success criterion 1): 20x SIGKILL the daemon, prove no accumulation
 scripts/soak-codex-orphans.sh 20
 
-# Scale proof: the daemon boot reaper clears a 25-orphan pile off foreign
-# sockets while sparing its own server; desktop app untouched.
+# Scale proof: clear a 25-orphan pile, spare another home's proxy-backed server,
+# then reap that server after its proxy exits.
 scripts/reap-stress-codex-orphans.sh 25
 ```
 
@@ -113,23 +116,21 @@ The soak isolates `AINB_HANGAR_HOME`, SIGKILLs the daemon 20×, and reports the
 **peak** orphan count, which stays bounded at ~1 (`bound_by_child` + boot
 adoption never accumulate; the pre-fix incident reached 900+ here) while the
 desktop app server stays alive. The scale proof starts a real daemon over a pile
-of foreign-socket orphans and shows its boot reaper clears them all.
+of foreign-socket orphans, proves another home's proxy-backed server survives,
+then proves the periodic reaper clears it after that proxy exits.
 
-## Why the reaper is safe: `ppid == 1` means the parent died
+## Why the reaper is safe: consumer liveness overrides `ppid == 1`
 
-`codex app-server --listen unix://<sock>` does NOT self-daemonize. Its `node
-.../bin/codex app-server --listen` launcher stays alive and the native listener
-is that launcher's child (`ppid == launcher`), so a healthy in-use server is
-never `ppid == 1`. A server reaches `ppid == 1` only when its parent launcher
-dies: a SIGKILLed or crashed daemon, or spawn-cleanup killing the launcher after
-an `initialize` failure. So `ppid == 1` is a sound orphan signal and neither
-reaper can hit a live in-use server.
+`codex app-server --listen unix://<sock>` can remain at `ppid == 1` after its
+original daemon exits. A restarted daemon can adopt that listener and keep using
+it through `app-server proxy --sock`, so `ppid == 1` is an orphan candidate,
+not proof that the server is unused.
 
-The daemon reaper keys on `ppid == 1` and additionally spares the holder of the
-daemon's own live socket, so a booting daemon can *adopt* a still-listening
-server left by a prior daemon rather than kill-and-respawn it. Every other
-`ppid == 1` codex app-server (a dead daemon's leftover, a dead plugin-broker
-session) is reaped.
+The reaper correlates every live proxy target with every candidate server
+socket across the complete process snapshot. A proxy-backed server is spared
+regardless of `AINB_HANGAR_HOME`. The daemon's own listener is also spared
+during adoption before its proxy starts. Only unproxied candidates are
+signalled.
 
 ## Known limitations / follow-ups
 

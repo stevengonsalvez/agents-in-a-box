@@ -133,8 +133,16 @@ impl FrameDecoder {
                 .split_once(':')
                 .ok_or_else(|| DecodeError::Header(format!("malformed header line: {line:?}")))?;
             if name.trim().eq_ignore_ascii_case("Content-Length") {
+                if content_length.is_some() {
+                    return Err(DecodeError::Header("duplicate Content-Length".to_string()));
+                }
+                let value = value.trim();
+                if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+                    return Err(DecodeError::Header(
+                        "Content-Length must be an unsigned decimal byte length".to_string(),
+                    ));
+                }
                 let len: usize = value
-                    .trim()
                     .parse()
                     .map_err(|_| DecodeError::Header(format!("bad Content-Length: {value:?}")))?;
                 content_length = Some(len);
@@ -254,6 +262,20 @@ mod tests {
         let bad = b"Content-Type: x\r\nContent-Length: 2\r\n\r\n{}".to_vec();
         let err = d.push(&bad).unwrap_err();
         assert!(matches!(err, DecodeError::Header(_)));
+    }
+
+    #[test]
+    fn decoder_rejects_missing_duplicate_malformed_and_oversized_length() {
+        let cases = [
+            b"\r\n".as_slice(),
+            b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
+            b"Content-Length: +2\r\n\r\n{}".as_slice(),
+            b"Content-Length: 16777217\r\n\r\n".as_slice(),
+        ];
+        for frame in cases {
+            let err = FrameDecoder::new().push_frames(frame).unwrap_err();
+            assert!(matches!(err, DecodeError::Header(_)));
+        }
     }
 
     #[test]
