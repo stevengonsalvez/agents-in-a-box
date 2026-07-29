@@ -77,6 +77,7 @@ final class FleetStore: ObservableObject {
     private let readVersions: FleetProtocolRange
     private let makeConnection: (HangarLocation) -> FleetConnection
     private let reconnectDelayNanoseconds: (Int) -> UInt64
+    private let notificationCenter = FleetNotificationCenter()
     private var connection: FleetConnection?
     private var connectionTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
@@ -86,6 +87,7 @@ final class FleetStore: ObservableObject {
     private var lastAuthoritativeRefresh: Date?
     private var reconnectAttempts = 0
     private var hasEstablishedLiveConnection = false
+    private var hasAppliedAuthoritativeSnapshot = false
     private let maximumReconnectAttempts = 3
 
     init(
@@ -474,9 +476,17 @@ final class FleetStore: ObservableObject {
     }
 
     private func apply(_ next: FleetProjection) {
+        let previousSessions = sessions
         projection = next
         sessions = next.snapshot?.sessions ?? sessions
-        if next.snapshot != nil { lastAuthoritativeRefresh = Date() }
+        if next.snapshot != nil {
+            lastAuthoritativeRefresh = Date()
+            if hasAppliedAuthoritativeSnapshot {
+                let events = FleetNotificationPolicy.events(previous: previousSessions, current: sessions)
+                Task { await notificationCenter.deliver(events) }
+            }
+            hasAppliedAuthoritativeSnapshot = true
+        }
         if let selectedSessionKey, !sessions.contains(where: { $0.sessionKey == selectedSessionKey }) {
             self.selectedSessionKey = nil
         }
