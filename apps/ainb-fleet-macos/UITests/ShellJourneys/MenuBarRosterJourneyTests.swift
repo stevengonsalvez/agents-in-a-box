@@ -41,7 +41,7 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
 
         try app.performAccessibilityAudit { issue in
             guard let element = issue.element else { return false }
-            issue.compactDescription == "Element has no description"
+            return issue.compactDescription == "Element has no description"
                 && element.elementType == .group
                 && element.descendants(matching: .searchField).firstMatch.label == "Search"
         }
