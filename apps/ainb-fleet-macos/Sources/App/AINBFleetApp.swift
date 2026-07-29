@@ -1,98 +1,36 @@
-import AppKit
 import SwiftUI
 
 @main
 struct AINBFleetApp: App {
     @StateObject private var store: FleetStore
-    @State private var presentation: FleetPresentationPreferences
-    private let presentationDefaults: UserDefaults
+    @StateObject private var presentation: FleetPresentationStore
+    @NSApplicationDelegateAdaptor(FleetAppDelegate.self) private var appDelegate
+    private let desktop: FleetDesktopController
 
     init() {
         let defaults = Self.presentationDefaults
         let fleetStore = FleetStore(readVersions: Self.testReadVersions)
+        let presentationStore = FleetPresentationStore(defaults: defaults)
         _store = StateObject(wrappedValue: fleetStore)
-        _presentation = State(initialValue: FleetPresentationPreferences.load(defaults: defaults))
-        presentationDefaults = defaults
-        Task { @MainActor in fleetStore.start() }
+        _presentation = StateObject(wrappedValue: presentationStore)
+        let desktopController = FleetDesktopController(store: fleetStore, presentation: presentationStore)
+        desktop = desktopController
+        FleetDesktopController.shared = desktopController
+        Task { @MainActor in
+            fleetStore.start()
+            desktopController.launch()
+            #if DEBUG
+            if Self.testLaunchesFleetWindow {
+                desktopController.showFleet()
+            }
+            #endif
+        }
     }
 
     var body: some Scene {
-        standardScenes
-    }
-
-    @SceneBuilder
-    private var standardScenes: some Scene {
-        MenuBarExtra {
-            FleetMenuBarView(store: store, openFleet: openFleet)
-                .onReceive(NotificationCenter.default.publisher(for: .fleetNotificationOpen)) { notification in
-                    guard let url = notification.object as? URL else { return }
-                    openDeepLink(url)
-                }
-        } label: {
-            Label("Fleet", systemImage: FleetStatusPresentation.symbol(for: store.connectionState, needsYou: store.needsYouCount, sessions: store.sessions))
-                .accessibilityLabel(FleetStatusPresentation.label(active: store.activeCount, needsYou: store.needsYouCount, state: store.connectionState, sessions: store.sessions))
-                .accessibilityIdentifier("fleet.status-item")
-                .task {
-                    #if DEBUG
-                    guard Self.testLaunchesFleetWindow else { return }
-                    showFleetWindow()
-                    #endif
-                }
-        }
-        .menuBarExtraStyle(.window)
-        .commands {
-            CommandMenu("Fleet") {
-                Button("Open Fleet") { openFleet() }
-                    .keyboardShortcut("o", modifiers: [.command, .shift])
-                Button("Show needs you") { openFleet(attentionOnly: true) }
-                    .keyboardShortcut("n", modifiers: [.command, .shift])
-            }
-        }
-
-        Window("Fleet", id: "fleet") {
-            FleetWindowView(store: store, presentation: presentationBinding)
-                .onOpenURL(perform: openDeepLink)
-        }
         Settings {
-            FleetSettingsView(presentation: presentationBinding)
+            FleetSettingsView(presentation: presentation.binding)
         }
-    }
-
-    @Environment(\.openWindow) private var openWindow
-
-    private var presentationBinding: Binding<FleetPresentationPreferences> {
-        Binding(
-            get: { presentation },
-            set: { newValue in
-                presentation = newValue
-                newValue.save(defaults: presentationDefaults)
-            }
-        )
-    }
-
-    private func openFleet(attentionOnly: Bool = false) {
-        if attentionOnly {
-            var next = presentation
-            next.filters.attentionOnly = true
-            presentationBinding.wrappedValue = next
-        }
-        showFleetWindow()
-    }
-
-    private func openDeepLink(_ url: URL) {
-        guard url.scheme == "ainbfleet",
-              url.host == "session",
-              let encodedPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
-              let key = String(encodedPath.dropFirst()).removingPercentEncoding,
-              !key.isEmpty else { return }
-        store.refresh()
-        store.selectedSessionKey = key
-        showFleetWindow()
-    }
-
-    private func showFleetWindow() {
-        openWindow(id: "fleet")
-        NSApp.activate(ignoringOtherApps: true)
     }
 
     private static var testReadVersions: FleetProtocolRange {
