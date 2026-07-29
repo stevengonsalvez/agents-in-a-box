@@ -27,25 +27,10 @@ final class FleetDesktopController {
     private let presentation: FleetPresentationStore
     private var notchPanel: NSPanel?
     private var fleetWindow: NSWindow?
-    private var notificationObserver: NSObjectProtocol?
 
     init(store: FleetStore, presentation: FleetPresentationStore) {
         self.store = store
         self.presentation = presentation
-        notificationObserver = NotificationCenter.default.addObserver(
-            forName: .fleetNotificationOpen,
-            object: nil,
-            queue: .main
-        ) { [weak self] notification in
-            guard let url = notification.object as? URL else { return }
-            Task { @MainActor in self?.open(url) }
-        }
-    }
-
-    deinit {
-        if let notificationObserver {
-            NotificationCenter.default.removeObserver(notificationObserver)
-        }
     }
 
     func launch() {
