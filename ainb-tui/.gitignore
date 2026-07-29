@@ -40,6 +40,8 @@ Thumbs.db
 
 # Agents Box specific
 .agents-box/
+# Agent skill scratch (goals/plans/research/scratch/handover) is local-only.
+.agents/
 # Override parent .gitignore's blanket `.claude/` ignore so project-local
 # skills travel with the repo. Re-include the directory FIRST (git can't
 # unignore children if the parent is excluded), then ignore everything
