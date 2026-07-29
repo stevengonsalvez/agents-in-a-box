@@ -147,6 +147,13 @@ they cannot legitimately flake. **If one goes red, never rerun the job to
 green it.** Fix the code, or update the golden and commit the diff. A red
 contract means a frozen guarantee actually broke, not noise.
 
+A test package must be reachable by the CI command that claims to run it.
+Adding a crate to `[workspace] members` does NOT put its tests in CI while
+`default-members` is narrower: a plain `cargo nextest run` (no `--workspace`)
+silently skips every crate outside `default-members`, and it will still
+report a clean summary. Check `-p <crate>` or `--workspace` deliberately
+when wiring a new gate, rather than assuming workspace membership is enough.
+
 To regenerate a golden after an intentional change:
 - argv matrix: `UPDATE_GOLDEN=1 cargo test -p ainb-hangar-daemon --test argv_golden_matrix`
 - wire surface: bump `version` in `crates/ainb-plugin-protocol/Cargo.toml`, then `UPDATE_WIRE_SURFACE=1 cargo test -p ainb-plugin-cts-v2 --test wire_surface_gate`
