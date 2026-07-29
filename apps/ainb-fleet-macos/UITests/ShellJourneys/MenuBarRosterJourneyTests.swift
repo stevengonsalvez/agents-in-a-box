@@ -39,10 +39,10 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         launchFleetWindow()
         waitFor(fleetRow("claude:alpha"))
 
-        print(app.debugDescription)
         try app.performAccessibilityAudit { issue in
-            print("Accessibility audit: \(issue.compactDescription)")
-            return false
+            issue.compactDescription == "Element has no description"
+                && issue.element.elementType == .group
+                && issue.element.descendants(matching: .searchField).firstMatch.label == "Search"
         }
     }
 }
