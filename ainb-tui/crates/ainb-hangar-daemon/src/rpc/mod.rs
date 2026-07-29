@@ -872,6 +872,9 @@ async fn handle(
         methods::FLEET_SUBSCRIBE => handle_fleet_subscribe(pool, req).await,
         methods::FLEET_ACTION => handle_fleet_action(pool, req, events).await,
         methods::FLEET_BROADCAST => handle_fleet_broadcast(pool, req, events).await,
+        methods::FLEET_RECEIPT_LIST => handle_fleet_receipt_list(pool, req).await,
+        methods::FLEET_RECEIPT_GET => handle_fleet_receipt_get(pool, req).await,
+        methods::FLEET_START => handle_fleet_start(pool, req, events).await,
         methods::ATTENTION_LIST => handle_attention_list(pool, req).await,
         // `attention/subscribe` acks with the current OPEN snapshot; the live
         // fleet-wide forwarder is the stream side (see `serve_conn`).
@@ -990,6 +993,63 @@ async fn handle_fleet_action(
         parse_params(req, "{ session_key, expected_version, request_id, action }")?;
     let receipt = execute_fleet_action(pool, params, None, events).await?;
     to_value(&ainb_hangar_proto::fleet::FleetActionResult { receipt })
+}
+
+const FLEET_RECEIPT_LIST_MAX: u32 = 100;
+
+/// Return a bounded, durable newest-first receipt projection.
+async fn handle_fleet_receipt_list(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FleetReceiptListParams, FleetReceiptListResult};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let params: FleetReceiptListParams = parse_params(req, "{ limit }")?;
+    if !(1..=FLEET_RECEIPT_LIST_MAX).contains(&params.limit) {
+        return Err(invalid_params(&format!(
+            "limit must be between 1 and {FLEET_RECEIPT_LIST_MAX}"
+        )));
+    }
+    let receipts = FleetRepo::list_action_receipts(pool, i64::from(params.limit))
+        .await
+        .map_err(|error| store_err(&error))?
+        .iter()
+        .map(action_receipt_wire)
+        .collect();
+    to_value(&FleetReceiptListResult { receipts })
+}
+
+/// Return one durable receipt, or `null` when its request id is unknown.
+async fn handle_fleet_receipt_get(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{FleetReceiptGetParams, FleetReceiptGetResult};
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    let params: FleetReceiptGetParams = parse_params(req, "{ request_id }")?;
+    if params.request_id.trim().is_empty() {
+        return Err(invalid_params("request_id must not be empty"));
+    }
+    let receipt = FleetRepo::get_action_receipt(pool, &params.request_id)
+        .await
+        .map_err(|error| store_err(&error))?
+        .as_ref()
+        .map(action_receipt_wire);
+    to_value(&FleetReceiptGetResult { receipt })
+}
+
+/// Start a provider session through daemon-owned new-session state.
+async fn handle_fleet_start(
+    pool: &SqlitePool,
+    req: &RpcRequest,
+    events: &EventSink,
+) -> Result<serde_json::Value, RpcError> {
+    let params: ainb_hangar_proto::fleet::FleetStartParams =
+        parse_params(req, "{ request_id, provider, cwd, prompt? }")?;
+    let result = execute_fleet_start(pool, params, events).await?;
+    to_value(&result)
 }
 
 /// Deliver one text prompt to explicit stable recipients with bounded fanout.
@@ -1163,6 +1223,12 @@ async fn execute_fleet_action(
         .map_err(|error| internal(&format!("serialize action: {error}")))?;
     let action_fingerprint = stable_fingerprint(&action_json);
 
+    if matches!(&params.action, ControlAction::Start { .. }) {
+        return Err(invalid_params(
+            "start must use fleet/start, not fleet/action",
+        ));
+    }
+
     if let Some(existing) = FleetRepo::get_action_receipt(pool, &params.request_id)
         .await
         .map_err(|error| store_err(&error))?
@@ -1178,11 +1244,6 @@ async fn execute_fleet_action(
             ));
         }
         return Ok(action_receipt_wire(&existing));
-    }
-
-    if matches!(&params.action, ControlAction::Start { .. }) {
-        return execute_fleet_start(pool, params, idempotency_key, action_fingerprint, events)
-            .await;
     }
 
     let request_fingerprint = match &params.action {
@@ -1368,22 +1429,32 @@ async fn execute_fleet_action(
 
 async fn execute_fleet_start(
     pool: &SqlitePool,
-    params: ainb_hangar_proto::fleet::FleetActionParams,
-    idempotency_key: Option<String>,
-    action_fingerprint: String,
+    params: ainb_hangar_proto::fleet::FleetStartParams,
     events: &EventSink,
-) -> Result<ainb_hangar_proto::fleet::FleetActionReceipt, RpcError> {
-    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetProvider};
+) -> Result<ainb_hangar_proto::fleet::FleetStartResult, RpcError> {
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, FleetProvider, FleetStartResult};
     use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
 
+    if params.request_id.trim().is_empty() || params.cwd.trim().is_empty() {
+        return Err(invalid_params("request_id and cwd must not be empty"));
+    }
+    if params.provider == FleetProvider::Unknown {
+        return Err(invalid_params("provider must be known"));
+    }
+    let prospective_session_key =
+        prospective_start_session_key(params.provider, &params.request_id);
+    let action_fingerprint = stable_fingerprint(
+        &serde_json::to_string(&params)
+            .map_err(|error| internal(&format!("serialize start params: {error}")))?,
+    );
     let now = SystemClock.now_ms();
     let mut receipt = NewActionReceipt {
         request_id: params.request_id.clone(),
-        session_key: params.session_key.clone(),
-        action_kind: params.action.kind().to_string(),
+        session_key: prospective_session_key.clone(),
+        action_kind: "start".to_string(),
         action_fingerprint,
-        expected_version: params.expected_version,
-        idempotency_key,
+        expected_version: 1,
+        idempotency_key: None,
         status: "PENDING".to_string(),
         detail: None,
         session_version: None,
@@ -1417,76 +1488,78 @@ async fn execute_fleet_start(
             .await
             .map_err(|error| store_err(&error))?
             .ok_or_else(|| internal("Fleet start receipt claim disappeared"))?;
-        if existing.session_key != params.session_key
-            || existing.action_kind != params.action.kind()
+        if existing.session_key != prospective_session_key
+            || existing.action_kind != "start"
             || existing.action_fingerprint != receipt.action_fingerprint
-            || existing.expected_version != params.expected_version
-            || existing.idempotency_key != receipt.idempotency_key
+            || existing.expected_version != 1
+            || existing.idempotency_key.is_some()
         {
             return Err(invalid_params(
-                "request_id was reused for a different Fleet action",
+                "request_id was reused for a different Fleet start",
             ));
         }
-        return Ok(action_receipt_wire(&existing));
+        return Ok(FleetStartResult {
+            prospective_session_key,
+            receipt: action_receipt_wire(&existing),
+        });
     }
 
-    let (status, detail) = match &params.action {
-        ControlAction::Start {
-            provider: FleetProvider::Codex,
-            cwd,
-            prompt,
-        } => match crate::fleet_provider::codex_manager::active_handle().await {
-            Some(manager) => match manager.thread_start(Path::new(cwd), None).await {
-                Ok(thread) => match launch_managed_codex_tui(&manager, &thread, cwd).await {
-                    Ok((tmux_name, tmux_session)) => {
-                        match crate::fleet::register_managed_codex_tmux(
-                            pool,
-                            events,
-                            &thread,
-                            cwd,
-                            &tmux_session,
-                            manager.capabilities(),
-                            SystemClock.now_ms(),
-                        )
-                        .await
-                        {
-                            Ok(_) => {
-                                let turn = match prompt
-                                    .as_deref()
-                                    .filter(|prompt| !prompt.trim().is_empty())
-                                {
-                                    Some(prompt) => {
-                                        manager.turn_start(&thread, prompt).await.map(|_| ())
+    let (status, detail) = match params.provider {
+        FleetProvider::Codex => match crate::fleet_provider::codex_manager::active_handle().await {
+            Some(manager) => match manager.thread_start(Path::new(&params.cwd), None).await {
+                Ok(thread) => {
+                    match launch_managed_codex_tui(&manager, &thread, &params.cwd).await {
+                        Ok((tmux_name, tmux_session)) => {
+                            match crate::fleet::register_managed_codex_tmux(
+                                pool,
+                                events,
+                                &thread,
+                                &params.cwd,
+                                &tmux_session,
+                                manager.capabilities(),
+                                SystemClock.now_ms(),
+                            )
+                            .await
+                            {
+                                Ok(_) => {
+                                    let turn = match params
+                                        .prompt
+                                        .as_deref()
+                                        .filter(|prompt| !prompt.trim().is_empty())
+                                    {
+                                        Some(prompt) => {
+                                            manager.turn_start(&thread, prompt).await.map(|_| ())
+                                        }
+                                        None => Ok(()),
+                                    };
+                                    match turn {
+                                        Ok(()) => (
+                                            ActionReceiptStatus::Delivered,
+                                            Some(format!(
+                                                "codex thread {thread}, tmux {}",
+                                                tmux_session
+                                                    .exact_tmux_target
+                                                    .as_deref()
+                                                    .unwrap_or(&tmux_name)
+                                            )),
+                                        ),
+                                        Err(error) => (
+                                            ActionReceiptStatus::Failed,
+                                            Some(format!(
+                                                "Codex thread {thread} launched in tmux {tmux_name}, initial prompt failed: {error}"
+                                            )),
+                                        ),
                                     }
-                                    None => Ok(()),
-                                };
-                                match turn {
-                                    Ok(()) => (
-                                        ActionReceiptStatus::Delivered,
-                                        Some(format!(
-                                            "codex thread {thread}, tmux {}",
-                                            tmux_session
-                                                .exact_tmux_target
-                                                .as_deref()
-                                                .unwrap_or(&tmux_name)
-                                        )),
-                                    ),
-                                    Err(error) => (
-                                        ActionReceiptStatus::Failed,
-                                        Some(format!(
-                                            "Codex thread {thread} launched in tmux {tmux_name}, initial prompt failed: {error}"
-                                        )),
-                                    ),
+                                }
+                                Err(error) => {
+                                    let _ = kill_tmux_session_exact(&tmux_name).await;
+                                    (ActionReceiptStatus::Failed, Some(error.to_string()))
                                 }
                             }
-                            Err(error) => {
-                                let _ = kill_tmux_session_exact(&tmux_name).await;
-                                (ActionReceiptStatus::Failed, Some(error.to_string()))
-                            }
                         }
+                        Err(error) => (ActionReceiptStatus::Failed, Some(error)),
                     }
-                    Err(error) => (ActionReceiptStatus::Failed, Some(error)),
-                },
+                }
                 Err(error) => (ActionReceiptStatus::Failed, Some(error.to_string())),
             },
             None => (
@@ -1494,17 +1567,31 @@ async fn execute_fleet_start(
                 Some("Codex managed transport is not active".to_string()),
             ),
         },
-        ControlAction::Start { .. } => (
+        FleetProvider::Claude | FleetProvider::Unknown => (
             ActionReceiptStatus::Rejected,
             Some("provider start transport is unavailable".to_string()),
         ),
-        _ => unreachable!("start handler only receives start actions"),
     };
     receipt.status = receipt_status_token(status).to_string();
     receipt.detail = detail;
     receipt.updated_at = SystemClock.now_ms();
     let row = FleetRepo::upsert_action_receipt(pool, &receipt).await.map_err(fleet_repo_err)?;
-    Ok(action_receipt_wire(&row))
+    Ok(FleetStartResult {
+        prospective_session_key,
+        receipt: action_receipt_wire(&row),
+    })
+}
+
+fn prospective_start_session_key(
+    provider: ainb_hangar_proto::fleet::FleetProvider,
+    request_id: &str,
+) -> String {
+    let provider = match provider {
+        ainb_hangar_proto::fleet::FleetProvider::Claude => "claude",
+        ainb_hangar_proto::fleet::FleetProvider::Codex => "codex",
+        ainb_hangar_proto::fleet::FleetProvider::Unknown => "unknown",
+    };
+    format!("start:{provider}:{}", stable_fingerprint(request_id))
 }
 
 async fn launch_managed_codex_tui(
@@ -1773,7 +1860,7 @@ async fn execute_codex_action(
     Option<String>,
 ) {
     use crate::fleet_provider::{ApprovalDecision, QuestionAnswer};
-    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction, FleetProvider};
+    use ainb_hangar_proto::fleet::{ActionReceiptStatus, ControlAction};
 
     let thread_id = session.provider_session_id.as_deref().unwrap_or_default();
     let result: Result<String, crate::fleet_provider::ProviderError> = async {
@@ -1977,17 +2064,6 @@ async fn execute_codex_action(
                 Ok(format!(
                     "codex thread {thread_id} archived after tmux {tmux_name} stop"
                 ))
-            }
-            ControlAction::Start {
-                provider,
-                cwd,
-                prompt,
-            } if *provider == FleetProvider::Codex => {
-                let thread = manager.thread_start(Path::new(cwd), None).await?;
-                if let Some(prompt) = prompt.as_deref().filter(|prompt| !prompt.trim().is_empty()) {
-                    manager.turn_start(&thread, prompt).await?;
-                }
-                Ok(format!("codex thread {thread}"))
             }
             _ => Err(crate::fleet_provider::ProviderError::Unsupported(
                 "Codex action is not available through app-server".to_string(),
@@ -2565,7 +2641,7 @@ fn action_capability(
         ControlAction::Continue => capabilities.continue_turn,
         ControlAction::Retry => capabilities.retry,
         ControlAction::Interrupt => capabilities.interrupt,
-        ControlAction::Start { .. } => capabilities.start,
+        ControlAction::Start { .. } => false,
         ControlAction::Restart => capabilities.restart,
         ControlAction::Stop => capabilities.stop,
         ControlAction::Kill => capabilities.kill,
