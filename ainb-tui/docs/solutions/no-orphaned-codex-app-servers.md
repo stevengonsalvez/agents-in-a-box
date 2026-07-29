@@ -48,30 +48,32 @@ Three layers, none of which depend on an exit path running:
    cannot answer, never "nobody") + `bound_by_child()` so a race loser reaps
    its own child and adopts the winner's server instead of stranding it.
    (`codex_manager.rs`, committed separately.)
-2. **Startup reaper (both sources).** `reap_orphaned_codex_servers()` runs once
-   at daemon boot, *before* we spawn our own server: it reads `ps -Ao
-   pid,ppid,args`, selects `ppid == 1` codex-app-server processes, spares any pid
-   currently listening on our live socket (a server we may adopt), and `SIGTERM`s
-   the rest by exact pid via `nix`. This is the only backstop that survives
-   `SIGKILL`/OOM. It reaps **both** sources' orphans because both share the
-   `bin/codex … app-server` shape. A twin Node reaper
-   (`scripts/reap-codex-orphans.mjs`) runs at Claude Code `SessionStart` and also
-   sweeps stale `cxc-*` temp dirs.
+2. **Daemon-owned reaper (both sources).** `reap_orphaned_codex_servers()` reads
+   `ps -Ao pid,ppid,args`, selects `ppid == 1` codex-app-server processes, spares
+   any pid currently listening on the daemon's own live socket (the server it
+   adopts), and `SIGTERM`s the rest by exact pid via `nix`. It runs at daemon
+   boot (before we spawn our own server) AND on the daemon's periodic sweeper
+   tick, so a long-running daemon keeps the machine clean. This is the only
+   backstop that survives `SIGKILL`/OOM, and it reaps **both** sources' orphans
+   because both share the `bin/codex … app-server` shape: a dead-daemon Source-A
+   leftover and a dead-session Source-B plugin broker (on its own temp socket)
+   are both `ppid == 1` and neither holds the daemon's socket, so both get reaped.
 3. **Cap that fails loud.** `spawn()` refuses to start a server once
-   `AINB_CODEX_MAX_SERVERS` (default 8) live `codex app-server` processes already
-   exist, turning a silent 900-process pileup into a visible error at spawn ~9.
+   `AINB_CODEX_MAX_SERVERS` (default 8, floor 1) live `codex app-server`
+   processes already exist, turning a silent 900-process pileup into a visible
+   error at spawn ~9.
 
-### Why the Node reaper is a wrapper, not a plugin fork
+### Why the daemon owns cleanup (no Claude Code hook)
 
-The `openai-codex` plugin is third-party, vendored under
-`~/.claude/plugins/marketplaces/`, and is overwritten on every plugin update.
-We do **not** edit it. Instead `scripts/reap-codex-orphans.mjs` is repo-owned and
-registered as an *additional* user-scope `SessionStart` hook in
-`~/.claude/settings.json` (installer:
-`scripts/install-codex-reaper-hook.mjs`, idempotent, keeps a `.bak`). Claude Code
-merges settings hooks with plugin hooks, so both fire and a plugin update cannot
-erase our backstop. A proper fix (shared-socket broker, or a broker that
-self-terminates on parent death) is upstream territory (logged below).
+The reaper lives entirely inside the ainb daemon (boot + periodic sweep). We do
+**not** ship a Claude Code `SessionStart` hook or edit `~/.claude/settings.json`,
+and we do **not** touch the vendored third-party `openai-codex` plugin. Because
+the daemon's reaper already reaps every `ppid == 1` codex app-server machine-wide
+(Source A leftovers and Source B plugin brokers alike), a running daemon is the
+single cleanup owner. Trade-off: a machine that runs the codex plugin with **no**
+ainb daemon gets no backstop, but such a machine is outside ainb's reach anyway.
+A proper Source-B fix (shared-socket broker, or a broker that self-terminates on
+parent death) is upstream territory (logged below).
 
 ## Decision: retain the hand-rolled socket ownership (success criterion 2)
 
@@ -97,31 +99,21 @@ rationale. We retain them.
 ```bash
 # Rust: reaper + cap + race fix
 cargo test -p ainb-hangar-daemon
-cargo clippy -p ainb-hangar-daemon --all-targets -- -D warnings
 cargo fmt --check
-
-# Node reaper
-node --test scripts/reap-codex-orphans.test.mjs
-node scripts/reap-codex-orphans.mjs          # safe to run anytime; exits 0
-
-# Wire the SessionStart hook (idempotent, backs up settings.json)
-node scripts/install-codex-reaper-hook.mjs --dry-run   # preview
-node scripts/install-codex-reaper-hook.mjs             # apply (idempotent; upgrades in place)
-node scripts/install-codex-reaper-hook.mjs --uninstall # remove (keeps a .bak)
 
 # Soak proof (success criterion 1): 20x SIGKILL the daemon, prove no accumulation
 scripts/soak-codex-orphans.sh 20
 
-# Scale proof: reap a 25-orphan pile to 0, spare an in-use (proxied) server,
-# then reap it once its session ends; desktop app untouched throughout.
+# Scale proof: the daemon boot reaper clears a 25-orphan pile off foreign
+# sockets while sparing its own server; desktop app untouched.
 scripts/reap-stress-codex-orphans.sh 25
 ```
 
 The soak isolates `AINB_HANGAR_HOME`, SIGKILLs the daemon 20×, and reports the
-**peak** orphan count (which stays ~1, proving `bound_by_child` + boot adoption
-never accumulate; the pre-fix incident reached 900+ here), then fires the
-SessionStart reaper against the now-idle machine and proves the count reaches 0
-while the desktop app server stays alive.
+**peak** orphan count, which stays bounded at ~1 (`bound_by_child` + boot
+adoption never accumulate; the pre-fix incident reached 900+ here) while the
+desktop app server stays alive. The scale proof starts a real daemon over a pile
+of foreign-socket orphans and shows its boot reaper clears them all.
 
 ## Why the reaper is safe: `ppid == 1` means the parent died
 
@@ -133,22 +125,21 @@ dies: a SIGKILLed or crashed daemon, or spawn-cleanup killing the launcher after
 an `initialize` failure. So `ppid == 1` is a sound orphan signal and neither
 reaper can hit a live in-use server.
 
-Both reapers key on `ppid == 1`. The Node SessionStart reaper adds a defensive
-extra layer: it spares a `ppid == 1` server that still has a live `app-server
-proxy` consumer on its socket (the transient "launcher gone but a proxy lingers"
-state). The Rust boot reaper instead spares the holder of the daemon's own live
-socket, so a booting daemon can *adopt* a still-listening server left by a prior
-daemon rather than kill-and-respawn it.
+The daemon reaper keys on `ppid == 1` and additionally spares the holder of the
+daemon's own live socket, so a booting daemon can *adopt* a still-listening
+server left by a prior daemon rather than kill-and-respawn it. Every other
+`ppid == 1` codex app-server (a dead daemon's leftover, a dead plugin-broker
+session) is reaped.
 
 ## Known limitations / follow-ups
 
-- **Boot-only, not periodic.** The daemon reaps at boot, not on a timer. With the
-  race fixed a running daemon no longer manufactures orphans, so boot + frequent
-  `SessionStart` reaping + the cap suffice. A periodic sweep is a cheap add if a
-  long-lived daemon ever regresses.
+- **Idle machine leaves one server.** When no daemon is running, the single
+  shared-socket server lingers at `ppid == 1` (reused via adoption on the next
+  boot, never accumulated). Only a running daemon reaps; there is no idle-time
+  reaper by design. This is the accepted cost of daemon-owned cleanup.
 - **Native grandchildren.** A reaped `node …/bin/codex` launcher may leave a
   `vendor/…/bin/codex` grandchild that reparents to init; it is caught on the
-  next boot/SessionStart reap (eventual convergence).
+  next boot/periodic reap (eventual convergence).
 - **User-run `codex app-server`.** The `ppid==1` heuristic cannot tell an
   ainb/plugin orphan from a `codex app-server --listen` someone runs on purpose
   (e.g. a launchd `KeepAlive` service on a foreign socket with no ainb proxy):
@@ -164,7 +155,8 @@ daemon rather than kill-and-respawn it.
 - **Upstream ask (Source B).** The real Source-B fix is a shared-socket broker or
   a broker that dies with its parent (`PR_SET_PDEATHSIG` is Linux-only; macOS
   needs a supervisor/pipe-EOF wrapper). Filed upstream against `openai-codex`;
-  our SessionStart reaper is the local backstop until then.
+  the daemon's boot + periodic reaper is the local backstop while a daemon runs
+  (a codex-plugin machine with no ainb daemon is uncovered).
 - **`ainb run -p` fix** (separate bug, fixed alongside): the initial prompt was
   sent after a fixed 2 s sleep into a not-yet-ready Claude splash and lost; now it
   polls `capture-pane` for the input box before sending, and targets the session
