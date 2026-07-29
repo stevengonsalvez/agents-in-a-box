@@ -64,6 +64,12 @@ pub enum FleetProviderEventError {
         /// Conflicting event identity.
         event_id: String,
     },
+    /// The requested source event is absent from the durable ledger.
+    #[error("provider event {event_id:?} was not found")]
+    EventNotFound {
+        /// Missing event identity.
+        event_id: String,
+    },
     /// SQLite failed.
     #[error(transparent)]
     Sql(#[from] sqlx::Error),
@@ -96,7 +102,9 @@ impl FleetProviderEventRepo {
         .await?;
         let row = Self::get(pool, &event.event_id)
             .await?
-            .expect("successful insert or conflict must leave provider event row");
+            .ok_or_else(|| FleetProviderEventError::EventNotFound {
+                event_id: event.event_id.clone(),
+            })?;
         if result.rows_affected() == 0 && !matches_event(&row, event, &digest) {
             return Err(FleetProviderEventError::EventIdCollision {
                 event_id: event.event_id.clone(),
@@ -121,6 +129,11 @@ impl FleetProviderEventRepo {
         .execute(pool)
         .await?;
         if result.rows_affected() == 0 {
+            if Self::get(pool, event_id).await?.is_none() {
+                return Err(FleetProviderEventError::EventNotFound {
+                    event_id: event_id.to_string(),
+                });
+            }
             return Err(FleetProviderEventError::EventIdCollision {
                 event_id: event_id.to_string(),
             });
@@ -142,6 +155,26 @@ impl FleetProviderEventRepo {
         .as_ref()
         .map(row_from)
         .transpose()
+    }
+
+    /// List source envelopes that still require projection, oldest receipt first.
+    pub async fn unprojected(
+        pool: &SqlitePool,
+        provider: &str,
+        source: &str,
+        limit: i64,
+    ) -> Result<Vec<FleetProviderEventRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT ingest_order, event_id, provider, source, session_key, provider_session_id, observed_at, received_at, event_type, raw_payload, raw_blake3, projection_revision \
+             FROM fleet_provider_event WHERE provider = ? AND source = ? AND projection_revision IS NULL \
+             ORDER BY ingest_order ASC LIMIT ?",
+        )
+        .bind(provider)
+        .bind(source)
+        .bind(limit.max(0))
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(row_from).collect()
     }
 }
 
@@ -242,6 +275,16 @@ mod tests {
         assert!(matches!(
             FleetProviderEventRepo::append(store.pool(), &event("source-1", "second")).await,
             Err(FleetProviderEventError::EventIdCollision { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn unknown_projection_event_is_not_a_collision() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        assert!(matches!(
+            FleetProviderEventRepo::mark_projected(store.pool(), "missing", 1).await,
+            Err(FleetProviderEventError::EventNotFound { .. })
         ));
     }
 }
