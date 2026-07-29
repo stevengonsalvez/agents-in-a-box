@@ -1,4 +1,4 @@
--- Persist exact request identity beside its durable event payload. A session's
+-- Migration 0068. Persist exact request identity beside its durable event payload. A session's
 -- active request fingerprint can outlive unrelated later events, so projection
 -- must select the matching request body rather than the latest applied one.
 ALTER TABLE fleet_event ADD COLUMN request_fingerprint TEXT;
