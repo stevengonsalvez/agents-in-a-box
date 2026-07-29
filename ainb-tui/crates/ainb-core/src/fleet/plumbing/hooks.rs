@@ -28,21 +28,42 @@ use serde_json::{Map, Value, json};
 pub const ATC_MANAGED_KEY: &str = "_ainb_atc_managed";
 
 /// The lifecycle events ATC injects, in stable order, each paired with its
-/// matcher. Most lifecycle events use the all-matcher `""`; `PreToolUse` is
-/// scoped to the `AskUserQuestion` tool so ASK is hook-native (a PreToolUse with
-/// `""` would fire on EVERY tool call — far too hot). `StopFailure` reports an
-/// exhausted-retry API error (observational; it cannot block). Each maps to a
-/// command that invokes the canonical hook script with the matching
-/// `AINB_HOOK_EVENT` so the script forwards the right event + matcher.
+/// matcher. All documented Claude events use the all-matcher `""`, including
+/// `PreToolUse`; the hook derives `tool_name` from its raw payload. This keeps
+/// the durable source ledger complete while only `AskUserQuestion` enters the
+/// blocking structured-answer broker. Each maps to the canonical hook script
+/// with the matching `AINB_HOOK_EVENT`.
 pub const ATC_EVENTS: &[(&str, &str)] = &[
     ("SessionStart", ""),
+    ("Setup", ""),
+    ("InstructionsLoaded", ""),
     ("UserPromptSubmit", ""),
-    ("Stop", ""),
-    ("Notification", ""),
-    ("SessionEnd", ""),
-    ("PreToolUse", "AskUserQuestion"),
+    ("UserPromptExpansion", ""),
+    ("MessageDisplay", ""),
+    ("PreToolUse", ""),
     ("PermissionRequest", ""),
+    ("PostToolUse", ""),
+    ("PostToolUseFailure", ""),
+    ("PostToolBatch", ""),
+    ("PermissionDenied", ""),
+    ("Notification", ""),
+    ("SubagentStart", ""),
+    ("SubagentStop", ""),
+    ("TaskCreated", ""),
+    ("TaskCompleted", ""),
+    ("Stop", ""),
     ("StopFailure", ""),
+    ("TeammateIdle", ""),
+    ("ConfigChange", ""),
+    ("CwdChanged", ""),
+    ("FileChanged", ""),
+    ("WorktreeCreate", ""),
+    ("WorktreeRemove", ""),
+    ("PreCompact", ""),
+    ("PostCompact", ""),
+    ("SessionEnd", ""),
+    ("Elicitation", ""),
+    ("ElicitationResult", ""),
 ];
 
 /// Default per-hook timeout (seconds) Claude allows before it kills the hook.
@@ -313,17 +334,57 @@ mod tests {
                 "event {event} matcher mismatch"
             );
         }
-        // PreToolUse is scoped to AskUserQuestion (NOT the all-matcher), so it
-        // doesn't fire on every tool call.
+        // PreToolUse is an all-matcher. The hook extracts tool_name from the
+        // payload before deciding whether this is an AskUserQuestion.
         let pre = &merged["hooks"]["PreToolUse"];
         assert!(pre.is_array(), "PreToolUse installed");
         let cmd = pre[0]["hooks"][0]["command"].as_str().unwrap();
         assert!(
-            cmd.contains("AINB_HOOK_MATCHER=AskUserQuestion"),
+            cmd.contains("AINB_HOOK_MATCHER="),
             "PreToolUse forwards its matcher: {cmd}"
         );
         // StopFailure installed (observational ERR source).
         assert!(merged["hooks"]["StopFailure"].is_array());
+    }
+
+    #[test]
+    fn managed_hook_set_covers_every_documented_claude_event() {
+        let names: Vec<_> = ATC_EVENTS.iter().map(|(event, _)| *event).collect();
+        assert_eq!(
+            names,
+            vec![
+                "SessionStart",
+                "Setup",
+                "InstructionsLoaded",
+                "UserPromptSubmit",
+                "UserPromptExpansion",
+                "MessageDisplay",
+                "PreToolUse",
+                "PermissionRequest",
+                "PostToolUse",
+                "PostToolUseFailure",
+                "PostToolBatch",
+                "PermissionDenied",
+                "Notification",
+                "SubagentStart",
+                "SubagentStop",
+                "TaskCreated",
+                "TaskCompleted",
+                "Stop",
+                "StopFailure",
+                "TeammateIdle",
+                "ConfigChange",
+                "CwdChanged",
+                "FileChanged",
+                "WorktreeCreate",
+                "WorktreeRemove",
+                "PreCompact",
+                "PostCompact",
+                "SessionEnd",
+                "Elicitation",
+                "ElicitationResult",
+            ]
+        );
     }
 
     #[test]

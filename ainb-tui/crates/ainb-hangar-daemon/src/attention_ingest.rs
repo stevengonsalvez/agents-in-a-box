@@ -1,7 +1,7 @@
 //! The attention ingest producer (spec P2, D10) — the daemon's own tail of the
 //! durable hook event log (`events.jsonl`) into the `attention` table.
 //!
-//! The lifecycle hook (`ainb fleet atc hook`) appends one JSON line per managed
+//! The lifecycle hook (`ainb fleet atc hook`) appends one JSON line per Claude
 //! event to `~/.agents-in-a-box/events.jsonl`. notifyd already ingests that file
 //! into ITS sqlite for OS notifications; this is the SECOND, independent consumer
 //! the converged control centre needs — the one that folds every input-request
@@ -20,14 +20,13 @@
 //!
 //! ## Idempotency
 //!
-//! The attention id is keyed on the hook line's ABSOLUTE byte offset in the
-//! append-only `events.jsonl`: `att:<session>:<offset>`. The offset is a stable
-//! per-occurrence identity — a given hook line lives at one offset for the life
-//! of the file, so:
+//! The attention id uses the hook's durable event ID:
+//! `att:<session>:<event_id>`. Legacy lines fall back to their absolute byte
+//! offset. The event ID is stable across replay, so:
 //!
 //!   - A re-read of the SAME line (a crash between insert and the cursor write, a
 //!     best-effort cursor-write failure, or a corrupt/missing cursor that resets
-//!     the read to 0) hashes to the SAME id → the insert is skipped → no
+//!     the read to 0) has the SAME id → the insert is skipped → no
 //!     duplicate card. Re-reading from 0 raises each request exactly once, so the
 //!     cursor is a pure efficiency optimisation, not a correctness dependency.
 //!   - A genuinely NEW occurrence (a fresh hook line — the same question asked
@@ -35,11 +34,8 @@
 //!     NEW offset → a NEW id → a fresh row, even when its request context is
 //!     byte-for-byte identical to a prior one.
 //!
-//! Keying on the offset — rather than a blake3 of the request context — is
-//! deliberate: the context can carry TIME-DERIVED fields (e.g. `idle_minutes`),
-//! so a context hash changes when the same line is re-classified at a later
-//! wall-clock, which would mint spurious duplicate rows on any delayed re-read.
-//! The offset is invariant to when the line is read.
+//! Event IDs avoid context hashes, whose time-derived fields can change when a
+//! line is re-classified. Legacy offsets remain invariant to read time.
 //!
 //! ## Delivery semantics
 //!
@@ -54,6 +50,9 @@ use ainb_fleet_core::read::needs::{ClassifyInput, NeedsContext, classify};
 use ainb_fleet_core::types::{Session, SessionSource};
 use ainb_hangar_proto::events::HangarEvent;
 use ainb_hangar_store::repo::attention::{AttentionKind, AttentionRepo, NewAttention};
+use ainb_hangar_store::repo::fleet_provider_event::{
+    FleetProviderEventRepo, NewFleetProviderEvent,
+};
 use serde::Deserialize;
 use sqlx::SqlitePool;
 
@@ -84,6 +83,10 @@ fn is_qualifying(event_type: &str) -> bool {
 /// breaks the tail.
 #[derive(Debug, Deserialize)]
 struct HookEventLine {
+    #[serde(default, deserialize_with = "null_as_default")]
+    event_id: String,
+    #[serde(default, deserialize_with = "null_as_default")]
+    raw_payload_ref: String,
     #[serde(default, deserialize_with = "null_as_default")]
     ts: i64,
     #[serde(default, deserialize_with = "null_as_default")]
@@ -197,10 +200,9 @@ impl AttentionIngest {
 
         let mut raised = 0;
         let mut committed_end = 0usize;
-        // Track each line's absolute byte offset in the file (the stable
-        // per-occurrence identity the attention id is keyed on). `split_inclusive`
-        // keeps the delimiter, avoiding a synthetic extra byte after the final
-        // newline.
+        // Track each line's absolute byte offset for legacy event identity.
+        // `split_inclusive` keeps the delimiter, avoiding a synthetic extra byte
+        // after the final newline.
         let mut line_start = 0usize;
         for segment in buf[..end].split_inclusive(|&b| b == b'\n') {
             let offset = start + line_start as u64;
@@ -233,15 +235,57 @@ impl AttentionIngest {
         let Ok(line) = serde_json::from_str::<HookEventLine>(raw) else {
             return LineOutcome::Processed;
         };
+        let event_id = (!line.event_id.is_empty())
+            .then_some(line.event_id.clone())
+            .unwrap_or_else(|| format!("legacy-hook:{}:{offset}", line.session_id));
+        let mut payload =
+            serde_json::from_str::<serde_json::Value>(raw).unwrap_or(serde_json::Value::Null);
+        let raw_payload = match self.raw_payload(&line, &event_id, &payload) {
+            Ok(payload) => payload,
+            Err(error) => {
+                tracing::warn!(error = %error, "fleet provider event payload unavailable");
+                return LineOutcome::Retry;
+            }
+        };
+        if let Ok(raw_value) = serde_json::from_str::<serde_json::Value>(&raw_payload) {
+            if let Some(envelope) = payload.as_object_mut() {
+                envelope.insert("payload".to_string(), raw_value);
+            }
+        }
+        let provider = if line.agent.is_empty() {
+            "unknown"
+        } else {
+            line.agent.as_str()
+        };
+        let session_key =
+            (!line.session_id.is_empty()).then(|| format!("{provider}:{}", line.session_id));
+        if FleetProviderEventRepo::append(
+            &self.pool,
+            &NewFleetProviderEvent {
+                event_id: event_id.clone(),
+                provider: provider.to_string(),
+                source: "claude_hook".to_string(),
+                session_key,
+                provider_session_id: (!line.session_id.is_empty()).then(|| line.session_id.clone()),
+                observed_at: if line.ts > 0 { line.ts } else { now_ms },
+                received_at: now_ms,
+                event_type: line.event_type.clone(),
+                raw_payload,
+            },
+        )
+        .await
+        .is_err()
+        {
+            tracing::warn!("fleet provider event persistence failed");
+            return LineOutcome::Retry;
+        }
         if line.cwd.is_empty() && line.session_id.is_empty() {
             return LineOutcome::Processed;
         }
 
         // Every hook line feeds the canonical Fleet reducer, including events
-        // that do not raise an attention card. The byte offset is a replay-safe
-        // occurrence id, shared with this consumer's durable cursor semantics.
-        let payload =
-            serde_json::from_str::<serde_json::Value>(raw).unwrap_or(serde_json::Value::Null);
+        // that do not raise an attention card. The source event ID is replay-safe;
+        // legacy lines use their durable byte offset.
         let semantic_event = if line.event_type == "PreToolUse" && line.matcher == "AskUserQuestion"
         {
             "AskUserQuestion"
@@ -250,7 +294,7 @@ impl AttentionIngest {
         };
         if !line.session_id.is_empty() {
             let observation = crate::fleet::HookObservation {
-                event_id: format!("hook:{}:{offset}", line.session_id),
+                event_id: event_id.clone(),
                 provider: &line.agent,
                 provider_session_id: &line.session_id,
                 cwd: &line.cwd,
@@ -258,10 +302,19 @@ impl AttentionIngest {
                 payload: &payload,
                 observed_at: if line.ts > 0 { line.ts } else { now_ms },
             };
+            let reduced =
+                match crate::fleet::apply_hook(&self.pool, &self.events, observation).await {
+                    Ok(result) => result,
+                    Err(error) => {
+                        tracing::warn!(error = %error, "fleet hook reduce failed");
+                        return LineOutcome::Retry;
+                    }
+                };
             if let Err(error) =
-                crate::fleet::apply_hook(&self.pool, &self.events, observation).await
+                FleetProviderEventRepo::mark_projected(&self.pool, &event_id, reduced.revision)
+                    .await
             {
-                tracing::warn!(error = %error, "fleet hook reduce failed");
+                tracing::warn!(error = %error, "fleet provider event projection link failed");
                 return LineOutcome::Retry;
             }
         }
@@ -296,12 +349,10 @@ impl AttentionIngest {
             self.reconcile_stale_asks(&line.session_id, now_ms).await;
         }
 
-        // Offset-keyed id: the SAME hook line (a replay / re-read) → same offset →
-        // same id → the insert is skipped (idempotent). A NEW hook line → a new
-        // offset → a fresh row, even if its request context is identical. Keying
-        // on the offset (not a hash of the possibly time-derived context) keeps a
-        // delayed re-read from minting spurious duplicates.
-        let id = format!("att:{}:{}", line.session_id, offset);
+        // Event-keyed id: a replay keeps the same id and is skipped. New source
+        // events receive a new id even when request context is identical. Legacy
+        // records retain offset identity rather than a time-derived context hash.
+        let id = format!("att:{}:{event_id}", line.session_id);
 
         match AttentionRepo::get(&self.pool, &id).await {
             Ok(Some(_)) => return LineOutcome::Processed, // already raised
@@ -352,6 +403,44 @@ impl AttentionIngest {
             channels,
         });
         LineOutcome::Raised
+    }
+
+    /// Return the exact payload sidecar when the hook stored one. Legacy lines
+    /// have no sidecar, so their bounded inline payload remains replayable.
+    fn raw_payload(
+        &self,
+        line: &HookEventLine,
+        event_id: &str,
+        envelope: &serde_json::Value,
+    ) -> Result<String, std::io::Error> {
+        if line.raw_payload_ref.is_empty() {
+            return Ok(envelope
+                .get("payload")
+                .map(serde_json::Value::to_string)
+                .unwrap_or_else(|| envelope.to_string()));
+        }
+        if line.raw_payload_ref != event_id
+            || !line
+                .raw_payload_ref
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+        {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid raw payload reference",
+            ));
+        }
+        let Some(home) = self.events_jsonl.parent() else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "hook event log has no parent",
+            ));
+        };
+        std::fs::read_to_string(
+            home.join("hangar")
+                .join("provider-events")
+                .join(format!("{}.json", line.raw_payload_ref)),
+        )
     }
 
     /// Close any OPEN ASK rows a session still carries once a later hook shows it
@@ -740,6 +829,35 @@ mod tests {
         let ingest = ingest_for(&store, &events_jsonl, &cursor);
         assert_eq!(ingest.ingest_once(5000).await, 0);
         assert!(AttentionRepo::list_fleet(store.pool()).await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn raw_sidecar_reaches_source_ledger_without_jsonl_truncation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let event_id = "source-sidecar-1";
+        let raw_payload = format!(r#"{{"tool_input":{{"body":"{}"}}}}"#, "x".repeat(8 * 1024));
+        let payload_dir = dir.path().join("hangar").join("provider-events");
+        std::fs::create_dir_all(&payload_dir).unwrap();
+        std::fs::write(payload_dir.join(format!("{event_id}.json")), &raw_payload).unwrap();
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                r#"{{"agent":"claude","cwd":"/w","event_id":"{event_id}","event_type":"SessionStart","matcher":null,"raw_payload_ref":"{event_id}","session_id":"sid-sidecar","transcript_path":null,"ts":1700000000000,"payload":{{"_truncated":true}}}}"#,
+            ) + "\n",
+        )
+        .unwrap();
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+
+        assert_eq!(ingest.ingest_once(5_000).await, 0);
+        let source = FleetProviderEventRepo::get(store.pool(), event_id)
+            .await
+            .unwrap()
+            .expect("source envelope must persist");
+        assert_eq!(source.raw_payload, raw_payload);
+        assert!(source.projection_revision.is_some());
     }
 
     #[tokio::test]

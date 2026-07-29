@@ -267,7 +267,7 @@ mod tests {
     #[test]
     fn decoder_rejects_missing_duplicate_malformed_and_oversized_length() {
         let cases = [
-            b"\r\n".as_slice(),
+            b"\r\n\r\n".as_slice(),
             b"Content-Length: 2\r\nContent-Length: 2\r\n\r\n{}".as_slice(),
             b"Content-Length: +2\r\n\r\n{}".as_slice(),
             b"Content-Length: 16777217\r\n\r\n".as_slice(),

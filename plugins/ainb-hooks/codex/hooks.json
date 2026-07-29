@@ -1,6 +1,18 @@
 {
-  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Only the events that need the human are registered (PermissionRequest = approval prompt, Stop = turn finished). Telemetry (SessionStart / UserPromptSubmit / PreToolUse / PostToolUse / PreCompact / PostCompact / SubagentStart / SubagentStop) is intentionally NOT hooked because it would bury the signal. The daemon also drops any non-user-facing event defensively.",
+  "//": "ainb-hooks managed block, merged into ~/.codex/hooks.json by `ainb-notifyd install --codex`. Do not edit by hand. Every Codex CLI lifecycle hook is captured into Hangar's durable provider log. The notification daemon still routes only user-facing events to OS surfaces.",
   "hooks": {
+    "SessionStart": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "SessionEnd": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "UserPromptSubmit": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "PreToolUse": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
     "PermissionRequest": [
       {
         "matcher": "",
@@ -12,6 +24,21 @@
           }
         ]
       }
+    ],
+    "PostToolUse": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "PreCompact": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "PostCompact": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "SubagentStart": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
+    ],
+    "SubagentStop": [
+      { "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=codex __AINB_HOOK_SCRIPT__", "timeout": 5 }] }
     ],
     "Stop": [
       {

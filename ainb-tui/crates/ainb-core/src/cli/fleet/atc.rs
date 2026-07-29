@@ -1030,9 +1030,14 @@ fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<HookEmit>> {
         .ok()
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty());
+    let agent = match std::env::var("AINB_AGENT").ok().as_deref() {
+        Some("codex") => "codex",
+        _ => "claude",
+    };
 
-    hook_core(
+    hook_core_for_agent(
         &home,
+        agent,
         &event,
         &session_id,
         &cwd,
@@ -1046,6 +1051,7 @@ fn hook_inner(matches: &clap::ArgMatches) -> Result<Option<HookEmit>> {
 
 /// Env-free core of the lifecycle hook. All filesystem state is rooted at the
 /// explicit `home`, so this is unit-testable against a tempdir.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn hook_core(
     home: &std::path::Path,
@@ -1058,11 +1064,43 @@ fn hook_core(
     payload: &str,
     matcher: Option<&str>,
 ) -> Result<Option<HookEmit>> {
+    hook_core_for_agent(
+        home,
+        "claude",
+        event,
+        session_id,
+        cwd,
+        env_parent,
+        done_summary,
+        now_ms,
+        payload,
+        matcher,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn hook_core_for_agent(
+    home: &std::path::Path,
+    agent: &str,
+    event: &str,
+    session_id: &str,
+    cwd: &str,
+    env_parent: Option<&str>,
+    done_summary: Option<String>,
+    now_ms: i64,
+    payload: &str,
+    matcher: Option<&str>,
+) -> Result<Option<HookEmit>> {
     let base_event = event.split(':').next().unwrap_or(event);
+    let matcher = matcher.map(str::to_string).or_else(|| {
+        serde_json::from_str::<serde_json::Value>(payload)
+            .ok()
+            .and_then(|value| resolve_matcher(base_event, None, Some(&value)))
+    });
     let inbox_dir = plumbing::paths::inbox_dir_in(home);
 
-    // Resolve the parent of THIS session (env first, then durable map). Used both
-    // to route our own completion up AND as one fleet-membership signal.
+    // Resolve the parent of THIS session (env first, then durable map). Used to
+    // route our own completion up and gate broker-mediated control.
     let our_parent = if session_id.is_empty() {
         None
     } else {
@@ -1074,7 +1112,7 @@ fn hook_core(
     // parent key for ATC (children are spawned `--parent <name>`, so they commit
     // to `inbox/<name>.jsonl`, NOT `inbox/<atc_session_id>.jsonl`). Resolving it
     // here lets the Stop-drain consume the SAME key the heartbeat consumes
-    // (fixes the split-brain in C-A3) and is a fleet-membership signal (H1).
+    // (fixes the split-brain in C-A3).
     // The ATC root is always `<home>/atc` (matches `atc::paths::atc_root`).
     let atc_name = if cwd.is_empty() {
         None
@@ -1097,25 +1135,24 @@ fn hook_core(
     //    hook (any error is swallowed) so a global Stop hook can't wedge any host
     //    session.
     //
-    //    GATED ON FLEET MEMBERSHIP (H1) — the CONSERVATIVE default. The hooks are
-    //    installed globally into ~/.claude/settings.json, so this verb runs on
-    //    EVERY Claude lifecycle event host-wide. To honour the host-wide-cheap
-    //    rule we append only for fleet members (a session with a resolvable
-    //    parent, a non-empty inbox, or an ATC-managed cwd); a truly unrelated host
-    //    session stays a true no-op. The appender below is trivially cheap, so if
-    //    Stevie wants broad event-sourcing coverage this gate can be dropped (or
-    //    relaxed to a lightweight lifecycle subset) by widening `is_fleet_member`
-    //    — the format + tables already accept any session.
+    //    The hooks are installed globally, so every session with a provider
+    //    session ID writes a raw envelope. Broker-mediated structured answers
+    //    and approvals remain limited to known Fleet members below.
     let is_fleet_member = our_parent.is_some() || has_self_inbox || atc_name.is_some();
-    if !session_id.is_empty() && is_fleet_member {
-        let line = build_event_line(
+    if !session_id.is_empty() {
+        let event_id = uuid::Uuid::new_v4().to_string();
+        let raw_payload_stored = persist_raw_hook_payload(home, &event_id, payload).is_ok();
+        let line = build_event_line_for_agent(
             now_ms,
+            &event_id,
+            agent,
             session_id,
             cwd,
             base_event,
-            matcher,
+            matcher.as_deref(),
             payload,
             our_parent.as_deref(),
+            raw_payload_stored,
         );
         let _ = append_event_line(home, &line);
     }
@@ -1175,8 +1212,9 @@ fn hook_core(
     // 4. PreToolUse(AskUserQuestion): block on exact structured answers and
     //    return the full original questions plus Claude's answer map. Labels
     //    never pass through generic text delivery.
-    if base_event == "PreToolUse"
-        && matcher == Some("AskUserQuestion")
+    if agent == "claude"
+        && base_event == "PreToolUse"
+        && matcher.as_deref() == Some("AskUserQuestion")
         && !session_id.is_empty()
         && is_fleet_member
     {
@@ -1214,9 +1252,13 @@ fn hook_core(
     //    on our socket. `client_await` re-dials to its deadline, so a notifyd
     //    restart mid-wait is survived; a dead socket / no answer deny-falls-back
     //    (never auto-approves).
-    if base_event == "PermissionRequest" && !session_id.is_empty() && is_fleet_member {
+    if agent == "claude"
+        && base_event == "PermissionRequest"
+        && !session_id.is_empty()
+        && is_fleet_member
+    {
         let sock = ainb_plugin_notifyd::paths::Paths::under(home).approve_socket;
-        let tool = matcher.unwrap_or_default();
+        let tool = matcher.as_deref().unwrap_or_default();
         let context = extract_permission_context(payload);
         let fingerprint = ainb_plugin_notifyd::broker::permission_fingerprint(tool, &context);
         let decision = ainb_plugin_notifyd::broker::client_await_exact(
@@ -1413,7 +1455,15 @@ fn resolve_matcher(
         // the payload — without this arm the TOOL column is empty on real fires.
         "PermissionRequest" => "tool_name",
         "Notification" => "notification_type",
-        "StopFailure" => "error_type",
+        "StopFailure" => {
+            return v
+                .get("error")
+                .or_else(|| v.get("error_type"))
+                .and_then(|x| x.as_str())
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string);
+        }
         _ => return None,
     };
     v.get(key)
@@ -1458,22 +1508,52 @@ fn parse_hook_tmux_identity(row: &str) -> Option<(String, String)> {
 
 /// Build the canonical `events.jsonl` line for one hook fire. This is the exact
 /// shape the notifyd ingest tailer parses (`crate ainb-plugin-notifyd::ingest`)
-/// and the Wave 3 materializer consumes: ts, session_id, cwd, transcript_path,
-/// agent, event_type (the base event), matcher, and the bounded raw payload.
+/// and the Hangar materializer consumes: ts, session_id, cwd, transcript_path,
+/// agent, event_type, matcher, and a bounded index payload plus raw sidecar.
 /// Parent is folded into the payload so the materializer can set current_state.parent.
 ///
 /// The raw payload is parsed exactly ONCE here (host-hot-path: this runs on
-/// every Claude lifecycle event for a fleet member) and the parsed `Value` is
+/// every Claude lifecycle event) and the parsed `Value` is
 /// reused for the matcher + transcript_path fields and the embedded payload.
+#[cfg(test)]
 #[allow(clippy::too_many_arguments)]
 fn build_event_line(
     now_ms: i64,
+    event_id: &str,
     session_id: &str,
     cwd: &str,
     base_event: &str,
     matcher: Option<&str>,
     payload: &str,
     parent: Option<&str>,
+    raw_payload_stored: bool,
+) -> serde_json::Value {
+    build_event_line_for_agent(
+        now_ms,
+        event_id,
+        "claude",
+        session_id,
+        cwd,
+        base_event,
+        matcher,
+        payload,
+        parent,
+        raw_payload_stored,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn build_event_line_for_agent(
+    now_ms: i64,
+    event_id: &str,
+    agent: &str,
+    session_id: &str,
+    cwd: &str,
+    base_event: &str,
+    matcher: Option<&str>,
+    payload: &str,
+    parent: Option<&str>,
+    raw_payload_stored: bool,
 ) -> serde_json::Value {
     // Parse the raw payload ONCE; reuse the parsed Value for every derived
     // field. Bounded by MAX_EVENT_PAYLOAD_BYTES so the whole canonical line
@@ -1499,18 +1579,36 @@ fn build_event_line(
         serde_json::json!({ "_truncated": true, "_bytes": payload.len() })
     };
     serde_json::json!({
+        "event_id": event_id,
         "ts": now_ms,
         "session_id": session_id,
         "cwd": cwd,
         "transcript_path": transcript_path,
-        "agent": "claude",
+        "agent": agent,
         "event_type": base_event,
         "matcher": matcher_val,
         "parent": parent,
         "tmux_target": tmux_target,
         "process_start_fingerprint": process_start_fingerprint,
         "payload": payload_val,
+        "raw_payload_ref": raw_payload_stored.then_some(event_id),
     })
+}
+
+/// Persist a complete hook payload before its bounded JSONL index entry. Each
+/// UUID-named file is published with rename, so concurrent global hooks cannot
+/// interleave a large envelope and daemon restart can replay it exactly.
+fn persist_raw_hook_payload(
+    home: &std::path::Path,
+    event_id: &str,
+    payload: &str,
+) -> std::io::Result<()> {
+    let dir = home.join("hangar").join("provider-events");
+    std::fs::create_dir_all(&dir)?;
+    let destination = dir.join(format!("{event_id}.json"));
+    let temporary = dir.join(format!(".{event_id}.{}.tmp", std::process::id()));
+    std::fs::write(&temporary, payload)?;
+    std::fs::rename(temporary, destination)
 }
 
 /// Append one canonical event line to `<home>/events.jsonl`. Best-effort and
@@ -1886,7 +1984,7 @@ mod tests {
         assert_eq!(hb_drained[0].child_id, "child-2");
     }
 
-    // --- H1: events.jsonl append GATED on fleet membership -------------------
+    // --- Host-wide events.jsonl capture -------------------------------------
 
     /// Read every canonical line from `<home>/events.jsonl` (empty when absent).
     fn read_event_lines(home: &std::path::Path) -> Vec<serde_json::Value> {
@@ -1903,10 +2001,10 @@ mod tests {
     }
 
     #[test]
-    fn unrelated_session_appends_no_event_line() {
+    fn unrelated_session_appends_event_without_broker_control() {
         let home = TempDir::new().unwrap();
-        // A session with NO parent, NO inbox, NOT an ATC cwd: a true no-op (H1
-        // conservative default — the appender is gated on fleet membership).
+        // A session with no Fleet relationship still contributes durable
+        // observation, but it must not block on a broker.
         let decision = hook_core(
             home.path(),
             "Stop",
@@ -1921,8 +2019,49 @@ mod tests {
         .unwrap();
         assert!(decision.is_none(), "unrelated session must not block");
         assert!(
-            !home.path().join("events.jsonl").exists(),
-            "unrelated session must append NO event line (H1)"
+            home.path().join("events.jsonl").exists(),
+            "unrelated session must append one source event"
+        );
+        let lines = read_event_lines(home.path());
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0]["session_id"], "random-unrelated-session");
+    }
+
+    #[test]
+    fn codex_permission_event_is_durable_without_claude_broker_control() {
+        let home = TempDir::new().unwrap();
+        let raw = r#"{"hook_event_name":"PermissionRequest","session_id":"codex-sid","cwd":"/work","tool_name":"shell_command"}"#;
+
+        let result = hook_core_for_agent(
+            home.path(),
+            "codex",
+            "PermissionRequest",
+            "codex-sid",
+            "/work",
+            None,
+            None,
+            7,
+            raw,
+            None,
+        )
+        .unwrap();
+
+        assert!(
+            result.is_none(),
+            "Codex CLI hooks must not use Claude's blocking broker"
+        );
+        let line = read_event_lines(home.path()).pop().expect("durable Codex event");
+        assert_eq!(line["agent"], "codex");
+        assert_eq!(line["event_type"], "PermissionRequest");
+        assert_eq!(line["matcher"], "shell_command");
+        let event_id = line["event_id"].as_str().expect("event id");
+        assert_eq!(
+            std::fs::read_to_string(
+                home.path().join("hangar/provider-events").join(format!("{event_id}.json")),
+            )
+            .unwrap(),
+            raw,
+            "the durable sidecar retains the exact provider payload"
         );
     }
 
@@ -1930,7 +2069,7 @@ mod tests {
     fn atc_session_appends_a_well_formed_event_line() {
         let home = TempDir::new().unwrap();
         let cwd = provision_atc(home.path(), "tower");
-        // An ATC-managed session IS a fleet member → an event line is appended.
+        // An ATC-managed session appends one event line.
         // Stamp a transcript_path + the PreToolUse matcher into the payload to
         // assert they land in the canonical line.
         let payload = r#"{"transcript_path":"/t/atc.jsonl","tool_name":"AskUserQuestion"}"#;
@@ -2001,7 +2140,7 @@ mod tests {
     #[test]
     fn child_with_parent_appends_a_line_and_routes_completion() {
         let home = TempDir::new().unwrap();
-        // A child with a live env parent IS a fleet member.
+        // A child with a live env parent writes event and routes completion.
         hook_core(
             home.path(),
             "Stop",
@@ -2046,12 +2185,14 @@ mod tests {
         assert!(big.len() > MAX_EVENT_PAYLOAD_BYTES);
         let line = build_event_line(
             1,
+            "event-oversized",
             "session-with-a-realistically-long-claude-id-0123456789abcdef",
             "/Users/someone/very/deep/nested/work/tree/path/that/is/long",
             "Stop",
             None,
             &big,
             Some("some-parent-instance-name"),
+            true,
         );
         // Over-cap payloads embed only the truncation marker (not the blob).
         assert_eq!(line["payload"]["_truncated"], true);
@@ -2073,12 +2214,14 @@ mod tests {
         assert!(payload.len() <= MAX_EVENT_PAYLOAD_BYTES);
         let line = build_event_line(
             i64::MAX,
+            "event-max",
             &"s".repeat(64),
             &"/".repeat(256),
             "PreToolUse",
             Some("AskUserQuestion"),
             &payload,
             Some(&"p".repeat(64)),
+            true,
         );
         assert!(
             line_bytes(&line) <= PIPE_BUF,
@@ -2091,7 +2234,17 @@ mod tests {
     fn small_payload_round_trips_matcher_and_transcript() {
         // The parse-once refactor must still surface matcher + transcript_path.
         let payload = r#"{"transcript_path":"/t/atc.jsonl","tool_name":"AskUserQuestion"}"#;
-        let line = build_event_line(7, "sid", "/cwd", "PreToolUse", None, payload, None);
+        let line = build_event_line(
+            7,
+            "event-small",
+            "sid",
+            "/cwd",
+            "PreToolUse",
+            None,
+            payload,
+            None,
+            true,
+        );
         assert_eq!(line["matcher"], "AskUserQuestion");
         assert_eq!(line["transcript_path"], "/t/atc.jsonl");
         assert_eq!(line["payload"]["tool_name"], "AskUserQuestion");
