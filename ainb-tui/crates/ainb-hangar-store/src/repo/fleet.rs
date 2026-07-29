@@ -1282,6 +1282,46 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn workload_update_does_not_replace_newer_lifecycle_state() {
+        let (_dir, store) = store().await;
+        FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-running",
+                "codex:s-1",
+                200,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    lifecycle_state: Some("RUNNING".to_string()),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        let result = FleetRepo::apply_event(
+            store.pool(),
+            &event(
+                "e-workload",
+                "codex:s-1",
+                100,
+                ObservationAuthority::Authoritative,
+                FleetSessionPatch {
+                    active_work_count: Some(1),
+                    ..FleetSessionPatch::default()
+                },
+            ),
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(result.session.lifecycle_state, "RUNNING");
+        assert_eq!(result.session.lifecycle_updated_at, 200);
+        assert_eq!(result.session.active_work_count, 1);
+        assert_eq!(result.session.workload_updated_at, 100);
+    }
+
+    #[tokio::test]
     async fn inferred_event_never_overwrites_authoritative_group() {
         let (_dir, store) = store().await;
         FleetRepo::apply_event(

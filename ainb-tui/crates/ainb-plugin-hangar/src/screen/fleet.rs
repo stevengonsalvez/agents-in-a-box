@@ -2904,6 +2904,19 @@ mod tests {
     }
 
     #[test]
+    fn unavailable_session_with_open_attention_stays_in_needs_input() {
+        let mut blocked = session("lost-ask", "codex", "IDLE", "ASK", "managed");
+        blocked.transport_health = "UNAVAILABLE".into();
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![blocked]);
+
+        assert_eq!(state.session_count(), 0);
+        let keys: Vec<_> =
+            state.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
+        assert_eq!(keys, ["lost-ask"]);
+    }
+
+    #[test]
     fn successful_action_advances_to_next_needs_input_row() {
         let state = state_with_roster();
         assert_eq!(state.selected_key(), Some("claude:ask"));
