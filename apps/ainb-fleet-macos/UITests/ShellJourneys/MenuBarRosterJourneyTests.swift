@@ -2,20 +2,29 @@ import XCTest
 
 final class MenuBarRosterJourneyTests: FleetUITestCase {
     @MainActor
-    func testRealStatusItemReflectsFleetTotals() throws {
+    func testNotchReflectsFleetTotals() throws {
         try fixture.seed(eventID: "alpha-start", sessionID: "alpha", eventType: "SessionStart", observedAt: 1_700_000_000_001)
         try fixture.seed(eventID: "beta-ask", provider: "codex", sessionID: "beta", eventType: "AskUserQuestion", observedAt: 1_700_000_000_002)
         launchApp()
 
-        let statusItem = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier == %@", "fleet.status-item"))
-            .firstMatch
-        waitFor(statusItem)
+        let notch = app.buttons["fleet.notch"]
+        waitFor(notch)
         let totals = XCTNSPredicateExpectation(
-            predicate: NSPredicate(format: "title CONTAINS %@", "1 active, 1 need you"),
-            object: statusItem
+            predicate: NSPredicate(format: "label CONTAINS %@", "1 active, 1 need you"),
+            object: notch
         )
         XCTAssertEqual(XCTWaiter().wait(for: [totals], timeout: 8), .completed, app.debugDescription)
+    }
+
+    @MainActor
+    func testNotchOpensFleetWindow() throws {
+        launchApp()
+
+        let notch = app.buttons["fleet.notch"]
+        waitFor(notch)
+        notch.click()
+
+        XCTAssertTrue(app.windows["Fleet"].waitForExistence(timeout: 8), app.debugDescription)
     }
 
     @MainActor
