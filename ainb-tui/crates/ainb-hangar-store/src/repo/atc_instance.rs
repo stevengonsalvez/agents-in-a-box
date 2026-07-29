@@ -11,6 +11,12 @@
 
 use sqlx::{Row, SqlitePool};
 
+/// Maximum time one scheduler owns a heartbeat claim before crash recovery may
+/// take it over.
+pub const ATC_SCHEDULER_CLAIM_LEASE_MS: i64 = 5 * 60 * 1000;
+/// How often an active scheduler refreshes its exact-token claim.
+pub const ATC_SCHEDULER_CLAIM_RENEW_MS: i64 = ATC_SCHEDULER_CLAIM_LEASE_MS / 3;
+
 /// A registered ATC instance (the `atc_instance` row).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AtcInstanceRow {
@@ -127,7 +133,8 @@ impl AtcInstanceRepo {
                  heartbeat_cron = excluded.heartbeat_cron, err_retry_cap = excluded.err_retry_cap, \
                  idle_pause_min = excluded.idle_pause_min, next_tick_at = excluded.next_tick_at, \
                  enabled = 1, config_generation = config_generation + 1, \
-                 scheduler_claim_generation = NULL",
+                 scheduler_claim_generation = NULL, scheduler_claim_token = NULL, \
+                 scheduler_claimed_at = NULL",
         )
         .bind(&req.name)
         .bind(&req.cwd)
@@ -183,7 +190,9 @@ impl AtcInstanceRepo {
                     Ok(RegisterAtcOutcome::Applied(
                         row.expect("inserted row exists"),
                     ))
-                } else if row.as_ref().is_some_and(|current| desired_matches(current, req)) {
+                } else if row.as_ref().is_some_and(|current| {
+                    current.config_generation == expected + 1 && desired_matches(current, req)
+                }) {
                     Ok(RegisterAtcOutcome::AlreadyApplied(row.expect("row exists")))
                 } else {
                     Ok(RegisterAtcOutcome::Stale(row))
@@ -194,7 +203,8 @@ impl AtcInstanceRepo {
                 let updated = sqlx::query(
                     "UPDATE atc_instance SET cwd = ?, tmux_session = ?, heartbeat_cron = ?, \
                      err_retry_cap = ?, idle_pause_min = ?, next_tick_at = ?, enabled = 1, \
-                     config_generation = config_generation + 1, scheduler_claim_generation = NULL \
+                     config_generation = config_generation + 1, scheduler_claim_generation = NULL, \
+                     scheduler_claim_token = NULL, scheduler_claimed_at = NULL \
                      WHERE name = ? AND config_generation = ?",
                 )
                 .bind(&req.cwd)
@@ -210,7 +220,7 @@ impl AtcInstanceRepo {
                 let row = Self::get(pool, &req.name).await?.expect("existing row remains");
                 if updated.rows_affected() == 1 {
                     Ok(RegisterAtcOutcome::Applied(row))
-                } else if desired_matches(&row, req) {
+                } else if row.config_generation == expected + 1 && desired_matches(&row, req) {
                     Ok(RegisterAtcOutcome::AlreadyApplied(row))
                 } else {
                     Ok(RegisterAtcOutcome::Stale(Some(row)))
@@ -244,7 +254,8 @@ impl AtcInstanceRepo {
         if current.config_generation == expected {
             let updated = sqlx::query(
                 "UPDATE atc_instance SET enabled = 0, next_tick_at = NULL, \
-                 config_generation = config_generation + 1, scheduler_claim_generation = NULL \
+                 config_generation = config_generation + 1, scheduler_claim_generation = NULL, \
+                 scheduler_claim_token = NULL, scheduler_claimed_at = NULL \
                  WHERE name = ? AND config_generation = ?",
             )
             .bind(name)
@@ -293,20 +304,26 @@ impl AtcInstanceRepo {
         Ok(rows.iter().map(instance_from_sqlite).collect())
     }
 
-    /// List every enabled instance with a scheduled next tick, earliest first —
-    /// the heartbeat cron's hot read (mirrors the autopilot scheduler).
+    /// List every enabled instance whose next tick is not protected by a live
+    /// scheduler claim, earliest first.
     ///
     /// # Errors
     ///
     /// Returns a [`sqlx::Error`] if the query fails.
-    pub async fn list_schedulable(pool: &SqlitePool) -> Result<Vec<AtcInstanceRow>, sqlx::Error> {
+    pub async fn list_schedulable(
+        pool: &SqlitePool,
+        now_ms: i64,
+    ) -> Result<Vec<AtcInstanceRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
                     next_tick_at, enabled, last_heartbeat_at, created_at, config_generation \
              FROM atc_instance \
              WHERE enabled = 1 AND next_tick_at IS NOT NULL \
+             AND (scheduler_claim_generation IS NULL OR scheduler_claimed_at IS NULL \
+                  OR scheduler_claimed_at <= ?) \
              ORDER BY next_tick_at ASC",
         )
+        .bind(now_ms.saturating_sub(ATC_SCHEDULER_CLAIM_LEASE_MS))
         .fetch_all(pool)
         .await?;
         Ok(rows.iter().map(instance_from_sqlite).collect())
@@ -333,22 +350,75 @@ impl AtcInstanceRepo {
 
     /// Atomically claim one exact due configuration. A later re-register or
     /// unregister invalidates this claim before the scheduler can reschedule.
-    /// The due tick remains durable while claimed, so a process crash retries it
-    /// rather than silently losing a heartbeat.
+    /// An expired claim can be recovered, while its old token cannot complete.
     pub async fn claim_due(
         pool: &SqlitePool,
         name: &str,
         config_generation: i64,
         due_tick_at: i64,
-    ) -> Result<bool, sqlx::Error> {
-        let result = sqlx::query(
-            "UPDATE atc_instance SET scheduler_claim_generation = config_generation \
+        now_ms: i64,
+    ) -> Result<Option<String>, sqlx::Error> {
+        sqlx::query_scalar(
+            "UPDATE atc_instance \
+             SET scheduler_claim_generation = config_generation, \
+                 scheduler_claim_token = lower(hex(randomblob(16))), scheduler_claimed_at = ? \
              WHERE name = ? AND enabled = 1 AND config_generation = ? AND next_tick_at = ? \
-             AND (scheduler_claim_generation IS NULL OR scheduler_claim_generation = config_generation)",
+             AND (scheduler_claim_generation IS NULL OR scheduler_claimed_at IS NULL \
+                  OR scheduler_claimed_at <= ?) \
+             RETURNING scheduler_claim_token",
         )
+        .bind(now_ms)
         .bind(name)
         .bind(config_generation)
         .bind(due_tick_at)
+        .bind(now_ms.saturating_sub(ATC_SCHEDULER_CLAIM_LEASE_MS))
+        .fetch_optional(pool)
+        .await
+    }
+
+    /// Refresh one exact-token claim. A mutation or takeover fences the old
+    /// worker out instead of letting it extend another worker's lease.
+    pub async fn renew_claim(
+        pool: &SqlitePool,
+        name: &str,
+        config_generation: i64,
+        claim_token: &str,
+        now_ms: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE atc_instance SET scheduler_claimed_at = ? \
+             WHERE name = ? AND enabled = 1 AND config_generation = ? \
+             AND scheduler_claim_generation = ? AND scheduler_claim_token = ?",
+        )
+        .bind(now_ms)
+        .bind(name)
+        .bind(config_generation)
+        .bind(config_generation)
+        .bind(claim_token)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Release one exact-token claim without changing its durable due tick.
+    /// A stale worker cannot clear a replacement worker's claim.
+    pub async fn release_claim(
+        pool: &SqlitePool,
+        name: &str,
+        config_generation: i64,
+        claim_token: &str,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE atc_instance \
+             SET scheduler_claim_generation = NULL, scheduler_claim_token = NULL, \
+                 scheduler_claimed_at = NULL \
+             WHERE name = ? AND config_generation = ? \
+             AND scheduler_claim_generation = ? AND scheduler_claim_token = ?",
+        )
+        .bind(name)
+        .bind(config_generation)
+        .bind(config_generation)
+        .bind(claim_token)
         .execute(pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -359,20 +429,23 @@ impl AtcInstanceRepo {
         pool: &SqlitePool,
         name: &str,
         config_generation: i64,
+        claim_token: &str,
         next_tick_at: Option<i64>,
         last_heartbeat_at: i64,
     ) -> Result<bool, sqlx::Error> {
         let result = sqlx::query(
             "UPDATE atc_instance \
-             SET next_tick_at = ?, last_heartbeat_at = ?, scheduler_claim_generation = NULL \
+             SET next_tick_at = ?, last_heartbeat_at = ?, scheduler_claim_generation = NULL, \
+                 scheduler_claim_token = NULL, scheduler_claimed_at = NULL \
              WHERE name = ? AND enabled = 1 AND config_generation = ? \
-             AND scheduler_claim_generation = ?",
+             AND scheduler_claim_generation = ? AND scheduler_claim_token = ?",
         )
         .bind(next_tick_at)
         .bind(last_heartbeat_at)
         .bind(name)
         .bind(config_generation)
         .bind(config_generation)
+        .bind(claim_token)
         .execute(pool)
         .await?;
         Ok(result.rows_affected() == 1)
@@ -411,7 +484,8 @@ impl AtcInstanceRepo {
     ) -> Result<(), sqlx::Error> {
         sqlx::query(
             "UPDATE atc_instance SET enabled = ?, next_tick_at = ?, \
-             config_generation = config_generation + 1, scheduler_claim_generation = NULL \
+             config_generation = config_generation + 1, scheduler_claim_generation = NULL, \
+             scheduler_claim_token = NULL, scheduler_claimed_at = NULL \
              WHERE name = ?",
         )
         .bind(i64::from(enabled))
@@ -644,7 +718,7 @@ mod tests {
         AtcInstanceRepo::set_enabled(store.pool(), "a", false, Some(3000))
             .await
             .unwrap();
-        let sched = AtcInstanceRepo::list_schedulable(store.pool()).await.unwrap();
+        let sched = AtcInstanceRepo::list_schedulable(store.pool(), 1).await.unwrap();
         // `a` is disabled, `c` has no next_tick → only `b`, and earliest-first.
         assert_eq!(
             sched.iter().map(|r| r.name.as_str()).collect::<Vec<_>>(),
@@ -698,22 +772,23 @@ mod tests {
             .await
             .unwrap();
         let row = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
-        assert!(
-            AtcInstanceRepo::claim_due(
-                store.pool(),
-                &row.name,
-                row.config_generation,
-                row.next_tick_at.unwrap(),
-            )
-            .await
-            .unwrap()
-        );
+        let claim = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            1000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
         AtcInstanceRepo::set_enabled(store.pool(), "main", false, None).await.unwrap();
         assert!(
             !AtcInstanceRepo::complete_claim(
                 store.pool(),
                 "main",
                 row.config_generation,
+                &claim,
                 Some(2000),
                 1500,
             )
@@ -724,5 +799,307 @@ mod tests {
         assert!(!current.enabled);
         assert_eq!(current.next_tick_at, None);
         assert!(current.config_generation > row.config_generation);
+    }
+
+    #[tokio::test]
+    async fn scheduler_claim_denies_duplicate_then_expires_with_token_fencing() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
+        let row = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+
+        let first = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            1000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            AtcInstanceRepo::claim_due(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                row.next_tick_at.unwrap(),
+                1001,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        let second = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            1001 + ATC_SCHEDULER_CLAIM_LEASE_MS,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(second, first);
+        assert!(
+            !AtcInstanceRepo::complete_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &first,
+                Some(2000),
+                1500,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            AtcInstanceRepo::complete_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &second,
+                Some(2000),
+                1500,
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn live_claim_does_not_starve_a_later_schedulable_instance() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("claimed", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("next", "* * * * *", Some(2000)), 1)
+            .await
+            .unwrap();
+        let claimed = AtcInstanceRepo::get(store.pool(), "claimed").await.unwrap().unwrap();
+        AtcInstanceRepo::claim_due(
+            store.pool(),
+            &claimed.name,
+            claimed.config_generation,
+            claimed.next_tick_at.unwrap(),
+            3000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        let sched = AtcInstanceRepo::list_schedulable(store.pool(), 3001).await.unwrap();
+        assert_eq!(
+            sched.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["next"]
+        );
+
+        let recovered =
+            AtcInstanceRepo::list_schedulable(store.pool(), 3000 + ATC_SCHEDULER_CLAIM_LEASE_MS)
+                .await
+                .unwrap();
+        assert_eq!(
+            recovered.iter().map(|row| row.name.as_str()).collect::<Vec<_>>(),
+            ["claimed", "next"]
+        );
+    }
+
+    #[tokio::test]
+    async fn renewal_extends_only_the_exact_claim_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
+        let row = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+        let first = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            1000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            AtcInstanceRepo::renew_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &first,
+                2000,
+            )
+            .await
+            .unwrap()
+        );
+        assert_eq!(
+            AtcInstanceRepo::claim_due(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                row.next_tick_at.unwrap(),
+                1001 + ATC_SCHEDULER_CLAIM_LEASE_MS,
+            )
+            .await
+            .unwrap(),
+            None
+        );
+
+        let second = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            2001 + ATC_SCHEDULER_CLAIM_LEASE_MS,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            !AtcInstanceRepo::renew_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &first,
+                2002 + ATC_SCHEDULER_CLAIM_LEASE_MS,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            AtcInstanceRepo::renew_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &second,
+                2002 + ATC_SCHEDULER_CLAIM_LEASE_MS,
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn release_clears_only_the_exact_claim_token() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
+        let row = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+        let first = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            1000,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+
+        assert!(
+            !AtcInstanceRepo::release_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                "wrong-token",
+            )
+            .await
+            .unwrap()
+        );
+        assert!(AtcInstanceRepo::list_schedulable(store.pool(), 1001).await.unwrap().is_empty());
+        assert!(
+            AtcInstanceRepo::release_claim(store.pool(), &row.name, row.config_generation, &first,)
+                .await
+                .unwrap()
+        );
+
+        let second = AtcInstanceRepo::claim_due(
+            store.pool(),
+            &row.name,
+            row.config_generation,
+            row.next_tick_at.unwrap(),
+            1001,
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_ne!(second, first);
+        assert!(
+            !AtcInstanceRepo::release_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &first,
+            )
+            .await
+            .unwrap()
+        );
+        assert!(
+            AtcInstanceRepo::renew_claim(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                &second,
+                1002,
+            )
+            .await
+            .unwrap()
+        );
+    }
+
+    #[tokio::test]
+    async fn register_race_requires_exact_successor_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let insert_req = reg("insert-race", "* * * * *", Some(1000));
+        sqlx::query(
+            "CREATE TRIGGER simulate_insert_race BEFORE INSERT ON atc_instance \
+             WHEN NEW.name = 'insert-race' AND NEW.config_generation = 1 BEGIN \
+               INSERT INTO atc_instance \
+                 (name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
+                  next_tick_at, enabled, created_at, config_generation) \
+               VALUES \
+                 (NEW.name, NEW.cwd, NEW.tmux_session, NEW.heartbeat_cron, NEW.err_retry_cap, \
+                  NEW.idle_pause_min, NEW.next_tick_at, NEW.enabled, NEW.created_at, 2); \
+               SELECT RAISE(IGNORE); \
+             END",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            AtcInstanceRepo::register_checked(store.pool(), &insert_req, 1, Some(0))
+                .await
+                .unwrap(),
+            RegisterAtcOutcome::Stale(Some(row)) if row.config_generation == 2
+        ));
+
+        let update_req = reg("update-race", "* * * * *", Some(1000));
+        AtcInstanceRepo::register(store.pool(), &update_req, 1).await.unwrap();
+        sqlx::query(
+            "CREATE TRIGGER simulate_update_race BEFORE UPDATE ON atc_instance \
+             WHEN OLD.name = 'update-race' \
+              AND NEW.config_generation = OLD.config_generation + 1 BEGIN \
+               UPDATE atc_instance SET config_generation = OLD.config_generation + 2 \
+                 WHERE name = OLD.name; \
+               SELECT RAISE(IGNORE); \
+             END",
+        )
+        .execute(store.pool())
+        .await
+        .unwrap();
+        assert!(matches!(
+            AtcInstanceRepo::register_checked(store.pool(), &update_req, 2, Some(1))
+                .await
+                .unwrap(),
+            RegisterAtcOutcome::Stale(Some(row)) if row.config_generation == 3
+        ));
     }
 }
