@@ -20,7 +20,7 @@ final class FleetPresentationStore: ObservableObject {
 }
 
 @MainActor
-final class FleetDesktopController {
+final class FleetDesktopController: NSObject, NSWindowDelegate {
     static var shared: FleetDesktopController?
 
     private let store: FleetStore
@@ -31,6 +31,7 @@ final class FleetDesktopController {
     init(store: FleetStore, presentation: FleetPresentationStore) {
         self.store = store
         self.presentation = presentation
+        super.init()
     }
 
     func launch() {
@@ -68,6 +69,7 @@ final class FleetDesktopController {
             window.title = "Fleet"
             window.minSize = NSSize(width: 620, height: 520)
             window.level = .floating
+            window.delegate = self
             window.contentView = NSHostingView(rootView: FleetWindowView(store: store, presentation: presentation.binding))
             window.center()
             window.setFrameAutosaveName("AINBFleetWindow")
@@ -87,6 +89,13 @@ final class FleetDesktopController {
         store.refresh()
         store.selectedSessionKey = key
         showFleet()
+    }
+
+    func windowWillClose(_ notification: Notification) {
+        guard let closingWindow = notification.object as? NSWindow,
+              closingWindow === fleetWindow else { return }
+        fleetWindow = nil
+        NSApp.setActivationPolicy(.accessory)
     }
 
     private func positionNotch() {
