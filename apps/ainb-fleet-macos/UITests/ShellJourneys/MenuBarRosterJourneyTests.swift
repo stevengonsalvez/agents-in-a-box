@@ -39,6 +39,9 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         launchFleetWindow()
         waitFor(fleetRow("claude:alpha"))
 
-        try app.performAccessibilityAudit()
+        try app.performAccessibilityAudit { issue in
+            print("Accessibility audit: \(issue.compactDescription)")
+            return false
+        }
     }
 }
