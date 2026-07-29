@@ -26,6 +26,37 @@
 //!    with its identity columns untouched and the columns added along the way
 //!    read back their declared defaults, and (c) a SECOND `apply_migrations` is a
 //!    pure no-op (idempotent — no row changes, no re-applied versions).
+//!
+//! # THE RULE
+//!
+//! **A migration that adds a CONSTRAINT must have a colliding-data case in this
+//! seed, or the constraint is unproven.** One representative row per entity
+//! cannot, even in principle, exercise the pre-flight de-collision a
+//! constraint-adding migration needs; only data that actually collides can. The
+//! seed below therefore carries adversarial shapes on purpose, and every new
+//! `CREATE UNIQUE INDEX` (or CHECK, or NOT NULL) landing on a table that already
+//! exists at [`SEED_VERSION`] owes this file a colliding pair.
+//!
+//! ## Which constraints above `SEED_VERSION` this seed can collide (audited 0010..0067)
+//!
+//! | Migration | Constraint | Colliding seed possible? |
+//! |---|---|---|
+//! | 0012 | `idx_one_pending_task_per_issue_agent` on `agent_task_queue` | NO. It REPLACES 0004's strictly stricter one-pending-per-issue index, so any data legal at the seed schema is legal under it. A colliding pair cannot be inserted at seed time. |
+//! | 0050 | `agent_workspace_name_unique` on `agent (workspace_id, name)` | YES, and it is seeded: two agents share a name in one workspace. |
+//! | 0050 | `agent_system_identity_unique` on `agent (..., system_key)` | NO. Partial on `WHERE system_key IS NOT NULL`, and `system_key` is a column 0050 itself adds, so every pre-existing row is NULL and excluded. |
+//! | 0016, 0017, 0027, 0037, 0061, 0063, 0066 | `label` / `squad` / `board` / `notify_rule` / `autopilot_rule_version` / `workspace_invitation` / `issue_property` unique indexes | NO. Each creates its table in the same migration, so it has no pre-existing rows to collide. |
+//!
+//! No migration in 0010..0067 converts an existing nullable column to NOT NULL:
+//! `SQLite` cannot do that without a table rebuild and the whole set contains no
+//! rebuild (no `ALTER TABLE ... RENAME TO`). The nearest real adversarial NULLs
+//! are therefore seeded instead: a NULL `agent.instructions`, and a task with a
+//! NULL `issue_id`, which is the excluded branch of BOTH partial pending-task
+//! indexes (0004's and 0012's).
+//!
+//! `task_usage` (the other FK-pinning side named in the parity bead) lands only
+//! at 0022, ABOVE the seed version, so it cannot be seeded here. The seeded
+//! duplicate agent is FK-pinned from the two sides that DO exist at
+//! [`SEED_VERSION`]: `agent_task_queue` and `autopilot`.
 
 use sqlx::sqlite::{SqliteConnectOptions, SqliteJournalMode, SqlitePoolOptions};
 use sqlx::{Row, SqlitePool};
@@ -44,6 +75,22 @@ const SEED_VERSION: i64 = 9;
 /// embedded migrator compiles from, so the prior set can never drift from what
 /// `apply_migrations` would itself apply.
 async fn pool_at_seed_schema(dir: &std::path::Path) -> SqlitePool {
+    pool_at_seed_schema_from(dir, &real_migrations_dir()).await
+}
+
+/// The repo's own `migrations/` directory: the ONLY set the shipped binary
+/// applies. The mutation proof copies it, never edits it.
+fn real_migrations_dir() -> std::path::PathBuf {
+    std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations")
+}
+
+/// [`pool_at_seed_schema`] against an arbitrary migration directory, so the
+/// mutation proof can seed from the SYNTHETIC set it replays (keeping the
+/// recorded checksums self-consistent).
+async fn pool_at_seed_schema_from(
+    dir: &std::path::Path,
+    migrations_dir: &std::path::Path,
+) -> SqlitePool {
     let db_path = dir.join("hangar.db");
     let opts = SqliteConnectOptions::new()
         .filename(&db_path)
@@ -51,11 +98,9 @@ async fn pool_at_seed_schema(dir: &std::path::Path) -> SqlitePool {
         .journal_mode(SqliteJournalMode::Wal);
     let pool = SqlitePoolOptions::new().connect_with(opts).await.expect("open pool");
 
-    let mut migrator = sqlx::migrate::Migrator::new(
-        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("migrations"),
-    )
-    .await
-    .expect("load migrations directory");
+    let mut migrator = sqlx::migrate::Migrator::new(migrations_dir)
+        .await
+        .expect("load migrations directory");
     migrator.migrations.to_mut().retain(|m| m.version <= SEED_VERSION);
     assert_eq!(
         migrator.migrations.iter().map(|m| m.version).max(),
@@ -66,18 +111,39 @@ async fn pool_at_seed_schema(dir: &std::path::Path) -> SqlitePool {
     pool
 }
 
-/// Seed exactly one representative row for EVERY entity table that exists at
-/// [`SEED_VERSION`]. Only columns valid at the seed schema are written — the
-/// columns later migrations add must NOT be referenced here (they don't exist
-/// yet) and are asserted to read back their declared defaults after the upgrade.
+/// Seed a representative row for EVERY entity table that exists at
+/// [`SEED_VERSION`], plus the ADVERSARIAL shapes the module doc's rule demands.
+/// Only columns valid at the seed schema are written. The columns later
+/// migrations add must NOT be referenced here (they don't exist yet) and are
+/// asserted to read back their declared defaults after the upgrade.
+///
+/// The shape reads like a plausible two-year-old home, not an edge-case dump: a
+/// workspace whose owner registered `Builder` twice (the second time from a
+/// second daemon, which pre-0050 nothing stopped), each copy carrying real
+/// history (a task and a schedule), so neither can be deleted.
 async fn seed_every_entity(pool: &SqlitePool) {
     seed_tenancy_and_agents(pool).await;
     seed_work_items(pool).await;
     seed_tokens(pool).await;
 }
 
+/// The two agents that COLLIDE on `(workspace_id, name)`, in insertion order.
+/// 0050 keeps the lowest rowid under the plain name and appends the id to every
+/// later duplicate, so `AGENT_KEEPS_NAME` reads `Builder` after the upgrade and
+/// `AGENT_GETS_RENAMED` reads `Builder (agent-2)`.
+const AGENT_KEEPS_NAME: &str = "agent-1";
+const AGENT_GETS_RENAMED: &str = "agent-2";
+/// The name both seeded agents share before the upgrade.
+const COLLIDING_AGENT_NAME: &str = "Builder";
+
 /// Tenancy primitives (0001) + agent runtime / agent / skill (0002). The columns
 /// later migrations add to `agent` (0015) are left to their defaults.
+///
+/// TWO agents share [`COLLIDING_AGENT_NAME`] inside `ws-1`, which is legal at the
+/// seed schema and illegal after 0050. This is the colliding-data case the
+/// module doc's rule requires for `agent_workspace_name_unique`; without it
+/// 0050's de-collision branch is never executed by the full chain and its
+/// documented DEVIATION from multica 046 (rename, do not delete) is unproven.
 async fn seed_tenancy_and_agents(pool: &SqlitePool) {
     sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES (?, ?, ?, ?)")
         .bind("ws-1")
@@ -120,9 +186,9 @@ async fn seed_tenancy_and_agents(pool: &SqlitePool) {
          (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) \
          VALUES (?, ?, ?, ?, ?, ?, ?)",
     )
-    .bind("agent-1")
+    .bind(AGENT_KEEPS_NAME)
     .bind("ws-1")
-    .bind("Builder")
+    .bind(COLLIDING_AGENT_NAME)
     .bind("rt-1")
     .bind("Build carefully.")
     .bind("workspace")
@@ -130,6 +196,24 @@ async fn seed_tenancy_and_agents(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("insert agent");
+    // The COLLIDING second registration of the same name. `instructions` is left
+    // NULL: the seed's adversarial NULL, carried through every later migration
+    // that reads or rewrites the agent row (0015's column adds, 0047's
+    // visibility backfill, 0050's de-collision UPDATE).
+    sqlx::query(
+        "INSERT INTO agent \
+         (id, workspace_id, name, runtime_id, instructions, visibility, owner_id) \
+         VALUES (?, ?, ?, ?, NULL, ?, ?)",
+    )
+    .bind(AGENT_GETS_RENAMED)
+    .bind("ws-1")
+    .bind(COLLIDING_AGENT_NAME)
+    .bind("rt-1")
+    .bind("private")
+    .bind("user-1")
+    .execute(pool)
+    .await
+    .expect("insert colliding agent");
     sqlx::query(
         "INSERT INTO skill (id, workspace_id, name, description, content) \
          VALUES (?, ?, ?, ?, ?)",
@@ -184,6 +268,27 @@ async fn seed_work_items(pool: &SqlitePool) {
     .await
     .expect("insert agent_task_queue");
 
+    // FK-PIN side 1 for the colliding agent: a running task. `issue_id` is NULL,
+    // the excluded branch of both partial pending-task indexes (0004's, and the
+    // per-(issue, agent) reshape 0012 replaces it with). A migration that
+    // DELETEd the duplicate agent instead of renaming it trips FOREIGN KEY here
+    // and aborts the whole upgrade. See the mutation proof at the foot of this
+    // file.
+    sqlx::query(
+        "INSERT INTO agent_task_queue \
+         (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at) \
+         VALUES (?, ?, ?, ?, NULL, ?, ?)",
+    )
+    .bind("task-2")
+    .bind("ws-1")
+    .bind("rt-1")
+    .bind(AGENT_GETS_RENAMED)
+    .bind("running")
+    .bind(3_100_i64)
+    .execute(pool)
+    .await
+    .expect("insert colliding agent's task");
+
     sqlx::query(
         "INSERT INTO autopilot \
          (id, workspace_id, agent_id, name, instructions, cron_expr, created_at) \
@@ -191,7 +296,7 @@ async fn seed_work_items(pool: &SqlitePool) {
     )
     .bind("ap-1")
     .bind("ws-1")
-    .bind("agent-1")
+    .bind(AGENT_KEEPS_NAME)
     .bind("daily-triage")
     .bind("Triage the inbox")
     .bind("0 9 * * *")
@@ -199,6 +304,26 @@ async fn seed_work_items(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("insert autopilot");
+
+    // FK-PIN side 2 for the colliding agent: a schedule. Two pinning sides is
+    // the point: a naive de-collision that tried to DELETE its way out has to
+    // clear BOTH before the agent row can go, which is exactly why 0050 renames.
+    sqlx::query(
+        "INSERT INTO autopilot \
+         (id, workspace_id, agent_id, name, instructions, cron_expr, created_at) \
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind("ap-2")
+    .bind("ws-1")
+    .bind(AGENT_GETS_RENAMED)
+    .bind("nightly-sweep")
+    .bind("Sweep stale branches")
+    .bind("0 2 * * *")
+    .bind(4_100_i64)
+    .execute(pool)
+    .await
+    .expect("insert colliding agent's autopilot");
+
     sqlx::query(
         "INSERT INTO autopilot_run (id, autopilot_id, started_at, status) \
          VALUES (?, ?, ?, ?)",
@@ -265,30 +390,40 @@ async fn count(pool: &SqlitePool, table: &str) -> i64 {
         .unwrap_or_else(|e| panic!("count {table}: {e}"))
 }
 
+/// Every seeded entity table and the number of rows [`seed_every_entity`] puts
+/// in it. The counts above 1 are the adversarial shapes: the colliding agent
+/// pair and the FK-pinning task / autopilot rows that make deleting either of
+/// them impossible.
+const EXPECTED_SEED_POPULATION: &[(&str, i64)] = &[
+    ("workspace", 1),
+    ("user", 1),
+    ("member", 1),
+    ("agent_runtime", 1),
+    ("agent", 2),
+    ("skill", 1),
+    ("issue", 1),
+    ("agent_task_queue", 2),
+    ("autopilot", 2),
+    ("autopilot_run", 1),
+    ("pat", 1),
+    ("daemon_token", 1),
+    ("beads_mapping", 1),
+];
+
 /// A fingerprint of every seeded entity's identity, captured as `(table, count)`
 /// pairs plus the single-row key columns. Equality of this snapshot across the
 /// upgrade proves no row was dropped, duplicated, or had its key rewritten.
 async fn population_snapshot(pool: &SqlitePool) -> Vec<(String, i64)> {
-    let tables = [
-        "workspace",
-        "user",
-        "member",
-        "agent_runtime",
-        "agent",
-        "skill",
-        "issue",
-        "agent_task_queue",
-        "autopilot",
-        "autopilot_run",
-        "pat",
-        "daemon_token",
-        "beads_mapping",
-    ];
-    let mut out = Vec::with_capacity(tables.len());
-    for t in tables {
-        out.push((t.to_string(), count(pool, t).await));
+    let mut out = Vec::with_capacity(EXPECTED_SEED_POPULATION.len());
+    for (t, _) in EXPECTED_SEED_POPULATION {
+        out.push(((*t).to_string(), count(pool, t).await));
     }
     out
+}
+
+/// [`EXPECTED_SEED_POPULATION`] in the shape [`population_snapshot`] returns.
+fn expected_seed_population() -> Vec<(String, i64)> {
+    EXPECTED_SEED_POPULATION.iter().map(|(t, n)| ((*t).to_string(), *n)).collect()
 }
 
 /// The seeded rows keep their identity keys across the upgrade. Spot-checks the
@@ -309,6 +444,127 @@ async fn assert_seeded_identity_survives(pool: &SqlitePool) {
             .await
             .expect("task row survives");
     assert_eq!(task_status, "queued", "the seeded task keeps its status");
+
+    // The adversarial NULLs are still NULL: nothing in the tail backfilled them
+    // behind the user's back. `agent.instructions` is read by the dispatch
+    // prompt builder and `agent_task_queue.issue_id` is the excluded branch of
+    // both partial pending-task indexes, so a stray backfill on either would
+    // change behaviour on a real home.
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>("SELECT instructions FROM agent WHERE id = ?")
+            .bind(AGENT_GETS_RENAMED)
+            .fetch_one(pool)
+            .await
+            .expect("colliding agent survives"),
+        None,
+        "the seeded NULL instructions stay NULL across the chain"
+    );
+    assert_eq!(
+        sqlx::query_scalar::<_, Option<String>>(
+            "SELECT issue_id FROM agent_task_queue WHERE id = ?"
+        )
+        .bind("task-2")
+        .fetch_one(pool)
+        .await
+        .expect("issueless task survives"),
+        None,
+        "the seeded NULL issue_id stays NULL across the chain"
+    );
+}
+
+/// THE survival check, shared by the real chain and the mutation proof: the
+/// population is row-for-row identical AND both colliding agents came through
+/// 0050 alive, with UNCHANGED ids and now-DISTINCT names.
+///
+/// This is 0050's documented DEVIATION from multica 046 stated as an executable
+/// assertion. Multica DELETEs duplicate-named rows before adding the unique
+/// index; hangar RENAMES them, because the agents are FK-pinned (here by a task
+/// and an autopilot) and a DELETE would trip FOREIGN KEY and abort the upgrade,
+/// bricking daemon boot on a populated home.
+///
+/// Returns `Err(reason)` rather than panicking so
+/// [`mutation_proof_delete_variant_of_0050_turns_the_survival_check_red`] can
+/// assert the SAME check goes red against a DELETE-duplicates 0050. A check only
+/// ever run in its passing direction proves nothing.
+async fn survival_check(pool: &SqlitePool, before: &[(String, i64)]) -> Result<(), String> {
+    let after = population_snapshot(pool).await;
+    if after != before {
+        return Err(format!(
+            "upgrade must not drop, duplicate, or rewrite any seeded entity: \
+             before={before:?} after={after:?}"
+        ));
+    }
+
+    let name_of = |id: &'static str| async move {
+        sqlx::query_scalar::<_, String>("SELECT name FROM agent WHERE id = ?")
+            .bind(id)
+            .fetch_optional(pool)
+            .await
+            .map_err(|e| format!("read agent {id}: {e}"))?
+            .ok_or_else(|| format!("agent {id} was DELETED by the upgrade"))
+    };
+    let keeper = name_of(AGENT_KEEPS_NAME).await?;
+    let renamed = name_of(AGENT_GETS_RENAMED).await?;
+    if keeper == renamed {
+        return Err(format!(
+            "the colliding agents still share the name {keeper:?}, so the unique \
+             index cannot have been created"
+        ));
+    }
+    if keeper != COLLIDING_AGENT_NAME {
+        return Err(format!(
+            "the FIRST agent keeps the plain name: expected {COLLIDING_AGENT_NAME:?}, got {keeper:?}"
+        ));
+    }
+    let expected_renamed = format!("{COLLIDING_AGENT_NAME} ({AGENT_GETS_RENAMED})");
+    if renamed != expected_renamed {
+        return Err(format!(
+            "the later duplicate is renamed with its id appended: expected \
+             {expected_renamed:?}, got {renamed:?}"
+        ));
+    }
+
+    // The FK pins that make the rename mandatory still point at the SAME id.
+    for (table, row_id) in [("agent_task_queue", "task-2"), ("autopilot", "ap-2")] {
+        let owner: Option<String> =
+            sqlx::query_scalar(&format!("SELECT agent_id FROM {table} WHERE id = ?"))
+                .bind(row_id)
+                .fetch_optional(pool)
+                .await
+                .map_err(|e| format!("read {table}.{row_id}: {e}"))?;
+        if owner.as_deref() != Some(AGENT_GETS_RENAMED) {
+            return Err(format!(
+                "{table}.{row_id} must still pin {AGENT_GETS_RENAMED}, got {owner:?}"
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// `PRAGMA foreign_key_check` reports no violation anywhere in the database.
+/// The rename branch rewrites a value the FK graph does not key on, but a future
+/// de-collision that touched an id would leave dangling children behind, and the
+/// per-table assertions above would not necessarily see it.
+async fn assert_no_foreign_key_violations(pool: &SqlitePool) {
+    let violations = sqlx::query("PRAGMA foreign_key_check")
+        .fetch_all(pool)
+        .await
+        .expect("run foreign_key_check");
+    let described: Vec<String> = violations
+        .iter()
+        .map(|row| {
+            format!(
+                "{} -> {} (rowid {:?})",
+                row.get::<String, _>(0),
+                row.get::<String, _>(2),
+                row.get::<Option<i64>, _>(1)
+            )
+        })
+        .collect();
+    assert!(
+        described.is_empty(),
+        "the upgrade must leave no dangling foreign keys, found: {described:?}"
+    );
 }
 
 /// The columns the upgrade ADDED read back their declared defaults on the
@@ -629,10 +885,11 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
     seed_every_entity(&pool).await;
 
     let before = population_snapshot(&pool).await;
-    // Every entity seeded exactly one row at the seed schema.
-    assert!(
-        before.iter().all(|(_, n)| *n == 1),
-        "each entity must hold exactly one seeded row: {before:?}"
+    // The seed is exactly the declared population, adversarial shapes included.
+    assert_eq!(
+        before,
+        expected_seed_population(),
+        "the seed must match EXPECTED_SEED_POPULATION"
     );
 
     // (a) Upgrade to head applies cleanly: the embedded migrator skips the
@@ -657,13 +914,14 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         "the upgrade must apply the WHOLE embedded chain, up to its head"
     );
 
-    // (b) Every seeded row survived: the population is row-for-row identical.
+    // (b) Every seeded row survived: the population is row-for-row identical,
+    //     and the colliding agents were RENAMED rather than deleted.
+    survival_check(&pool, &before)
+        .await
+        .expect("the populated upgrade must survive");
     let after = population_snapshot(&pool).await;
-    assert_eq!(
-        after, before,
-        "upgrade must not drop, duplicate, or rewrite any seeded entity"
-    );
 
+    assert_no_foreign_key_violations(&pool).await;
     assert_seeded_identity_survives(&pool).await;
     assert_added_columns_read_defaults(&pool).await;
     assert_legacy_issue_state_remapped_forward(&pool).await;
@@ -688,6 +946,193 @@ async fn full_chain_upgrade_preserves_every_seeded_entity_and_is_idempotent() {
         after,
         "double-apply must not change any seeded row"
     );
+
+    pool.close().await;
+}
+
+// ---------------------------------------------------------------------------
+// MUTATION PROOF
+// ---------------------------------------------------------------------------
+//
+// A contract test is only worth its runtime if breaking the contract turns it
+// red. The proof below breaks 0050 the way multica 046 does it, replays the
+// SAME seed through the SAME survival check, and asserts the check goes red.
+//
+// HARD RULE, encoded here so nobody has to rediscover it: the repo's own
+// `migrations/` files are NEVER edited for this, not even temporarily and
+// reverted. Applied sqlx migrations are immutable: a modified one makes every
+// daemon holding an already-migrated database refuse to boot with "previously
+// applied but has been modified", which has already cost a day of debugging.
+// The mutated set lives entirely in a tempdir; `sqlx::migrate::Migrator::new`
+// takes a runtime path, so no source file has to move for this to work.
+
+/// The migration whose de-collision branch the adversarial seed exists to prove.
+const MUTATED_MIGRATION: &str = "0050_agent_metadata.sql";
+
+/// A SYNTHETIC 0050: identical to the real one except that the pre-flight
+/// de-collision DELETEs duplicate-named agents (multica 046's shape) instead of
+/// renaming them. Written only into a tempdir copy of the migration set.
+const DELETE_DUPLICATES_0050: &str = r"-- SYNTHETIC MUTANT, test-only. Never applied to a real database.
+ALTER TABLE agent ADD COLUMN description TEXT NOT NULL DEFAULT ''
+    CHECK (length(description) <= 255);
+ALTER TABLE agent ADD COLUMN avatar_url TEXT;
+ALTER TABLE agent ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'
+    CHECK (kind IN ('user', 'system'));
+ALTER TABLE agent ADD COLUMN system_key TEXT;
+ALTER TABLE agent ADD COLUMN service_tier TEXT;
+
+-- THE MUTATION: delete every duplicate instead of renaming it.
+DELETE FROM agent
+ WHERE rowid NOT IN (SELECT MIN(rowid) FROM agent GROUP BY workspace_id, name);
+
+CREATE UNIQUE INDEX agent_workspace_name_unique ON agent (workspace_id, name);
+
+CREATE UNIQUE INDEX agent_system_identity_unique
+    ON agent (workspace_id, owner_id, runtime_id, system_key)
+    WHERE system_key IS NOT NULL;
+";
+
+/// A second SYNTHETIC 0050 with NO pre-flight de-collision at all: it just adds
+/// the unique index. Its red proves the seed data really does collide: if the
+/// seed held one agent per name this variant would apply cleanly and the whole
+/// colliding-data case would be theatre.
+const NO_DECOLLISION_0050: &str = r"-- SYNTHETIC MUTANT, test-only. Never applied to a real database.
+ALTER TABLE agent ADD COLUMN description TEXT NOT NULL DEFAULT ''
+    CHECK (length(description) <= 255);
+ALTER TABLE agent ADD COLUMN avatar_url TEXT;
+ALTER TABLE agent ADD COLUMN kind TEXT NOT NULL DEFAULT 'user'
+    CHECK (kind IN ('user', 'system'));
+ALTER TABLE agent ADD COLUMN system_key TEXT;
+ALTER TABLE agent ADD COLUMN service_tier TEXT;
+
+-- THE MUTATION: no de-collision pass at all.
+
+CREATE UNIQUE INDEX agent_workspace_name_unique ON agent (workspace_id, name);
+
+CREATE UNIQUE INDEX agent_system_identity_unique
+    ON agent (workspace_id, owner_id, runtime_id, system_key)
+    WHERE system_key IS NOT NULL;
+";
+
+/// Copy the real migration set into `dst`, then overwrite `file` with `body`.
+/// Returns `dst`. The real set is only ever READ here.
+fn synthetic_migration_set(dst: &std::path::Path, file: &str, body: &str) {
+    let src = real_migrations_dir();
+    std::fs::create_dir_all(dst).expect("create synthetic migrations dir");
+    let mut copied = 0_usize;
+    for entry in std::fs::read_dir(&src).expect("read migrations dir") {
+        let path = entry.expect("read migration entry").path();
+        if path.extension().is_some_and(|e| e == "sql") {
+            let name = path.file_name().expect("migration file name");
+            std::fs::copy(&path, dst.join(name)).expect("copy migration");
+            copied += 1;
+        }
+    }
+    assert!(copied > 0, "the real migration set must not be empty");
+    let target = dst.join(file);
+    assert!(target.exists(), "{file} must exist in the copied set");
+    std::fs::write(&target, body).expect("write the mutated migration");
+}
+
+/// Replay the WHOLE chain in `migrations_dir` over an already-seeded pool,
+/// surfacing the migrator's error instead of panicking on it.
+async fn replay_full_chain_from(
+    pool: &SqlitePool,
+    migrations_dir: &std::path::Path,
+) -> Result<(), sqlx::migrate::MigrateError> {
+    sqlx::migrate::Migrator::new(migrations_dir)
+        .await
+        .expect("load synthetic migrations directory")
+        .run(pool)
+        .await
+}
+
+/// Run the EXACT seed and survival check the green test runs, against a
+/// migration set whose 0050 body has been replaced by `body`. Returns the
+/// verdict: `Ok(())` if the mutant survives the check (which for a mutant is a
+/// failure of the check), `Err(reason)` if the contract caught it.
+async fn verdict_for_0050_body(body: &str) -> Result<(), String> {
+    let migrations = tempfile::tempdir().expect("tempdir for the synthetic set");
+    synthetic_migration_set(migrations.path(), MUTATED_MIGRATION, body);
+
+    let db = tempfile::tempdir().expect("tempdir for the db");
+    let pool = pool_at_seed_schema_from(db.path(), migrations.path()).await;
+    seed_every_entity(&pool).await;
+    let before = population_snapshot(&pool).await;
+    assert_eq!(
+        before,
+        expected_seed_population(),
+        "a mutation proof must run the SAME seed as the green test"
+    );
+
+    let verdict = match replay_full_chain_from(&pool, migrations.path()).await {
+        Err(e) => Err(format!("replay ABORTED: {e}")),
+        Ok(()) => survival_check(&pool, &before).await,
+    };
+    pool.close().await;
+    verdict
+}
+
+/// MUTATION PROOF: with 0050's rename swapped for multica 046's DELETE, the
+/// exact seed and survival check the green test above runs go RED.
+///
+/// Either failure mode counts and both are real: the DELETE trips FOREIGN KEY on
+/// the pinned task / autopilot rows and aborts the upgrade (which is what would
+/// brick daemon boot on a populated home), or, if it ever got through, the agent
+/// rows would be gone and the population check would catch it. The reason is
+/// printed so the proof is legible in CI output rather than inferred from a
+/// bare pass.
+#[tokio::test]
+async fn mutation_proof_delete_variant_of_0050_turns_the_survival_check_red() {
+    let reason = verdict_for_0050_body(DELETE_DUPLICATES_0050).await.expect_err(
+        "a 0050 that DELETEs duplicate-named agents MUST fail the survival check; \
+         it passing means the check cannot detect data loss and is worthless",
+    );
+    eprintln!("MUTATION PROOF (DELETE-duplicates 0050) went red with: {reason}");
+    assert!(
+        reason.contains("FOREIGN KEY") || reason.contains("agent"),
+        "the failure must name the agent rows the mutation destroys, got: {reason}"
+    );
+}
+
+/// MUTATION PROOF, second axis: a 0050 with NO de-collision pass cannot even
+/// create the index over this seed. Its red is what proves the seed's data
+/// genuinely COLLIDES, the thing a one-row-per-entity seed can never claim.
+#[tokio::test]
+async fn mutation_proof_a_0050_without_de_collision_cannot_create_the_index() {
+    let reason = verdict_for_0050_body(NO_DECOLLISION_0050).await.expect_err(
+        "adding the unique index over the seed WITHOUT de-colliding first must fail; \
+         it passing means the seeded agents do not actually collide",
+    );
+    eprintln!("MUTATION PROOF (no de-collision in 0050) went red with: {reason}");
+    assert!(
+        reason.contains("UNIQUE") || reason.contains("unique"),
+        "the failure must name the UNIQUE violation, got: {reason}"
+    );
+}
+
+/// The mutation harness only proves anything if the UNMUTATED copy is green:
+/// otherwise the red above could come from the copying, not from the mutation.
+/// Same tempdir set, same seed, real 0050 body, and the survival check passes.
+#[tokio::test]
+async fn mutation_proof_control_the_unmutated_copy_stays_green() {
+    let migrations = tempfile::tempdir().expect("tempdir for the copied set");
+    let real_0050 = std::fs::read_to_string(real_migrations_dir().join(MUTATED_MIGRATION))
+        .expect("read the real 0050");
+    synthetic_migration_set(migrations.path(), MUTATED_MIGRATION, &real_0050);
+
+    let db = tempfile::tempdir().expect("tempdir for the db");
+    let pool = pool_at_seed_schema_from(db.path(), migrations.path()).await;
+    seed_every_entity(&pool).await;
+    let before = population_snapshot(&pool).await;
+
+    replay_full_chain_from(&pool, migrations.path())
+        .await
+        .expect("the unmutated copy applies cleanly");
+    survival_check(&pool, &before)
+        .await
+        .expect("the unmutated copy must pass the survival check");
+    assert_no_foreign_key_violations(&pool).await;
 
     pool.close().await;
 }
