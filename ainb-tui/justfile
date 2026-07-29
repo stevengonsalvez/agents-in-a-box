@@ -147,6 +147,18 @@ gen-cli-ref:
 check-cli-ref: gen-cli-ref
     git diff --exit-code -- ../docs/tui/cli.md
 
+# Run the v2 conformance axes against every in-tree plugin BINARY and print
+# the plugin x axis matrix. The synthetic-canary suite in
+# crates/ainb-plugin-cts-v2/tests/axes.rs proves the runtime is conformant;
+# this proves the plugins we actually ship are.
+cts-matrix:
+    cargo test -p ainb-plugin-cts-v2 --test real_plugin_axes -- --nocapture
+
+# Every plugin contract in one shot: the synthetic axes, the per-plugin
+# matrix, and the ainb-plugin-protocol wire-surface semver gate.
+cts-contracts:
+    cargo test -p ainb-plugin-cts-v2 -- --nocapture
+
 # Check everything (format, lint, test)
 check:
     just fmt-check
