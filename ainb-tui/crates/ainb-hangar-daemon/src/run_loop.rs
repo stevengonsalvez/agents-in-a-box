@@ -611,6 +611,12 @@ fn spawn_sweepers(pool: SqlitePool, cfg: SweeperConfig) {
                 // IO (an fs2 advisory lock + atomic rewrite), so it runs on the
                 // blocking pool; a fault is logged, never fatal.
                 cap_parent_inbox().await;
+                // The daemon now owns all codex-orphan cleanup (the Node
+                // SessionStart reaper is gone), so sweep leftover ppid==1
+                // `codex app-server` processes on this same tick, not only at boot.
+                // Best-effort and gated exactly like the boot reaper; it spares this
+                // daemon's own live server.
+                reap_codex_orphans_periodic().await;
             }
         });
     }
@@ -650,6 +656,37 @@ async fn cap_parent_inbox() {
         Ok(Ok(_)) => {}
         Ok(Err(e)) => tracing::warn!(error = %e, "hangar-daemon inbox cap failed"),
         Err(e) => tracing::warn!(error = %e, "hangar-daemon inbox cap task join failed"),
+    }
+}
+
+/// Reap orphaned `codex app-server` processes on the sweeper tick.
+///
+/// The daemon owns all codex-orphan cleanup now (the Node `SessionStart` reaper is
+/// deleted), so the boot-time sweep is no longer enough: a daemon that outlives many
+/// crashed sibling daemons and dead plugin-broker sessions must keep clearing their
+/// ppid==1 leftovers while it runs. Gated exactly like the boot reaper (skip when
+/// `AINB_CODEX_MANAGED == "0"`), resolving the shared socket the same way boot does
+/// (`hangar_dir()`, i.e. `$AINB_HANGAR_HOME` else `~/.agents-in-a-box`). Best-effort:
+/// an unresolvable home is a no-op. `reap_orphaned_codex_servers` spares the holder
+/// of our own live socket, so this never kills this daemon's in-use server, only
+/// dead-daemon and dead-session orphans.
+async fn reap_codex_orphans_periodic() {
+    let codex_managed = std::env::var_os("AINB_CODEX_MANAGED")
+        .as_deref()
+        .is_none_or(|value| value != "0");
+    if !codex_managed {
+        return;
+    }
+    let Ok(dir) = crate::hangar_dir() else {
+        return;
+    };
+    let socket = dir.join("codex-app-server.sock");
+    let reaped = crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
+    if reaped > 0 {
+        tracing::info!(
+            reaped,
+            "reaped orphaned codex app-server processes (periodic)"
+        );
     }
 }
 

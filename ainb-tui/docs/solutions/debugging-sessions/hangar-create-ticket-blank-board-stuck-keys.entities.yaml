@@ -1,0 +1,58 @@
+document_id: lrn-hangar-create-ticket-blank-board-stuck-keys-a70c77
+extracted_at: "2026-07-15T14:19:44Z"
+entities:
+  - name: "ainb-plugin-hangar"
+    type: technology
+    description: "Hangar Kanban board plugin crate for the ainb TUI"
+  - name: "boards.rs"
+    type: technology
+    description: "crates/ainb-plugin-hangar/src/screen/boards.rs — board reducer + render + create-card wizard stages"
+  - name: "app_screens.rs"
+    type: technology
+    description: "crates/ainb-plugin-hangar/src/screen/app_screens.rs — key routing / intent-to-RPC lifting"
+  - name: "plugin.rs"
+    type: technology
+    description: "crates/ainb-plugin-hangar/src/plugin.rs — global key gate, overlay guard, RPC dispatch"
+  - name: "overlay key-capture bug"
+    type: error
+    description: "global-key bypass at plugin.rs:2647-2655 routes every key including q into the overlay reducer while an overlay is open, returning before the quit/routing layer"
+  - name: "4-stage create-card wizard"
+    type: pattern
+    description: "title -> repo -> agent -> profile overlay; only the final stage's Enter raises BoardsIntent::CreateCard and persists"
+  - name: "BoardsIntent::CreateCard"
+    type: function
+    description: "intent raised only at final wizard stage (boards.rs:1817-1835), lifted to BoardsAction::CardCreate and sent as hangar/board_card_create RPC"
+  - name: "error-swallowing on create path"
+    type: pattern
+    description: "let Ok(...) else { return } and let _ = ... discard encode/send/routing failures silently at plugin.rs:1945-1950,2653"
+relationships:
+  - source: "4-stage create-card wizard"
+    target: "blank board after ticket creation"
+    type: caused_by
+    description: "single Enter after title only advances to stage 2 (repo), so no DB insert ever happens"
+    strength: 10
+  - source: "overlay key-capture bug"
+    target: "q/Esc stuck (unresponsive TUI)"
+    type: causes
+    description: "global-key bypass returns before reaching the quit/routing layer while any overlay stage is open"
+    strength: 10
+  - source: "overlay key-capture bug"
+    target: "force-quit required"
+    type: causes
+    description: "user cannot discover the multi-Esc unwind path and must kill the app"
+    strength: 8
+  - source: "BoardsIntent::CreateCard"
+    target: "IssueRepo::insert / BoardRepo::card_add"
+    type: triggers
+    description: "final-stage Enter lifts intent to CardCreate action, sent over unix-socket JSON-RPC to daemon which performs the DB insert"
+    strength: 9
+  - source: "error-swallowing on create path"
+    target: "silent create failure (hypothetical)"
+    type: enables
+    description: "if the socket send ever failed, the failure would not surface to the user — though in this bug the create was simply never sent"
+    strength: 5
+  - source: "4-stage create-card wizard"
+    target: "overlay key-capture bug"
+    type: relates_to
+    description: "the wizard staying open (never submitting on first Enter) is what keeps the key-capture bug active"
+    strength: 7

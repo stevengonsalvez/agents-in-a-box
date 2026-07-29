@@ -1,0 +1,61 @@
+document_id: lrn-hangar-daemon-provider-contract-drift-a1f9c2
+extracted_at: "2026-07-17T00:00:00Z"
+entities:
+  - name: "ainb-hangar-daemon"
+    type: technology
+    description: "Rust daemon in ainb-tui that dispatches claude/codex CLI runs and finalizes task outcomes"
+  - name: "runner.rs"
+    type: concept
+    description: "Source file implementing terminal-event parsing and outcome finalization for the hangar daemon"
+  - name: "classify_claude_result"
+    type: function
+    description: "Function that maps a parsed claude CLI subtype/is_error to a task outcome; was a denylist, fixed to an allowlist"
+  - name: "finalize_outcome"
+    type: function
+    description: "Decides done/failed from parsed terminal event plus process exit code"
+  - name: "providercontractdrift"
+    type: concept
+    description: "New FailureReason variant representing an unrecognized-but-terminal provider outcome, distinct from a genuine agent failure"
+  - name: "streamline"
+    type: concept
+    description: "Struct parsing both claude and codex CLI stream-json shapes in one pass; kept permissive via serde default"
+  - name: "deny_unknown_fields"
+    type: pattern
+    description: "Serde strictness anti-pattern that would false-fail genuine successes on harmless new fields"
+  - name: "silent-done bug"
+    type: error
+    description: "Bug class where an unrecognized future CLI terminal subtype is silently classified as task success"
+  - name: "false-fail on genuine success"
+    type: error
+    description: "Bug class where field-level parsing strictness incorrectly fails a task that actually succeeded"
+relationships:
+  - source: "classify_claude_result"
+    target: "providercontractdrift"
+    type: implements
+    description: "classify_claude_result routes unrecognized terminal subtypes to the new ProviderContractDrift failure reason instead of silently succeeding"
+    strength: 9
+  - source: "classify_claude_result"
+    target: "silent-done bug"
+    type: caused_by
+    description: "The original denylist default arm (everything non-error = Success) silently marks unrecognized future CLI subtypes as done"
+    strength: 9
+  - source: "providercontractdrift"
+    target: "silent-done bug"
+    type: prevents
+    description: "Allowlist discriminator with a distinct drift failure reason fails closed instead of silently succeeding"
+    strength: 9
+  - source: "deny_unknown_fields"
+    target: "false-fail on genuine success"
+    type: causes
+    description: "Field-level strictness (as opposed to discriminator-level strictness) fails real successful work when the provider adds an unrelated field"
+    strength: 8
+  - source: "streamline"
+    target: "false-fail on genuine success"
+    type: prevents
+    description: "Keeping StreamLine's serde parsing permissive (#[serde(default)]) avoids false-failing on harmless schema additions"
+    strength: 7
+  - source: "runner.rs"
+    target: "ainb-hangar-daemon"
+    type: part_of
+    description: "runner.rs is the source file implementing the daemon's outcome-finalization logic"
+    strength: 6
