@@ -39,6 +39,7 @@
 pub mod auth;
 pub mod snapshots;
 
+use std::fs::{File, OpenOptions};
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 use std::sync::Arc;
@@ -57,6 +58,7 @@ use ainb_hangar_proto::methods;
 use ainb_hangar_proto::settings::{DaemonHealthSnapshot, HealthSnapshot};
 use ainb_hangar_proto::{RpcError, RpcId, RpcRequest, RpcResponse};
 use ainb_hangar_store::service::activity::ActivityService;
+use fs2::FileExt as _;
 use futures_util::future::join_all;
 use sqlx::SqlitePool;
 
@@ -83,6 +85,57 @@ const INTERNAL_ERROR: i32 = -32603;
 const PERMISSION_DENIED: i32 = -32000;
 /// Soft cap on one request body. Snapshot requests are tiny.
 const MAX_BODY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Cross-process, crash-safe ownership of one operation against one Hangar DB.
+///
+/// The lock file sits beside `hangar.db`, so duplicate daemons using the same
+/// home contend on the same inode. The kernel releases the lock when a process
+/// exits, including a crash; the empty file may remain and is deliberately
+/// reused.
+struct DatabaseOperationSlot(File);
+
+impl DatabaseOperationSlot {
+    async fn try_acquire(
+        pool: &SqlitePool,
+        namespace: &str,
+        key: &str,
+    ) -> Result<Option<Self>, sqlx::Error> {
+        use std::os::unix::fs::OpenOptionsExt as _;
+
+        let db_file: String =
+            sqlx::query_scalar("SELECT file FROM pragma_database_list WHERE name = 'main'")
+                .fetch_one(pool)
+                .await?;
+        let db_dir = Path::new(&db_file).parent().ok_or_else(|| {
+            sqlx::Error::Protocol(format!(
+                "Hangar database has no parent directory: {db_file}"
+            ))
+        })?;
+        let lock_dir = db_dir.join("hangar").join("operation-locks");
+        tokio::fs::create_dir_all(&lock_dir).await.map_err(sqlx::Error::Io)?;
+        let fingerprint = stable_fingerprint(key);
+        let fingerprint = fingerprint.strip_prefix("fnv1a64:").unwrap_or(&fingerprint);
+        let file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .mode(0o600)
+            .open(lock_dir.join(format!("{namespace}-{fingerprint}.lock")))
+            .map_err(sqlx::Error::Io)?;
+        match file.try_lock_exclusive() {
+            Ok(()) => Ok(Some(Self(file))),
+            Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(None),
+            Err(error) => Err(sqlx::Error::Io(error)),
+        }
+    }
+}
+
+impl Drop for DatabaseOperationSlot {
+    fn drop(&mut self) {
+        let _ = self.0.unlock();
+    }
+}
 
 #[cfg(any(test, feature = "test-support"))]
 static APPROVE_SOCKET_OVERRIDE: OnceLock<RwLock<Option<PathBuf>>> = OnceLock::new();
@@ -1065,12 +1118,14 @@ async fn handle_fleet_receipt_list(
             "limit must be between 1 and {FLEET_RECEIPT_LIST_MAX}"
         )));
     }
-    let receipts = FleetRepo::list_action_receipts(pool, i64::from(params.limit))
+    let rows = FleetRepo::list_action_receipts(pool, i64::from(params.limit))
         .await
-        .map_err(|error| store_err(&error))?
-        .iter()
-        .map(action_receipt_wire)
-        .collect();
+        .map_err(|error| store_err(&error))?;
+    let mut receipts = Vec::with_capacity(rows.len());
+    for row in rows {
+        let row = reconcile_abandoned_receipt(pool, row).await?;
+        receipts.push(action_receipt_wire(&row));
+    }
     to_value(&FleetReceiptListResult { receipts })
 }
 
@@ -1088,10 +1143,101 @@ async fn handle_fleet_receipt_get(
     }
     let receipt = FleetRepo::get_action_receipt(pool, &params.request_id)
         .await
-        .map_err(|error| store_err(&error))?
-        .as_ref()
-        .map(action_receipt_wire);
+        .map_err(|error| store_err(&error))?;
+    let receipt = match receipt {
+        Some(row) => Some(action_receipt_wire(
+            &reconcile_abandoned_receipt(pool, row).await?,
+        )),
+        None => None,
+    };
     to_value(&FleetReceiptGetResult { receipt })
+}
+
+const ABANDONED_RECEIPT_DETAIL: &str = "daemon exited before the delivery outcome was recorded";
+
+/// Resolve a receipt left `PENDING` by a crashed daemon.
+///
+/// A live executor holds the same per-request kernel lock, so its receipt stays
+/// pending. Acquiring the lock proves no process still owns the delivery; the
+/// only honest terminal result is `UNKNOWN`, never a replay that could duplicate
+/// a side effect already delivered before the crash.
+async fn reconcile_abandoned_receipt(
+    pool: &SqlitePool,
+    row: ainb_hangar_store::repo::fleet::ActionReceiptRow,
+) -> Result<ainb_hangar_store::repo::fleet::ActionReceiptRow, RpcError> {
+    if row.status != "PENDING" {
+        return Ok(row);
+    }
+    let Some(_slot) = DatabaseOperationSlot::try_acquire(pool, "fleet-receipt", &row.request_id)
+        .await
+        .map_err(|error| store_err(&error))?
+    else {
+        return Ok(row);
+    };
+    mark_abandoned_receipt(pool, &row.request_id).await
+}
+
+async fn mark_abandoned_receipt(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<ainb_hangar_store::repo::fleet::ActionReceiptRow, RpcError> {
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    sqlx::query(
+        "UPDATE fleet_action_receipt \
+         SET status = 'UNKNOWN', detail = ?, updated_at = ? \
+         WHERE request_id = ? AND status = 'PENDING'",
+    )
+    .bind(ABANDONED_RECEIPT_DETAIL)
+    .bind(SystemClock.now_ms())
+    .bind(request_id)
+    .execute(pool)
+    .await
+    .map_err(|error| store_err(&error))?;
+    FleetRepo::get_action_receipt(pool, request_id)
+        .await
+        .map_err(|error| store_err(&error))?
+        .ok_or_else(|| internal("Fleet action receipt disappeared"))
+}
+
+enum ReceiptExecutionClaim {
+    Owned {
+        slot: DatabaseOperationSlot,
+        existing: Option<ainb_hangar_store::repo::fleet::ActionReceiptRow>,
+    },
+    Replay(ainb_hangar_store::repo::fleet::ActionReceiptRow),
+}
+
+/// Own a new or abandoned receipt, or replay a live owner's durable claim.
+///
+/// Lock publication precedes the `PENDING` insert. A contender therefore polls
+/// until either the row appears or the first caller releases ownership before
+/// inserting, such as after validation failure.
+async fn claim_receipt_execution(
+    pool: &SqlitePool,
+    request_id: &str,
+) -> Result<ReceiptExecutionClaim, RpcError> {
+    use ainb_hangar_store::repo::fleet::FleetRepo;
+
+    for _ in 0..2_000 {
+        if let Some(slot) = DatabaseOperationSlot::try_acquire(pool, "fleet-receipt", request_id)
+            .await
+            .map_err(|error| store_err(&error))?
+        {
+            let existing = FleetRepo::get_action_receipt(pool, request_id)
+                .await
+                .map_err(|error| store_err(&error))?;
+            return Ok(ReceiptExecutionClaim::Owned { slot, existing });
+        }
+        if let Some(row) = FleetRepo::get_action_receipt(pool, request_id)
+            .await
+            .map_err(|error| store_err(&error))?
+        {
+            return Ok(ReceiptExecutionClaim::Replay(row));
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    Err(internal("Fleet action receipt claim remained unavailable"))
 }
 
 /// Start a provider session through daemon-owned new-session state.
@@ -1283,10 +1429,11 @@ async fn execute_fleet_action(
         ));
     }
 
-    if let Some(existing) = FleetRepo::get_action_receipt(pool, &params.request_id)
-        .await
-        .map_err(|error| store_err(&error))?
-    {
+    let (receipt_slot, existing) = match claim_receipt_execution(pool, &params.request_id).await? {
+        ReceiptExecutionClaim::Owned { slot, existing } => (Some(slot), existing),
+        ReceiptExecutionClaim::Replay(existing) => (None, Some(existing)),
+    };
+    if let Some(existing) = existing {
         if existing.session_key != params.session_key
             || existing.action_kind != params.action.kind()
             || existing.action_fingerprint != action_fingerprint
@@ -1297,8 +1444,15 @@ async fn execute_fleet_action(
                 "request_id was reused for a different Fleet action",
             ));
         }
+        if existing.status == "PENDING" && receipt_slot.is_some() {
+            return Ok(action_receipt_wire(
+                &mark_abandoned_receipt(pool, &params.request_id).await?,
+            ));
+        }
         return Ok(action_receipt_wire(&existing));
     }
+    let _receipt_slot = receipt_slot
+        .ok_or_else(|| internal("Fleet action receipt lock lost before durable claim"))?;
 
     let request_fingerprint = match &params.action {
         ControlAction::StructuredAnswer {
@@ -1515,6 +1669,33 @@ async fn execute_fleet_start(
         created_at: now,
         updated_at: now,
     };
+    let (receipt_slot, existing) = match claim_receipt_execution(pool, &params.request_id).await? {
+        ReceiptExecutionClaim::Owned { slot, existing } => (Some(slot), existing),
+        ReceiptExecutionClaim::Replay(existing) => (None, Some(existing)),
+    };
+    if let Some(existing) = existing {
+        if existing.session_key != prospective_session_key
+            || existing.action_kind != "start"
+            || existing.action_fingerprint != receipt.action_fingerprint
+            || existing.expected_version != 1
+            || existing.idempotency_key.is_some()
+        {
+            return Err(invalid_params(
+                "request_id was reused for a different Fleet start",
+            ));
+        }
+        let existing = if existing.status == "PENDING" && receipt_slot.is_some() {
+            mark_abandoned_receipt(pool, &params.request_id).await?
+        } else {
+            existing
+        };
+        return Ok(FleetStartResult {
+            prospective_session_key,
+            receipt: action_receipt_wire(&existing),
+        });
+    }
+    let _receipt_slot = receipt_slot
+        .ok_or_else(|| internal("Fleet start receipt lock lost before durable claim"))?;
     let claimed = sqlx::query(
         "INSERT INTO fleet_action_receipt \
          (request_id, session_key, action_kind, action_fingerprint, expected_version, \
@@ -6246,43 +6427,23 @@ fn card_run_message(e: CardRunError) -> RpcError {
     }
 }
 
-/// The card launches currently in flight, keyed by issue id (tcp T4 hardening).
+/// Cross-process card launch slot held across the active check and enqueue.
 ///
-/// [`run_card`]'s blocked/active checks and its enqueue are separate statements,
-/// so two CONCURRENT launches of one card — a manual Run racing the finalize
-/// auto-run — could both pass the checks before either inserts. The migration-0012
-/// unique index only backstops `queued`/`dispatched` rows: once the first task is
-/// claimed to `running`, the second insert would slip through and the card runs
-/// twice. Every launch path lives in this one daemon process (the daemon owns the
-/// socket, the claim loop, AND the store — architecture invariant #1), so an
-/// in-process per-issue slot held across the whole check+enqueue serializes them:
-/// the loser refuses exactly like a run that lost to an already-active task.
-static CARD_LAUNCHES_IN_FLIGHT: std::sync::LazyLock<
-    std::sync::Mutex<std::collections::HashSet<String>>,
-> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashSet::new()));
-
-/// RAII slot in [`CARD_LAUNCHES_IN_FLIGHT`]: acquired at [`run_card`] entry,
-/// released on drop (any exit path). The mutex is only held inside
-/// acquire/release — never across an await — so it cannot block the runtime.
-struct CardLaunchSlot(String);
+/// Duplicate daemons can temporarily share one Hangar home. A process-local
+/// mutex lets both pass the check+enqueue gap, so this uses the database-scoped
+/// kernel lock shared by every process opening that `hangar.db`. Process exit
+/// releases ownership automatically.
+struct CardLaunchSlot {
+    _slot: DatabaseOperationSlot,
+}
 
 impl CardLaunchSlot {
     /// Claim the launch slot for `issue_id`, or `None` when another launch of the
     /// same card is already in flight.
-    fn acquire(issue_id: &str) -> Option<Self> {
-        let mut set = CARD_LAUNCHES_IN_FLIGHT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        set.insert(issue_id.to_string()).then(|| Self(issue_id.to_string()))
-    }
-}
-
-impl Drop for CardLaunchSlot {
-    fn drop(&mut self) {
-        CARD_LAUNCHES_IN_FLIGHT
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .remove(&self.0);
+    async fn acquire(pool: &SqlitePool, issue_id: &str) -> Result<Option<Self>, sqlx::Error> {
+        DatabaseOperationSlot::try_acquire(pool, "card-launch", issue_id)
+            .await
+            .map(|slot| slot.map(|slot| Self { _slot: slot }))
     }
 }
 
@@ -6550,7 +6711,9 @@ async fn run_card_inner(
     //    serializes here, so the active check and enqueue below cannot both pass
     //    for one card. Admission failures above remain deterministic and need no
     //    launch serialization.
-    let _launch_slot = CardLaunchSlot::acquire(issue_id)
+    let _launch_slot = CardLaunchSlot::acquire(pool, issue_id)
+        .await
+        .map_err(CardRunError::Db)?
         .ok_or_else(|| CardRunError::ActiveRun("launching".to_string()))?;
 
     // 3. One active run per card (card = issue). Blocks a re-run — and a second
@@ -9145,6 +9308,145 @@ mod tests {
             method: method.into(),
             params,
         }
+    }
+
+    #[tokio::test]
+    async fn abandoned_action_and_start_receipts_become_unknown() {
+        use ainb_hangar_proto::fleet::{
+            ActionReceiptStatus, ControlAction, FleetActionParams, FleetProvider, FleetStartParams,
+        };
+        use ainb_hangar_store::repo::fleet::{FleetRepo, NewActionReceipt};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let action = FleetActionParams {
+            session_key: "claude:crashed".to_string(),
+            expected_version: 1,
+            request_id: "crashed-action".to_string(),
+            action: ControlAction::SendPrompt {
+                text: "hello".to_string(),
+            },
+        };
+        let action_slot =
+            DatabaseOperationSlot::try_acquire(store.pool(), "fleet-receipt", &action.request_id)
+                .await
+                .unwrap()
+                .expect("first daemon owns action receipt");
+        FleetRepo::upsert_action_receipt(
+            store.pool(),
+            &NewActionReceipt {
+                request_id: action.request_id.clone(),
+                session_key: action.session_key.clone(),
+                action_kind: action.action.kind().to_string(),
+                action_fingerprint: stable_fingerprint(
+                    &serde_json::to_string(&action.action).unwrap(),
+                ),
+                expected_version: action.expected_version,
+                idempotency_key: None,
+                status: "PENDING".to_string(),
+                detail: None,
+                session_version: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let live = execute_fleet_action(store.pool(), action.clone(), None, &sink()).await.unwrap();
+        assert_eq!(live.status, ActionReceiptStatus::Pending);
+        drop(action_slot);
+        let recovered = execute_fleet_action(store.pool(), action, None, &sink()).await.unwrap();
+        assert_eq!(recovered.status, ActionReceiptStatus::Unknown);
+        assert_eq!(recovered.detail.as_deref(), Some(ABANDONED_RECEIPT_DETAIL));
+
+        let start = FleetStartParams {
+            request_id: "crashed-start".to_string(),
+            provider: FleetProvider::Codex,
+            cwd: dir.path().to_string_lossy().into_owned(),
+            prompt: None,
+        };
+        let start_slot =
+            DatabaseOperationSlot::try_acquire(store.pool(), "fleet-receipt", &start.request_id)
+                .await
+                .unwrap()
+                .expect("first daemon owns start receipt");
+        FleetRepo::upsert_action_receipt(
+            store.pool(),
+            &NewActionReceipt {
+                request_id: start.request_id.clone(),
+                session_key: prospective_start_session_key(start.provider, &start.request_id),
+                action_kind: "start".to_string(),
+                action_fingerprint: stable_fingerprint(&serde_json::to_string(&start).unwrap()),
+                expected_version: 1,
+                idempotency_key: None,
+                status: "PENDING".to_string(),
+                detail: None,
+                session_version: None,
+                created_at: 1,
+                updated_at: 1,
+            },
+        )
+        .await
+        .unwrap();
+        let live = execute_fleet_start(store.pool(), start.clone(), &sink()).await.unwrap();
+        assert_eq!(live.receipt.status, ActionReceiptStatus::Pending);
+        drop(start_slot);
+        let recovered = execute_fleet_start(store.pool(), start, &sink()).await.unwrap();
+        assert_eq!(recovered.receipt.status, ActionReceiptStatus::Unknown);
+        assert_eq!(
+            recovered.receipt.detail.as_deref(),
+            Some(ABANDONED_RECEIPT_DETAIL)
+        );
+    }
+
+    const CARD_SLOT_CHILD_HOME: &str = "AINB_TEST_CARD_SLOT_CHILD_HOME";
+    const CARD_SLOT_CHILD_EXPECT: &str = "AINB_TEST_CARD_SLOT_CHILD_EXPECT";
+
+    #[test]
+    fn card_launch_slot_subprocess_probe() {
+        let Some(home) = std::env::var_os(CARD_SLOT_CHILD_HOME) else {
+            return;
+        };
+        let expected = std::env::var(CARD_SLOT_CHILD_EXPECT).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let acquired = runtime.block_on(async {
+            let store = Store::open_in(Path::new(&home)).await.unwrap();
+            CardLaunchSlot::acquire(store.pool(), "shared-card").await.unwrap()
+        });
+        assert_eq!(acquired.is_some(), expected == "acquired");
+    }
+
+    #[test]
+    fn card_launch_slot_serializes_duplicate_daemon_processes() {
+        let dir = tempfile::tempdir().unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap();
+        let store = runtime.block_on(Store::open_in(dir.path())).unwrap();
+        let slot = runtime
+            .block_on(CardLaunchSlot::acquire(store.pool(), "shared-card"))
+            .unwrap()
+            .expect("first daemon owns launch");
+
+        let run_probe = |expected: &str| {
+            std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "rpc::tests::card_launch_slot_subprocess_probe",
+                    "--nocapture",
+                ])
+                .env(CARD_SLOT_CHILD_HOME, dir.path())
+                .env(CARD_SLOT_CHILD_EXPECT, expected)
+                .status()
+                .unwrap()
+        };
+        assert!(
+            run_probe("blocked").success(),
+            "second daemon must not acquire live card launch"
+        );
+        drop(slot);
+        assert!(
+            run_probe("acquired").success(),
+            "kernel must release card launch when owner drops it"
+        );
     }
 
     #[tokio::test]
