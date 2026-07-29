@@ -70,6 +70,8 @@ pub struct FleetSessionPatch {
     pub confidence: Option<String>,
     /// Independent lifecycle state.
     pub lifecycle_state: Option<String>,
+    /// Active provider child-work count.
+    pub active_work_count: Option<i64>,
     /// Independent attention state.
     pub attention_state: Option<String>,
     /// Exact active request fingerprint. `Some(None)` explicitly clears it.
@@ -130,6 +132,8 @@ pub struct FleetSessionRow {
     pub display_name: Option<String>,
     /// Lifecycle state token.
     pub lifecycle_state: String,
+    /// Number of active provider child-work items.
+    pub active_work_count: i64,
     /// Attention state token.
     pub attention_state: String,
     /// Fingerprint of current structured request or approval.
@@ -762,7 +766,7 @@ const SESSION_SELECT_BY_KEY: &str = "SELECT session_key, provider, provider_sess
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, version, updated_revision \
+    transport_authority, active_work_count, version, updated_revision \
     FROM fleet_session WHERE session_key = ?";
 
 const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session_id, \
@@ -771,7 +775,7 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, version, updated_revision \
+    transport_authority, active_work_count, version, updated_revision \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
 
 async fn session_by_key_tx(
@@ -825,6 +829,7 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
             .lifecycle_state
             .clone()
             .unwrap_or_else(|| "UNKNOWN".to_string()),
+        active_work_count: event.patch.active_work_count.unwrap_or(0),
         attention_state: event.patch.attention_state.clone().unwrap_or_else(|| "NONE".to_string()),
         current_request_fingerprint: event.patch.current_request_fingerprint.clone().flatten(),
         management_state: event
@@ -900,14 +905,17 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
         changed = true;
     }
 
-    if let Some(state) = &event.patch.lifecycle_state {
+    if event.patch.lifecycle_state.is_some() || event.patch.active_work_count.is_some() {
         if should_replace(
             authority,
             event.observed_at,
             &row.lifecycle_authority,
             row.lifecycle_updated_at,
         ) {
-            row.lifecycle_state.clone_from(state);
+            assign_if_some(&mut row.lifecycle_state, &event.patch.lifecycle_state);
+            if let Some(count) = event.patch.active_work_count {
+                row.active_work_count = count;
+            }
             row.lifecycle_updated_at = event.observed_at;
             row.lifecycle_authority.clone_from(&authority_token);
             changed = true;
@@ -982,8 +990,8 @@ async fn insert_session(
             confidence, discovered_at, last_observed_at, metadata_updated_at, \
             metadata_authority, lifecycle_updated_at, lifecycle_authority, \
             attention_updated_at, attention_authority, transport_updated_at, \
-            transport_authority, version, updated_revision) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            transport_authority, active_work_count, version, updated_revision) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     bind_session(query, row).execute(&mut **tx).await?;
     Ok(())
@@ -1002,7 +1010,7 @@ async fn update_session(
             discovered_at = ?, last_observed_at = ?, metadata_updated_at = ?, \
             metadata_authority = ?, lifecycle_updated_at = ?, lifecycle_authority = ?, \
             attention_updated_at = ?, attention_authority = ?, transport_updated_at = ?, \
-            transport_authority = ?, version = ?, updated_revision = ? \
+            transport_authority = ?, active_work_count = ?, version = ?, updated_revision = ? \
          WHERE session_key = ?",
     )
     .bind(&row.provider)
@@ -1029,6 +1037,7 @@ async fn update_session(
     .bind(&row.attention_authority)
     .bind(row.transport_updated_at)
     .bind(&row.transport_authority)
+    .bind(row.active_work_count)
     .bind(row.version)
     .bind(row.updated_revision)
     .bind(&row.session_key)
@@ -1067,6 +1076,7 @@ fn bind_session<'q>(
         .bind(&row.attention_authority)
         .bind(row.transport_updated_at)
         .bind(&row.transport_authority)
+        .bind(row.active_work_count)
         .bind(row.version)
         .bind(row.updated_revision)
 }
@@ -1098,6 +1108,7 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sq
         attention_authority: row.try_get("attention_authority")?,
         transport_updated_at: row.try_get("transport_updated_at")?,
         transport_authority: row.try_get("transport_authority")?,
+        active_work_count: row.try_get("active_work_count")?,
         version: row.try_get("version")?,
         updated_revision: row.try_get("updated_revision")?,
     })
