@@ -82,18 +82,18 @@ The CLI:
 
 ## Hook events
 
-Claude and Codex both use PascalCase event names, but Codex now exposes a
-separate `PermissionRequest` hook instead of a `Notification` hook. The
-human-facing registrations are:
+Claude and Codex both use PascalCase event names. Every documented event is
+registered and retained by Hangar. The notification inbox independently keeps
+only human-facing events:
 
 | Agent | Hooks registered | Meaning |
 | --- | --- | --- |
-| Claude Code | `Notification`, `Stop` | awaiting input / permission prompt, turn finished |
-| Codex CLI | `PermissionRequest`, `Stop` | approval prompt, turn finished |
+| Claude Code | all 30 documented hooks | lifecycle, tool, task, worktree, compact, and attention state |
+| Codex CLI | all 11 documented CLI hooks | lifecycle, tool, compact, subagent, approval, and session-end state |
 | GitHub Copilot CLI | `notification`, `agentStop` | awaiting input / permission prompt, turn finished |
 
-Only the user-facing events are hooked on every agent; telemetry events are
-intentionally left out so they don't bury the signal.
+Telemetry reaches the durable provider log, never the operator inbox. This
+keeps lifecycle projections accurate without burying attention signal.
 
 The matcher `Notification:idle_prompt` (Claude) and `PermissionRequest`
 (Codex) carry different raw names but the same user-facing shape: the agent
@@ -120,12 +120,9 @@ inbox detail view can show full forensics.
 
 ## ATC plumbing (event-driven orchestration)
 
-The same `notify.sh` doubles as the shell shim for the **event-driven ATC
-plumbing**. It is dormant by default and activates only when the hook was
-installed under ATC management — i.e. the command carries `AINB_MANAGED=atc`
-(set by the lifecycle-hook block that `ainb fleet atc setup` merges into
-`~/.claude/settings.json`). A plain notifyd-only install never sets it, so the
-plumbing block is skipped and leaf sessions pay nothing.
+The same `notify.sh` sends Claude and Codex hook payloads into Hangar's durable
+provider log. `AINB_MANAGED=atc` adds ATC-only structured control: completion
+routing and synchronous Claude answer or permission brokerage.
 
 When active, after delivering the notifyd envelope the script forwards the parsed
 event to the Rust side:
@@ -151,10 +148,8 @@ replaces reliance on the claude-peers broker's lossy delivery path. Full design,
 formats, and the consecutive-block budget are documented in
 [`docs/atc-plumbing.md`](../../docs/atc-plumbing.md).
 
-> The lifecycle hooks are installed into `~/.claude/settings.json` by
-> `ainb fleet atc setup` via a read-preserve-modify-write merge that keeps the
-> reflect plugin's and notifyd's hooks intact — they are **not** part of this
-> marketplace manifest (which stays notifyd-only: `Notification` + `Stop`).
+> `ainb fleet atc setup` merges the same Claude lifecycle registrations into
+> `~/.claude/settings.json` for managed sessions while preserving other hooks.
 
 ## See also
 

@@ -3,15 +3,15 @@ title: "ainb-hooks"
 description: "Claude Code / Codex / Copilot plugin that emits session lifecycle events to the ainb notification inbox over a Unix socket."
 ---
 
-`ainb-hooks` (v0.2.0) is a **host-agent hook plugin** — it is loaded by Claude Code, Codex CLI, or GitHub Copilot CLI, not by the `ainb` TUI. (Contrast with the ainb v2 subprocess plugins such as `burndown` and `witr`, which run inside `ainb`.) It registers lifecycle hooks on the host agent and forwards each event to the **ainb notification inbox** — the `ainb-notifyd` daemon — over a Unix socket, powering session-state badges, the Inbox screen, and optional OS notifications in `ainb-tui`. It pairs with the [Inbox & notifications](../../tui/inbox-notifications.md) daemon (`ainb-notifyd`) — host code compiled into `ainb-core`, not a plugin — which is the consumer on the other end of the socket.
+`ainb-hooks` (v0.2.0) is a **host-agent hook plugin**. Claude Code and Codex CLI events enter Hangar's durable provider log through `ainb-notifyd`; only attention events enter the notification inbox. It is not an `ainb` TUI subprocess plugin.
 
 ## How it works
 
 ![ainb-hooks — how it works](../../assets/diagrams/ainb-hooks.svg)
 
-The plugin's `.claude-plugin/plugin.json` registers only the **actionable** lifecycle events with a single command: `AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh`. Codex is registered via `codex/hooks.json` (with `AINB_AGENT=codex`), and Copilot via `copilot/hooks.json` (with `AINB_AGENT=copilot`). Each hook has a 5-second timeout so a slow delivery never stalls the agent.
+The plugin's `.claude-plugin/plugin.json` registers every documented Claude lifecycle hook with `AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh`. Codex registers every documented CLI hook via `codex/hooks.json` with `AINB_AGENT=codex`; Copilot remains `copilot/hooks.json` with `AINB_AGENT=copilot`. Each hook has a 5-second timeout so a slow delivery never stalls the agent.
 
-**Only events that need the human are hooked** — Claude/Copilot use `Notification`/`notification` for awaiting input and permission prompts, Codex uses `PermissionRequest` for approvals, and all three use `Stop`/`agentStop` for turn completion. Telemetry — `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop` — is **not** registered: `PostToolUse` alone fires dozens of times per turn and would bury the signal in the inbox. As a second line of defence, `ainb-notifyd` also drops any non-user-facing event on arrival (see `crates/ainb-plugin-notifyd/src/listener.rs`), so even a stale install never accumulates noise.
+Every observed Claude and Codex event is appended to Hangar's durable provider log, including tool and subagent activity. `ainb-notifyd` still drops non-user-facing events, so telemetry never becomes inbox noise.
 
 `hooks/notify.sh` is the universal normalizer. Claude Code pipes the hook payload as JSON on stdin; Codex passes it as `argv[1]`. The script autodetects the source, extracts the event name, session id, and cwd (via `jq`, falling back to `grep` in minimal environments), and wraps the verbatim original payload in a normalized envelope: `{protocol_version, agent, raw_event, session_id, cwd, project, ts, payload}`. The `raw_event` field preserves the original event name (e.g. `Notification:idle_prompt`) so semantic mapping happens in the consumer, not on the wire.
 
@@ -25,18 +25,16 @@ This plugin ships only hooks plus the shared `notify.sh` script — no skills, c
 
 ### Hooks
 
-Only the events that need the human are registered:
+Claude and Codex retain every documented hook in Hangar. Inbox handling remains attention-only:
 
 | Agent | Event | What fires | Why it's actionable |
 | --- | --- | --- | --- |
-| Claude Code | `Notification` | Agent notifications, incl. `Notification:idle_prompt` and permission prompts | the agent is blocked on you |
-| Claude Code | `Stop` | Agent turn / session stops | the agent finished — come back |
-| Codex CLI | `PermissionRequest` | Exec / patch / permission approval prompts | the agent is blocked on approval |
-| Codex CLI | `Stop` | Agent turn / session stops | the agent finished — come back |
+| Claude Code | all 30 documented hooks | full lifecycle and workload record | durable projection source |
+| Codex CLI | all 11 documented CLI hooks | full lifecycle and workload record | durable projection source |
 | GitHub Copilot CLI | `notification` | Agent notifications and permission prompts | the agent is blocked on you |
 | GitHub Copilot CLI | `agentStop` | Agent turn / session stops | the agent finished — come back |
 
-Deliberately **not** registered (telemetry / activity noise — would bury the signal): `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PostToolUse`, `PreCompact`, `PostCompact`, `SubagentStart`, `SubagentStop`. `PostToolUse` alone fires once per tool call (dozens per turn). The daemon additionally drops any non-user-facing event on arrival as a safety net.
+Telemetry stays out of the inbox because the daemon drops non-user-facing events on arrival.
 
 ### Components
 
@@ -63,7 +61,7 @@ For **Claude**, the installer shells out to the `claude` plugin CLI — ensuring
 
 ## Using it
 
-- Once installed, delivery is fully automatic — every registered actionable event on the host agent (`Notification`/`notification`, `PermissionRequest`, `Stop`/`agentStop`) is forwarded to the inbox with no user action. Telemetry events are not hooked, so the inbox only ever shows things that need you.
+- Once installed, every registered Claude and Codex event is forwarded to Hangar with no user action. Only actionable events surface in the inbox.
 - `Notification:idle_prompt` and `PermissionRequest` events surface in `ainb-tui` as attention markers so you can see which sessions need you.
 - Events show up as session-state badges and in the dedicated Inbox screen in `ainb-tui`; the inbox detail view exposes the full original hook JSON (carried in `payload`) for forensics.
 - Run `ainb-notifyd status` to confirm the plugin is wired for each agent; if `ainb-notifyd` is not running, the next hook fire lazily spawns it (or buffers to the fallback file).
