@@ -1,0 +1,6 @@
+# Relative source path|literal fragment. Each entry permits one opaque JSONValue
+# encoding or decoding implementation line. Semantic inspection stays forbidden.
+Sources/FleetRPC/FleetWire.swift|case array([JSONValue])
+Sources/FleetRPC/FleetWire.swift|case object([String: JSONValue])
+Sources/FleetRPC/FleetWire.swift|case .array(let value)
+Sources/FleetRPC/FleetWire.swift|case .object(let value)
