@@ -302,7 +302,7 @@ jobs:
         run: cargo run -p xtask -- gen-catalog-index --toolkit-root "${TOOLKIT_DIR}" --release-tag "${AINB_TOOLKIT_REF}" --out "${OUT_DIR}/catalog-index.json"
 
       - name: Create Release
-        uses: softprops/action-gh-release@v1
+        uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ needs.prepare.outputs.version }}
           name: v${{ needs.prepare.outputs.version }}

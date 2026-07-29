@@ -471,19 +471,29 @@ pub async fn boot(once: bool) -> anyhow::Result<()> {
     // Managed Codex transport starts independently from daemon readiness. A
     // missing or incompatible Codex binary leaves hook and tmux observation
     // running, while the service records an honest transport downgrade.
-    let _codex_manager = (!once
+    let _codex_manager = if !once
         && std::env::var_os("AINB_CODEX_MANAGED")
             .as_deref()
-            .is_none_or(|value| value != "0"))
-    .then(|| {
+            .is_none_or(|value| value != "0")
+    {
         let binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
         let socket = dir.join("codex-app-server.sock");
-        crate::fleet_provider::codex_manager::spawn_service(
+        // Reap any app-server orphaned by a SIGKILLed/OOM-reaped prior daemon (or a
+        // dead plugin broker) BEFORE we spawn our own. Rust Drop never runs after
+        // SIGKILL, so this boot-time sweep is the only backstop that survives it.
+        let reaped =
+            crate::fleet_provider::codex_manager::reap_orphaned_codex_servers(&socket).await;
+        if reaped > 0 {
+            tracing::warn!(reaped, "reaped orphaned codex app-server processes at boot");
+        }
+        Some(crate::fleet_provider::codex_manager::spawn_service(
             crate::fleet_provider::codex_manager::CodexManagerConfig::new(binary, socket),
             store.pool().clone(),
             broker.sink(),
-        )
-    });
+        ))
+    } else {
+        None
+    };
 
     // P5 (T6): reconcile the agent-profile index against the on-disk masters and
     // spawn an fs-watch so an edit-on-disk of `{hangar_home}/profiles/<slug>.md`

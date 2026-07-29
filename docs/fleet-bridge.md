@@ -1,3 +1,7 @@
+---
+title: "`ainb fleet bridge` — native phone bridge (Telegram + Slack + Discord)"
+---
+
 # `ainb fleet bridge` — native phone bridge (Telegram + Slack + Discord)
 
 A single-binary Rust daemon, built into `ainb`, that relays messages **two-way**

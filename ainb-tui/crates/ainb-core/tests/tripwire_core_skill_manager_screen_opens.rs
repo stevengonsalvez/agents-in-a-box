@@ -161,9 +161,11 @@ fn pressing_m_on_home_opens_skill_manager_screen() {
         .expect("tmux new-session");
     assert!(status.success(), "tmux new-session failed");
 
+    let ainb_home = home_tmp.path().join(".agents-in-a-box");
     let cmd = format!(
-        "HOME={} exec {} 2>&1",
+        "unset XDG_CONFIG_HOME; HOME={} AINB_HOME={} exec {} 2>&1",
         home_tmp.path().display(),
+        ainb_home.display(),
         bin.display()
     );
     Command::new("tmux")
