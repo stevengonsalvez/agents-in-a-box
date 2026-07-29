@@ -1,0 +1,92 @@
+# ARGV GOLDEN: codex
+#
+# Frozen output of Runner::provider_command for every codex case in the
+# matrix: mode x model x cli_args. One token per line; <PROMPT> and
+# <*_BIN> are normalised so the file is stable across machines.
+#
+# Regenerate with UPDATE_GOLDEN=1 cargo test -p ainb-hangar-daemon \
+#   --test argv_golden_matrix    (only when the change is INTENDED).
+
+=== case: codex | headless | model=default | cli_args=absent
+program: <CODEX_BIN>
+argv:
+  exec
+  --skip-git-repo-check
+  -s
+  danger-full-access
+  --json
+  --
+  <PROMPT>
+
+=== case: codex | headless | model=default | cli_args=present
+program: <CODEX_BIN>
+argv:
+  exec
+  --skip-git-repo-check
+  -s
+  danger-full-access
+  --json
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: codex | headless | model=pinned | cli_args=absent
+program: <CODEX_BIN>
+argv:
+  exec
+  --skip-git-repo-check
+  -s
+  danger-full-access
+  --json
+  -m
+  pinned-model-id
+  --
+  <PROMPT>
+
+=== case: codex | headless | model=pinned | cli_args=present
+program: <CODEX_BIN>
+argv:
+  exec
+  --skip-git-repo-check
+  -s
+  danger-full-access
+  --json
+  -m
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: codex | interactive | model=default | cli_args=absent
+program: <CODEX_BIN>
+argv:
+  --
+  <PROMPT>
+
+=== case: codex | interactive | model=default | cli_args=present
+program: <CODEX_BIN>
+argv:
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: codex | interactive | model=pinned | cli_args=absent
+program: <CODEX_BIN>
+argv:
+  -m
+  pinned-model-id
+  --
+  <PROMPT>
+
+=== case: codex | interactive | model=pinned | cli_args=present
+program: <CODEX_BIN>
+argv:
+  -m
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
