@@ -84,6 +84,7 @@ struct AINBFleetApp: App {
               let encodedPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
               let key = String(encodedPath.dropFirst()).removingPercentEncoding,
               !key.isEmpty else { return }
+        store.refresh()
         store.selectedSessionKey = key
         openWindow(id: "fleet")
     }
