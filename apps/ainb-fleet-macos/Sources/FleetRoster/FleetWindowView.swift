@@ -11,70 +11,28 @@ struct FleetWindowView: View {
     @State private var atcPresented = false
     @State private var timelinePresented = false
 
+    private var visibleSessions: [FleetSession] {
+        FleetRosterPresentation.visibleSessions(
+            store.sessions,
+            search: search,
+            filters: presentation.filters,
+            sort: presentation.sort
+        )
+    }
+
     var body: some View {
-        NavigationSplitView {
-            List(selection: $store.selectedSessionKey) {
-                ForEach(FleetRosterPresentation.visibleSessions(store.sessions, search: search, filters: presentation.filters, sort: presentation.sort), id: \.sessionKey) { session in
-                    HStack {
-                        Image(systemName: FleetRosterPresentation.statusSymbol(for: session, connection: store.connectionState))
-                            .accessibilityHidden(true)
-                        VStack(alignment: .leading) {
-                            Text(session.displayName ?? session.sessionKey)
-                            Text("\(session.provider.rawValue) · \(FleetRosterPresentation.statusLabel(for: session))").font(.caption)
-                            Text(session.cwd).font(.caption2).foregroundStyle(.secondary)
-                            Text("Updated \(FleetRosterPresentation.freshnessLabel(for: session))").font(.caption2).foregroundStyle(.secondary)
-                        }
-                    }
-                    .tag(session.sessionKey)
-                    .accessibilityIdentifier("fleet.row.\(session.sessionKey)")
-                    .accessibilityElement(children: .combine)
-                    .accessibilityLabel(session.displayName ?? session.sessionKey)
-                    .accessibilityValue(FleetRosterPresentation.semanticStatus(for: session, connection: store.connectionState))
-                }
+        HStack(spacing: 0) {
+            roster
+                .frame(minWidth: 290, idealWidth: 330, maxWidth: 380)
+                .background(FleetPalette.sidebar)
+
+            VStack(spacing: 0) {
+                commandBar
+                Divider().overlay(FleetPalette.separator)
+                detail
             }
-            .searchable(text: $search)
-            .toolbar {
-                ToolbarItem {
-                    Toggle("Needs you", isOn: $presentation.filters.attentionOnly)
-                        .accessibilityIdentifier("fleet.filter.attention")
-                }
-                ToolbarItem { Picker("Sort", selection: $presentation.sort) { ForEach(FleetRosterSort.allCases) { Text($0.label).tag($0) } } }
-                ToolbarItem { Picker("Lifecycle", selection: $presentation.filters.lifecycle) { Text("Any lifecycle").tag(LifecycleState?.none); ForEach([LifecycleState.starting, .running, .turnComplete, .idle, .exited, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
-                ToolbarItem { Picker("Provider", selection: $presentation.filters.provider) { Text("Any provider").tag(FleetProvider?.none); ForEach([FleetProvider.claude, .codex, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
-                ToolbarItem { Picker("Management", selection: $presentation.filters.management) { Text("Any management").tag(ManagementState?.none); ForEach([ManagementState.managed, .degraded], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
-                ToolbarItem { Picker("Transport", selection: $presentation.filters.transportHealth) { Text("Any transport").tag(TransportHealth?.none); ForEach([TransportHealth.healthy, .degraded, .unavailable, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
-                ToolbarItem {
-                    Button("Quick switch") { switcherPresented = true }
-                        .accessibilityIdentifier("fleet.quick-switch.open")
-                }
-                ToolbarItem { Button("Start") { startPresented = true }.disabled(!store.canStart).accessibilityIdentifier("fleet.start.open") }
-                ToolbarItem { Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts).accessibilityIdentifier("fleet.receipts.open") }
-                ToolbarItemGroup {
-                    Button("ATC") { atcPresented = true }.disabled(!store.canReadATC).accessibilityIdentifier("fleet.atc.open")
-                    Button("Timeline") { timelinePresented = true }.disabled(!store.canReadTimeline).accessibilityIdentifier("fleet.timeline.open")
-                    Button("Broadcast") { broadcastPresented = true }.disabled(!store.canBroadcast).accessibilityIdentifier("fleet.broadcast.open")
-                }
-            }
-        } detail: {
-            if let key = store.selectedSessionKey, let session = store.sessions.first(where: { $0.sessionKey == key }) {
-                FleetSessionDetailView(store: store, session: session, connection: store.connectionState)
-            } else {
-                VStack(spacing: 8) {
-                    Image(systemName: "bolt.circle")
-                        .font(.largeTitle)
-                        .accessibilityHidden(true)
-                    Text("Select a Fleet session")
-                        .font(.title3.weight(.semibold))
-                    Text("Choose a session from the sidebar to inspect its current Fleet state.")
-                }
-                .foregroundStyle(.primary)
-                .accessibilityElement(children: .combine)
-                .accessibilityLabel("Select a Fleet session")
-                .accessibilityHint("Choose a session from the sidebar to inspect its current Fleet state.")
-            }
-        }
-        .overlay(alignment: .top) {
-            if !store.connectionState.isLive { Text(store.connectionState.message).padding(8).background(.yellow.opacity(0.2)) }
+            .frame(maxWidth: .infinity, maxHeight: .infinity)
+            .background(FleetPalette.canvas)
         }
         .sheet(isPresented: $switcherPresented) { FleetQuickSwitcher(store: store, sort: presentation.sort, isPresented: $switcherPresented) }
         .sheet(isPresented: $startPresented) { FleetStartForm(store: store, isPresented: $startPresented) }
@@ -82,7 +40,262 @@ struct FleetWindowView: View {
         .sheet(isPresented: $atcPresented) { FleetATCList(store: store) }
         .sheet(isPresented: $timelinePresented) { FleetTimelineList(store: store) }
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
-        .frame(minWidth: 620, minHeight: 520)
+        .onAppear(perform: selectFirstVisibleSession)
+        .onReceive(store.$sessions) { selectFirstVisibleSession(in: $0) }
+        .frame(minWidth: 760, minHeight: 560)
+    }
+
+    private var roster: some View {
+        VStack(spacing: 0) {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack(alignment: .firstTextBaseline) {
+                    Text("Fleet")
+                        .font(.title3.weight(.bold))
+                    Spacer()
+                    Text("\(visibleSessions.count) shown")
+                        .font(.caption.weight(.medium))
+                        .foregroundStyle(FleetPalette.muted)
+                }
+                TextField("Search sessions", text: $search)
+                    .textFieldStyle(.roundedBorder)
+                    .accessibilityIdentifier("fleet.search")
+            }
+            .padding(16)
+
+            if visibleSessions.isEmpty {
+                FleetEmptyRoster(query: search, hasFilters: presentation.filters != .all) {
+                    search = ""
+                    presentation.filters = .all
+                }
+            } else {
+                ScrollView {
+                    LazyVStack(spacing: 5) {
+                        ForEach(visibleSessions, id: \.sessionKey) { session in
+                            FleetRosterRow(
+                                session: session,
+                                isSelected: store.selectedSessionKey == session.sessionKey,
+                                connection: store.connectionState
+                            ) {
+                                store.selectedSessionKey = session.sessionKey
+                            }
+                        }
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.bottom, 12)
+                }
+            }
+        }
+    }
+
+    private var commandBar: some View {
+        HStack(spacing: 10) {
+            connectionBadge
+
+            Toggle("Needs you", isOn: $presentation.filters.attentionOnly)
+                .toggleStyle(.button)
+                .buttonStyle(.bordered)
+                .accessibilityIdentifier("fleet.filter.attention")
+
+            Menu {
+                Button("All providers") { presentation.filters.provider = nil }
+                Divider()
+                Button("Claude") { presentation.filters.provider = .claude }
+                Button("Codex") { presentation.filters.provider = .codex }
+                Button("Unknown") { presentation.filters.provider = .unknown }
+            } label: {
+                Label(providerFilterLabel, systemImage: "slider.horizontal.3")
+            }
+            .accessibilityIdentifier("fleet.filter.provider")
+
+            Menu {
+                Button("Priority") { presentation.sort = .priority }
+                Button("Recent") { presentation.sort = .recent }
+                Divider()
+                Button("Any lifecycle") { presentation.filters.lifecycle = nil }
+                ForEach([LifecycleState.starting, .running, .turnComplete, .idle, .exited, .unknown], id: \.self) { lifecycle in
+                    Button(lifecycle.rawValue.replacingOccurrences(of: "_", with: " ").capitalized) {
+                        presentation.filters.lifecycle = lifecycle
+                    }
+                }
+            } label: {
+                Label(presentation.sort == .priority ? "Priority" : "Recent", systemImage: "arrow.up.arrow.down")
+            }
+
+            Spacer(minLength: 0)
+
+            Button { switcherPresented = true } label: { Image(systemName: "magnifyingglass") }
+                .accessibilityLabel("Quick switch")
+                .accessibilityIdentifier("fleet.quick-switch.open")
+            Button("Start") { startPresented = true }
+                .disabled(!store.canStart)
+                .accessibilityIdentifier("fleet.start.open")
+            Menu {
+                Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts)
+                Button("ATC") { atcPresented = true }.disabled(!store.canReadATC)
+                Button("Timeline") { timelinePresented = true }.disabled(!store.canReadTimeline)
+                Button("Broadcast") { broadcastPresented = true }.disabled(!store.canBroadcast)
+            } label: {
+                Image(systemName: "ellipsis.circle")
+            }
+        }
+        .controlSize(.regular)
+        .padding(.horizontal, 18)
+        .padding(.vertical, 12)
+    }
+
+    @ViewBuilder private var detail: some View {
+        if let key = store.selectedSessionKey,
+           let session = store.sessions.first(where: { $0.sessionKey == key }) {
+            FleetSessionDetailView(store: store, session: session, connection: store.connectionState)
+        } else {
+            FleetEmptyDetail()
+        }
+    }
+
+    private var connectionBadge: some View {
+        HStack(spacing: 6) {
+            Circle()
+                .fill(store.connectionState.isLive ? FleetPalette.mint : FleetPalette.amber)
+                .frame(width: 7, height: 7)
+            Text(store.connectionState.isLive ? "Live" : "Offline")
+                .font(.caption.weight(.semibold))
+        }
+        .foregroundStyle(FleetPalette.ink)
+        .padding(.horizontal, 9)
+        .padding(.vertical, 6)
+        .background(FleetPalette.control, in: Capsule())
+        .accessibilityLabel(store.connectionState.message)
+    }
+
+    private var providerFilterLabel: String {
+        switch presentation.filters.provider {
+        case .claude: "Claude"
+        case .codex: "Codex"
+        case .unknown: "Unknown"
+        case nil: "All providers"
+        }
+    }
+
+    private func selectFirstVisibleSession() {
+        selectFirstVisibleSession(in: visibleSessions)
+    }
+
+    private func selectFirstVisibleSession(in sessions: [FleetSession]) {
+        let matching = FleetRosterPresentation.visibleSessions(
+            sessions,
+            search: search,
+            filters: presentation.filters,
+            sort: presentation.sort
+        )
+        guard !matching.isEmpty,
+              !matching.contains(where: { $0.sessionKey == store.selectedSessionKey }) else { return }
+        store.selectedSessionKey = matching.first?.sessionKey
+    }
+}
+
+private enum FleetPalette {
+    static let canvas = Color(red: 0.055, green: 0.071, blue: 0.086)
+    static let sidebar = Color(red: 0.043, green: 0.057, blue: 0.071)
+    static let control = Color(red: 0.091, green: 0.118, blue: 0.141)
+    static let selected = Color(red: 0.075, green: 0.172, blue: 0.255)
+    static let separator = Color.white.opacity(0.08)
+    static let ink = Color(red: 0.89, green: 0.92, blue: 0.95)
+    static let muted = Color(red: 0.57, green: 0.64, blue: 0.71)
+    static let mint = Color(red: 0.37, green: 0.88, blue: 0.76)
+    static let amber = Color(red: 0.96, green: 0.72, blue: 0.23)
+    static let coral = Color(red: 0.95, green: 0.43, blue: 0.49)
+}
+
+private struct FleetRosterRow: View {
+    let session: FleetSession
+    let isSelected: Bool
+    let connection: FleetConnectionState
+    let select: () -> Void
+
+    var body: some View {
+        Button(action: select) {
+            HStack(alignment: .top, spacing: 10) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                    .padding(.top, 6)
+                VStack(alignment: .leading, spacing: 4) {
+                    HStack(spacing: 6) {
+                        Text(session.displayName ?? session.sessionKey)
+                            .font(.subheadline.weight(.semibold))
+                            .lineLimit(1)
+                        Spacer(minLength: 0)
+                        Text(session.provider.rawValue.uppercased())
+                            .font(.caption2.weight(.bold))
+                            .foregroundStyle(FleetPalette.muted)
+                    }
+                    Text(FleetRosterPresentation.statusLabel(for: session).replacingOccurrences(of: "_", with: " "))
+                        .font(.caption)
+                        .foregroundStyle(isSelected ? FleetPalette.ink : FleetPalette.muted)
+                        .lineLimit(1)
+                    Text(session.cwd)
+                        .font(.caption2)
+                        .foregroundStyle(FleetPalette.muted)
+                        .lineLimit(1)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 9)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(isSelected ? FleetPalette.selected : .clear, in: RoundedRectangle(cornerRadius: 10, style: .continuous))
+        }
+        .buttonStyle(.plain)
+        .accessibilityIdentifier("fleet.row.\(session.sessionKey)")
+        .accessibilityLabel(session.displayName ?? session.sessionKey)
+        .accessibilityValue(FleetRosterPresentation.semanticStatus(for: session, connection: connection))
+    }
+
+    private var statusColor: Color {
+        if session.attention != .none { return FleetPalette.amber }
+        if session.management == .degraded || session.transportHealth != .healthy { return FleetPalette.coral }
+        return FleetPalette.mint
+    }
+}
+
+private struct FleetEmptyRoster: View {
+    let query: String
+    let hasFilters: Bool
+    let reset: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            Image(systemName: "line.3.horizontal.decrease.circle")
+                .font(.title2)
+                .foregroundStyle(FleetPalette.muted)
+            Text(query.isEmpty ? "No matching sessions" : "No match for \(query)")
+                .font(.headline)
+            Text(hasFilters ? "Clear filters to inspect the rest of Fleet." : "The daemon has not reported sessions yet.")
+                .font(.caption)
+                .foregroundStyle(FleetPalette.muted)
+            if hasFilters || !query.isEmpty {
+                Button("Clear filters", action: reset)
+                    .buttonStyle(.bordered)
+            }
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .topLeading)
+        .padding(20)
+    }
+}
+
+private struct FleetEmptyDetail: View {
+    var body: some View {
+        VStack(spacing: 12) {
+            Image(systemName: "scope")
+                .font(.system(size: 28, weight: .medium))
+                .foregroundStyle(FleetPalette.mint)
+            Text("Choose a Fleet session")
+                .font(.title3.weight(.semibold))
+            Text("Select a session to inspect current state and send exact controls.")
+                .foregroundStyle(FleetPalette.muted)
+        }
+        .frame(maxWidth: .infinity, maxHeight: .infinity)
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel("Choose a Fleet session")
     }
 }
 
