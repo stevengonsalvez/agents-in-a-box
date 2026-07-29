@@ -59,7 +59,18 @@ struct FleetWindowView: View {
             if let key = store.selectedSessionKey, let session = store.sessions.first(where: { $0.sessionKey == key }) {
                 FleetSessionDetailView(store: store, session: session, connection: store.connectionState)
             } else {
-                ContentUnavailableView("Select a Fleet session", systemImage: "bolt.circle")
+                VStack(spacing: 8) {
+                    Image(systemName: "bolt.circle")
+                        .font(.largeTitle)
+                        .accessibilityHidden(true)
+                    Text("Select a Fleet session")
+                        .font(.title3.weight(.semibold))
+                    Text("Choose a session from the sidebar to inspect its current Fleet state.")
+                }
+                .foregroundStyle(.primary)
+                .accessibilityElement(children: .combine)
+                .accessibilityLabel("Select a Fleet session")
+                .accessibilityHint("Choose a session from the sidebar to inspect its current Fleet state.")
             }
         }
         .overlay(alignment: .top) {

@@ -23,6 +23,10 @@ struct AINBFleetApp: App {
     private var standardScenes: some Scene {
         MenuBarExtra {
             FleetMenuBarView(store: store, openFleet: openFleet)
+                .onReceive(NotificationCenter.default.publisher(for: .fleetNotificationOpen)) { notification in
+                    guard let url = notification.object as? URL else { return }
+                    openDeepLink(url)
+                }
         } label: {
             Label("Fleet", systemImage: FleetStatusPresentation.symbol(for: store.connectionState, needsYou: store.needsYouCount, sessions: store.sessions))
                 .accessibilityLabel(FleetStatusPresentation.label(active: store.activeCount, needsYou: store.needsYouCount, state: store.connectionState, sessions: store.sessions))
@@ -75,7 +79,12 @@ struct AINBFleetApp: App {
     }
 
     private func openDeepLink(_ url: URL) {
-        guard url.scheme == "ainbfleet", url.host == "session", let key = url.pathComponents.last else { return }
+        guard url.scheme == "ainbfleet",
+              url.host == "session",
+              let encodedPath = URLComponents(url: url, resolvingAgainstBaseURL: false)?.percentEncodedPath,
+              let key = String(encodedPath.dropFirst()).removingPercentEncoding,
+              !key.isEmpty else { return }
+        store.refresh()
         store.selectedSessionKey = key
         openWindow(id: "fleet")
     }

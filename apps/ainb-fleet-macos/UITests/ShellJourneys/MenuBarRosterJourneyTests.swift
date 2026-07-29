@@ -32,4 +32,15 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         waitFor(fleetRow("claude:running"))
 
     }
+
+    @MainActor
+    func testFleetWindowExposesVoiceOverLabels() throws {
+        try fixture.seed(eventID: "alpha", sessionID: "alpha", eventType: "AskUserQuestion", observedAt: 1_700_000_000_001)
+        launchFleetWindow()
+        let row = fleetRow("claude:alpha")
+        waitFor(row)
+
+        XCTAssertEqual(row.label, "claude:alpha")
+        XCTAssertEqual(row.value as? String, "IDLE · ASK")
+    }
 }
