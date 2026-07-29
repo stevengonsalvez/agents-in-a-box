@@ -37,6 +37,8 @@
 		A10000000000000000000047 /* MenuBarRosterJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004B /* MenuBarRosterJourneyTests.swift */; };
 		A1000000000000000000004F /* OfflineAndReconnectJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000050 /* OfflineAndReconnectJourneyTests.swift */; };
 		A10000000000000000000058 /* ProtocolCompatibilityJourneyTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000059 /* ProtocolCompatibilityJourneyTests.swift */; };
+		A1000000000000000000005D /* FleetNotificationPolicy.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005F /* FleetNotificationPolicy.swift */; };
+		A1000000000000000000005E /* FleetNotificationCenter.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000060 /* FleetNotificationCenter.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -80,6 +82,8 @@
 		A1000000000000000000004B /* MenuBarRosterJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/MenuBarRosterJourneyTests.swift; sourceTree = SOURCE_ROOT; };
 		A10000000000000000000050 /* OfflineAndReconnectJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/OfflineAndReconnectJourneyTests.swift; sourceTree = SOURCE_ROOT; };
 		A10000000000000000000059 /* ProtocolCompatibilityJourneyTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = UITests/ShellJourneys/ProtocolCompatibilityJourneyTests.swift; sourceTree = SOURCE_ROOT; };
+		A1000000000000000000005F /* FleetNotificationPolicy.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Notifications/FleetNotificationPolicy.swift; sourceTree = SOURCE_ROOT; };
+		A10000000000000000000060 /* FleetNotificationCenter.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Sources/Notifications/FleetNotificationCenter.swift; sourceTree = SOURCE_ROOT; };
 		A1000000000000000000004D /* FleetUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000031 /* AINBFleet.app */ = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = AINBFleet.app; sourceTree = BUILT_PRODUCTS_DIR; };
 		A10000000000000000000032 /* FleetRPCTests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = FleetRPCTests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
@@ -115,6 +119,7 @@
 			children = (
 				A10000000000000000000052 /* App */,
 				A10000000000000000000056 /* FleetRPC */,
+				A10000000000000000000061 /* Notifications */,
 				A10000000000000000000053 /* Resources */,
 				A10000000000000000000054 /* FleetRPCTests */,
 				A10000000000000000000057 /* FleetUITests */,
@@ -146,6 +151,15 @@
 			);
 			path = Resources;
 			sourceTree = "<group>";
+		};
+		A10000000000000000000061 /* Notifications */ = {
+			isa = PBXGroup;
+			children = (
+				A1000000000000000000005F /* FleetNotificationPolicy.swift */,
+				A10000000000000000000060 /* FleetNotificationCenter.swift */,
+			);
+			path = Sources/Notifications;
+			sourceTree = SOURCE_ROOT;
 		};
 		A10000000000000000000056 /* FleetRPC */ = {
 			isa = PBXGroup;
@@ -331,6 +345,8 @@
 				A1000000000000000000003A /* FleetSessionDetailView.swift in Sources */,
 				A1000000000000000000003C /* FleetQuickSwitcher.swift in Sources */,
 				A1000000000000000000003E /* FleetSettingsView.swift in Sources */,
+				A1000000000000000000005D /* FleetNotificationPolicy.swift in Sources */,
+				A1000000000000000000005E /* FleetNotificationCenter.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
