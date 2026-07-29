@@ -1,0 +1,373 @@
+# ainb-plugin-protocol public wire surface
+#
+# GENERATED. Do not hand-edit. Regenerate with:
+#   UPDATE_WIRE_SURFACE=1 cargo test -p ainb-plugin-cts-v2 --test wire_surface_gate
+#
+# The regenerator REFUSES to write while the surface has changed but
+# ainb-plugin-protocol's version has not. Bump the version first.
+protocol_version = "0.1.0"
+
+[lib]
+reexport errors :: { ProtocolError , RpcError }
+reexport manifest :: Manifest
+reexport wire_buffer :: { Cell , Color , Coord , WireBuffer }
+
+[errors]
+const METHOD_NOT_FOUND: i32 = - 32601
+const INVALID_PARAMS: i32 = - 32602
+const INTERNAL_ERROR: i32 = - 32603
+const CAPABILITY_DENIED: i32 = - 32001
+const ACTION_TIMEOUT: i32 = - 32002
+const MANIFEST_VALIDATION: i32 = - 32003
+const SECRET_NOT_FOUND: i32 = - 32004
+const NOT_IMPLEMENTED: i32 = - 32005
+const SECRET_BACKEND_LOCKED: i32 = - 32006
+const SECRET_ACCESS_DENIED: i32 = - 32007
+const WORKSPACE_CREATION_DISABLED: i32 = - 32008
+struct RpcError [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field code: i32
+  field message: String
+  field data: Option < serde_json :: Value > [# [serde (skip_serializing_if = "Option::is_none")]]
+RpcError::fn new (code : i32 , message : impl Into < String >) -> Self
+RpcError::fn with_data (mut self , data : serde_json :: Value) -> Self
+RpcError::fn method_not_found (method : impl Into < String >) -> Self
+RpcError::fn capability_denied (cap : impl Into < String >) -> Self
+RpcError::fn action_timeout (action : impl Into < String >) -> Self
+RpcError::fn manifest_validation (reason : impl Into < String >) -> Self
+RpcError::fn invalid_params (reason : impl Into < String >) -> Self
+RpcError::fn internal (reason : impl Into < String >) -> Self
+RpcError::fn secret_not_found (scope : impl Into < String > , key : impl Into < String >) -> Self
+RpcError::fn secret_backend_locked (scope : impl Into < String > , key : impl Into < String >) -> Self
+RpcError::fn secret_access_denied (scope : impl Into < String > , key : impl Into < String >) -> Self
+RpcError::fn not_implemented (reason : impl Into < String >) -> Self
+RpcError::fn workspace_creation_disabled () -> Self
+enum ProtocolError
+  variant Transport(std :: io :: Error)
+  variant Decode(String)
+  variant Server { code: i32, message: String }
+
+[framing]
+const MAX_BODY_BYTES: usize = 16 * 1024 * 1024
+fn encode (body : & [u8]) -> Vec < u8 >
+fn encode_json (body : & serde_json :: Value) -> Result < Vec < u8 > , ProtocolError >
+fn write_frame < W : Write > (w : & mut W , body : & [u8]) -> Result < () , ProtocolError >
+fn read_frame < R : BufRead > (r : & mut R) -> Result < Option < Vec < u8 > > , ProtocolError >
+
+[manifest]
+struct Manifest [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field plugin: PluginMeta
+  field capabilities: Capabilities [# [serde (default)]]
+  field provides: Provides [# [serde (default)]]
+  field subscribes: Subscribes [# [serde (default)]]
+  field lifecycle: Lifecycle [# [serde (default)]]
+  field config: Vec < ConfigField > [# [serde (default)]]
+enum ConfigKind [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")]]
+  variant Path
+  variant String
+  variant Bool
+  variant Enum
+  variant Int
+struct ConfigField [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field key: String
+  field kind: ConfigKind
+  field label: String
+  field default: String [# [serde (default)]]
+  field choices: Vec < String > [# [serde (default)]]
+struct PluginMeta [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field name: String
+  field version: String
+  field abi_version: u32
+  field description: String [# [serde (default)]]
+enum CapabilityGrant [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)] # [serde (untagged)]]
+  variant Bool(bool)
+  variant List(Vec < String >)
+CapabilityGrant::const fn is_granted (& self) -> bool
+CapabilityGrant::fn allow_list (& self) -> Option < & [String] >
+struct Capabilities [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field read_sessions: CapabilityGrant [# [serde (default)]]
+  field write_plugin_data: CapabilityGrant [# [serde (default)]]
+  field event_bus: CapabilityGrant [# [serde (default)]]
+  field network: CapabilityGrant [# [serde (default)]]
+  field spawn_subprocess: CapabilityGrant [# [serde (default)]]
+  field read_claude_logs: CapabilityGrant [# [serde (default)]]
+  field read_codex_logs: CapabilityGrant [# [serde (default)]]
+  field read_paths: CapabilityGrant [# [serde (default)]]
+  field event_stream_subscribe: CapabilityGrant [# [serde (default)]]
+  field spawn_managed_subprocess: CapabilityGrant [# [serde (default)]]
+  field unix_socket_dial: CapabilityGrant [# [serde (default)]]
+  field secrets_read: CapabilityGrant [# [serde (rename = "secrets:read" , default)]]
+  field workspace_write: CapabilityGrant [# [serde (rename = "workspace:write" , default)]]
+struct Provides [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field screens: Vec < String > [# [serde (default)]]
+  field commands: Vec < String > [# [serde (default)]]
+  field cli_namespaces: Vec < String > [# [serde (default)]]
+  field snapshots: Vec < String > [# [serde (default)]]
+struct Subscribes [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field snapshots: Vec < String > [# [serde (default)]]
+enum SpawnMode [# [derive (Debug , Clone , Copy , Default , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")]]
+  variant Eager
+  variant Lazy
+struct Lifecycle [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field spawn: SpawnMode [# [serde (default)]]
+  field idle_reap_secs: u32 [# [serde (default = "default_idle_reap_secs")]]
+
+[methods]
+const PLUGIN_INIT: & str = "plugin/init"
+const PLUGIN_SHUTDOWN: & str = "plugin/shutdown"
+const PLUGIN_RENDER: & str = "plugin/render"
+const PLUGIN_HANDLE_EVENT: & str = "plugin/handle_event"
+const PLUGIN_HANDLE_KEY: & str = "plugin/handle_key"
+const PLUGIN_HANDLE_MOUSE: & str = "plugin/handle_mouse"
+const PLUGIN_CLI_DISPATCH: & str = "plugin/cli_dispatch"
+const HOST_SNAPSHOT_GET: & str = "host/snapshot/get"
+const HOST_SNAPSHOT_PUBLISH: & str = "host/snapshot/publish"
+const HOST_SNAPSHOT_SUBSCRIBE: & str = "host/snapshot/subscribe"
+const HOST_ACTION_INVOKE: & str = "host/action/invoke"
+const HOST_LOG: & str = "host/log"
+const HOST_FS_READ_DIR: & str = "host/fs/read_dir"
+const HOST_FS_READ_FILE: & str = "host/fs/read_file"
+const HOST_NETWORK_FETCH: & str = "host/network/fetch"
+const HOST_EVENT_STREAM_SUBSCRIBE: & str = "host/event_stream_subscribe"
+const HOST_EVENT_STREAM_CANCEL: & str = "host/event_stream_cancel"
+const HOST_SPAWN_MANAGED_SUBPROCESS: & str = "host/spawn_managed_subprocess"
+const HOST_UNIX_SOCKET_DIAL: & str = "host/unix_socket_dial"
+const HOST_UNIX_SOCKET_SEND: & str = "host/unix_socket_send"
+const HOST_UNIX_SOCKET_CLOSE: & str = "host/unix_socket_close"
+const HOST_SECRET_STORE_GET: & str = "host/secret_store_get"
+const HOST_WORKSPACE_LIST: & str = "host/workspace_list"
+const HOST_WORKSPACE_GET_ACTIVE: & str = "host/workspace_get_active"
+const HOST_WORKSPACE_SET_ACTIVE: & str = "host/workspace_set_active"
+const HOST_WORKSPACE_SET_DEFAULT: & str = "host/workspace_set_default"
+const HOST_WORKSPACE_CREATE: & str = "host/workspace_create"
+const HOST_WORKSPACE_DELETE: & str = "host/workspace_delete"
+const ALL_METHODS: & [& str] = & [PLUGIN_INIT , PLUGIN_SHUTDOWN , PLUGIN_RENDER , PLUGIN_HANDLE_EVENT , PLUGIN_HANDLE_KEY , PLUGIN_HANDLE_MOUSE , PLUGIN_CLI_DISPATCH , HOST_SNAPSHOT_GET , HOST_SNAPSHOT_PUBLISH , HOST_SNAPSHOT_SUBSCRIBE , HOST_ACTION_INVOKE , HOST_LOG , HOST_FS_READ_DIR , HOST_FS_READ_FILE , HOST_NETWORK_FETCH , HOST_EVENT_STREAM_SUBSCRIBE , HOST_EVENT_STREAM_CANCEL , HOST_SPAWN_MANAGED_SUBPROCESS , HOST_UNIX_SOCKET_DIAL , HOST_UNIX_SOCKET_SEND , HOST_UNIX_SOCKET_CLOSE , HOST_SECRET_STORE_GET , HOST_WORKSPACE_LIST , HOST_WORKSPACE_GET_ACTIVE , HOST_WORKSPACE_SET_ACTIVE , HOST_WORKSPACE_SET_DEFAULT , HOST_WORKSPACE_CREATE , HOST_WORKSPACE_DELETE ,]
+
+[params]
+struct PluginInitParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field manifest_path: String
+  field granted_capabilities: Vec < String >
+  field abi_version: u32
+  field config: serde_json :: Value [# [serde (default)]]
+struct PluginInitResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field name: String
+  field version: String
+struct PluginShutdownParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct PluginShutdownResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct Viewport [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)]]
+  field width: u16
+  field height: u16
+Viewport::const fn new (width : u16 , height : u16) -> Self
+struct RenderParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field viewport: Viewport
+  field generation: u64 [# [serde (default)]]
+struct RenderResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field buffer: WireBuffer
+  field redraw: bool [# [serde (default)]]
+  field captures_text: bool [# [serde (default)]]
+struct HandleEventParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field topic: String
+  field payload: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+struct KeyEvent [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field code: KeyCode
+  field mods: u8 [# [serde (default)]]
+  field kind: KeyKind [# [serde (default)]]
+enum KeyCode [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)] # [serde (tag = "type" , rename_all = "snake_case")]]
+  variant Char { ch: char }
+  variant Enter
+  variant Tab
+  variant BackTab
+  variant Esc
+  variant Backspace
+  variant Delete
+  variant Up
+  variant Down
+  variant Left
+  variant Right
+  variant Home
+  variant End
+  variant PageUp
+  variant PageDown
+  variant F { n: u8 }
+enum KeyKind [# [derive (Debug , Clone , Copy , PartialEq , Eq , Default , Serialize , Deserialize)] # [serde (rename_all = "snake_case")]]
+  variant Press
+  variant Repeat
+  variant Release
+const KEY_MOD_SHIFT: u8 = 0b0001
+const KEY_MOD_CTRL: u8 = 0b0010
+const KEY_MOD_ALT: u8 = 0b0100
+const KEY_MOD_SUPER: u8 = 0b1000
+struct HandleKeyParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field screen_id: String
+  field key: KeyEvent
+  field generation: u64
+enum MouseButton [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)] # [serde (tag = "type" , rename_all = "snake_case")]]
+  variant Left
+  variant Right
+  variant Middle
+enum MouseKind [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)] # [serde (tag = "type" , rename_all = "snake_case")]]
+  variant Down { button: MouseButton }
+  variant Up { button: MouseButton }
+  variant Drag { button: MouseButton }
+  variant Moved
+  variant ScrollUp
+  variant ScrollDown
+  variant ScrollLeft
+  variant ScrollRight
+struct MouseEvent [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)]]
+  field kind: MouseKind
+  field col: u16
+  field row: u16
+  field mods: u8 [# [serde (default)]]
+struct HandleMouseParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field screen_id: String
+  field mouse: MouseEvent
+  field generation: u64
+struct CliDispatchParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field namespace: String
+  field argv: Vec < String >
+struct CliDispatchResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field stdout: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+  field stderr: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+  field exit_code: i32
+struct SnapshotGetParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field topic: String
+struct SnapshotGetResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field payload: Option < bytes :: Bytes > [# [serde (default , with = "opt_bytes_serde")]]
+  field version: u64 [# [serde (default)]]
+struct SnapshotPublishParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field topic: String
+  field payload: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+struct SnapshotSubscribeParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field topic: String
+struct SnapshotSubscribeResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct ActionInvokeParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field action: String
+  field payload: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+  field timeout_ms: u64 [# [serde (default)]]
+struct ActionInvokeResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field payload: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+enum LogLevel [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")]]
+  variant Trace
+  variant Debug
+  variant Info
+  variant Warn
+  variant Error
+struct LogParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field level: LogLevel
+  field message: String
+  field fields: Option < serde_json :: Value > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+struct FsReadDirParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field path: String
+struct FsDirEntry [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field name: String
+  field is_dir: bool
+  field size: u64 [# [serde (default)]]
+struct FsReadDirResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field entries: Vec < FsDirEntry >
+struct FsReadFileParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field path: String
+struct FsReadFileResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field bytes: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+struct NetworkFetchParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field url: String
+  field method: String [# [serde (default)]]
+  field body: Option < bytes :: Bytes > [# [serde (default , with = "opt_bytes_serde")]]
+  field headers: Vec < (String , String) > [# [serde (default)]]
+struct NetworkFetchResult [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field status: u16
+  field headers: Vec < (String , String) >
+  field body: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+struct EventStreamSubscribeParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field topic: String
+  field since_version: Option < u64 > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+struct EventStreamSubscribeResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field stream_id: String
+  field version: u64 [# [serde (default)]]
+struct EventStreamCancelParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field stream_id: String
+struct SpawnManagedSubprocessParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field bin: String
+  field argv: Vec < String > [# [serde (default)]]
+  field env_allowlist: Vec < String > [# [serde (default)]]
+  field cwd: Option < String > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+struct SpawnManagedSubprocessResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field handle: String
+  field pid: u32
+struct UnixSocketDialParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field path: String
+struct UnixSocketDialResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field stream_id: String
+struct UnixSocketSendParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field stream_id: String
+  field bytes: bytes :: Bytes [# [serde (with = "bytes_serde")]]
+struct UnixSocketCloseParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field stream_id: String
+enum UnixSocketEventKind [# [derive (Debug , Clone , Copy , PartialEq , Eq , Serialize , Deserialize)] # [serde (rename_all = "lowercase")]]
+  variant Data
+  variant Eof
+  variant Error
+struct UnixSocketEvent [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field kind: UnixSocketEventKind
+  field bytes: Option < bytes :: Bytes > [# [serde (default , skip_serializing_if = "Option::is_none" , with = "opt_bytes_serde")]]
+  field error: Option < String > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+struct SecretStoreGetParams [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field scope: String
+  field workspace_id: Option < String > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+  field key: String
+struct SecretStoreGetResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field value: String
+struct WorkspaceEntry [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field id: String
+  field slug: String
+  field name: String
+  field active: bool
+  field default: bool
+struct WorkspaceListParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct WorkspaceListResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field workspaces: Vec < WorkspaceEntry >
+  field creation_disabled: bool [# [serde (default , skip_serializing_if = "std::ops::Not::not")]]
+struct WorkspaceGetActiveParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct WorkspaceGetActiveResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field workspace_id: Option < String > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+struct WorkspaceSetActiveParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field workspace_id: String
+struct WorkspaceSetActiveResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct WorkspaceSetDefaultParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field workspace_id: String
+struct WorkspaceSetDefaultResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+struct WorkspaceCreateParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field slug: String
+  field name: String
+struct WorkspaceCreateResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field workspace: WorkspaceEntry
+struct WorkspaceDeleteParams [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+  field workspace_id: String
+struct WorkspaceDeleteResult [# [derive (Debug , Clone , Default , PartialEq , Eq , Serialize , Deserialize)]]
+
+[topics]
+const UI_CLOSE_REQUEST: & str = "ui.close_request"
+struct UiCloseRequest [# [derive (Debug , Clone , PartialEq , Eq , serde :: Serialize , serde :: Deserialize)]]
+  field screen_id: String
+
+[wire_buffer]
+struct Coord [# [derive (Debug , Clone , Copy , PartialEq , Eq , Hash , Serialize , Deserialize)]]
+  field x: u16
+  field y: u16
+Coord::const fn new (x : u16 , y : u16) -> Self
+struct Color [# [derive (Debug , Clone , Copy , PartialEq , Eq , Hash , Serialize , Deserialize)]]
+  field r: u8
+  field g: u8
+  field b: u8
+Color::const fn rgb (r : u8 , g : u8 , b : u8) -> Self
+struct Cell [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field symbol: String
+  field fg: Option < Color > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+  field bg: Option < Color > [# [serde (default , skip_serializing_if = "Option::is_none")]]
+  field modifier: u16 [# [serde (default)]]
+Cell::fn new (symbol : impl Into < String >) -> Self
+struct WireBuffer [# [derive (Debug , Clone , PartialEq , Eq , Serialize , Deserialize)]]
+  field width: u16
+  field height: u16
+  field cells: Vec < (Coord , Cell) >
+WireBuffer::const fn new (width : u16 , height : u16) -> Self
+WireBuffer::fn push (& mut self , coord : Coord , cell : Cell)

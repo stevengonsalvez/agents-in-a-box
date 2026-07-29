@@ -29,6 +29,11 @@ toml = { workspace = true }
 bytes = { version = "1.6", features = ["serde"] }
 async-trait = "0.1"
 base64 = "0.22"
+# `wire_surface` renders ainb-plugin-protocol's public surface from source so
+# the semver gate is a plain `cargo test` on stable (no rustdoc JSON, no
+# nightly, no crates.io baseline: the protocol crate is a path dependency).
+syn = { version = "2.0", features = ["full", "parsing", "printing", "extra-traits"] }
+quote = "1.0"
 
 [dev-dependencies]
 ainb-plugin-protocol = { path = "../ainb-plugin-protocol" }
