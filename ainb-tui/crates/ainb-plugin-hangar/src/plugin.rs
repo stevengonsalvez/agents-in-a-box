@@ -255,7 +255,7 @@ const FLEET_ACTION_REQ_ID: i64 = 59;
 /// Explicit-recipient Fleet broadcast.
 const FLEET_BROADCAST_REQ_ID: i64 = 60;
 /// Daemon-owned new Fleet session start.
-const FLEET_START_REQ_ID: i64 = 64;
+const FLEET_START_REQ_ID: i64 = 65;
 /// JSON-RPC id for a `hangar/skill_set_enabled` request (parity #24).
 const SKILL_SET_ENABLED_REQ_ID: i64 = 61;
 /// JSON-RPC id for a `hangar/agent_skills_list` request (parity #24). Fired
