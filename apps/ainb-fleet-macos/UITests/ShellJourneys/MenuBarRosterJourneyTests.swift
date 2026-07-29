@@ -40,9 +40,10 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         waitFor(fleetRow("claude:alpha"))
 
         try app.performAccessibilityAudit { issue in
+            guard let element = issue.element else { return false }
             issue.compactDescription == "Element has no description"
-                && issue.element.elementType == .group
-                && issue.element.descendants(matching: .searchField).firstMatch.label == "Search"
+                && element.elementType == .group
+                && element.descendants(matching: .searchField).firstMatch.label == "Search"
         }
     }
 }
