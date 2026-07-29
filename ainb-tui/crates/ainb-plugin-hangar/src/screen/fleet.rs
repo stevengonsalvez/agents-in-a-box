@@ -736,9 +736,7 @@ impl FleetPaneState {
     pub fn attention_count(&self) -> usize {
         self.roster
             .iter()
-            .filter(|session| {
-                session.is_active_session() && !session.attention_state.eq_ignore_ascii_case("NONE")
-            })
+            .filter(|session| session.is_actionable())
             .count()
     }
 
@@ -2911,6 +2909,7 @@ mod tests {
         state.set_sessions(vec![blocked]);
 
         assert_eq!(state.session_count(), 0);
+        assert_eq!(state.attention_count(), 1);
         let keys: Vec<_> =
             state.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
         assert_eq!(keys, ["lost-ask"]);
