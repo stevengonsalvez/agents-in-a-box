@@ -46,6 +46,23 @@ final class FleetConnectionTests: XCTestCase {
         }
     }
 
+    func testConnectPreventsSIGPIPEOnOwnedSocket() async throws {
+        var descriptors = [Int32](repeating: 0, count: 2)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
+        defer { Darwin.close(descriptors[1]) }
+        let connection = FleetConnection(
+            location: HangarLocation(environment: ["AINB_HANGAR_HOME": "/unused"]),
+            injectedDescriptor: descriptors[0]
+        )
+
+        try await connection.connect()
+        var enabled: Int32 = 0
+        var length = socklen_t(MemoryLayout.size(ofValue: enabled))
+        XCTAssertEqual(Darwin.getsockopt(descriptors[0], SOL_SOCKET, SO_NOSIGPIPE, &enabled, &length), 0)
+        XCTAssertEqual(enabled, 1)
+        await connection.close()
+    }
+
     func testWriteMismatchIsBlocked() {
         XCTAssertThrowsError(try FleetConnection.validateWriteCompatibility(
             FleetNegotiateResult(
@@ -185,6 +202,12 @@ final class FleetConnectionTests: XCTestCase {
         XCTAssertFalse(FleetStartPreflight.isExistingDirectory(root.appendingPathComponent("missing").path))
     }
 
+    func testStartPreflightSupportsOnlyCodex() {
+        XCTAssertTrue(FleetStartPreflight.supports(.codex))
+        XCTAssertFalse(FleetStartPreflight.supports(.claude))
+        XCTAssertFalse(FleetStartPreflight.supports(.unknown))
+    }
+
     func testUnavailablePromptNeverWritesActionWire() async throws {
         var descriptors = [Int32](repeating: 0, count: 2)
         XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &descriptors), 0)
@@ -321,6 +344,116 @@ final class FleetConnectionTests: XCTestCase {
         releaseSecond.signal()
         try serverResult.throwIfRecorded()
         XCTAssertTrue(reloaded, "reconnect must reload durable receipts before Fleet becomes live")
+    }
+
+    func testOptionalPreloadFailuresPreserveCachedProjections() async throws {
+        var first = [Int32](repeating: 0, count: 2)
+        var second = [Int32](repeating: 0, count: 2)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &first), 0)
+        XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &second), 0)
+        let firstServer = first[1]
+        let secondServer = second[1]
+        defer {
+            Darwin.close(firstServer)
+            Darwin.close(secondServer)
+        }
+        let location = try Self.testLocation()
+        defer { try? FileManager.default.removeItem(at: location.home) }
+        let factory = TestConnectionFactory(descriptors: [first[0], second[0]], location: location)
+        let store = await MainActor.run {
+            FleetStore(location: location, makeConnection: factory.make, reconnectDelayNanoseconds: { _ in 0 })
+        }
+        let firstDone = expectation(description: "cached optional projections loaded")
+        let secondReady = expectation(description: "optional preload failures returned")
+        let releaseSecond = DispatchSemaphore(value: 0)
+        let serverResult = SocketServerResult()
+
+        DispatchQueue.global().async {
+            defer {
+                Darwin.shutdown(firstServer, SHUT_RDWR)
+                firstDone.fulfill()
+            }
+            do {
+                try Self.serveOptionalPreloads(descriptor: firstServer, succeed: true)
+            } catch {
+                serverResult.record(error)
+            }
+        }
+        DispatchQueue.global().async {
+            defer { Darwin.shutdown(secondServer, SHUT_RDWR) }
+            do {
+                try Self.serveOptionalPreloads(descriptor: secondServer, succeed: false)
+                secondReady.fulfill()
+                _ = releaseSecond.wait(timeout: .now() + 2)
+            } catch {
+                serverResult.record(error)
+                secondReady.fulfill()
+            }
+        }
+
+        await MainActor.run { store.start() }
+        await fulfillment(of: [firstDone, secondReady], timeout: 2)
+        try serverResult.throwIfRecorded()
+        let preserved = await Self.waitUntil {
+            await MainActor.run {
+                guard case .live = store.connectionState else { return false }
+                return factory.count == 2
+                    && store.receipts.map(\.requestID) == ["cached"]
+                    && store.atcInstances.map(\.name) == ["main"]
+                    && store.atcSchedulerOwnership == .legacyTimerReconciliationRequired
+                    && store.timeline.map(\.revision) == [7]
+            }
+        }
+        await MainActor.run { store.stop() }
+        releaseSecond.signal()
+
+        XCTAssertTrue(preserved, "transient optional preload failures must keep last known good projections")
+    }
+
+    func testFastSuccessfulReconnectsStillExhaustBoundedRetryBudget() async throws {
+        var pairs = [[Int32]]()
+        for _ in 0...4 {
+            var pair = [Int32](repeating: 0, count: 2)
+            XCTAssertEqual(Darwin.socketpair(AF_UNIX, SOCK_STREAM, 0, &pair), 0)
+            pairs.append(pair)
+        }
+        defer { Darwin.close(pairs[4][1]) }
+        let location = try Self.testLocation()
+        defer { try? FileManager.default.removeItem(at: location.home) }
+        let factory = TestConnectionFactory(descriptors: pairs.map { $0[0] }, location: location)
+        let store = await MainActor.run {
+            FleetStore(location: location, makeConnection: factory.make, reconnectDelayNanoseconds: { _ in 0 })
+        }
+        let serversDone = expectation(description: "fast-closing servers finished")
+        serversDone.expectedFulfillmentCount = 4
+
+        for serverDescriptor in pairs.prefix(4).map({ $0[1] }) {
+            DispatchQueue.global().async {
+                defer {
+                    Darwin.shutdown(serverDescriptor, SHUT_RDWR)
+                    Darwin.close(serverDescriptor)
+                    serversDone.fulfill()
+                }
+                try? Self.serveStoreBootstrap(
+                    descriptor: serverDescriptor,
+                    subscriptionSnapshot: Self.snapshotObject(head: 0, sessions: []),
+                    eventBeforeSubscriptionResponse: false,
+                    snapshotAfterEvent: Self.snapshotObject(head: 0, sessions: [])
+                )
+            }
+        }
+
+        await MainActor.run { store.start() }
+        await fulfillment(of: [serversDone], timeout: 3)
+        let stoppedReconnecting = await Self.waitUntil {
+            await MainActor.run { factory.count == 4 && store.debugConnectionTaskCount == 0 }
+        }
+        if factory.count == 4 {
+            Darwin.close(pairs[4][0])
+        }
+        await MainActor.run { store.stop() }
+
+        XCTAssertTrue(stoppedReconnecting, "successful handshakes that close immediately must not reset the retry budget")
     }
 
     func testResyncNotificationStreamsThroughOwnedSocket() async throws {
@@ -690,6 +823,54 @@ final class FleetConnectionTests: XCTestCase {
         }
     }
 
+    private static func serveOptionalPreloads(descriptor: Int32, succeed: Bool) throws {
+        let authentication = try readRequest(from: descriptor)
+        try writeResponse(to: descriptor, request: authentication, result: [:])
+        let negotiation = try readRequest(from: descriptor)
+        try writeResponse(to: descriptor, request: negotiation, result: [
+            "daemon_version": "fixture-daemon",
+            "protocol_version": 1,
+            "read_compatible": true,
+            "write_compatible": true,
+            "capability_ids": ["fleet.receipt.read", "fleet.atc.read", "fleet.timeline.read"],
+        ])
+        let subscription = try readRequest(from: descriptor)
+        try writeResponse(to: descriptor, request: subscription, result: [
+            "snapshot": try snapshotObject(head: 0, sessions: []),
+            "replay": [],
+            "replay_state": ["state": "complete"],
+        ])
+        let results: [String: Any] = [
+            "fleet/receipt_list": ["receipts": [try receiptObject(requestID: "cached")]],
+            "atc/list": [
+                "instances": [[
+                    "name": "main", "cwd": "/tmp", "tmux_session": "atc-main",
+                    "heartbeat_cron": "*/2 * * * *", "err_retry_cap": 3,
+                    "idle_pause_min": 60, "next_tick_at": 2_000, "enabled": true,
+                    "last_heartbeat_at": 1_000, "config_generation": 4,
+                ]],
+                "scheduler_ownership": "legacy_timer_reconciliation_required",
+            ],
+            "fleet/timeline": [
+                "entries": [[
+                    "revision": 7, "session_key": "s1", "observed_at": 1_000,
+                    "provenance": "authoritative", "kind": "turn_completed",
+                    "applied": true, "session_version": 3,
+                ]],
+                "next_after_revision": 7,
+            ],
+        ]
+        for method in ["fleet/receipt_list", "atc/list", "fleet/timeline"] {
+            let request = try readRequest(from: descriptor)
+            XCTAssertEqual(request["method"] as? String, method)
+            if succeed {
+                try writeResponse(to: descriptor, request: request, result: results[method]!)
+            } else {
+                try writeError(to: descriptor, request: request)
+            }
+        }
+    }
+
     private static func readRequest(from descriptor: Int32) throws -> [String: Any] {
         guard let frame = readFrame(from: descriptor),
               let request = try JSONSerialization.jsonObject(with: frame) as? [String: Any] else {
@@ -700,6 +881,14 @@ final class FleetConnectionTests: XCTestCase {
 
     private static func writeResponse(to descriptor: Int32, request: [String: Any], result: Any) throws {
         try writeJSONObject(["jsonrpc": "2.0", "id": request["id"] as Any, "result": result], to: descriptor)
+    }
+
+    private static func writeError(to descriptor: Int32, request: [String: Any]) throws {
+        try writeJSONObject([
+            "jsonrpc": "2.0",
+            "id": request["id"] as Any,
+            "error": ["code": -32603, "message": "fixture failure"],
+        ], to: descriptor)
     }
 
     private static func writeNotification(to descriptor: Int32, method: String, params: Any) throws {
@@ -758,17 +947,19 @@ final class FleetConnectionTests: XCTestCase {
 private final class TestConnectionFactory: @unchecked Sendable {
     private let lock = NSLock()
     private var descriptors: [Int32]
+    private let initialCount: Int
     private let location: HangarLocation
 
     init(descriptors: [Int32], location: HangarLocation) {
         self.descriptors = descriptors
+        initialCount = descriptors.count
         self.location = location
     }
 
     var count: Int {
         lock.lock()
         defer { lock.unlock() }
-        return descriptors.count == 2 ? 0 : 2 - descriptors.count
+        return initialCount - descriptors.count
     }
 
     func make(_: HangarLocation) -> FleetConnection {
