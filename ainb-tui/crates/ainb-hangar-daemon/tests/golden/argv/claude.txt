@@ -1,0 +1,96 @@
+# ARGV GOLDEN: claude
+#
+# Frozen output of Runner::provider_command for every claude case in the
+# matrix: mode x model x cli_args. One token per line; <PROMPT> and
+# <*_BIN> are normalised so the file is stable across machines.
+#
+# Regenerate with UPDATE_GOLDEN=1 cargo test -p ainb-hangar-daemon \
+#   --test argv_golden_matrix    (only when the change is INTENDED).
+
+=== case: claude | headless | model=default | cli_args=absent
+program: <CLAUDE_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --verbose
+  --
+  <PROMPT>
+
+=== case: claude | headless | model=default | cli_args=present
+program: <CLAUDE_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --verbose
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: claude | headless | model=pinned | cli_args=absent
+program: <CLAUDE_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --verbose
+  --model
+  pinned-model-id
+  --
+  <PROMPT>
+
+=== case: claude | headless | model=pinned | cli_args=present
+program: <CLAUDE_BIN>
+argv:
+  -p
+  --dangerously-skip-permissions
+  --output-format
+  stream-json
+  --verbose
+  --model
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: claude | interactive | model=default | cli_args=absent
+program: <CLAUDE_BIN>
+argv:
+  --dangerously-skip-permissions
+  --
+  <PROMPT>
+
+=== case: claude | interactive | model=default | cli_args=present
+program: <CLAUDE_BIN>
+argv:
+  --dangerously-skip-permissions
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>
+
+=== case: claude | interactive | model=pinned | cli_args=absent
+program: <CLAUDE_BIN>
+argv:
+  --dangerously-skip-permissions
+  --model
+  pinned-model-id
+  --
+  <PROMPT>
+
+=== case: claude | interactive | model=pinned | cli_args=present
+program: <CLAUDE_BIN>
+argv:
+  --dangerously-skip-permissions
+  --model
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+  --
+  <PROMPT>

@@ -1,0 +1,80 @@
+# ARGV GOLDEN: copilot
+#
+# Frozen output of Runner::provider_command for every copilot case in the
+# matrix: mode x model x cli_args. One token per line; <PROMPT> and
+# <*_BIN> are normalised so the file is stable across machines.
+#
+# Regenerate with UPDATE_GOLDEN=1 cargo test -p ainb-hangar-daemon \
+#   --test argv_golden_matrix    (only when the change is INTENDED).
+
+=== case: copilot | headless | model=default | cli_args=absent
+program: <COPILOT_BIN>
+argv:
+  -p
+  <PROMPT>
+  --allow-all-tools
+
+=== case: copilot | headless | model=default | cli_args=present
+program: <COPILOT_BIN>
+argv:
+  -p
+  <PROMPT>
+  --allow-all-tools
+  --extra-flag
+  --extra-key=extra-value
+
+=== case: copilot | headless | model=pinned | cli_args=absent
+program: <COPILOT_BIN>
+argv:
+  -p
+  <PROMPT>
+  --allow-all-tools
+  --model
+  pinned-model-id
+
+=== case: copilot | headless | model=pinned | cli_args=present
+program: <COPILOT_BIN>
+argv:
+  -p
+  <PROMPT>
+  --allow-all-tools
+  --model
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
+
+=== case: copilot | interactive | model=default | cli_args=absent
+program: <COPILOT_BIN>
+argv:
+  -i
+  <PROMPT>
+  --allow-all-tools
+
+=== case: copilot | interactive | model=default | cli_args=present
+program: <COPILOT_BIN>
+argv:
+  -i
+  <PROMPT>
+  --allow-all-tools
+  --extra-flag
+  --extra-key=extra-value
+
+=== case: copilot | interactive | model=pinned | cli_args=absent
+program: <COPILOT_BIN>
+argv:
+  -i
+  <PROMPT>
+  --allow-all-tools
+  --model
+  pinned-model-id
+
+=== case: copilot | interactive | model=pinned | cli_args=present
+program: <COPILOT_BIN>
+argv:
+  -i
+  <PROMPT>
+  --allow-all-tools
+  --model
+  pinned-model-id
+  --extra-flag
+  --extra-key=extra-value
