@@ -34,13 +34,19 @@ struct FleetWindowView: View {
             }
             .searchable(text: $search)
             .toolbar {
-                ToolbarItem { Toggle("Needs you", isOn: $presentation.filters.attentionOnly) }
+                ToolbarItem {
+                    Toggle("Needs you", isOn: $presentation.filters.attentionOnly)
+                        .accessibilityIdentifier("fleet.filter.attention")
+                }
                 ToolbarItem { Picker("Sort", selection: $presentation.sort) { ForEach(FleetRosterSort.allCases) { Text($0.label).tag($0) } } }
                 ToolbarItem { Picker("Lifecycle", selection: $presentation.filters.lifecycle) { Text("Any lifecycle").tag(LifecycleState?.none); ForEach([LifecycleState.starting, .running, .turnComplete, .idle, .exited, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
                 ToolbarItem { Picker("Provider", selection: $presentation.filters.provider) { Text("Any provider").tag(FleetProvider?.none); ForEach([FleetProvider.claude, .codex, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
                 ToolbarItem { Picker("Management", selection: $presentation.filters.management) { Text("Any management").tag(ManagementState?.none); ForEach([ManagementState.managed, .degraded], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
                 ToolbarItem { Picker("Transport", selection: $presentation.filters.transportHealth) { Text("Any transport").tag(TransportHealth?.none); ForEach([TransportHealth.healthy, .degraded, .unavailable, .unknown], id: \.self) { Text($0.rawValue).tag(Optional($0)) } } }
-                ToolbarItem { Button("Quick switch") { switcherPresented = true } }
+                ToolbarItem {
+                    Button("Quick switch") { switcherPresented = true }
+                        .accessibilityIdentifier("fleet.quick-switch.open")
+                }
                 ToolbarItem { Button("Start") { startPresented = true }.disabled(!store.canStart).accessibilityIdentifier("fleet.start.open") }
                 ToolbarItem { Button("Receipts") { receiptsPresented = true }.disabled(!store.canReadReceipts).accessibilityIdentifier("fleet.receipts.open") }
                 ToolbarItemGroup {
