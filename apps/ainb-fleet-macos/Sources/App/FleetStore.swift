@@ -161,6 +161,14 @@ final class FleetStore: ObservableObject {
         beginConnection()
     }
 
+    func refresh() {
+        guard let connection else { return }
+        Task { [weak self] in
+            guard let self else { return }
+            await self.refreshAuthoritativeState(using: connection)
+        }
+    }
+
     func stop() {
         connectionGeneration &+= 1
         hasEstablishedLiveConnection = false
