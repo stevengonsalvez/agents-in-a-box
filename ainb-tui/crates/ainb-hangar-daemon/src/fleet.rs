@@ -22,7 +22,8 @@ use sqlx::SqlitePool;
 
 use crate::events::EventSink;
 use crate::fleet_provider::codex::{
-    CodexApprovalKind, CodexCapabilities, CodexInbound, CodexInboundEnvelope,
+    parse_inbound_envelope, CodexApprovalKind, CodexCapabilities, CodexInbound,
+    CodexInboundEnvelope,
 };
 
 /// Semantic hook observation before storage normalization.
@@ -374,20 +375,72 @@ pub async fn ingest_codex_inbound(
         },
     )
     .await?;
-    apply_codex_child_work(pool, events, &envelope.raw, &event_id, observed_at).await?;
+    reduce_codex_source_event(pool, events, &event_id, envelope, capabilities, observed_at).await
+}
+
+async fn reduce_codex_source_event(
+    pool: &SqlitePool,
+    events: &EventSink,
+    event_id: &str,
+    envelope: CodexInboundEnvelope,
+    capabilities: &CodexCapabilities,
+    observed_at: i64,
+) -> Result<Option<ApplyFleetEventResult>, FleetProviderIngressError> {
+    apply_codex_child_work(pool, events, &envelope.raw, event_id, observed_at).await?;
     let result = apply_codex_inbound(
         pool,
         events,
-        event_id.clone(),
+        event_id.to_string(),
         envelope.inbound,
         capabilities,
         observed_at,
     )
     .await?;
     if let Some(reduced) = &result {
-        FleetProviderEventRepo::mark_projected(pool, &event_id, reduced.revision).await?;
+        FleetProviderEventRepo::mark_projected(pool, event_id, reduced.revision).await?;
     }
     Ok(result)
+}
+
+/// Replay Codex source envelopes that committed before their Fleet projection.
+/// Each source row keeps its original event ID and observation time, so replay
+/// is idempotent and cannot manufacture a newer state.
+pub async fn replay_unprojected_codex_events(
+    pool: &SqlitePool,
+    events: &EventSink,
+    capabilities: &CodexCapabilities,
+) -> Result<usize, FleetProviderIngressError> {
+    let rows = FleetProviderEventRepo::unprojected(pool, "codex", "codex_app_server", 1_000)
+        .await
+        .map_err(FleetProviderEventError::from)?;
+    let mut replayed = 0;
+    for row in rows {
+        let raw: Value = match serde_json::from_str(&row.raw_payload) {
+            Ok(raw) => raw,
+            Err(error) => {
+                tracing::warn!(event_id = %row.event_id, error = %error, "Codex source replay skipped invalid raw envelope");
+                continue;
+            }
+        };
+        let envelope = match parse_inbound_envelope(&raw) {
+            Ok(envelope) => envelope,
+            Err(error) => {
+                tracing::warn!(event_id = %row.event_id, error = %error, "Codex source replay skipped unsupported envelope");
+                continue;
+            }
+        };
+        reduce_codex_source_event(
+            pool,
+            events,
+            &row.event_id,
+            envelope,
+            capabilities,
+            row.observed_at,
+        )
+        .await?;
+        replayed += 1;
+    }
+    Ok(replayed)
 }
 
 async fn apply_codex_child_work(

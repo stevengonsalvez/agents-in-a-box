@@ -332,7 +332,7 @@ pub enum FleetFilter {
 
 impl FleetFilter {
     fn matches(self, row: &FleetSessionRow) -> bool {
-        if !row.is_active_session() {
+        if !row.is_active_session() && !row.is_actionable() {
             return false;
         }
         match self {
