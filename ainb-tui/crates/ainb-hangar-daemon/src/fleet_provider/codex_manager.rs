@@ -806,16 +806,34 @@ fn is_codex_app_server(args: &str) -> bool {
     args.contains("bin/codex") && args.contains("app-server")
 }
 
+fn codex_server_socket(args: &str) -> Option<&str> {
+    args.rsplit_once("app-server --listen unix://").map(|(_, socket)| socket.trim())
+}
+
+fn codex_proxy_socket(args: &str) -> Option<&str> {
+    args.rsplit_once("app-server proxy --sock ").map(|(_, socket)| socket.trim())
+}
+
 /// PIDs of orphaned codex app-server processes in a `ps -Ao pid,ppid,args` dump.
 ///
-/// Target = ppid == 1 AND argv contains `bin/codex` AND contains `app-server`.
-/// Skips the header line (its pid column does not parse). The desktop app is
-/// excluded twice: no `bin/codex` in its argv, and its ppid is not 1.
+/// A ppid==1 server is only orphaned when no live proxy consumes its socket.
+/// Matching against the complete process snapshot protects adopted servers
+/// used by other Hangar homes.
 fn codex_orphans_to_reap(ps_output: &str) -> Vec<u32> {
-    ps_output
-        .lines()
-        .filter_map(parse_ps_row)
-        .filter(|row| row.ppid == 1 && is_codex_app_server(row.args))
+    let rows = ps_output.lines().filter_map(parse_ps_row).collect::<Vec<_>>();
+    let live_proxy_sockets = rows
+        .iter()
+        .filter(|row| is_codex_app_server(row.args))
+        .filter_map(|row| codex_proxy_socket(row.args))
+        .collect::<std::collections::HashSet<_>>();
+
+    rows.iter()
+        .filter(|row| {
+            row.ppid == 1 && is_codex_app_server(row.args) && !row.args.contains("app-server proxy")
+        })
+        .filter(|row| {
+            codex_server_socket(row.args).is_none_or(|socket| !live_proxy_sockets.contains(socket))
+        })
         .map(|row| row.pid)
         .collect()
 }
@@ -836,13 +854,9 @@ fn live_codex_app_server_count(ps_output: &str) -> usize {
 /// From ppid==1 orphan candidates, drop our own pid and the pid(s) listening on our
 /// shared socket, then return who to signal.
 ///
-/// The live-socket spare is NOT a safety check against killing an in-use server: a
-/// healthy server is never ppid==1 (its launcher stays alive), so no candidate here
-/// is ever in use. It exists only so a booting daemon can ADOPT a still-listening
-/// server left by a prior daemon rather than kill-and-respawn it. When `listeners`
-/// is `None` (lsof could not answer) we still reap every candidate: ppid==1 is
-/// independent proof of orphan-hood, so the "unknown != nobody" caveat that guards
-/// socket-ownership decisions does not apply here.
+/// Machine-wide live proxy consumers are removed before this function. The
+/// listener spare also protects this daemon's adoption window before its proxy
+/// starts.
 fn reap_targets(candidates: &[u32], listeners: Option<&[u32]>, self_pid: u32) -> Vec<u32> {
     candidates
         .iter()
@@ -907,13 +921,10 @@ async fn enforce_codex_server_cap() -> Result<(), ProviderError> {
 /// Reap codex app-server processes orphaned by a prior daemon or plugin broker.
 ///
 /// A codex app-server does not self-daemonize: its `node .../bin/codex app-server`
-/// launcher stays alive for the server's whole life, so a healthy in-use server is
-/// NEVER at ppid==1. A server reaches ppid==1 only when that parent launcher dies:
-/// a daemon `SIGKILL`/crash (Rust `Drop` never runs) or spawn-cleanup killing the
-/// launcher after an initialize failure. ppid==1 therefore means genuinely orphaned,
-/// which is why this boot-time sweep is safe and is the only backstop that survives
-/// `SIGKILL`. Best-effort: any failure returns the count reaped so far. Returns how
-/// many processes were signalled.
+/// A server can remain at ppid==1 after another daemon adopts it, so the process
+/// snapshot excludes every socket targeted by a live `app-server proxy` before
+/// signalling candidates. Best-effort: any failure returns the count reaped so
+/// far. Returns how many processes were signalled.
 pub async fn reap_orphaned_codex_servers(live_socket: &Path) -> usize {
     use nix::errno::Errno;
     use nix::sys::signal::{Signal, kill};
@@ -1441,29 +1452,36 @@ mod tests {
         assert!(bound_by_child(42, None));
     }
 
-    /// A realistic `ps -Ao pid,ppid,args` dump: header, both orphan leak sources
-    /// (501, 777, real ppid==1 servers), a live `app-server proxy` (1500, ppid!=1,
-    /// a consumer not a server), and the desktop Codex/ChatGPT app (900).
+    /// A realistic `ps -Ao pid,ppid,args` dump: header, one adopted ppid==1
+    /// server, one unproxied orphan, a live proxy from another Hangar home, and
+    /// the desktop Codex/ChatGPT app.
     const PS_FIXTURE: &str = "\
   PID  PPID ARGS
-  501     1 /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server --listen unix:///Users/x/.agents-in-a-box/codex-app-server.sock
+  501     1 /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server --listen unix:///Users/x/Home A/codex-app-server.sock
   777     1 node /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server --listen unix:///var/folders/ab/cd/T/cxc-9Q2/broker.sock
- 1500  4242 /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server proxy --listen unix:///Users/x/.agents-in-a-box/codex-app-server.sock
+ 1500  4242 /Users/x/.nvm/versions/node/v20.11.0/bin/codex app-server proxy --sock /Users/x/Home A/codex-app-server.sock
   900   500 /Applications/ChatGPT.app/Contents/Resources/codex --foo bar
 ";
 
     #[test]
-    fn codex_orphans_reaps_only_ppid1_app_servers() {
-        // Both leak sources (daemon child + node broker child) are ppid==1 orphans.
-        // The live child (ppid!=1) and the desktop app are left alone. Header skipped.
-        assert_eq!(codex_orphans_to_reap(PS_FIXTURE), vec![501, 777]);
+    fn codex_orphans_spares_proxy_backed_server_from_another_home() {
+        assert_eq!(codex_orphans_to_reap(PS_FIXTURE), vec![777]);
+
+        let without_proxy = PS_FIXTURE
+            .lines()
+            .filter(|line| !line.contains("app-server proxy"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert_eq!(codex_orphans_to_reap(&without_proxy), vec![501, 777]);
     }
 
     #[test]
     fn codex_orphans_ignores_desktop_app_and_non_orphan() {
         // A ppid!=1 line with a matching argv must NOT be returned.
-        let dump = " 1500  4242 /home/u/.nvm/bin/codex app-server proxy --listen unix:///t.sock\n";
+        let dump = " 1500  4242 /home/u/.nvm/bin/codex app-server proxy --sock /t.sock\n";
         assert!(codex_orphans_to_reap(dump).is_empty());
+        let adopted_proxy = " 1500     1 /home/u/.nvm/bin/codex app-server proxy --sock /t.sock\n";
+        assert!(codex_orphans_to_reap(adopted_proxy).is_empty());
         // The desktop app has neither `bin/codex` nor ppid==1.
         let desktop = "  900     1 /Applications/ChatGPT.app/Contents/Resources/codex --foo\n";
         assert!(codex_orphans_to_reap(desktop).is_empty());

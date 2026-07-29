@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Scale proof for success criterion 1: the hangar daemon's reaper clears a PILE
 # of orphaned codex app-servers (the incident's real failure mode was 900+),
-# while sparing its own in-use server and never touching the desktop Codex app.
+# while sparing its own in-use server, a proxy-backed server owned by another
+# Hangar home, and the desktop Codex app.
 #
 # It fabricates N ppid==1 codex-shaped orphans on FOREIGN sockets (simulating
 # leftovers from dead daemons and dead plugin-broker sessions), then starts a
@@ -24,6 +25,7 @@ MARK="/tmp/ainb-reapstress-$$"
 SOAK_HOME="$(mktemp -d)/soak-agents-in-a-box"
 mkdir -p "$SOAK_HOME"
 export AINB_HANGAR_HOME="$SOAK_HOME"
+export HANGAR_SWEEP_INTERVAL_MS=100
 
 orphan_count() {
   ps -Ao pid,ppid,args | grep '[b]in/codex' | grep -v grep | awk '$2==1' \
@@ -60,9 +62,19 @@ echo "desktop app server at start: $(desktop_alive)"
 for n in $(seq 1 "$N"); do
   spawn_orphan "/opt/fake/bin/codex app-server --listen unix://${MARK}-orphan-${n}.sock"
 done
+
+# One ppid==1 server remains live through a proxy from another Hangar home.
+# The reaper must spare it until that exact proxy exits.
+PROTECTED_SOCKET="${MARK}-home-a/codex-app-server.sock"
+mkdir -p "$(dirname "$PROTECTED_SOCKET")"
+spawn_orphan "/opt/fake/bin/codex app-server --listen unix://${PROTECTED_SOCKET}"
+bash -c "exec -a \"/opt/fake/bin/codex app-server proxy --sock ${PROTECTED_SOCKET}\" sleep 600" &
+PROXY_PID=$!
 sleep 1
 after_spawn="$(orphan_count)"
-echo "after spawning: orphan count $after_spawn (expected >= $((base + N)))"
+PROTECTED_PID="$(ps -Ao pid,args | grep -F "$PROTECTED_SOCKET" | grep 'app-server --listen' | grep -v grep | head -1 | awk '{print $1}')"
+echo "after spawning: orphan count $after_spawn (expected >= $((base + N + 1)))"
+echo "protected foreign server: ${PROTECTED_PID:-missing}; proxy: $PROXY_PID"
 
 # Start a real daemon; its boot reaper reaps every ppid==1 codex app-server that
 # is NOT holding its own socket, i.e. all N foreign orphans.
@@ -77,16 +89,36 @@ for _ in $(seq 1 60); do
 done
 foreign_left="$(ps -Ao pid,args | grep "${MARK}-orphan-" | grep -v grep | wc -l | tr -d ' ')"
 own="$(ps -Ao pid,args | grep "$SOAK_HOME/codex-app-server.sock" | grep 'app-server --listen' | grep -v grep | head -1 | awk '{print $1}')"
+protected_alive=0
+if [[ -n "$PROTECTED_PID" ]] && kill -0 "$PROTECTED_PID" 2>/dev/null; then
+  protected_alive=1
+fi
 echo "  foreign orphans left after boot reap: $foreign_left (want 0)"
+echo "  proxy-backed foreign server alive: $protected_alive (want 1)"
 echo "  daemon's own server on its own socket: ${own:-none (auth-less init may not persist; not required)}"
+
+# Once its consumer exits, the same foreign server becomes an orphan and the
+# periodic reaper must clear it.
+kill -TERM "$PROXY_PID" 2>/dev/null
+wait "$PROXY_PID" 2>/dev/null
+protected_gone=0
+for _ in $(seq 1 60); do
+  if ! kill -0 "$PROTECTED_PID" 2>/dev/null; then
+    protected_gone=1
+    break
+  fi
+  sleep 0.25
+done
+echo "  formerly proxy-backed server reaped after proxy exit: $protected_gone (want 1)"
 
 kill -TERM "$DPID" 2>/dev/null; wait "$DPID" 2>/dev/null
 echo "desktop app server at end: $(desktop_alive)"
 
-if [[ "$foreign_left" == "0" && "$gone" == "1" && "$after_spawn" -ge "$((base + N))" ]]; then
-  echo "PASS: daemon boot reaper cleared all $N foreign-socket orphans; own socket spared; desktop app untouched."
+if [[ "$foreign_left" == "0" && "$gone" == "1" && "$protected_alive" == "1" \
+   && "$protected_gone" == "1" && "$after_spawn" -ge "$((base + N + 1))" ]]; then
+  echo "PASS: cleared $N orphans, spared live foreign proxy target, reaped it after proxy exit."
   exit 0
 else
-  echo "FAIL: base=$base spawn=$after_spawn foreign_left=$foreign_left"
+  echo "FAIL: base=$base spawn=$after_spawn foreign_left=$foreign_left protected_alive=$protected_alive protected_gone=$protected_gone"
   exit 1
 fi
