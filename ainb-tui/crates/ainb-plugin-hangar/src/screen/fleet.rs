@@ -734,10 +734,7 @@ impl FleetPaneState {
 
     /// Sessions requiring operator review, independent from active lens.
     pub fn attention_count(&self) -> usize {
-        self.roster
-            .iter()
-            .filter(|session| session.is_actionable())
-            .count()
+        self.roster.iter().filter(|session| session.is_actionable()).count()
     }
 
     pub fn feedback(&self) -> Option<&str> {
