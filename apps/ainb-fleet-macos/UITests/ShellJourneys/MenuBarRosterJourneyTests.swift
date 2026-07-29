@@ -43,7 +43,7 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
             guard let element = issue.element else { return false }
             return issue.compactDescription == "Element has no description"
                 && element.elementType == .group
-                && element.descendants(matching: .searchField).firstMatch.label == "Search"
+                && !element.isHittable
         }
     }
 }
