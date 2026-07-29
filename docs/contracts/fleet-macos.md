@@ -1,3 +1,7 @@
+---
+title: "Fleet macOS daemon contract"
+---
+
 # Fleet macOS daemon contract
 
 Fleet macOS is a native JSON-RPC client of the Hangar daemon. It does not
