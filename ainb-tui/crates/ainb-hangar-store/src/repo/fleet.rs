@@ -682,6 +682,22 @@ impl FleetRepo {
         .await?;
         row.as_ref().map(receipt_from_row).transpose()
     }
+
+    /// List durable action receipts newest first.
+    pub async fn list_action_receipts(
+        pool: &SqlitePool,
+        limit: i64,
+    ) -> Result<Vec<ActionReceiptRow>, sqlx::Error> {
+        let rows = sqlx::query(
+            "SELECT request_id, session_key, action_kind, action_fingerprint, expected_version, \
+                    idempotency_key, status, detail, session_version, created_at, updated_at \
+             FROM fleet_action_receipt ORDER BY updated_at DESC, request_id DESC LIMIT ?",
+        )
+        .bind(limit.max(0))
+        .fetch_all(pool)
+        .await?;
+        rows.iter().map(receipt_from_row).collect()
+    }
 }
 
 const SESSION_SELECT_BY_KEY: &str = "SELECT session_key, provider, provider_session_id, \
