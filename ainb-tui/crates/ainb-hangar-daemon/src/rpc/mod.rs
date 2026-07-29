@@ -8524,11 +8524,11 @@ async fn handle_atc_register(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, RegisterAtc};
+    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, RegisterAtc, RegisterAtcOutcome};
 
     let params: ainb_hangar_proto::snapshots::AtcRegisterParams = parse_params(
         req,
-        "{ name, cwd?, tmux_session?, heartbeat_cron?, err_retry_cap?, idle_pause_min? }",
+        "{ name, cwd?, tmux_session?, heartbeat_cron?, err_retry_cap?, idle_pause_min?, expected_generation? }",
     )?;
     if params.name.trim().is_empty() {
         return Err(invalid_params("atc instance name must not be empty"));
@@ -8552,10 +8552,31 @@ async fn handle_atc_register(
         idle_pause_min: params.idle_pause_min.unwrap_or(60),
         next_tick_at,
     };
-    AtcInstanceRepo::register(pool, &reg, now_ms).await.map_err(|e| store_err(&e))?;
+    let outcome = AtcInstanceRepo::register_checked(pool, &reg, now_ms, params.expected_generation)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let (row, status) = match outcome {
+        RegisterAtcOutcome::Applied(row) => (
+            row,
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Applied,
+        ),
+        RegisterAtcOutcome::AlreadyApplied(row) => (
+            row,
+            ainb_hangar_proto::snapshots::AtcMutationStatus::AlreadyApplied,
+        ),
+        RegisterAtcOutcome::Stale(Some(row)) => {
+            (row, ainb_hangar_proto::snapshots::AtcMutationStatus::Stale)
+        }
+        RegisterAtcOutcome::Stale(None) => {
+            return Err(invalid_params("atc configuration generation is stale"));
+        }
+    };
     to_value(&ainb_hangar_proto::snapshots::AtcRegisterResult {
-        name: reg.name,
-        next_tick_at,
+        name: row.name,
+        next_tick_at: row.next_tick_at,
+        config_generation: row.config_generation,
+        status,
+        scheduler_ownership: atc_scheduler_ownership(),
     })
 }
 
@@ -8579,9 +8600,13 @@ async fn handle_atc_list(pool: &SqlitePool) -> Result<serde_json::Value, RpcErro
             next_tick_at: r.next_tick_at,
             enabled: r.enabled,
             last_heartbeat_at: r.last_heartbeat_at,
+            config_generation: r.config_generation,
         })
         .collect();
-    to_value(&ainb_hangar_proto::snapshots::AtcListResult { instances })
+    to_value(&ainb_hangar_proto::snapshots::AtcListResult {
+        instances,
+        scheduler_ownership: atc_scheduler_ownership(),
+    })
 }
 
 /// Dispatch `atc/escalate` (spec P9, D12): raise an ATC escalation as an
@@ -8796,25 +8821,53 @@ async fn handle_atc_unregister(
     pool: &SqlitePool,
     req: &RpcRequest,
 ) -> Result<serde_json::Value, RpcError> {
-    use ainb_hangar_store::repo::atc_instance::AtcInstanceRepo;
+    use ainb_hangar_store::repo::atc_instance::{AtcInstanceRepo, DisableAtcOutcome};
 
-    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams = parse_params(req, "{ name }")?;
+    let params: ainb_hangar_proto::snapshots::AtcUnregisterParams =
+        parse_params(req, "{ name, expected_generation? }")?;
     let name = params.name.trim();
     if name.is_empty() {
         return Err(invalid_params("atc instance name must not be empty"));
     }
-    // Only a registered instance is disabled; an unknown name is a clean no-op so
-    // teardown is safe to fire unconditionally.
-    let disabled = AtcInstanceRepo::get(pool, name).await.map_err(|e| store_err(&e))?.is_some();
-    if disabled {
-        AtcInstanceRepo::set_enabled(pool, name, false, None)
-            .await
-            .map_err(|e| store_err(&e))?;
-    }
+    let outcome = AtcInstanceRepo::disable_checked(pool, name, params.expected_generation)
+        .await
+        .map_err(|e| store_err(&e))?;
+    let (disabled, config_generation, status) = match outcome {
+        DisableAtcOutcome::Applied(row) => (
+            true,
+            Some(row.config_generation),
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Applied,
+        ),
+        DisableAtcOutcome::AlreadyApplied(row) => (
+            true,
+            Some(row.config_generation),
+            ainb_hangar_proto::snapshots::AtcMutationStatus::AlreadyApplied,
+        ),
+        DisableAtcOutcome::NotFound => (
+            false,
+            None,
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Applied,
+        ),
+        DisableAtcOutcome::Stale(row) => (
+            false,
+            Some(row.config_generation),
+            ainb_hangar_proto::snapshots::AtcMutationStatus::Stale,
+        ),
+    };
     to_value(&ainb_hangar_proto::snapshots::AtcUnregisterResult {
         name: name.to_string(),
         disabled,
+        config_generation,
+        status,
+        scheduler_ownership: atc_scheduler_ownership(),
     })
+}
+
+/// E04 deliberately withholds the mutation capability until the legacy
+/// launchd/systemd lifecycle is moved below both core and daemon. The daemon
+/// exposes this fact rather than guessing from files it does not own.
+const fn atc_scheduler_ownership() -> ainb_hangar_proto::snapshots::AtcSchedulerOwnership {
+    ainb_hangar_proto::snapshots::AtcSchedulerOwnership::LegacyTimerReconciliationRequired
 }
 
 /// Build the [`DaemonHealthSnapshot`] for the `hangar/daemon_health` pane (P8.5).
