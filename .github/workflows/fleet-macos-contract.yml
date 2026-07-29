@@ -1,0 +1,54 @@
+name: Fleet macOS contract
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "apps/ainb-fleet-macos/**"
+      - "ainb-tui/crates/ainb-hangar-proto/**"
+      - "ainb-tui/crates/ainb-hangar-daemon/src/rpc/**"
+      - "ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs"
+      - "ainb-tui/crates/ainb-hangar-daemon/Cargo.toml"
+      - "ainb-tui/Cargo.lock"
+      - ".github/workflows/fleet-macos-contract.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "apps/ainb-fleet-macos/**"
+      - "ainb-tui/crates/ainb-hangar-proto/**"
+      - "ainb-tui/crates/ainb-hangar-daemon/src/rpc/**"
+      - "ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs"
+      - "ainb-tui/crates/ainb-hangar-daemon/Cargo.toml"
+      - "ainb-tui/Cargo.lock"
+      - ".github/workflows/fleet-macos-contract.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: fleet-macos-contract-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  contract:
+    name: Fixture daemon and Fleet macOS
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - name: Build Fleet fixture daemon
+        run: cargo build -p ainb-hangar-daemon --example fleet_fixture_daemon
+        working-directory: ainb-tui
+      - name: Run Fleet RPC contract tests
+        run: |
+          xcodebuild test \
+            -project apps/ainb-fleet-macos/AINBFleet.xcodeproj \
+            -scheme AINBFleet \
+            -destination 'platform=macOS' \
+            -derivedDataPath "$RUNNER_TEMP/ainb-fleet-macos-contract" \
+            CODE_SIGNING_ALLOWED=NO
+      - name: Build Release Fleet app
+        run: bash apps/ainb-fleet-macos/ci/check-release-diagnostics.sh "$RUNNER_TEMP/ainb-fleet-macos-release"
