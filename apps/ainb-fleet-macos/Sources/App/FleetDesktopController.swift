@@ -128,6 +128,7 @@ private struct FleetNotchView: View {
             .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
         }
         .buttonStyle(.plain)
+        .accessibilityIdentifier("fleet.notch")
         .accessibilityLabel(FleetStatusPresentation.label(active: store.activeCount, needsYou: store.needsYouCount, state: store.connectionState, sessions: store.sessions))
         .accessibilityHint("Open Fleet")
     }
