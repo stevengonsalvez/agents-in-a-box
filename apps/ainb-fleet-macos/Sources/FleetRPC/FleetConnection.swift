@@ -68,6 +68,12 @@ actor FleetConnection {
         } else {
             connectedDescriptor = try Self.connectUnixSocket(at: location.socketURL)
         }
+        do {
+            try Self.preventSIGPIPE(on: connectedDescriptor)
+        } catch {
+            Darwin.close(connectedDescriptor)
+            throw error
+        }
         descriptor = connectedDescriptor
         readerTask = Task.detached { [weak self] in
             guard let connection = self else { return }
@@ -385,6 +391,19 @@ actor FleetConnection {
         } catch {
             Darwin.close(descriptor)
             throw error
+        }
+    }
+
+    private static func preventSIGPIPE(on descriptor: Int32) throws {
+        var enabled: Int32 = 1
+        guard Darwin.setsockopt(
+            descriptor,
+            SOL_SOCKET,
+            SO_NOSIGPIPE,
+            &enabled,
+            socklen_t(MemoryLayout.size(ofValue: enabled))
+        ) == 0 else {
+            throw FleetConnectionError.socket(errno)
         }
     }
 
