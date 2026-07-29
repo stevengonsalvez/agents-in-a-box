@@ -43,6 +43,12 @@ struct AINBFleetApp: App {
         Settings {
             FleetSettingsView(presentation: presentationBinding)
         }
+        CommandMenu("Fleet") {
+            Button("Open Fleet") { openFleet() }
+                .keyboardShortcut("o", modifiers: [.command, .shift])
+            Button("Show needs you") { openFleet(attentionOnly: true) }
+                .keyboardShortcut("n", modifiers: [.command, .shift])
+        }
     }
 
     @Environment(\.openWindow) private var openWindow
