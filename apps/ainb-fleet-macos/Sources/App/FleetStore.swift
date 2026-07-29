@@ -87,8 +87,10 @@ final class FleetStore: ObservableObject {
     private var lastAuthoritativeRefresh: Date?
     private var reconnectAttempts = 0
     private var hasEstablishedLiveConnection = false
+    private var liveConnectionStartedAt: Date?
     private var hasAppliedAuthoritativeSnapshot = false
     private let maximumReconnectAttempts = 3
+    private let reconnectResetInterval: TimeInterval = 30
 
     init(
         location: HangarLocation = HangarLocation(),
@@ -155,6 +157,7 @@ final class FleetStore: ObservableObject {
     func retry() {
         reconnectAttempts = 0
         hasEstablishedLiveConnection = false
+        liveConnectionStartedAt = nil
         reconnectTask?.cancel()
         reconnectTask = nil
         connectionState = .connecting
@@ -172,6 +175,7 @@ final class FleetStore: ObservableObject {
     func stop() {
         connectionGeneration &+= 1
         hasEstablishedLiveConnection = false
+        liveConnectionStartedAt = nil
         connectionTask?.cancel()
         connectionTask = nil
         reconnectTask?.cancel()
@@ -391,27 +395,33 @@ final class FleetStore: ObservableObject {
             }
             apply(bootstrapped)
             if result.capabilityIDs.contains("fleet.receipt.read") {
-                receipts = try await newConnection.receiptList(FleetReceiptListParams(limit: 50)).receipts
+                do {
+                    receipts = try await newConnection.receiptList(FleetReceiptListParams(limit: 50)).receipts
+                } catch {}
+            } else {
+                receipts = []
             }
             if result.capabilityIDs.contains("fleet.atc.read") {
-                let atc = try await newConnection.atcList()
-                atcInstances = atc.instances
-                atcSchedulerOwnership = atc.schedulerOwnership
+                do {
+                    let atc = try await newConnection.atcList()
+                    atcInstances = atc.instances
+                    atcSchedulerOwnership = atc.schedulerOwnership
+                } catch {}
             } else {
                 atcInstances = []
                 atcSchedulerOwnership = nil
             }
             if result.capabilityIDs.contains("fleet.timeline.read") {
-                timeline = try await newConnection.timeline(FleetTimelineParams(afterRevision: nil, sessionKey: nil, limit: 100)).entries
+                do {
+                    timeline = try await newConnection.timeline(FleetTimelineParams(afterRevision: nil, sessionKey: nil, limit: 100)).entries
+                } catch {}
             } else {
                 timeline = []
             }
             connectionState = .live(daemonVersion: result.daemonVersion, writeCompatible: result.writeCompatible)
             established = true
-            if reconnectAttempts > 0 {
-                reconnectAttempts = 0
-            }
             hasEstablishedLiveConnection = true
+            liveConnectionStartedAt = Date()
 
             for await incoming in stream {
                 if Task.isCancelled || connectionGeneration != generation { return }
@@ -515,6 +525,11 @@ final class FleetStore: ObservableObject {
         generation: UInt
     ) async {
         guard connectionGeneration == generation else { return }
+        if let liveConnectionStartedAt,
+           Date().timeIntervalSince(liveConnectionStartedAt) >= reconnectResetInterval {
+            reconnectAttempts = 0
+        }
+        liveConnectionStartedAt = nil
         becomeStale(reason: reason)
         await close(connection, ifCurrentGeneration: generation)
         guard connectionGeneration == generation,
