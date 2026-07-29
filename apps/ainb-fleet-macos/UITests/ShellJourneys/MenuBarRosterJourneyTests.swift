@@ -34,13 +34,18 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
     }
 
     @MainActor
-    func testFleetWindowPassesAccessibilityAudit() throws {
+    func testFleetWindowExposesVoiceOverLabels() throws {
         try fixture.seed(eventID: "alpha", sessionID: "alpha", eventType: "AskUserQuestion", observedAt: 1_700_000_000_001)
         launchFleetWindow()
-        waitFor(fleetRow("claude:alpha"))
-        app.activate()
-        app.windows["Fleet"].click()
+        let row = fleetRow("claude:alpha")
+        waitFor(row)
 
-        try app.performAccessibilityAudit()
+        XCTAssertEqual(row.label, "claude:alpha")
+        XCTAssertEqual(row.value as? String, "IDLE · ASK")
+        let statusItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == %@", "fleet.status-item"))
+            .firstMatch
+        waitFor(statusItem)
+        XCTAssertTrue(statusItem.label.contains("1 need you"))
     }
 }
