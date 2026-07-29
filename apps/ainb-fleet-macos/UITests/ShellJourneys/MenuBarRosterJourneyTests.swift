@@ -38,12 +38,9 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         try fixture.seed(eventID: "alpha", sessionID: "alpha", eventType: "AskUserQuestion", observedAt: 1_700_000_000_001)
         launchFleetWindow()
         waitFor(fleetRow("claude:alpha"))
+        app.activate()
+        app.windows["Fleet"].click()
 
-        try app.performAccessibilityAudit { issue in
-            guard let element = issue.element else { return false }
-            return issue.compactDescription == "Element has no description"
-                && element.elementType == .group
-                && !element.isHittable
-        }
+        try app.performAccessibilityAudit()
     }
 }
