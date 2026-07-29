@@ -5,6 +5,71 @@
 
 use serde::{Deserialize, Serialize};
 
+/// Current Fleet wire protocol version.
+pub const FLEET_PROTOCOL_VERSION: u32 = 1;
+
+/// Fleet capability identifiers advertised during protocol negotiation.
+pub const FLEET_PROTOCOL_CAPABILITY_IDS: &[&str] = &[
+    "fleet.action.execute",
+    "fleet.broadcast.execute",
+    "fleet.protocol.negotiate",
+    "fleet.snapshot.read",
+    "fleet.subscription.live",
+    "fleet.subscription.replay",
+    "fleet.subscription.resync",
+];
+
+/// Inclusive supported protocol version range.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetProtocolRange {
+    /// Lowest supported version.
+    pub min: u32,
+    /// Highest supported version.
+    pub max: u32,
+}
+
+impl FleetProtocolRange {
+    /// Whether this is a non-empty protocol range.
+    #[must_use]
+    pub const fn is_valid(self) -> bool {
+        self.min > 0 && self.min <= self.max
+    }
+
+    /// Whether `version` is in this inclusive range.
+    #[must_use]
+    pub const fn contains(self, version: u32) -> bool {
+        self.min <= version && version <= self.max
+    }
+}
+
+/// Parameters for `fleet/negotiate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetNegotiateParams {
+    /// Stable client implementation name.
+    pub client_name: String,
+    /// Client implementation version.
+    pub client_version: String,
+    /// Versions the client can safely read.
+    pub read_versions: FleetProtocolRange,
+    /// Versions the client can safely write.
+    pub write_versions: FleetProtocolRange,
+}
+
+/// Result from `fleet/negotiate`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct FleetNegotiateResult {
+    /// Daemon build version.
+    pub daemon_version: String,
+    /// Exact daemon Fleet protocol version.
+    pub protocol_version: u32,
+    /// Whether the client can safely read this daemon.
+    pub read_compatible: bool,
+    /// Whether the client can safely write to this daemon.
+    pub write_compatible: bool,
+    /// Stable, ordered daemon capability catalogue.
+    pub capability_ids: Vec<String>,
+}
+
 /// Session provider.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -209,6 +274,63 @@ pub struct FleetSubscribeParams {
     pub after_revision: i64,
 }
 
+/// Why a subscription acknowledgement requires a fresh snapshot baseline.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FleetReplayResetReason {
+    /// Initial subscribe has no prior cursor.
+    Bootstrap,
+    /// Caller cursor is newer than daemon durable head.
+    CursorAhead,
+    /// Missed durable interval exceeds the bounded replay response.
+    ReplayLimitExceeded,
+}
+
+/// Replay status for a subscription acknowledgement.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "state", rename_all = "snake_case")]
+pub enum FleetReplayState {
+    /// Replay exactly covers the requested interval.
+    Complete,
+    /// Snapshot replaces the requested replay interval.
+    SnapshotReset {
+        /// Reason the daemon cannot provide a complete replay interval.
+        reason: FleetReplayResetReason,
+    },
+}
+
+impl<'de> Deserialize<'de> for FleetReplayState {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        use serde::de::Error;
+
+        let value = serde_json::Value::deserialize(deserializer)?;
+        let object = value
+            .as_object()
+            .ok_or_else(|| D::Error::custom("FleetReplayState must be an object"))?;
+        let state = object
+            .get("state")
+            .and_then(serde_json::Value::as_str)
+            .ok_or_else(|| D::Error::custom("FleetReplayState requires string state"))?;
+        match state {
+            "complete" if object.len() == 1 => Ok(Self::Complete),
+            "snapshot_reset" if object.len() == 2 => {
+                let reason = object
+                    .get("reason")
+                    .cloned()
+                    .ok_or_else(|| D::Error::custom("snapshot_reset requires reason"))?;
+                let reason = serde_json::from_value(reason).map_err(D::Error::custom)?;
+                Ok(Self::SnapshotReset { reason })
+            }
+            "complete" => Err(D::Error::custom("complete carries unsupported fields")),
+            "snapshot_reset" => Err(D::Error::custom("snapshot_reset requires only reason")),
+            _ => Err(D::Error::custom("unknown FleetReplayState state")),
+        }
+    }
+}
+
 /// One durable change emitted after a subscription cursor.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct FleetEvent {
@@ -237,8 +359,10 @@ pub struct FleetEvent {
 pub struct FleetSubscribeResult {
     /// Consistent snapshot registered against live delivery.
     pub snapshot: FleetSnapshot,
-    /// Events committed after snapshot head and before live delivery.
+    /// Events in `(after_revision, snapshot.head_revision]` when replay is complete.
     pub replay: Vec<FleetEvent>,
+    /// Whether the response has complete replay coverage or resets the cursor.
+    pub replay_state: FleetReplayState,
 }
 
 /// One answer to one provider question.
