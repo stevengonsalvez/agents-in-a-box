@@ -71,7 +71,7 @@ struct FleetWindowView: View {
         .sheet(isPresented: $atcPresented) { FleetATCList(store: store) }
         .sheet(isPresented: $timelinePresented) { FleetTimelineList(store: store) }
         .sheet(isPresented: $broadcastPresented) { FleetBroadcastForm(store: store, isPresented: $broadcastPresented) }
-        .frame(minWidth: 820, minHeight: 520)
+        .frame(minWidth: 620, minHeight: 520)
     }
 }
 
