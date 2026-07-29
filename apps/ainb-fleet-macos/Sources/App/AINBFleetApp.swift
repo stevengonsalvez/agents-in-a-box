@@ -35,6 +35,10 @@ struct AINBFleetApp: App {
                 }
         }
         .menuBarExtraStyle(.window)
+        .onReceive(NotificationCenter.default.publisher(for: .fleetNotificationOpen)) { notification in
+            guard let url = notification.object as? URL else { return }
+            openDeepLink(url)
+        }
         .commands {
             CommandMenu("Fleet") {
                 Button("Open Fleet") { openFleet() }
@@ -75,7 +79,10 @@ struct AINBFleetApp: App {
     }
 
     private func openDeepLink(_ url: URL) {
-        guard url.scheme == "ainbfleet", url.host == "session", let key = url.pathComponents.last else { return }
+        guard url.scheme == "ainbfleet",
+              url.host == "session",
+              let key = String(url.percentEncodedPath.dropFirst()).removingPercentEncoding,
+              !key.isEmpty else { return }
         store.selectedSessionKey = key
         openWindow(id: "fleet")
     }
