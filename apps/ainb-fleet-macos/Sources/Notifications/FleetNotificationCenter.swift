@@ -1,8 +1,12 @@
 import Foundation
 import UserNotifications
 
+extension Notification.Name {
+    static let fleetNotificationOpen = Notification.Name("ainb.fleet.notification.open")
+}
+
 @MainActor
-final class FleetNotificationCenter {
+final class FleetNotificationCenter: NSObject, UNUserNotificationCenterDelegate {
     private static let preferencesKey = "ainb.fleet.notifications.v1"
     private let center: UNUserNotificationCenter
     private let defaults: UserDefaults
@@ -10,6 +14,8 @@ final class FleetNotificationCenter {
     init(center: UNUserNotificationCenter = .current(), defaults: UserDefaults = .standard) {
         self.center = center
         self.defaults = defaults
+        super.init()
+        center.delegate = self
     }
 
     var preferences: FleetNotificationPreferences {
@@ -40,8 +46,27 @@ final class FleetNotificationCenter {
             content.sound = preferences.playsSound ? .default : nil
             content.threadIdentifier = event.threadIdentifier
             content.userInfo = ["session_key": event.sessionKey, "deep_link": event.deepLink.absoluteString]
-            let request = UNNotificationRequest(identifier: "fleet.\(event.sessionKey).\(UUID().uuidString)", content: content, trigger: nil)
+            let request = UNNotificationRequest(identifier: "fleet.\(event.sessionKey)", content: content, trigger: nil)
             try? await center.add(request)
         }
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        willPresent notification: UNNotification,
+        withCompletionHandler completionHandler: @escaping (UNNotificationPresentationOptions) -> Void
+    ) {
+        completionHandler([.banner, .list, .sound])
+    }
+
+    nonisolated func userNotificationCenter(
+        _ center: UNUserNotificationCenter,
+        didReceive response: UNNotificationResponse,
+        withCompletionHandler completionHandler: @escaping () -> Void
+    ) {
+        defer { completionHandler() }
+        guard let value = response.notification.request.content.userInfo["deep_link"] as? String,
+              let url = URL(string: value) else { return }
+        NotificationCenter.default.post(name: .fleetNotificationOpen, object: url)
     }
 }
