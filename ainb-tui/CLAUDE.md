@@ -133,6 +133,25 @@ cargo test --features vt100-tests
 cargo test --test e2e_pty_tests
 ```
 
+### Contract Tests: never rerun to green
+
+Five test binaries are deterministic contracts, gated by their own CI job
+(`Contracts`, see `.github/workflows/ci.yml`):
+
+- `argv_golden_matrix` (`crates/ainb-hangar-daemon/tests/`): frozen per-provider CLI argv
+- `migration_upgrade_full_chain` (`crates/ainb-hangar-store/tests/`): migration replay over a populated, adversarially-seeded db
+- `axes`, `real_plugin_axes`, `wire_surface_gate` (`crates/ainb-plugin-cts-v2/tests/`): 14-axis plugin protocol conformance + wire-surface semver gate
+
+They compare a deterministic rendering to a committed golden/lock file, so
+they cannot legitimately flake. **If one goes red, never rerun the job to
+green it.** Fix the code, or update the golden and commit the diff. A red
+contract means a frozen guarantee actually broke, not noise.
+
+To regenerate a golden after an intentional change:
+- argv matrix: `UPDATE_GOLDEN=1 cargo test -p ainb-hangar-daemon --test argv_golden_matrix`
+- wire surface: bump `version` in `crates/ainb-plugin-protocol/Cargo.toml`, then `UPDATE_WIRE_SURFACE=1 cargo test -p ainb-plugin-cts-v2 --test wire_surface_gate`
+- migration chain: extend the seed in `migration_upgrade_full_chain.rs` directly; there is no separate regen command
+
 ## Recommended tmux Configuration
 
 Claude Code generates high-frequency screen updates (4,000+ scroll events/sec) which causes flickering in tmux. See `config/tmux.conf` for recommended settings:
