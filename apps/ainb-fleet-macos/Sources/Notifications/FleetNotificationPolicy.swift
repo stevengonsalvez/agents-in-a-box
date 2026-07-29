@@ -1,5 +1,22 @@
 import Foundation
 
+struct FleetNotificationPreferences: Codable, Equatable {
+    var enabled = true
+    var playsSound = true
+    var quietHoursEnabled = false
+    var quietHoursStart = 22
+    var quietHoursEnd = 8
+
+    func shouldDeliver(atHour hour: Int) -> Bool {
+        guard enabled, (0...23).contains(hour) else { return false }
+        guard quietHoursEnabled, quietHoursStart != quietHoursEnd else { return true }
+        let isQuiet = quietHoursStart < quietHoursEnd
+            ? (quietHoursStart..<quietHoursEnd).contains(hour)
+            : hour >= quietHoursStart || hour < quietHoursEnd
+        return !isQuiet
+    }
+}
+
 struct FleetNotificationEvent: Equatable {
     let sessionKey: String
     let title: String
