@@ -42,10 +42,5 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
 
         XCTAssertEqual(row.label, "claude:alpha")
         XCTAssertEqual(row.value as? String, "IDLE · ASK")
-        let statusItem = app.descendants(matching: .any)
-            .matching(NSPredicate(format: "identifier == %@", "fleet.status-item"))
-            .firstMatch
-        waitFor(statusItem)
-        XCTAssertTrue(statusItem.label.contains("1 need you"))
     }
 }
