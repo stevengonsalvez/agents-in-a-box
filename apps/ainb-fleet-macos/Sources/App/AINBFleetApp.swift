@@ -35,6 +35,14 @@ struct AINBFleetApp: App {
                 }
         }
         .menuBarExtraStyle(.window)
+        .commands {
+            CommandMenu("Fleet") {
+                Button("Open Fleet") { openFleet() }
+                    .keyboardShortcut("o", modifiers: [.command, .shift])
+                Button("Show needs you") { openFleet(attentionOnly: true) }
+                    .keyboardShortcut("n", modifiers: [.command, .shift])
+            }
+        }
 
         Window("Fleet", id: "fleet") {
             FleetWindowView(store: store, presentation: presentationBinding)
