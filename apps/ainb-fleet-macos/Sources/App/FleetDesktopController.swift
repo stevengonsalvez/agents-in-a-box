@@ -57,6 +57,7 @@ final class FleetDesktopController {
     }
 
     func showFleet() {
+        NSApp.setActivationPolicy(.regular)
         if fleetWindow == nil {
             let window = NSWindow(
                 contentRect: NSRect(x: 0, y: 0, width: 980, height: 680),
@@ -66,12 +67,14 @@ final class FleetDesktopController {
             )
             window.title = "Fleet"
             window.minSize = NSSize(width: 620, height: 520)
+            window.level = .floating
             window.contentView = NSHostingView(rootView: FleetWindowView(store: store, presentation: presentation.binding))
             window.center()
             window.setFrameAutosaveName("AINBFleetWindow")
             fleetWindow = window
         }
         fleetWindow?.makeKeyAndOrderFront(nil)
+        fleetWindow?.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
     }
 
