@@ -482,7 +482,7 @@ fn run_tmp(tag: &str) -> PathBuf {
     base
 }
 
-/// Register the read_paths/[config] canary with a custom `read_paths`
+/// Register the `read_paths`/`[config]` canary with a custom `read_paths`
 /// allow-list, a `[config]` schema, and a stamped resolved config table.
 fn register_read_paths_canary(
     rt: &Runtime,

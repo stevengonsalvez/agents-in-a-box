@@ -11,3 +11,5 @@
 //! - A host-side `#[test]` in `tests/axes.rs`
 
 pub mod harness;
+pub mod real_plugin;
+pub mod wire_surface;
