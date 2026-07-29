@@ -134,6 +134,10 @@ pub struct FleetSessionRow {
     pub lifecycle_state: String,
     /// Number of active provider child-work items.
     pub active_work_count: i64,
+    /// Workload group timestamp.
+    pub workload_updated_at: i64,
+    /// Workload group authority.
+    pub workload_authority: String,
     /// Attention state token.
     pub attention_state: String,
     /// Fingerprint of current structured request or approval.
@@ -766,7 +770,7 @@ const SESSION_SELECT_BY_KEY: &str = "SELECT session_key, provider, provider_sess
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, active_work_count, version, updated_revision \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
     FROM fleet_session WHERE session_key = ?";
 
 const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session_id, \
@@ -775,7 +779,7 @@ const SESSION_SELECT_ALL: &str = "SELECT session_key, provider, provider_session
     confidence, discovered_at, last_observed_at, metadata_updated_at, \
     metadata_authority, lifecycle_updated_at, lifecycle_authority, \
     attention_updated_at, attention_authority, transport_updated_at, \
-    transport_authority, active_work_count, version, updated_revision \
+    transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision \
     FROM fleet_session WHERE visible = 1 ORDER BY session_key ASC";
 
 async fn session_by_key_tx(
@@ -816,6 +820,7 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
         0
     };
     let transport_at = event.patch.transport_health.as_ref().map_or(0, |_| event.observed_at);
+    let workload_at = event.patch.active_work_count.map_or(0, |_| event.observed_at);
     FleetSessionRow {
         session_key: event.session_key.clone(),
         provider: event.patch.provider.clone().unwrap_or_else(|| "unknown".to_string()),
@@ -830,6 +835,12 @@ fn new_session(event: &NewFleetEvent) -> FleetSessionRow {
             .clone()
             .unwrap_or_else(|| "UNKNOWN".to_string()),
         active_work_count: event.patch.active_work_count.unwrap_or(0),
+        workload_updated_at: workload_at,
+        workload_authority: if workload_at == 0 {
+            "inferred".to_string()
+        } else {
+            authority.clone()
+        },
         attention_state: event.patch.attention_state.clone().unwrap_or_else(|| "NONE".to_string()),
         current_request_fingerprint: event.patch.current_request_fingerprint.clone().flatten(),
         management_state: event
@@ -905,7 +916,7 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
         changed = true;
     }
 
-    if event.patch.lifecycle_state.is_some() || event.patch.active_work_count.is_some() {
+    if event.patch.lifecycle_state.is_some() {
         if should_replace(
             authority,
             event.observed_at,
@@ -913,11 +924,22 @@ fn apply_patch(row: &mut FleetSessionRow, event: &NewFleetEvent) -> bool {
             row.lifecycle_updated_at,
         ) {
             assign_if_some(&mut row.lifecycle_state, &event.patch.lifecycle_state);
-            if let Some(count) = event.patch.active_work_count {
-                row.active_work_count = count;
-            }
             row.lifecycle_updated_at = event.observed_at;
             row.lifecycle_authority.clone_from(&authority_token);
+            changed = true;
+        }
+    }
+
+    if let Some(count) = event.patch.active_work_count {
+        if should_replace(
+            authority,
+            event.observed_at,
+            &row.workload_authority,
+            row.workload_updated_at,
+        ) {
+            row.active_work_count = count;
+            row.workload_updated_at = event.observed_at;
+            row.workload_authority.clone_from(&authority_token);
             changed = true;
         }
     }
@@ -990,8 +1012,8 @@ async fn insert_session(
             confidence, discovered_at, last_observed_at, metadata_updated_at, \
             metadata_authority, lifecycle_updated_at, lifecycle_authority, \
             attention_updated_at, attention_authority, transport_updated_at, \
-            transport_authority, active_work_count, version, updated_revision) \
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            transport_authority, active_work_count, workload_updated_at, workload_authority, version, updated_revision) \
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
     );
     bind_session(query, row).execute(&mut **tx).await?;
     Ok(())
@@ -1010,7 +1032,7 @@ async fn update_session(
             discovered_at = ?, last_observed_at = ?, metadata_updated_at = ?, \
             metadata_authority = ?, lifecycle_updated_at = ?, lifecycle_authority = ?, \
             attention_updated_at = ?, attention_authority = ?, transport_updated_at = ?, \
-            transport_authority = ?, active_work_count = ?, version = ?, updated_revision = ? \
+            transport_authority = ?, active_work_count = ?, workload_updated_at = ?, workload_authority = ?, version = ?, updated_revision = ? \
          WHERE session_key = ?",
     )
     .bind(&row.provider)
@@ -1038,6 +1060,8 @@ async fn update_session(
     .bind(row.transport_updated_at)
     .bind(&row.transport_authority)
     .bind(row.active_work_count)
+    .bind(row.workload_updated_at)
+    .bind(&row.workload_authority)
     .bind(row.version)
     .bind(row.updated_revision)
     .bind(&row.session_key)
@@ -1077,6 +1101,8 @@ fn bind_session<'q>(
         .bind(row.transport_updated_at)
         .bind(&row.transport_authority)
         .bind(row.active_work_count)
+        .bind(row.workload_updated_at)
+        .bind(&row.workload_authority)
         .bind(row.version)
         .bind(row.updated_revision)
 }
@@ -1109,6 +1135,8 @@ fn session_from_row(row: &sqlx::sqlite::SqliteRow) -> Result<FleetSessionRow, sq
         transport_updated_at: row.try_get("transport_updated_at")?,
         transport_authority: row.try_get("transport_authority")?,
         active_work_count: row.try_get("active_work_count")?,
+        workload_updated_at: row.try_get("workload_updated_at")?,
+        workload_authority: row.try_get("workload_authority")?,
         version: row.try_get("version")?,
         updated_revision: row.try_get("updated_revision")?,
     })
