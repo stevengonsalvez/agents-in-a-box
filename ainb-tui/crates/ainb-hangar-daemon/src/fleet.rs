@@ -22,8 +22,8 @@ use sqlx::SqlitePool;
 
 use crate::events::EventSink;
 use crate::fleet_provider::codex::{
-    parse_inbound_envelope, CodexApprovalKind, CodexCapabilities, CodexInbound,
-    CodexInboundEnvelope,
+    CodexApprovalKind, CodexCapabilities, CodexInbound, CodexInboundEnvelope,
+    parse_inbound_envelope,
 };
 
 /// Semantic hook observation before storage normalization.

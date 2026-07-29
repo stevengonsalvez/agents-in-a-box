@@ -100,11 +100,11 @@ impl FleetProviderEventRepo {
         .bind(&digest)
         .execute(pool)
         .await?;
-        let row = Self::get(pool, &event.event_id)
-            .await?
-            .ok_or_else(|| FleetProviderEventError::EventNotFound {
+        let row = Self::get(pool, &event.event_id).await?.ok_or_else(|| {
+            FleetProviderEventError::EventNotFound {
                 event_id: event.event_id.clone(),
-            })?;
+            }
+        })?;
         if result.rows_affected() == 0 && !matches_event(&row, event, &digest) {
             return Err(FleetProviderEventError::EventIdCollision {
                 event_id: event.event_id.clone(),
