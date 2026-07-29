@@ -1,35 +1,41 @@
 {
   "name": "ainb-hooks",
   "version": "0.3.0",
-  "description": "Emit actionable Claude Code lifecycle events (awaiting-input / permission via Notification, plus Stop) to the ainb notification inbox (ainb-notifyd via Unix socket). The same notify.sh also powers the event-driven ATC plumbing when installed under ATC management (AINB_MANAGED=atc): it writes per-session status files, commits child completions to the parent's durable inbox, and runs the synchronous Stop-drain. Those ATC lifecycle hooks are installed into ~/.claude/settings.json by `ainb fleet atc setup` (read-preserve-modify-write — reflect/notifyd hooks are preserved), NOT by this marketplace manifest.",
+  "description": "Emit every safely observable Claude Code lifecycle event into Hangar's durable provider log. User-facing events still reach ainb-notifyd over its Unix socket. The same notify.sh powers ATC structured control when installed with AINB_MANAGED=atc.",
   "author": {
     "name": "Agents-in-a-Box"
   },
-  "//": "Only the events that need the human are registered. Claude Code surfaces both idle/awaiting-input AND permission prompts through the Notification hook, so Notification + Stop cover every actionable case. Telemetry (SessionStart / UserPromptSubmit / PostToolUse / PreCompact) is intentionally NOT hooked — PostToolUse alone fires dozens of times per turn and would bury the signal. The daemon also drops any non-user-facing event defensively (see crates/ainb-plugin-notifyd/src/listener.rs).",
+  "//": "All documented Claude Code hook events are registered for Hangar's durable provider log. ainb-notifyd independently drops non-user-facing events, so activity telemetry never pollutes the operator inbox.",
   "hooks": {
-    "Notification": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
-            "timeout": 5
-          }
-        ]
-      }
-    ],
-    "Stop": [
-      {
-        "matcher": "",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh",
-            "timeout": 5
-          }
-        ]
-      }
-    ]
+    "SessionStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "Setup": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "InstructionsLoaded": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "UserPromptSubmit": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "UserPromptExpansion": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "MessageDisplay": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PreToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PermissionRequest": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PostToolUse": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PostToolUseFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PostToolBatch": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PermissionDenied": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "Notification": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "SubagentStart": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "SubagentStop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "TaskCreated": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "TaskCompleted": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "Stop": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "StopFailure": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "TeammateIdle": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "ConfigChange": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "CwdChanged": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "FileChanged": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "WorktreeCreate": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "WorktreeRemove": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PreCompact": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "PostCompact": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "SessionEnd": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "Elicitation": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }],
+    "ElicitationResult": [{ "matcher": "", "hooks": [{ "type": "command", "command": "AINB_AGENT=claude ${CLAUDE_PLUGIN_ROOT}/hooks/notify.sh", "timeout": 5 }] }]
   }
 }

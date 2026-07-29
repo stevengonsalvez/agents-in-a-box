@@ -873,6 +873,84 @@ mod tests {
     }
 
     #[test]
+    fn codex_template_registers_every_documented_cli_hook() {
+        let template: serde_json::Value = serde_json::from_str(CODEX_HOOKS_TEMPLATE).unwrap();
+        let hooks = template["hooks"].as_object().expect("hooks object");
+        let events = hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "PermissionRequest",
+            "PostCompact",
+            "PostToolUse",
+            "PreCompact",
+            "PreToolUse",
+            "SessionEnd",
+            "SessionStart",
+            "Stop",
+            "SubagentStart",
+            "SubagentStop",
+            "UserPromptSubmit",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(events, expected);
+    }
+
+    #[test]
+    fn claude_manifest_registers_every_documented_hook() {
+        let manifest: serde_json::Value = serde_json::from_str(CLAUDE_PLUGIN_JSON).unwrap();
+        let hooks = manifest["hooks"].as_object().expect("hooks object");
+        let events = hooks.keys().map(String::as_str).collect::<std::collections::BTreeSet<_>>();
+        let expected = [
+            "SessionStart",
+            "Setup",
+            "InstructionsLoaded",
+            "UserPromptSubmit",
+            "UserPromptExpansion",
+            "MessageDisplay",
+            "PreToolUse",
+            "PermissionRequest",
+            "PostToolUse",
+            "PostToolUseFailure",
+            "PostToolBatch",
+            "PermissionDenied",
+            "Notification",
+            "SubagentStart",
+            "SubagentStop",
+            "TaskCreated",
+            "TaskCompleted",
+            "Stop",
+            "StopFailure",
+            "TeammateIdle",
+            "ConfigChange",
+            "CwdChanged",
+            "FileChanged",
+            "WorktreeCreate",
+            "WorktreeRemove",
+            "PreCompact",
+            "PostCompact",
+            "SessionEnd",
+            "Elicitation",
+            "ElicitationResult",
+        ]
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+        assert_eq!(events, expected);
+        for entries in hooks.values() {
+            assert!(
+                entries.as_array().is_some_and(|entries| entries.iter().all(|entry| {
+                    entry["hooks"].as_array().is_some_and(|hooks| {
+                        hooks.iter().all(|hook| {
+                            hook["command"]
+                                .as_str()
+                                .is_some_and(|command| command.contains("AINB_AGENT=claude"))
+                        })
+                    })
+                }))
+            );
+        }
+    }
+
+    #[test]
     fn uninstall_strips_codex_managed_block_but_keeps_user_hooks() {
         let dir = fake_home();
         let p = paths_under_home(dir.path());
