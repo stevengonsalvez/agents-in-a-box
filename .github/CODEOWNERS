@@ -1,0 +1,8 @@
+# Fleet macOS consumes the Hangar daemon contract. Review these paths together.
+/apps/ainb-fleet-macos/ @stevengonsalvez
+/ainb-tui/crates/ainb-hangar-proto/src/fleet.rs @stevengonsalvez
+/ainb-tui/crates/ainb-hangar-proto/src/methods.rs @stevengonsalvez
+/ainb-tui/crates/ainb-hangar-daemon/src/rpc/ @stevengonsalvez
+/ainb-tui/crates/ainb-hangar-daemon/examples/fleet_fixture_daemon.rs @stevengonsalvez
+/.github/workflows/fleet-macos-contract.yml @stevengonsalvez
+/docs/contracts/fleet-macos.md @stevengonsalvez
