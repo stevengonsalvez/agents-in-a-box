@@ -19,6 +19,23 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
     }
 
     @MainActor
+    func testOpenFleetButtonOpensFleetWindow() throws {
+        launchApp()
+
+        let statusItem = app.descendants(matching: .any)
+            .matching(NSPredicate(format: "identifier == %@", "fleet.status-item"))
+            .firstMatch
+        waitFor(statusItem)
+        statusItem.click()
+
+        let openFleet = app.buttons["fleet.open"]
+        waitFor(openFleet)
+        openFleet.click()
+
+        XCTAssertTrue(app.windows["Fleet"].waitForExistence(timeout: 8), app.debugDescription)
+    }
+
+    @MainActor
     func testRealFixtureRendersAttentionRosterAndFiltersInFleetWindow() throws {
         try fixture.seed(eventID: "alpha", sessionID: "alpha", eventType: "AskUserQuestion", observedAt: 1_700_000_000_001)
         try fixture.seed(eventID: "beta", provider: "codex", sessionID: "beta", eventType: "AskUserQuestion", observedAt: 1_700_000_000_002)
