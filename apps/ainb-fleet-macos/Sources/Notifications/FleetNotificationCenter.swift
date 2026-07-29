@@ -46,7 +46,7 @@ final class FleetNotificationCenter: NSObject, UNUserNotificationCenterDelegate 
             content.sound = preferences.playsSound ? .default : nil
             content.threadIdentifier = event.threadIdentifier
             content.userInfo = ["session_key": event.sessionKey, "deep_link": event.deepLink.absoluteString]
-            let request = UNNotificationRequest(identifier: "fleet.\(event.sessionKey)", content: content, trigger: nil)
+            let request = UNNotificationRequest(identifier: event.requestIdentifier, content: content, trigger: nil)
             try? await center.add(request)
         }
     }

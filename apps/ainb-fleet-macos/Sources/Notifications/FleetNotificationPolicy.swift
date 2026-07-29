@@ -21,8 +21,10 @@ struct FleetNotificationEvent: Equatable {
     let sessionKey: String
     let title: String
     let body: String
+    let eventID = UUID().uuidString
 
     var threadIdentifier: String { "fleet.\(sessionKey)" }
+    var requestIdentifier: String { "\(threadIdentifier).\(eventID)" }
     var deepLink: URL {
         var components = URLComponents()
         components.scheme = "ainbfleet"
