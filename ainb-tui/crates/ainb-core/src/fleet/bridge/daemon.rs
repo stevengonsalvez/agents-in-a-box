@@ -455,7 +455,8 @@ mod tests {
                     "id": 2,
                     "result": {
                         "snapshot": {"head_revision": 41, "sessions": []},
-                        "replay": []
+                        "replay": [],
+                        "replay_state": {"state": "complete"}
                     }
                 }),
             )
