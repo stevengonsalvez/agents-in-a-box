@@ -106,6 +106,8 @@ pub struct FleetSessionRow {
     pub current_request: Option<serde_json::Value>,
     #[serde(alias = "lifecycle")]
     pub lifecycle_state: String,
+    #[serde(default)]
+    pub active_work_count: i64,
     #[serde(alias = "attention")]
     pub attention_state: String,
     #[serde(alias = "management")]
@@ -144,6 +146,13 @@ pub struct FleetSessionRow {
 }
 
 impl FleetSessionRow {
+    /// Active Fleet roster excludes terminal history and lost transports. A
+    /// completed turn stays active while its provider or exact tmux target lives.
+    fn is_active_session(&self) -> bool {
+        !self.lifecycle_state.eq_ignore_ascii_case("EXITED")
+            && !self.transport_health.eq_ignore_ascii_case("UNAVAILABLE")
+    }
+
     fn is_actionable(&self) -> bool {
         !self.attention_state.eq_ignore_ascii_case("NONE")
     }
@@ -209,9 +218,7 @@ impl FleetSessionRow {
             "RUNNING"
         } else if self.lifecycle_state.eq_ignore_ascii_case("IDLE") {
             "IDLE"
-        } else if self.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
-            || self.lifecycle_state.eq_ignore_ascii_case("EXITED")
-        {
+        } else if self.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE") {
             "COMPLETED"
         } else {
             "UNKNOWN"
@@ -263,6 +270,7 @@ impl From<ainb_hangar_proto::fleet::FleetSession> for FleetSessionRow {
                 LifecycleState::Unknown => "UNKNOWN",
             }
             .into(),
+            active_work_count: session.active_work_count,
             attention_state: match session.attention {
                 AttentionState::None => "NONE",
                 AttentionState::Ask => "ASK",
@@ -324,13 +332,14 @@ pub enum FleetFilter {
 
 impl FleetFilter {
     fn matches(self, row: &FleetSessionRow) -> bool {
+        if !row.is_active_session() {
+            return false;
+        }
         match self {
             Self::NeedsInput => row.is_actionable(),
             Self::Idle => !row.is_actionable() && row.lifecycle_state.eq_ignore_ascii_case("IDLE"),
             Self::Completed => {
-                !row.is_actionable()
-                    && (row.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
-                        || row.lifecycle_state.eq_ignore_ascii_case("EXITED"))
+                !row.is_actionable() && row.lifecycle_state.eq_ignore_ascii_case("TURN_COMPLETE")
             }
             Self::Running => {
                 !row.is_actionable()
@@ -718,16 +727,18 @@ impl FleetPaneState {
         self.roster.iter().filter(|row| self.filter.matches(row)).collect()
     }
 
-    /// Total sessions in unfiltered authoritative roster.
+    /// Total active sessions in the operator roster.
     pub fn session_count(&self) -> usize {
-        self.roster.len()
+        self.roster.iter().filter(|session| session.is_active_session()).count()
     }
 
     /// Sessions requiring operator review, independent from active lens.
     pub fn attention_count(&self) -> usize {
         self.roster
             .iter()
-            .filter(|session| !session.attention_state.eq_ignore_ascii_case("NONE"))
+            .filter(|session| {
+                session.is_active_session() && !session.attention_state.eq_ignore_ascii_case("NONE")
+            })
             .count()
     }
 
@@ -1882,8 +1893,13 @@ fn render_table_row(
     let operator_state = session.operator_state();
     let attachment = session.attachment_label();
     let age = format_age(now_ms, session.last_observed_at);
+    let workload = if session.active_work_count > 0 {
+        format!(" +{}", session.active_work_count)
+    } else {
+        String::new()
+    };
     let text = format!(
-        "{marker} {identity:<identity_width$} {provider:<8} {operator_state:<13} {attachment:<7} {age:>4}"
+        "{marker} {identity:<identity_width$} {provider:<8} {operator_state:<13}{workload:<4} {attachment:<7} {age:>4}"
     );
     put_str_styled(
         buffer,
@@ -2728,6 +2744,7 @@ mod tests {
                 .collect(),
             ),
             version: 7,
+            active_work_count: 0,
             cwd: format!("/work/{key}"),
             tmux_target: Some(format!("{key}:0.0")),
             display_name: Some(key.into()),
@@ -2840,7 +2857,7 @@ mod tests {
         let cases = [
             (FleetFilter::NeedsInput, vec!["ask", "error-done"]),
             (FleetFilter::Idle, vec!["idle"]),
-            (FleetFilter::Completed, vec!["turn-done", "exited"]),
+            (FleetFilter::Completed, vec!["turn-done"]),
             (FleetFilter::Running, vec!["starting", "running"]),
             (
                 FleetFilter::All,
@@ -2849,7 +2866,6 @@ mod tests {
                     "error-done",
                     "idle",
                     "turn-done",
-                    "exited",
                     "starting",
                     "running",
                     "unknown",
@@ -2861,6 +2877,29 @@ mod tests {
             let actual: Vec<_> =
                 filtered.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
             assert_eq!(actual, expected, "filter {filter:?}");
+        }
+    }
+
+    #[test]
+    fn terminal_history_is_excluded_from_every_operator_lens_and_counts() {
+        let mut exited = session("old-exit", "claude", "EXITED", "NONE", "degraded");
+        exited.transport_health = "UNAVAILABLE".into();
+        let mut unavailable = session("lost-turn", "codex", "TURN_COMPLETE", "NONE", "managed");
+        unavailable.transport_health = "UNAVAILABLE".into();
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![
+            session("active-turn", "claude", "TURN_COMPLETE", "NONE", "managed"),
+            exited,
+            unavailable,
+        ]);
+
+        assert_eq!(state.session_count(), 1);
+        for filter in FleetFilter::ALL {
+            let filtered = apply(&state, FleetEvent::SetFilter(filter)).state;
+            assert!(
+                filtered.visible_sessions().iter().all(|row| row.session_key == "active-turn"),
+                "terminal history leaked into {filter:?}"
+            );
         }
     }
 
@@ -3707,12 +3746,14 @@ mod tests {
             last_observed_at: 20,
             lifecycle_updated_at: 20,
             attention_updated_at: 10,
+            active_work_count: 2,
             version: 3,
             updated_revision: 4,
         });
         assert_eq!(row.provider, "codex");
         assert_eq!(row.lifecycle_state, "RUNNING");
         assert_eq!(row.management_state, "MANAGED");
+        assert_eq!(row.active_work_count, 2);
         assert!(row.capabilities.contains("interrupt"));
         assert!(row.capabilities.contains("tmux_attach"));
         let request_lines = request_detail_lines(row.current_request.as_ref().unwrap());

@@ -7399,6 +7399,7 @@ mod tests {
             transport_health: "healthy".into(),
             capabilities: FleetCapabilities::List(vec!["tmux_attach".to_string()]),
             version: 7,
+            active_work_count: 0,
             cwd: "/work/claude".into(),
             tmux_target: Some("claude:ask:0.0".into()),
             display_name: Some("claude:ask".into()),

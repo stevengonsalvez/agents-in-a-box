@@ -2879,6 +2879,7 @@ mod fleet_routing_tests {
                 ("start".into(), true),
             ])),
             version: 9,
+            active_work_count: 0,
             cwd: "/work/one".into(),
             tmux_target: Some("one:0.0".into()),
             display_name: Some("one".into()),

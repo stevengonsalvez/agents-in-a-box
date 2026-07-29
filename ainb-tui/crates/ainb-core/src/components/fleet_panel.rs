@@ -1044,6 +1044,7 @@ fn canonical_row_from_legacy(row: &StateRow) -> FleetSessionRow {
             .collect(),
         ),
         version: 1,
+        active_work_count: 0,
         cwd: row.cwd.clone(),
         repository_name: None,
         branch_name: None,
