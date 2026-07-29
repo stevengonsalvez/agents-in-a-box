@@ -82,6 +82,20 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(FleetNotificationPolicy.events(previous: [previous], current: [current]).first?.threadIdentifier, "fleet.codex:alpha")
     }
 
+    func testNotificationPreferencesRespectEnabledAndQuietHours() {
+        var preferences = FleetNotificationPreferences()
+        XCTAssertTrue(preferences.shouldDeliver(atHour: 23))
+
+        preferences.enabled = false
+        XCTAssertFalse(preferences.shouldDeliver(atHour: 12))
+
+        preferences.enabled = true
+        preferences.quietHoursEnabled = true
+        XCTAssertFalse(preferences.shouldDeliver(atHour: 23))
+        XCTAssertFalse(preferences.shouldDeliver(atHour: 7))
+        XCTAssertTrue(preferences.shouldDeliver(atHour: 8))
+    }
+
     private func session(key: String, lifecycle: LifecycleState, attention: AttentionState = .none, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
         FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: "/workspace", displayName: key, lifecycle: lifecycle, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
     }
