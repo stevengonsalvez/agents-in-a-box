@@ -864,6 +864,7 @@ async fn handle(
         methods::HANGAR_ISSUE_TIMELINE => handle_issue_timeline(pool, req).await,
         methods::HANGAR_BOARD_CARD_SET_AUTO_RUN => handle_board_card_set_auto_run(pool, req).await,
         methods::HANGAR_REPO_LIST => handle_repo_list(req),
+        methods::FLEET_NEGOTIATE => handle_fleet_negotiate(req, health).await,
         methods::FLEET_SNAPSHOT => handle_fleet_snapshot(pool).await,
         // Receiver registration occurs in `serve_conn` before this snapshot is
         // read. The ack carries its exact head, then the forwarder drains rows
@@ -902,6 +903,34 @@ async fn handle_fleet_snapshot(pool: &SqlitePool) -> Result<serde_json::Value, R
     to_value(&snapshot)
 }
 
+/// Negotiate the exact Fleet protocol version and capability catalogue.
+async fn handle_fleet_negotiate(
+    req: &RpcRequest,
+    health: &DaemonHealth,
+) -> Result<serde_json::Value, RpcError> {
+    use ainb_hangar_proto::fleet::{
+        FLEET_PROTOCOL_CAPABILITY_IDS, FLEET_PROTOCOL_VERSION, FleetNegotiateParams,
+        FleetNegotiateResult,
+    };
+
+    let params: FleetNegotiateParams = parse_params(
+        req,
+        "{ client_name, client_version, read_versions: { min, max }, write_versions: { min, max } }",
+    )?;
+    if !params.read_versions.is_valid() || !params.write_versions.is_valid() {
+        return Err(invalid_params(
+            "protocol version ranges require 1 <= min <= max",
+        ));
+    }
+    to_value(&FleetNegotiateResult {
+        daemon_version: health.version.clone(),
+        protocol_version: FLEET_PROTOCOL_VERSION,
+        read_compatible: params.read_versions.contains(FLEET_PROTOCOL_VERSION),
+        write_compatible: params.write_versions.contains(FLEET_PROTOCOL_VERSION),
+        capability_ids: FLEET_PROTOCOL_CAPABILITY_IDS.iter().map(|id| (*id).to_string()).collect(),
+    })
+}
+
 /// Register a revision cursor and return the snapshot head paired with it.
 async fn handle_fleet_subscribe(
     pool: &SqlitePool,
@@ -912,10 +941,42 @@ async fn handle_fleet_subscribe(
     if params.after_revision < 0 {
         return Err(invalid_params("after_revision must be non-negative"));
     }
-    let snapshot = crate::fleet::snapshot_wire(pool).await.map_err(|error| store_err(&error))?;
+    let projection = crate::fleet::subscription_wire(pool, params.after_revision, REPLAY_BATCH + 1)
+        .await
+        .map_err(fleet_repo_err)?;
+    let snapshot = crate::fleet::subscription_snapshot_wire(&projection);
+    use ainb_hangar_proto::fleet::{FleetReplayResetReason, FleetReplayState};
+    let (replay, replay_state) = if params.after_revision == 0 {
+        (
+            Vec::new(),
+            FleetReplayState::SnapshotReset {
+                reason: FleetReplayResetReason::Bootstrap,
+            },
+        )
+    } else if params.after_revision > projection.head_revision {
+        (
+            Vec::new(),
+            FleetReplayState::SnapshotReset {
+                reason: FleetReplayResetReason::CursorAhead,
+            },
+        )
+    } else if projection.replay.len() > REPLAY_BATCH as usize {
+        (
+            Vec::new(),
+            FleetReplayState::SnapshotReset {
+                reason: FleetReplayResetReason::ReplayLimitExceeded,
+            },
+        )
+    } else {
+        (
+            projection.replay.iter().map(crate::fleet::event_wire).collect(),
+            FleetReplayState::Complete,
+        )
+    };
     to_value(&ainb_hangar_proto::fleet::FleetSubscribeResult {
         snapshot,
-        replay: Vec::new(),
+        replay,
+        replay_state,
     })
 }
 
@@ -8795,33 +8856,71 @@ async fn read_frame<R: tokio::io::AsyncBufRead + Unpin>(
 ) -> std::io::Result<Option<Vec<u8>>> {
     use tokio::io::AsyncBufReadExt;
     let mut content_length: Option<usize> = None;
+    let mut saw_header = false;
     loop {
         let mut line = String::new();
         let n = r.read_line(&mut line).await?;
         if n == 0 {
-            return Ok(None);
+            return if saw_header {
+                Err(std::io::Error::new(
+                    std::io::ErrorKind::UnexpectedEof,
+                    "truncated Content-Length frame header",
+                ))
+            } else {
+                Ok(None)
+            };
         }
+        saw_header = true;
         let trimmed = line.trim_end_matches("\r\n");
         if trimmed.is_empty() {
             let Some(len) = content_length else {
-                // Blank line with no Content-Length seen — skip (lenient).
-                continue;
-            };
-            if len > MAX_BODY_BYTES {
                 return Err(std::io::Error::new(
                     std::io::ErrorKind::InvalidData,
-                    format!("Content-Length {len} exceeds cap {MAX_BODY_BYTES}"),
+                    "missing Content-Length header",
                 ));
-            }
+            };
             let mut body = vec![0u8; len];
             r.read_exact(&mut body).await?;
             return Ok(Some(body));
         }
-        if let Some((name, value)) = trimmed.split_once(':') {
-            if name.trim().eq_ignore_ascii_case("Content-Length") {
-                content_length = value.trim().parse().ok();
-            }
+        let Some((name, value)) = trimmed.split_once(':') else {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "malformed frame header",
+            ));
+        };
+        if !name.trim().eq_ignore_ascii_case("Content-Length") {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("unsupported frame header: {}", name.trim()),
+            ));
         }
+        if content_length.is_some() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "duplicate Content-Length header",
+            ));
+        }
+        let value = value.trim();
+        if value.is_empty() || !value.bytes().all(|byte| byte.is_ascii_digit()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Content-Length must be an unsigned decimal byte length",
+            ));
+        }
+        let len = value.parse::<usize>().map_err(|_| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "Content-Length is out of range",
+            )
+        })?;
+        if len > MAX_BODY_BYTES {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("Content-Length {len} exceeds cap {MAX_BODY_BYTES}"),
+            ));
+        }
+        content_length = Some(len);
     }
 }
 
