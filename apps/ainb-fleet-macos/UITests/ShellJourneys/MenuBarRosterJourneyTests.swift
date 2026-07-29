@@ -31,7 +31,9 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         waitFor(fleetRow("unknown:gamma"))
         waitFor(fleetRow("claude:running"))
 
-        selectToolbarItem("Needs you")
+        let attentionOnly = app.checkBoxes["fleet.filter.attention"]
+        waitFor(attentionOnly)
+        attentionOnly.click()
         XCTAssertFalse(fleetRow("claude:running").waitForExistence(timeout: 1))
     }
 }
