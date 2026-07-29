@@ -59,7 +59,7 @@ class FleetUITestCase: XCTestCase {
 
     @MainActor
     func fleetRow(_ sessionKey: String) -> XCUIElement {
-        app.staticTexts
+        app.descendants(matching: .any)
             .matching(NSPredicate(format: "identifier BEGINSWITH %@", "fleet.row.\(sessionKey)"))
             .firstMatch
     }
