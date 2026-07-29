@@ -214,6 +214,42 @@ async fn snapshot_keeps_same_cwd_authoritative_provider_sessions_distinct() {
 }
 
 #[tokio::test]
+async fn snapshot_exposes_active_claude_subagent_work() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket, store, sink) = start_server(dir.path()).await;
+    apply_hook(
+        &store,
+        &sink,
+        "claude-session-start",
+        "claude",
+        "parent",
+        "SessionStart",
+        &serde_json::json!({}),
+        100,
+    )
+    .await;
+    apply_hook(
+        &store,
+        &sink,
+        "claude-subagent-start",
+        "claude",
+        "parent",
+        "SubagentStart",
+        &serde_json::json!({ "payload": { "agent_id": "child-1" } }),
+        200,
+    )
+    .await;
+
+    let mut client = Client::connect(&socket).await;
+    client.auth_from_file(dir.path()).await;
+    let snapshot = client.call(methods::FLEET_SNAPSHOT, serde_json::json!({})).await;
+    let session = &snapshot["result"]["sessions"][0];
+    assert_eq!(session["session_key"], "claude:parent");
+    assert_eq!(session["lifecycle"], "RUNNING");
+    assert_eq!(session["active_work_count"], 1);
+}
+
+#[tokio::test]
 async fn action_rejects_stale_or_wrong_request_and_replays_receipt() {
     let dir = tempfile::tempdir().unwrap();
     let (socket, store, sink) = start_server(dir.path()).await;

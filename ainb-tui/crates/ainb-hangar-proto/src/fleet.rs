@@ -239,6 +239,9 @@ pub struct FleetSession {
     pub display_name: Option<String>,
     /// Independent lifecycle state.
     pub lifecycle: LifecycleState,
+    /// Number of active provider child tasks, agents, or threads.
+    #[serde(default)]
+    pub active_work_count: i64,
     /// Independent attention state.
     pub attention: AttentionState,
     /// Fingerprint of current structured request or approval.

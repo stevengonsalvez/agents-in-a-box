@@ -13,11 +13,17 @@ use ainb_hangar_store::repo::fleet::{
     ApplyFleetEventResult, FleetEventRow, FleetRepo, FleetRepoError, FleetSessionPatch,
     FleetSessionRow, NewFleetEvent, ObservationAuthority,
 };
+use ainb_hangar_store::repo::fleet_provider_event::{
+    FleetProviderEventError, FleetProviderEventRepo, NewFleetProviderEvent,
+};
+use ainb_hangar_store::repo::fleet_work::{FleetWorkRepo, FleetWorkUpdate};
 use serde_json::Value;
 use sqlx::SqlitePool;
 
 use crate::events::EventSink;
-use crate::fleet_provider::codex::{CodexApprovalKind, CodexCapabilities, CodexInbound};
+use crate::fleet_provider::codex::{
+    CodexApprovalKind, CodexCapabilities, CodexInbound, CodexInboundEnvelope,
+};
 
 /// Semantic hook observation before storage normalization.
 #[derive(Debug, Clone)]
@@ -46,6 +52,7 @@ pub async fn apply_hook(
 ) -> Result<ApplyFleetEventResult, FleetRepoError> {
     let provider = parse_provider(observation.provider);
     let session_key = SessionKey::managed(provider, observation.provider_session_id);
+    let source_event_id = observation.event_id.clone();
     let tmux_target = observation
         .payload
         .get("tmux_target")
@@ -59,7 +66,8 @@ pub async fn apply_hook(
         .filter(|value| !value.is_empty())
         .map(str::to_string);
     let exact_tmux_identity = tmux_target.is_some() && process_start_fingerprint.is_some();
-    let (lifecycle_state, attention_state) = states_for_hook(observation.event_type);
+    let (lifecycle_state, attention_state) =
+        states_for_hook(observation.event_type, observation.payload);
     let request_fingerprint = match attention_state {
         Some(AttentionState::Ask | AttentionState::Approval) => {
             let fingerprint = match (provider, observation.event_type) {
@@ -85,7 +93,7 @@ pub async fn apply_hook(
         _ => None,
     };
     let event = NewFleetEvent {
-        event_id: observation.event_id,
+        event_id: source_event_id.clone(),
         session_key: session_key.to_string(),
         observed_at: observation.observed_at,
         authority: ObservationAuthority::Authoritative,
@@ -112,6 +120,9 @@ pub async fn apply_hook(
     if !result.duplicate {
         events.emit_fleet_revision(result.revision);
     }
+    if let Some(update) = hook_work_update(&observation, session_key.as_str()) {
+        apply_workload_projection(pool, events, &update).await?;
+    }
     if let (Some(target), Some(fingerprint)) =
         (tmux_target.as_deref(), process_start_fingerprint.as_deref())
     {
@@ -127,6 +138,77 @@ pub async fn apply_hook(
         .await?;
     }
     Ok(result)
+}
+
+async fn apply_workload_projection(
+    pool: &SqlitePool,
+    events: &EventSink,
+    update: &FleetWorkUpdate,
+) -> Result<ApplyFleetEventResult, FleetRepoError> {
+    let active_work_count = FleetWorkRepo::apply(pool, update).await?;
+    publish_workload_projection(pool, events, update, active_work_count).await
+}
+
+async fn publish_workload_projection(
+    pool: &SqlitePool,
+    events: &EventSink,
+    update: &FleetWorkUpdate,
+    active_work_count: i64,
+) -> Result<ApplyFleetEventResult, FleetRepoError> {
+    let workload = FleetRepo::apply_event(
+        pool,
+        &NewFleetEvent {
+            event_id: format!("workload:{}", update.event_id),
+            session_key: update.session_key.clone(),
+            observed_at: update.observed_at,
+            authority: ObservationAuthority::Authoritative,
+            event_type: "workload_changed".to_string(),
+            payload: serde_json::to_string(&serde_json::json!({
+                "kind": update.kind,
+                "workKey": update.work_key,
+                "active": update.active,
+                "activeWorkCount": active_work_count,
+            }))
+            .unwrap_or_else(|_| "{}".to_string()),
+            patch: FleetSessionPatch {
+                active_work_count: Some(active_work_count),
+                ..FleetSessionPatch::default()
+            },
+        },
+    )
+    .await?;
+    if !workload.duplicate {
+        events.emit_fleet_revision(workload.revision);
+    }
+    Ok(workload)
+}
+
+fn hook_work_update(
+    observation: &HookObservation<'_>,
+    session_key: &str,
+) -> Option<FleetWorkUpdate> {
+    let hook = observation.payload.get("payload").unwrap_or(observation.payload);
+    let (kind, active, key_names): (&str, bool, &[&str]) = match observation.event_type {
+        "SubagentStart" => ("subagent", true, &["agent_id", "agentId"]),
+        "SubagentStop" => ("subagent", false, &["agent_id", "agentId"]),
+        "TaskCreated" => ("task", true, &["task_id", "taskId"]),
+        "TaskCompleted" => ("task", false, &["task_id", "taskId"]),
+        _ => return None,
+    };
+    let work_key = key_names
+        .iter()
+        .find_map(|name| hook.get(*name).and_then(Value::as_str))
+        .filter(|value| !value.is_empty())?
+        .to_string();
+    Some(FleetWorkUpdate {
+        provider: parse_provider(observation.provider).as_str().to_string(),
+        session_key: session_key.to_string(),
+        work_key,
+        kind: kind.to_string(),
+        active,
+        event_id: observation.event_id.clone(),
+        observed_at: observation.observed_at,
+    })
 }
 
 async fn retire_correlated_legacy(
@@ -243,6 +325,145 @@ pub async fn apply_codex_inbound(
         events.emit_fleet_revision(result.revision);
     }
     Ok(Some(result))
+}
+
+/// Error while persisting or reducing one provider source envelope.
+#[derive(Debug, thiserror::Error)]
+pub enum FleetProviderIngressError {
+    /// Raw source ledger failed.
+    #[error(transparent)]
+    ProviderEvent(#[from] FleetProviderEventError),
+    /// Fleet projection failed.
+    #[error(transparent)]
+    Fleet(#[from] FleetRepoError),
+}
+
+/// Persist one exact Codex app-server envelope before reducing it. A crash after
+/// the source write is safe: retrying the same manager sequence reuses its row,
+/// then completes the projection link.
+pub async fn ingest_codex_inbound(
+    pool: &SqlitePool,
+    events: &EventSink,
+    event_id: String,
+    envelope: CodexInboundEnvelope,
+    capabilities: &CodexCapabilities,
+    observed_at: i64,
+) -> Result<Option<ApplyFleetEventResult>, FleetProviderIngressError> {
+    let method = envelope
+        .raw
+        .get("method")
+        .and_then(Value::as_str)
+        .unwrap_or("unknown")
+        .to_string();
+    let provider_session_id = envelope.raw.get("params").and_then(codex_thread_id);
+    let session_key = provider_session_id
+        .as_deref()
+        .map(|thread_id| SessionKey::managed(Provider::Codex, thread_id).to_string());
+    FleetProviderEventRepo::append(
+        pool,
+        &NewFleetProviderEvent {
+            event_id: event_id.clone(),
+            provider: "codex".to_string(),
+            source: "codex_app_server".to_string(),
+            session_key,
+            provider_session_id,
+            observed_at,
+            received_at: observed_at,
+            event_type: method,
+            raw_payload: serde_json::to_string(&envelope.raw).unwrap_or_default(),
+        },
+    )
+    .await?;
+    apply_codex_child_work(pool, events, &envelope.raw, &event_id, observed_at).await?;
+    let result = apply_codex_inbound(
+        pool,
+        events,
+        event_id.clone(),
+        envelope.inbound,
+        capabilities,
+        observed_at,
+    )
+    .await?;
+    if let Some(reduced) = &result {
+        FleetProviderEventRepo::mark_projected(pool, &event_id, reduced.revision).await?;
+    }
+    Ok(result)
+}
+
+async fn apply_codex_child_work(
+    pool: &SqlitePool,
+    events: &EventSink,
+    raw: &Value,
+    event_id: &str,
+    observed_at: i64,
+) -> Result<(), FleetRepoError> {
+    let method = raw.get("method").and_then(Value::as_str);
+    let params = raw.get("params").unwrap_or(&Value::Null);
+    match method {
+        Some("thread/started") => {
+            let Some(parent_thread_id) = codex_parent_thread_id(params) else {
+                return Ok(());
+            };
+            let Some(child_thread_id) = codex_thread_id(params) else {
+                return Ok(());
+            };
+            let session_key = SessionKey::managed(Provider::Codex, &parent_thread_id).to_string();
+            if FleetRepo::get_session(pool, &session_key).await?.is_none() {
+                return Ok(());
+            }
+            let update = FleetWorkUpdate {
+                provider: "codex".to_string(),
+                session_key,
+                work_key: child_thread_id,
+                kind: "child_thread".to_string(),
+                active: true,
+                event_id: event_id.to_string(),
+                observed_at,
+            };
+            apply_workload_projection(pool, events, &update).await?;
+        }
+        Some("thread/closed" | "thread/archived") => {
+            let Some(child_thread_id) = codex_thread_id(params) else {
+                return Ok(());
+            };
+            for (session_key, active_work_count) in FleetWorkRepo::complete_by_work_key(
+                pool,
+                "codex",
+                &child_thread_id,
+                event_id,
+                observed_at,
+            )
+            .await?
+            {
+                let update = FleetWorkUpdate {
+                    provider: "codex".to_string(),
+                    session_key,
+                    work_key: child_thread_id.clone(),
+                    kind: "child_thread".to_string(),
+                    active: false,
+                    event_id: event_id.to_string(),
+                    observed_at,
+                };
+                publish_workload_projection(pool, events, &update, active_work_count).await?;
+            }
+        }
+        _ => {}
+    }
+    Ok(())
+}
+
+fn codex_parent_thread_id(params: &Value) -> Option<String> {
+    params
+        .get("parentThreadId")
+        .or_else(|| params.get("parent_thread_id"))
+        .or_else(|| {
+            params.get("thread").and_then(|thread| {
+                thread.get("parentThreadId").or_else(|| thread.get("parent_thread_id"))
+            })
+        })
+        .and_then(Value::as_str)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
 }
 
 /// Downgrade managed Codex rows when app-server transport exits.
@@ -467,13 +688,10 @@ fn normalize_codex_inbound(
     capabilities: &CodexCapabilities,
     observed_at: i64,
 ) -> Option<NewFleetEvent> {
-    let _manager_sequence = event_id;
-    let event_id;
     let (thread_id, event_type, payload, lifecycle, attention, fingerprint) = match inbound {
         CodexInbound::RequestUserInput(request) => {
             let payload = serde_json::to_value(&request).ok()?;
             let fingerprint = fingerprint_value(&payload);
-            event_id = format!("codex-request:{}:{fingerprint}", request.identity.thread_id);
             (
                 request.identity.thread_id.clone(),
                 "item/tool/requestUserInput".to_string(),
@@ -505,7 +723,6 @@ fn normalize_codex_inbound(
             });
             let thread_id = payload["identity"]["threadId"].as_str()?.to_string();
             let fingerprint = fingerprint_value(&payload);
-            event_id = format!("codex-request:{thread_id}:{fingerprint}");
             (
                 thread_id,
                 event_type.to_string(),
@@ -517,11 +734,6 @@ fn normalize_codex_inbound(
         }
         CodexInbound::Notification { method, params } => {
             let thread_id = codex_thread_id(&params)?;
-            event_id = format!(
-                "codex-event:{thread_id}:{}:{}",
-                method,
-                fingerprint_value(&params)
-            );
             let (lifecycle, attention, fingerprint) = codex_notification_state(&method);
             (thread_id, method, params, lifecycle, attention, fingerprint)
         }
@@ -537,7 +749,6 @@ fn normalize_codex_inbound(
                 "params": params,
             });
             let fingerprint = fingerprint_value(&payload);
-            event_id = format!("codex-request:{thread_id}:{fingerprint}");
             (
                 thread_id,
                 method,
@@ -646,6 +857,7 @@ fn session_wire(
         cwd: row.cwd.clone(),
         display_name: row.display_name.clone(),
         lifecycle: parse_lifecycle(&row.lifecycle_state),
+        active_work_count: row.active_work_count,
         attention: parse_attention(&row.attention_state),
         current_request_fingerprint: row.current_request_fingerprint.clone(),
         current_request,
@@ -969,16 +1181,23 @@ fn parse_provider(value: &str) -> Provider {
     }
 }
 
-fn states_for_hook(event_type: &str) -> (Option<LifecycleState>, Option<AttentionState>) {
+fn states_for_hook(
+    event_type: &str,
+    payload: &Value,
+) -> (Option<LifecycleState>, Option<AttentionState>) {
     match event_type {
         "SessionStart" => (Some(LifecycleState::Starting), Some(AttentionState::None)),
-        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" => {
+        "UserPromptSubmit" | "PreToolUse" | "PostToolUse" | "PostToolUseFailure"
+        | "PostToolBatch" | "SubagentStart" | "TaskCreated" => {
             (Some(LifecycleState::Running), Some(AttentionState::None))
         }
         "AskUserQuestion" => (Some(LifecycleState::Idle), Some(AttentionState::Ask)),
         "PermissionRequest" => (Some(LifecycleState::Idle), Some(AttentionState::Approval)),
         "Notification" => (None, Some(AttentionState::Waiting)),
-        "Stop" | "SubagentStop" => (
+        "Stop" if has_active_background_work(payload) => {
+            (Some(LifecycleState::Running), Some(AttentionState::None))
+        }
+        "Stop" => (
             Some(LifecycleState::TurnComplete),
             Some(AttentionState::None),
         ),
@@ -989,6 +1208,22 @@ fn states_for_hook(event_type: &str) -> (Option<LifecycleState>, Option<Attentio
         "SessionEnd" => (Some(LifecycleState::Exited), Some(AttentionState::None)),
         _ => (None, None),
     }
+}
+
+fn has_active_background_work(payload: &Value) -> bool {
+    let hook = payload.get("payload").unwrap_or(payload);
+    [
+        "background_tasks",
+        "backgroundTasks",
+        "session_crons",
+        "sessionCrons",
+    ]
+    .iter()
+    .filter_map(|field| hook.get(*field))
+    .any(|value| {
+        value.as_array().is_some_and(|items| !items.is_empty())
+            || value.as_object().is_some_and(|items| !items.is_empty())
+    })
 }
 
 fn managed_capabilities(provider: Provider) -> String {
@@ -1153,24 +1388,45 @@ const fn transport_token(value: TransportHealth) -> &'static str {
 mod tests {
     use super::*;
     use crate::events::EventBroker;
+
+    #[test]
+    fn stop_with_background_work_remains_running() {
+        let (lifecycle, attention) = states_for_hook(
+            "Stop",
+            &serde_json::json!({ "payload": { "background_tasks": [{ "id": "task-1" }] } }),
+        );
+        assert_eq!(lifecycle, Some(LifecycleState::Running));
+        assert_eq!(attention, Some(AttentionState::None));
+    }
+
+    #[test]
+    fn subagent_stop_never_completes_parent_turn() {
+        let (lifecycle, attention) = states_for_hook("SubagentStop", &serde_json::json!({}));
+        assert_eq!(lifecycle, None);
+        assert_eq!(attention, None);
+    }
     use ainb_hangar_store::Store;
 
     #[test]
     fn lifecycle_and_attention_are_independent() {
         assert_eq!(
-            states_for_hook("AskUserQuestion"),
+            states_for_hook("AskUserQuestion", &serde_json::json!({})),
             (Some(LifecycleState::Idle), Some(AttentionState::Ask))
         );
         assert_eq!(
-            states_for_hook("PermissionRequest"),
+            states_for_hook("PermissionRequest", &serde_json::json!({})),
             (Some(LifecycleState::Idle), Some(AttentionState::Approval))
         );
         assert_eq!(
-            states_for_hook("Stop"),
+            states_for_hook("Stop", &serde_json::json!({})),
             (
                 Some(LifecycleState::TurnComplete),
                 Some(AttentionState::None)
             )
+        );
+        assert_eq!(
+            states_for_hook("SessionEnd", &serde_json::json!({})),
+            (Some(LifecycleState::Exited), Some(AttentionState::None))
         );
     }
 
@@ -1276,6 +1532,79 @@ mod tests {
         assert_eq!(codex.lifecycle_state, "IDLE");
         assert_eq!(codex.attention_state, "ASK");
         assert_eq!(codex.management_state, "DEGRADED");
+    }
+
+    #[tokio::test]
+    async fn child_work_keeps_parent_running_and_replay_safe() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let start = serde_json::json!({ "payload": { "agent_id": "agent-1" } });
+        let stop = serde_json::json!({ "payload": { "agent_id": "agent-1" } });
+
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "subagent-start-1".to_string(),
+                provider: "claude",
+                provider_session_id: "session-1",
+                cwd: "/repo",
+                event_type: "SubagentStart",
+                payload: &start,
+                observed_at: 100,
+            },
+        )
+        .await
+        .unwrap();
+        let running =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(running.lifecycle_state, "RUNNING");
+        assert_eq!(running.active_work_count, 1);
+
+        apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "subagent-stop-1".to_string(),
+                provider: "claude",
+                provider_session_id: "session-1",
+                cwd: "/repo",
+                event_type: "SubagentStop",
+                payload: &stop,
+                observed_at: 200,
+            },
+        )
+        .await
+        .unwrap();
+        let stopped =
+            FleetRepo::get_session(store.pool(), "claude:session-1").await.unwrap().unwrap();
+        assert_eq!(stopped.lifecycle_state, "RUNNING");
+        assert_eq!(stopped.active_work_count, 0);
+
+        let replay = apply_hook(
+            store.pool(),
+            &sink,
+            HookObservation {
+                event_id: "subagent-stop-1".to_string(),
+                provider: "claude",
+                provider_session_id: "session-1",
+                cwd: "/repo",
+                event_type: "SubagentStop",
+                payload: &stop,
+                observed_at: 200,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(replay.duplicate);
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM fleet_work_item WHERE session_key = ?")
+                .bind("claude:session-1")
+                .fetch_one(store.pool())
+                .await
+                .unwrap();
+        assert_eq!(count, 1);
     }
 
     #[tokio::test]
@@ -1497,7 +1826,7 @@ mod tests {
         let replay = apply_codex_inbound(
             store.pool(),
             &sink,
-            "different-manager-sequence".to_string(),
+            "codex:req:1".to_string(),
             CodexInbound::RequestUserInput(request),
             &capabilities,
             101,
@@ -1506,6 +1835,9 @@ mod tests {
         .unwrap()
         .unwrap();
         assert!(replay.duplicate);
+
+        let events = FleetRepo::events_after(store.pool(), 0, 10).await.unwrap();
+        assert_eq!(events[0].event_id, "codex:req:1");
 
         apply_codex_inbound(
             store.pool(),
@@ -1527,6 +1859,160 @@ mod tests {
         assert_eq!(row.lifecycle_state, "RUNNING");
         assert_eq!(row.attention_state, "NONE");
         assert!(row.current_request_fingerprint.is_none());
+    }
+
+    #[tokio::test]
+    async fn codex_source_ledger_preserves_unknown_raw_envelope_fields() {
+        use crate::fleet_provider::codex::{CodexCapabilities, CodexInbound, CodexInboundEnvelope};
+        use ainb_hangar_store::repo::fleet_provider_event::FleetProviderEventRepo;
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let capabilities = CodexCapabilities {
+            cli_version: "codex-test".to_string(),
+            daemon_version: None,
+            app_server: true,
+            stdio_proxy: true,
+            request_user_input: true,
+            approvals: true,
+            thread_archive: true,
+        };
+        let raw = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "turn/started",
+            "params": { "threadId": "thread-raw", "turn": { "id": "turn-1" }, "futureField": "kept" },
+            "topLevelFutureField": { "kept": true },
+        });
+        ingest_codex_inbound(
+            store.pool(),
+            &sink,
+            "codex-manager:boot:1".to_string(),
+            CodexInboundEnvelope {
+                inbound: CodexInbound::Notification {
+                    method: "turn/started".to_string(),
+                    params: raw["params"].clone(),
+                },
+                raw: raw.clone(),
+            },
+            &capabilities,
+            100,
+        )
+        .await
+        .unwrap();
+
+        let source = FleetProviderEventRepo::get(store.pool(), "codex-manager:boot:1")
+            .await
+            .unwrap()
+            .expect("source envelope persisted");
+        assert_eq!(
+            serde_json::from_str::<Value>(&source.raw_payload).unwrap(),
+            raw,
+            "raw app-server envelope must keep unknown fields"
+        );
+        assert!(source.projection_revision.is_some());
+    }
+
+    #[tokio::test]
+    async fn codex_child_thread_lifecycle_updates_only_explicit_parent_workload() {
+        use crate::fleet_provider::codex::{CodexCapabilities, CodexInbound, CodexInboundEnvelope};
+
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let sink = EventBroker::new().sink();
+        let capabilities = CodexCapabilities {
+            cli_version: "codex-test".to_string(),
+            daemon_version: None,
+            app_server: true,
+            stdio_proxy: true,
+            request_user_input: true,
+            approvals: true,
+            thread_archive: true,
+        };
+        let parent = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "thread/started",
+            "params": { "thread": { "id": "parent" } },
+        });
+        ingest_codex_inbound(
+            store.pool(),
+            &sink,
+            "manager:parent".to_string(),
+            CodexInboundEnvelope {
+                inbound: CodexInbound::Notification {
+                    method: "thread/started".to_string(),
+                    params: parent["params"].clone(),
+                },
+                raw: parent,
+            },
+            &capabilities,
+            100,
+        )
+        .await
+        .unwrap();
+        let child = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "thread/started",
+            "params": { "thread": { "id": "child", "parentThreadId": "parent" } },
+        });
+        ingest_codex_inbound(
+            store.pool(),
+            &sink,
+            "manager:child-start".to_string(),
+            CodexInboundEnvelope {
+                inbound: CodexInbound::Notification {
+                    method: "thread/started".to_string(),
+                    params: child["params"].clone(),
+                },
+                raw: child,
+            },
+            &capabilities,
+            200,
+        )
+        .await
+        .unwrap();
+        let parent_row =
+            FleetRepo::get_session(store.pool(), "codex:parent").await.unwrap().unwrap();
+        assert_eq!(parent_row.active_work_count, 1);
+
+        let closed = serde_json::json!({
+            "jsonrpc": "2.0",
+            "method": "thread/closed",
+            "params": { "threadId": "child" },
+        });
+        // Simulate a crash after durable child completion but before its parent
+        // workload revision. Replaying the same source event must repair it.
+        assert_eq!(
+            FleetWorkRepo::complete_by_work_key(
+                store.pool(),
+                "codex",
+                "child",
+                "manager:child-close",
+                300,
+            )
+            .await
+            .unwrap(),
+            vec![("codex:parent".to_string(), 0)],
+        );
+        ingest_codex_inbound(
+            store.pool(),
+            &sink,
+            "manager:child-close".to_string(),
+            CodexInboundEnvelope {
+                inbound: CodexInbound::Notification {
+                    method: "thread/closed".to_string(),
+                    params: closed["params"].clone(),
+                },
+                raw: closed,
+            },
+            &capabilities,
+            300,
+        )
+        .await
+        .unwrap();
+        let parent_row =
+            FleetRepo::get_session(store.pool(), "codex:parent").await.unwrap().unwrap();
+        assert_eq!(parent_row.active_work_count, 0);
     }
 
     #[tokio::test]

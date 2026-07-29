@@ -26,9 +26,9 @@ use tokio::task::JoinHandle;
 use tokio::time::{Instant, sleep};
 
 use super::codex::{
-    CodexApprovalKind, CodexApprovalRequest, CodexCapabilities, CodexInbound, CodexQuestionRequest,
-    CommandSpec, RpcRequestId, app_server_command, managed_tui_command, parse_inbound, probe_codex,
-    proxy_command,
+    CodexApprovalKind, CodexApprovalRequest, CodexCapabilities, CodexInboundEnvelope,
+    CodexQuestionRequest, CommandSpec, RpcRequestId, app_server_command, managed_tui_command,
+    parse_inbound_envelope, probe_codex, proxy_command,
 };
 use super::{ApprovalDecision, ProviderError, ProviderReceipt, QuestionAnswer};
 
@@ -274,7 +274,7 @@ pub struct ManagedCodexManager {
     /// Cloneable control handle.
     pub handle: CodexManagerHandle,
     /// Ordered server requests and notifications.
-    pub events: mpsc::Receiver<CodexInbound>,
+    pub events: mpsc::Receiver<CodexInboundEnvelope>,
     task: JoinHandle<Result<(), ProviderError>>,
 }
 
@@ -340,7 +340,7 @@ pub fn spawn_service(
             while let Some(event) = inbound.recv().await {
                 sequence = sequence.wrapping_add(1);
                 let event_id = format!("codex-manager:{boot_id}:{sequence}");
-                if let Err(error) = crate::fleet::apply_codex_inbound(
+                if let Err(error) = crate::fleet::ingest_codex_inbound(
                     &pool,
                     &events,
                     event_id,
@@ -1137,7 +1137,7 @@ async fn initialize_connection<R, W>(
     reader: &mut R,
     writer: &mut W,
     client_version: &str,
-    events: &mpsc::Sender<CodexInbound>,
+    events: &mpsc::Sender<CodexInboundEnvelope>,
 ) -> Result<(), ProviderError>
 where
     R: AsyncBufRead + Unpin,
@@ -1176,7 +1176,7 @@ where
             }
             break;
         }
-        let inbound = parse_inbound(&message)?;
+        let inbound = parse_inbound_envelope(&message)?;
         events
             .send(inbound)
             .await
@@ -1194,7 +1194,7 @@ async fn run_actor<R, W>(
     mut reader: R,
     mut writer: W,
     mut commands: mpsc::Receiver<ManagerCommand>,
-    events: mpsc::Sender<CodexInbound>,
+    events: mpsc::Sender<CodexInboundEnvelope>,
 ) -> Result<(), ProviderError>
 where
     R: AsyncBufRead + Unpin,
@@ -1261,7 +1261,7 @@ where
                     }
                 }
                 events
-                    .send(parse_inbound(&message)?)
+                    .send(parse_inbound_envelope(&message)?)
                     .await
                     .map_err(|_| ProviderError::Transport("Codex event receiver closed".into()))?;
             }
@@ -1436,6 +1436,7 @@ mod tests {
     use tokio::net::UnixListener;
 
     use super::*;
+    use crate::fleet_provider::codex::CodexInbound;
     use crate::fleet_provider::{QuestionOption, StructuredQuestion};
 
     #[test]
@@ -1696,7 +1697,8 @@ mod tests {
         assert_eq!(repaired, repaired_owner);
 
         let event = manager.events.recv().await.expect("ordered event");
-        let CodexInbound::RequestUserInput(request) = event else {
+        assert_eq!(event.raw["method"], "item/tool/requestUserInput");
+        let CodexInbound::RequestUserInput(request) = event.inbound else {
             panic!("expected request-user-input");
         };
         assert_eq!(request.identity.thread_id, "thread-1");
@@ -1719,7 +1721,11 @@ mod tests {
             .await
             .expect("turn interrupt");
         let approval = manager.events.recv().await.expect("ordered approval");
-        let CodexInbound::Approval(approval) = approval else {
+        assert_eq!(
+            approval.raw["method"],
+            "item/commandExecution/requestApproval"
+        );
+        let CodexInbound::Approval(approval) = approval.inbound else {
             panic!("expected approval");
         };
         assert_eq!(approval.identity.item_id, "item-10");

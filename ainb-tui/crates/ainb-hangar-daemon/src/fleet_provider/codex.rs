@@ -414,6 +414,23 @@ pub enum CodexInbound {
     },
 }
 
+/// Parsed inbound message paired with its exact JSON-RPC envelope.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CodexInboundEnvelope {
+    /// Parsed action or lifecycle message.
+    pub inbound: CodexInbound,
+    /// Original app-server JSON-RPC object, including unknown fields.
+    pub raw: Value,
+}
+
+/// Parse one inbound message while retaining its complete source envelope.
+pub fn parse_inbound_envelope(message: &Value) -> Result<CodexInboundEnvelope, ProviderError> {
+    Ok(CodexInboundEnvelope {
+        inbound: parse_inbound(message)?,
+        raw: message.clone(),
+    })
+}
+
 /// Parse one app-server request or notification without discarding unknown fields.
 pub fn parse_inbound(message: &Value) -> Result<CodexInbound, ProviderError> {
     let method = message
