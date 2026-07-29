@@ -242,6 +242,13 @@ impl AttentionIngest {
             serde_json::from_str::<serde_json::Value>(raw).unwrap_or(serde_json::Value::Null);
         let raw_payload = match self.raw_payload(&line, &event_id, &payload) {
             Ok(payload) => payload,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                tracing::warn!(error = %error, event_id, "fleet provider event sidecar missing; using envelope payload");
+                payload
+                    .get("payload")
+                    .map(serde_json::Value::to_string)
+                    .unwrap_or_else(|| payload.to_string())
+            }
             Err(error) => {
                 tracing::warn!(error = %error, "fleet provider event payload unavailable");
                 return LineOutcome::Retry;
@@ -264,7 +271,12 @@ impl AttentionIngest {
             &NewFleetProviderEvent {
                 event_id: event_id.clone(),
                 provider: provider.to_string(),
-                source: "claude_hook".to_string(),
+                source: match provider {
+                    "claude" => "claude_hook",
+                    "codex" => "codex_hook",
+                    _ => "hook",
+                }
+                .to_string(),
                 session_key,
                 provider_session_id: (!line.session_id.is_empty()).then(|| line.session_id.clone()),
                 observed_at: if line.ts > 0 { line.ts } else { now_ms },

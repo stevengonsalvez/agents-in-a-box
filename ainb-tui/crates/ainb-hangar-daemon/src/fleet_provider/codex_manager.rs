@@ -334,6 +334,12 @@ pub fn spawn_service(
             {
                 tracing::warn!(error = %error, "Codex Fleet recovery sweep failed");
             }
+            if let Err(error) =
+                crate::fleet::replay_unprojected_codex_events(&pool, &events, handle.capabilities())
+                    .await
+            {
+                tracing::warn!(error = %error, "Codex Fleet source replay failed");
+            }
 
             let boot_id = epoch_millis();
             let mut sequence = 0_u64;
