@@ -75,6 +75,13 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertEqual(FleetStatusPresentation.symbol(for: .unavailable(message: "offline"), needsYou: 0, sessions: [value]), "exclamationmark.triangle.fill")
     }
 
+    func testLifecycleNotificationPolicyGroupsBySessionAndSkipsInitialSnapshot() {
+        let previous = session(key: "codex:alpha", lifecycle: .running, revision: 1)
+        let current = session(key: "codex:alpha", lifecycle: .turnComplete, revision: 2)
+        XCTAssertEqual(FleetNotificationPolicy.events(previous: [], current: [current]), [])
+        XCTAssertEqual(FleetNotificationPolicy.events(previous: [previous], current: [current]).first?.threadIdentifier, "fleet.codex:alpha")
+    }
+
     private func session(key: String, lifecycle: LifecycleState, attention: AttentionState = .none, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
         FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: "/workspace", displayName: key, lifecycle: lifecycle, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
     }
