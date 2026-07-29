@@ -161,16 +161,12 @@ private struct FleetATCList: View {
 private struct FleetStartForm: View {
     @ObservedObject var store: FleetStore
     @Binding var isPresented: Bool
-    @State private var provider: FleetProvider = .codex
     @State private var cwd = FileManager.default.currentDirectoryPath
     @State private var prompt = ""
 
     var body: some View {
         Form {
-            Picker("Provider", selection: $provider) {
-                Text("Codex").tag(FleetProvider.codex)
-                Text("Claude").tag(FleetProvider.claude)
-            }
+            LabeledContent("Provider", value: "Codex")
             TextField("Working directory", text: $cwd)
             TextField("Initial prompt", text: $prompt, axis: .vertical)
             if let start = store.lastStart {
@@ -182,7 +178,7 @@ private struct FleetStartForm: View {
                 Button("Cancel") { isPresented = false }
                 Spacer()
                 Button("Start") {
-                    store.start(provider: provider, cwd: cwd, prompt: prompt)
+                    store.start(provider: .codex, cwd: cwd, prompt: prompt)
                 }
                 .disabled(!store.canStart || !FleetStartPreflight.isExistingDirectory(cwd.trimmingCharacters(in: .whitespacesAndNewlines)))
                 .accessibilityIdentifier("fleet.start.submit")

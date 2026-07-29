@@ -54,6 +54,10 @@ enum FleetOperatorAction: CaseIterable, Identifiable, Equatable {
 }
 
 enum FleetStartPreflight {
+    static func supports(_ provider: FleetProvider) -> Bool {
+        provider == .codex
+    }
+
     static func isExistingDirectory(_ path: String) -> Bool {
         var isDirectory: ObjCBool = false
         return FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) && isDirectory.boolValue
@@ -244,7 +248,7 @@ final class FleetStore: ObservableObject {
     func start(provider: FleetProvider, cwd: String, prompt: String?) {
         let trimmedCWD = cwd.trimmingCharacters(in: .whitespacesAndNewlines)
         guard canStart,
-              provider != .unknown,
+              FleetStartPreflight.supports(provider),
               !trimmedCWD.isEmpty,
               FleetStartPreflight.isExistingDirectory(trimmedCWD),
               let connection else {

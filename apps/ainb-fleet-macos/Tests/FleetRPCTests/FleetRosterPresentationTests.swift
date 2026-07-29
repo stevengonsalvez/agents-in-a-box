@@ -79,7 +79,13 @@ final class FleetRosterPresentationTests: XCTestCase {
         let previous = session(key: "codex:alpha", lifecycle: .running, revision: 1)
         let current = session(key: "codex:alpha", lifecycle: .turnComplete, revision: 2)
         XCTAssertEqual(FleetNotificationPolicy.events(previous: [], current: [current]), [])
-        XCTAssertEqual(FleetNotificationPolicy.events(previous: [previous], current: [current]).first?.threadIdentifier, "fleet.codex:alpha")
+        let event = FleetNotificationPolicy.events(previous: [previous], current: [current]).first
+        XCTAssertEqual(event?.threadIdentifier, "fleet.codex:alpha")
+        XCTAssertEqual(event?.requestIdentifier, event?.requestIdentifier)
+        XCTAssertNotEqual(
+            event?.requestIdentifier,
+            FleetNotificationPolicy.events(previous: [previous], current: [current]).first?.requestIdentifier
+        )
     }
 
     func testNotificationPreferencesRespectEnabledAndQuietHours() {
