@@ -35,10 +35,10 @@ struct AINBFleetApp: App {
                 }
         }
         .menuBarExtraStyle(.window)
-        .onOpenURL(perform: openDeepLink)
 
         Window("Fleet", id: "fleet") {
             FleetWindowView(store: store, presentation: presentationBinding)
+                .onOpenURL(perform: openDeepLink)
         }
         Settings {
             FleetSettingsView(presentation: presentationBinding)
