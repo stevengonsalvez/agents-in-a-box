@@ -725,5 +725,4 @@ mod tests {
         assert_eq!(current.next_tick_at, None);
         assert!(current.config_generation > row.config_generation);
     }
-
 }
