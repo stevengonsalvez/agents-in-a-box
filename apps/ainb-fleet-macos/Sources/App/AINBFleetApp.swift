@@ -1,3 +1,4 @@
+import AppKit
 import SwiftUI
 
 @main
@@ -34,7 +35,7 @@ struct AINBFleetApp: App {
                 .task {
                     #if DEBUG
                     guard Self.testLaunchesFleetWindow else { return }
-                    openWindow(id: "fleet")
+                    showFleetWindow()
                     #endif
                 }
         }
@@ -75,7 +76,7 @@ struct AINBFleetApp: App {
             next.filters.attentionOnly = true
             presentationBinding.wrappedValue = next
         }
-        openWindow(id: "fleet")
+        showFleetWindow()
     }
 
     private func openDeepLink(_ url: URL) {
@@ -86,7 +87,12 @@ struct AINBFleetApp: App {
               !key.isEmpty else { return }
         store.refresh()
         store.selectedSessionKey = key
+        showFleetWindow()
+    }
+
+    private func showFleetWindow() {
         openWindow(id: "fleet")
+        NSApp.activate(ignoringOtherApps: true)
     }
 
     private static var testReadVersions: FleetProtocolRange {
