@@ -35,6 +35,7 @@ struct AINBFleetApp: App {
                 }
         }
         .menuBarExtraStyle(.window)
+        .onOpenURL(perform: openDeepLink)
 
         Window("Fleet", id: "fleet") {
             FleetWindowView(store: store, presentation: presentationBinding)
@@ -62,6 +63,12 @@ struct AINBFleetApp: App {
             next.filters.attentionOnly = true
             presentationBinding.wrappedValue = next
         }
+        openWindow(id: "fleet")
+    }
+
+    private func openDeepLink(_ url: URL) {
+        guard url.scheme == "ainbfleet", url.host == "session", let key = url.pathComponents.last else { return }
+        store.selectedSessionKey = key
         openWindow(id: "fleet")
     }
 
