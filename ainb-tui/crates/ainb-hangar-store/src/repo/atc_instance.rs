@@ -34,6 +34,8 @@ pub struct AtcInstanceRow {
     pub last_heartbeat_at: Option<i64>,
     /// Epoch-ms the instance was registered.
     pub created_at: i64,
+    /// Monotonic configuration version. Schedule mutations invalidate old work.
+    pub config_generation: i64,
 }
 
 /// One `atc_retry` ledger row — a (instance, monitored session) pair.
@@ -73,6 +75,30 @@ pub struct RegisterAtc {
     pub next_tick_at: Option<i64>,
 }
 
+/// Result of a generation-checked registration request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegisterAtcOutcome {
+    /// The requested configuration was written.
+    Applied(AtcInstanceRow),
+    /// A lost-response retry found the same already-applied configuration.
+    AlreadyApplied(AtcInstanceRow),
+    /// Another operator changed the configuration first.
+    Stale(Option<AtcInstanceRow>),
+}
+
+/// Result of a generation-checked disable request.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DisableAtcOutcome {
+    /// The instance was disabled.
+    Applied(AtcInstanceRow),
+    /// A lost-response retry found the same disabled result.
+    AlreadyApplied(AtcInstanceRow),
+    /// No instance exists with this name.
+    NotFound,
+    /// Another operator changed the configuration first.
+    Stale(AtcInstanceRow),
+}
+
 /// Stateless typed wrapper over the `atc_instance` + `atc_retry` tables.
 pub struct AtcInstanceRepo;
 
@@ -100,7 +126,8 @@ impl AtcInstanceRepo {
                  cwd = excluded.cwd, tmux_session = excluded.tmux_session, \
                  heartbeat_cron = excluded.heartbeat_cron, err_retry_cap = excluded.err_retry_cap, \
                  idle_pause_min = excluded.idle_pause_min, next_tick_at = excluded.next_tick_at, \
-                 enabled = 1",
+                 enabled = 1, config_generation = config_generation + 1, \
+                 scheduler_claim_generation = NULL",
         )
         .bind(&req.name)
         .bind(&req.cwd)
@@ -113,6 +140,131 @@ impl AtcInstanceRepo {
         .execute(pool)
         .await?;
         Ok(())
+    }
+
+    /// Register with optimistic concurrency when `expected_generation` is
+    /// supplied. `None` preserves the legacy CLI contract while negotiated
+    /// clients use the typed conditional path.
+    pub async fn register_checked(
+        pool: &SqlitePool,
+        req: &RegisterAtc,
+        now_ms: i64,
+        expected_generation: Option<i64>,
+    ) -> Result<RegisterAtcOutcome, sqlx::Error> {
+        let Some(expected) = expected_generation else {
+            Self::register(pool, req, now_ms).await?;
+            return Ok(RegisterAtcOutcome::Applied(
+                Self::get(pool, &req.name).await?.expect("register creates row"),
+            ));
+        };
+        if expected < 0 {
+            return Ok(RegisterAtcOutcome::Stale(Self::get(pool, &req.name).await?));
+        }
+
+        match Self::get(pool, &req.name).await? {
+            None if expected == 0 => {
+                let inserted = sqlx::query(
+                    "INSERT OR IGNORE INTO atc_instance \
+                     (name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
+                      next_tick_at, enabled, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?)",
+                )
+                .bind(&req.name)
+                .bind(&req.cwd)
+                .bind(&req.tmux_session)
+                .bind(&req.heartbeat_cron)
+                .bind(req.err_retry_cap)
+                .bind(req.idle_pause_min)
+                .bind(req.next_tick_at)
+                .bind(now_ms)
+                .execute(pool)
+                .await?;
+                let row = Self::get(pool, &req.name).await?;
+                if inserted.rows_affected() == 1 {
+                    Ok(RegisterAtcOutcome::Applied(
+                        row.expect("inserted row exists"),
+                    ))
+                } else if row.as_ref().is_some_and(|current| desired_matches(current, req)) {
+                    Ok(RegisterAtcOutcome::AlreadyApplied(row.expect("row exists")))
+                } else {
+                    Ok(RegisterAtcOutcome::Stale(row))
+                }
+            }
+            None => Ok(RegisterAtcOutcome::Stale(None)),
+            Some(current) if current.config_generation == expected => {
+                let updated = sqlx::query(
+                    "UPDATE atc_instance SET cwd = ?, tmux_session = ?, heartbeat_cron = ?, \
+                     err_retry_cap = ?, idle_pause_min = ?, next_tick_at = ?, enabled = 1, \
+                     config_generation = config_generation + 1, scheduler_claim_generation = NULL \
+                     WHERE name = ? AND config_generation = ?",
+                )
+                .bind(&req.cwd)
+                .bind(&req.tmux_session)
+                .bind(&req.heartbeat_cron)
+                .bind(req.err_retry_cap)
+                .bind(req.idle_pause_min)
+                .bind(req.next_tick_at)
+                .bind(&req.name)
+                .bind(expected)
+                .execute(pool)
+                .await?;
+                let row = Self::get(pool, &req.name).await?.expect("existing row remains");
+                if updated.rows_affected() == 1 {
+                    Ok(RegisterAtcOutcome::Applied(row))
+                } else if desired_matches(&row, req) {
+                    Ok(RegisterAtcOutcome::AlreadyApplied(row))
+                } else {
+                    Ok(RegisterAtcOutcome::Stale(Some(row)))
+                }
+            }
+            Some(current)
+                if desired_matches(&current, req) && current.config_generation == expected + 1 =>
+            {
+                Ok(RegisterAtcOutcome::AlreadyApplied(current))
+            }
+            Some(current) => Ok(RegisterAtcOutcome::Stale(Some(current))),
+        }
+    }
+
+    /// Disable with optimistic concurrency when `expected_generation` is
+    /// supplied. A retry after a lost response returns the durable disabled row.
+    pub async fn disable_checked(
+        pool: &SqlitePool,
+        name: &str,
+        expected_generation: Option<i64>,
+    ) -> Result<DisableAtcOutcome, sqlx::Error> {
+        let Some(current) = Self::get(pool, name).await? else {
+            return Ok(DisableAtcOutcome::NotFound);
+        };
+        let Some(expected) = expected_generation else {
+            Self::set_enabled(pool, name, false, None).await?;
+            return Ok(DisableAtcOutcome::Applied(
+                Self::get(pool, name).await?.expect("disabled row remains"),
+            ));
+        };
+        if current.config_generation == expected {
+            let updated = sqlx::query(
+                "UPDATE atc_instance SET enabled = 0, next_tick_at = NULL, \
+                 config_generation = config_generation + 1, scheduler_claim_generation = NULL \
+                 WHERE name = ? AND config_generation = ?",
+            )
+            .bind(name)
+            .bind(expected)
+            .execute(pool)
+            .await?;
+            let row = Self::get(pool, name).await?.expect("existing row remains");
+            return if updated.rows_affected() == 1 {
+                Ok(DisableAtcOutcome::Applied(row))
+            } else if !row.enabled && row.config_generation == expected + 1 {
+                Ok(DisableAtcOutcome::AlreadyApplied(row))
+            } else {
+                Ok(DisableAtcOutcome::Stale(row))
+            };
+        }
+        if !current.enabled && current.config_generation == expected + 1 {
+            Ok(DisableAtcOutcome::AlreadyApplied(current))
+        } else {
+            Ok(DisableAtcOutcome::Stale(current))
+        }
     }
 
     /// Fetch one instance by name, `None` when it is not registered.
@@ -133,7 +285,7 @@ impl AtcInstanceRepo {
     pub async fn list(pool: &SqlitePool) -> Result<Vec<AtcInstanceRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
-                    next_tick_at, enabled, last_heartbeat_at, created_at \
+                    next_tick_at, enabled, last_heartbeat_at, created_at, config_generation \
              FROM atc_instance ORDER BY name ASC",
         )
         .fetch_all(pool)
@@ -150,7 +302,7 @@ impl AtcInstanceRepo {
     pub async fn list_schedulable(pool: &SqlitePool) -> Result<Vec<AtcInstanceRow>, sqlx::Error> {
         let rows = sqlx::query(
             "SELECT name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
-                    next_tick_at, enabled, last_heartbeat_at, created_at \
+                    next_tick_at, enabled, last_heartbeat_at, created_at, config_generation \
              FROM atc_instance \
              WHERE enabled = 1 AND next_tick_at IS NOT NULL \
              ORDER BY next_tick_at ASC",
@@ -177,6 +329,53 @@ impl AtcInstanceRepo {
             .execute(pool)
             .await?;
         Ok(())
+    }
+
+    /// Atomically claim one exact due configuration. A later re-register or
+    /// unregister invalidates this claim before the scheduler can reschedule.
+    /// The due tick remains durable while claimed, so a process crash retries it
+    /// rather than silently losing a heartbeat.
+    pub async fn claim_due(
+        pool: &SqlitePool,
+        name: &str,
+        config_generation: i64,
+        due_tick_at: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE atc_instance SET scheduler_claim_generation = config_generation \
+             WHERE name = ? AND enabled = 1 AND config_generation = ? AND next_tick_at = ? \
+             AND (scheduler_claim_generation IS NULL OR scheduler_claim_generation = config_generation)",
+        )
+        .bind(name)
+        .bind(config_generation)
+        .bind(due_tick_at)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
+    }
+
+    /// Complete a claimed heartbeat only when no config mutation superseded it.
+    pub async fn complete_claim(
+        pool: &SqlitePool,
+        name: &str,
+        config_generation: i64,
+        next_tick_at: Option<i64>,
+        last_heartbeat_at: i64,
+    ) -> Result<bool, sqlx::Error> {
+        let result = sqlx::query(
+            "UPDATE atc_instance \
+             SET next_tick_at = ?, last_heartbeat_at = ?, scheduler_claim_generation = NULL \
+             WHERE name = ? AND enabled = 1 AND config_generation = ? \
+             AND scheduler_claim_generation = ?",
+        )
+        .bind(next_tick_at)
+        .bind(last_heartbeat_at)
+        .bind(name)
+        .bind(config_generation)
+        .bind(config_generation)
+        .execute(pool)
+        .await?;
+        Ok(result.rows_affected() == 1)
     }
 
     /// Stamp `last_heartbeat_at` after a fired heartbeat.
@@ -210,12 +409,16 @@ impl AtcInstanceRepo {
         enabled: bool,
         next_tick_at: Option<i64>,
     ) -> Result<(), sqlx::Error> {
-        sqlx::query("UPDATE atc_instance SET enabled = ?, next_tick_at = ? WHERE name = ?")
-            .bind(i64::from(enabled))
-            .bind(next_tick_at)
-            .bind(name)
-            .execute(pool)
-            .await?;
+        sqlx::query(
+            "UPDATE atc_instance SET enabled = ?, next_tick_at = ?, \
+             config_generation = config_generation + 1, scheduler_claim_generation = NULL \
+             WHERE name = ?",
+        )
+        .bind(i64::from(enabled))
+        .bind(next_tick_at)
+        .bind(name)
+        .execute(pool)
+        .await?;
         Ok(())
     }
 
@@ -322,7 +525,7 @@ impl AtcInstanceRepo {
 
 /// The single-instance select column list, shared by `get` (needs the `WHERE`).
 const SELECT_INSTANCE_COLS: &str = "SELECT name, cwd, tmux_session, heartbeat_cron, err_retry_cap, idle_pause_min, \
-            next_tick_at, enabled, last_heartbeat_at, created_at \
+            next_tick_at, enabled, last_heartbeat_at, created_at, config_generation \
      FROM atc_instance WHERE name = ?";
 
 /// Map one raw `atc_instance` row into an [`AtcInstanceRow`].
@@ -339,7 +542,17 @@ fn instance_from_sqlite(row: &sqlx::sqlite::SqliteRow) -> AtcInstanceRow {
         enabled: enabled != 0,
         last_heartbeat_at: row.get("last_heartbeat_at"),
         created_at: row.get("created_at"),
+        config_generation: row.get("config_generation"),
     }
+}
+
+fn desired_matches(row: &AtcInstanceRow, req: &RegisterAtc) -> bool {
+    row.enabled
+        && row.cwd == req.cwd
+        && row.tmux_session == req.tmux_session
+        && row.heartbeat_cron == req.heartbeat_cron
+        && row.err_retry_cap == req.err_retry_cap
+        && row.idle_pause_min == req.idle_pause_min
 }
 
 /// Map one raw `atc_retry` row into an [`AtcRetryRow`].
@@ -476,4 +689,41 @@ mod tests {
         assert_eq!(got.last_heartbeat_at, Some(5000));
         assert_eq!(got.next_tick_at, Some(6000));
     }
+
+    #[tokio::test]
+    async fn stale_claim_cannot_restore_a_disabled_schedule() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        AtcInstanceRepo::register(store.pool(), &reg("main", "* * * * *", Some(1000)), 1)
+            .await
+            .unwrap();
+        let row = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+        assert!(
+            AtcInstanceRepo::claim_due(
+                store.pool(),
+                &row.name,
+                row.config_generation,
+                row.next_tick_at.unwrap(),
+            )
+            .await
+            .unwrap()
+        );
+        AtcInstanceRepo::set_enabled(store.pool(), "main", false, None).await.unwrap();
+        assert!(
+            !AtcInstanceRepo::complete_claim(
+                store.pool(),
+                "main",
+                row.config_generation,
+                Some(2000),
+                1500,
+            )
+            .await
+            .unwrap()
+        );
+        let current = AtcInstanceRepo::get(store.pool(), "main").await.unwrap().unwrap();
+        assert!(!current.enabled);
+        assert_eq!(current.next_tick_at, None);
+        assert!(current.config_generation > row.config_generation);
+    }
+
 }
