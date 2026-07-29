@@ -32,4 +32,13 @@ final class MenuBarRosterJourneyTests: FleetUITestCase {
         waitFor(fleetRow("claude:running"))
 
     }
+
+    @MainActor
+    func testFleetWindowPassesAccessibilityAudit() throws {
+        try fixture.seed(eventID: "alpha", sessionID: "alpha", eventType: "AskUserQuestion", observedAt: 1_700_000_000_001)
+        launchFleetWindow()
+        waitFor(fleetRow("claude:alpha"))
+
+        try app.performAccessibilityAudit()
+    }
 }
