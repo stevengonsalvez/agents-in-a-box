@@ -96,6 +96,11 @@ final class FleetRosterPresentationTests: XCTestCase {
         XCTAssertTrue(preferences.shouldDeliver(atHour: 8))
     }
 
+    func testNotificationDeepLinkEncodesOpaqueSessionKey() {
+        let event = FleetNotificationEvent(sessionKey: "codex/a?b#c", title: "Codex", body: "Complete")
+        XCTAssertEqual(event.deepLink.absoluteString, "ainbfleet://session/codex%2Fa%3Fb%23c")
+    }
+
     private func session(key: String, lifecycle: LifecycleState, attention: AttentionState = .none, management: ManagementState = .managed, transportHealth: TransportHealth = .healthy, observedAt: Int64 = 1, revision: Int64 = 1) -> FleetSession {
         FleetSession(sessionKey: key, provider: .codex, providerSessionID: nil, tmuxTarget: nil, processStartFingerprint: nil, cwd: "/workspace", displayName: key, lifecycle: lifecycle, attention: attention, currentRequestFingerprint: nil, currentRequest: nil, management: management, transportHealth: transportHealth, capabilities: FleetCapabilities(structuredAnswer: false, approvals: false, sendPrompt: false, continueTurn: false, retry: false, interrupt: false, start: false, stop: false, restart: false, kill: false, archive: false, tmuxAttach: false, tmuxText: false, verifiedPicker: false), provenance: .authoritative, confidence: .high, discoveredAt: observedAt, lastObservedAt: observedAt, lifecycleUpdatedAt: observedAt, attentionUpdatedAt: observedAt, version: 1, updatedRevision: revision)
     }
