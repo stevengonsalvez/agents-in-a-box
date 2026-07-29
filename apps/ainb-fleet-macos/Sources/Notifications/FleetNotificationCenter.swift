@@ -67,6 +67,6 @@ final class FleetNotificationCenter: NSObject, UNUserNotificationCenterDelegate 
         defer { completionHandler() }
         guard let value = response.notification.request.content.userInfo["deep_link"] as? String,
               let url = URL(string: value) else { return }
-        NotificationCenter.default.post(name: .fleetNotificationOpen, object: url)
+        Task { @MainActor in FleetDesktopController.shared?.open(url) }
     }
 }
