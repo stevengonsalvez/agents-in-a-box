@@ -20,9 +20,18 @@
     <string>$(CURRENT_PROJECT_VERSION)</string>
     <key>LSMinimumSystemVersion</key>
     <string>$(MACOSX_DEPLOYMENT_TARGET)</string>
-    <key>LSUIElement</key>
-    <true/>
-    <key>NSPrincipalClass</key>
+	<key>LSUIElement</key>
+	<true/>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>dev.ainb.fleet.session</string>
+			<key>CFBundleURLSchemes</key>
+			<array><string>ainbfleet</string></array>
+		</dict>
+	</array>
+	<key>NSPrincipalClass</key>
     <string>NSApplication</string>
 </dict>
 </plist>
