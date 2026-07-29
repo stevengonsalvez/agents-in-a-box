@@ -23,7 +23,14 @@ struct FleetNotificationEvent: Equatable {
     let body: String
 
     var threadIdentifier: String { "fleet.\(sessionKey)" }
-    var deepLink: URL { URL(string: "ainbfleet://session/\(sessionKey)")! }
+    var deepLink: URL {
+        var components = URLComponents()
+        components.scheme = "ainbfleet"
+        components.host = "session"
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-._~"))
+        components.percentEncodedPath = "/" + sessionKey.addingPercentEncoding(withAllowedCharacters: allowed)!
+        return components.url!
+    }
 }
 
 enum FleetNotificationPolicy {
