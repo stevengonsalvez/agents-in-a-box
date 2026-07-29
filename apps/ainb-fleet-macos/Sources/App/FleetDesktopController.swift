@@ -35,7 +35,7 @@ final class FleetDesktopController {
 
     func launch() {
         if notchPanel == nil {
-            let size = NSSize(width: 360, height: 58)
+            let size = NSSize(width: 320, height: 38)
             let panel = NSPanel(
                 contentRect: NSRect(origin: .zero, size: size),
                 styleMask: [.borderless, .nonactivatingPanel],
@@ -44,7 +44,7 @@ final class FleetDesktopController {
             )
             panel.isOpaque = false
             panel.backgroundColor = .clear
-            panel.hasShadow = true
+            panel.hasShadow = false
             panel.level = .statusBar
             panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
             panel.contentView = NSHostingView(rootView: FleetNotchView(store: store, openFleet: { [weak self] in
@@ -94,7 +94,7 @@ final class FleetDesktopController {
               let screen = NSScreen.screens.first(where: { $0.frame.contains(NSEvent.mouseLocation) }) ?? NSScreen.main
         else { return }
         let frame = screen.frame
-        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - panel.frame.height - 2))
+        panel.setFrameOrigin(NSPoint(x: frame.midX - panel.frame.width / 2, y: frame.maxY - panel.frame.height))
     }
 }
 
@@ -112,27 +112,50 @@ private struct FleetNotchView: View {
 
     var body: some View {
         Button(action: openFleet) {
-            HStack(spacing: 10) {
+            HStack(spacing: 8) {
                 Image(systemName: FleetStatusPresentation.symbol(for: store.connectionState, needsYou: store.needsYouCount, sessions: store.sessions))
-                    .foregroundStyle(store.needsYouCount > 0 ? .orange : .primary)
+                    .font(.caption2.weight(.bold))
+                    .foregroundStyle(store.needsYouCount > 0 ? .orange : .mint)
                 Text("Fleet")
-                    .fontWeight(.semibold)
+                    .fontWeight(.bold)
                 Spacer()
-                Text("\(store.activeCount) active")
+                Text(store.connectionState.isLive ? "\(store.sessions.count) observed" : "Offline")
                 if store.needsYouCount > 0 {
                     Text("\(store.needsYouCount) need you")
                         .fontWeight(.semibold)
                         .foregroundStyle(.orange)
                 }
             }
-            .font(.caption)
-            .padding(.horizontal, 18)
-            .frame(width: 360, height: 58)
-            .background(.regularMaterial, in: RoundedRectangle(cornerRadius: 20, style: .continuous))
+            .font(.caption2)
+            .padding(.horizontal, 20)
+            .frame(width: 320, height: 38)
+            .background(FleetNotchShape().fill(.black))
+            .contentShape(FleetNotchShape())
         }
         .buttonStyle(.plain)
         .accessibilityIdentifier("fleet.notch")
         .accessibilityLabel(FleetStatusPresentation.label(active: store.activeCount, needsYou: store.needsYouCount, state: store.connectionState, sessions: store.sessions))
         .accessibilityHint("Open Fleet")
+    }
+}
+
+private struct FleetNotchShape: Shape {
+    func path(in rect: CGRect) -> Path {
+        let radius = min(15, rect.height / 2)
+        var path = Path()
+        path.move(to: .zero)
+        path.addLine(to: CGPoint(x: rect.maxX, y: 0))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.maxY - radius))
+        path.addQuadCurve(
+            to: CGPoint(x: rect.maxX - radius, y: rect.maxY),
+            control: CGPoint(x: rect.maxX, y: rect.maxY)
+        )
+        path.addLine(to: CGPoint(x: radius, y: rect.maxY))
+        path.addQuadCurve(
+            to: CGPoint(x: 0, y: rect.maxY - radius),
+            control: CGPoint(x: 0, y: rect.maxY)
+        )
+        path.closeSubpath()
+        return path
     }
 }
