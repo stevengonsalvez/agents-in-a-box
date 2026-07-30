@@ -22,6 +22,11 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .compact()
         .init();
 
-    Server::new(AbtopPlugin::default()).run_stdio().await?;
+    // Detect BEFORE the stdio server reads its first frame: the host does
+    // not wait for `plugin/init` to be answered before it sends
+    // `plugin/render`, so a plugin that resolves its lifecycle in
+    // `on_init` can be asked to paint while it is still Unknown. See
+    // `AbtopPlugin::detected`.
+    Server::new(AbtopPlugin::detected().await).run_stdio().await?;
     Ok(())
 }
