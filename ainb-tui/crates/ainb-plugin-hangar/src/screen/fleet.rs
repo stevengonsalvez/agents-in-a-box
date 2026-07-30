@@ -332,7 +332,7 @@ pub enum FleetFilter {
 
 impl FleetFilter {
     fn matches(self, row: &FleetSessionRow) -> bool {
-        if !row.is_active_session() {
+        if !row.is_active_session() && !row.is_actionable() {
             return false;
         }
         match self {
@@ -734,12 +734,7 @@ impl FleetPaneState {
 
     /// Sessions requiring operator review, independent from active lens.
     pub fn attention_count(&self) -> usize {
-        self.roster
-            .iter()
-            .filter(|session| {
-                session.is_active_session() && !session.attention_state.eq_ignore_ascii_case("NONE")
-            })
-            .count()
+        self.roster.iter().filter(|session| session.is_actionable()).count()
     }
 
     pub fn feedback(&self) -> Option<&str> {
@@ -2901,6 +2896,20 @@ mod tests {
                 "terminal history leaked into {filter:?}"
             );
         }
+    }
+
+    #[test]
+    fn unavailable_session_with_open_attention_stays_in_needs_input() {
+        let mut blocked = session("lost-ask", "codex", "IDLE", "ASK", "managed");
+        blocked.transport_health = "UNAVAILABLE".into();
+        let mut state = FleetPaneState::default();
+        state.set_sessions(vec![blocked]);
+
+        assert_eq!(state.session_count(), 0);
+        assert_eq!(state.attention_count(), 1);
+        let keys: Vec<_> =
+            state.visible_sessions().iter().map(|row| row.session_key.as_str()).collect();
+        assert_eq!(keys, ["lost-ask"]);
     }
 
     #[test]

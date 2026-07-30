@@ -27,6 +27,7 @@ pub struct FleetWorkRepo;
 impl FleetWorkRepo {
     /// Apply one transition and return parent active-work count.
     pub async fn apply(pool: &SqlitePool, update: &FleetWorkUpdate) -> Result<i64, sqlx::Error> {
+        let mut tx = pool.begin().await?;
         if update.active {
             sqlx::query(
                 "INSERT INTO fleet_work_item (provider, session_key, work_key, kind, state, started_at, last_event_id) VALUES (?, ?, ?, ?, 'ACTIVE', ?, ?) \
@@ -39,7 +40,7 @@ impl FleetWorkRepo {
             .bind(&update.kind)
             .bind(update.observed_at)
             .bind(&update.event_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         } else {
             sqlx::query(
@@ -52,15 +53,17 @@ impl FleetWorkRepo {
             .bind(&update.session_key)
             .bind(&update.work_key)
             .bind(&update.event_id)
-            .execute(pool)
+            .execute(&mut *tx)
             .await?;
         }
-        sqlx::query_scalar(
+        let count = sqlx::query_scalar(
             "SELECT COUNT(*) FROM fleet_work_item WHERE session_key = ? AND state = 'ACTIVE'",
         )
         .bind(&update.session_key)
-        .fetch_one(pool)
-        .await
+        .fetch_one(&mut *tx)
+        .await?;
+        tx.commit().await?;
+        Ok(count)
     }
 
     /// Complete every active parent relationship for one provider child key.
