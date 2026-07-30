@@ -31,6 +31,7 @@ use std::collections::HashMap;
 use std::process::Stdio;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::{Duration, Instant};
 
 use parking_lot::Mutex;
 use tokio::process::{Child as TokioChild, Command};
@@ -199,6 +200,10 @@ impl ManagedSubprocessRegistry {
     /// Kill every managed child regardless of owner. Called on
     /// [`crate::Runtime`] drop so no managed process outlives the host.
     /// Returns the number of children reaped.
+    ///
+    /// Blocks until each child has actually been `waitpid`-ed, so the
+    /// caller may tear the tokio runtime down immediately afterwards
+    /// without leaving zombies behind. See [`reap_child`].
     pub fn kill_all(&self) -> usize {
         let mut map = self.inner.lock();
         let n = map.len();
@@ -228,8 +233,9 @@ impl ManagedSubprocessRegistry {
 }
 
 /// Reap a single managed child: SIGTERM the whole process group (so any
-/// descendants the child forked die too), then `start_kill` the child
-/// itself as a backstop.
+/// descendants the child forked die too), `start_kill` the child itself
+/// as a backstop, then **block until the child has actually been
+/// `waitpid`-ed** (see [`reap_child`]).
 fn kill_child(c: &mut ManagedChild) {
     // `setpgid(0, 0)` in the leak guard makes the child a process-group
     // leader equal to its pid, so `kill(-pid, SIGTERM)` reaches every
@@ -238,6 +244,61 @@ fn kill_child(c: &mut ManagedChild) {
         let _ = signal_pgrp(c.pid.cast_signed(), SIGTERM);
     }
     let _ = c.child.start_kill();
+    reap_child(c);
+}
+
+/// Longest [`reap_child`] will block waiting for a signalled child to
+/// become reapable. A SIGKILL-ed child is normally reapable within a
+/// millisecond or two; the bound only exists so a pathological child
+/// (uninterruptible sleep in a syscall) can't wedge host shutdown.
+const REAP_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Poll interval for the [`reap_child`] `waitpid` loop.
+const REAP_POLL: Duration = Duration::from_millis(2);
+
+/// Block until `c`'s child has been reaped, bounded by [`REAP_TIMEOUT`].
+///
+/// ## Why this has to be synchronous
+///
+/// `start_kill` only *delivers* SIGKILL; it does not `waitpid`. Tokio
+/// performs the actual reap on a SIGCHLD-driven future owned by the
+/// tokio runtime. Every caller of [`kill_child`] is a teardown path
+/// ([`ManagedSubprocessRegistry::kill_all`] from `Runtime::shutdown` /
+/// `Drop`, [`ManagedSubprocessRegistry::kill_plugin`] from plugin
+/// teardown), and `Runtime` tears the tokio runtime down with
+/// `shutdown_background()`, which by contract returns immediately. That
+/// abandons the reaping future, so the child dies but is never
+/// `waitpid`-ed: it becomes a **zombie**, and a zombie still answers
+/// `kill(pid, 0)`, i.e. every liveness probe (ours, the CTS suite's, an
+/// operator's `kill -0`) reports the "reaped" child as still alive for
+/// the remaining life of the host process.
+///
+/// Reaping here, before the caller returns, makes the kill observably
+/// complete. We own the [`TokioChild`] exclusively (it is never polled
+/// as a task), so `try_wait` is the authoritative `waitpid` for it and
+/// needs no reactor, so it is safe to call while the runtime is being
+/// torn down.
+/// It also cannot re-trip the "cannot drop a runtime in a context where
+/// blocking is not allowed" panic guarded at `runtime.rs`: this blocks
+/// on a `waitpid` syscall, it does not drop or `block_on` a runtime.
+fn reap_child(c: &mut ManagedChild) {
+    let deadline = Instant::now() + REAP_TIMEOUT;
+    loop {
+        match c.child.try_wait() {
+            // Reaped. `Err` means the pid is not ours to wait on any
+            // more (ECHILD): already reaped, equally done.
+            Ok(Some(_)) | Err(_) => return,
+            Ok(None) => {}
+        }
+        if Instant::now() >= deadline {
+            tracing::warn!(
+                pid = c.pid,
+                "managed child still unreaped after {REAP_TIMEOUT:?}; leaving it to the OS"
+            );
+            return;
+        }
+        std::thread::sleep(REAP_POLL);
+    }
 }
 
 /// The delivery topic a managed child's stdout stream arrives under:
@@ -358,6 +419,34 @@ mod tests {
         std::env::remove_var("CTS_MANAGED_KEEP");
         std::env::remove_var("CTS_MANAGED_DROP");
         let _ = reg.kill_all();
+    }
+
+    /// Regression lock for the zombie leak: `kill_all` must complete the
+    /// `waitpid`, not merely deliver the signal. Deliberately NOT a
+    /// `#[tokio::test]`: the bug only shows once the tokio runtime that
+    /// owns the SIGCHLD reaper is gone, which is exactly what
+    /// `Runtime::shutdown` / `Drop` do via `shutdown_background()`.
+    /// Before the fix the child ended up `Z (defunct)`, and `kill(pid, 0)`
+    /// still reported it alive for the rest of the process's life.
+    #[test]
+    fn kill_all_reaps_before_tokio_runtime_teardown() {
+        let tokio_rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+        let reg = ManagedSubprocessRegistry::new();
+        let s = tokio_rt.block_on(async {
+            reg.spawn(pid_id("p"), "sleep", &["30".into()], &[], None).expect("spawn sleep")
+        });
+        assert!(process_alive(s.pid), "child not alive after spawn");
+
+        // Mirror `Runtime::shutdown` exactly: drain the registry, then
+        // hand the tokio runtime off to a non-blocking teardown.
+        assert_eq!(reg.kill_all(), 1);
+        tokio_rt.shutdown_background();
+
+        // No polling grace: `kill_all` returning is the guarantee.
+        assert!(
+            !process_alive(s.pid),
+            "managed child left unreaped (zombie) after kill_all + shutdown_background"
+        );
     }
 
     #[test]
