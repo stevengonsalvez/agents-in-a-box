@@ -62,6 +62,95 @@ fn read_frame<R: BufRead>(r: &mut R) -> Option<Value> {
     }
 }
 
+/// Flatten a `WireBuffer`'s cells into the text it paints.
+fn buffer_text(buffer: &Value) -> String {
+    buffer["cells"]
+        .as_array()
+        .expect("cells array")
+        .iter()
+        .filter_map(|pair| pair.get(1))
+        .filter_map(|cell| cell.get("symbol"))
+        .filter_map(Value::as_str)
+        .collect()
+}
+
+/// The host does NOT wait for `plugin/init` to be answered before it asks
+/// for a frame: `ainb-plugin-runtime`'s `send_init` writes the init request
+/// and returns, `spawn_and_init` marks the plugin Running straight after,
+/// and the SDK serves `plugin/init` and `plugin/render` on independent
+/// tasks, so which one takes the plugin mutex first is a scheduler race.
+///
+/// abtop must therefore be correct from its FIRST frame: it resolves
+/// detection in `AbtopPlugin::detected` before the stdio server reads
+/// anything, so `Lifecycle::Unknown` (the "checking abtop…" placeholder)
+/// can never reach the wire.
+///
+/// Regression: while detection lived only in `on_init`, a render that won
+/// the race painted the placeholder. Two such frames in a row read as a
+/// settled screen to CTS v2's A05 determinism axis, which then failed on
+/// the next (real) frame: a load-sensitive flake rather than an honest
+/// signal.
+#[test]
+fn render_racing_init_never_paints_the_pre_init_placeholder() {
+    // The window is a scheduler race, so a single round trip proves little.
+    for attempt in 0..5 {
+        let mut child = Command::new(binary_path())
+            .env("RUST_LOG", "off")
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .expect("spawn abtop plugin");
+
+        let mut stdin = child.stdin.take().expect("stdin handle");
+        let mut stdout = BufReader::new(child.stdout.take().expect("stdout handle"));
+
+        // Back to back, exactly like the runtime: no wait for the init reply.
+        write_frame(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0", "id": 1, "method": "plugin/init",
+                "params": {
+                    "manifest_path": "/tmp/abtop/manifest.toml",
+                    "granted_capabilities": ["spawn_subprocess"],
+                    "abi_version": 2
+                }
+            }),
+        );
+        write_frame(
+            &mut stdin,
+            &json!({
+                "jsonrpc": "2.0", "id": 2, "method": "plugin/render",
+                "params": {
+                    "viewport": { "width": 60_u16, "height": 12_u16 },
+                    "generation": 0_u64
+                }
+            }),
+        );
+
+        // Independent tasks answer these, so replies may arrive in either
+        // order. Take them by id.
+        let mut render: Option<Value> = None;
+        for _ in 0..2 {
+            let resp = read_frame(&mut stdout).expect("a response");
+            if resp["id"] == 2 {
+                render = Some(resp);
+            }
+        }
+        let resp = render.expect("render response");
+        let buffer = resp["result"].get("buffer").expect("render buffer");
+        let text = buffer_text(buffer);
+        assert!(
+            !text.contains("checking abtop"),
+            "attempt {attempt}: first frame painted the pre-init placeholder \
+             ({text:?}); detection must be resolved before the server loop"
+        );
+
+        drop(stdin);
+        let _ = child.wait();
+    }
+}
+
 #[test]
 fn init_render_cli_dispatch_shutdown_round_trip() {
     let mut child = Command::new(binary_path())

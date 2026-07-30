@@ -53,16 +53,10 @@ impl Plugin for AbtopPlugin {
     }
 
     async fn on_init(&mut self, _host: &HostClient, _ctx: InitContext<'_>) -> Result<()> {
-        let result = detect_abtop().await;
-        match &result {
-            crate::detect::DetectResult::Ready { path } => {
-                self.abtop_path = Some(path.clone());
-            }
-            crate::detect::DetectResult::Missing(_) => {
-                self.abtop_path = None;
-            }
-        }
-        self.lifecycle = Lifecycle::from_detect(result);
+        // Idempotent. The binary already detected in `AbtopPlugin::detected`
+        // before the stdio server started, so this normally re-affirms the
+        // same answer; it matters only for a plugin built via `Default`.
+        self.refresh_detect().await;
         Ok(())
     }
 
@@ -102,16 +96,7 @@ impl Plugin for AbtopPlugin {
         // actually transitions to Ready when abtop appears on PATH.
         let r_pressed = matches!(params.key.code, KeyCode::Char { ch: 'r' });
         if r_pressed && !was_ready && matches!(self.lifecycle, Lifecycle::Unknown) {
-            let result = detect_abtop().await;
-            match &result {
-                crate::detect::DetectResult::Ready { path } => {
-                    self.abtop_path = Some(path.clone());
-                }
-                crate::detect::DetectResult::Missing(_) => {
-                    self.abtop_path = None;
-                }
-            }
-            self.lifecycle = Lifecycle::from_detect(result);
+            self.refresh_detect().await;
         }
 
         Ok(())
@@ -135,6 +120,43 @@ impl Plugin for AbtopPlugin {
 }
 
 impl AbtopPlugin {
+    /// Build a plugin that has ALREADY resolved whether abtop is on
+    /// PATH, so [`Lifecycle::Unknown`] never reaches the wire.
+    ///
+    /// The host does not wait for `plugin/init` to be answered before it
+    /// sends `plugin/render` (`ainb-plugin-runtime`'s `send_init` writes
+    /// the request and returns; `spawn_and_init` marks the plugin Running
+    /// immediately), and the SDK serves `plugin/init` and `plugin/render`
+    /// on independent tasks. A render can therefore be answered before
+    /// `on_init` has run. Every other plugin needs that window because its
+    /// startup work is genuinely slow (a subprocess exec, a socket dial)
+    /// and the transient IS the wanted UI. abtop's is a single `which`
+    /// lookup with no blocking call in it, so paying for a "checking
+    /// abtop…" flash buys nothing: resolve it here, before the stdio
+    /// server reads its first frame, and the screen is correct from frame
+    /// zero.
+    pub async fn detected() -> Self {
+        let mut plugin = Self::default();
+        plugin.refresh_detect().await;
+        plugin
+    }
+
+    /// Run detection and apply it to lifecycle + the cached binary path.
+    /// The single place that maps a [`crate::detect::DetectResult`] onto
+    /// state, shared by construction, `on_init`, and the `r` re-detect.
+    async fn refresh_detect(&mut self) {
+        let result = detect_abtop().await;
+        match &result {
+            crate::detect::DetectResult::Ready { path } => {
+                self.abtop_path = Some(path.clone());
+            }
+            crate::detect::DetectResult::Missing(_) => {
+                self.abtop_path = None;
+            }
+        }
+        self.lifecycle = Lifecycle::from_detect(result);
+    }
+
     /// Host-free body of [`Plugin::cli_dispatch`]. Public (doc-hidden)
     /// so integration tests can exercise the full `ainb abtop` surface
     /// against a stub binary without constructing a [`HostClient`].
@@ -355,6 +377,21 @@ mod tests {
         assert_eq!(p.lifecycle, Lifecycle::Unknown);
         let buf = render_test(&mut p, vp(40, 6));
         assert!(buffer_contains(&buf, "checking abtop"));
+    }
+
+    /// The invariant that keeps abtop's frames deterministic: the binary
+    /// hands `Server` an already-detected plugin, so the host can never be
+    /// answered with the `Unknown` placeholder no matter how the init and
+    /// render tasks interleave. Holds whether or not abtop is installed on
+    /// the machine running the test.
+    #[tokio::test]
+    async fn detected_plugin_is_never_unknown() {
+        let p = AbtopPlugin::detected().await;
+        assert_ne!(
+            p.lifecycle_for_test(),
+            &Lifecycle::Unknown,
+            "detected() must resolve lifecycle before the server loop starts"
+        );
     }
 
     #[test]

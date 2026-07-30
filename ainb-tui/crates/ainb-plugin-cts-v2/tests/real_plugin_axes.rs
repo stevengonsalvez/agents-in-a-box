@@ -519,13 +519,24 @@ fn axis_unknown_method(subject: &Subject) -> Outcome {
 /// demands five identical buffers. A real plugin legitimately transitions
 /// while it comes up (`checking witr…` becomes the detection result, hangar
 /// connects to its daemon), so demanding determinism from frame 0 measures
-/// startup, not conformance. This axis instead renders until two consecutive
-/// frames agree (the settle point), then requires the next
-/// [`STEADY_FRAMES`] to be byte-identical. A plugin that paints a clock or a
-/// spinner never settles and fails, which is the finding the axis exists for:
-/// the host treats an unchanged buffer as a no-op frame.
-const SETTLE_BUDGET: usize = 20;
-const STEADY_FRAMES: usize = 3;
+/// startup, not conformance. This axis instead asks for a run of
+/// [`STEADY_RUN`] consecutive byte-identical frames somewhere inside
+/// [`SETTLE_BUDGET`] frames. A plugin that paints a clock or a spinner never
+/// produces that run and fails, which is the finding the axis exists for: the
+/// host treats an unchanged buffer as a no-op frame.
+///
+/// The run is deliberately NOT anchored to the first pair of agreeing frames.
+/// The host does not wait for `plugin/init` to be answered before it asks for
+/// a frame, so a startup transient can be painted for several frames running
+/// and two identical transients are not a steady state. Anchoring on the
+/// first agreement read that as "settled", then failed on the next frame when
+/// the real screen finally arrived. That made the axis load-sensitive: it
+/// passed on an idle machine and failed under a saturated one, for plugins
+/// that were behaving correctly. Requiring a longer unanchored run is a
+/// strictly stronger stability demand ([`STEADY_RUN`] identical frames versus
+/// the five the anchored form asked for) without the false signal.
+const SETTLE_BUDGET: usize = 24;
+const STEADY_RUN: usize = 6;
 
 fn axis_render_determinism(subject: &Subject) -> Outcome {
     outcome(|| {
@@ -540,33 +551,33 @@ fn axis_render_determinism(subject: &Subject) -> Outcome {
             }
         };
 
-        let mut previous = frame(0)?;
-        let mut settled_at = None;
-        for n in 1..SETTLE_BUDGET {
+        let mut previous: Option<Vec<u8>> = None;
+        let mut run = 0_usize;
+        let mut longest_run = 0_usize;
+        let mut transitions = 0_usize;
+        for n in 0..SETTLE_BUDGET {
             let current = frame(n)?;
-            if current == previous {
-                settled_at = Some(n);
-                break;
+            if previous.as_ref() == Some(&current) {
+                run += 1;
+            } else {
+                if previous.is_some() {
+                    transitions += 1;
+                }
+                run = 1;
             }
-            previous = current;
+            longest_run = longest_run.max(run);
+            if run >= STEADY_RUN {
+                return Ok(());
+            }
+            previous = Some(current);
         }
-        let Some(settled_at) = settled_at else {
-            return fail(format!(
-                "no two consecutive renders agreed within {SETTLE_BUDGET} frames; \
-                 the plugin never reaches a steady state"
-            ));
-        };
 
-        for n in 0..STEADY_FRAMES {
-            let current = frame(settled_at + 1 + n)?;
-            if current != previous {
-                return fail(format!(
-                    "settled at frame {settled_at}, then frame {} differed byte-for-byte",
-                    settled_at + 1 + n
-                ));
-            }
-        }
-        Ok(())
+        fail(format!(
+            "never produced {STEADY_RUN} consecutive byte-identical frames within \
+             {SETTLE_BUDGET} renders of an unchanged viewport (longest identical run was \
+             {longest_run}, across {transitions} buffer changes); the plugin does not \
+             reach a steady state"
+        ))
     })
 }
 

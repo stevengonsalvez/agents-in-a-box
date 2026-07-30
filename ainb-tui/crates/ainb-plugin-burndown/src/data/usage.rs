@@ -3459,6 +3459,7 @@ pub fn format_tokens_commas(n: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::NaiveDateTime;
     use std::fs;
     use std::sync::Mutex;
     use tempfile::tempdir;
@@ -3467,6 +3468,24 @@ mod tests {
     // same process don't read each other's env. Defined here rather
     // than via lazy_static so the lock has no init-order surprises.
     static ENV_LOCK: Mutex<()> = Mutex::new(());
+
+    /// Stamp a wall clock with the host's own UTC offset.
+    ///
+    /// Period bounds anchor at LOCAL midnight (`start_of_day` /
+    /// `end_of_day`) and daily buckets key off the local calendar date, so
+    /// any fixture that means "this instant is on day D" has to be written
+    /// in the host's zone. A hardcoded offset (`+01:00`, `Z`) silently
+    /// means a different calendar day on a machine at a different offset,
+    /// which is how these tests passed at +01:00 and failed at UTC.
+    fn local_rfc3339(naive: NaiveDateTime) -> String {
+        Local
+            .from_local_datetime(&naive)
+            .single()
+            // Same DST fallback the production boundary helpers use for a
+            // wall clock a transition skips or repeats.
+            .unwrap_or_else(|| Local.from_utc_datetime(&naive))
+            .to_rfc3339()
+    }
 
     #[test]
     fn last_day_of_month_handles_leap_years() {
@@ -3745,14 +3764,23 @@ mod tests {
         let temp = tempdir().unwrap();
         let claude_projects = temp.path().join(".claude/projects");
         let project_dir = claude_projects.join("proj");
-        write_file(
-            &project_dir.join("session.jsonl"),
-            r#"{"type":"user","timestamp":"2026-04-09T23:59:00Z","sessionId":"s1","message":{"role":"user","content":"late ask"}}
-{"type":"assistant","timestamp":"2026-04-10T00:00:05Z","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1,"output_tokens":2}}}
-"#,
-        );
 
         let day = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        // The user ask lands the day before, its assistant reply just after
+        // local midnight, so the pair only counts if the filter keys off
+        // the assistant timestamp. The literal `Z` this used to hardcode
+        // put the reply on the previous local day at any negative offset.
+        let ask = local_rfc3339(day.pred_opt().unwrap().and_hms_opt(23, 59, 0).unwrap());
+        let reply = local_rfc3339(day.and_hms_opt(0, 0, 5).unwrap());
+        write_file(
+            &project_dir.join("session.jsonl"),
+            &format!(
+                r#"{{"type":"user","timestamp":"{ask}","sessionId":"s1","message":{{"role":"user","content":"late ask"}}}}
+{{"type":"assistant","timestamp":"{reply}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":1,"output_tokens":2}}}}}}
+"#
+            ),
+        );
+
         let data = parse_usage_for_with_roots(
             UsageQuery {
                 provider_filter: UsageProviderFilter::Claude,
@@ -3773,14 +3801,23 @@ mod tests {
         let temp = tempdir().unwrap();
         let claude_projects = temp.path().join(".claude/projects");
         let project_dir = claude_projects.join("proj");
-        write_file(
-            &project_dir.join("session.jsonl"),
-            r#"{"type":"assistant","timestamp":"2026-04-10T23:59:59+01:00","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":1,"output_tokens":1}}}
-{"type":"assistant","timestamp":"2026-04-11T00:00:00+01:00","sessionId":"s1","message":{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{"input_tokens":10,"output_tokens":10}}}
-"#,
-        );
 
         let day = NaiveDate::from_ymd_opt(2026, 4, 10).unwrap();
+        // Two events either side of the local midnight that ends `day`:
+        // the first is the last instant the range covers, the second the
+        // first instant past it.
+        let inside = local_rfc3339(day.and_hms_opt(23, 59, 59).unwrap());
+        let outside = local_rfc3339(day.succ_opt().unwrap().and_hms_opt(0, 0, 0).unwrap());
+
+        write_file(
+            &project_dir.join("session.jsonl"),
+            &format!(
+                r#"{{"type":"assistant","timestamp":"{inside}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":1,"output_tokens":1}}}}}}
+{{"type":"assistant","timestamp":"{outside}","sessionId":"s1","message":{{"role":"assistant","model":"claude-sonnet-4-5","content":[],"usage":{{"input_tokens":10,"output_tokens":10}}}}}}
+"#
+            ),
+        );
+
         let data = parse_usage_for_with_roots(
             UsageQuery {
                 provider_filter: UsageProviderFilter::Claude,
@@ -4277,7 +4314,16 @@ mod tests {
         // so the override is unambiguously responsible for the answer.
         let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let prev = std::env::var("AINB_NOW").ok();
-        std::env::set_var("AINB_NOW", "2026-05-11T00:00:00Z");
+        // AINB_NOW names an INSTANT, which `local_now` reads in the host's
+        // zone; the anchor asserted below is a local calendar date. Pin the
+        // instant by local midday so it names 2026-05-11 at every offset.
+        // The literal `2026-05-11T00:00:00Z` this used to hardcode anchored
+        // on 2026-05-10 anywhere west of Greenwich.
+        let anchor = NaiveDate::from_ymd_opt(2026, 5, 11).unwrap();
+        std::env::set_var(
+            "AINB_NOW",
+            local_rfc3339(anchor.and_hms_opt(12, 0, 0).unwrap()),
+        );
 
         let (today_start, today_end) =
             date_range_for_period(&UsagePeriod::Today).expect("today range");

@@ -103,7 +103,15 @@ jobs:
       # `+01:00` wall clock for a range anchored at LOCAL midnight. They now
       # drive a stub on a controlled `$PATH` and derive their boundaries from
       # the host's own zone, so nothing needs muting.
-      - run: "cargo nextest run --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
+      #
+      # `--workspace` is load-bearing. Without it nextest honours the
+      # `default-members` in ainb-tui/Cargo.toml (ainb-core and
+      # ainb-hangar-daemon), so this job tested 2 of 29 crates and silently
+      # skipped 27, roughly 160 test files. Everything in ainb-hangar-store
+      # (the database layer, 74 files) and ainb-plugin-hangar (46) had never
+      # run here. `--lib --tests` widened WHICH targets are built; this
+      # widens WHICH crates they are built from.
+      - run: "cargo nextest run --workspace --lib --tests --all-features --no-fail-fast -E 'not binary(/^tripwire_/)'"
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
@@ -127,18 +135,17 @@ jobs:
   # intentional.
   #
   # DELIBERATE: `migration_upgrade_full_chain` and the `ainb-plugin-cts-v2`
-  # binaries also need `--workspace`, since this repo's `default-members`
-  # (see ainb-tui/Cargo.toml) covers only ainb-core and ainb-hangar-daemon.
-  # `ainb-hangar-store` and `ainb-plugin-cts-v2` are outside it, so `Test`'s
-  # workspace-default `cargo nextest run` does not exercise them today.
-  # `argv_golden_matrix` (ainb-hangar-daemon) IS inside default-members and
-  # genuinely double-runs in `Test`; that overlap is intentional (see below),
-  # not redundant with this job as a whole.
+  # binaries need `--workspace`, since this repo's `default-members` (see
+  # ainb-tui/Cargo.toml) covers only ainb-core and ainb-hangar-daemon and
+  # both live outside it. `Test` now passes `--workspace` too, so all three
+  # of these binaries double-run: once here, once there.
   #
-  # DELIBERATE: no exclusion is added to `Test`'s `-E` filter for the overlap
-  # that does exist. The duplicate run costs a few seconds; a filter typo
-  # silently dropping coverage is the exact failure class this effort exists
-  # to prevent.
+  # DELIBERATE: that overlap is kept, and no exclusion is added to `Test`'s
+  # `-E` filter to remove it. This job exists for the SIGNAL: a contract
+  # failure gets its own red check and its own no-rerun policy instead of
+  # being one line among thousands. Running the same binary twice costs
+  # seconds; a filter typo silently dropping coverage is the exact failure
+  # class this effort exists to prevent.
   # ────────────────────────────────────────────────────────────────────────────
   contracts:
     name: Contracts
