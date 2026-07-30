@@ -182,17 +182,29 @@ impl ManagedSubprocessRegistry {
     /// teardown (shutdown / crash / quarantine). Returns the number of
     /// children reaped.
     pub fn kill_plugin(&self, plugin: &PluginId) -> usize {
-        let mut map = self.inner.lock();
-        let to_kill: Vec<ManagedHandle> = map
-            .iter()
-            .filter(|(_, c)| &c.plugin == plugin)
-            .map(|(h, _)| h.clone())
-            .collect();
-        let n = to_kill.len();
-        for h in to_kill {
-            if let Some(mut c) = map.remove(&h) {
-                kill_child(&mut c);
+        // Remove the plugin's children under the lock, reap after
+        // releasing it: `kill_child` now blocks up to `REAP_TIMEOUT` per
+        // child, and holding the registry mutex across that would stall
+        // every other caller (`spawn`, `len`, `kill_all`, ...) during
+        // teardown.
+        let drained: Vec<ManagedChild> = {
+            let mut map = self.inner.lock();
+            let to_kill: Vec<ManagedHandle> = map
+                .iter()
+                .filter(|(_, c)| &c.plugin == plugin)
+                .map(|(h, _)| h.clone())
+                .collect();
+            let mut drained = Vec::with_capacity(to_kill.len());
+            for h in to_kill {
+                if let Some(c) = map.remove(&h) {
+                    drained.push(c);
+                }
             }
+            drained
+        };
+        let n = drained.len();
+        for mut c in drained {
+            kill_child(&mut c);
         }
         n
     }
@@ -205,9 +217,16 @@ impl ManagedSubprocessRegistry {
     /// caller may tear the tokio runtime down immediately afterwards
     /// without leaving zombies behind. See [`reap_child`].
     pub fn kill_all(&self) -> usize {
-        let mut map = self.inner.lock();
-        let n = map.len();
-        for (_, mut c) in map.drain() {
+        // Drain under the lock, reap after releasing it: `kill_child` now
+        // blocks up to `REAP_TIMEOUT` per child, and holding the registry
+        // mutex across that would stall every other caller during
+        // teardown.
+        let drained: Vec<ManagedChild> = {
+            let mut map = self.inner.lock();
+            map.drain().map(|(_, c)| c).collect()
+        };
+        let n = drained.len();
+        for mut c in drained {
             kill_child(&mut c);
         }
         n
