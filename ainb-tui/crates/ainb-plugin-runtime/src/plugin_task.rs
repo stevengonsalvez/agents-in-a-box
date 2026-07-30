@@ -1375,7 +1375,7 @@ impl PluginTask {
         // host-supervised process outlives its requester.
         self.snapshots.unsubscribe_all(&self.plugin.id);
         self.event_streams.drop_plugin(&self.plugin.id);
-        self.managed_subprocess.kill_plugin(&self.plugin.id);
+        self.managed_subprocess.kill_plugin(&self.plugin.id).await;
         self.unix_sockets.drop_plugin(&self.plugin.id);
         self.record_failure();
         if self.is_quarantine_due() {
@@ -1495,7 +1495,7 @@ impl PluginTask {
         self.event_streams.drop_plugin(&self.plugin.id);
         // Reap every managed child this plugin requested — the plugin
         // that owns their lifecycle is gone.
-        self.managed_subprocess.kill_plugin(&self.plugin.id);
+        self.managed_subprocess.kill_plugin(&self.plugin.id).await;
         // Drop every dialled socket the plugin held — the process is gone,
         // so further `socket:<id>` frames would leak to a dead subscription.
         self.unix_sockets.drop_plugin(&self.plugin.id);
