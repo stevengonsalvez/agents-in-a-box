@@ -9,9 +9,13 @@
 //! Migrations live in `migrations/` and follow the frozen naming convention
 //! `NNNN_<terse_slug>.sql` (4-digit zero-padded ordinal, `snake_case` slug, no
 //! `_up`/`_down` suffix — `SQLite` migrations are forward-only here). They are
-//! embedded at compile time by [`sqlx::migrate!`], so a migration edit that is
-//! not picked up usually means a stale build cache — run
-//! `cargo clean -p ainb-hangar-store` and rebuild.
+//! embedded at compile time by [`sqlx::migrate!`], which on stable Rust
+//! cannot register `migrations/` as a build dependency on its own; `build.rs`
+//! emits `cargo:rerun-if-changed=migrations` so cargo rebuilds this crate
+//! whenever a `.sql` file is added, edited, or removed. If a migration edit
+//! is somehow still not picked up, that is a `build.rs` regression, not
+//! expected behavior (`cargo clean -p ainb-hangar-store` remains the escape
+//! hatch, but should not be needed).
 //!
 //! ## An applied migration file is IMMUTABLE — including its comments
 //!
