@@ -181,7 +181,7 @@ impl ManagedSubprocessRegistry {
     /// Kill every managed child owned by `plugin`. Called on plugin
     /// teardown (shutdown / crash / quarantine). Returns the number of
     /// children reaped.
-    pub fn kill_plugin(&self, plugin: &PluginId) -> usize {
+    pub async fn kill_plugin(&self, plugin: &PluginId) -> usize {
         // Remove the plugin's children under the lock, reap after
         // releasing it: `kill_child` now blocks up to `REAP_TIMEOUT` per
         // child, and holding the registry mutex across that would stall
@@ -203,8 +203,17 @@ impl ManagedSubprocessRegistry {
             drained
         };
         let n = drained.len();
-        for mut c in drained {
-            kill_child(&mut c);
+        if n == 0 {
+            return 0;
+        }
+        let result = tokio::task::spawn_blocking(move || {
+            for mut c in drained {
+                kill_child(&mut c);
+            }
+        })
+        .await;
+        if let Err(error) = result {
+            tracing::error!(?error, "managed child reaper task failed");
         }
         n
     }
@@ -384,7 +393,7 @@ mod tests {
         let reg = ManagedSubprocessRegistry::new();
         let a = reg.spawn(pid_id("p1"), "sleep", &["30".into()], &[], None).unwrap();
         let _b = reg.spawn(pid_id("p2"), "sleep", &["30".into()], &[], None).unwrap();
-        assert_eq!(reg.kill_plugin(&pid_id("p1")), 1);
+        assert_eq!(reg.kill_plugin(&pid_id("p1")).await, 1);
         assert_eq!(reg.len(), 1, "p2's child must survive");
         // p1's child must actually die within ~2s.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
