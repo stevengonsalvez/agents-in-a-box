@@ -107,6 +107,55 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
+  # Contracts: deterministic golden/mutation gates, own job, no rerun-to-green
+  #
+  # Runs the five contract test binaries from the contract-testing-hardening
+  # plan (issue #500, phases 1-4): argv_golden_matrix (frozen per-provider CLI
+  # invocation shape), migration_upgrade_full_chain (forward-chain replay over
+  # a populated, adversarially-seeded db), and the ainb-plugin-cts-v2 package
+  # (axes, real_plugin_axes, wire_surface_gate: 14-axis protocol conformance
+  # against real in-tree plugin binaries plus the wire-surface semver gate).
+  #
+  # Why a separate job instead of trusting `Test` to carry them: in the
+  # general `cargo test` pool a contract failure is one line among thousands
+  # and reads as noise. That is exactly how a real `BdLock` two-holder race
+  # got mistaken for a flake for days this week. These tests compare
+  # deterministic renderings to committed golden/lock files, so they cannot
+  # legitimately flake. POLICY: a red job here is NEVER rerun to green. Fix
+  # the code or delete the contract; do not re-run the workflow. See
+  # ainb-tui/CLAUDE.md for the regeneration commands when a change is
+  # intentional.
+  #
+  # DELIBERATE: `migration_upgrade_full_chain` and the `ainb-plugin-cts-v2`
+  # binaries also need `--workspace`, since this repo's `default-members`
+  # (see ainb-tui/Cargo.toml) covers only ainb-core and ainb-hangar-daemon.
+  # `ainb-hangar-store` and `ainb-plugin-cts-v2` are outside it, so `Test`'s
+  # workspace-default `cargo nextest run` does not exercise them today.
+  # `argv_golden_matrix` (ainb-hangar-daemon) IS inside default-members and
+  # genuinely double-runs in `Test`; that overlap is intentional (see below),
+  # not redundant with this job as a whole.
+  #
+  # DELIBERATE: no exclusion is added to `Test`'s `-E` filter for the overlap
+  # that does exist. The duplicate run costs a few seconds; a filter typo
+  # silently dropping coverage is the exact failure class this effort exists
+  # to prevent.
+  # ────────────────────────────────────────────────────────────────────────────
+  contracts:
+    name: Contracts
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: "ainb-tui -> target"
+      - uses: taiki-e/install-action@nextest
+      - run: >
+          cargo nextest run --workspace --all-features --no-fail-fast
+          -E 'binary(argv_golden_matrix) + binary(migration_upgrade_full_chain) + package(ainb-plugin-cts-v2)'
+        working-directory: ${{ env.WORKING_DIR }}
+
+  # ────────────────────────────────────────────────────────────────────────────
   # ainb-hooks daemon + plugin integration tests
   # ────────────────────────────────────────────────────────────────────────────
   ainb-hooks:
