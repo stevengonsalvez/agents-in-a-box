@@ -183,6 +183,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y tmux jq
       - name: Verify hook script parses on the runner
         run: bash -n plugins/ainb-hooks/hooks/notify.sh
+      - name: Stall guard compiles + self-check passes
+        run: |
+          python3 -m py_compile plugins/ainb-hooks/hooks/stall_guard.py
+          python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test
       - name: Build + lib tests (ainb-plugin-notifyd)
         run: cargo test -p ainb-plugin-notifyd --lib --no-fail-fast
         working-directory: ${{ env.WORKING_DIR }}
