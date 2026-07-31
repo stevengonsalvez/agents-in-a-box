@@ -40,7 +40,8 @@ plugins/ainb-hooks/
 ├── copilot/
 │   └── hooks.json           # Copilot ~/.copilot/hooks/ainb.json drop-in (native format)
 ├── hooks/
-│   └── notify.sh            # universal hook script (claude + codex + copilot)
+│   ├── notify.sh            # universal hook script (claude + codex + copilot)
+│   └── stall_guard.py       # Stop-hook stall guard (claude only)
 └── README.md
 ```
 
@@ -53,6 +54,50 @@ The same `notify.sh` is used by all three agents:
 `notify.sh` autodetects the source and uses the right input. The agent
 is identified via `AINB_AGENT={claude,codex,copilot}` set in the registering
 command line.
+
+## Stall guard (Claude only)
+
+`hooks/stall_guard.py` runs as a second `Stop` hook, alongside `notify.sh`. It
+refuses turn-end when a session is about to park on work that is still in
+flight with nothing armed to wake it, which is how an ATC-managed session goes
+quiet with a CI job half-finished.
+
+```
+┌──────────────┐  no    ┌────────────────────┐  no   ┌──────────────┐
+│ live task /  │───────▶│ in-flight evidence │──────▶│ allow stop   │
+│ Monitor?     │        │ in the final state │       └──────────────┘
+└──────┬───────┘        └─────────┬──────────┘
+       │ yes                      │ yes
+       ▼                          ▼
+┌──────────────┐          ┌──────────────────┐
+│ allow stop   │          │ block + tell it  │
+│ (wake armed) │          │ to arm a wake    │
+└──────────────┘          └──────────────────┘
+```
+
+Design notes, each one paid for by a false positive found in a
+120-transcript replay:
+
+- Scans **assistant text and `tool_result` bodies only**. Matching whole
+  transcript entries drags in system prompts, skill listings, `TaskUpdate`
+  todo statuses and task-notification bodies (13% false-positive rate).
+- Only the turn's **final** state counts. A turn that polled a queued job and
+  then watched it go green is finished, not stalled.
+- "Armed" means **still live**. A background watcher that already completed,
+  or was launched over 30 minutes ago and never reported, is not a wake. Todo
+  tools (`TaskCreate`/`TaskUpdate`) are never treated as arming.
+- `stop_hook_active` short-circuits to allow, so the guard nudges once and can
+  never wedge a session.
+
+It cannot catch a watcher that was armed and later died silently; nothing at
+turn-end can see that. That case belongs to the idle-session path
+(`TeammateIdle` / notifyd), not here.
+
+Run the self-check after editing it:
+
+```bash
+python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 21 cases
+```
 
 ## Install
 
