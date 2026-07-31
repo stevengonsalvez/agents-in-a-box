@@ -50,18 +50,10 @@ else
 fi
 [[ -x "$BIN" ]] || { echo "[gen-cli-reference] binary not found: $BIN" >&2; exit 1; }
 
-# Child subcommand names from a node's `--help` Commands: block (skip `help`).
-children() {
-  "$BIN" "$@" --help 2>&1 | awk '
-    /^Commands:/{f=1; next}
-    /^Options:/{f=0}
-    f && /^  [a-z]/ {print $1}' | grep -vxE 'help' || true
-}
-
-# First non-empty line before "Usage:" — the command "about".
-about_of() {
-  "$BIN" "$@" --help 2>&1 | awk 'NR>0 && !/^$/ && !/^Usage:/{print; exit} /^Usage:/{exit}'
-}
+# `children()` / `about_of()`: shared with scripts/gen-man.sh so the two
+# generated artifacts can never disagree about the shape of the command tree.
+# shellcheck source=lib/cli-walk.sh
+. "$SCRIPT_DIR/lib/cli-walk.sh"
 
 # Emit one command section: heading at `depth` (1=##, 2=###, 3=####) + a fenced
 # console block of its full --help.
@@ -159,14 +151,15 @@ daemon/hook entrypoints rather than everyday verbs. Run `<cmd> --help` for each:
 | Code | Meaning |
 |------|---------|
 | `0` | Success. |
-| `1` | Runtime error (the command ran but failed). |
-| `2` | Usage error (bad flags/args), or a required plugin/tool is not installed. |
+| `1` | Runtime error (the command ran but failed). This includes a missing provider CLI: `ainb run --tool codex` with no `codex` on `PATH` exits `1`, not `2`. |
+| `2` | Usage error (bad flags/args), or a required *plugin* is not installed (e.g. `ainb usage` / `ainb learnings` with nothing staged under `dist/plugins/`). |
 
 ## Scripting recipes
 
 ```bash
 # List running sessions as JSON and pull workspace names
-ainb list --running --format json | jq -r '.[].workspace'
+# (the field is `workspace_name`; see `ainb list --format json`)
+ainb list --running --format json | jq -r '.[].workspace_name'
 
 # Spawn a session in an isolated worktree with an initial prompt
 ainb run --repo . --worktree -p "fix the failing tests"
