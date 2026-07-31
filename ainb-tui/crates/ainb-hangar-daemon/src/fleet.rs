@@ -1075,13 +1075,19 @@ fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent 
 }
 
 fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
+    // A lifecycle set by a provider hook outranks this inferred tmux sample, so
+    // the repo will never apply ours over it. Comparing them anyway would report
+    // a permanent mismatch and append one no-op `fleet_event` per discovery
+    // tick, forever, for every hook-backed session.
+    let lifecycle_settled = row.lifecycle_authority == "authoritative"
+        || row.lifecycle_state == state_token(session.lifecycle);
     row.provider == session.provider.as_str()
         && row.tmux_target == session.exact_tmux_target
         && row.process_start_fingerprint == session.process_start_fingerprint
         && row.cwd == session.cwd
         && row.management_state == management_token(session.management)
         && row.confidence == confidence_token(session.confidence)
-        && row.lifecycle_state == state_token(session.lifecycle)
+        && lifecycle_settled
         && row.attention_state == attention_token(session.attention)
         && row.transport_health == transport_token(session.transport_health)
 }
