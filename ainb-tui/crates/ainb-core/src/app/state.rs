@@ -5339,6 +5339,14 @@ impl AppState {
         let mut live_tmux_names: std::collections::HashSet<String> =
             std::collections::HashSet::new();
 
+        // Workspace bucket key. Two paths that both FAIL to canonicalize must
+        // NOT compare equal (the old `a.canonicalize().ok() == b.canonicalize().ok()`
+        // matched `None == None`, so the fabricated `__broken_worktrees__`
+        // sentinel absorbed every workspace whose path was also unresolvable).
+        let canonical_key = |p: &std::path::Path| -> std::path::PathBuf {
+            p.canonicalize().unwrap_or_else(|_| p.to_path_buf())
+        };
+
         // Discover Interactive sessions from tmux
         match manager.list_sessions().await {
             Ok(sessions) => {
@@ -5354,10 +5362,13 @@ impl AppState {
 
                     // Find or create workspace for this session.
                     // Use source_repository (the original git repo) not worktree_path parent.
-                    // When the worktree is broken (no `.git`), source_repository was
-                    // collapsed onto worktree_path by the discovery fallback — bucket
-                    // every such session under a single sentinel path so they all
-                    // collapse into one "(broken)" workspace row instead of fanning out.
+                    // When the worktree is broken (inside no git repo at all),
+                    // source_repository was collapsed onto worktree_path by the discovery
+                    // fallback, bucket every such session under a single sentinel path so
+                    // they all collapse into one "(broken)" workspace row instead of
+                    // fanning out. A plain checkout is NOT broken: it resolves to itself,
+                    // so it buckets under its own repo root and joins any existing row for
+                    // that repository (including linked worktrees off the same repo).
                     let broken_bucket = std::path::PathBuf::from("__broken_worktrees__");
                     let is_broken = interactive_session.workspace_name
                         == crate::interactive::InteractiveSessionManager::BROKEN_WORKSPACE_NAME;
@@ -5372,10 +5383,12 @@ impl AppState {
                         workspace.sessions.retain(|s| s.id != interactive_session.session_id);
                     }
 
-                    if let Some(workspace) = self.workspaces.iter_mut().find(|w| {
-                        std::path::Path::new(&w.path).canonicalize().ok()
-                            == workspace_path.canonicalize().ok()
-                    }) {
+                    let workspace_key = canonical_key(workspace_path);
+                    if let Some(workspace) = self
+                        .workspaces
+                        .iter_mut()
+                        .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
+                    {
                         // Add to existing workspace
                         workspace.sessions.push(session);
                     } else {
@@ -5408,14 +5421,18 @@ impl AppState {
         // still exists on disk. Worktree-missing entries fall through to the
         // existing recovery flow.
         //
-        // Skip "dead-but-not-deleted" worktrees (dir exists but `.git` file is
-        // gone — usually a leftover cache like `.vite/` keeping the dir alive).
-        // Without this guard the loader fabricates a phantom workspace named
-        // after the sanitized worktree-dir basename and bunches every such
-        // session into it, because the previous grouping key was
+        // Skip "dead-but-not-deleted" worktrees (dir exists but sits inside NO
+        // git repository, usually a leftover cache like `.vite/` keeping the
+        // dir alive). Without this guard the loader fabricates a phantom
+        // workspace named after the sanitized worktree-dir basename and bunches
+        // every such session into it, because the previous grouping key was
         // `worktree_path.parent()` (a single shared dir for every flat
         // worktree). These entries should be surfaced via /recover-sessions
         // instead.
+        //
+        // Plain checkouts and subdirectories of a checkout resolve fine (see
+        // `get_source_repository`), so a stopped session created with
+        // `ainb run --repo <clone>` stays visible here instead of vanishing.
         let store = SessionStore::load();
         for metadata in store.sessions().values() {
             if live_tmux_names.contains(&metadata.tmux_session_name) {
@@ -5431,7 +5448,7 @@ impl AppState {
                 )
             else {
                 debug!(
-                    "Skipping stopped session {} — worktree {:?} has no `.git` file (broken). Use /recover-sessions to clean up.",
+                    "Skipping stopped session {}: worktree {:?} is inside no git repository (broken). Use /recover-sessions to clean up.",
                     metadata.session_id, metadata.worktree_path
                 );
                 continue;
@@ -5443,11 +5460,13 @@ impl AppState {
             // always the shared `~/.agents-in-a-box/worktrees/` dir, which
             // collapsed every stopped session into one bucket.
             let workspace_path = source_repo.clone();
+            let workspace_key = canonical_key(&workspace_path);
 
-            if let Some(workspace) = self.workspaces.iter_mut().find(|w| {
-                std::path::Path::new(&w.path).canonicalize().ok()
-                    == workspace_path.canonicalize().ok()
-            }) {
+            if let Some(workspace) = self
+                .workspaces
+                .iter_mut()
+                .find(|w| canonical_key(std::path::Path::new(&w.path)) == workspace_key)
+            {
                 if !workspace.sessions.iter().any(|s| s.id == metadata.session_id) {
                     workspace.sessions.push(stopped);
                 }

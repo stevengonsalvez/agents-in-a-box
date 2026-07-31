@@ -130,6 +130,43 @@ impl SessionMetadata {
 
         self.codex_model.and_then(|model| model.cli_value()).map(str::to_string)
     }
+
+    /// The workspace name to DISPLAY for this session.
+    ///
+    /// Re-derived from `worktree_path` via
+    /// [`InteractiveSessionManager::workspace_name_for`], never read from the
+    /// persisted `workspace_name` field. `ainb run` records the `--repo`
+    /// basename, which is the wrong answer whenever the session is rooted at a
+    /// subdirectory of a checkout: the TUI (which always re-derives) would say
+    /// `myrepo` while `ainb list` said `subdir`, for the same session.
+    ///
+    /// The persisted field is kept as the creation-time record and is what a
+    /// legacy entry still resolves against in
+    /// [`crate::cli::util::find_session_in_store`].
+    ///
+    /// It is ALSO the fallback for a session whose worktree is GONE from disk.
+    /// The derivation can only answer `(broken)` there, the TUI drops those
+    /// rows from its tree entirely (so there is no TUI value to agree with),
+    /// and `ainb list` is exactly the command a user runs to decide what to
+    /// clean up. Collapsing every deleted worktree onto one undifferentiated
+    /// `(broken)` throws away the only human-readable identifier those rows
+    /// still carry.
+    ///
+    /// A root that still EXISTS and yet resolves to nothing is a different
+    /// animal: a live directory sitting outside any usable repository. That
+    /// one keeps saying `(broken)`, because it is the case the operator can
+    /// still act on and the one the spawn skills tell them to look for.
+    #[must_use]
+    pub fn display_workspace_name(&self) -> String {
+        let derived = InteractiveSessionManager::workspace_name_for(&self.worktree_path);
+        if derived == InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+            && !self.worktree_path.exists()
+            && !self.workspace_name.trim().is_empty()
+        {
+            return self.workspace_name.clone();
+        }
+        derived
+    }
 }
 
 fn normalize_raw_model(value: &str) -> Option<String> {
@@ -769,8 +806,7 @@ impl InteractiveSessionManager {
                 );
 
                 // Try to get current branch name from the worktree
-                let branch_name = self
-                    .get_current_branch(&metadata.worktree_path)
+                let branch_name = Self::get_current_branch(&metadata.worktree_path)
                     .unwrap_or_else(|| "unknown".to_string());
 
                 // Try to get source repository from worktree
@@ -903,25 +939,31 @@ impl InteractiveSessionManager {
         None
     }
 
-    /// Get the current branch name from a worktree path
-    fn get_current_branch(&self, worktree_path: &Path) -> Option<String> {
-        use git2::Repository;
-
-        let repo = Repository::open(worktree_path).ok()?;
-        let head = repo.head().ok()?;
-
-        if head.is_branch() {
-            head.shorthand().map(|s| s.to_string())
-        } else {
-            // Detached HEAD - get the commit hash
-            head.target().map(|oid| oid.to_string()[..8].to_string())
-        }
+    /// Get the current branch name from a worktree path.
+    ///
+    /// Delegates to the one shared implementation
+    /// ([`crate::git::current_branch_at`]), which DISCOVERS the owning
+    /// repository rather than requiring `worktree_path` to be a repository
+    /// root. A session rooted at a subdirectory of a checkout (the shape
+    /// `get_source_repository` now resolves) would otherwise render its branch
+    /// as "unknown".
+    ///
+    /// Associated fn, not a method: it reads nothing from `self`, and keeping
+    /// it callable without a manager instance is what lets the unit tests
+    /// exercise it against real git state.
+    fn get_current_branch(worktree_path: &Path) -> Option<String> {
+        crate::git::current_branch_at(worktree_path)
     }
 
-    /// Sentinel workspace name for sessions whose worktree is on disk but
-    /// has no `.git` file (e.g. emptied except for a leftover cache like
-    /// `.vite/`). Callers also use this as the workspace bucket key so
-    /// every broken session collapses into one row instead of fanning out.
+    /// Sentinel workspace name for sessions whose worktree directory is on
+    /// disk but sits inside NO git repository at all (e.g. a worktree emptied
+    /// except for a leftover cache like `.vite/`). Callers also use this as
+    /// the workspace bucket key so every broken session collapses into one
+    /// row instead of fanning out.
+    ///
+    /// It explicitly does NOT mean "not a linked git worktree": a plain clone
+    /// (`.git` is a directory) and a subdirectory of a clone are both valid
+    /// session roots and must render with their real repository name.
     pub const BROKEN_WORKSPACE_NAME: &'static str = "(broken)";
 
     /// Derive a workspace display name from a worktree path.
@@ -931,10 +973,17 @@ impl InteractiveSessionManager {
     /// `path.split("--").next()` return the entire directory, producing bogus
     /// workspace groups like `shotclubhouse_shotclubhouse_temp_debug`.
     ///
-    /// When the worktree is broken (no `.git` file), callers fall back to
-    /// passing `worktree_path` itself as `source_repository`. Detect that
-    /// collapse and surface `(broken)` instead of the sanitized doubled-prefix
-    /// dir name — otherwise a dead worktree dir appears as a real workspace.
+    /// When the worktree is broken (inside no git repository), callers fall
+    /// back to passing `worktree_path` itself as `source_repository`. Detect
+    /// that collapse and surface `(broken)` instead of the sanitized
+    /// doubled-prefix dir name, otherwise a dead worktree dir appears as a
+    /// real workspace.
+    ///
+    /// The collapse alone is NOT proof of breakage: a session created directly
+    /// in a plain checkout (`ainb run --repo <clone>` with no `--worktree`)
+    /// legitimately has `source_repository == worktree_path`. We therefore
+    /// re-run the repository lookup and only claim `(broken)` when it genuinely
+    /// finds nothing.
     pub fn derive_workspace_name(worktree_path: &Path, source_repository: &Path) -> String {
         let from_dir = worktree_path
             .file_name()
@@ -949,8 +998,13 @@ impl InteractiveSessionManager {
         // Broken-worktree sentinel: the loaders fall back to
         // `source_repository = worktree_path` whenever `get_source_repository`
         // returns None. We only treat that collapse as "broken" when both
-        // paths actually have a basename (so `/` + `/` still yields "unknown").
-        if source_repository == worktree_path && worktree_path.file_name().is_some() {
+        // paths actually have a basename (so `/` + `/` still yields "unknown")
+        // AND the lookup really does come up empty: a plain checkout resolves
+        // to itself, which produces the same collapsed shape but is valid.
+        if source_repository == worktree_path
+            && worktree_path.file_name().is_some()
+            && Self::get_source_repository(worktree_path).is_none()
+        {
             return Self::BROKEN_WORKSPACE_NAME.to_string();
         }
 
@@ -961,20 +1015,95 @@ impl InteractiveSessionManager {
             .to_string()
     }
 
-    /// Get the source repository path from a worktree
+    /// THE workspace-name derivation: repository lookup + naming in one call.
+    ///
+    /// Every surface that displays a workspace name must go through this, so
+    /// the TUI's session list and `ainb list` / `ainb status` can never
+    /// disagree about what a session is called. The TUI's two loaders already
+    /// compose exactly these two steps; the CLI used to print the value
+    /// PERSISTED at creation time (the `--repo` basename), which differs for
+    /// any session rooted at a subdirectory of a checkout.
+    ///
+    /// Derived from the path on every read, never written back: a render path
+    /// that mutates `sessions.json` would rewrite persisted state as a side
+    /// effect of drawing a frame, and would still be wrong for any surface
+    /// that had not been drawn yet.
+    #[must_use]
+    pub fn workspace_name_for(worktree_path: &Path) -> String {
+        let source_repository = Self::get_source_repository(worktree_path)
+            .unwrap_or_else(|| worktree_path.to_path_buf());
+        Self::derive_workspace_name(worktree_path, &source_repository)
+    }
+
+    /// Resolve the git repository root that owns `worktree_path`.
+    ///
+    /// Three on-disk shapes are recognised, checked from `worktree_path`
+    /// upwards through its ancestors:
+    ///
+    /// 1. `<dir>/.git` is a FILE: a linked git worktree. The file holds a
+    ///    `gitdir: <main>/.git/worktrees/<name>` pointer; follow it back to
+    ///    the main repository (or the bare repo dir).
+    /// 2. `<dir>/.git` is a DIRECTORY: a plain checkout. `<dir>` IS the
+    ///    repository root.
+    /// 3. Neither: keep walking up. This covers a session rooted at a
+    ///    SUBDIRECTORY of a checkout, which is what
+    ///    `ainb run --repo <clone>/subdir` produces.
+    ///
+    /// Returns `None` only when no ancestor is inside any git repository, i.e.
+    /// the directory is genuinely repo-less. Callers treat that (and only
+    /// that) as [`Self::BROKEN_WORKSPACE_NAME`].
+    ///
+    /// Note: the ancestor walk attributes a session to whatever repository
+    /// contains it, which is exactly what `git` itself would report from that
+    /// directory. Running a session inside e.g. a git-tracked `$HOME` will
+    /// therefore group it under that repository rather than reporting it
+    /// broken. The walk is bounded by the filesystem root.
+    ///
+    /// ABSOLUTE PATHS ONLY. A relative path is rejected outright rather than
+    /// walked, because `Path::ancestors()` on a relative path terminates at
+    /// `""`, and `Path::new("").join(".git")` is `".git"`, which the
+    /// filesystem resolves against the PROCESS's current directory. The walk
+    /// would then silently attribute the session to whatever repository the
+    /// user happened to run `ainb` from, which has nothing to do with the
+    /// session. Every real caller (the session store, the worktree manager)
+    /// holds an absolute path, so this rejects only nonsense input.
     pub fn get_source_repository(worktree_path: &Path) -> Option<PathBuf> {
-        // Read the .git file in the worktree to find the main repo
-        let git_file = worktree_path.join(".git");
-        if !git_file.exists() || !git_file.is_file() {
+        if !worktree_path.is_absolute() {
             return None;
         }
+        for candidate in worktree_path.ancestors() {
+            let git_entry = candidate.join(".git");
+            if git_entry.is_file() {
+                // Linked worktree: resolve through the gitdir pointer. A
+                // malformed pointer is a real breakage, so stop here rather
+                // than silently attributing the session to an ancestor repo.
+                return Self::source_repository_from_gitdir_pointer(&git_entry);
+            }
+            if git_entry.is_dir() {
+                return Some(candidate.to_path_buf());
+            }
+        }
+        None
+    }
 
-        let content = std::fs::read_to_string(&git_file).ok()?;
+    /// Follow a linked worktree's `.git` pointer file back to its main repo.
+    ///
+    /// A pointer that PARSES but names a gitdir that is gone (the main repo was
+    /// deleted) resolves to nothing. Path arithmetic alone would happily hand
+    /// back the vanished repo's basename, so a session whose repository no
+    /// longer exists would render as a healthy row named after it. Requiring
+    /// the target to exist is what makes `(broken)` mean what the docs say it
+    /// means: not inside any usable repository.
+    fn source_repository_from_gitdir_pointer(git_file: &Path) -> Option<PathBuf> {
+        let content = std::fs::read_to_string(git_file).ok()?;
         // Format: "gitdir: /path/to/main/repo/.git/worktrees/name"
         let gitdir = content.trim().strip_prefix("gitdir: ")?;
 
         // Navigate from .git/worktrees/name to the main repo
         let worktree_git_path = PathBuf::from(gitdir);
+        if !worktree_git_path.exists() {
+            return None;
+        }
         let main_git = worktree_git_path.parent()?.parent()?.parent()?;
 
         // The main git dir might be .git or bare repo
@@ -1973,6 +2102,323 @@ mod tests {
         let dead = Path::new("/wt/shotclubhouse_shotclubhouse_fix_all-bugs");
         assert_eq!(
             InteractiveSessionManager::derive_workspace_name(dead, dead),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+        );
+    }
+
+    // ── Real git fixtures ───────────────────────────────────────────────
+    //
+    // These build actual git state with the `git` CLI rather than hand-faking
+    // `.git` files. Hand-faked fixtures are exactly how the "(broken)"
+    // misclassification survived: they only ever modelled the linked-worktree
+    // shape (`.git` as a FILE), so the plain-checkout shape (`.git` as a
+    // DIRECTORY) was never exercised.
+
+    use crate::test_support::{git_available, real_git_fixture};
+
+    #[test]
+    fn test_get_source_repository_real_git_shapes() {
+        if !git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = real_git_fixture();
+        let (repo, worktree, repo_less) = (&fx.repo, &fx.worktree, &fx.repo_less);
+        let root = fx.tmp.path().canonicalize().unwrap();
+
+        // 1. Plain checkout resolves to ITSELF (this is the bug: it used to
+        //    return None because `.git` is a directory, not a file).
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(&repo),
+            Some(repo.clone()),
+            "a plain checkout is its own source repository"
+        );
+
+        // 2. A subdirectory of a plain checkout resolves to the repo root.
+        //    This is the shape in the reported bug report
+        //    (`ainb run --repo <clone>/<subdir>`).
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(&fx.subdir),
+            Some(repo.clone()),
+            "a subdirectory of a checkout resolves to the repo root"
+        );
+
+        // 3. A real linked worktree still resolves through the gitdir pointer.
+        let resolved = InteractiveSessionManager::get_source_repository(&worktree)
+            .expect("linked worktree must resolve to its main repo");
+        assert_eq!(
+            &resolved.canonicalize().unwrap(),
+            repo,
+            "linked worktree must resolve through the gitdir pointer"
+        );
+
+        // 3b. A subdirectory inside a linked worktree resolves the same way.
+        let wt_sub = worktree.join("src");
+        std::fs::create_dir_all(&wt_sub).unwrap();
+        let resolved_sub = InteractiveSessionManager::get_source_repository(&wt_sub)
+            .expect("worktree subdir must resolve to its main repo");
+        assert_eq!(&resolved_sub.canonicalize().unwrap(), repo);
+
+        // 4. Genuinely repo-less directory resolves to nothing.
+        //    (Precondition: the tempdir itself is not inside a git repo. If
+        //    this trips, your TMPDIR lives inside a checkout.)
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(&root),
+            None,
+            "precondition: TMPDIR must not be inside a git repository"
+        );
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(&repo_less),
+            None,
+            "a dir with no `.git` anywhere above it has no source repository"
+        );
+
+        // 5. A RELATIVE path is refused outright. `Path::ancestors()` ends at
+        //    `""` and `Path::new("").join(".git")` resolves against the
+        //    process's current directory, so an unguarded walk would attribute
+        //    the session to whatever repository `ainb` was launched from. The
+        //    CWD-dependent half of this is proven end-to-end in
+        //    tests/cwd_escape_repo_lookup.rs, which chdirs into a real
+        //    checkout; here we pin the contract itself.
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(Path::new("myrepo")),
+            None,
+            "a relative path has no resolvable source repository"
+        );
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(Path::new("nested/deep")),
+            None,
+            "a relative path must never be walked up into the process CWD"
+        );
+    }
+
+    /// F13: the branch shown for a session must come from the checkout that
+    /// OWNS its directory. `git2::Repository::open` only succeeds at a
+    /// repository/worktree ROOT, so a session rooted at `<clone>/<subdir>`
+    /// rendered its branch as "unknown" — the very sessions the
+    /// `get_source_repository` fix brings back into the tree.
+    #[test]
+    fn test_get_current_branch_real_git_shapes() {
+        if !git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = real_git_fixture();
+
+        assert_eq!(
+            InteractiveSessionManager::get_current_branch(&fx.repo).as_deref(),
+            Some("main"),
+            "a plain checkout reports its own branch"
+        );
+
+        // The regression: `Repository::open` fails here and the caller
+        // substituted "unknown".
+        assert_eq!(
+            InteractiveSessionManager::get_current_branch(&fx.subdir).as_deref(),
+            Some("main"),
+            "a session rooted at <clone>/subdir reports the checkout's branch"
+        );
+
+        assert_eq!(
+            InteractiveSessionManager::get_current_branch(&fx.worktree).as_deref(),
+            Some("feature"),
+            "a linked worktree reports ITS branch, not the main checkout's"
+        );
+
+        let wt_sub = fx.worktree.join("src");
+        std::fs::create_dir_all(&wt_sub).unwrap();
+        assert_eq!(
+            InteractiveSessionManager::get_current_branch(&wt_sub).as_deref(),
+            Some("feature"),
+            "a subdir of a linked worktree reports the worktree's branch"
+        );
+
+        assert_eq!(
+            InteractiveSessionManager::get_current_branch(&fx.repo_less),
+            None,
+            "a dir inside no git repository has no branch"
+        );
+    }
+
+    #[test]
+    fn test_derive_workspace_name_real_git_shapes() {
+        if !git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = real_git_fixture();
+        let (repo, worktree, repo_less) = (&fx.repo, &fx.worktree, &fx.repo_less);
+
+        // Plain checkout: callers pass `source_repository == worktree_path`
+        // (get_source_repository resolves it to itself). That collapse must
+        // NOT be read as broken: it is the repo, named after its directory.
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(repo, repo),
+            "myrepo",
+            "a plain checkout must render its real name, not (broken)"
+        );
+
+        // Subdirectory of a checkout: grouped under the owning repository.
+        let src = InteractiveSessionManager::get_source_repository(&fx.subdir).unwrap();
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(&fx.subdir, &src),
+            "myrepo"
+        );
+
+        // Linked worktree: unchanged, name comes from the `<repo>--<branch>--<id>`
+        // directory convention.
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(worktree, repo),
+            "myrepo"
+        );
+
+        // Repo-less dir: still (broken), and still collapses under the sentinel.
+        assert_eq!(
+            InteractiveSessionManager::derive_workspace_name(repo_less, repo_less),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME,
+            "a dir inside no git repository is still (broken)"
+        );
+    }
+
+    /// `workspace_name_for` must be exactly what the TUI loaders compute by
+    /// hand (`get_source_repository` + fallback + `derive_workspace_name`).
+    /// If these two ever diverge, the "one derivation" guarantee behind
+    /// `SessionMetadata::display_workspace_name` is gone and `ainb list` starts
+    /// disagreeing with the session tree again.
+    #[test]
+    fn workspace_name_for_matches_the_tui_longhand() {
+        if !git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = real_git_fixture();
+
+        // The longhand, copied from `AppState::load_real_workspaces`.
+        let tui_longhand = |path: &Path| {
+            let source = InteractiveSessionManager::get_source_repository(path)
+                .unwrap_or_else(|| path.to_path_buf());
+            InteractiveSessionManager::derive_workspace_name(path, &source)
+        };
+
+        for path in [&fx.repo, &fx.subdir, &fx.worktree, &fx.repo_less] {
+            assert_eq!(
+                InteractiveSessionManager::workspace_name_for(path),
+                tui_longhand(path),
+                "derivation drift for {}",
+                path.display()
+            );
+        }
+
+        // And the values themselves, so a shared-but-wrong derivation still fails.
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&fx.repo),
+            "myrepo"
+        );
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&fx.subdir),
+            "myrepo"
+        );
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&fx.worktree),
+            "myrepo"
+        );
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&fx.repo_less),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+        );
+    }
+
+    /// A linked worktree whose main repo has been DELETED must not keep
+    /// rendering the vanished repo's name. The pointer file still parses, so
+    /// path arithmetic alone would hand back `myrepo` forever.
+    #[test]
+    fn dangling_gitdir_pointer_resolves_to_broken() {
+        if !git_available() {
+            eprintln!("SKIP: git unavailable");
+            return;
+        }
+        let fx = real_git_fixture();
+
+        // Precondition: the intact worktree resolves to its repo.
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&fx.worktree),
+            "myrepo"
+        );
+        assert!(fx.worktree.join(".git").is_file());
+
+        // Delete the main repository, leaving a well-formed but dangling pointer.
+        std::fs::remove_dir_all(fx.repo.join(".git")).expect("remove main gitdir");
+
+        assert_eq!(
+            InteractiveSessionManager::get_source_repository(&fx.worktree),
+            None,
+            "a gitdir pointer whose target is gone must not resolve"
+        );
+
+        // The NAME survives, because ainb's own worktree directories encode
+        // the repo (`<repo>--<branch>--<shortid>`) and that convention is read
+        // before the sentinel. Losing the repo does not make the row anonymous.
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&fx.worktree),
+            "myrepo"
+        );
+
+        // A dangling pointer WITHOUT that naming convention has nothing left
+        // to go on, and that is the case the `(broken)` label exists for.
+        let plain_named = fx.tmp.path().join("checkout-copy");
+        std::fs::create_dir_all(&plain_named).unwrap();
+        std::fs::copy(fx.worktree.join(".git"), plain_named.join(".git")).unwrap();
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&plain_named),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+        );
+    }
+
+    /// `ainb list` must not collapse every deleted-worktree row onto the same
+    /// undifferentiated `(broken)` label. The persisted name is the only
+    /// human-readable identifier those rows still carry, and listing them is
+    /// exactly how a user decides what to clean up.
+    #[test]
+    fn display_workspace_name_falls_back_to_the_persisted_name() {
+        let gone = std::path::PathBuf::from("/nonexistent/deleted-worktree");
+        assert_eq!(
+            InteractiveSessionManager::workspace_name_for(&gone),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME,
+            "precondition: the derivation collapses for a vanished worktree"
+        );
+
+        let mut metadata = SessionMetadata {
+            session_id: Uuid::new_v4(),
+            tmux_session_name: "tmux_gone".to_string(),
+            worktree_path: gone,
+            workspace_name: "shotclubhouse".to_string(),
+            created_at: Utc::now(),
+            agent_type: SessionAgentType::Claude,
+            headroom_enabled: false,
+            rtk_enabled: false,
+            skip_permissions: None,
+            model: None,
+            model_source: ModelSource::Raw,
+            codex_model: None,
+        };
+        assert_eq!(metadata.display_workspace_name(), "shotclubhouse");
+
+        // With nothing persisted there is nothing better to show.
+        metadata.workspace_name = "   ".to_string();
+        assert_eq!(
+            metadata.display_workspace_name(),
+            InteractiveSessionManager::BROKEN_WORKSPACE_NAME
+        );
+
+        // A root that still EXISTS but resolves to no repository keeps saying
+        // "(broken)": that is the actionable case the spawn skills document,
+        // and hiding it behind a stale persisted name would make `ainb list`
+        // lie about a session the operator can still fix.
+        let live_but_repoless = tempfile::tempdir().expect("tempdir");
+        metadata.worktree_path = live_but_repoless.path().to_path_buf();
+        metadata.workspace_name = "shotclubhouse".to_string();
+        assert_eq!(
+            metadata.display_workspace_name(),
             InteractiveSessionManager::BROKEN_WORKSPACE_NAME
         );
     }
