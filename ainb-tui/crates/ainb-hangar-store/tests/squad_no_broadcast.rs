@@ -413,3 +413,163 @@ async fn redundant_more_than_the_roster_dispatches_to_everyone() {
         "leader plus three members, capped by the roster"
     );
 }
+
+/// FANOUT-SEMANTICS, preserved for the surviving multi-task shape: a dependent
+/// stays blocked until the blocker's WHOLE cluster has drained with a success.
+///
+/// This property used to be covered end-to-end by
+/// `tripwire_tcp_card_dependency_chain_e2e`, which built its multi-task blocker
+/// out of the squad BROADCAST. With the broadcast gone a squad blocker holds one
+/// task, so that tripwire can no longer express the case, and the coverage is
+/// re-homed here against `--redundant`, which is now the only way one card
+/// carries several concurrent runs.
+///
+/// The three states that must each keep the dependent blocked: any sibling still
+/// active, all siblings terminal but NONE succeeded, and a success that arrived
+/// in an older generation.
+#[tokio::test]
+async fn dependent_waits_for_the_whole_redundant_cluster_to_drain() {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-dep','ws-1','dependent','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("dependent issue");
+    sqlx::query(
+        "INSERT INTO card_dependency \
+         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
+         VALUES ('ws-1','i-dep','i-1',0,'blocked_by')",
+    )
+    .execute(pool)
+    .await
+    .expect("dependency");
+
+    // A deliberate cluster of three concurrent runs on the blocker.
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        3,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    let ids: Vec<String> =
+        sqlx::query_scalar("SELECT id FROM agent_task_queue WHERE issue_id='i-1' ORDER BY id")
+            .fetch_all(pool)
+            .await
+            .expect("cluster ids");
+    assert_eq!(ids.len(), 3);
+
+    let blocked = |pool: &sqlx::SqlitePool| {
+        let pool = pool.clone();
+        async move {
+            !CardDependencyRepo::unfinished_blockers_of(&pool, "i-dep")
+                .await
+                .expect("blockers")
+                .is_empty()
+        }
+    };
+
+    assert!(blocked(pool).await, "all three siblings still active");
+
+    // First sibling home is NOT enough: two are still running.
+    sqlx::query("UPDATE agent_task_queue SET status='done' WHERE id=?1")
+        .bind(&ids[0])
+        .execute(pool)
+        .await
+        .expect("finish first");
+    assert!(
+        blocked(pool).await,
+        "one done, two still active: still blocked"
+    );
+
+    sqlx::query("UPDATE agent_task_queue SET status='failed' WHERE id=?1")
+        .bind(&ids[1])
+        .execute(pool)
+        .await
+        .expect("fail second");
+    assert!(
+        blocked(pool).await,
+        "two terminal, one still active: still blocked"
+    );
+
+    // The LAST sibling drains the set, and one of them succeeded.
+    sqlx::query("UPDATE agent_task_queue SET status='cancelled' WHERE id=?1")
+        .bind(&ids[2])
+        .execute(pool)
+        .await
+        .expect("cancel third");
+    assert!(
+        !blocked(pool).await,
+        "the cluster has drained with a success, so the dependent unblocks"
+    );
+}
+
+/// The other half of the same contract: a cluster that drains with NO success
+/// leaves the dependent blocked, rather than unblocking on mere terminality.
+#[tokio::test]
+async fn a_cluster_that_drains_without_a_success_keeps_the_dependent_blocked() {
+    use ainb_hangar_store::repo::card_dependency::CardDependencyRepo;
+
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-dep','ws-1','dependent','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("dependent issue");
+    sqlx::query(
+        "INSERT INTO card_dependency \
+         (workspace_id, dependent_issue_id, blocker_issue_id, created_at, link_type) \
+         VALUES ('ws-1','i-dep','i-1',0,'blocked_by')",
+    )
+    .execute(pool)
+    .await
+    .expect("dependency");
+
+    SquadAssignService::assign_redundant(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        2,
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("redundant dispatch");
+
+    sqlx::query("UPDATE agent_task_queue SET status='failed' WHERE issue_id='i-1'")
+        .execute(pool)
+        .await
+        .expect("fail the whole cluster");
+
+    assert!(
+        !CardDependencyRepo::unfinished_blockers_of(pool, "i-dep")
+            .await
+            .expect("blockers")
+            .is_empty(),
+        "a cluster that drained without any success must NOT unblock the dependent"
+    );
+}
