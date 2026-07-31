@@ -4,7 +4,7 @@
 //! SQLite owns canonical state and revision order. Live broadcasts only wake
 //! subscribers after the matching revision commits.
 
-use ainb_fleet_core::discover::discover_from_tmux;
+use ainb_fleet_core::discover::{discover_all_tmux_panes, discover_from_tmux};
 use ainb_fleet_core::types::{
     AttentionState, Confidence, FleetSession, LifecycleState, ManagementState, Provider,
     SessionKey, TransportHealth,
@@ -579,7 +579,9 @@ pub async fn recover_codex_manager(
     manager: &crate::fleet_provider::codex_manager::CodexManagerHandle,
     observed_at: i64,
 ) -> Result<usize, FleetRepoError> {
-    let discovered = match discover_from_tmux().await {
+    // Liveness, not roster: a managed Codex pane must not read as gone merely
+    // because its agent process is momentarily absent from the tree.
+    let discovered = match discover_all_tmux_panes().await {
         Ok(discovered) => discovered,
         Err(error) => {
             tracing::debug!(error = %error, "Codex manager recovery tmux discovery unavailable");

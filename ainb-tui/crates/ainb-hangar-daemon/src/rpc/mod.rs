@@ -1860,7 +1860,7 @@ async fn launch_managed_codex_tui(
 
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
     loop {
-        match ainb_fleet_core::discover::discover_from_tmux().await {
+        match ainb_fleet_core::discover::discover_all_tmux_panes().await {
             Ok(sessions) => {
                 if let Some(session) = sessions.into_iter().find(|session| {
                     session
@@ -2329,7 +2329,7 @@ async fn exact_live_tmux_session_name(
             "exact tmux process identity is unavailable".to_string(),
         )
     })?;
-    let discovered = ainb_fleet_core::discover::discover_from_tmux()
+    let discovered = ainb_fleet_core::discover::discover_all_tmux_panes()
         .await
         .map_err(|error| crate::fleet_provider::ProviderError::Transport(error.to_string()))?;
     if !discovered.iter().any(|candidate| {
@@ -2603,7 +2603,7 @@ async fn verified_tmux_send(
             Some("exact tmux process identity is unavailable".to_string()),
         );
     };
-    let discovered = match ainb_fleet_core::discover::discover_from_tmux().await {
+    let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
         Ok(discovered) => discovered,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };
@@ -2646,7 +2646,7 @@ async fn verified_tmux_picker(
             Some("exact tmux process identity is unavailable".to_string()),
         );
     };
-    let discovered = match ainb_fleet_core::discover::discover_from_tmux().await {
+    let discovered = match ainb_fleet_core::discover::discover_all_tmux_panes().await {
         Ok(discovered) => discovered,
         Err(error) => return (ActionReceiptStatus::Failed, Some(error.to_string())),
     };

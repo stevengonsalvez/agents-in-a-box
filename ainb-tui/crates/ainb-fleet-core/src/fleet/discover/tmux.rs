@@ -62,7 +62,7 @@ impl TmuxPaneRow {
     /// This is an INFERRED observation, so a provider hook always outranks it
     /// (see `should_replace` in the fleet repo) — it only has to be right for
     /// sessions that emit no hooks at all, which is most of them.
-    fn lifecycle(&self, now_secs: i64) -> LifecycleState {
+    const fn lifecycle(&self, now_secs: i64) -> LifecycleState {
         if self.pane_dead {
             return LifecycleState::Exited;
         }
@@ -75,18 +75,19 @@ impl TmuxPaneRow {
         }
     }
 
-    /// Build a Fleet row, or `None` when this pane holds no agent.
+    /// Build a Fleet row for this pane.
     ///
-    /// The gate is the pane's process tree, not its command string: a running
-    /// Claude renames itself to its version (`pane_current_command` reads
-    /// `2.1.220`), while a leftover pane whose agent exited still reports a
-    /// perfectly ordinary `zsh`. Only the tree distinguishes the two.
-    fn into_agent_session(self, processes: &ProcessTable, now_secs: i64) -> Option<FleetSession> {
-        let provider = agent_provider(processes, self.pane_pid)?;
+    /// The provider comes from the pane's process tree, not its command string:
+    /// a running Claude renames itself to its version (`pane_current_command`
+    /// reads `2.1.220`), while a leftover pane whose agent exited still reports
+    /// a perfectly ordinary `zsh`. Only the tree distinguishes the two. A pane
+    /// with no agent in its tree yields `Provider::Unknown`.
+    fn into_session(self, processes: &ProcessTable, now_secs: i64) -> FleetSession {
+        let provider = agent_provider(processes, self.pane_pid).unwrap_or(Provider::Unknown);
         let exact_tmux_target = self.exact_target();
         let fingerprint = self.process_start_fingerprint();
         let lifecycle = self.lifecycle(now_secs);
-        Some(FleetSession {
+        FleetSession {
             session_key: SessionKey::legacy(provider, &exact_tmux_target, &fingerprint),
             provider,
             provider_session_id: None,
@@ -104,17 +105,36 @@ impl TmuxPaneRow {
             first_seen_ms: self.session_created.checked_mul(1000),
             last_seen_ms: None,
             version: 0,
-        })
+        }
     }
 }
 
-/// Enumerate every tmux pane that actually holds an agent. One exact pane
-/// target produces at most one Fleet row.
+/// Panes that actually hold an agent — the Fleet roster.
 ///
-/// Panes without an agent process are NOT Fleet sessions — a host accumulates
+/// Panes without an agent process are NOT Fleet sessions: a host accumulates
 /// plenty of ordinary shells, and admitting them buries the real sessions in
 /// rows that can never carry a lifecycle.
+///
+/// Use [`discover_all_tmux_panes`] instead for identity or liveness checks. A
+/// control action must not fail merely because a pane's agent is momentarily
+/// between processes.
 pub async fn discover_from_tmux() -> Result<Vec<FleetSession>> {
+    Ok(discover_all_tmux_panes()
+        .await?
+        .into_iter()
+        // The provider is derived from the very tree the gate asks about, so
+        // "has a known provider" and "holds an agent" are the same predicate.
+        .filter(|session| session.provider != Provider::Unknown)
+        .collect())
+}
+
+/// Every tmux pane, agent-bearing or not. One exact pane target produces one
+/// row.
+///
+/// This is the roster for identity and liveness checks — "is pane X with
+/// fingerprint Y still there" — which must stay true to tmux rather than to
+/// Fleet's view of what deserves a row.
+pub async fn discover_all_tmux_panes() -> Result<Vec<FleetSession>> {
     let output = Command::new("tmux")
         .args(["list-panes", "-a", "-F", LIST_FORMAT])
         .output()
@@ -140,10 +160,7 @@ pub async fn discover_from_tmux() -> Result<Vec<FleetSession>> {
     // instead of retiring every session.
     let processes = ProcessTable::snapshot().await?;
     let now_secs = chrono::Utc::now().timestamp();
-    Ok(rows
-        .into_iter()
-        .filter_map(|row| row.into_agent_session(&processes, now_secs))
-        .collect())
+    Ok(rows.into_iter().map(|row| row.into_session(&processes, now_secs)).collect())
 }
 
 fn parse_rows(stdout: &str) -> Result<Vec<TmuxPaneRow>> {
@@ -229,8 +246,7 @@ mod tests {
         .expect("parse tmux rows");
 
         let table = processes();
-        let sessions: Vec<_> =
-            rows.into_iter().filter_map(|row| row.into_agent_session(&table, NOW)).collect();
+        let sessions: Vec<_> = rows.into_iter().map(|row| row.into_session(&table, NOW)).collect();
         assert_eq!(sessions.len(), 2);
         assert_eq!(sessions[0].cwd, sessions[1].cwd);
         assert_ne!(sessions[0].session_key, sessions[1].session_key);
@@ -253,7 +269,7 @@ mod tests {
         let row = parse_row("build\t0\t0\t%1\t101\t/repo\t2.1.220\tzsh\t1700000000\t0\t1700000499")
             .expect("parse row");
 
-        let session = row.into_agent_session(&processes(), NOW).expect("claude pane is a session");
+        let session = row.into_session(&processes(), NOW);
 
         assert_eq!(session.provider, Provider::Claude);
     }
@@ -267,7 +283,10 @@ mod tests {
         )
         .expect("parse row");
 
-        assert!(row.into_agent_session(&processes(), NOW).is_none());
+        assert_eq!(
+            row.into_session(&processes(), NOW).provider,
+            Provider::Unknown
+        );
     }
 
     #[test]
@@ -275,14 +294,43 @@ mod tests {
         let row = parse_row("plain\t0\t0\t%9\t909\t/tmp\tzsh\tzsh\t1700000000\t0\t1700000499")
             .expect("parse row");
 
-        assert!(row.into_agent_session(&processes(), NOW).is_none());
+        // `Unknown` is exactly what the roster filter drops, so a bare shell is
+        // still enumerated for identity checks but never becomes a Fleet row.
+        assert_eq!(
+            row.into_session(&processes(), NOW).provider,
+            Provider::Unknown
+        );
+    }
+
+    #[test]
+    fn the_roster_filter_drops_only_the_agentless_panes() {
+        let rows = parse_rows(concat!(
+            "claude-a\t0\t0\t%1\t101\t/repo\t2.1.220\tzsh\t1700000000\t0\t1700000499\n",
+            "bare\t0\t0\t%9\t909\t/tmp\tzsh\tzsh\t1700000000\t0\t1700000499\n",
+            "codex-b\t2\t1\t%2\t202\t/repo\tcodex\tcodex\t1700000001\t0\t1700000499\n"
+        ))
+        .expect("parse tmux rows");
+        let table = processes();
+
+        let all: Vec<_> = rows.into_iter().map(|row| row.into_session(&table, NOW)).collect();
+        let roster = all.iter().filter(|session| session.provider != Provider::Unknown).count();
+
+        // Identity and liveness checks keep every pane; the Fleet roster keeps
+        // only the two that hold an agent.
+        assert_eq!(all.len(), 3);
+        assert_eq!(roster, 2);
+        assert!(
+            all.iter()
+                .any(|session| session.exact_tmux_target.as_deref() == Some("bare:0.0")),
+            "the agentless pane must still be enumerated for liveness checks"
+        );
     }
 
     #[test]
     fn tmux_rows_are_degraded_and_only_allow_safe_fallbacks() {
         let row = parse_row("plain\t0\t0\t%1\t101\t/tmp\tzsh\tclaude\t1700000000\t0\t1700000499")
             .expect("parse row");
-        let session = row.into_agent_session(&processes(), NOW).expect("claude pane is a session");
+        let session = row.into_session(&processes(), NOW);
 
         assert_eq!(session.management, ManagementState::Degraded);
         assert!(session.capabilities.contains(Capability::TextSend));
@@ -303,8 +351,7 @@ mod tests {
                 "s\t0\t0\t%1\t101\t/repo\tzsh\tclaude\t1700000000\t{dead}\t{activity}"
             ))
             .expect("parse row")
-            .into_agent_session(&processes(), NOW)
-            .expect("claude pane is a session")
+            .into_session(&processes(), NOW)
             .lifecycle
         };
 
@@ -323,7 +370,7 @@ mod tests {
         let row =
             parse_row("s\t0\t0\t%1\t101\t/repo\tzsh\tclaude\t1700000000\t0\t").expect("parse row");
 
-        let session = row.into_agent_session(&processes(), NOW).expect("claude pane is a session");
+        let session = row.into_session(&processes(), NOW);
 
         assert_eq!(session.lifecycle, LifecycleState::Unknown);
     }

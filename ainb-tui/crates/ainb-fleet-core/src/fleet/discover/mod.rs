@@ -12,4 +12,4 @@ pub use jobs::discover_from_jobs;
 pub use merge::{merge_fleet_sessions, merge_sessions};
 pub use peers::{discover_from_peers, list_broker_peers};
 pub use process_tree::ProcessTable;
-pub use tmux::discover_from_tmux;
+pub use tmux::{discover_all_tmux_panes, discover_from_tmux};
