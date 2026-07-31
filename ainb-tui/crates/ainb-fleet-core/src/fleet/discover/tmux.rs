@@ -135,7 +135,7 @@ pub async fn discover_from_tmux() -> Result<Vec<FleetSession>> {
 /// fingerprint Y still there" — which must stay true to tmux rather than to
 /// Fleet's view of what deserves a row.
 pub async fn discover_all_tmux_panes() -> Result<Vec<FleetSession>> {
-    let output = Command::new(crate::fleet::tmux_bin())
+    let output = Command::new("tmux")
         .args(["list-panes", "-a", "-F", LIST_FORMAT])
         .output()
         .await
