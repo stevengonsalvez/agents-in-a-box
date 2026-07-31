@@ -13,9 +13,6 @@ on:
       - 'ainb-tui/**'
       - '.github/workflows/toolkit-validation.yml'
   pull_request:
-    paths:
-      - 'ainb-tui/**'
-      - '.github/workflows/toolkit-validation.yml'
 
 # The pinned ainb-toolkit ref this build of ainb consumes. Keep in lockstep
 # with release.yml's AINB_TOOLKIT_REF.
@@ -23,8 +20,40 @@ env:
   AINB_TOOLKIT_REF: v1.6.0
 
 jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Which paths changed?
+  #
+  # Path filtering lives HERE, on the jobs, and NOT on `on.pull_request.paths`.
+  # A workflow skipped by `on.paths` creates no check runs at all, so a required
+  # context stays "Expected" forever and the PR can never merge — that is what
+  # blocked every Swift-only and docs-only PR (bead mbl).
+  # A job skipped by an `if:` DOES report, and a skipped job satisfies a required
+  # check, so the gate stays honest while irrelevant PRs still cost no compute.
+  #
+  # `on.push` keeps its own `paths:` — push runs are not required checks, so
+  # main-branch CI cost is unchanged.
+  # ────────────────────────────────────────────────────────────────────────────
+  changes:
+    name: Detect relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'ainb-tui/**'
+              - '.github/workflows/toolkit-validation.yml'
+
   validate-template-skill-refs:
     name: Validate template skill refs against ainb-toolkit
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ubuntu-latest
 
     steps:
@@ -68,6 +97,10 @@ jobs:
 
   test-ainb-installations:
     name: Test ainb installations (replaces bootstrap.js parity tests)
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ubuntu-latest
 
     steps:
