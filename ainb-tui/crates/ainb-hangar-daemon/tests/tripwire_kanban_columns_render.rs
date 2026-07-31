@@ -45,6 +45,18 @@ use common::{
 /// card-status chip carrying the same word.
 const COLUMN_HEADERS: [&str; 4] = ["queued (", "running (", "done (", "failed ("];
 
+/// The issue list's own footer key hint (`screen/chrome.rs`, `Screen::IssueList`):
+/// the SCREEN-IDENTITY token this tripwire proves the `K` transition against.
+///
+/// It replaces [`READY_MARKER`] in the negative half of the pair. `READY_MARKER`
+/// is the seeded issue's TITLE, i.e. workspace DATA, and a Kanban task card now
+/// legitimately names its parent issue, so the old marker asserted "no issue is
+/// named anywhere on the board", which was never the invariant under test. A
+/// footer hint is rendered by the chrome for exactly one `Screen` variant and can
+/// never appear on another, so it is a strictly stronger proof of the transition,
+/// and the landing assertion below pins it as actually present before the switch.
+const ISSUE_LIST_FOOTER_HINT: &str = "s:sub-issue";
+
 #[test]
 fn kanban_board_renders_four_columns_with_cards() {
     if !can_run_tripwire() {
@@ -66,6 +78,11 @@ fn kanban_board_renders_four_columns_with_cards() {
     assert!(
         landing.contains(READY_MARKER),
         "expected the Hangar issue-list landing before pressing K:\n{landing}"
+    );
+    assert!(
+        landing.contains(ISSUE_LIST_FOOTER_HINT),
+        "the issue-list screen must render its own footer hint, or the negative \
+         marker below proves nothing:\n{landing}"
     );
     assert!(
         !landing.contains("queued ("),
@@ -111,9 +128,11 @@ fn kanban_board_renders_four_columns_with_cards() {
     );
 
     // NEGATIVE: we are no longer on the issue-list landing screen (the board
-    // replaced it). Pairs the positive column markers with proof of transition.
+    // replaced it). Pairs the positive column markers with proof of transition,
+    // asserted on the issue list's own footer hint (chrome only that screen can
+    // render) rather than on any workspace data the board may legitimately echo.
     assert!(
-        !board.contains(READY_MARKER),
+        !board.contains(ISSUE_LIST_FOOTER_HINT),
         "still on the issue list after pressing K (no screen switch):\n{board}"
     );
 
