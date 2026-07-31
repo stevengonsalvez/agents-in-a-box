@@ -1475,7 +1475,7 @@ fn resolve_matcher(
 
 fn current_tmux_identity() -> Option<(String, String)> {
     let pane = std::env::var_os("TMUX_PANE").filter(|value| !value.is_empty())?;
-    let tmux = std::env::var_os("AINB_TMUX_BIN").unwrap_or_else(|| "tmux".into());
+    let tmux = ainb_fleet_core::fleet::tmux_bin();
     let output = std::process::Command::new(tmux)
         .args([
             std::ffi::OsStr::new("display-message"),
