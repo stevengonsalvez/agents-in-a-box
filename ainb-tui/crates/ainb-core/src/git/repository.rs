@@ -20,6 +20,34 @@ pub enum GitError {
     InvalidState(String),
 }
 
+/// Current branch name for the checkout that OWNS `path`, or the short commit
+/// hash when HEAD is detached. `None` when `path` is inside no git repository.
+///
+/// Uses [`git2::Repository::discover`], NOT `Repository::open`. `open` only
+/// succeeds when `path` is itself a repository root (or a linked worktree
+/// root); it fails for a session rooted at a SUBDIRECTORY of a checkout, which
+/// is exactly what `ainb run --repo <clone>/<subdir>` produces. `discover`
+/// walks ancestors the same way
+/// [`InteractiveSessionManager::get_source_repository`](crate::interactive::InteractiveSessionManager::get_source_repository)
+/// does, so the branch a session reports and the repository it is grouped
+/// under are resolved from the same directory.
+///
+/// Single implementation on purpose: the TUI's session discovery and
+/// `ainb run` both used to carry their own `Repository::open` copy, so the
+/// subdirectory hole had to be fixed twice or drift.
+#[must_use]
+pub fn current_branch_at(path: &Path) -> Option<String> {
+    let repo = Repository::discover(path).ok()?;
+    let head = repo.head().ok()?;
+
+    if head.is_branch() {
+        head.shorthand().map(std::string::ToString::to_string)
+    } else {
+        // Detached HEAD: identify the commit instead.
+        head.target().map(|oid| oid.to_string()[..8].to_string())
+    }
+}
+
 pub struct RepositoryManager {
     repo: Repository,
 }
