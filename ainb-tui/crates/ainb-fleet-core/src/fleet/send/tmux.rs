@@ -70,7 +70,7 @@ fn picker_key_args<'a>(tmux_session: &'a str, key: &'a str) -> Option<[&'a str; 
 }
 
 pub async fn tmux_send(tmux_session: &str, text: &str) -> Result<()> {
-    let status = Command::new("tmux")
+    let status = Command::new(crate::fleet::tmux_bin())
         .args(send_keys_literal_args(tmux_session, text))
         .status()
         .await
@@ -107,7 +107,7 @@ pub async fn tmux_send(tmux_session: &str, text: &str) -> Result<()> {
 /// Press Enter in the target session (used both to submit a send and to flush
 /// a previously-parked paste).
 pub async fn tmux_press_enter(tmux_session: &str) -> Result<()> {
-    let enter = Command::new("tmux")
+    let enter = Command::new(crate::fleet::tmux_bin())
         .args(["send-keys", "-t", tmux_session, "Enter"])
         .status()
         .await
@@ -122,7 +122,7 @@ pub async fn tmux_press_enter(tmux_session: &str) -> Result<()> {
 pub async fn tmux_send_picker_key(tmux_session: &str, key: &str) -> Result<()> {
     let args = picker_key_args(tmux_session, key)
         .ok_or_else(|| anyhow::anyhow!("unsupported verified picker key: {key}"))?;
-    let status = Command::new("tmux")
+    let status = Command::new(crate::fleet::tmux_bin())
         .args(args)
         .status()
         .await
@@ -171,7 +171,7 @@ fn composer_pending(pane: &str) -> bool {
 }
 
 pub async fn tmux_session_exists(name: &str) -> bool {
-    Command::new("tmux")
+    Command::new(crate::fleet::tmux_bin())
         .args(["has-session", "-t", name])
         .status()
         .await
