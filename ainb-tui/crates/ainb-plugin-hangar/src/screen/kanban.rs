@@ -2,9 +2,10 @@
 //!
 //! The Kanban board (hotkey `K`) lays the workspace's task queue out as four
 //! width-aware columns — `queued` / `running` / `done` / `failed` — each holding
-//! the task cards bucketed into it. A card shows `#<short_id>`, the parent issue's
-//! title, the assignee agent BY NAME, the task age (`5m` / `2h` / `3d`), and a
-//! coloured status chip.
+//! the task cards bucketed into it. A card's ID LINE reads
+//! `#<short_id> · <parent issue title>`; its TITLE line carries the run identity:
+//! the assignee agent BY NAME, the task age (`5m` / `2h` / `3d`), the status, and
+//! the run's durable artifacts (branch + PR chip).
 //!
 //! Focus walks columns with `←` / `→` and rows with `↑` / `↓`; `Shift+←` / `Shift+→`
 //! drags the focused card to the adjacent column, which the plugin glue lifts
@@ -44,6 +45,16 @@
 //! tasks snapshot resolves against the cached rosters, and each roster snapshot
 //! re-resolves the cards already on the board). An id that resolves to nothing
 //! (a deleted agent, an orphan task) falls back to a SHORT form, never the ULID.
+//!
+//! ## Why the parent issue sits on the ID line, not the title
+//!
+//! The card widget wraps its title to exactly TWO lines and ellipsis-cuts the
+//! overflow, while its id line carries `#<short_id>` alone and is ~35 cells of
+//! dead space. Leading the TITLE with the parent issue therefore spent the run's
+//! own budget on context and pushed the tail off the tile: a finished run's `PR ✓`
+//! chip was silently elided (`tripwire_tcp_card_branch_pr_e2e`). The parent is
+//! context and belongs on the identity line beside the id; the title line is the
+//! run (agent, age, status, branch, PR) and keeps its whole two-line budget.
 //!
 //! As with every Hangar screen the reducer ([`reduce_kanban`]) is **pure**: it
 //! folds a directional / move / event input into a new [`KanbanState`] plus an
@@ -270,7 +281,7 @@ impl KanbanState {
     /// Same order-independent contract as [`set_agent_names`](Self::set_agent_names):
     /// both `set_tasks` and `set_issues` call it, whichever snapshot lands first.
     /// An orphan task, or one whose issue is not in the snapshot, keeps `None` and
-    /// simply renders the metadata line alone.
+    /// simply renders the bare `#<short_id>` id line.
     pub fn set_issue_titles(&mut self, titles: &BTreeMap<String, String>) {
         if titles.is_empty() {
             return;
@@ -288,8 +299,9 @@ impl KanbanState {
     /// [`BoardColumn`](card_board::BoardColumn)s the render paints and the mouse
     /// layer hit-tests against (63l.6), computing each card's age against `now_ms`.
     ///
-    /// Each task card maps onto the card anatomy: the id line is `#<short_id>`, the
-    /// two title lines carry `<issue> · <agent> · <age> · <status>` (so the bead's
+    /// Each task card maps onto the card anatomy: the id line is
+    /// `#<short_id> · <issue>`, the two title lines carry
+    /// `<agent> · <age> · <status>` plus the run's artifacts (so the bead's
     /// required id + title + state + age all read on the tile), the priority chip
     /// comes from the row, and the assignee initial is the agent NAME's first char.
     /// The same geometry feeds `render_kanban` and the hit-map, so paint + hit-test
@@ -305,7 +317,7 @@ impl KanbanState {
                     .map(|c| BoardCard {
                         not_dispatched: false,
                         issue_id: c.task_id.clone(),
-                        display_id: format!("#{}", c.short_id),
+                        display_id: card_id_line(c),
                         title: card_title(c, now_ms),
                         priority: PriorityChip::from_priority(0),
                         assignee_initial: c.agent_label.chars().next(),
@@ -445,29 +457,42 @@ impl KanbanState {
     }
 }
 
-/// Chars of the parent issue's title a card shows before eliding.
+/// Chars of the parent issue's title the id line shows before eliding.
 ///
-/// The card widget wraps the title to TWO lines of `col_w - 4`, which is 27 at the
-/// narrow 120-col board, so the whole budget is ~54 chars. Capping the issue title
-/// here guarantees the `<agent> · <age> · <status>` run identity always survives
-/// the wrap: the parent is context, the run identity is the point.
+/// The id line is `#<short_id> · <issue>` clipped at the card's inner width, which
+/// is 42 on the reference 180-col board and 27 on the narrow 120-col one. Capping
+/// here means a long title ends in a visible `…` rather than being hard-clipped by
+/// the widget mid-word on the wide board.
 const ISSUE_TITLE_CAP: usize = 24;
 
-/// The card's title line: `<issue> · <agent> · <age> · <status>`, then the run's
-/// durable artifacts when present (tcp T2): the `ainb/<slug>` branch it committed
-/// on and a `PR <ci>` chip, so a finished run's branch + PR read on the tile
-/// itself.
+/// The card's ID line: `#<short_id>`, then the parent issue's title (elided at
+/// [`ISSUE_TITLE_CAP`]) when it has resolved.
 ///
-/// The parent issue leads (elided at [`ISSUE_TITLE_CAP`]) and is omitted entirely
-/// for an orphan task or before the issues snapshot lands, so the line degrades to
-/// the pre-issue-title form rather than to a dangling separator.
+/// The parent names the card so N dispatch runs of ONE issue (a squad fan-out, or
+/// a rerun) read as N runs of that issue rather than N unrelated cards. It rides
+/// the id line (the card's identity row, otherwise ~35 cells of dead space)
+/// rather than the title, which the widget wraps to two lines and ellipsis-cuts:
+/// spending that budget on context is what pushed a finished run's `PR ✓` chip off
+/// the tile. An orphan task, or one whose issue snapshot has not landed, renders
+/// the bare `#<short_id>` with no dangling separator.
+fn card_id_line(c: &CardSummary) -> String {
+    c.issue_title.as_deref().map_or_else(
+        || format!("#{}", c.short_id),
+        |t| format!("#{} · {}", c.short_id, elide(t, ISSUE_TITLE_CAP)),
+    )
+}
+
+/// The card's title line: `<agent> · <age> · <status>`, then the run's durable
+/// artifacts when present (tcp T2): the `ainb/<slug>` branch it committed on and a
+/// `PR <ci>` chip, so a finished run's branch + PR read on the tile itself.
+///
+/// Deliberately carries the RUN and nothing else. The widget wraps this to exactly
+/// two lines and ellipsis-cuts the overflow, so every char spent ahead of the
+/// branch is a char of the branch + PR chip that falls off the tile; the parent
+/// issue is on the id line ([`card_id_line`]) for exactly that reason.
 fn card_title(c: &CardSummary, now_ms: i64) -> String {
-    let lead = c
-        .issue_title
-        .as_deref()
-        .map_or_else(String::new, |t| format!("{} · ", elide(t, ISSUE_TITLE_CAP)));
     let mut title = format!(
-        "{lead}{} · {} · {}",
+        "{} · {} · {}",
         c.agent_label,
         age_label(c.created_at, now_ms),
         c.status
@@ -753,12 +778,14 @@ fn cards_len_floor(cards: &[CardSummary]) -> usize {
     cards.len().saturating_sub(1)
 }
 
-/// Render the Kanban board into `buf` between rows `top` and `bottom` THROUGH the
-/// shared Linear-style card-board (63l.6) — four status columns (`queued` /
-/// `running` / `done` / `failed`) side by side, each a per-column-scrollable
-/// stack of bordered task cards showing `#<short_id>`, the parent issue, the agent
-/// NAME + age + status, and a priority chip. The hovered (or keyboard-focused)
-/// card carries the heavy clay highlight border.
+/// Render the Kanban board into `buf` between rows `top` and `bottom`.
+///
+/// Paints THROUGH the shared Linear-style card-board (63l.6): four status columns
+/// (`queued` / `running` / `done` / `failed`) side by side, each a
+/// per-column-scrollable stack of bordered task cards whose id line is
+/// `#<short_id> · <parent issue>` and whose title line is the agent NAME + age +
+/// status (+ branch + PR chip), with a priority chip in the footer. The hovered
+/// (or keyboard-focused) card carries the heavy clay highlight border.
 ///
 /// `now_ms` is the render-time clock the card ages are computed against.
 pub fn render_kanban(
@@ -964,18 +991,17 @@ mod tests {
         titles.insert("issue-1".to_string(), "test".to_string());
         state.set_issue_titles(&titles);
 
-        assert_eq!(
-            state.board_columns(NOW)[2].cards[0].title,
-            "test · claude · 5m · done"
-        );
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert_eq!(card.title, "claude · 5m · done");
+        assert_eq!(card.display_id, "#8CQ051 · test");
     }
 
-    /// The parent issue's title leads the card so N dispatch runs of ONE issue
-    /// read as N runs of that issue. A long title elides at [`ISSUE_TITLE_CAP`] so
-    /// the `<agent> · <age> · <status>` run identity always survives the wrap, and
-    /// an unresolved issue simply omits the segment (no dangling separator).
+    /// The parent issue's title names the card ON THE ID LINE, so N dispatch runs
+    /// of ONE issue read as N runs of that issue. A long title elides at
+    /// [`ISSUE_TITLE_CAP`]; an unresolved issue leaves the bare `#<short_id>` with
+    /// no dangling separator. The title line stays the RUN and nothing else.
     #[test]
-    fn issue_title_leads_the_card_and_elides_without_eating_the_run_identity() {
+    fn issue_title_names_the_card_on_the_id_line_and_elides() {
         let mut state = KanbanState::from_tasks(
             &[
                 task("01HANGARTASKDONE0001", "done"),
@@ -991,25 +1017,74 @@ mod tests {
         );
         state.set_issue_titles(&titles);
 
-        let title = &state.board_columns(NOW)[2].cards[0].title;
-        assert!(
-            title.starts_with("Fix kanban card renderi… · claude · "),
-            "issue title leads, elided at the cap: {title:?}"
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert_eq!(
+            card.display_id, "#NE0001 · Fix kanban card renderi…",
+            "the parent issue names the card on the id line, elided at the cap"
         );
-        assert!(
-            title.ends_with("claude · 5m · done"),
-            "the run identity survives the elision: {title:?}"
+        assert_eq!(
+            card.title, "claude · 5m · done",
+            "the title line carries the RUN only, so the artifacts keep their budget"
         );
 
-        // An orphan / unresolved issue drops the segment entirely.
+        // An orphan / unresolved issue leaves the bare id, no dangling separator.
         let mut orphan = KanbanState::from_tasks(&[task("01HANGARTASKDONE0003", "done")], NOW);
         orphan.set_agent_names(&roster(&[("claude-agent", "claude")]));
         orphan.set_issue_titles(&BTreeMap::new());
-        assert_eq!(
-            orphan.board_columns(NOW)[2].cards[0].title,
-            "claude · 5m · done",
-            "no parent issue means no leading segment and no stray separator"
+        let orphan_card = &orphan.board_columns(NOW)[2].cards[0];
+        assert_eq!(orphan_card.display_id, "#NE0003");
+        assert_eq!(orphan_card.title, "claude · 5m · done");
+    }
+
+    /// The two-line title budget at the reference 180-col board: four columns of
+    /// 45, each ceding a gutter cell and two border cells, leaves 42 content cells
+    /// per line and the widget paints exactly two of them.
+    const TWO_LINE_TITLE_BUDGET: usize = 84;
+
+    /// REGRESSION PIN (tcp T2): a finished run's `ainb/<task-ulid>` branch AND its
+    /// `PR ✓` chip both fit the card's two-line title budget.
+    ///
+    /// The widget ellipsis-cuts whatever overflows line two, silently and without
+    /// error. Leading this line with the parent issue title pushed a real run's
+    /// title to 88 chars and ate the `PR ✓` chip off the tile: green unit tests,
+    /// a board that had quietly stopped surfacing PR state
+    /// (`tripwire_tcp_card_branch_pr_e2e`). Any future segment added ahead of the
+    /// branch must keep this budget.
+    #[test]
+    fn a_finished_run_keeps_its_branch_and_pr_chip_inside_the_title_budget() {
+        const TASK_ULID: &str = "01KYTV3EWKS8C5G66G850SCAKH";
+        let mut t = task(TASK_ULID, "done");
+        t.branch = Some(format!("ainb/{TASK_ULID}"));
+        t.pr_url = Some("https://github.com/o/r/pull/8".into());
+        t.pr_status = Some(PrStatus {
+            ci: CiRollup::Pass,
+            ..PrStatus::default()
+        });
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        // A 12-char roster name, the longest the real fixtures dispatch under.
+        state.set_agent_names(&roster(&[("claude-agent", "claude-agent")]));
+        state.set_issue_titles(&BTreeMap::from([(
+            "issue-1".to_string(),
+            "Cardbranchprtripwire".to_string(),
+        )]));
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert!(
+            card.title.contains(&format!("ainb/{TASK_ULID}")) && card.title.ends_with("PR ✓"),
+            "branch + PR chip both on the title: {:?}",
+            card.title
         );
+        assert!(
+            card.title.chars().count() <= TWO_LINE_TITLE_BUDGET,
+            "the title must fit the two-line budget of {TWO_LINE_TITLE_BUDGET} or the \
+             widget elides the PR chip off the tile ({} chars): {:?}",
+            card.title.chars().count(),
+            card.title
+        );
+        // The parent issue still names the card, on the id line, where it costs
+        // the run's artifacts nothing.
+        assert_eq!(card.display_id, "#0SCAKH · Cardbranchprtripwire");
     }
 
     /// A captured PR whose CI has not resolved yet (or is unknown) renders the

@@ -5,10 +5,11 @@
 //! and pins the layout with `insta::assert_snapshot!` (trailing newline trimmed
 //! per `reference_insta_trailing_newline_trap`). The snapshot proves the four
 //! status columns carry their bucket counts and each task renders as a bordered
-//! card showing `#<short_id>`, the parent issue title, the agent BY NAME, the age,
-//! the status, and a priority chip. The fixture dispatches under REAL agent ULIDs
-//! and resolves them through the same seams `ScreenStates` uses, so the snapshot
-//! is a standing guard that no raw ULID reaches the board.
+//! card whose id line is `#<short_id> · <parent issue title>` and whose title line
+//! is the run (the agent BY NAME, the age, the status) plus a priority chip. The
+//! fixture dispatches under REAL agent ULIDs and resolves them through the same
+//! seams `ScreenStates` uses, so the snapshot is a standing guard that no raw ULID
+//! reaches the board.
 //! A non-vacuous colour check backs the heavy highlight border on the focused
 //! card.
 
@@ -170,11 +171,16 @@ fn render_full_board_snapshot() {
         !full.contains(CLAUDE_ULID) && !full.contains(GPT_ULID),
         "no raw agent ULID may reach the board:\n{full}"
     );
-    // The parent issue names every card, so N runs of ONE issue read as N runs of
-    // that issue rather than N unrelated cards.
+    // The parent issue names every card ON THE ID LINE, so N runs of ONE issue read
+    // as N runs of that issue rather than N unrelated cards, without spending the
+    // title's two-line budget, which the run's branch + PR chip need.
     assert!(
-        full.contains("test · claude"),
-        "parent issue leads:\n{full}"
+        full.contains("#EUED01 · test"),
+        "parent issue names the card on the id line:\n{full}"
+    );
+    assert!(
+        full.contains("claude · 5m · queued"),
+        "the title line is the run identity alone:\n{full}"
     );
     // Age labels (5m queued, 1m running, 3d done, 10m failed, 1h cancelled).
     assert!(full.contains("5m"), "5m age:\n{full}");
