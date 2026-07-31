@@ -1836,7 +1836,7 @@ async fn launch_managed_codex_tui(
 ) -> Result<(String, ainb_fleet_core::types::FleetSession), String> {
     let tmux_name = managed_codex_tmux_name(thread_id, SystemClock.now_ms());
     let codex_binary = std::env::var_os("AINB_CODEX_BIN").unwrap_or_else(|| "codex".into());
-    let tmux_binary = ainb_fleet_core::fleet::tmux_bin();
+    let tmux_binary = std::ffi::OsString::from("tmux");
     let command = manager.managed_tui_command(
         &codex_binary,
         [
@@ -1913,7 +1913,7 @@ fn managed_codex_tmux_name(thread_id: &str, now_ms: i64) -> String {
 }
 
 async fn kill_tmux_session_exact(session_name: &str) -> Result<(), String> {
-    let tmux_binary = ainb_fleet_core::fleet::tmux_bin();
+    let tmux_binary = std::ffi::OsString::from("tmux");
     let output = tokio::process::Command::new(tmux_binary)
         .args(["kill-session", "-t", session_name])
         .output()

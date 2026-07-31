@@ -7,7 +7,7 @@ use crate::fleet::types::Signal;
 
 pub async fn capture_pane(tmux_session: &str, lines: u32) -> Result<String> {
     let scroll_arg = format!("-{lines}");
-    let output = Command::new(crate::fleet::tmux_bin())
+    let output = Command::new("tmux")
         .args([
             "capture-pane",
             "-t",
