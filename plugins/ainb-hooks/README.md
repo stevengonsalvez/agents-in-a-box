@@ -41,7 +41,7 @@ plugins/ainb-hooks/
 │   └── hooks.json           # Copilot ~/.copilot/hooks/ainb.json drop-in (native format)
 ├── hooks/
 │   ├── notify.sh            # universal hook script (claude + codex + copilot)
-│   └── stall_guard.py       # Stop-hook stall guard (claude only)
+│   └── stall_guard.py       # Stop-hook stall guard (claude + codex)
 └── README.md
 ```
 
@@ -55,7 +55,7 @@ The same `notify.sh` is used by all three agents:
 is identified via `AINB_AGENT={claude,codex,copilot}` set in the registering
 command line.
 
-## Stall guard (Claude only)
+## Stall guard (Claude + Codex)
 
 `hooks/stall_guard.py` runs as a second `Stop` hook, alongside `notify.sh`. It
 refuses turn-end when a session is about to park on work that is still in
@@ -93,10 +93,32 @@ It cannot catch a watcher that was armed and later died silently; nothing at
 turn-end can see that. That case belongs to the idle-session path
 (`TeammateIdle` / notifyd), not here.
 
+### Both agents, one script
+
+Codex ships the same Stop contract as Claude: `stop.command.output` accepts
+`{"decision": "block", "reason": …}`, and the binary rejects a block without a
+non-empty reason. The differences are all at the edges, so they are absorbed in
+one place each:
+
+| | Claude Code | Codex CLI |
+|---|---|---|
+| payload delivery | stdin | `argv[1]` |
+| transcript | `transcript_path` JSONL | rollout JSONL, `response_item` lines (nullable path) |
+| closing text | last assistant entry | `last_assistant_message`, required on input |
+| advice given | background Bash, Monitor, ScheduleWakeup | foreground poll loop (no background primitive) |
+
+`read_payload()` accepts either delivery, `adapt()` reshapes a Codex rollout
+into the Claude transcript shape, and everything downstream is shared. Codex is
+wired through `codex/hooks.json` via the `__AINB_STALL_GUARD__` placeholder,
+which `ainb-notifyd install --codex` substitutes after extracting the script to
+`~/.agents-in-a-box/hooks/stall_guard.py` next to `notify.sh`.
+
+Copilot is not wired: its hook format has no Stop-with-decision contract.
+
 Run the self-check after editing it:
 
 ```bash
-python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 21 cases
+python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 24 cases
 ```
 
 ## Install
@@ -119,9 +141,12 @@ The CLI:
 3. Writes this directory's `copilot/hooks.json` to `~/.copilot/hooks/ainb.json`
    as a standalone drop-in (Copilot loads every `*.json` in `~/.copilot/hooks/`
    and combines them, so ainb owns one file; uninstall deletes just that file).
-4. Extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and rewrites
-   the `__AINB_HOOK_SCRIPT__` placeholder in each agent's template to that
-   absolute path.
+4. Extracts `notify.sh` to `~/.agents-in-a-box/hooks/notify.sh` and
+   `stall_guard.py` beside it, then rewrites the `__AINB_HOOK_SCRIPT__` and
+   `__AINB_STALL_GUARD__` placeholders in each agent's template to those
+   absolute paths. Claude needs neither substitution: the marketplace install
+   puts both scripts in the plugin directory, which `${CLAUDE_PLUGIN_ROOT}`
+   already resolves.
 5. Records the install method in `~/.agents-in-a-box/install.json` so
    `ainb hooks uninstall` is fully reversible.
 
