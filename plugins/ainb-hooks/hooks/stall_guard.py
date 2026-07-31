@@ -22,12 +22,23 @@ Self-check: `stall_guard.py --self-test`.
 """
 
 import json
+import os
 import re
+import select
 import sys
 from datetime import datetime
 
 # A launched-but-never-terminal task stops counting as an armed wake after this.
 STALE_AFTER_S = 30 * 60
+
+# Seconds to wait for a stdin payload before giving up (stdin delivery only).
+STDIN_WAIT_S = 2
+
+# Only the tail of a transcript is parsed. Real transcripts reach 135MB / 70k
+# lines, which took ~3.2s to parse in full against a 10s hook timeout, on every
+# Stop of every session. The evaluation only needs the current turn plus recent
+# task launches, and STALE_AFTER_S already discards old ones.
+MAX_TAIL_BYTES = 4 * 1024 * 1024
 
 # Terminal states in a <task-notification>; anything else means still live.
 TERMINAL = {"completed", "failed", "error", "killed", "cancelled",
@@ -98,7 +109,11 @@ REASON = (
 def load_entries(path):
     out = []
     try:
-        with open(path, "r") as fh:
+        size = os.path.getsize(path)
+        with open(path, "r", errors="replace") as fh:
+            if size > MAX_TAIL_BYTES:
+                fh.seek(size - MAX_TAIL_BYTES)
+                fh.readline()  # discard the partial line the seek landed in
             for line in fh:
                 line = line.strip()
                 if not line:
@@ -317,22 +332,37 @@ def evaluate(entries, how=HOW_CLAUDE):
 
 
 def read_payload():
-    """Claude and Copilot pipe the payload on stdin; Codex passes it as argv[1]."""
-    raws = []
-    try:
-        if not sys.stdin.isatty():
-            raws.append(sys.stdin.read())
-    except (OSError, ValueError):
-        pass
-    raws.extend(a for a in sys.argv[1:] if not a.startswith("-"))
-    for raw in raws:
-        try:
-            data = json.loads(raw)
-        except (ValueError, TypeError):
+    """Claude and Copilot pipe the payload on stdin; Codex passes it as argv[1].
+
+    argv is tried FIRST and stdin is never touched when it wins. A hook launched
+    with an inherited-but-idle stdin (Codex's delivery) would otherwise block in
+    read() until the host's hook timeout killed it, on every single Stop.
+    """
+    for raw in sys.argv[1:]:
+        if raw.startswith("-"):
             continue
-        if isinstance(data, dict):
+        data = _as_object(raw)
+        if data is not None:
             return data
-    return None
+
+    # No argv payload: this is stdin delivery. Wait briefly for data rather than
+    # blocking forever if nothing is ever written.
+    try:
+        if sys.stdin.isatty():
+            return None
+        if not select.select([sys.stdin], [], [], STDIN_WAIT_S)[0]:
+            return None
+        return _as_object(sys.stdin.read())
+    except (OSError, ValueError):
+        return None
+
+
+def _as_object(raw):
+    try:
+        data = json.loads(raw)
+    except (ValueError, TypeError):
+        return None
+    return data if isinstance(data, dict) else None
 
 
 def main():
@@ -521,8 +551,58 @@ CHECKS = [
 ]
 
 
+def _extra_checks():
+    """Regressions that are about plumbing, not the block/allow decision."""
+    out = []
+
+    # argv must win outright: reading stdin first hung every Codex Stop until
+    # the host's hook timeout killed the process.
+    argv = sys.argv
+    try:
+        sys.argv = ["stall_guard.py", '{"turn_id":"t","last_assistant_message":"x"}']
+        got = read_payload()
+    finally:
+        sys.argv = argv
+    out.append(("argv payload wins without touching stdin",
+                isinstance(got, dict) and got.get("turn_id") == "t"))
+
+    # A flag-only argv must not be mistaken for a payload.
+    argv = sys.argv
+    try:
+        sys.argv = ["stall_guard.py", "--self-test"]
+        got = _as_object("--self-test")
+    finally:
+        sys.argv = argv
+    out.append(("flag argument is not a payload", got is None))
+
+    # Oversized transcripts are read from the tail, and the partial first line
+    # the seek lands in must not break parsing.
+    import tempfile
+    with tempfile.NamedTemporaryFile("w", suffix=".jsonl", delete=False) as fh:
+        filler = json.dumps({"type": "assistant", "message": {"content": [
+            {"type": "text", "text": "x" * 512}]}})
+        for _ in range(MAX_TAIL_BYTES // len(filler) + 200):
+            fh.write(filler + "\n")
+        fh.write(json.dumps(_user("merge it")) + "\n")
+        fh.write(json.dumps(_asst("CI is still running.")) + "\n")
+        path = fh.name
+    try:
+        entries = load_entries(path)
+        out.append(("tail read stays under the cap",
+                    0 < len(entries) < MAX_TAIL_BYTES // len(filler) + 200))
+        out.append(("tail read still sees the turn end",
+                    evaluate(entries) is not None))
+    finally:
+        os.unlink(path)
+    return out
+
+
 def self_test():
     failures = 0
+    for name, ok in _extra_checks():
+        if not ok:
+            failures += 1
+            print("FAIL: %s" % name)
     for name, should_block, entries in CHECKS:
         got = evaluate(entries) is not None
         if got != should_block:
@@ -530,7 +610,7 @@ def self_test():
             print("FAIL: %s (expected %s, got %s)"
                   % (name, "block" if should_block else "allow",
                      "block" if got else "allow"))
-    total = len(CHECKS)
+    total = len(CHECKS) + len(_extra_checks())
     print("stall_guard self-test: %d/%d ok" % (total - failures, total))
     sys.exit(1 if failures else 0)
 
