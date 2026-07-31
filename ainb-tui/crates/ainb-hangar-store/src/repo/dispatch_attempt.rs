@@ -8,6 +8,17 @@
 //! running", which before 0058 existed only as an ephemeral RPC error string or
 //! a debug log line.
 //!
+//! # Newest-first is ordered by `rowid`, not by `id`
+//!
+//! `created_at` is epoch MILLISECONDS, and a burst of admission decisions for
+//! one card lands inside a single millisecond routinely. The tie-break must
+//! therefore carry the real insertion order. `id` cannot: it is a ULID, whose
+//! low 80 bits are random within a millisecond, so `ORDER BY created_at DESC,
+//! id DESC` scrambled same-millisecond rows and made "newest first" a lie —
+//! both for the trim (which decides what to KEEP) and for every reader.
+//! SQLite's implicit `rowid` is monotonic per insert and the table is not
+//! `WITHOUT ROWID`, so it is the tie-break with no schema change.
+//!
 //! # Bounded by construction
 //!
 //! [`DispatchAttemptRepo::record`] trims the issue's history to the newest
@@ -168,7 +179,7 @@ impl DispatchAttemptRepo {
                    AND id NOT IN ( \
                        SELECT id FROM dispatch_attempt \
                        WHERE issue_id = ? \
-                       ORDER BY created_at DESC, id DESC \
+                       ORDER BY created_at DESC, rowid DESC \
                        LIMIT ? \
                    )",
             )
@@ -190,7 +201,7 @@ impl DispatchAttemptRepo {
     ) -> Result<Option<DispatchAttempt>, sqlx::Error> {
         let row = sqlx::query(&format!(
             "SELECT {SELECT_COLS} FROM dispatch_attempt \
-             WHERE issue_id = ? ORDER BY created_at DESC, id DESC LIMIT 1"
+             WHERE issue_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1"
         ))
         .bind(issue_id)
         .fetch_optional(pool)
@@ -206,7 +217,7 @@ impl DispatchAttemptRepo {
     ) -> Result<Vec<DispatchAttempt>, sqlx::Error> {
         let rows = sqlx::query(&format!(
             "SELECT {SELECT_COLS} FROM dispatch_attempt \
-             WHERE issue_id = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+             WHERE issue_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?"
         ))
         .bind(issue_id)
         .bind(limit.max(0))
@@ -224,7 +235,7 @@ impl DispatchAttemptRepo {
     ) -> Result<Vec<DispatchAttempt>, sqlx::Error> {
         let rows = sqlx::query(&format!(
             "SELECT {SELECT_COLS} FROM dispatch_attempt \
-             WHERE workspace_id = ? ORDER BY created_at DESC, id DESC LIMIT ?"
+             WHERE workspace_id = ? ORDER BY created_at DESC, rowid DESC LIMIT ?"
         ))
         .bind(workspace_id)
         .bind(limit.max(0))
