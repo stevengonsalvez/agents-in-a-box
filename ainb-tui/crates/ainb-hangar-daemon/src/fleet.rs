@@ -4,7 +4,7 @@
 //! SQLite owns canonical state and revision order. Live broadcasts only wake
 //! subscribers after the matching revision commits.
 
-use ainb_fleet_core::discover::discover_from_tmux;
+use ainb_fleet_core::discover::{discover_all_tmux_panes, discover_from_tmux};
 use ainb_fleet_core::types::{
     AttentionState, Confidence, FleetSession, LifecycleState, ManagementState, Provider,
     SessionKey, TransportHealth,
@@ -579,7 +579,9 @@ pub async fn recover_codex_manager(
     manager: &crate::fleet_provider::codex_manager::CodexManagerHandle,
     observed_at: i64,
 ) -> Result<usize, FleetRepoError> {
-    let discovered = match discover_from_tmux().await {
+    // Liveness, not roster: a managed Codex pane must not read as gone merely
+    // because its agent process is momentarily absent from the tree.
+    let discovered = match discover_all_tmux_panes().await {
         Ok(discovered) => discovered,
         Err(error) => {
             tracing::debug!(error = %error, "Codex manager recovery tmux discovery unavailable");
@@ -1075,13 +1077,19 @@ fn tmux_missing_event(row: &FleetSessionRow, observed_at: i64) -> NewFleetEvent 
 }
 
 fn tmux_row_matches(row: &FleetSessionRow, session: &FleetSession) -> bool {
+    // A lifecycle set by a provider hook outranks this inferred tmux sample, so
+    // the repo will never apply ours over it. Comparing them anyway would report
+    // a permanent mismatch and append one no-op `fleet_event` per discovery
+    // tick, forever, for every hook-backed session.
+    let lifecycle_settled = row.lifecycle_authority == "authoritative"
+        || row.lifecycle_state == state_token(session.lifecycle);
     row.provider == session.provider.as_str()
         && row.tmux_target == session.exact_tmux_target
         && row.process_start_fingerprint == session.process_start_fingerprint
         && row.cwd == session.cwd
         && row.management_state == management_token(session.management)
         && row.confidence == confidence_token(session.confidence)
-        && row.lifecycle_state == state_token(session.lifecycle)
+        && lifecycle_settled
         && row.attention_state == attention_token(session.attention)
         && row.transport_health == transport_token(session.transport_health)
 }
