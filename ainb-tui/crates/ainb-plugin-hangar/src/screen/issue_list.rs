@@ -1146,6 +1146,18 @@ impl IssueListState {
         }
     }
 
+    /// Every cached row, UNFILTERED: the raw `hangar/issues_list` snapshot, which
+    /// enumerates every issue state in the workspace.
+    ///
+    /// Distinct from [`visible_rows`](Self::visible_rows), which applies the active
+    /// filter chip + query. Callers that need the snapshot as a lookup table (the
+    /// Kanban board resolving a task's parent issue title) must use this one, or a
+    /// filter the user happened to type would blank out unrelated screens.
+    #[must_use]
+    pub fn all_rows(&self) -> &[IssueRow] {
+        &self.rows
+    }
+
     /// The selection index into the visible rows.
     #[must_use]
     pub const fn selected_index(&self) -> usize {

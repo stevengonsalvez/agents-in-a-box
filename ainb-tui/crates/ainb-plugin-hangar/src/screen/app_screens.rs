@@ -780,6 +780,9 @@ impl ScreenStates {
     /// Replace the issue-list rows from an `hangar/issues_list` snapshot.
     pub fn set_issues(&mut self, issues: Vec<IssueRow>) {
         self.issue_list = IssueListState::with_rows(issues);
+        // Re-label any Kanban card already on the board with its parent issue's
+        // title: the tasks snapshot may have landed before this one did.
+        self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
     }
 
     /// Replace the skill-manager rows from an `hangar/skills_list` snapshot.
@@ -798,10 +801,12 @@ impl ScreenStates {
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
         self.kanban = KanbanState::from_tasks(tasks, 0);
-        // Resolve each card's agent id to its roster name against the cached
-        // actor snapshot. The two snapshots are fired in one batch and land in
-        // either order, so `set_actors` re-applies this the other way round.
+        // Resolve each card's agent id to its roster name, and its issue id to
+        // that issue's title, against the cached snapshots. All three snapshots
+        // are fired in one batch and land in any order, so `set_actors` and
+        // `set_issues` re-apply their half the other way round.
         self.kanban.set_agent_names(&agent_names(&self.actors));
+        self.kanban.set_issue_titles(&issue_titles(self.issue_list.all_rows()));
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -1240,6 +1245,13 @@ fn agent_names(actors: &[ActorRow]) -> std::collections::BTreeMap<String, String
                 .map(|id| (id.to_string(), a.display_name.clone()))
         })
         .collect()
+}
+
+/// The `issue_id -> title` map the Kanban cards name their parent from, projected
+/// out of the cached `hangar/issues_list` snapshot (which enumerates every issue
+/// state, so a card's parent resolves whatever state it is in).
+fn issue_titles(rows: &[IssueRow]) -> std::collections::BTreeMap<String, String> {
+    rows.iter().map(|r| (r.id.as_str().to_string(), r.title.clone())).collect()
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be

@@ -5,10 +5,10 @@
 //! and pins the layout with `insta::assert_snapshot!` (trailing newline trimmed
 //! per `reference_insta_trailing_newline_trap`). The snapshot proves the four
 //! status columns carry their bucket counts and each task renders as a bordered
-//! card showing `#<short_id>`, the agent BY NAME, the age, the status, and a
-//! priority chip. The fixture dispatches under REAL agent ULIDs and resolves them
-//! through the same seam `ScreenStates` uses, so the snapshot is a standing guard
-//! that no raw ULID reaches the board.
+//! card showing `#<short_id>`, the parent issue title, the agent BY NAME, the age,
+//! the status, and a priority chip. The fixture dispatches under REAL agent ULIDs
+//! and resolves them through the same seams `ScreenStates` uses, so the snapshot
+//! is a standing guard that no raw ULID reaches the board.
 //! A non-vacuous colour check backs the heavy highlight border on the focused
 //! card.
 
@@ -79,10 +79,10 @@ fn six_tasks() -> Vec<TaskCardRow> {
     ]
 }
 
-/// The board the render tests paint: the six tasks with the roster seam applied,
-/// exactly as `ScreenStates` applies it once the `hangar/agents_list` snapshot
-/// lands. Without this the cards would fall back to short ids, which is the
-/// un-resolved path the unit tests cover separately.
+/// The board the render tests paint: the six tasks with BOTH resolve seams
+/// applied, exactly as `ScreenStates` applies them once the `hangar/agents_list`
+/// and `hangar/issues_list` snapshots land. Without this the cards would fall back
+/// to short ids, which is the un-resolved path the unit tests cover separately.
 fn resolved_board() -> KanbanState {
     let mut state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
     state.set_agent_names(
@@ -91,6 +91,7 @@ fn resolved_board() -> KanbanState {
             .map(|(id, name)| (id.to_string(), name.to_string()))
             .collect(),
     );
+    state.set_issue_titles(&std::iter::once(("issue-1".to_string(), "test".to_string())).collect());
     state
 }
 
@@ -156,7 +157,7 @@ fn render_full_board_snapshot() {
     assert!(full.contains("done (1)"), "done header/count:\n{full}");
     assert!(full.contains("failed (2)"), "failed header/count:\n{full}");
 
-    // Card fields: `#<short_id>` id line, agent + age + status in the title.
+    // Card fields: `#<short_id>` id line, issue + agent + age + status in the title.
     assert!(full.contains("#EUED01"), "queued short id:\n{full}");
     assert!(full.contains("#NING03"), "running short id:\n{full}");
     // Agents read BY NAME, resolved from the roster.
@@ -168,6 +169,12 @@ fn render_full_board_snapshot() {
     assert!(
         !full.contains(CLAUDE_ULID) && !full.contains(GPT_ULID),
         "no raw agent ULID may reach the board:\n{full}"
+    );
+    // The parent issue names every card, so N runs of ONE issue read as N runs of
+    // that issue rather than N unrelated cards.
+    assert!(
+        full.contains("test · claude"),
+        "parent issue leads:\n{full}"
     );
     // Age labels (5m queued, 1m running, 3d done, 10m failed, 1h cancelled).
     assert!(full.contains("5m"), "5m age:\n{full}");
