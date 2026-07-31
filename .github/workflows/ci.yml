@@ -12,13 +12,6 @@ on:
       - ".github/workflows/ci.yml"
   pull_request:
     branches: [main, v2]
-    paths:
-      - "ainb-tui/**"
-      - "plugins/ainb-hooks/**"
-      - "ainb-tui/crates/ainb-plugin-hangar/**"
-      - "scripts/hangar/**"
-      - "Cargo.*"
-      - ".github/workflows/ci.yml"
 
 env:
   CARGO_TERM_COLOR: always
@@ -27,10 +20,45 @@ env:
 
 jobs:
   # ────────────────────────────────────────────────────────────────────────────
+  # Which paths changed?
+  #
+  # Path filtering lives HERE, on the jobs, and NOT on `on.pull_request.paths`.
+  # A workflow skipped by `on.paths` creates no check runs at all, so a required
+  # context stays "Expected" forever and the PR can never merge — that is what
+  # blocked every Swift-only and docs-only PR (bead mbl).
+  # A job skipped by an `if:` DOES report, and a skipped job satisfies a required
+  # check, so the gate stays honest while irrelevant PRs still cost no compute.
+  #
+  # `on.push` keeps its own `paths:` — push runs are not required checks, so
+  # main-branch CI cost is unchanged.
+  # ────────────────────────────────────────────────────────────────────────────
+  changes:
+    name: Detect relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      relevant: ${{ steps.filter.outputs.relevant }}
+    steps:
+      - uses: dorny/paths-filter@v3
+        if: github.event_name == 'pull_request'
+        id: filter
+        with:
+          filters: |
+            relevant:
+              - 'ainb-tui/**'
+              - 'plugins/ainb-hooks/**'
+              - 'scripts/hangar/**'
+              - 'Cargo.*'
+              - '.github/workflows/ci.yml'
+
+  # ────────────────────────────────────────────────────────────────────────────
   # Format check
   # ────────────────────────────────────────────────────────────────────────────
   fmt:
     name: Rustfmt
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -46,6 +74,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   cli-docs:
     name: CLI reference freshness
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -71,6 +103,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   test:
     name: Test (${{ matrix.os }})
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -149,6 +185,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   contracts:
     name: Contracts
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -167,6 +207,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   ainb-hooks:
     name: ainb-hooks (${{ matrix.os }})
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -211,6 +255,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   hangar-e2e:
     name: hangar-e2e (${{ matrix.os }})
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
@@ -277,6 +325,10 @@ jobs:
   # ────────────────────────────────────────────────────────────────────────────
   machete:
     name: Cargo Machete
+    needs: changes
+    if: >-
+      always() && (github.event_name != 'pull_request' ||
+      needs.changes.outputs.relevant != 'false')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
