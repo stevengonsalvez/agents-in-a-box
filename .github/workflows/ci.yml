@@ -39,13 +39,20 @@ jobs:
           components: rustfmt
       - run: cargo fmt --all --check
         working-directory: ${{ env.WORKING_DIR }}
+      # An abandoned debugging probe reverts real behaviour while every doc
+      # comment, test and help string around it still asserts the fix. Cheap
+      # grep, runs in the fastest job.
+      - name: No leftover debugging probes
+        run: bash scripts/check-no-probes.sh
+        working-directory: ${{ env.WORKING_DIR }}
 
   # ────────────────────────────────────────────────────────────────────────────
-  # CLI reference freshness — docs/tui/cli.md is generated from `ainb --help`.
-  # Fails if it drifts, so the binary stays the single source of truth.
+  # CLI reference + man page freshness. docs/tui/cli.md and docs/man/ainb.1 are
+  # both generated from `ainb --help`. Fails if either drifts, so the binary
+  # stays the single source of truth. One job: the build is paid for once.
   # ────────────────────────────────────────────────────────────────────────────
   cli-docs:
-    name: CLI reference freshness
+    name: CLI reference + man freshness
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -61,8 +68,31 @@ jobs:
         working-directory: ${{ env.WORKING_DIR }}
       - name: Assert docs/tui/cli.md is up to date
         run: |
+          # Tracked-ness FIRST: `git diff` ignores untracked files, so an
+          # uncommitted generated page would make the diff a silent no-op and
+          # this job would go green having shipped nothing.
+          if ! git ls-files --error-unmatch docs/tui/cli.md > /dev/null 2>&1; then
+            echo "::error::docs/tui/cli.md is not tracked by git: generate it and commit the result." >&2
+            exit 1
+          fi
           if ! git diff --exit-code -- docs/tui/cli.md; then
-            echo "::error::docs/tui/cli.md is stale — run ainb-tui/scripts/gen-cli-reference.sh and commit the result." >&2
+            echo "::error::docs/tui/cli.md is stale: run ainb-tui/scripts/gen-cli-reference.sh and commit the result." >&2
+            exit 1
+          fi
+      - name: Regenerate the man page from the binary
+        run: AINB_BIN=target/debug/ainb bash scripts/gen-man.sh
+        working-directory: ${{ env.WORKING_DIR }}
+      - name: Assert docs/man/ainb.1 is up to date
+        run: |
+          # Same tracked-ness assertion as above: without it a man page that
+          # was never committed passes the freshness gate, and the release
+          # tarball / install.sh ship no man page at all.
+          if ! git ls-files --error-unmatch docs/man/ainb.1 > /dev/null 2>&1; then
+            echo "::error::docs/man/ainb.1 is not tracked by git: generate it with ainb-tui/scripts/gen-man.sh and commit the result." >&2
+            exit 1
+          fi
+          if ! git diff --exit-code -- docs/man/ainb.1; then
+            echo "::error::docs/man/ainb.1 is stale: run ainb-tui/scripts/gen-man.sh and commit the result." >&2
             exit 1
           fi
 
