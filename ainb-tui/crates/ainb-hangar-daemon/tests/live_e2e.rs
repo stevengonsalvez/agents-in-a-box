@@ -1071,3 +1071,631 @@ fn now_ms() -> i64 {
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis() as i64)
 }
+
+// ---------------------------------------------------------------------------
+// LIVE PIPELINE PROOF: one card, four role-gated stages, three REAL agents.
+// ---------------------------------------------------------------------------
+
+/// THE LIVE END-TO-END PROOF of the role-gated pull pipeline (goal criterion 1).
+///
+/// One issue traverses the pipeline across THREE DIFFERENT agents driving TWO
+/// REAL provider CLIs, and the DB is asserted at every transition:
+///
+/// ```text
+///  Triage        Implement       Review          QA            Done
+///  triager       implementer     reviewer        tester        (terminal)
+///  pipe-triage   pipe-triage     pipe-review     pipe-qa
+///  [claude]      [claude]        [codex]         [claude]
+///        \___________/                 excl. prior    excl. prior
+///         same agent may                    \______________/
+///         implement what it                  a checker is never
+///         triaged                            the agent it checks
+/// ```
+///
+/// The assertions, sampled on EVERY poll rather than once at the end, are:
+///   * never more than ONE `running` task on the card at any instant,
+///   * the Review stage's `agent_id` differs from the Implement stage's,
+///   * the `parent_task_id` chain is unbroken across stages,
+///   * `board_card.column_id` advances ONE column at a time, never skipping.
+///
+/// # Why fakes are not permitted here
+///
+/// A scripted stub proves ROUTING and never invocation shape. That is exactly
+/// how a broken headless path survived undetected in this repo for weeks: the
+/// fake exits 0 by construction, so `queued -> done` walked perfectly while the
+/// real CLI was never correctly invoked. So the success signal is not the task
+/// status. It is a per-stage NONCE ARTIFACT the model cannot fabricate without
+/// actually running a tool, written into that stage's OWN worktree, plus a
+/// recorded `task_usage` row proving real tokens were burned.
+#[tokio::test]
+async fn live_pipeline_walks_four_stages_across_three_real_agents() {
+    let Some(ainb) = ainb_bin() else {
+        eprintln!("SKIPPED: ainb binary not built (run `cargo build -p ainb --bin ainb`)");
+        return;
+    };
+    let Some(claude) = real_claude() else {
+        eprintln!("SKIPPED: no claude on PATH");
+        return;
+    };
+    let Some(codex) = real_codex() else {
+        eprintln!("SKIPPED: no codex on PATH");
+        return;
+    };
+    if !claude_alive(&claude) {
+        eprintln!("SKIPPED: no authenticated claude on PATH");
+        return;
+    }
+    if !codex_alive(&codex) {
+        eprintln!("SKIPPED: no authenticated codex on PATH");
+        return;
+    }
+
+    let tag = format!("{}-{}", std::process::id(), now_ms());
+    let nonce = format!("HANGAR-PIPELINE-NONCE-{tag}");
+    let home = tempfile::tempdir().expect("tempdir home");
+    let db_path = home.path().join("hangar.db");
+
+    // A scratch git repo so EVERY stage provisions its OWN worktree. Distinct
+    // work_dirs are what make the per-stage artifact assertion meaningful: a
+    // single shared cwd would let stage 1's file satisfy stage 4's check.
+    let repo = home.path().join("repo");
+    std::fs::create_dir_all(&repo).expect("mkdir repo");
+    init_scratch_repo(&repo);
+
+    // 1. Three agents on TWO providers, created through the real CLI.
+    let a_tri = format!("pipe-triage-{tag}");
+    let a_rev = format!("pipe-review-{tag}");
+    let a_qa = format!("pipe-qa-{tag}");
+    for (name, provider) in [(&a_tri, "claude"), (&a_rev, "codex"), (&a_qa, "claude")] {
+        run_ainb(
+            &ainb,
+            home.path(),
+            &[
+                "hangar",
+                "agent",
+                "create",
+                "--name",
+                name,
+                "--provider",
+                provider,
+            ],
+        );
+    }
+
+    let pool = open_pool(&db_path).await;
+    let (id_tri, rt_claude) = agent_ids_by_name(&pool, &a_tri).await;
+    let (id_rev, rt_codex) = agent_ids_by_name(&pool, &a_rev).await;
+    let (id_qa, _) = agent_ids_by_name(&pool, &a_qa).await;
+    // A runtime is a DAEMON, not a provider binding: every agent binds to the one
+    // `default` runtime whatever `--provider` said, and the per-agent provider
+    // lives on `agent.provider`. So ONE daemon serves all three agents, and it is
+    // handed BOTH real provider binaries.
+    assert_eq!(
+        rt_claude, rt_codex,
+        "all agents share the single default runtime"
+    );
+    let providers: Vec<String> =
+        sqlx::query_scalar("SELECT provider FROM agent WHERE id IN (?1, ?2, ?3) ORDER BY id")
+            .bind(&id_tri)
+            .bind(&id_rev)
+            .bind(&id_qa)
+            .fetch_all(&pool)
+            .await
+            .expect("read agent providers");
+    assert!(
+        providers.iter().any(|p| p == "codex") && providers.iter().any(|p| p == "claude"),
+        "the roster must mix real providers, saw {providers:?}"
+    );
+
+    // Cheapest live claude model on both claude agents.
+    for id in [&id_tri, &id_qa] {
+        run_ainb(
+            &ainb,
+            home.path(),
+            &["hangar", "agent", "edit", id, "--model", "haiku"],
+        );
+    }
+
+    // 2. The pipeline, through the real CLI verb.
+    run_ainb(&ainb, home.path(), &["hangar", "pipeline", "init"]);
+
+    // 3. A squad whose members carry the ROLES that gate each stage. This is the
+    //    only thing that decides who may take which stage.
+    let squad = format!("pipe-squad-{tag}");
+    let squad_id = parse_parenthesised_id(&run_ainb_capture(
+        &ainb,
+        home.path(),
+        &[
+            "hangar",
+            "squad",
+            "create",
+            &squad,
+            "--leader",
+            &format!("agent:{id_tri}"),
+        ],
+    ));
+    for (agent_id, roles) in [
+        (&id_tri, "triager,implementer"),
+        (&id_rev, "reviewer"),
+        (&id_qa, "tester"),
+    ] {
+        run_ainb(
+            &ainb,
+            home.path(),
+            &[
+                "hangar",
+                "squad",
+                "add-member",
+                &squad_id,
+                "--member",
+                &format!("agent:{agent_id}"),
+                "--role",
+                roles,
+            ],
+        );
+    }
+
+    // 4. Two daemons, one per runtime, each pointed at its REAL provider binary.
+    let daemon = LiveDaemon::spawn_with(
+        &home.path().join("daemon.log"),
+        home.path(),
+        &rt_claude,
+        &[
+            ("HANGAR_CLAUDE_PATH", claude.as_path()),
+            ("HANGAR_CODEX_PATH", codex.as_path()),
+        ],
+    );
+
+    // 5. The issue. Its title BECOMES the provider prompt at every stage, so the
+    //    brief asks for the one observable side effect the model cannot fake by
+    //    printing text.
+    let brief = format!(
+        "Use the Bash tool to run exactly this one shell command and nothing else: \
+         printf '%s' '{nonce}' > {ARTIFACT_NAME}  \
+         Do not use the Write tool. Once the command has run, stop."
+    );
+    let issue_out = run_ainb_capture(
+        &ainb,
+        home.path(),
+        &[
+            "hangar",
+            "issue",
+            "create",
+            "--title",
+            &brief,
+            "--repo",
+            repo.to_str().expect("repo path"),
+        ],
+    );
+    let issue_id = parse_created_id(&issue_out);
+
+    // No task exists yet: the card has not been dispatched.
+    assert_eq!(
+        count_tasks(&pool, &issue_id).await,
+        0,
+        "issue create without --assign must not enqueue a run"
+    );
+
+    // 6. Dispatch to the squad. Under pull this enqueues the card into Triage and
+    //    ONE eligible agent takes it, rather than starting one run per member.
+    run_ainb(
+        &ainb,
+        home.path(),
+        &[
+            "hangar", "squad", "assign", &squad_id, "--issue", &issue_id, "--fanout",
+        ],
+    );
+
+    // 7. WALK THE PIPELINE, asserting continuously.
+    let observed = walk_pipeline(&pool, &issue_id, home.path()).await;
+    drop(daemon);
+
+    // ---- Assertions -----------------------------------------------------
+    println!("\n=== LIVE PIPELINE PROOF: {issue_id} ===");
+    for s in &observed.stages {
+        println!(
+            "stage {:<10} agent={:<28} kind={:<7} task={} parent={}",
+            s.column,
+            s.agent_id,
+            s.agent_kind,
+            s.task_id,
+            s.parent_task_id.as_deref().unwrap_or("(none)")
+        );
+    }
+
+    assert!(
+        observed.max_concurrent_running <= 1,
+        "MORE THAN ONE RUNNING TASK on the card at once (saw {}), which is the \
+         broadcast defect this pipeline removes",
+        observed.max_concurrent_running
+    );
+
+    assert!(
+        observed.stages.len() >= 4,
+        "expected the card to traverse 4 role-gated stages, saw {}: {:?}",
+        observed.stages.len(),
+        observed.stages
+    );
+
+    let by_role = |role: &str| {
+        observed
+            .stages
+            .iter()
+            .find(|s| s.services_role == role)
+            .unwrap_or_else(|| panic!("no stage serviced role `{role}`: {:?}", observed.stages))
+            .clone()
+    };
+    let implement = by_role("implementer");
+    let review = by_role("reviewer");
+    let qa = by_role("tester");
+
+    assert_ne!(
+        review.agent_id, implement.agent_id,
+        "THE REVIEWER IS THE IMPLEMENTER. The prior-agent exclusion did not bite."
+    );
+    assert_ne!(
+        qa.agent_id, implement.agent_id,
+        "QA must not be the implementer"
+    );
+    assert_ne!(qa.agent_id, review.agent_id, "QA must not be the reviewer");
+
+    let distinct: std::collections::HashSet<_> =
+        observed.stages.iter().map(|s| s.agent_id.clone()).collect();
+    assert!(
+        distinct.len() >= 3,
+        "expected at least THREE different agents across the pipeline, saw {}: {distinct:?}",
+        distinct.len()
+    );
+
+    // Two REAL provider CLIs actually drove the work.
+    let kinds: std::collections::HashSet<_> =
+        observed.stages.iter().map(|s| s.agent_kind.clone()).collect();
+    assert!(
+        kinds.contains("claude") && kinds.contains("codex"),
+        "expected both real provider CLIs to have run, saw {kinds:?}"
+    );
+
+    // The parent_task_id chain is unbroken: stage N+1 points at stage N.
+    for pair in observed.stages.windows(2) {
+        assert_eq!(
+            pair[1].parent_task_id.as_deref(),
+            Some(pair[0].task_id.as_str()),
+            "BROKEN HANDOFF CHAIN: stage `{}` must chain to stage `{}`",
+            pair[1].column,
+            pair[0].column
+        );
+    }
+    assert_eq!(
+        observed.stages[0].parent_task_id, None,
+        "the first stage has no predecessor to chain to"
+    );
+
+    // The card advanced ONE column at a time, never skipping a stage.
+    assert_eq!(
+        observed.column_ords,
+        (1..=observed.column_ords.len() as i64).collect::<Vec<_>>(),
+        "the card must step one column at a time, saw ords {:?}",
+        observed.column_ords
+    );
+
+    // Every stage did REAL work: its own worktree holds the exact nonce, and the
+    // run recorded real token usage.
+    for s in &observed.stages {
+        let work_dir = s
+            .work_dir
+            .as_deref()
+            .unwrap_or_else(|| panic!("stage `{}` recorded no work_dir", s.column));
+        let artifact = Path::new(work_dir).join(ARTIFACT_NAME);
+        let got = std::fs::read_to_string(&artifact).unwrap_or_else(|e| {
+            panic!(
+                "NONCE ARTIFACT MISSING for stage `{}` at {artifact:?} ({e}). \
+                 The task reached a terminal state without doing real work. \
+                 daemon log:\n{}",
+                s.column,
+                std::fs::read_to_string(home.path().join("daemon.log")).unwrap_or_default(),
+            )
+        });
+        assert_eq!(
+            got.trim(),
+            nonce,
+            "stage `{}` wrote the wrong nonce",
+            s.column
+        );
+
+        let usage = fetch_usage(&pool, &s.task_id).await;
+        assert!(
+            usage.is_some_and(|u| u.input_tokens > 0 || u.output_tokens > 0),
+            "stage `{}` recorded no token usage, so no real inference happened",
+            s.column
+        );
+    }
+
+    dump_sqlite_evidence(&pool, &issue_id, &observed).await;
+    println!("=== ALL PIPELINE ASSERTIONS PASSED ===\n");
+}
+
+/// Print the RAW sqlite evidence behind each success criterion, so the proof can
+/// be read directly off the database rather than taken on the assertions' word.
+async fn dump_sqlite_evidence(pool: &SqlitePool, issue_id: &str, walk: &PipelineWalk) {
+    // The PEAK, tracked live. A post-hoc count would read 0 (everything is
+    // terminal by now) and would prove nothing about what happened mid-flight,
+    // which is exactly where a double-dispatch would appear.
+    println!("\n--- [1] PEAK simultaneous runs on the card (must be <= 1) ---");
+    println!(
+        "MAX over `SELECT COUNT(*) FROM agent_task_queue WHERE issue_id=? AND status='running'`,\n\
+         sampled every 250ms across the whole walk => {}",
+        walk.max_concurrent_running
+    );
+    println!(
+        "columns the card occupied, in order (ords) => {:?}",
+        walk.column_ords
+    );
+
+    println!("\n--- [2] the stage chain: agent, provider, parent_task_id ---");
+    let rows = sqlx::query(
+        "SELECT t.id, t.agent_id, a.name AS agent_name, t.agent_kind, t.status, \
+                t.generation, COALESCE(t.parent_task_id,'(none)') AS parent \
+           FROM agent_task_queue t JOIN agent a ON a.id = t.agent_id \
+          WHERE t.issue_id = ?1 ORDER BY t.created_at, t.id",
+    )
+    .bind(issue_id)
+    .fetch_all(pool)
+    .await
+    .expect("read chain");
+    println!(
+        "{:<28} {:<22} {:<7} {:<6} {:>3}  {}",
+        "task_id", "agent_name", "kind", "status", "gen", "parent_task_id"
+    );
+    for r in &rows {
+        println!(
+            "{:<28} {:<22} {:<7} {:<6} {:>3}  {}",
+            r.get::<String, _>("id"),
+            r.get::<String, _>("agent_name"),
+            r.get::<String, _>("agent_kind"),
+            r.get::<String, _>("status"),
+            r.get::<i64, _>("generation"),
+            r.get::<String, _>("parent"),
+        );
+    }
+
+    println!("\n--- [3] distinct agents that ran the card ---");
+    let n: i64 = sqlx::query_scalar(
+        "SELECT COUNT(DISTINCT agent_id) FROM agent_task_queue WHERE issue_id = ?1",
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await
+    .expect("count distinct");
+    println!("SELECT COUNT(DISTINCT agent_id) => {n}");
+
+    println!("\n--- [4] where the card finished ---");
+    let fin = sqlx::query(
+        "SELECT col.name AS name, col.ord AS ord, \
+                COALESCE(col.services_role,'(none)') AS role \
+           FROM board_card bc JOIN board_column col ON col.id = bc.column_id \
+          WHERE bc.issue_id = ?1",
+    )
+    .bind(issue_id)
+    .fetch_one(pool)
+    .await
+    .expect("read final column");
+    println!(
+        "board_card.column => {} (ord {}, services_role {})",
+        fin.get::<String, _>("name"),
+        fin.get::<i64, _>("ord"),
+        fin.get::<String, _>("role"),
+    );
+
+    println!("\n--- [5] real token spend per stage (a stub cannot fake this) ---");
+    for r in &rows {
+        let id: String = r.get("id");
+        let u = fetch_usage(pool, &id).await;
+        println!(
+            "{id}  in={:<7} out={:<7}",
+            u.as_ref().map_or(-1, |u| u.input_tokens),
+            u.as_ref().map_or(-1, |u| u.output_tokens),
+        );
+    }
+}
+
+/// One observed pipeline stage: the task that owned it plus where it sat.
+#[derive(Debug, Clone)]
+struct StageObservation {
+    column: String,
+    services_role: String,
+    task_id: String,
+    agent_id: String,
+    agent_kind: String,
+    parent_task_id: Option<String>,
+    work_dir: Option<String>,
+}
+
+/// What a full pipeline walk observed.
+#[derive(Debug, Default)]
+struct PipelineWalk {
+    stages: Vec<StageObservation>,
+    /// The HIGHEST number of simultaneously `running` tasks ever seen on the
+    /// card. Sampled every poll, so a transient double-dispatch cannot hide
+    /// between two end-state reads.
+    max_concurrent_running: i64,
+    /// The `ord` of every column the card was observed in, in order.
+    column_ords: Vec<i64>,
+}
+
+/// Total wall-clock budget for the whole four-stage walk (four real provider
+/// runs across two CLIs).
+const PIPELINE_BUDGET: Duration = Duration::from_secs(900);
+
+/// Drive and observe the card until it reaches a terminal (non-role-gated)
+/// column or the budget expires.
+///
+/// Polls fast (250ms) so the "never two running at once" sample is dense enough
+/// to catch a transient double-dispatch, which a start/end comparison would miss
+/// entirely.
+async fn walk_pipeline(pool: &SqlitePool, issue_id: &str, home: &Path) -> PipelineWalk {
+    let deadline = std::time::Instant::now() + PIPELINE_BUDGET;
+    let mut walk = PipelineWalk::default();
+    let mut seen_tasks: Vec<String> = Vec::new();
+    let mut last_ord: Option<i64> = None;
+
+    while std::time::Instant::now() < deadline {
+        // (a) One-owner sample, every poll.
+        let running: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_task_queue \
+              WHERE issue_id = ?1 AND status = 'running'",
+        )
+        .bind(issue_id)
+        .fetch_one(pool)
+        .await
+        .expect("count running");
+        walk.max_concurrent_running = walk.max_concurrent_running.max(running);
+
+        // (b) Where the card sits now.
+        let pos = sqlx::query(
+            "SELECT col.name AS name, col.ord AS ord, col.services_role AS role \
+               FROM board_card bc JOIN board_column col ON col.id = bc.column_id \
+              WHERE bc.issue_id = ?1",
+        )
+        .bind(issue_id)
+        .fetch_optional(pool)
+        .await
+        .expect("read card position");
+
+        if let Some(p) = &pos {
+            let ord: i64 = p.get("ord");
+            if last_ord != Some(ord) {
+                walk.column_ords.push(ord);
+                last_ord = Some(ord);
+            }
+        }
+
+        // (c) Record any newly-created task, with the stage it serves.
+        let rows = sqlx::query(
+            "SELECT t.id AS id, t.agent_id AS agent_id, t.agent_kind AS agent_kind, \
+                    t.parent_task_id AS parent_task_id, t.work_dir AS work_dir, \
+                    t.status AS status, t.created_at AS created_at \
+               FROM agent_task_queue t \
+              WHERE t.issue_id = ?1 ORDER BY t.created_at, t.id",
+        )
+        .bind(issue_id)
+        .fetch_all(pool)
+        .await
+        .expect("read tasks");
+
+        for r in &rows {
+            let id: String = r.get("id");
+            if seen_tasks.contains(&id) {
+                // Refresh work_dir, which is only stamped once the run starts.
+                if let Some(s) = walk.stages.iter_mut().find(|s| s.task_id == id) {
+                    if s.work_dir.is_none() {
+                        s.work_dir = r.get("work_dir");
+                    }
+                }
+                continue;
+            }
+            seen_tasks.push(id.clone());
+            // The stage a task serves is the column the card was in when it was
+            // pulled, which is the card's position right now for the newest task.
+            let (column, role) = pos.as_ref().map_or_else(
+                || ("(unknown)".to_string(), String::new()),
+                |p| {
+                    (
+                        p.get::<String, _>("name"),
+                        p.get::<Option<String>, _>("role").unwrap_or_default(),
+                    )
+                },
+            );
+            walk.stages.push(StageObservation {
+                column,
+                services_role: role,
+                task_id: id,
+                agent_id: r.get("agent_id"),
+                agent_kind: r.get("agent_kind"),
+                parent_task_id: r.get("parent_task_id"),
+                work_dir: r.get("work_dir"),
+            });
+        }
+
+        // (d) Done when the card reaches a column with no role gate AND nothing
+        //     is active: the pipeline has run to its terminal stage.
+        let gated = pos.as_ref().and_then(|p| p.get::<Option<String>, _>("role")).is_some();
+        let active: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM agent_task_queue \
+              WHERE issue_id = ?1 AND status IN ('queued','dispatched','running')",
+        )
+        .bind(issue_id)
+        .fetch_one(pool)
+        .await
+        .expect("count active");
+        if !gated && active == 0 && !walk.stages.is_empty() {
+            return walk;
+        }
+
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+
+    panic!(
+        "pipeline did not reach a terminal column within {PIPELINE_BUDGET:?}. \
+         observed stages: {:?}\ndaemon log:\n{}",
+        walk.stages,
+        std::fs::read_to_string(home.join("daemon.log")).unwrap_or_default(),
+    );
+}
+
+/// Count every task row on an issue.
+async fn count_tasks(pool: &SqlitePool, issue_id: &str) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = ?1")
+        .bind(issue_id)
+        .fetch_one(pool)
+        .await
+        .expect("count tasks")
+}
+
+/// Pull the created entity id out of a `... <id>` CLI creation line. The hangar
+/// creation verbs all echo the new id as the last whitespace-separated token of
+/// their first output line.
+fn parse_created_id(stdout: &str) -> String {
+    stdout
+        .lines()
+        .find(|l| !l.trim().is_empty())
+        .and_then(|l| l.split_whitespace().last())
+        .map(ToString::to_string)
+        .unwrap_or_else(|| panic!("no created id in output:\n{stdout}"))
+}
+
+/// Pull an id out of a `created squad <name> (<id>) led by ...` line, whose id
+/// is parenthesised rather than trailing.
+fn parse_parenthesised_id(stdout: &str) -> String {
+    stdout
+        .split_once('(')
+        .and_then(|(_, rest)| rest.split_once(')'))
+        .map(|(id, _)| id.trim().to_string())
+        .unwrap_or_else(|| panic!("no parenthesised id in output:\n{stdout}"))
+}
+
+/// A scratch git repo with one commit, so each stage can provision its own
+/// worktree from it.
+fn init_scratch_repo(dir: &Path) {
+    let git = |args: &[&str]| {
+        let out = Command::new("git")
+            .args(args)
+            .current_dir(dir)
+            .env("GIT_TERMINAL_PROMPT", "0")
+            .output()
+            .unwrap_or_else(|e| panic!("git {args:?}: {e}"));
+        assert!(
+            out.status.success(),
+            "git {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    };
+    git(&["init", "--initial-branch=main"]);
+    git(&["config", "user.email", "pipeline@example.test"]);
+    git(&["config", "user.name", "Pipeline Proof"]);
+    // Signing is disabled for this throwaway repo: a headless commit against a
+    // locked keychain would hang on pinentry rather than fail.
+    git(&["config", "commit.gpgsign", "false"]);
+    std::fs::write(dir.join("README.md"), "pipeline proof scratch repo\n").expect("write README");
+    git(&["add", "README.md"]);
+    git(&["commit", "-m", "seed"]);
+}

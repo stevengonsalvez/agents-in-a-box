@@ -50,6 +50,7 @@ use ainb_hangar_store::service::claim::{ClaimTaskService, ClaimedTask};
 use ainb_hangar_store::service::complete::{CompleteParams, CompleteTaskService};
 use ainb_hangar_store::service::fail::FailTaskService;
 use ainb_hangar_store::service::finalize::FinalizeError;
+use ainb_hangar_store::service::pull::PullService;
 use ainb_hangar_store::service::retry::{RetryDecision, RetryService};
 use ainb_hangar_store::service::start::StartTaskService;
 use sqlx::{Row, SqlitePool};
@@ -554,6 +555,31 @@ pub async fn run(
                 continue;
             }
             () = tokio::time::sleep(cfg.poll_interval) => {}
+        }
+
+        // PULL TICK, ahead of the claim. A card sitting in a role-gated column is
+        // a queue with no `agent_task_queue` row yet, so nothing downstream can
+        // see it until an eligible agent is selected. This materialises at most
+        // ONE such row per tick; the claim below then dispatches it exactly as it
+        // dispatches any other queued task, so the whole existing claim, run and
+        // finalize path is reused unchanged.
+        //
+        // Ordering matters: pulling FIRST means a card enqueued by this tick is
+        // claimable within the same tick, which is what keeps a handoff to the
+        // next stage one poll interval rather than two.
+        match PullService::pull_for_runtime(&pool, &runtime_id, &SystemIdGen, &SystemClock).await {
+            Ok(Some(pulled)) => tracing::info!(
+                task_id = %pulled.task_id,
+                issue_id = %pulled.issue_id,
+                agent_id = %pulled.agent_id,
+                services_role = %pulled.services_role,
+                "pulled a card from a role-gated column"
+            ),
+            Ok(None) => {}
+            // A pull fault must never down the loop: the claim below still drains
+            // any directly-dispatched work, so the daemon degrades to push-only
+            // rather than stopping.
+            Err(e) => tracing::error!(error = %e, "card pull failed"),
         }
 
         match ClaimTaskService::claim_for_runtime(&pool, &runtime_id, &SystemClock).await {

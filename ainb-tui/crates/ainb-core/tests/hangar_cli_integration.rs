@@ -1722,14 +1722,18 @@ fn squad_fanout_gates_a_private_leader_against_a_non_owner_member() {
         ok,
         "the allow-listed member's fan-out should exit 0; out={out}"
     );
+    // Under the pull pipeline a dispatch reports the single OWNER of the work
+    // rather than "briefed leader + fanned members". The squad here has no agent
+    // members and the workspace no role-gated pipeline, so the owner is the
+    // leader via the single-task fallback.
     assert!(
-        out.contains("briefed leader assign-agent"),
-        "the fan-out must brief the leader:\n{out}"
+        out.contains("dispatched task") && out.contains("to agent assign-agent"),
+        "the dispatch must name the single owner:\n{out}"
     );
     assert_eq!(
         queued_task_count(tmp.path()),
         1,
-        "the leader brief landed (the squad has no agent members)"
+        "exactly ONE task, never one per member"
     );
 }
 

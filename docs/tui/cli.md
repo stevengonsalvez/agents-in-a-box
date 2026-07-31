@@ -2842,6 +2842,7 @@ Commands:
   property   Define and archive a workspace's custom issue properties
   comment    Post issue comments and preview their `@`-mention routing
   inbox      Read an actor's notification inbox
+  pipeline   Provision and inspect the role-gated pull pipeline
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -4540,7 +4541,8 @@ Options:
       --issue <ISSUE>          The issue the routed task carries (`issue.id`), or omit for an ad-hoc task
       --work-dir <WORK_DIR>    The run's working directory, or omit
       --priority <PRIORITY>    Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine) [default: 0]
-      --fanout                 Fan the work out across the WHOLE squad (leader brief + one task per distinct `agent` member) instead of briefing the leader alone
+      --fanout                 Dispatch through the squad. Enqueues the card into the first role-gated pipeline column, where ONE eligible agent takes it (no longer one run per member)
+      --redundant <N>          Deliberately run this issue N times in parallel on up to N distinct squad agents, all stamped with one shared `run_group`. Omitted or `1` is a single owner
       --invoker <INVOKER>      The user the invocation-permission gate judges this assignment by (a user id or an email). Omitted defaults to the workspace owner — the ordinary single-operator assign, which the gate always admits
       --workspace <WORKSPACE>  Workspace slug the squad belongs to. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
@@ -5382,6 +5384,58 @@ Options:
       --unread                 Show only UNREAD entries
       --limit <LIMIT>          How many entries to show, newest first [default: 50]
       --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar pipeline`
+
+Provision and inspect the role-gated pull pipeline
+
+```console
+$ ainb hangar pipeline --help
+Provision and inspect the role-gated pull pipeline
+
+Usage: ainb hangar pipeline [OPTIONS] <COMMAND>
+
+Commands:
+  init  Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+  show  Show each stage with its role gate, WIP limit and current card count
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar pipeline init`
+
+Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+
+```console
+$ ainb hangar pipeline init --help
+Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+
+Usage: ainb hangar pipeline init [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to provision. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar pipeline show`
+
+Show each stage with its role gate, WIP limit and current card count
+
+```console
+$ ainb hangar pipeline show --help
+Show each stage with its role gate, WIP limit and current card count
+
+Usage: ainb hangar pipeline show [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to provision. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 

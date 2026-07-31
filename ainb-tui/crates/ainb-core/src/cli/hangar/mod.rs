@@ -124,6 +124,27 @@ pub enum HangarCommand {
     /// Read an actor's notification inbox.
     #[command(subcommand)]
     Inbox(InboxCommand),
+    /// Provision and inspect the role-gated pull pipeline.
+    #[command(subcommand)]
+    Pipeline(PipelineCommand),
+}
+
+/// `hangar pipeline <verb>` - provision the role-gated board pipeline that
+/// squad work is pulled through.
+#[derive(Subcommand, Debug)]
+pub enum PipelineCommand {
+    /// Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board.
+    Init(PipelineInitArgs),
+    /// Show each stage with its role gate, WIP limit and current card count.
+    Show(PipelineInitArgs),
+}
+
+/// Arguments for `hangar pipeline init` / `hangar pipeline show`.
+#[derive(Args, Debug)]
+pub struct PipelineInitArgs {
+    /// Workspace slug to provision. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar comment <verb>` — post a comment and see EXACTLY where its
@@ -1341,10 +1362,12 @@ pub struct SquadAssignArgs {
     /// Claim urgency (0..3, higher = more urgent). Defaults to `0` (routine).
     #[arg(long, default_value_t = 0)]
     pub priority: i64,
-    /// Fan the work out across the WHOLE squad (leader brief + one task per
-    /// distinct `agent` member) instead of briefing the leader alone.
+    /// Dispatch through the squad. Enqueues the card into the first role-gated pipeline column, where ONE eligible agent takes it (no longer one run per member).
     #[arg(long)]
     pub fanout: bool,
+    /// Deliberately run this issue N times in parallel on up to N distinct squad agents, all stamped with one shared `run_group`. Omitted or `1` is a single owner.
+    #[arg(long, value_name = "N")]
+    pub redundant: Option<usize>,
     /// The user the invocation-permission gate judges this assignment by (a user
     /// id or an email). Omitted defaults to the workspace owner — the ordinary
     /// single-operator assign, which the gate always admits.
@@ -2481,7 +2504,74 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Property(c) => dispatch_property(c, format).await,
         HangarCommand::Comment(c) => dispatch_comment(c, format).await,
         HangarCommand::Inbox(InboxCommand::List(args)) => run_inbox_list(args, format).await,
+        HangarCommand::Pipeline(c) => dispatch_pipeline(c).await,
     }
+}
+
+/// `hangar pipeline init|show`: provision (or describe) the role-gated board
+/// pipeline that squad work is pulled through.
+///
+/// `init` is idempotent and non-destructive: an existing pipeline board is
+/// reported and left exactly as the operator tuned it, so re-running never
+/// resets a WIP limit or a renamed stage.
+async fn dispatch_pipeline(cmd: PipelineCommand) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::service::pipeline::PipelineService;
+    use sqlx::Row;
+
+    let (args, init) = match cmd {
+        PipelineCommand::Init(a) => (a, true),
+        PipelineCommand::Show(a) => (a, false),
+    };
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    if init {
+        let board_id =
+            PipelineService::provision_default(store.pool(), &ws, &SystemIdGen, &SystemClock)
+                .await
+                .context("provision the default pipeline")?;
+        println!("pipeline board {board_id}");
+    }
+
+    let rows = sqlx::query(
+        "SELECT col.name AS name, col.services_role AS role, col.wip_limit AS wip, \
+                col.excludes_prior_agent AS excl, \
+                (SELECT COUNT(*) FROM board_card bc WHERE bc.column_id = col.id) AS cards \
+           FROM board_column col JOIN board bd ON bd.id = col.board_id \
+          WHERE bd.workspace_id = ?1 AND bd.name = ?2 ORDER BY col.ord",
+    )
+    .bind(ws.as_str())
+    .bind(ainb_hangar_store::service::pipeline::DEFAULT_PIPELINE_BOARD)
+    .fetch_all(store.pool())
+    .await
+    .context("read the pipeline stages")?;
+
+    if rows.is_empty() {
+        println!("no pipeline provisioned (run `ainb hangar pipeline init`)");
+        return Ok(());
+    }
+    println!(
+        "{:<12} {:<14} {:>5} {:>6} {:>6}",
+        "STAGE", "ROLE", "WIP", "EXCL", "CARDS"
+    );
+    for r in &rows {
+        let name: String = r.try_get("name").unwrap_or_default();
+        let role: Option<String> = r.try_get("role").unwrap_or_default();
+        let wip: Option<i64> = r.try_get("wip").unwrap_or_default();
+        let excl: i64 = r.try_get("excl").unwrap_or_default();
+        let cards: i64 = r.try_get("cards").unwrap_or_default();
+        println!(
+            "{:<12} {:<14} {:>5} {:>6} {:>6}",
+            name,
+            role.as_deref().unwrap_or("-"),
+            wip.map_or_else(|| "-".to_string(), |w| w.to_string()),
+            if excl == 1 { "yes" } else { "-" },
+            cards
+        );
+    }
+    Ok(())
 }
 
 /// `hangar comment add|preview`: post a comment (or dry-run one) and report
@@ -5014,24 +5104,35 @@ async fn run_squad_assign(store: &Store, args: SquadAssignArgs) -> Result<()> {
         // exactly the pre-T4 behaviour.
         ..SquadAssignRequest::default()
     };
-    if args.fanout {
-        let fanout = SquadAssignService::assign_fanout(
+    let copies = args.redundant.unwrap_or(1);
+    if args.fanout || copies > 1 {
+        let fanout = SquadAssignService::assign_redundant(
             store.pool(),
             &ws,
             &args.squad_id,
             &request,
+            copies,
             &SystemIdGen,
             &SystemClock,
         )
         .await
         .map_err(squad_assign_cli_err)?;
+        if fanout.leader.task_id.is_empty() {
+            // The card is enqueued but no agent currently holds the stage's role,
+            // so it waits, visibly, on the board. Reported rather than silently
+            // answering as if a run had started.
+            println!(
+                "enqueued the card into the pipeline; no agent holds the stage's role yet, so it is waiting"
+            );
+            return Ok(());
+        }
         println!(
-            "briefed leader {} with task {} (runtime {})",
-            fanout.leader.leader_agent_id, fanout.leader.task_id, fanout.leader.runtime_id
+            "dispatched task {} to agent {} (runtime {})",
+            fanout.leader.task_id, fanout.leader.leader_agent_id, fanout.leader.runtime_id
         );
         for m in &fanout.members {
             println!(
-                "fanned task {} to member {} (runtime {})",
+                "redundant task {} to agent {} (runtime {})",
                 m.task_id, m.agent_id, m.runtime_id
             );
         }

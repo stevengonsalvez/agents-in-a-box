@@ -12344,7 +12344,7 @@ mod tests {
         );
         assert_eq!(queue_len().await, 0, "a blocked fan-out writes NO task row");
 
-        // (b) OWNER (default `None` invoker) fans out — leader brief + one member.
+        // (b) OWNER (default `None` invoker) is ADMITTED and dispatches once.
         let owner_run = run_card(
             pool,
             &ws_id,
@@ -12359,8 +12359,15 @@ mod tests {
             DispatchSource::Manual,
         )
         .await;
-        assert!(owner_run.is_ok(), "the owner's squad run must fan out");
-        assert_eq!(queue_len().await, 2, "leader brief + one member task");
+        assert!(owner_run.is_ok(), "the owner's squad run must be admitted");
+        // This test pins the GATE, not the dispatch width. Under the pull
+        // pipeline an admitted squad run yields ONE owner, never one task per
+        // member; it asserted 2 while the broadcast existed.
+        assert_eq!(
+            queue_len().await,
+            1,
+            "an admitted squad run is exactly one task"
+        );
     }
 
     /// Pattern-B handover regression: the create-wizard fires ONE `issue_update`

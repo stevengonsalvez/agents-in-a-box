@@ -486,19 +486,21 @@ async fn squad_assign_rpc_routes_a_task_to_the_leader_agent() {
     );
 }
 
-/// FAN-OUT THROUGH THE `hangar/squad_fanout` RPC (P7): assigning an issue to a
-/// squad briefs the LEADER *and* enqueues one task per distinct `agent` member,
-/// all on the SAME issue, each claimable in parallel on its own runtime.
+/// PULL, NOT BROADCAST, THROUGH THE `hangar/squad_fanout` RPC: assigning an issue
+/// to a squad yields exactly ONE run, whatever the member count.
 ///
 /// The squad's leader is `agent-2` (runtime-2); its members are `agent-3`
-/// (runtime-3), `agent-4` (runtime-4), plus the human `member:user-1` (which must
-/// NOT fan out). The test drives the product RPC naming only the squad + issue;
-/// the daemon resolves the leader + members server-side. It then proves each of
-/// the three agent runtimes claims its own task on `issue-2` via the real
-/// `ClaimTaskService` — three pending tasks coexisting on one issue, the
-/// per-(issue, agent) guard (migration 0012) at work.
+/// (runtime-3), `agent-4` (runtime-4), plus the human `member:user-1`. The test
+/// drives the product RPC naming only the squad + issue.
+///
+/// This previously asserted the OPPOSITE, that all three agent runtimes claimed
+/// their own task on `issue-2` in parallel, and it is inverted here
+/// deliberately: three agents holding a task on one issue meant three worktrees
+/// doing the same work and racing each other, which is the reported defect. The
+/// per-(issue, agent) guard still PERMITS that shape; nothing now produces it
+/// except an explicit `--redundant` fan-out.
 #[tokio::test]
-async fn squad_fanout_rpc_briefs_leader_and_fans_members_claimable_in_parallel() {
+async fn squad_fanout_rpc_yields_one_owner_never_one_task_per_member() {
     let dir = tempfile::tempdir().unwrap();
     let (socket_path, store) = start_server(dir.path()).await;
     // Leader + two member agents, each on its own runtime.
@@ -539,41 +541,36 @@ async fn squad_fanout_rpc_briefs_leader_and_fans_members_claimable_in_parallel()
         "the leader gets the brief: {fanned}"
     );
     let members = fanned["result"]["members"].as_array().unwrap();
-    assert_eq!(
-        members.len(),
-        2,
-        "two agent members fanned out (human skipped): {fanned}"
-    );
-    let member_agents: Vec<&str> =
-        members.iter().map(|m| m["agent_id"].as_str().unwrap()).collect();
     assert!(
-        member_agents.contains(&"agent-3"),
-        "agent-3 fanned: {fanned}"
-    );
-    assert!(
-        member_agents.contains(&"agent-4"),
-        "agent-4 fanned: {fanned}"
+        members.is_empty(),
+        "a squad of N members must not fan out to N tasks: {fanned}"
     );
 
-    // PARALLEL CLAIM: every runtime claims its own task on issue-2 at once.
-    let clock = FixedClock(10_000);
-    for (runtime, agent) in [
-        ("runtime-2", "agent-2"),
-        ("runtime-3", "agent-3"),
-        ("runtime-4", "agent-4"),
-    ] {
-        let claimed = ClaimTaskService::claim_for_runtime(pool, runtime, &clock)
+    let rows: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = 'issue-2'")
+            .fetch_one(pool)
             .await
-            .unwrap()
-            .unwrap_or_else(|| panic!("{runtime} claims its squad task"));
-        assert_eq!(
-            claimed.agent_id, agent,
-            "{runtime} claimed the wrong agent's task"
-        );
-        assert_eq!(
-            claimed.issue_id.as_deref(),
-            Some("issue-2"),
-            "the fanned-out task is on issue-2"
+            .unwrap();
+    assert_eq!(rows, 1, "exactly one task row exists on the issue");
+
+    // Only the OWNER's runtime has anything to claim. The member runtimes find
+    // nothing, which is what stops three agents provisioning three worktrees for
+    // one card.
+    let clock = FixedClock(10_000);
+    let claimed = ClaimTaskService::claim_for_runtime(pool, "runtime-2", &clock)
+        .await
+        .unwrap()
+        .expect("the owner's runtime claims the one task");
+    assert_eq!(claimed.agent_id, "agent-2");
+    assert_eq!(claimed.issue_id.as_deref(), Some("issue-2"));
+
+    for runtime in ["runtime-3", "runtime-4"] {
+        assert!(
+            ClaimTaskService::claim_for_runtime(pool, runtime, &clock)
+                .await
+                .unwrap()
+                .is_none(),
+            "member runtime {runtime} must have nothing to claim"
         );
     }
 }

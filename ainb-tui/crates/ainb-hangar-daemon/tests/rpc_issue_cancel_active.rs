@@ -300,3 +300,102 @@ async fn cancel_active_rejects_unknown_workspace() {
             .unwrap();
     assert_eq!(status, "running", "rejected cancel left the run running");
 }
+
+/// EVERY active sibling on one issue is cancelled, not just the newest.
+///
+/// The cancel path used to resolve a SINGLE task (`LIMIT 1`), so with several
+/// concurrent runs on one card it cancelled the newest and left the rest burning
+/// tokens, which later re-moved the "cancelled" card.
+///
+/// This property was previously proven end-to-end by
+/// `tripwire_tcp_squad_card_fanout_e2e`, whose three live siblings came from the
+/// squad BROADCAST. A squad card now carries ONE run, so that tripwire can no
+/// longer build the case, and the coverage is re-homed here rather than being
+/// allowed to evaporate along with the defect. Several concurrent runs on one
+/// card are still reachable deliberately, via `--redundant N`.
+#[tokio::test]
+async fn cancel_active_cancels_every_sibling_not_just_the_newest() {
+    let dir = tempfile::tempdir().unwrap();
+    let (socket_path, store) = start_server(dir.path()).await;
+
+    // Three concurrent runs on ONE issue, in the three states the cancel must
+    // sweep, seeded oldest-first so a LIMIT 1 resolver would take `t-newest`.
+    //
+    // Each sits on its OWN agent, which is both the real `--redundant` shape and
+    // a hard requirement: `idx_one_pending_task_per_issue_agent` (migration 0012)
+    // forbids two PENDING rows per (issue, agent), so seeding all three on one
+    // agent trips a UNIQUE violation rather than building the case.
+    let (runtime_id, base_agent): (String, String) =
+        sqlx::query_as("SELECT a.runtime_id, a.id FROM agent a WHERE a.workspace_id = ? LIMIT 1")
+            .bind(WS_ID)
+            .fetch_one(store.pool())
+            .await
+            .unwrap();
+    for (task_id, agent_suffix, status) in [
+        ("t-oldest", "sib-a", "running"),
+        ("t-middle", "sib-b", "dispatched"),
+        ("t-newest", "sib-c", "queued"),
+    ] {
+        let agent_id = format!("{base_agent}-{agent_suffix}");
+        sqlx::query(
+            "INSERT INTO agent (id, workspace_id, name, runtime_id, visibility, owner_id) \
+             SELECT ?1, workspace_id, ?1, runtime_id, visibility, owner_id \
+               FROM agent WHERE id = ?2",
+        )
+        .bind(&agent_id)
+        .bind(&base_agent)
+        .execute(store.pool())
+        .await
+        .unwrap();
+        sqlx::query(
+            "INSERT INTO agent_task_queue \
+             (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, run_group) \
+             VALUES (?1, ?2, ?3, ?4, 'issue-2', ?5, 0, 'rg-1')",
+        )
+        .bind(task_id)
+        .bind(WS_ID)
+        .bind(&runtime_id)
+        .bind(&agent_id)
+        .bind(status)
+        .execute(store.pool())
+        .await
+        .unwrap();
+    }
+
+    let mut c = Client::connect(&socket_path).await;
+    c.auth_from_file(dir.path()).await;
+
+    let cancelled = c
+        .call(
+            methods::HANGAR_ISSUE_CANCEL_ACTIVE,
+            serde_json::json!({ "workspace_id": WS_SLUG, "issue_id": "issue-2" }),
+        )
+        .await;
+    assert!(
+        cancelled["error"].is_null(),
+        "cancel_active must ack: {cancelled}"
+    );
+
+    let states: Vec<(String, String)> = sqlx::query_as(
+        "SELECT id, status FROM agent_task_queue WHERE issue_id = 'issue-2' ORDER BY id",
+    )
+    .fetch_all(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(states.len(), 3, "all three rows survive as rows");
+    for (id, status) in &states {
+        assert_eq!(
+            status, "cancelled",
+            "sibling {id} must be cancelled, not left active: {states:?}"
+        );
+    }
+
+    let still_active: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*) FROM agent_task_queue \
+          WHERE issue_id = 'issue-2' AND status IN ('queued','dispatched','running')",
+    )
+    .fetch_one(store.pool())
+    .await
+    .unwrap();
+    assert_eq!(still_active, 0, "no sibling may be left burning tokens");
+}
