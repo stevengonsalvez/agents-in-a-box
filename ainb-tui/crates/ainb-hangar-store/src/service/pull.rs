@@ -237,7 +237,7 @@ impl PullService {
 /// ONE statement, no transaction, for the reason
 /// [`BoardRepo::auto_move_on_state`](crate::repo::board::BoardRepo::auto_move_on_state)
 /// documents at length: a SELECT-then-UPDATE takes a read snapshot and then
-/// upgrades it to a write, which SQLite fails with `SQLITE_BUSY_SNAPSHOT` (517)
+/// upgrades it to a write, which `SQLite` fails with `SQLITE_BUSY_SNAPSHOT` (517)
 /// whenever another daemon writer commits in that window, and `busy_timeout`
 /// does NOT cover a stale snapshot. A bare UPDATE takes the write lock
 /// immediately and has no snapshot to invalidate, so the card cannot silently

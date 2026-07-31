@@ -1291,7 +1291,7 @@ mod tests {
     /// left `private` is not invocable by the assignment's effective invoker (here
     /// the workspace owner), so the whole fan-out is refused and NO task row is
     /// written — not the leader's, not the allowed member's. Allow-listing the
-    /// invoker on that agent (public_to + a `member` target) then lets the very same
+    /// invoker on that agent (`public_to` + a `member` target) then lets the very same
     /// call through, proving the gate is a real decision and not blanket denial.
     #[tokio::test]
     async fn fanout_refuses_a_private_member_agent_and_writes_no_row() {
