@@ -288,18 +288,32 @@ RETURNING board_id, column_id";
 ///
 /// `?1` = new task id, `?2` = `created_at` (now), `?3` = `runtime_id`.
 ///
-/// `agent_kind` is derived from the PULLING AGENT'S RUNTIME provider, not from
-/// the card. Under pull the agent is chosen per stage, so the provider CLI that
-/// runs the stage must be the chosen agent's own: a codex reviewer has to invoke
-/// `codex`, even when the card was created with `agent_kind = 'claude'`. An
-/// unrecognised provider falls back to the card's own kind, then to `claude`, so
-/// a runtime advertising something exotic still dispatches rather than tripping
-/// the NOT NULL.
+/// `agent_kind` is derived from the PULLING AGENT, not from the card. Under pull
+/// the agent is chosen per stage, so the provider CLI that runs the stage must be
+/// the chosen agent's own: a codex reviewer has to invoke `codex`, even when the
+/// card was created with `agent_kind = 'claude'`.
+///
+/// `agent.provider` is the authority, NOT `agent_runtime.provider`. A runtime is
+/// a DAEMON, not a provider binding: `ainb hangar agent create --provider codex`
+/// records `codex` on the agent and still binds it to the single `default`
+/// runtime, whose own `provider` column reads `claude` for every install. Keying
+/// on the runtime therefore silently ran every agent as claude. The runtime is
+/// kept only as a fallback for an agent row with no provider recorded, then the
+/// card's own kind, then `claude`, so an unrecognised value still dispatches
+/// rather than tripping the NOT NULL.
 ///
 /// `generation` is `MAX(existing) + 1`: each STAGE is its own run generation, so
 /// the card-state folds (aggregate, blocker-finished, auto-move) that scope to an
 /// issue's latest generation see the current stage alone and are not confused by
 /// the previous stage's `done` row.
+///
+/// `parent_task_id` chains each stage to the one before it: the most recent
+/// `done` task on the card. This is the HANDOFF CHAIN, and it is what lets an
+/// operator (or an assertion) walk a card's history stage by stage and see who
+/// handed what to whom. The column already existed for infra retries, whose
+/// chain is parent-to-child within one stage; a pipeline chain is the same edge
+/// read across stages, so nothing new is introduced. The first stage of a card
+/// has no `done` predecessor and correctly chains to NULL.
 ///
 /// # Why this is `pub`
 ///
@@ -313,7 +327,7 @@ RETURNING board_id, column_id";
 pub const PULL_SQL: &str = "\
 INSERT INTO agent_task_queue \
     (id, workspace_id, runtime_id, agent_id, issue_id, status, created_at, \
-     priority, generation, agent_kind, repo_ref, squad_id) \
+     priority, generation, agent_kind, repo_ref, squad_id, parent_task_id) \
 SELECT ?1, \
        bd.workspace_id, \
        a.runtime_id, \
@@ -325,12 +339,17 @@ SELECT ?1, \
        (SELECT COALESCE(MAX(g.generation), 0) + 1 FROM agent_task_queue AS g \
          WHERE g.issue_id = bc.issue_id), \
        COALESCE( \
+         NULLIF(CASE WHEN a.provider IN ('claude','codex','copilot') \
+                     THEN a.provider END, ''), \
          (SELECT rt.provider FROM agent_runtime AS rt \
            WHERE rt.id = a.runtime_id \
              AND rt.provider IN ('claude','codex','copilot')), \
          i.agent_kind, 'claude'), \
        i.repo_ref, \
-       i.squad_id \
+       i.squad_id, \
+       (SELECT p.id FROM agent_task_queue AS p \
+         WHERE p.issue_id = bc.issue_id AND p.status = 'done' \
+         ORDER BY p.generation DESC, p.finished_at DESC, p.id DESC LIMIT 1) \
   FROM board_card AS bc \
   JOIN board_column AS col ON col.id = bc.column_id \
   JOIN board AS bd ON bd.id = bc.board_id \

@@ -688,7 +688,11 @@ async fn pulled_row_carries_the_agents_provider_and_a_fresh_generation() {
     .await
     .expect("codex runtime");
     add_agent(pool, "ag-rev", "reviewer", 5).await;
-    sqlx::query("UPDATE agent SET runtime_id='rt-codex' WHERE id='ag-rev'")
+    // `agent.provider` is the authority, not the runtime's. A runtime is a
+    // DAEMON: `agent create --provider codex` records codex on the AGENT and
+    // still binds it to the single `default` runtime, whose provider column
+    // reads `claude` on every install.
+    sqlx::query("UPDATE agent SET runtime_id='rt-codex', provider='codex' WHERE id='ag-rev'")
         .execute(pool)
         .await
         .expect("repoint agent at codex");
@@ -715,6 +719,42 @@ async fn pulled_row_carries_the_agents_provider_and_a_fresh_generation() {
             .expect("read the pulled row");
     assert_eq!(kind, "codex", "the run uses the PULLING agent's provider");
     assert_eq!(created, NOW_MS);
+}
+
+/// REGRESSION: the run's provider comes from `agent.provider`, NOT from the
+/// runtime's.
+///
+/// A runtime is a DAEMON, not a provider binding. `ainb hangar agent create
+/// --provider codex` records `codex` on the AGENT and still binds it to the one
+/// `default` runtime, whose own `provider` column reads `claude` on every
+/// install. Keying the pulled row on the runtime therefore dispatched EVERY
+/// agent as claude while the roster looked correctly mixed, which is exactly
+/// what the first live pipeline run surfaced.
+#[tokio::test]
+async fn agent_provider_beats_the_runtime_provider() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_world(pool).await;
+    add_agent(pool, "ag-rev", "reviewer", 5).await;
+    // The shipped shape: a codex agent on the shared `default` runtime, which
+    // advertises `claude`.
+    sqlx::query("UPDATE agent SET provider='codex' WHERE id='ag-rev'")
+        .execute(pool)
+        .await
+        .expect("mark the agent codex");
+    add_column(pool, "col-rev", 2, Some("reviewer"), None, false).await;
+    add_card(pool, "i-1", "col-rev", 0).await;
+
+    let got = pull(pool, "t-1").await.expect("reviewer pulls");
+    assert_eq!(got.runtime_id, "rt-1", "still the shared default runtime");
+    let kind: String = sqlx::query_scalar("SELECT agent_kind FROM agent_task_queue WHERE id='t-1'")
+        .fetch_one(pool)
+        .await
+        .expect("read agent_kind");
+    assert_eq!(
+        kind, "codex",
+        "the run must invoke the AGENT's provider, even though its runtime says claude"
+    );
 }
 
 // ---------------------------------------------------------------------------
