@@ -30,11 +30,16 @@ impl ProcessTable {
     /// caller treats that as "discovery unavailable" and leaves durable state
     /// untouched, rather than concluding that no pane holds an agent.
     pub async fn snapshot() -> Result<Self> {
+        // `-ww` forces unlimited column width. macOS inherits the BSD habit of
+        // truncating to the detected terminal width even when stdout is a pipe,
+        // and `comm` is the LAST column — a truncated full path loses exactly the
+        // basename the agent match depends on, so a real agent pane would look
+        // agentless. Repeating `w` is understood by both BSD and procps.
         let output = Command::new("ps")
-            .args(["-axo", "pid=,ppid=,comm="])
+            .args(["-axww", "-o", "pid=,ppid=,comm="])
             .output()
             .await
-            .context("failed to invoke `ps -axo pid=,ppid=,comm=`")?;
+            .context("failed to invoke `ps -axww -o pid=,ppid=,comm=`")?;
 
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
