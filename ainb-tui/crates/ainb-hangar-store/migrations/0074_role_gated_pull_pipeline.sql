@@ -1,5 +1,24 @@
 -- Hangar v1 schema, migration 0074: role-gated pull pipeline.
 --
+-- # THIS REVERSES DECISION D3 (migration 0053)
+--
+-- 0053 recorded, as "DEVIATION (D3)", that `squad_member.role` does NOT gate
+-- dispatch: that `SquadRepo::member_agent_ids` stays role-blind, that every agent
+-- member is dispatched to regardless of role, and that selective routing was
+-- deferred to parity item #16. This migration reverses that deliberately.
+--
+-- Role-blind dispatch WAS the reported defect. Issue 01KY7SHDMWVMHE218DV5TQRN3R
+-- produced four runs, three of them within two seconds on the assignee plus both
+-- members of squad `team1`, each provisioning its own worktree for the same work.
+-- `services_role` below is the gate that makes `role` finally mean something at
+-- the dispatch seam.
+--
+-- 0053's own file cannot be corrected to say this: an applied migration's text is
+-- frozen (`sqlx` checksums the full file, and editing one aborts boot with
+-- "previously applied but has been modified"). The reversal is therefore recorded
+-- in `src/lib.rs` alongside the other applied-migration corrections, and in the
+-- `SquadRepo::member_agent_ids` doc comment.
+--
 -- Turns board columns into PULL QUEUES. Before this migration a squad dispatch
 -- BROADCASTS: `SquadAssignService::assign_fanout` writes the leader brief plus one
 -- `agent_task_queue` row per distinct agent member, so one issue becomes N

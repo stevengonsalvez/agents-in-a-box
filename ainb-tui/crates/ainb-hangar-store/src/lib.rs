@@ -28,6 +28,28 @@
 //! here (or in the owning repo module) instead. Only brand-new migrations are
 //! editable, and only until they ship.
 //!
+//! ## D3 (migration 0053) is REVERSED by migration 0074
+//!
+//! `0053_squad_role_instructions.sql` states, as "DEVIATION (D3)", that
+//! `squad_member.role` does NOT gate dispatch: that `SquadRepo::member_agent_ids`
+//! stays role-blind, that every agent member is dispatched to regardless of role,
+//! and that selective routing is deferred to parity item #16.
+//!
+//! **That is no longer true, and 0053's file cannot say so** (an applied
+//! migration's text is frozen, see above). Dispatch IS role-gated as of migration
+//! `0074_role_gated_pull_pipeline`: `role` is matched against
+//! `board_column.services_role` in
+//! [`service::pull::PullService`], and
+//! [`service::squad_assign::SquadAssignService::assign_fanout`] no longer emits
+//! one task per member at all. The old broadcast was the reported defect, not a
+//! feature: one issue became N simultaneous runs, each in its own worktree, all
+//! doing the same work.
+//!
+//! `member_agent_ids` itself is still role-blind, deliberately. It answers the
+//! narrower question "which agents are in this squad", which is what the leader
+//! briefing and the explicit `--redundant N` fan-out want. Role SELECTION lives
+//! in the pull predicate.
+//!
 //! ## Foreign keys ARE enforced
 //!
 //! Several applied migration comments (0009/0010/0016/0017/0018/0027/0036) claim
