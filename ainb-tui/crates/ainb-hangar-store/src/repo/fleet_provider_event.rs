@@ -1,4 +1,28 @@
 //! Durable raw provider-event ledger for Fleet projections.
+//!
+//! ## RETENTION: none. This ledger is never trimmed.
+//!
+//! Like `activity_log` (0059) and unlike `dispatch_attempt` (0058, bounded to
+//! 20/issue), this table keeps every row forever, on purpose.
+//!
+//! `raw_payload` is the verbatim provider envelope, and the whole point of
+//! keeping it is that a FUTURE reducer can replay history and re-derive Fleet
+//! state that today's reducer does not extract. Trimming would silently destroy
+//! exactly the rows that make a re-reduction possible, and it would do so
+//! oldest-first — discarding the beginning of every session's story.
+//!
+//! The growth case does not justify that risk. Measured on a heavy real profile
+//! (15-20 concurrent agent sessions): roughly 21 rows per 2 days at a ~344 byte
+//! mean `raw_payload`, i.e. on the order of 1.3 MB per YEAR, against a whole
+//! hangar database of ~4 MB. There is no horizon on which this is the thing that
+//! fills a disk.
+//!
+//! If unbounded growth ever does bite, the fix is an explicit operator-invoked
+//! export-then-delete, NOT an automatic sweep, and it must never remove a row
+//! with `projection_revision IS NULL` — that marks pending recovery work which
+//! the Codex manager replays on startup, not garbage.
+//!
+//! Revisit trigger: this table exceeding ~1M rows or ~100 MB on a real profile.
 
 use blake3::Hasher;
 use sqlx::{Row, SqlitePool};
