@@ -448,11 +448,22 @@ impl AttentionIngest {
                 "hook event log has no parent",
             ));
         };
-        std::fs::read_to_string(
+        let sidecar = std::fs::read_to_string(
             home.join("hangar")
                 .join("provider-events")
                 .join(format!("{}.json", line.raw_payload_ref)),
-        )
+        )?;
+        // An empty sidecar is a torn / never-filled write, not a payload. Report
+        // it as absent so the caller falls back to the durable inline envelope —
+        // storing "" would record it as the EXACT source payload and lose the
+        // real one silently.
+        if sidecar.is_empty() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::NotFound,
+                "empty raw payload sidecar",
+            ));
+        }
+        Ok(sidecar)
     }
 
     /// Close any OPEN ASK rows a session still carries once a later hook shows it
@@ -869,6 +880,40 @@ mod tests {
             .unwrap()
             .expect("source envelope must persist");
         assert_eq!(source.raw_payload, raw_payload);
+        assert!(source.projection_revision.is_some());
+    }
+
+    #[tokio::test]
+    async fn empty_sidecar_falls_back_to_inline_envelope_payload() {
+        // A 0-byte sidecar is a torn / never-filled write. It must NOT be stored
+        // as the exact source payload — the durable inline envelope wins, exactly
+        // as it does when the sidecar file is missing outright.
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open_in(dir.path()).await.unwrap();
+        let events_jsonl = dir.path().join("events.jsonl");
+        let cursor = dir.path().join("attention_ingest.offset");
+        let event_id = "source-sidecar-empty";
+        let payload_dir = dir.path().join("hangar").join("provider-events");
+        std::fs::create_dir_all(&payload_dir).unwrap();
+        std::fs::write(payload_dir.join(format!("{event_id}.json")), "").unwrap();
+        std::fs::write(
+            &events_jsonl,
+            format!(
+                r#"{{"agent":"claude","cwd":"/w","event_id":"{event_id}","event_type":"SessionStart","matcher":null,"raw_payload_ref":"{event_id}","session_id":"sid-empty","transcript_path":null,"ts":1700000000000,"payload":{{"inline":"kept"}}}}"#,
+            ) + "\n",
+        )
+        .unwrap();
+        let ingest = ingest_for(&store, &events_jsonl, &cursor);
+
+        assert_eq!(ingest.ingest_once(5_000).await, 0);
+        let source = FleetProviderEventRepo::get(store.pool(), event_id)
+            .await
+            .unwrap()
+            .expect("source envelope must persist");
+        assert_eq!(
+            source.raw_payload, r#"{"inline":"kept"}"#,
+            "an empty sidecar must not overwrite the inline envelope payload"
+        );
         assert!(source.projection_revision.is_some());
     }
 
