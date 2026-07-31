@@ -173,6 +173,7 @@ struct FleetWindowView: View {
         switch presentation.filters.provider {
         case .claude: "Claude"
         case .codex: "Codex"
+        case .copilot: "Copilot"
         case .unknown: "Unknown"
         case nil: "All providers"
         }

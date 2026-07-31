@@ -16,8 +16,10 @@ final class FleetWireForwardCompatibilityTests: XCTestCase {
     }
 
     func testUnknownProviderDecodesAsUnknownRatherThanThrowing() throws {
-        XCTAssertEqual(try decode(FleetProvider.self, "copilot"), .unknown)
+        XCTAssertEqual(try decode(FleetProvider.self, "gemini"), .unknown)
         XCTAssertEqual(try decode(FleetProvider.self, "claude"), .claude)
+        // copilot is a KNOWN provider now, so it must decode as itself.
+        XCTAssertEqual(try decode(FleetProvider.self, "copilot"), .copilot)
     }
 
     func testUnknownLifecycleDecodesAsUnknown() throws {
@@ -50,7 +52,7 @@ final class FleetWireForwardCompatibilityTests: XCTestCase {
     func testAnUnknownProviderDoesNotFailTheWholeSnapshot() throws {
         let json = """
         {"head_revision":7,"sessions":[
-          {"session_key":"legacy:copilot:pane","provider":"copilot","provider_session_id":null,
+          {"session_key":"legacy:gemini:pane","provider":"gemini","provider_session_id":null,
            "tmux_target":"demo:1.1","process_start_fingerprint":"pane=%1;pid=1;session_started=1",
            "cwd":"/repo","display_name":null,"lifecycle":"RUNNING","attention":"NONE",
            "current_request_fingerprint":null,"current_request":null,"management":"DEGRADED",
