@@ -199,18 +199,28 @@ fn manual_done_transition_auto_runs_dependent() {
     );
 }
 
-/// tcp T4 / FANOUT-SEMANTICS — a dependent waits for the blocker's WHOLE squad, not
-/// just its latest member.
+/// tcp T4 / FANOUT-SEMANTICS: a dependent waits until the blocker's active set has
+/// DRAINED with a success, proven against the REAL daemon.
 ///
-/// Blocker A is a SQUAD card (leader + two members → three tasks on one issue). The
-/// old logic keyed "A finished" on A's LATEST task, so B unblocked the instant the
-/// newest member finished while the leader / other member still ran. This proves the
-/// whole-set contract against the REAL daemon: transitioning A's NEWEST active task
-/// to `done` while OLDER siblings still run leaves B blocked (latest-wins would have
-/// unblocked it there); only when A's ENTIRE set has drained with a success does B
-/// become runnable and auto-run.
+/// # Why this no longer drives a multi-task blocker
+///
+/// Blocker A used to be a SQUAD card that BROADCAST into three tasks on one issue
+/// (leader + two members), and this test drained them one at a time to prove that
+/// finishing the newest was not enough. A squad dispatch now yields ONE owner, so
+/// that shape is no longer reachable here and the sibling-draining steps are
+/// DELETED rather than faked with hand-built rows.
+///
+/// The whole-set property itself is unchanged and is still pinned, on the shape
+/// that can still produce several concurrent runs on one card: the explicit
+/// `--redundant N` cluster, covered by
+/// `ainb-hangar-store/tests/squad_no_broadcast.rs`
+/// (`dependent_waits_for_the_whole_redundant_cluster_to_drain` and
+/// `a_cluster_that_drains_without_a_success_keeps_the_dependent_blocked`).
+///
+/// What remains here, and is genuinely end-to-end: B holds NO task while A has any
+/// active task, and B auto-runs only once A reaches `done`.
 #[test]
-fn dependent_waits_for_the_whole_squad_blocker() {
+fn dependent_waits_for_the_blocker_to_drain() {
     if daemon_bin().is_none() || !git_available() {
         skip("tcp_card_dependency_whole_squad_e2e");
         return;
@@ -220,8 +230,7 @@ fn dependent_waits_for_the_whole_squad_blocker() {
     let scale = budget_scale();
     let mut rpc = DaemonRpc::connect_and_auth(pipe.home());
 
-    // Fan A out; assign_fanout inserts all three tasks before the RPC returns, so A
-    // now carries three active tasks on one issue.
+    // Run the squad blocker A. Under the pull model this dispatches ONE owner.
     let run_a = rpc.call(
         ainb_hangar_proto::methods::HANGAR_BOARD_CARD_RUN,
         run_params(T4_DEP_BLOCKER_ISSUE),
@@ -232,18 +241,23 @@ fn dependent_waits_for_the_whole_squad_blocker() {
     );
     let member_count = run_a["result"]["member_task_ids"].as_array().map_or(0, Vec::len);
     assert_eq!(
-        member_count, 2,
-        "A must fan out to a leader + two members: {run_a}"
+        member_count, 0,
+        "a squad dispatch must not fan out to one task per member: {run_a}"
+    );
+    assert_eq!(
+        task_count_for_issue(pipe.home(), T4_DEP_BLOCKER_ISSUE),
+        1,
+        "A carries exactly ONE run"
     );
 
-    // B has no task — A's set has not drained.
+    // B has no task: A's set has not drained.
     assert_eq!(
         task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE),
         0,
         "B blocked while A runs"
     );
 
-    // Transition A's NEWEST active task to `done` while OLDER siblings still run.
+    // Drain A's active set.
     let newest = newest_active_task_for_issue(pipe.home(), T4_DEP_BLOCKER_ISSUE)
         .expect("A must have an active task to complete");
     let done = rpc.call(
@@ -256,20 +270,10 @@ fn dependent_waits_for_the_whole_squad_blocker() {
     );
     assert!(
         done["error"].is_null(),
-        "completing the newest member must ack: {done}"
+        "completing A's run must ack: {done}"
     );
 
-    // KEY DISCRIMINATOR: the newest member is done but older siblings still run — the
-    // old latest-wins logic would have unblocked B here. The whole-set contract must
-    // keep it blocked. The unblock hook fired synchronously inside the RPC above, so
-    // if B were going to gain a task it already would have.
-    assert_eq!(
-        task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE),
-        0,
-        "B must stay blocked while ANY squad member of A still runs (newest-done is not enough)"
-    );
-
-    // Drain the rest of A's set to `done`, newest-first, until nothing is active.
+    // Drain any residue (a retry child, say) so the active set is genuinely empty.
     while let Some(t) = newest_active_task_for_issue(pipe.home(), T4_DEP_BLOCKER_ISSUE) {
         let d = rpc.call(
             ainb_hangar_proto::methods::HANGAR_TASK_TRANSITION,
@@ -279,13 +283,10 @@ fn dependent_waits_for_the_whole_squad_blocker() {
                 "to_status": "done",
             }),
         );
-        assert!(
-            d["error"].is_null(),
-            "draining a squad member must ack: {d}"
-        );
+        assert!(d["error"].is_null(), "draining A must ack: {d}");
     }
 
-    // A's WHOLE set has now drained with a success → B becomes runnable and auto-runs.
+    // A's set has now drained with a success, so B becomes runnable and auto-runs.
     let autorun_deadline = Instant::now() + Duration::from_secs(45 * scale);
     let b_ran = poll_until(autorun_deadline, || {
         task_count_for_issue(pipe.home(), T4_DEP_DEPENDENT_ISSUE) >= 1
@@ -298,7 +299,7 @@ fn dependent_waits_for_the_whole_squad_blocker() {
 
     assert!(
         b_ran,
-        "B must auto-run only once A's ENTIRE squad set has drained with a done"
+        "B must auto-run only once A's active set has drained with a done"
     );
 }
 
