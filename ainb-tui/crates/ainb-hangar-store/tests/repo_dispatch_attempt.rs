@@ -131,6 +131,52 @@ async fn newest_first_and_queued_reads_as_dispatched() {
     assert_eq!(latest.id, "att-new");
 }
 
+/// Same-millisecond attempts still read back in insertion order.
+///
+/// `created_at` is epoch milliseconds and a burst of admission decisions for one
+/// card lands inside a single millisecond routinely. The old tie-break was
+/// `id DESC`, and `id` is a ULID whose low bits are RANDOM within a
+/// millisecond — so this ordering was decided by chance, which is what made
+/// `dispatch_attempts_list_is_newest_first_limited_and_tenant_scoped` fail on
+/// CI at random. The ids here are deliberately chosen so a lexical tie-break
+/// would disagree with insertion order.
+#[tokio::test]
+async fn attempts_in_one_millisecond_keep_insertion_order() {
+    let (_dir, store) = open().await;
+    const SAME_MS: i64 = 5_000;
+
+    // Insertion order is z, a, m. A ULID-style `id DESC` tie-break would return
+    // z, m, a; only a monotonic tie-break returns the true reverse insertion.
+    for id in ["att-z", "att-a", "att-m"] {
+        record(
+            &store,
+            id,
+            "ws-1",
+            Some("iss-1"),
+            DispatchReason::AlreadyActive,
+            None,
+            SAME_MS,
+        )
+        .await;
+    }
+
+    let rows = DispatchAttemptRepo::list_for_issue(store.pool(), "iss-1", 10)
+        .await
+        .expect("list");
+    let ids: Vec<&str> = rows.iter().map(|r| r.id.as_str()).collect();
+    assert_eq!(
+        ids,
+        ["att-m", "att-a", "att-z"],
+        "same-millisecond rows must read newest-inserted first"
+    );
+
+    let latest = DispatchAttemptRepo::latest_for_issue(store.pool(), "iss-1")
+        .await
+        .expect("query")
+        .expect("present");
+    assert_eq!(latest.id, "att-m", "latest must be the last one inserted");
+}
+
 /// Bounded by construction: 25 records leave exactly the newest 20, so a hot
 /// auto-run cascade cannot grow the table without bound (migration decision 3).
 #[tokio::test]
