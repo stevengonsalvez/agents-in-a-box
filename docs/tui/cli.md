@@ -2842,6 +2842,7 @@ Commands:
   property   Define and archive a workspace's custom issue properties
   comment    Post issue comments and preview their `@`-mention routing
   inbox      Read an actor's notification inbox
+  pipeline   Provision and inspect the role-gated pull pipeline
   help       Print this message or the help of the given subcommand(s)
 
 Options:
@@ -5383,6 +5384,58 @@ Options:
       --unread                 Show only UNREAD entries
       --limit <LIMIT>          How many entries to show, newest first [default: 50]
       --workspace <WORKSPACE>  Workspace slug. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+### `ainb hangar pipeline`
+
+Provision and inspect the role-gated pull pipeline
+
+```console
+$ ainb hangar pipeline --help
+Provision and inspect the role-gated pull pipeline
+
+Usage: ainb hangar pipeline [OPTIONS] <COMMAND>
+
+Commands:
+  init  Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+  show  Show each stage with its role gate, WIP limit and current card count
+  help  Print this message or the help of the given subcommand(s)
+
+Options:
+      --format <format>  Output format [default: text] [possible values: text, json, csv, markdown]
+  -h, --help             Print help
+```
+
+#### `ainb hangar pipeline init`
+
+Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+
+```console
+$ ainb hangar pipeline init --help
+Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board
+
+Usage: ainb hangar pipeline init [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to provision. Defaults to the bootstrapped `default` workspace
+  -h, --help                   Print help
+```
+
+#### `ainb hangar pipeline show`
+
+Show each stage with its role gate, WIP limit and current card count
+
+```console
+$ ainb hangar pipeline show --help
+Show each stage with its role gate, WIP limit and current card count
+
+Usage: ainb hangar pipeline show [OPTIONS]
+
+Options:
+      --format <format>        Output format [default: text] [possible values: text, json, csv, markdown]
+      --workspace <WORKSPACE>  Workspace slug to provision. Defaults to the bootstrapped `default` workspace
   -h, --help                   Print help
 ```
 
