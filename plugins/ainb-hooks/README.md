@@ -118,7 +118,7 @@ Copilot is not wired: its hook format has no Stop-with-decision contract.
 Run the self-check after editing it:
 
 ```bash
-python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 24 cases
+python3 plugins/ainb-hooks/hooks/stall_guard.py --self-test   # 28 cases
 ```
 
 ## Install
