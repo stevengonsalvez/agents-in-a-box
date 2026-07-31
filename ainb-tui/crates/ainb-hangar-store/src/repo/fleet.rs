@@ -668,7 +668,8 @@ impl FleetRepo {
                    'SubagentStop', 'StopFailure', 'SessionEnd', \
                    'codex_manager_unavailable', 'codex_manager_recovered', \
                    'codex_managed_tui_started', 'tmux_missing', 'tmux_unavailable', \
-                   'tmux_available', 'tmux_discovered', 'session_superseded' \
+                   'tmux_available', 'tmux_discovered', 'session_superseded', \
+                   'session_stale' \
                ) \
              ORDER BY e.revision ASC LIMIT ?",
         )
