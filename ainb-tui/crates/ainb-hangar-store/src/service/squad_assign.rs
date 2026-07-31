@@ -32,6 +32,7 @@ use sqlx::SqlitePool;
 use crate::repo::agent::AgentRepo;
 use crate::repo::squad::SquadRepo;
 use crate::repo::task::{NewTask, TaskRepo};
+use crate::service::pipeline::{PipelineError, PipelineService};
 
 /// The task knobs a squad assignment rides through to the enqueued row.
 ///
@@ -362,12 +363,55 @@ impl SquadAssignService {
             member_targets.push((agent_id, member.runtime_id));
         }
 
-        // 3. Every target is known-good — enqueue the leader brief and all member
-        //    tasks in ONE transaction so a mid-loop failure (e.g. a UNIQUE
-        //    `(issue, agent)` collision) rolls the whole fan-out back, honouring
-        //    the documented all-or-nothing contract.
+        // 3. PULL, NOT BROADCAST. `member_targets` has been resolved and gated
+        //    above (so a dangling / foreign / private member still rejects the
+        //    whole dispatch), but it is NOT dispatched to. Writing one task per
+        //    member is exactly the defect this replaces: it turned one issue into
+        //    N simultaneous runs of the same work in N worktrees.
+        //
+        //    When the workspace has a role-gated pipeline, the card is ENQUEUED
+        //    into its first stage and a single eligible agent then PULLS it. The
+        //    pull is attempted synchronously here so this call answers with the
+        //    task that actually owns the work; when no agent currently holds the
+        //    stage's role the card simply waits, visibly queued on the board, and
+        //    the next daemon tick picks it up.
+        if let Some(issue_id) = request.issue_id {
+            match PipelineService::enqueue(pool, workspace, issue_id, clock).await {
+                Ok(_) => {
+                    let pulled =
+                        Self::pull_once_in_workspace(pool, workspace, idgen, clock).await?;
+                    return Ok(SquadFanout {
+                        leader: SquadAssignment {
+                            // The single OWNER of the stage. Empty when the card is
+                            // enqueued but no agent holds the role yet, which is a
+                            // waiting card, not a failure.
+                            task_id: pulled.as_ref().map(|p| p.task_id.clone()).unwrap_or_default(),
+                            leader_agent_id: pulled
+                                .as_ref()
+                                .map_or_else(|| leader_agent_id.clone(), |p| p.agent_id.clone()),
+                            runtime_id: pulled.as_ref().map_or_else(
+                                || leader_runtime_id.clone(),
+                                |p| p.runtime_id.clone(),
+                            ),
+                        },
+                        // ALWAYS empty under pull. Kept on the wire so the plugin
+                        // and CLI keep deserialising, and so the shape still
+                        // describes a deliberate `--redundant` fan-out, which is
+                        // now the ONLY way to get more than one run on a card.
+                        members: Vec::new(),
+                    });
+                }
+                // No pipeline provisioned: fall through to the single leader
+                // brief below. Still ONE task, never one per member.
+                Err(PipelineError::NoPipeline) => {}
+                Err(PipelineError::Db(e)) => return Err(SquadAssignError::Db(e)),
+            }
+        }
+
+        // 3b. Fallback for a workspace with no role-gated pipeline (and for an
+        //     issueless ad-hoc dispatch): brief the LEADER, and only the leader.
         let leader_task_id = idgen.new_ulid();
-        let mut members = Vec::with_capacity(member_targets.len());
+        let members = Vec::new();
 
         let mut tx = pool.begin().await?;
         TaskRepo::insert_in_tx(
@@ -392,32 +436,10 @@ impl SquadAssignService {
         // stamped even for the no-repo squads-screen fan-out, where
         // `stamp_dispatch_fields` early-returns on a NULL `repo_ref`.
         TaskRepo::set_squad_id_in_tx(&mut tx, &leader_task_id, squad_id).await?;
-        for (agent_id, runtime_id) in member_targets {
-            let task_id = idgen.new_ulid();
-            TaskRepo::insert_in_tx(
-                &mut tx,
-                &NewTask {
-                    id: task_id.clone(),
-                    workspace_id: workspace.as_str().to_string(),
-                    runtime_id: runtime_id.clone(),
-                    agent_id: agent_id.clone(),
-                    issue_id: request.issue_id.map(str::to_string),
-                    work_dir: request.work_dir.map(str::to_string),
-                    priority: request.priority,
-                    created_at: clock.now_ms(),
-                    autopilot_run_id: None,
-                    generation: request.generation,
-                },
-            )
-            .await?;
-            Self::stamp_dispatch_fields(&mut tx, &task_id, request).await?;
-            TaskRepo::set_squad_id_in_tx(&mut tx, &task_id, squad_id).await?;
-            members.push(SquadMemberDispatch {
-                task_id,
-                agent_id,
-                runtime_id,
-            });
-        }
+        // NO per-member loop. `member_targets` was resolved and gated so a bad
+        // member ref still rejects the dispatch, but a squad of N members now
+        // yields exactly ONE task here, never N.
+        drop(member_targets);
         tx.commit().await?;
 
         Ok(SquadFanout {
@@ -428,6 +450,38 @@ impl SquadAssignService {
             },
             members,
         })
+    }
+
+    /// Attempt ONE pull across every runtime in `workspace`, stopping at the
+    /// first that yields.
+    ///
+    /// Used by [`Self::assign_fanout`] so a squad dispatch answers with the task
+    /// that actually owns the work rather than merely "the card is on the board".
+    /// Iterating runtimes (rather than pulling per-runtime on a timer) is what
+    /// makes the dispatch synchronous from the operator's point of view; the
+    /// daemon's own tick still covers the case where no agent is eligible yet.
+    ///
+    /// At most ONE card is ever taken, whichever runtime wins.
+    async fn pull_once_in_workspace(
+        pool: &SqlitePool,
+        workspace: &WorkspaceId,
+        idgen: &dyn IdGen,
+        clock: &dyn HangarClock,
+    ) -> Result<Option<crate::service::pull::PulledCard>, sqlx::Error> {
+        let runtimes: Vec<String> =
+            sqlx::query_scalar("SELECT id FROM agent_runtime WHERE workspace_id = ?1 ORDER BY id")
+                .bind(workspace.as_str())
+                .fetch_all(pool)
+                .await?;
+        for runtime_id in runtimes {
+            if let Some(p) =
+                crate::service::pull::PullService::pull_for_runtime(pool, &runtime_id, idgen, clock)
+                    .await?
+            {
+                return Ok(Some(p));
+            }
+        }
+        Ok(None)
     }
 
     /// Stamp the card's `repo_ref` + resolved `agent_kind` onto a fanned-out task
@@ -738,13 +792,17 @@ mod tests {
         );
     }
 
-    /// FAN-OUT (P7): assigning an issue to a squad briefs the LEADER *and*
-    /// enqueues one task per distinct `agent` member — all on the SAME issue — and
-    /// every runtime (leader + each member) claims its own task in parallel. This
-    /// is the acceptance the per-(issue, agent) guard (migration `0012`) unlocks:
-    /// three agents each hold a pending task on one issue at once.
+    /// PULL, NOT BROADCAST: assigning an issue to a squad yields exactly ONE
+    /// task, whatever the member count.
+    ///
+    /// This test previously asserted the OPPOSITE, that the leader brief plus one
+    /// task per agent member were all claimable in parallel, and it is inverted
+    /// here deliberately. That contract is the reported defect: three agents each
+    /// holding a task on one issue meant three worktrees doing the same work and
+    /// racing each other. The per-(issue, agent) guard still permits that shape;
+    /// nothing now produces it except an explicit `--redundant` fan-out.
     #[tokio::test]
-    async fn assign_fanout_briefs_the_leader_and_fans_members_claimable_in_parallel() {
+    async fn assign_fanout_yields_one_owner_never_one_task_per_member() {
         let dir = tempfile::tempdir().unwrap();
         let store = Store::open_in(dir.path()).await.unwrap();
         let pool = store.pool();
@@ -785,21 +843,25 @@ mod tests {
         .await
         .unwrap();
 
-        // The leader gets the brief; both agent members fan out (the human does not).
+        // ONE owner. This workspace has no role-gated pipeline, so the fallback
+        // briefs the leader, and ONLY the leader.
         assert_eq!(fanout.leader.leader_agent_id, "a-lead");
         assert_eq!(fanout.leader.runtime_id, "rt-lead");
-        assert_eq!(
-            fanout.members.len(),
-            2,
-            "two agent members fanned out (human skipped)"
+        assert!(
+            fanout.members.is_empty(),
+            "a squad of N members must not fan out to N tasks"
         );
-        assert_eq!(fanout.members[0].agent_id, "a-m1");
-        assert_eq!(fanout.members[0].runtime_id, "rt-m1");
-        assert_eq!(fanout.members[1].agent_id, "a-m2");
-        assert_eq!(fanout.members[1].runtime_id, "rt-m2");
 
-        // PARALLEL CLAIM: every runtime claims its own task on the one issue — the
-        // per-(issue, agent) guard lets three pending tasks coexist on `issue-1`.
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = 'issue-1'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 1, "exactly one task row exists on the issue");
+
+        // Only the LEADER's runtime has anything to claim. The member runtimes
+        // find nothing, which is precisely the behaviour that stops three agents
+        // provisioning three worktrees for one card.
         let clock = FixedClock(10_000);
         let lead = ClaimTaskService::claim_for_runtime(pool, "rt-lead", &clock)
             .await
@@ -807,47 +869,28 @@ mod tests {
             .expect("leader claims the brief");
         assert_eq!(lead.agent_id, "a-lead");
         assert_eq!(lead.id, fanout.leader.task_id);
-
-        let m1 = ClaimTaskService::claim_for_runtime(pool, "rt-m1", &clock)
-            .await
-            .unwrap()
-            .expect("member 1 claims its task in parallel");
-        assert_eq!(m1.agent_id, "a-m1");
-        assert_eq!(m1.id, fanout.members[0].task_id);
-
-        let m2 = ClaimTaskService::claim_for_runtime(pool, "rt-m2", &clock)
-            .await
-            .unwrap()
-            .expect("member 2 claims its task in parallel");
-        assert_eq!(m2.agent_id, "a-m2");
-        assert_eq!(m2.id, fanout.members[1].task_id);
-
-        // All three tasks are distinct rows on the same issue.
         assert_eq!(lead.issue_id.as_deref(), Some("issue-1"));
-        assert_eq!(m1.issue_id.as_deref(), Some("issue-1"));
-        assert_eq!(m2.issue_id.as_deref(), Some("issue-1"));
 
-        // Every fanned-out task (leader + both members) carries the dispatching
-        // squad (migration 0045), so the daemon keys a briefing hook off each.
-        for id in [
-            &fanout.leader.task_id,
-            &fanout.members[0].task_id,
-            &fanout.members[1].task_id,
-        ] {
-            let row = TaskRepo::get_by_id(pool, id).await.unwrap().unwrap();
-            assert_eq!(
-                row.squad_id.as_deref(),
-                Some("s1"),
-                "fanned task {id} must carry squad_id"
+        for rt in ["rt-m1", "rt-m2"] {
+            assert!(
+                ClaimTaskService::claim_for_runtime(pool, rt, &clock).await.unwrap().is_none(),
+                "member runtime {rt} must have nothing to claim"
             );
         }
+
+        // The one task still carries the dispatching squad (migration 0045), so
+        // the daemon's briefing hook is unaffected by the change.
+        let row = TaskRepo::get_by_id(pool, &fanout.leader.task_id).await.unwrap().unwrap();
+        assert_eq!(row.squad_id.as_deref(), Some("s1"));
     }
 
-    /// FAN-OUT stamps the card's repo + agent-kind onto EVERY fanned task (leader
-    /// + members), so each provisions its OWN worktree from the card's repo (tcp
-    /// T4 / F7). The pre-T4 no-repo fan-out leaves them NULL (runs in-tree).
+    /// The dispatch stamps the card's repo + agent-kind onto the ONE task it
+    /// writes, so that run provisions its own worktree from the card's repo (tcp
+    /// T4 / F7). A no-repo dispatch leaves them NULL (runs in-tree).
+    ///
+    /// Previously asserted over "every fanned task"; there is now exactly one.
     #[tokio::test]
-    async fn assign_fanout_stamps_the_card_repo_on_every_task() {
+    async fn assign_fanout_stamps_the_card_repo_on_the_single_task() {
         use crate::repo::card_parity::CardParityRepo;
         use ainb_hangar_core::agent_kind::AgentKind;
 
@@ -883,20 +926,18 @@ mod tests {
         .await
         .unwrap();
 
-        // Both the leader brief and the member task carry the card's repo + kind,
-        // so each provisions its own worktree from `/repos/app`.
-        for id in [&fanout.leader.task_id, &fanout.members[0].task_id] {
-            assert_eq!(
-                CardParityRepo::get_task_repo_agent(pool, id).await.unwrap(),
-                Some((Some("/repos/app".to_string()), AgentKind::Codex)),
-                "fanned task {id} must carry the card repo + agent-kind"
-            );
-        }
+        assert!(fanout.members.is_empty(), "no member fan-out");
+        assert_eq!(
+            CardParityRepo::get_task_repo_agent(pool, &fanout.leader.task_id).await.unwrap(),
+            Some((Some("/repos/app".to_string()), AgentKind::Codex)),
+            "the single dispatched task must carry the card repo + agent-kind"
+        );
     }
 
-    /// FAN-OUT dedupe: a squad whose LEADER is also listed as a member does not
-    /// double-dispatch — the leader's agent appears only as the brief, never again
-    /// as a fanned-out member (which would collide on the `(issue, agent)` guard).
+    /// A squad whose LEADER is also listed as a member is dispatched ONCE. Under
+    /// broadcast this needed an explicit dedupe to avoid colliding on the
+    /// `(issue, agent)` guard; under pull there is simply nothing to dedupe,
+    /// which is asserted here so a reintroduced fan-out cannot slip through.
     #[tokio::test]
     async fn assign_fanout_never_double_dispatches_the_leader() {
         let dir = tempfile::tempdir().unwrap();
@@ -934,12 +975,13 @@ mod tests {
         .unwrap();
 
         assert_eq!(fanout.leader.leader_agent_id, "a-lead");
-        assert_eq!(
-            fanout.members.len(),
-            1,
-            "only the non-leader member fans out; the leader is not re-dispatched"
-        );
-        assert_eq!(fanout.members[0].agent_id, "a-m1");
+        assert!(fanout.members.is_empty(), "nothing fans out under pull");
+        let rows: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = 'issue-1'")
+                .fetch_one(pool)
+                .await
+                .unwrap();
+        assert_eq!(rows, 1, "the leader is dispatched exactly once");
     }
 
     /// FAN-OUT is all-or-nothing: a dangling member ref rejects the WHOLE fan-out,
@@ -1218,8 +1260,11 @@ mod tests {
         )
         .await
         .expect("an allow-listed member unblocks the fan-out");
-        assert_eq!(fanout.members.len(), 2, "both members fanned out");
-        assert_eq!(queue_len(pool).await, 3, "leader brief + two member tasks");
+        // The GATE is what this test pins, not the fan-out width: once every
+        // member is invocable the dispatch is admitted, and it now writes ONE
+        // task rather than one per member.
+        assert!(fanout.members.is_empty(), "no member fan-out under pull");
+        assert_eq!(queue_len(pool).await, 1, "an admitted dispatch is one task");
     }
 
     /// gap #8 — FAN-OUT LEADER GATE (the direct port of multica's
@@ -1294,7 +1339,7 @@ mod tests {
         )
         .await
         .expect("the owner always fans out");
-        assert_eq!(queue_len(pool).await, 2, "leader brief + one member task");
+        assert_eq!(queue_len(pool).await, 1, "an admitted dispatch is one task");
     }
 
     /// gap #8 — the LEADER-ONLY assign shares the same gate: a plain member cannot

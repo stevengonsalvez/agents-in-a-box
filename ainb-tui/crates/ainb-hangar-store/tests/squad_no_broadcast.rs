@@ -1,0 +1,295 @@
+//! REGRESSION: dispatching an issue to a squad must produce exactly ONE run,
+//! never one per member (goal success criterion 2).
+//!
+//! # The defect this pins
+//!
+//! Issue `01KY7SHDMWVMHE218DV5TQRN3R` in the operator's live database produced
+//! FOUR runs. Three of them landed within two seconds of each other, on agents
+//! `claude`, `test` and `devops`, which is the issue's assignee plus BOTH members
+//! of squad `team1`. `SquadAssignService::assign_fanout` wrote the leader brief
+//! plus one task per distinct `agent` member, each stamped with the card's repo
+//! so each provisioned its OWN worktree: one issue, N agents, N worktrees, all
+//! doing the same work and racing each other to the same branch.
+//!
+//! The fix is not a smaller fan-out, it is a different model: the card in a
+//! role-gated column IS the queue, and exactly one eligible agent pulls it.
+//!
+//! # These tests fail against the pre-change code
+//!
+//! `three_member_squad_yields_exactly_one_run` asserts `COUNT(*) == 1`. The old
+//! code wrote 1 leader + 3 members = 4, so it fails with `4 != 1`.
+//! `broadcast_is_gone_even_without_a_pipeline` asserts the same for a workspace
+//! with no pipeline provisioned, where the old code wrote 1 + 3 = 4 as well.
+
+use ainb_hangar_core::clock::FixedClock;
+use ainb_hangar_core::idgen::SystemIdGen;
+use ainb_hangar_core::ids::WorkspaceId;
+use ainb_hangar_store::Store;
+use ainb_hangar_store::service::pipeline::PipelineService;
+use ainb_hangar_store::service::squad_assign::{SquadAssignRequest, SquadAssignService};
+use sqlx::SqlitePool;
+
+const NOW_MS: i64 = 1_700_000_500_000;
+
+fn ws() -> WorkspaceId {
+    WorkspaceId::from_str("ws-1".to_string()).expect("workspace id")
+}
+
+/// A workspace with a squad whose leader is `ag-lead` and which has THREE agent
+/// members holding pipeline roles. Under the old code this is a 4-way broadcast.
+async fn seed_squad_of_three(pool: &SqlitePool) {
+    sqlx::query("INSERT INTO workspace (id, slug, name, created_at) VALUES ('ws-1','a','A',0)")
+        .execute(pool)
+        .await
+        .expect("workspace");
+    sqlx::query("INSERT INTO user (id, email, created_at) VALUES ('u-1','a@x.dev',0)")
+        .execute(pool)
+        .await
+        .expect("user");
+    // The gap #8 invocation gate defaults the invoker to the workspace OWNER, so
+    // the dispatch is refused outright without this membership.
+    sqlx::query("INSERT INTO member (workspace_id, user_id, role) VALUES ('ws-1','u-1','owner')")
+        .execute(pool)
+        .await
+        .expect("owner membership");
+    sqlx::query(
+        "INSERT INTO agent_runtime (id, workspace_id, daemon_id, provider, runtime_mode) \
+         VALUES ('rt-1','ws-1','d-1','claude','local')",
+    )
+    .execute(pool)
+    .await
+    .expect("runtime");
+    // The squad row must precede its members: `squad_member.squad_id` is an FK.
+    sqlx::query(
+        "INSERT INTO squad (id, workspace_id, name, leader_type, leader_id, created_at) \
+         VALUES ('sq-1','ws-1','team1','agent','ag-lead',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("squad");
+    for (id, roles) in [
+        ("ag-lead", "triager,implementer"),
+        ("ag-a", "implementer"),
+        ("ag-b", "reviewer"),
+        ("ag-c", "tester"),
+    ] {
+        sqlx::query(
+            "INSERT INTO agent \
+             (id, workspace_id, name, runtime_id, visibility, owner_id, max_concurrent_tasks) \
+             VALUES (?1,'ws-1',?1,'rt-1','workspace','u-1',5)",
+        )
+        .bind(id)
+        .execute(pool)
+        .await
+        .expect("agent");
+        sqlx::query(
+            "INSERT INTO squad_member (squad_id, member_type, member_id, role) \
+             VALUES ('sq-1','agent',?1,?2)",
+        )
+        .bind(id)
+        .bind(roles)
+        .execute(pool)
+        .await
+        .expect("member");
+    }
+    sqlx::query(
+        "INSERT INTO issue \
+         (id, workspace_id, title, state, creator_type, creator_id, created_at) \
+         VALUES ('i-1','ws-1','Ship it','open','member','u-1',0)",
+    )
+    .execute(pool)
+    .await
+    .expect("issue");
+}
+
+async fn store() -> (tempfile::TempDir, Store) {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let store = Store::open_in(dir.path()).await.expect("open store");
+    (dir, store)
+}
+
+/// Count every task row on the issue, in ANY status. Deliberately unfiltered:
+/// the defect was N rows written at once, so any filter could hide it.
+async fn task_count(pool: &SqlitePool) -> i64 {
+    sqlx::query_scalar("SELECT COUNT(*) FROM agent_task_queue WHERE issue_id = 'i-1'")
+        .fetch_one(pool)
+        .await
+        .expect("count tasks")
+}
+
+/// THE REGRESSION. A squad with a leader and three agent members yields exactly
+/// ONE run. The old code wrote four.
+#[tokio::test]
+async fn three_member_squad_yields_exactly_one_run() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision pipeline");
+
+    let out = SquadAssignService::assign_fanout(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("fanout");
+
+    assert_eq!(
+        task_count(pool).await,
+        1,
+        "a squad of N members must yield exactly ONE run, not one per member"
+    );
+    assert!(
+        out.members.is_empty(),
+        "there are no member dispatches under pull"
+    );
+
+    // The one run is owned by an agent that HOLDS the first stage's role
+    // (`triager`), which is the leader here, and it is a real task row.
+    assert!(
+        !out.leader.task_id.is_empty(),
+        "the pull produced a real task"
+    );
+    let (owner, count): (String, i64) = sqlx::query_as(
+        "SELECT agent_id, COUNT(*) FROM agent_task_queue WHERE issue_id='i-1' GROUP BY agent_id",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("single owner");
+    assert_eq!(count, 1);
+    assert_eq!(
+        owner, "ag-lead",
+        "only the triager could take the Triage stage"
+    );
+}
+
+/// The card lands in the FIRST ROLE-GATED column (Triage), not in Backlog and not
+/// spread across the board.
+#[tokio::test]
+async fn dispatch_places_the_card_in_the_first_role_gated_stage() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+
+    SquadAssignService::assign_fanout(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("fanout");
+
+    let (name, role): (String, Option<String>) = sqlx::query_as(
+        "SELECT col.name, col.services_role FROM board_card AS bc \
+           JOIN board_column AS col ON col.id = bc.column_id \
+          WHERE bc.issue_id = 'i-1'",
+    )
+    .fetch_one(pool)
+    .await
+    .expect("card is on the board");
+    assert_eq!(name, "Triage");
+    assert_eq!(role.as_deref(), Some("triager"));
+
+    let cards: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM board_card WHERE issue_id='i-1'")
+        .fetch_one(pool)
+        .await
+        .expect("count cards");
+    assert_eq!(cards, 1, "one card, one place on the board");
+}
+
+/// Even with NO pipeline provisioned, a squad dispatch is ONE task. The
+/// no-pipeline fallback briefs the leader alone: the member broadcast is gone
+/// outright, not merely bypassed when a pipeline happens to exist.
+#[tokio::test]
+async fn broadcast_is_gone_even_without_a_pipeline() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+
+    let out = SquadAssignService::assign_fanout(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await
+    .expect("fanout");
+
+    assert_eq!(
+        task_count(pool).await,
+        1,
+        "no pipeline is still ONE task, never four"
+    );
+    assert!(out.members.is_empty());
+    assert_eq!(out.leader.leader_agent_id, "ag-lead");
+}
+
+/// A dangling member ref STILL rejects the whole dispatch. Members are no longer
+/// dispatched to, but they are still resolved and gated, so removing the
+/// broadcast did not quietly remove the tenant / invocation safety checks with
+/// it, and no partial state is left behind.
+#[tokio::test]
+async fn a_dangling_member_still_rejects_the_dispatch_with_zero_rows() {
+    let (_d, s) = store().await;
+    let pool = s.pool();
+    seed_squad_of_three(pool).await;
+    PipelineService::provision_default(pool, &ws(), &SystemIdGen, &FixedClock(NOW_MS))
+        .await
+        .expect("provision");
+    sqlx::query(
+        "INSERT INTO squad_member (squad_id, member_type, member_id, role) \
+         VALUES ('sq-1','agent','ag-ghost','implementer')",
+    )
+    .execute(pool)
+    .await
+    .expect("dangling member");
+
+    let err = SquadAssignService::assign_fanout(
+        pool,
+        &ws(),
+        "sq-1",
+        &SquadAssignRequest {
+            issue_id: Some("i-1"),
+            ..SquadAssignRequest::default()
+        },
+        &SystemIdGen,
+        &FixedClock(NOW_MS),
+    )
+    .await;
+    assert!(
+        err.is_err(),
+        "a dangling member ref must still reject the dispatch"
+    );
+    assert_eq!(
+        task_count(pool).await,
+        0,
+        "a rejected dispatch writes nothing"
+    );
+    let cards: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM board_card WHERE issue_id='i-1'")
+        .fetch_one(pool)
+        .await
+        .expect("count cards");
+    assert_eq!(cards, 0, "and places no card either");
+}
