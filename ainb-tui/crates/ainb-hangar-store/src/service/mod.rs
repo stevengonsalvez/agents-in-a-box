@@ -42,6 +42,10 @@ pub mod fail;
 /// and report a per-target outcome code. One seam behind both the `comment_add`
 /// write and the `comment_mention_preview` dry run.
 pub mod mention;
+/// Role-gated PULL of board work: a card in a role-gated column is the queue,
+/// and exactly one eligible agent takes it. The seam that replaces squad
+/// BROADCAST (one run per member) with one owner per card.
+pub mod pull;
 /// Spawn a `parent_task_id`-chained child row for a retryable failed task.
 pub mod retry;
 /// Route a squad assignment to its leader by enqueueing a leader-keyed task.

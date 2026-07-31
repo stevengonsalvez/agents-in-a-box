@@ -89,10 +89,12 @@ async fn seed_populated(pool: &SqlitePool) {
     .execute(pool)
     .await
     .expect("seed issue");
-    sqlx::query("INSERT INTO board (id, workspace_id, name, created_at) VALUES ('b-1','ws-1','Kanban',5)")
-        .execute(pool)
-        .await
-        .expect("seed board");
+    sqlx::query(
+        "INSERT INTO board (id, workspace_id, name, created_at) VALUES ('b-1','ws-1','Kanban',5)",
+    )
+    .execute(pool)
+    .await
+    .expect("seed board");
     sqlx::query(
         "INSERT INTO board_column (id, board_id, ord, name, fsm_state, auto_move) \
          VALUES ('col-1','b-1',0,'Backlog',NULL,0)",
@@ -196,9 +198,15 @@ async fn migration_0074_adds_the_pull_gate_columns_inert() {
     .expect("read new board_column columns");
     assert_eq!(gates.len(), 2, "both seeded columns survive the upgrade");
     for (services_role, wip_limit, excludes_prior_agent) in &gates {
-        assert_eq!(*services_role, None, "pre-existing column must stay ungated");
+        assert_eq!(
+            *services_role, None,
+            "pre-existing column must stay ungated"
+        );
         assert_eq!(*wip_limit, None, "pre-existing column must stay uncapped");
-        assert_eq!(*excludes_prior_agent, 0, "prior-agent exclusion defaults off");
+        assert_eq!(
+            *excludes_prior_agent, 0,
+            "prior-agent exclusion defaults off"
+        );
     }
 
     let run_group: Option<String> =
@@ -206,7 +214,10 @@ async fn migration_0074_adds_the_pull_gate_columns_inert() {
             .fetch_one(&pool)
             .await
             .expect("read run_group");
-    assert_eq!(run_group, None, "a pre-existing task belongs to no fan-out cluster");
+    assert_eq!(
+        run_group, None,
+        "a pre-existing task belongs to no fan-out cluster"
+    );
 
     // (c) The pre-existing payloads survived BYTE-IDENTICAL, an ALTER TABLE
     //     that rewrote a sibling column would show up here. `fsm_state` and
