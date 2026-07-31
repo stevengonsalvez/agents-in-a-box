@@ -3,8 +3,9 @@
 //! The Kanban board (hotkey `K`) lays the workspace's task queue out as four
 //! width-aware columns — `queued` / `running` / `done` / `failed` — each holding
 //! the task cards bucketed into it. A card shows `#<short_id>`, the assignee
-//! agent, the task age (`5m` / `2h` / `3d`), and a coloured status chip. Focus
-//! walks columns with `←` / `→` and rows with `↑` / `↓`; `Shift+←` / `Shift+→`
+//! agent BY NAME, the task age (`5m` / `2h` / `3d`), and a coloured status chip.
+//!
+//! Focus walks columns with `←` / `→` and rows with `↑` / `↓`; `Shift+←` / `Shift+→`
 //! drags the focused card to the adjacent column, which the plugin glue lifts
 //! into a `hangar/task_transition` daemon RPC (the real store FSM move, not a
 //! local re-bucket).
@@ -27,11 +28,27 @@
 //! An unknown wire token falls into `queued` (fail-visible, not fail-hidden) so a
 //! future status never silently drops a card off the board.
 //!
+//! ## The agent id the card must NOT show raw
+//!
+//! A [`TaskCardRow`] carries the executing `agent_id` as a 26-char ULID. Painted
+//! raw it swamps a ~27-char card line and reads as noise, and N dispatch runs of
+//! ONE issue become N opaque, seemingly unrelated cards. It is therefore resolved
+//! CLIENT-SIDE by [`KanbanState::set_agent_names`] against the `hangar/agents_list`
+//! roster the plugin already caches. No wire field carries the resolved name.
+//!
+//! The seam is idempotent and order-independent: the snapshots are fired in one
+//! batch and land in any order, so it is applied from BOTH sides (the tasks
+//! snapshot resolves against the cached roster, and the roster snapshot re-resolves
+//! the cards already on the board). An id that resolves to nothing (a deleted
+//! agent) falls back to a SHORT form, never the ULID.
+//!
 //! As with every Hangar screen the reducer ([`reduce_kanban`]) is **pure**: it
 //! folds a directional / move / event input into a new [`KanbanState`] plus an
 //! optional [`KanbanIntent`] the plugin glue lifts into the matching daemon RPC.
 //! The card rows come from the daemon (`hangar/tasks_list`); the plugin owns zero
 //! domain data (`project_ainb_plugin_owns_data_plane`).
+
+use std::collections::BTreeMap;
 
 use ainb_hangar_proto::events::{HangarEvent, TaskCardRow};
 use ainb_hangar_proto::pr_status::{CiRollup, PrStatus};
@@ -117,6 +134,15 @@ pub struct CardSummary {
     pub short_id: String,
     /// The executing agent's id.
     pub agent_id: String,
+    /// The executing agent's HUMAN-READABLE label: the roster `display_name`
+    /// resolved from [`agent_id`](Self::agent_id) by
+    /// [`KanbanState::set_agent_names`].
+    ///
+    /// Seeded to [`short_id`] of the agent id at build time, so a board rendered
+    /// before the `hangar/agents_list` snapshot lands (or a card whose agent was
+    /// deleted from the roster) shows a short `#`-style token rather than a raw
+    /// 26-char ULID that swamps the tile.
+    pub agent_label: String,
     /// The raw lifecycle status (drives the status chip colour).
     pub status: String,
     /// Creation timestamp (epoch ms), kept for re-computing age on re-render.
@@ -201,6 +227,28 @@ impl KanbanState {
         state
     }
 
+    /// Resolve every card's [`agent_label`](CardSummary::agent_label) against the
+    /// `agent_id -> display_name` roster the `hangar/agents_list` snapshot carries,
+    /// so a card reads `claude · 7d · done` rather than a raw 26-char ULID.
+    ///
+    /// Idempotent and order-independent: the two snapshots (`hangar/tasks_list`
+    /// and `hangar/agents_list`) are fired in one batch and may land in either
+    /// order, so BOTH `set_tasks` and `set_actors` call this seam. An id with no
+    /// roster entry (a deleted agent) keeps its [`short_id`] fallback, never the
+    /// full ULID.
+    pub fn set_agent_names(&mut self, names: &BTreeMap<String, String>) {
+        if names.is_empty() {
+            return;
+        }
+        for col in &mut self.columns {
+            for card in &mut col.cards {
+                if let Some(name) = names.get(&card.agent_id) {
+                    card.agent_label.clone_from(name);
+                }
+            }
+        }
+    }
+
     /// Flatten the four board columns into the shared card-board
     /// [`BoardColumn`](card_board::BoardColumn)s the render paints and the mouse
     /// layer hit-tests against (63l.6), computing each card's age against `now_ms`.
@@ -208,7 +256,7 @@ impl KanbanState {
     /// Each task card maps onto the card anatomy: the id line is `#<short_id>`, the
     /// two title lines carry `<agent> · <age> · <status>` (so the bead's required
     /// id + title + state + age all read on the tile), the priority chip comes from
-    /// the row, and the assignee initial is the agent's first char. The same
+    /// the row, and the assignee initial is the agent NAME's first char. The same
     /// geometry feeds `render_kanban` and the hit-map, so paint + hit-test never
     /// drift.
     #[must_use]
@@ -225,7 +273,7 @@ impl KanbanState {
                         display_id: format!("#{}", c.short_id),
                         title: card_title(c, now_ms),
                         priority: PriorityChip::from_priority(0),
-                        assignee_initial: c.agent_id.chars().next(),
+                        assignee_initial: c.agent_label.chars().next(),
                         linked: false,
                         subtasks: None,
                     })
@@ -368,7 +416,7 @@ impl KanbanState {
 fn card_title(c: &CardSummary, now_ms: i64) -> String {
     let mut title = format!(
         "{} · {} · {}",
-        c.agent_id,
+        c.agent_label,
         age_label(c.created_at, now_ms),
         c.status
     );
@@ -393,6 +441,8 @@ fn cards_for(tasks: &[TaskCardRow], col: BoardColumn, now_ms: i64) -> Vec<CardSu
             task_id: t.id.as_str().to_string(),
             short_id: short_id(t.id.as_str()),
             agent_id: t.agent_id.clone(),
+            // Un-resolved until the roster arrives; never the full ULID.
+            agent_label: short_id(&t.agent_id),
             status: t.status.clone(),
             created_at: t.created_at,
             branch: t.branch.clone(),
@@ -638,7 +688,8 @@ fn cards_len_floor(cards: &[CardSummary]) -> usize {
 /// Render the Kanban board into `buf` between rows `top` and `bottom` THROUGH the
 /// shared Linear-style card-board (63l.6) — four status columns (`queued` /
 /// `running` / `done` / `failed`) side by side, each a per-column-scrollable
-/// stack of bordered task cards showing `#<short_id>`, the agent + age + status,
+/// stack of bordered task cards showing `#<short_id>`, the agent NAME + age +
+/// status,
 /// and a priority chip. The hovered (or keyboard-focused) card carries the heavy
 /// clay highlight border.
 ///
@@ -692,18 +743,27 @@ mod tests {
         }
     }
 
+    /// The `agent_id -> display_name` roster the resolve seam takes.
+    fn roster(pairs: &[(&str, &str)]) -> BTreeMap<String, String> {
+        pairs
+            .iter()
+            .map(|(id, name)| ((*id).to_string(), (*name).to_string()))
+            .collect()
+    }
+
     /// `board_columns` flattens the four buckets into card-board columns whose
     /// cards carry `#<short_id>`, an agent · age · status title, and the column
     /// glyph + label, so the screen renders THROUGH the shared card-board (63l.6).
     #[test]
     fn board_columns_map_tasks_to_card_board_cards() {
-        let state = KanbanState::from_tasks(
+        let mut state = KanbanState::from_tasks(
             &[
                 task("01HANGARTASKQUEUED01", "queued"),
                 task("01HANGARTASKRUNNING03", "running"),
             ],
             NOW,
         );
+        state.set_agent_names(&roster(&[("claude-agent", "claude")]));
         let cols = state.board_columns(NOW);
         assert_eq!(cols.len(), 4, "four board columns");
         assert_eq!(cols[0].name, "queued");
@@ -712,7 +772,7 @@ mod tests {
         assert_eq!(queued_card.issue_id, "01HANGARTASKQUEUED01");
         assert_eq!(queued_card.display_id, "#EUED01");
         assert!(
-            queued_card.title.contains("claude-agent")
+            queued_card.title.contains("claude")
                 && queued_card.title.contains("5m")
                 && queued_card.title.contains("queued"),
             "the card title carries agent · age · status: {:?}",
@@ -756,6 +816,82 @@ mod tests {
         assert!(
             !plain_title.contains("ainb/") && !plain_title.contains("PR "),
             "a card with no run artifacts carries no branch / PR chip: {plain_title:?}"
+        );
+    }
+
+    /// REGRESSION PIN: a card names its agent, and NEVER prints the raw 26-char
+    /// agent ULID.
+    ///
+    /// The board read `01KXPM2K4DYDTRZ7RHDGAA9Q9X · 7d · done` in the field,
+    /// interpolating `agent_id` where the doc comment promised the agent. Four
+    /// dispatch runs of one issue became four opaque, seemingly unrelated cards.
+    /// Both halves are asserted: the NAME is present AND the id is absent, so a
+    /// future refactor cannot half-regress by appending the id alongside the name.
+    #[test]
+    fn card_names_the_agent_and_never_prints_the_raw_ulid() {
+        const AGENT_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+        let mut t = task("01KY7SJ2CM6TCC82KG9T8CQ051", "done");
+        t.agent_id = AGENT_ULID.into();
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        state.set_agent_names(&roster(&[(AGENT_ULID, "claude")]));
+
+        let card = &state.board_columns(NOW)[2].cards[0];
+        assert_eq!(card.title, "claude · 5m · done");
+        assert!(
+            !card.title.contains(AGENT_ULID),
+            "the raw agent ULID must never reach the card: {:?}",
+            card.title
+        );
+        assert_eq!(
+            card.assignee_initial,
+            Some('c'),
+            "the assignee pip is the NAME's initial, not the ULID's"
+        );
+    }
+
+    /// An agent id with no roster entry (a deleted agent, or a board rendered
+    /// before `hangar/agents_list` lands) falls back to the SHORT id: the same
+    /// last-6 convention the `#<short_id>` line uses, never the full ULID.
+    #[test]
+    fn unresolvable_agent_falls_back_to_short_id_not_the_ulid() {
+        const AGENT_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+        let mut t = task("01KY7SJ2CM6TCC82KG9T8CQ051", "done");
+        t.agent_id = AGENT_ULID.into();
+
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        // A roster that knows some OTHER agent: the seam runs, this id misses.
+        state.set_agent_names(&roster(&[("01KY83MQCPZGPH4YGCZ566Q1GR", "test")]));
+
+        let title = &state.board_columns(NOW)[2].cards[0].title;
+        assert_eq!(title, "AA9Q9X · 5m · done");
+        assert!(
+            !title.contains(AGENT_ULID),
+            "the fallback is still never the full ULID: {title:?}"
+        );
+    }
+
+    /// The resolve seam is ORDER-INDEPENDENT: the snapshots are fired in one batch,
+    /// so a roster that arrives AFTER the tasks snapshot must still re-label the
+    /// cards already on the board.
+    #[test]
+    fn roster_arriving_after_the_tasks_snapshot_still_labels_the_cards() {
+        const AGENT_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+        let mut t = task("01KY7SJ2CM6TCC82KG9T8CQ051", "done");
+        t.agent_id = AGENT_ULID.into();
+
+        // Board built with NO roster at all (the tasks snapshot won the race).
+        let mut state = KanbanState::from_tasks(&[t], NOW);
+        assert_eq!(
+            state.board_columns(NOW)[2].cards[0].title,
+            "AA9Q9X · 5m · done"
+        );
+
+        // The roster lands second and re-labels in place.
+        state.set_agent_names(&roster(&[(AGENT_ULID, "claude")]));
+        assert_eq!(
+            state.board_columns(NOW)[2].cards[0].title,
+            "claude · 5m · done"
         );
     }
 

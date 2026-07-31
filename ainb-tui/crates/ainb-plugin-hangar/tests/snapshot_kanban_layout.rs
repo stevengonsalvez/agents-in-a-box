@@ -5,7 +5,10 @@
 //! and pins the layout with `insta::assert_snapshot!` (trailing newline trimmed
 //! per `reference_insta_trailing_newline_trap`). The snapshot proves the four
 //! status columns carry their bucket counts and each task renders as a bordered
-//! card showing `#<short_id>`, the agent + age + status, and a priority chip.
+//! card showing `#<short_id>`, the agent BY NAME, the age, the status, and a
+//! priority chip. The fixture dispatches under REAL agent ULIDs and resolves them
+//! through the same seam `ScreenStates` uses, so the snapshot is a standing guard
+//! that no raw ULID reaches the board.
 //! A non-vacuous colour check backs the heavy highlight border on the focused
 //! card.
 
@@ -17,6 +20,11 @@ use ainb_plugin_sdk::{Color, WireBuffer};
 const NOW_MS: i64 = 1_700_000_600_000;
 /// `CLAY` — the heavy highlight border colour of the focused card-board card.
 const CLAY: Color = Color::rgb(210, 130, 90);
+
+/// The two agent ids the fixture dispatches under. REAL 26-char ULIDs, as the
+/// daemon stores them: the board must resolve these to names, never paint them.
+const CLAUDE_ULID: &str = "01KXPM2K4DYDTRZ7RHDGAA9Q9X";
+const GPT_ULID: &str = "01KY83MQCPZGPH4YGCZ566Q1GR";
 
 fn task(id: &str, agent: &str, status: &str, created_at: i64) -> TaskCardRow {
     TaskCardRow {
@@ -39,41 +47,51 @@ fn six_tasks() -> Vec<TaskCardRow> {
     vec![
         task(
             "01HANGARTASKQUEUED01",
-            "claude-agent",
+            CLAUDE_ULID,
             "queued",
             NOW_MS - 300_000,
         ), // 5m
         task(
             "01HANGARTASKDISPTCH02",
-            "gpt-agent",
+            GPT_ULID,
             "dispatched",
             NOW_MS - 7_200_000,
         ), // 2h
         task(
             "01HANGARTASKRUNNING03",
-            "claude-agent",
+            CLAUDE_ULID,
             "running",
             NOW_MS - 60_000,
         ), // 1m
         task(
             "01HANGARTASKDONE0004",
-            "claude-agent",
+            CLAUDE_ULID,
             "done",
             NOW_MS - 259_200_000,
         ), // 3d
-        task(
-            "01HANGARTASKFAILED05",
-            "gpt-agent",
-            "failed",
-            NOW_MS - 600_000,
-        ), // 10m
+        task("01HANGARTASKFAILED05", GPT_ULID, "failed", NOW_MS - 600_000), // 10m
         task(
             "01HANGARTASKCANCEL06",
-            "claude-agent",
+            CLAUDE_ULID,
             "cancelled",
             NOW_MS - 3_600_000,
         ), // 1h
     ]
+}
+
+/// The board the render tests paint: the six tasks with the roster seam applied,
+/// exactly as `ScreenStates` applies it once the `hangar/agents_list` snapshot
+/// lands. Without this the cards would fall back to short ids, which is the
+/// un-resolved path the unit tests cover separately.
+fn resolved_board() -> KanbanState {
+    let mut state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
+    state.set_agent_names(
+        &[(CLAUDE_ULID, "claude"), (GPT_ULID, "gpt")]
+            .into_iter()
+            .map(|(id, name)| (id.to_string(), name.to_string()))
+            .collect(),
+    );
+    state
 }
 
 /// Flatten the buffer into a `\n`-joined glyph map, each line `trim_end`-ed and
@@ -124,7 +142,7 @@ fn board_buckets_counts() {
 /// card fields, painted THROUGH the shared card-board (63l.6).
 #[test]
 fn render_full_board_snapshot() {
-    let state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
+    let state = resolved_board();
     let mut buf = WireBuffer::new(120, 30);
     render_kanban(&mut buf, 120, 0, 30, &state, NOW_MS);
     let full = glyph_map(&buf, 120);
@@ -141,8 +159,16 @@ fn render_full_board_snapshot() {
     // Card fields: `#<short_id>` id line, agent + age + status in the title.
     assert!(full.contains("#EUED01"), "queued short id:\n{full}");
     assert!(full.contains("#NING03"), "running short id:\n{full}");
-    assert!(full.contains("claude-agent"), "assignee:\n{full}");
-    assert!(full.contains("gpt-agent"), "assignee 2:\n{full}");
+    // Agents read BY NAME, resolved from the roster.
+    assert!(full.contains("claude"), "assignee:\n{full}");
+    assert!(full.contains("gpt"), "assignee 2:\n{full}");
+    // ...and NEITHER raw agent ULID ever reaches the board. This is the whole
+    // point of the resolve seam: the board once painted
+    // `01KXPM2K4DYDTRZ7RHDGAA9Q9X · 7d · done` and read as noise.
+    assert!(
+        !full.contains(CLAUDE_ULID) && !full.contains(GPT_ULID),
+        "no raw agent ULID may reach the board:\n{full}"
+    );
     // Age labels (5m queued, 1m running, 3d done, 10m failed, 1h cancelled).
     assert!(full.contains("5m"), "5m age:\n{full}");
     assert!(full.contains("3d"), "3d age:\n{full}");
@@ -162,7 +188,7 @@ fn render_full_board_snapshot() {
 /// render goes through the shared card-board, which raises the focused tile.
 #[test]
 fn focused_card_has_heavy_clay_border() {
-    let state = KanbanState::from_tasks(&six_tasks(), NOW_MS);
+    let state = resolved_board();
     let mut buf = WireBuffer::new(120, 30);
     render_kanban(&mut buf, 120, 0, 30, &state, NOW_MS);
     let heavy_in_clay =

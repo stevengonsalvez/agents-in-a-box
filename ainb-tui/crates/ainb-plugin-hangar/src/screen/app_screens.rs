@@ -798,6 +798,10 @@ impl ScreenStates {
     /// renderer is passed the live clock.
     pub fn set_tasks(&mut self, tasks: &[TaskCardRow]) {
         self.kanban = KanbanState::from_tasks(tasks, 0);
+        // Resolve each card's agent id to its roster name against the cached
+        // actor snapshot. The two snapshots are fired in one batch and land in
+        // either order, so `set_actors` re-applies this the other way round.
+        self.kanban.set_agent_names(&agent_names(&self.actors));
     }
 
     /// Rebuild the user-defined Boards screen from a `hangar/boards_list`
@@ -1014,6 +1018,10 @@ impl ScreenStates {
         next_agents.set_note(note);
         self.agents = next_agents;
         self.actors = actors;
+        // Re-label any Kanban card already on the board: the tasks snapshot may
+        // have landed before this roster did, in which case its cards are still
+        // on the short-id fallback.
+        self.kanban.set_agent_names(&agent_names(&self.actors));
     }
 
     /// Build the settings cache from the four daemon snapshots.
@@ -1214,6 +1222,24 @@ impl ScreenStates {
     pub const fn take_pending_fleet_intent(&mut self) -> Option<FleetIntent> {
         self.pending_fleet_intent.take()
     }
+}
+
+/// The `agent_id -> display_name` roster the Kanban cards label themselves from,
+/// projected out of the cached `hangar/agents_list` actor snapshot.
+///
+/// Members are skipped (a task never runs as a human) and the canonical
+/// `agent:<id>` actor-ref is unwrapped back to the bare `agent.id` a
+/// [`TaskCardRow`] carries, so the lookup key matches the wire row directly.
+fn agent_names(actors: &[ActorRow]) -> std::collections::BTreeMap<String, String> {
+    actors
+        .iter()
+        .filter(|a| a.is_agent)
+        .filter_map(|a| {
+            a.actor_ref
+                .strip_prefix("agent:")
+                .map(|id| (id.to_string(), a.display_name.clone()))
+        })
+        .collect()
 }
 
 /// The cached actor snapshot, stashed on [`ScreenStates`] so the picker can be
