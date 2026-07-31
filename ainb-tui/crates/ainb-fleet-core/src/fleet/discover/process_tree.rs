@@ -77,7 +77,7 @@ impl ProcessTable {
                 break;
             }
             let mut next = Vec::new();
-            for pid in frontier.drain(..) {
+            for pid in frontier {
                 if let Some(command) = self.commands.get(&pid) {
                     names.push(command.as_str());
                 }
