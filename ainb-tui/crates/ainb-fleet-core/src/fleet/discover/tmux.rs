@@ -203,9 +203,10 @@ fn parse_row(line: &str) -> Result<TmuxPaneRow> {
 /// desktop app (`…/Claude.app/Contents/MacOS/Claude`) nor a branch called
 /// `f/claude-resume` can pass as a session.
 ///
-/// ponytail: copilot is deliberately absent. Fleet has no `Provider::Copilot`
-/// on the wire, so admitting one would render it `UNKNOWN` — add the name here
-/// together with the enum variant, never before it.
+/// Copilot is admitted now that `Provider::Copilot` exists on the wire AND the
+/// Swift client decodes unknown enum values tolerantly. Emitting a provider token
+/// an older client has never seen used to fail its whole snapshot decode, so this
+/// name could not land before those two.
 fn agent_provider(processes: &ProcessTable, pane_pid: u32) -> Option<Provider> {
     processes.tree_commands(pane_pid).into_iter().find_map(|command| match command {
         "claude" => Some(Provider::Claude),
