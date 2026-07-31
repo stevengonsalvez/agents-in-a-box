@@ -132,7 +132,7 @@ hooks — the plumbing is a pure drop-in enhancement.
 
 ```bash
 # Spawn a child that reports completions back to ATC instance "tower":
-ainb run --repo . --parent tower -p "fix the failing tests"
+ainb run --repo . --worktree --parent tower -p "fix the failing tests"
 
 # Inspect / drain a parent's inbox directly (debug):
 ainb fleet atc inbox peek  tower
