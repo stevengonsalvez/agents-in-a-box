@@ -241,8 +241,14 @@ jobs:
           mkdir -p out
           cp target/${{ matrix.target }}/release/${BINARY_NAME}${{ matrix.ext }} out/
           cp -R dist/plugins out/plugins
+          # ainb(1). The checkout is the full repo and this step's
+          # working-directory is ainb-tui, so the committed page is one level
+          # up. share/ is a top-level member of the tarball: install.sh reads
+          # share/man/man1/ainb.1 and the Homebrew formula does man1.install.
+          mkdir -p out/share/man/man1
+          cp ../docs/man/${BINARY_NAME}.1 out/share/man/man1/
           cd out
-          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}" plugins
+          tar -czf "${ARCHIVE}.tar.gz" "${BINARY_NAME}${{ matrix.ext }}" plugins share
           shasum -a 256 "${ARCHIVE}.tar.gz" > "${ARCHIVE}.tar.gz.sha256"
 
       - name: Upload artifacts
@@ -414,6 +420,9 @@ jobs:
               # user-set AINB_PLUGIN_ROOT still wins.
               libexec.install "ainb"
               libexec.install "plugins" if File.directory?("plugins")
+              # ainb(1). Guarded so this formula still installs an older
+              # tarball that predates the man page.
+              man1.install "share/man/man1/ainb.1" if File.exist?("share/man/man1/ainb.1")
               (bin/"ainb").write <<~WRAPPER
                 #!/bin/bash
                 export AINB_PLUGIN_ROOT="${AINB_PLUGIN_ROOT:-#{libexec}/plugins}"

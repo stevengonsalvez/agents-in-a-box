@@ -1,0 +1,572 @@
+#!/usr/bin/env bash
+# Generate the ainb(1) man page (docs/man/ainb.1) from the real `ainb` binary.
+#
+# The COMMANDS section is generated: every top-level command's one-line "about"
+# and its immediate subcommand names come straight from the binary's recursive
+# `--help`, so the index can never drift from the actual CLI. Everything else
+# (DESCRIPTION, EXAMPLES, SPAWNING SESSIONS FROM AN AGENT, FILES, ENVIRONMENT,
+# EXIT STATUS) is authored prose that a --help dump cannot express.
+#
+# Driving the real binary (rather than clap_mangen over the clap tree) is not a
+# style choice, it is the only faithful option:
+#   * `tui` and `diff-review` are attached in main.rs AFTER the reusable
+#     builders, so no library-visible `clap::Command` contains them. Proof:
+#     `ainb completion zsh | grep -c diff-review` is 0 while `ainb --help`
+#     lists it. clap_mangen wired the same way inherits the same hole.
+#   * `skill` / `source` / `search` are intercepted before clap exists at all
+#     and routed to ainb-cli, yet they answer `--help` and are advertised in
+#     `ainb --help`. No clap-tree generator can see them.
+#
+# Usage:
+#   scripts/gen-man.sh                                  # builds ainb (release)
+#   AINB_BIN=target/debug/ainb scripts/gen-man.sh       # reuse a built bin
+#
+# CI freshness gate (see .github/workflows/ci.yml, job `cli-docs`):
+#   AINB_BIN=target/debug/ainb bash scripts/gen-man.sh
+#   git diff --exit-code -- docs/man/ainb.1
+#
+# Output is deterministic: registry order, and NO version string, NO build date,
+# NO timestamp anywhere (including `.TH`). A version in the header would make
+# every Cargo.toml bump turn the gate red for a page whose content did not
+# change, so the gate only fires on real CLI-surface changes.
+# DO NOT edit docs/man/ainb.1 by hand.
+#
+# NB: pipefail is intentionally OFF, for the same reason as
+# gen-cli-reference.sh: the shared walk helpers early-exit their `awk`, which
+# SIGPIPEs the producing `ainb --help`; with pipefail + `set -e` that non-zero
+# pipe status would abort generation mid-tree. cargo build runs unpiped, so its
+# failure signal is not lost.
+set -eu
+
+# Repo paths. The script lives in ainb-tui/scripts/, the docs at repo-root docs/.
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+AINB_TUI_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+REPO_ROOT="$(cd "$AINB_TUI_DIR/.." && pwd)"
+OUT="$REPO_ROOT/docs/man/ainb.1"
+
+# Resolve the binary: explicit AINB_BIN, else build release. Same three-form
+# resolution as gen-cli-reference.sh so a wrong cwd cannot silently pick up a
+# stale `ainb` from $PATH.
+if [[ -n "${AINB_BIN:-}" ]]; then
+  if [[ "$AINB_BIN" = /* ]]; then
+    BIN="$AINB_BIN"
+  elif [[ -x "$AINB_BIN" ]]; then
+    BIN="$(cd "$(dirname "$AINB_BIN")" && pwd)/$(basename "$AINB_BIN")"
+  else
+    BIN="$AINB_TUI_DIR/$AINB_BIN"
+  fi
+else
+  echo "[gen-man] building ainb (release)..." >&2
+  ( cd "$AINB_TUI_DIR" && cargo build --release -p ainb >&2 )
+  BIN="$AINB_TUI_DIR/target/release/ainb"
+fi
+[[ -x "$BIN" ]] || { echo "[gen-man] binary not found: $BIN" >&2; exit 1; }
+
+# `children()` / `about_of()`: shared with scripts/gen-cli-reference.sh.
+# shellcheck source=lib/cli-walk.sh
+. "$SCRIPT_DIR/lib/cli-walk.sh"
+
+# Make text captured from the binary safe to paste into roff:
+#   \        -> \e     (a bare backslash starts a roff escape)
+#   U+2014   -> \(em   (and U+2013 -> \(en, U+2026 -> ...): keeps the page pure
+#                       ASCII, which nroff/mandoc render identically everywhere
+#   -        -> \-     (a literal minus, so options stay copy-pasteable instead
+#                       of becoming the typographic hyphen U+2010)
+# Order matters: backslashes first, then the unicode folds (their replacements
+# contain no minus), then minus.
+roff_escape() {
+  perl -CSD -pe '
+    s/\\/\\e/g;
+    s/\x{2014}/\\(em/g;
+    s/\x{2013}/\\(en/g;
+    s/\x{2026}/.../g;
+    s/-/\\-/g;
+  '
+}
+
+# Escape, then hard-wrap to 76 columns on word boundaries, then guard any line
+# that now starts with `.` or `'` (roff would read it as a request) with `\&`.
+#
+# The wrap is cosmetic for the reader of the .1 source only: roff refills the
+# text regardless. It is done in perl, never with `fmt`/`fold`, because those
+# differ between BSD (macOS dev boxes) and GNU (ubuntu CI) and would make the
+# freshness gate flap depending on where it ran. This implementation never
+# splits a word, so a `\-` or `\(em` escape can never be cut in half.
+roff_text() {
+  roff_escape | perl -ne '
+    chomp;
+    my $line = "";
+    for my $tok (split /\s+/) {
+      next if $tok eq "";
+      if (length($line) && length($line) + 1 + length($tok) > 76) {
+        print "$line\n"; $line = $tok;
+      } else {
+        $line = length($line) ? "$line $tok" : $tok;
+      }
+    }
+    print "$line\n" if length($line);
+  ' | perl -pe 's/^([.\x27])/\\&$1/;'
+}
+
+# One COMMANDS entry: `.TP` tag + the about line + (for groups) the immediate
+# subcommand names. One line each, by design: this section is a navigable index,
+# the exhaustive per-flag reference is docs/tui/cli.md and `ainb <cmd> --help`.
+emit_command() {
+  local cmd="$1"
+  local about; about="$(about_of "$cmd" | roff_text)"
+  local subs; subs="$(children "$cmd" | tr '\n' ' ' | sed -e 's/ $//' -e 's/ /, /g')"
+  printf '.TP\n.B ainb %s\n' "$(printf '%s' "$cmd" | roff_escape)"
+  [[ -n "$about" ]] && printf '%s\n' "$about"
+  if [[ -n "$subs" ]]; then
+    printf '.br\n%s\n' "$(printf 'Subcommands: %s' "$subs" | roff_text)"
+  fi
+}
+
+mkdir -p "$(dirname "$OUT")"
+
+{
+  # ---- Header + authored front matter -------------------------------------
+  # `.TH` carries NO version and NO date on purpose (see the header comment).
+  cat <<'HEAD'
+.\" Generated by ainb-tui/scripts/gen-man.sh from the real `ainb` binary.
+.\" DO NOT EDIT BY HAND. Run the script and commit the result.
+.\"
+.\" The date below is deliberately STATIC and is NOT the build date. It marks
+.\" when this page's authored structure last changed; bump it by hand, never
+.\" from `date` or from the crate version. A moving value here would make the
+.\" CI freshness gate red on every release bump for a page nobody edited.
+.TH AINB 1 "2026-07-30" "ainb" "User Commands"
+.SH NAME
+ainb \- spawn and manage AI coding sessions in isolated git worktrees
+.SH SYNOPSIS
+.B ainb
+[\fB\-\-format\fR \fItext\fR|\fIjson\fR|\fIcsv\fR|\fImarkdown\fR]
+[\fICOMMAND\fR]
+[\fIARGS\fR...]
+.br
+.B ainb
+.RB [ \-h | \-\-help ]
+.RB [ \-V | \-\-version ]
+.SH DESCRIPTION
+.B ainb
+("agents in a box") runs AI coding agents as first\-class, supervised
+processes. It is two things behind one binary:
+.PP
+An interactive terminal UI, launched by running
+.B ainb
+with no arguments. The dashboard lists every session on the host, streams their
+output, shows diffs, usage and notifications, and can attach straight into a
+session's tmux pane.
+.PP
+A headless, scriptable CLI. Every operation the TUI performs is also a
+subcommand, and every subcommand accepts
+.B \-\-format json
+so agents and shell scripts can drive it. This is the interface an orchestrating
+agent should use: see
+.B SPAWNING SESSIONS FROM AN AGENT
+below.
+.PP
+A session is a tmux session running a provider CLI (Claude Code, Codex, Gemini,
+Copilot) inside a working directory, plus persisted metadata so the TUI, the
+fleet tooling and ATC can find it again after a restart. The working directory
+should be a dedicated
+.BR git\-worktree (1),
+not your everyday checkout: see
+.B WORKTREES AND WORKSPACE NAMES.
+.SH OPTIONS
+These are accepted at every level of the command tree.
+.TP
+.BI \-\-format " text|json|csv|markdown"
+Output format for the command (default
+.BR text ).
+.B json
+is the machine\-readable form: stable field names, safe to pipe into
+.BR jq (1).
+.TP
+.BR \-h ", " \-\-help
+Print help. Recursive: it works on every command and subcommand, and each one
+carries its own
+.B EXAMPLES
+block.
+.TP
+.BR \-V ", " \-\-version
+Print the build identity (commit and date).
+.B \-V
+alone prints the bare semver.
+HEAD
+
+  # ---- COMMANDS (generated) ------------------------------------------------
+  cat <<'CMDHEAD'
+.SH COMMANDS
+One line per command, generated from the binary. Run
+.RI "ainb " COMMAND " \-\-help"
+for the full flag list and per\-command examples, or see the complete reference
+at
+.UR https://github.com/stevengonsalvez/agents\-in\-a\-box/blob/main/docs/tui/cli.md
+docs/tui/cli.md
+.UE .
+CMDHEAD
+
+  # Registry order (deterministic). `skill`, `source` and `search` are appended
+  # explicitly: they are intercepted before clap, so they never appear in the
+  # root `Commands:` block, yet the binary answers `--help` for each.
+  while IFS= read -r c; do
+    [[ -z "$c" ]] && continue
+    emit_command "$c"
+  done < <(children; printf 'skill\nsource\nsearch\n')
+
+  # ---- Authored tail -------------------------------------------------------
+  cat <<'TAIL'
+.SH EXAMPLES
+.SS Launch the TUI
+.RS 4
+.nf
+ainb
+.fi
+.RE
+.PP
+The dashboard: every session on the host, live output, diffs, usage and
+notifications. This is the same data the subcommands below return.
+.SS Spawn an isolated session on a new branch
+.RS 4
+.nf
+ainb run \-\-repo . \-\-create\-branch feat/oauth \-p "wire up oauth login"
+.fi
+.RE
+.PP
+Cuts branch
+.B feat/oauth
+in a fresh git worktree at
+.IR ~/.agents\-in\-a\-box/worktrees/by\-name/myapp\-\-feat\-oauth\-\-<8charid> ,
+starts Claude Code there, and sends the prompt once the input box is ready. Your
+own checkout is untouched, so you can keep working while the agent does.
+.SS Spawn an isolated session on an auto\-named branch
+.RS 4
+.nf
+ainb run \-\-repo ~/src/myapp \-\-worktree
+.fi
+.RE
+.PP
+Same isolation, but the branch is named
+.RI ainb/session\- <8\-char\-id>
+for you. Use this when the branch name does not matter yet.
+.SS Spawn against an existing worktree
+.RS 4
+.nf
+ainb run \-\-repo ~/.agents\-in\-a\-box/worktrees/by\-name/myapp\-\-feat\-oauth\-\-a1b2c3d4
+.fi
+.RE
+.PP
+Reuses a worktree that already exists (for example, to put a second agent on
+work another session started). No new worktree is created and no warning is
+printed, because the target is already isolated from your checkout.
+.SS Spawn with Codex instead of Claude
+.RS 4
+.nf
+ainb run \-\-repo . \-\-worktree \-\-tool codex
+.fi
+.RE
+.PP
+Runs the Codex CLI in the worktree.
+.B \-\-tool
+accepts
+.BR claude ", " codex ", " gemini " and " copilot ;
+.B \-\-model
+passes a provider model id straight through, unvalidated.
+.SS Spawn with an initial prompt and drop straight into it
+.RS 4
+.nf
+ainb run \-\-repo . \-\-worktree \-p "port the auth tests to nextest" \-\-attach
+.fi
+.RE
+.PP
+Creates the session, sends the prompt, then attaches your terminal to its tmux
+pane. Detach with
+.BR Ctrl\-B ", " d
+and the agent keeps running.
+.SS List sessions as JSON
+.RS 4
+.nf
+ainb list \-\-format json | jq \-r '.[] | select(.is_running) | .workspace_name'
+.fi
+.RE
+.PP
+The machine\-readable inventory. This is how the fleet tooling discovers
+sessions, and it is the verification step after spawning anything.
+.SS Attach to a running session
+.RS 4
+.nf
+ainb attach myapp
+.fi
+.RE
+.PP
+Drops you into the session's tmux. The argument is a session id, a unique id
+prefix, or a workspace name (see
+.BR "WORKTREES AND WORKSPACE NAMES" ).
+.SS Inspect a session's status
+.RS 4
+.nf
+ainb status myapp \-\-format json
+.fi
+.RE
+.PP
+Health, provider, branch, worktree path and activity for one session, without
+attaching to it.
+.SS Read a session's output without attaching
+.RS 4
+.nf
+ainb logs myapp
+.fi
+.RE
+.PP
+Safe to run from a script or another agent: it never takes over your terminal.
+.SS Kill a session
+.RS 4
+.nf
+ainb kill myapp
+ainb kill 88dd9219 \-\-force
+.fi
+.RE
+.PP
+Terminates the tmux session and removes the record.
+.B \-\-force
+skips the confirmation. The worktree is left on disk; remove it with
+.B ainb git
+if you are done with the branch.
+.SS Find and clean up orphans
+.RS 4
+.nf
+ainb recover list \-\-format json
+ainb recover cleanup
+.fi
+.RE
+.PP
+Orphans are records whose tmux session died, or tmux sessions with no record
+(after a crash or a reboot).
+.B list
+reports,
+.B cleanup
+reconciles.
+.SS Generate shell completions
+.RS 4
+.nf
+ainb completion zsh > ~/.zfunc/_ainb
+.fi
+.RE
+.PP
+Supports
+.BR bash ", " zsh ", " fish ", " powershell " and " elvish .
+.SH SPAWNING SESSIONS FROM AN AGENT
+This is the contract for an orchestrating agent (or any script) that spawns
+sessions. Getting it wrong produces sessions that collide with each other, or
+that the TUI and fleet tooling cannot address.
+.TP
+.B Always pass \-\-worktree or \-\-create\-branch.
+Without one of them the session's working directory
+.I is the checkout you pointed at.
+There is no isolation: the agent shares that branch, index and working tree with
+your editor and with every other session started there, so two concurrent
+sessions will overwrite each other's edits and stage each other's files. Prefer
+.B \-\-create\-branch
+when you know what the work is called,
+.B \-\-worktree
+when you do not.
+.B ainb run
+prints a warning to standard error when it detects this, but it does not refuse:
+the spawn still succeeds, so a script must not rely on a non\-zero exit to catch
+it.
+.TP
+.B Do not pass \-\-name.
+.B \-\-name
+only overrides the tmux session name. It does
+.I not
+become a handle you can use later:
+.BR "ainb attach" ", " "ainb status" " and " "ainb kill"
+resolve their argument as a session id, a unique id prefix, or a
+.I workspace
+name, and the workspace name is derived from the repository directory, never
+from
+.BR \-\-name .
+Let the default name stand (\fIworkspace\fR\-\fI8charid\fR) and address the
+session by the id that
+.B ainb list \-\-format json
+returns.
+.TP
+.BI \-\-parent " <id>"
+links the new session to an orchestrator. The child's Stop hook routes its
+completion into the parent's durable inbox, so the orchestrator is woken by an
+event instead of polling. Pass the orchestrator's own session identity, which is
+exported into every ainb\-spawned session as
+.BR AINB_PARENT_SESSION ,
+or the stable ATC handle (for example
+.BR tower ).
+Without
+.BR \-\-parent ,
+completions go nowhere and you are back to polling.
+.TP
+.B Verify, do not assume.
+.B ainb run
+exits 0 as soon as the tmux session is up. Confirm the session exists and is
+running before reporting success:
+.RS
+.RS 4
+.nf
+ainb list \-\-format json | jq \-e '.[] | select(.workspace_name == "myapp")'
+.fi
+.RE
+.RE
+.PP
+Putting it together, the shape an agent should emit is:
+.RS 4
+.nf
+ainb run \-\-repo "$REPO" \-\-create\-branch "feat/$TASK" \\
+         \-\-parent "$AINB_PARENT_SESSION" \\
+         \-p "$TASK_PROMPT"
+ainb list \-\-format json | jq \-r '.[] | select(.is_running) | .session_id'
+.fi
+.RE
+.SH WORKTREES AND WORKSPACE NAMES
+A session's
+.I workspace name
+is how humans and the TUI address it, and it is derived from the session's
+directory, not from anything you pass on the command line.
+.PP
+When the session runs in a linked git worktree, ainb can resolve that worktree
+back to the repository it belongs to (a linked worktree's
+.I .git
+is a file pointing at the real git directory) and names the workspace after it.
+When the session's directory has no
+.I .git
+entry at all anywhere above it, there is nothing to resolve and the session is
+reported as
+.BR (broken) :
+its directory is gone or was never a repository.
+.PP
+A plain clone, where
+.I .git
+is a directory, is a perfectly valid place to run a session and is named after
+that directory. It is simply not
+.I isolated:
+that is what the warning from
+.B ainb run
+is about, and it is why
+.B \-\-worktree
+exists.
+.SH FILES
+.TP
+.I ~/.agents\-in\-a\-box/
+Everything ainb persists, for the current user. Never
+.IR ~/.ainb/ .
+.TP
+.I ~/.agents\-in\-a\-box/sessions.json
+The session store: one record per session (id, workspace name, tmux session
+name, worktree path, branch, provider). This is what
+.B ainb list
+reads and what
+.BR "ainb attach" / "status" / "kill"
+resolve against.
+.TP
+.I ~/.agents\-in\-a\-box/config/config.toml
+User configuration. Edit through
+.B ainb config
+rather than by hand.
+.TP
+.I ~/.agents\-in\-a\-box/worktrees/
+Where
+.B \-\-worktree
+and
+.B \-\-create\-branch
+put the git worktrees they create, one directory per session. Two views of the
+same set:
+.I by\-name/<repo>\-\-<branch>\-\-<8charid>
+is the real directory,
+.I by\-session/<uuid>
+is a symlink to it.
+.TP
+.I ~/.agents\-in\-a\-box/logs/
+JSONL logs, one file per run. The first place to look when a spawn or a daemon
+misbehaves.
+.TP
+.I ./.ainb/config.toml
+Per\-repository overrides, read from the repository ainb is pointed at.
+.SH ENVIRONMENT
+.TP
+.B AINB_HOME
+Relocates ainb's state so a test run or a throwaway fleet does not touch your
+real one. Be aware that it is interpreted two different ways today: the session
+store and the worktree manager treat it as a stand\-in for
+.B $HOME
+and still append
+.IR .agents\-in\-a\-box ,
+while the fleet/ATC plumbing treats it as the state directory itself. Set it for
+isolation, not as a permanent relocation.
+.TP
+.B AINB_PARENT_SESSION
+Set by ainb inside a session spawned with
+.BR "\-\-parent <id>" .
+The child's Stop hook reads it to route completions to that parent's inbox. An
+orchestrating agent reads its own value to pass down to grandchildren.
+.TP
+.B AINB_BIN
+The
+.B ainb
+executable that ainb's own subprocesses should shell out to. Set it when a
+freshly built binary must not lose to a stale one on
+.BR PATH .
+.TP
+.B AINB_PLUGIN_ROOT
+Plugin staging directory to load from. First entry in the search order, ahead of
+the release\-tarball, workspace and installed
+.RI ( ~/.agents\-in\-a\-box/plugins/cache/ )
+locations. Ignored if the path does not exist.
+.TP
+.B AINB_DISABLE_PLUGINS
+Set to
+.BR 1 / true / yes / on
+to run with the plugin runtime off. Anything else, including unset, leaves
+plugins enabled, so a typo cannot silently disable them.
+.TP
+.B AINB_HANGAR_HOME
+State directory for the Hangar managed\-agents control plane.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Runtime error: the command ran and failed. This includes a missing provider
+CLI:
+.B ainb run \-\-tool codex
+with no
+.B codex
+on
+.B PATH
+exits 1, not 2.
+.TP
+.B 2
+Usage error (bad flags or arguments), or a required
+.I plugin
+is not installed (for example
+.B ainb usage
+or
+.B ainb learnings
+with nothing staged under
+.IR dist/plugins/ ).
+.SH SEE ALSO
+.BR tmux (1),
+.BR git\-worktree (1),
+.BR jq (1).
+.PP
+Full CLI reference:
+.UR https://github.com/stevengonsalvez/agents\-in\-a\-box/blob/main/docs/tui/cli.md
+docs/tui/cli.md
+.UE
+.SH BUGS
+Report issues at
+.UR https://github.com/stevengonsalvez/agents\-in\-a\-box/issues
+github.com/stevengonsalvez/agents\-in\-a\-box/issues
+.UE .
+TAIL
+} > "$OUT"
+
+echo "[gen-man] wrote $OUT" >&2

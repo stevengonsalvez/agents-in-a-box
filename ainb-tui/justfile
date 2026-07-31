@@ -137,6 +137,11 @@ lint:
 lint-fix:
     cargo clippy --fix --allow-dirty --allow-staged
 
+# Fail if a temporary debugging probe (REVERT-PROBE / DO-NOT-COMMIT) was left
+# behind in the Rust sources. Cheap, runs first in `just check`.
+check-no-probes:
+    bash scripts/check-no-probes.sh
+
 # Regenerate docs/tui/cli.md from the ainb binary (source of truth)
 gen-cli-ref:
     cargo build -p ainb
@@ -144,8 +149,30 @@ gen-cli-ref:
 
 # Fail if docs/tui/cli.md has drifted from the binary
 # (docs/tui/ lives at the repo root, one level up from this justfile)
+#
+# `git ls-files --error-unmatch` FIRST: `git diff` ignores untracked files, so
+# a generated page that was never `git add`ed makes the diff a silent no-op and
+# the gate passes while nothing ships.
 check-cli-ref: gen-cli-ref
+    git ls-files --error-unmatch ../docs/tui/cli.md > /dev/null
+    test -f ../docs/tui/cli.md
     git diff --exit-code -- ../docs/tui/cli.md
+
+# Regenerate docs/man/ainb.1 (the ainb(1) man page) from the ainb binary
+gen-man:
+    cargo build -p ainb
+    AINB_BIN=target/debug/ainb bash scripts/gen-man.sh
+
+# Fail if docs/man/ainb.1 has drifted from the binary, or was never committed
+# (see check-cli-ref for why the tracked-ness assertion comes first)
+check-man: gen-man
+    git ls-files --error-unmatch ../docs/man/ainb.1 > /dev/null
+    test -f ../docs/man/ainb.1
+    git diff --exit-code -- ../docs/man/ainb.1
+
+# Render the man page locally exactly as `man ainb` will after install
+man-preview: gen-man
+    man ../docs/man/ainb.1
 
 # Run the v2 conformance axes against every in-tree plugin BINARY and print
 # the plugin x axis matrix. The synthetic-canary suite in
@@ -161,9 +188,11 @@ cts-contracts:
 
 # Check everything (format, lint, test)
 check:
+    just check-no-probes
     just fmt-check
     just lint
     just check-cli-ref
+    just check-man
     just test
 
 # Fix formatting and linting issues
