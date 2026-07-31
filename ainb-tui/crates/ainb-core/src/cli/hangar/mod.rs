@@ -124,6 +124,27 @@ pub enum HangarCommand {
     /// Read an actor's notification inbox.
     #[command(subcommand)]
     Inbox(InboxCommand),
+    /// Provision and inspect the role-gated pull pipeline.
+    #[command(subcommand)]
+    Pipeline(PipelineCommand),
+}
+
+/// `hangar pipeline <verb>` - provision the role-gated board pipeline that
+/// squad work is pulled through.
+#[derive(Subcommand, Debug)]
+pub enum PipelineCommand {
+    /// Provision the default six-stage pipeline (Backlog, Triage, Implement, Review, QA, Done). Idempotent; never rewrites an existing pipeline board.
+    Init(PipelineInitArgs),
+    /// Show each stage with its role gate, WIP limit and current card count.
+    Show(PipelineInitArgs),
+}
+
+/// Arguments for `hangar pipeline init` / `hangar pipeline show`.
+#[derive(Args, Debug)]
+pub struct PipelineInitArgs {
+    /// Workspace slug to provision. Defaults to the bootstrapped `default` workspace.
+    #[arg(long)]
+    pub workspace: Option<String>,
 }
 
 /// `hangar comment <verb>` — post a comment and see EXACTLY where its
@@ -2483,7 +2504,74 @@ pub async fn dispatch(cmd: HangarCommand, format: OutputFormat) -> Result<()> {
         HangarCommand::Property(c) => dispatch_property(c, format).await,
         HangarCommand::Comment(c) => dispatch_comment(c, format).await,
         HangarCommand::Inbox(InboxCommand::List(args)) => run_inbox_list(args, format).await,
+        HangarCommand::Pipeline(c) => dispatch_pipeline(c).await,
     }
+}
+
+/// `hangar pipeline init|show`: provision (or describe) the role-gated board
+/// pipeline that squad work is pulled through.
+///
+/// `init` is idempotent and non-destructive: an existing pipeline board is
+/// reported and left exactly as the operator tuned it, so re-running never
+/// resets a WIP limit or a renamed stage.
+async fn dispatch_pipeline(cmd: PipelineCommand) -> Result<()> {
+    use ainb_hangar_core::ids::WorkspaceId;
+    use ainb_hangar_store::service::pipeline::PipelineService;
+    use sqlx::Row;
+
+    let (args, init) = match cmd {
+        PipelineCommand::Init(a) => (a, true),
+        PipelineCommand::Show(a) => (a, false),
+    };
+    let store = Store::open_default().await.context("open hangar database")?;
+    let workspace_id = resolve_skills_workspace(&store, args.workspace.as_deref()).await?;
+    let ws = WorkspaceId::from_str(workspace_id).context("workspace id was empty")?;
+
+    if init {
+        let board_id =
+            PipelineService::provision_default(store.pool(), &ws, &SystemIdGen, &SystemClock)
+                .await
+                .context("provision the default pipeline")?;
+        println!("pipeline board {board_id}");
+    }
+
+    let rows = sqlx::query(
+        "SELECT col.name AS name, col.services_role AS role, col.wip_limit AS wip, \
+                col.excludes_prior_agent AS excl, \
+                (SELECT COUNT(*) FROM board_card bc WHERE bc.column_id = col.id) AS cards \
+           FROM board_column col JOIN board bd ON bd.id = col.board_id \
+          WHERE bd.workspace_id = ?1 AND bd.name = ?2 ORDER BY col.ord",
+    )
+    .bind(ws.as_str())
+    .bind(ainb_hangar_store::service::pipeline::DEFAULT_PIPELINE_BOARD)
+    .fetch_all(store.pool())
+    .await
+    .context("read the pipeline stages")?;
+
+    if rows.is_empty() {
+        println!("no pipeline provisioned (run `ainb hangar pipeline init`)");
+        return Ok(());
+    }
+    println!(
+        "{:<12} {:<14} {:>5} {:>6} {:>6}",
+        "STAGE", "ROLE", "WIP", "EXCL", "CARDS"
+    );
+    for r in &rows {
+        let name: String = r.try_get("name").unwrap_or_default();
+        let role: Option<String> = r.try_get("role").unwrap_or_default();
+        let wip: Option<i64> = r.try_get("wip").unwrap_or_default();
+        let excl: i64 = r.try_get("excl").unwrap_or_default();
+        let cards: i64 = r.try_get("cards").unwrap_or_default();
+        println!(
+            "{:<12} {:<14} {:>5} {:>6} {:>6}",
+            name,
+            role.as_deref().unwrap_or("-"),
+            wip.map_or_else(|| "-".to_string(), |w| w.to_string()),
+            if excl == 1 { "yes" } else { "-" },
+            cards
+        );
+    }
+    Ok(())
 }
 
 /// `hangar comment add|preview`: post a comment (or dry-run one) and report
