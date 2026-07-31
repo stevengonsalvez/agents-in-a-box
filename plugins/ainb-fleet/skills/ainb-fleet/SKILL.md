@@ -3,7 +3,7 @@ name: ainb-fleet
 description: |
   Fleet orchestration overview — the `ainb fleet ...` Rust subcommand
   namespace for driving every claude session on the host. Routes to the
-  sub-skills (standup / broadcast / sequence / needs / daemon / atc).
+  sub-skills (ainb-spawn / standup / broadcast / sequence / needs / daemon / atc).
   Invoke this for an at-a-glance map of what fleet can do; reach for the
   specific sub-skill for the verb you want.
 version: "0.1.0"
@@ -28,6 +28,7 @@ sub-skill with focused docs.
 
 | sub-skill | what it does |
 |---|---|
+| [`/ainb-fleet:ainb-spawn`](../ainb-spawn/SKILL.md) | Spawn a session correctly with `ainb run` (always into a worktree, and the `--parent` shapes that silently misfire) |
 | [`/ainb-fleet:standup`](../standup/SKILL.md) | List every claude session — merged across ainb · peers · bg jobs |
 | [`/ainb-fleet:broadcast`](../broadcast/SKILL.md) | Send one prompt to selected sessions |
 | [`/ainb-fleet:sequence`](../sequence/SKILL.md) | Ordered multi-step prompts, ack-gated between steps |
