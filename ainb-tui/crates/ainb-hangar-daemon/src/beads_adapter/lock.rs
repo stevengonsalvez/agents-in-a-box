@@ -80,11 +80,16 @@ impl BdLock {
                     });
                 }
                 Ok(false) => {
-                    if self.steal_if_stale() {
-                        continue;
-                    }
+                    // The deadline bounds EVERY path, including the immediate
+                    // retry. `steal_if_stale` now reports "free, retry now" for
+                    // an absent pidfile, which under contention is common rather
+                    // than rare — leaving that branch to `continue` unchecked
+                    // would let a contender spin without ever timing out.
                     if Instant::now() >= deadline {
                         return Err(BdError::LockTimeout(self.path.clone()));
+                    }
+                    if self.steal_if_stale() {
+                        continue;
                     }
                     std::thread::sleep(POLL_INTERVAL);
                 }
