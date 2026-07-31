@@ -121,13 +121,51 @@ struct FleetNegotiateResult: Codable, Equatable {
     private enum CodingKeys: String, CodingKey { case daemonVersion = "daemon_version", protocolVersion = "protocol_version", readCompatible = "read_compatible", writeCompatible = "write_compatible", capabilityIDs = "capability_ids" }
 }
 
-enum FleetProvider: String, Codable, Equatable { case claude, codex, unknown }
-enum LifecycleState: String, Codable, Equatable { case starting = "STARTING", running = "RUNNING", turnComplete = "TURN_COMPLETE", idle = "IDLE", exited = "EXITED", unknown = "UNKNOWN" }
-enum AttentionState: String, Codable, Equatable { case none = "NONE", ask = "ASK", approval = "APPROVAL", waiting = "WAITING", error = "ERROR" }
-enum ManagementState: String, Codable, Equatable { case managed = "MANAGED", degraded = "DEGRADED" }
-enum TransportHealth: String, Codable, Equatable { case healthy = "HEALTHY", degraded = "DEGRADED", unavailable = "UNAVAILABLE", unknown = "UNKNOWN" }
-enum FleetProvenance: String, Codable, Equatable { case authoritative, inferred }
-enum FleetConfidence: String, Codable, Equatable { case high = "HIGH", medium = "MEDIUM", low = "LOW" }
+/// A wire enum that survives a value this client has never heard of.
+///
+/// The daemon may add enum values — a new provider, a new lifecycle — and that
+/// is NOT a protocol version bump today, so version negotiation does not catch
+/// it. Swift's synthesized `Codable` throws `DecodingError.dataCorrupted` on an
+/// unrecognised raw value, and because `FleetSnapshot` decodes `sessions` as an
+/// ARRAY, one unknown value fails the ENTIRE snapshot: the client goes blank
+/// rather than degrading. Falling back is strictly better than failing.
+///
+/// Each `wireFallback` is chosen for FAIL-SAFETY, not convenience: where the
+/// choice affects whether an operator sees a session, it errs toward showing it.
+/// These types declare `Encodable` only, so the synthesized `init(from:)` does
+/// not shadow the tolerant one below.
+protocol TolerantWireEnum: RawRepresentable, Decodable where RawValue == String {
+    /// Used when the daemon sends a value this build does not know.
+    static var wireFallback: Self { get }
+}
+
+extension TolerantWireEnum {
+    init(from decoder: Decoder) throws {
+        let raw = try decoder.singleValueContainer().decode(String.self)
+        self = Self(rawValue: raw) ?? Self.wireFallback
+    }
+}
+
+enum FleetProvider: String, Encodable, Equatable { case claude, codex, unknown }
+enum LifecycleState: String, Encodable, Equatable { case starting = "STARTING", running = "RUNNING", turnComplete = "TURN_COMPLETE", idle = "IDLE", exited = "EXITED", unknown = "UNKNOWN" }
+enum AttentionState: String, Encodable, Equatable { case none = "NONE", ask = "ASK", approval = "APPROVAL", waiting = "WAITING", error = "ERROR" }
+enum ManagementState: String, Encodable, Equatable { case managed = "MANAGED", degraded = "DEGRADED" }
+enum TransportHealth: String, Encodable, Equatable { case healthy = "HEALTHY", degraded = "DEGRADED", unavailable = "UNAVAILABLE", unknown = "UNKNOWN" }
+enum FleetProvenance: String, Encodable, Equatable { case authoritative, inferred }
+enum FleetConfidence: String, Encodable, Equatable { case high = "HIGH", medium = "MEDIUM", low = "LOW" }
+
+// An unrecognised PROVIDER or LIFECYCLE is simply unknown — both already model it.
+extension FleetProvider: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+extension LifecycleState: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+// An unrecognised ATTENTION means the daemon is signalling something we cannot
+// name. Falling back to `.none` would DROP it out of the Needs-input tab and the
+// operator would never learn a session wanted them; `.waiting` keeps it visible.
+extension AttentionState: TolerantWireEnum { static var wireFallback: Self { .waiting } }
+// Unrecognised capability/quality signals degrade rather than over-promise.
+extension ManagementState: TolerantWireEnum { static var wireFallback: Self { .degraded } }
+extension TransportHealth: TolerantWireEnum { static var wireFallback: Self { .unknown } }
+extension FleetProvenance: TolerantWireEnum { static var wireFallback: Self { .inferred } }
+extension FleetConfidence: TolerantWireEnum { static var wireFallback: Self { .low } }
 
 struct FleetCapabilities: Codable, Equatable {
     let structuredAnswer: Bool
